@@ -8,15 +8,15 @@ import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, 
 import Control.Monad (foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
-import Data.IORef (newIORef, modifyIORef', readIORef)
-import Data.List (isInfixOf, isPrefixOf, nub, permutations, stripPrefix, tails)
+import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
+import Data.List (sortOn, isInfixOf, isPrefixOf, nub, permutations, stripPrefix, tails)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
 import System.FilePath ((</>), takeDirectory)
-import System.IO (hClose, hFlush, hGetLine, hPutStrLn)
+import System.IO (hClose, hFlush, hGetLine, hPutStrLn, Handle)
 import Foreign.C.String (CString, withCString)
 import Foreign.C.Types (CInt(..), CUInt(..))
 import System.Posix.Types (Fd(..))
@@ -41,7 +41,9 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.ExactScope
   ( ExactScope, ExactCompilation(..), SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
-  , scopeInterfaces, scopeModuleInterfaceProofs, readExactScope, revalidateExactScope
+  , scopeInterfaces, scopeModuleInterfaceProofs, scopeProducerSha256, scopeProducts, ExactProduct(..)
+  , canonicalCertificatePath, canonicalCertificateSha256, canonicalCoreArtifact
+  , canonicalCorePath, canonicalCoreSha256, readExactScope, revalidateExactScope
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs
   , writeCheckedExactCompilation, writeRetainedExactCompilation
   , ExactCompilationPublication(..), writeRetainedExactCompilationWithOutputsAndPublication
@@ -54,6 +56,7 @@ import Tidepool.GhcPipeline
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
 import Tidepool.ArtifactBytes
 import Tidepool.RequestInputs
+import Tidepool.OwnedInputTransport (OriginalInputKind(..), inputImageDigest, inputKindTag)
 import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..))
 import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope)
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
@@ -63,11 +66,33 @@ import Tidepool.Timing (readSummaryTimingEnabled, withValidationTiming)
 import Codec.CBOR.Term (Term(..), encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
 import SourceBootCases (admitCheckedScope, counterValues)
-import CodecFixtureSupport (readCodecTerm)
+import CodecFixtureSupport
+  ( readCodecTerm, readScopeCodecFixture, scopeCodecField, scopeCodecAcquisition
+  , ScopeCodecField(..), ScopeCodecAcquisition(..), replaceScopeCodecAcquisition, scopeCodecTerm )
 import SourceBootFixtureSupport (withScratch, withTiming, digest, capturePreparedFixture, captureDiagnostics)
 
 foreign import ccall unsafe "memfd_create" createArena :: CString -> CUInt -> IO CInt
 foreign import ccall unsafe "fcntl" sealArena :: CInt -> CInt -> CInt -> IO CInt
+
+withSealedInputBytes :: BS.ByteString -> (FilePath -> IO a) -> IO a
+withSealedInputBytes bytes action = bracket (acquireSealedInputBytes bytes) (hClose . fst) (action . snd)
+
+acquireSealedInputBytes :: BS.ByteString -> IO (Handle,FilePath)
+acquireSealedInputBytes = acquireInputBytes True
+
+acquireInputBytes :: Bool -> BS.ByteString -> IO (Handle,FilePath)
+acquireInputBytes seal bytes = do
+  raw <- withCString "tidepool-artifact-byte-test" (\name -> createArena name 3)
+  when (raw < 0) (fail "memfd_create failed")
+  handle <- bracketOnError (pure (Fd raw)) closeFd fdToHandle
+  (do BS.hPut handle bytes
+      hFlush handle
+      when seal $ do
+        result <- sealArena raw 1033 15
+        unless (result == 0) (fail "owned fixture arena sealing failed")
+      pid <- getProcessID
+      pure (handle,"/proc/" ++ show pid ++ "/fd/" ++ show raw))
+    `onException` hClose handle
 
 -- Exercise the production cold reader against real sealed Linux arenas. The
 -- logical artifact path is absent throughout; it never becomes a read source.
@@ -75,17 +100,7 @@ ownedArenaRangeReads :: IO ()
 ownedArenaRangeReads = withScratch $ \work -> do
   let bytes = BS.pack [10,20,30]
       backing = BS.pack [90,91] <> bytes <> BS.pack [92,93]
-      acquire seal = do
-        raw <- withCString "tidepool-artifact-byte-test" (\name -> createArena name 3)
-        when (raw < 0) (fail "memfd_create failed")
-        handle <- bracketOnError (pure (Fd raw)) closeFd fdToHandle
-        (do BS.hPut handle backing
-            hFlush handle
-            when seal $ do
-              result <- sealArena raw 1033 15
-              unless (result == 0) (fail "arena sealing failed")) `onException` hClose handle
-        pid <- getProcessID
-        pure (handle,"/proc/" ++ show pid ++ "/fd/" ++ show raw)
+      acquire seal = acquireInputBytes seal backing
       release (handle,_) = hClose handle
       reference endpoint path sha count extent offset = do
         transport <- either fail pure (ownedArenaRange endpoint extent offset)
@@ -149,129 +164,207 @@ artifactByteOwnership = do
       (bodyOwner,_,_) = BSI.toForeignPtr same
   unless (sourceOwner == bodyOwner) (fail "artifact byte capture copied its strict body")
 
-ownedScopeInputReuse :: IO ()
-ownedScopeInputReuse = withTiming $ withScratch $ \work -> do
-  forM_ ["CanonicalSource.hs","CanonicalDependency.hs"] $ \name ->
-    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
-  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing (work </> "CanonicalSource.hs") [work] Nothing
-  fixture <- capturePreparedFixture work original
-  owner <- newExactInputOwner
-  firstPath <- writeGenuineExecutionScope ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture
-  (_,cold) <- captureDiagnostics (readExactScopeWithOwner owner firstPath >>= either fail pure)
-  secondPath <- writeGenuineMetadataScope work ["CanonicalDependency"] fixture
-  (_,contracted) <- captureDiagnostics (readExactScopeWithOwner owner secondPath >>= either fail pure)
-  thirdPath <- writeGenuineExecutionScope ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture
-  removeFile firstPath
-  removeFile secondPath
-  (third,warm) <- captureDiagnostics (readExactScopeWithOwner owner thirdPath >>= either fail pure)
-  revalidateExactScope (prHscEnv (pprPipelineResult original)) third >>= either fail pure
-  let total label = sum . counterValues label
-  unless (total "original_inputs.certificate.misses" cold == 2
-      && total "original_inputs.certificate.hits" contracted == 1
-      && total "original_inputs.certificate.hits" warm == 2
-      && total "original_inputs.certificate.misses" warm == 0
-      && total "original_inputs.packages.hits" warm == 2
-      && total "original_inputs.census.hits" warm == 2
-      && total "original_inputs.graph.hits" warm > 0)
-    (fail ("owned scope A/B/A failed to reuse its immutable facts: " ++ cold ++ contracted ++ warm))
-  rotated <- newExactInputOwner
-  (_,rehydrated) <- captureDiagnostics (readExactScopeWithOwner rotated thirdPath >>= either fail pure)
-  unless (total "original_inputs.certificate.misses" rehydrated == 2)
-    (fail "fresh physical owner inherited a prior worker's decoder")
-  withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" "0" $ do
-    bounded <- newExactInputOwner
-    _ <- readExactScopeWithOwner bounded thirdPath >>= either fail pure
-    (_,evicted) <- captureDiagnostics (readExactScopeWithOwner bounded thirdPath >>= either fail pure)
-    unless (counterValues "original_inputs.retained_encoded_bytes" evicted == [0]
-        && total "original_inputs.certificate.misses" evicted == 2)
-      (fail "zero inactive allowance retained content or decoded facts")
-  -- Permit either genuine image alone, but not both. The receiving scope owns
-  -- both images even while the inactive pool evicts one of them.
-  term <- readCodecTerm thirdPath
-  imageSizes <- case term of
-    TList fields -> case last fields of
-      TList [TString "continue-originals",TList images] -> forM images $ \image -> case image of
-        TList [_,_,_,_,TList parts] -> do
-          sizes <- forM parts $ \part -> case part of
-            TList [_,_,TString sha,size,_] -> case size of
-              TInt amount -> pure ((sha,toInteger amount),toInteger amount)
-              TInteger amount -> pure ((sha,amount),amount)
-              _ -> fail "owned image has another byte-count representation"
-            _ -> fail "owned image has another part representation"
-          pure (sum (Map.elems (Map.fromList sizes)))
-        _ -> fail "owned image has another envelope"
-      _ -> fail "genuine scope lacks continued original images"
-    _ -> fail "genuine scope has another envelope"
-  unless (length imageSizes == 2 && all (> 0) imageSizes)
-    (fail "positive eviction fixture lacks two separately retainable images")
+-- The genuine issuer owns semantic selection and certificates. This test
+-- adapts only its file transport to a live sealed arena in the consuming process;
+-- the production parser validates the complete receiving projection again.
+ownedFixtureScope :: IORef [Handle] -> FilePath -> IO FilePath
+ownedFixtureScope handles path = do
+  (scope,fixture) <- readScopeCodecFixture path
+  unless (scopeCodecAcquisition fixture == Just FreshCodecInputs)
+    (fail "owned transport fixture requires the independent file-only issuer")
+  let producer = scopeProducerSha256 scope
+      ifaceParts = Map.fromListWith (++)
+        [((exactUnit iface,exactModule iface),[(InputInterface,exactPath iface,exactSha256 iface),
+          (InputPackages,packages,packageSha)]) | (iface,packages,packageSha) <- scopeInterfaces scope]
+      certificateParts = Map.map (\proof ->
+        [(InputCertificate,canonicalCertificatePath proof,canonicalCertificateSha256 proof)]
+          ++ [(InputCore,canonicalCorePath core,canonicalCoreSha256 core)
+            | core <- maybe [] pure (canonicalCoreArtifact proof)]) (scopeModuleInterfaceProofs scope)
+  nativeParts <- case scopeCodecField ScopeCodecNativeProducts fixture of
+    TList rows -> Map.fromListWith (++) <$> forM rows (\row -> case row of
+      TList [TString unit,TString name,_,_,_,_,_,TList [TString censusPath,TString censusSha]] -> do
+        let key = (T.unpack unit,T.unpack name)
+        product' <- maybe (fail "issued native census lacks its admitted product") pure
+          (Map.lookup key (Map.fromList [((originalUnit value,originalModule value),value)
+            | value <- scopeProducts scope]))
+        pure (key,[(InputNative,originalProductPath product',originalProductSha256 product'),
+          (InputCensus,T.unpack censusPath,T.unpack censusSha)])
+      _ -> fail "issued native selection has another row shape")
+    _ -> fail "issued native selection has another inventory shape"
+  graphParts <- case scopeCodecField ScopeCodecExecution fixture of
+    TNull -> pure Map.empty
+    TList [TList descriptors,TList references] -> do
+      let byDigest = Map.fromList [(sha,T.unpack graphPath) | TList [TString sha,TString graphPath] <- descriptors]
+      Map.fromListWith (++) <$> forM references (\reference -> case reference of
+        TList [TString unit,TString name,_,_,_,TString sha] -> case Map.lookup sha byDigest of
+          Just graphPath -> pure ((T.unpack unit,T.unpack name),[(InputGraph,graphPath,T.unpack sha)])
+          Nothing -> fail "issued graph selection lacks its descriptor"
+        _ -> fail "issued graph selection has another reference shape")
+    _ -> fail "issued graph selection has another parcel shape"
+  let owners = Map.unionsWith (++) [ifaceParts,certificateParts,nativeParts,graphParts]
+  bodies <- forM (Set.toAscList (Set.fromList (concat (Map.elems owners)))) $ \(_,input,sha) -> do
+    bytes <- BS.readFile input
+    unless (digest bytes == sha && not (BS.null bytes)) (fail ("issued fixture bytes differ from their original seal: " ++ input ++ " expected=" ++ sha ++ " actual=" ++ digest bytes))
+    pure (input,(sha,bytes))
+  let allBodies = Map.fromList bodies
+      (extent,ranges) = foldl (\(offset,parts) (input,(_,bytes)) ->
+        (offset + BS.length bytes,Map.insert input (offset,BS.length bytes) parts))
+        (0,Map.empty) (Map.toAscList allBodies)
+  (handle,endpoint) <- acquireSealedInputBytes (BS.concat [bytes | (_,(_,bytes)) <- Map.toAscList allBodies])
+  modifyIORef' handles (handle:)
+  transport <- either fail pure (ownedArenaRange endpoint (toInteger extent) 0)
+  let text = TString . T.pack
+      part owner = forM (sortOn (\(kind,_,sha) -> (kind,sha)) owner) $ \(kind,input,sha) -> do
+        let (offset,size) = ranges Map.! input
+        selectedRange <- either fail pure (ownedArenaRange endpoint (toInteger extent) (toInteger offset))
+        pure (kind,OriginalInputReference input sha size [] selectedRange,offset)
+  images <- forM (Map.toAscList owners) $ \(key@(unit,name),parts) -> do
+    selected <- part parts
+    let references = [(kind,reference) | (kind,reference,_) <- selected]
+        emit (kind,reference,offset) = TList [text (inputKindTag kind),text (originalInputPath reference),
+          text (originalInputSha256 reference),TInt (originalInputLength reference),TList [],TList [TInt 0,TInt offset]]
+    pure (TList [text producer,text unit,text name,text (inputImageDigest producer key references),TList (map emit selected)])
+  -- Exercise the real cold range reader before publishing the adapted frame.
+  probe <- continueRequestInputs emptyCapturedOriginalContent
+    [OriginalInputReference endpoint (digest (BS.concat [bytes | (_,(_,bytes)) <- Map.toAscList allBodies])) extent [] transport]
+  unless (requestInputBytes probe == toInteger extent) (fail "sealed fixture arena lost its exact extent")
+  let acquisition = ContinueCodecOriginals (TList [TList [text endpoint,TInt extent]]) (TList images)
+  BS.writeFile path (toStrictByteString (encodeTerm
+    (scopeCodecTerm (replaceScopeCodecAcquisition acquisition fixture))))
+  _ <- readExactScope path >>= either fail pure
+  pure path
 
-  let positiveLimit = maximum imageSizes
-  unless (positiveLimit < sum imageSizes)
-    (fail "positive eviction fixture lacks two separately retainable images")
-  withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" (show positiveLimit) $ do
-    bounded <- newExactInputOwner
-    (live,evicted) <- captureDiagnostics (readExactScopeWithOwner bounded thirdPath >>= either fail pure)
-    unless (total "original_inputs.retained_encoded_bytes" evicted > 0
-        && total "original_inputs.evicted_encoded_bytes" evicted > 0)
-      (fail "positive allowance did not retain and evict genuine images")
-    putStrLn ("owned input positive allowance=" ++ show positiveLimit
-      ++ " retained=" ++ show (total "original_inputs.retained_encoded_bytes" evicted)
-      ++ " evicted=" ++ show (total "original_inputs.evicted_encoded_bytes" evicted))
-    receiving <- writeGenuineMetadataScope work ["CanonicalDependency"] fixture
-    _ <- readExactScopeWithOwner bounded receiving >>= either fail pure
-    forM_ (scopeInterfaces live) $ \(iface,_,_) -> do
-      bytes <- scopeInterfaceBytes live iface
-      bracket (BS.readFile (exactPath iface)) (BS.writeFile (exactPath iface)) $ \_ -> do
-        BS.writeFile (exactPath iface) (BS.singleton 0)
-        held <- scopeInterfaceBytes live iface
-        unless (held == bytes) (fail "inactive eviction dropped live original custody")
-        revalidateExactScope (prHscEnv (pprPipelineResult original)) live >>= \result ->
-          either fail pure result
-    revalidateExactScope (prHscEnv (pprPipelineResult original)) live >>= either fail pure
-  -- GHC opens FIFO descriptors nonblocking, so an already-open RDWR peer
-  -- prevents an early EOF. The reader's blocked state then establishes that
-  -- admission has started its incomplete-manifest read before cancellation.
-  python <- lookupEnv "TIDEPOOL_TEST_PYTHON" >>= maybe (fail "missing declared fixture Python") pure
-  fifo <- makeAbsolute (work </> "pending-exact-scope.cbor")
-  callProcess python ["-c","import os,sys; os.mkfifo(sys.argv[1])",fifo]
-  let script = "import os,sys; fd=os.open(sys.argv[1],os.O_RDWR); os.write(fd,b'\\x00'); print('ready',flush=True); sys.stdin.readline(); os.close(fd)"
-      peer = (proc python ["-c",script,fifo]) {std_in=CreatePipe,std_out=CreatePipe}
-  withCreateProcess peer $ \input output _ processHandle -> case (input,output) of
-    (Just commands,Just responses) -> do
-      ready <- timeout 5000000 (hGetLine responses)
-      unless (ready == Just "ready") (fail "input cancellation peer did not open its FIFO")
-      readerDone <- newEmptyMVar
-      bracket (forkIO ((try (readExactScopeWithOwner owner fifo) :: IO (Either SomeException (Either String ExactScope)))
-          >>= putMVar readerDone)) killThread $ \reader -> do
-        let await = do
-              status <- threadStatus reader
-              case status of
-                ThreadBlocked reason -> pure reason
-                ThreadRunning -> threadDelay 1000 >> await
-                _ -> fail ("exact input admission did not block on its partial manifest: " ++ show status)
-        blocked <- timeout 5000000 await
-        case blocked of
-          Just reason -> putStrLn ("owned input cancelled admission blocked=" ++ show reason)
-          Nothing -> fail "exact input admission did not reach its pending read"
-        killThread reader
-        settled <- timeout 5000000 (takeMVar readerDone)
-        unless (case settled of
-          Just (Left problem) -> fromException problem == Just ThreadKilled
-          _ -> False) (fail "exact input admission swallowed cancellation or failed to settle")
-      hPutStrLn commands "release"
-      hFlush commands
-      completed <- timeout 5000000 (waitForProcess processHandle)
-      unless (completed == Just ExitSuccess) (fail "cancelled input admission retained its fixture peer")
-    _ -> fail "input cancellation peer lacks its declared pipes"
-  (_,afterCancellation) <- captureDiagnostics (readExactScopeWithOwner owner thirdPath >>= either fail pure)
-  unless (total "original_inputs.certificate.hits" afterCancellation == 2)
-    (fail "cancelled admission discarded the previous complete owner state")
-  replacement <- newExactInputOwner
-  (_,afterReplacement) <- captureDiagnostics (readExactScopeWithOwner replacement thirdPath >>= either fail pure)
-  unless (total "original_inputs.certificate.misses" afterReplacement == 2)
-    (fail "replacement owner inherited cancelled physical-worker facts")
-  putStrLn ("owned exact inputs: A/B/A reuse, deleted manifests, rotation, positive/live and zero-budget eviction, cancelled admission and replacement passed\n" ++ warm)
+ownedScopeInputReuse :: IO ()
+ownedScopeInputReuse = withTiming $ withScratch $ \work ->
+  bracket (newIORef []) (\owners -> readIORef owners >>= mapM_ hClose) $ \handles -> do
+    forM_ ["CanonicalSource.hs","CanonicalDependency.hs"] $ \name ->
+      copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+    original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+      Nothing (work </> "CanonicalSource.hs") [work] Nothing
+    fixture <- capturePreparedFixture work original
+    filePath <- writeGenuineMetadataScope work ["CanonicalDependency"] fixture
+    fileOwner <- newExactInputOwner
+    _ <- readExactScopeWithOwner fileOwner filePath >>= either fail pure
+    (_,fileAgain) <- captureDiagnostics (readExactScopeWithOwner fileOwner filePath >>= either fail pure)
+    unless (sum (counterValues "original_inputs.certificate.misses" fileAgain) == 1
+        && counterValues "original_inputs.retained_encoded_bytes" fileAgain == [0])
+      (fail "file-only fixture claimed owned continuation reuse")
+    owner <- newExactInputOwner
+    firstPath <- writeGenuineExecutionScope ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture >>= ownedFixtureScope handles
+    (_,cold) <- captureDiagnostics (readExactScopeWithOwner owner firstPath >>= either fail pure)
+    secondPath <- writeGenuineMetadataScope work ["CanonicalDependency"] fixture >>= ownedFixtureScope handles
+    (_,contracted) <- captureDiagnostics (readExactScopeWithOwner owner secondPath >>= either fail pure)
+    thirdPath <- writeGenuineExecutionScope ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture >>= ownedFixtureScope handles
+    removeFile firstPath
+    removeFile secondPath
+    (third,warm) <- captureDiagnostics (readExactScopeWithOwner owner thirdPath >>= either fail pure)
+    revalidateExactScope (prHscEnv (pprPipelineResult original)) third >>= either fail pure
+    let total label = sum . counterValues label
+    unless (total "original_inputs.certificate.misses" cold == 2
+        && total "original_inputs.certificate.hits" contracted == 1
+        && total "original_inputs.certificate.hits" warm == 2
+        && total "original_inputs.certificate.misses" warm == 0
+        && total "original_inputs.packages.hits" warm == 2
+        && total "original_inputs.census.hits" warm == 2
+        && total "original_inputs.graph.hits" warm > 0)
+      (fail ("owned scope A/B/A failed to reuse its immutable facts: " ++ cold ++ contracted ++ warm))
+    rotated <- newExactInputOwner
+    (_,rehydrated) <- captureDiagnostics (readExactScopeWithOwner rotated thirdPath >>= either fail pure)
+    unless (total "original_inputs.certificate.misses" rehydrated == 2)
+      (fail "fresh physical owner inherited a prior worker's decoder")
+    withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" "0" $ do
+      bounded <- newExactInputOwner
+      _ <- readExactScopeWithOwner bounded thirdPath >>= either fail pure
+      (_,evicted) <- captureDiagnostics (readExactScopeWithOwner bounded thirdPath >>= either fail pure)
+      unless (counterValues "original_inputs.retained_encoded_bytes" evicted == [0]
+          && total "original_inputs.certificate.misses" evicted == 2)
+        (fail "zero inactive allowance retained content or decoded facts")
+    -- Permit either genuine image alone, but not both. The receiving scope owns
+    -- both images even while the inactive pool evicts one of them.
+    term <- readCodecTerm thirdPath
+    imageSizes <- case term of
+      TList fields -> case last fields of
+        TList [TString "continue-originals",_,TList images] -> forM images $ \image -> case image of
+          TList [_,_,_,_,TList parts] -> do
+            sizes <- forM parts $ \part -> case part of
+              TList [_,_,TString sha,size,_,_] -> case size of
+                TInt amount -> pure ((sha,toInteger amount),toInteger amount)
+                TInteger amount -> pure ((sha,amount),amount)
+                _ -> fail "owned image has another byte-count representation"
+              _ -> fail "owned image has another part representation"
+            pure (sum (Map.elems (Map.fromList sizes)))
+          _ -> fail "owned image has another envelope"
+        _ -> fail "genuine scope lacks continued original images"
+      _ -> fail "genuine scope has another envelope"
+    unless (length imageSizes == 2 && all (> 0) imageSizes)
+      (fail "positive eviction fixture lacks two separately retainable images")
+
+    let positiveLimit = maximum imageSizes
+    unless (positiveLimit < sum imageSizes)
+      (fail "positive eviction fixture lacks two separately retainable images")
+    withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" (show positiveLimit) $ do
+      bounded <- newExactInputOwner
+      (live,evicted) <- captureDiagnostics (readExactScopeWithOwner bounded thirdPath >>= either fail pure)
+      unless (total "original_inputs.retained_encoded_bytes" evicted > 0
+          && total "original_inputs.evicted_encoded_bytes" evicted > 0)
+        (fail "positive allowance did not retain and evict genuine images")
+      putStrLn ("owned input positive allowance=" ++ show positiveLimit
+        ++ " retained=" ++ show (total "original_inputs.retained_encoded_bytes" evicted)
+        ++ " evicted=" ++ show (total "original_inputs.evicted_encoded_bytes" evicted))
+      receiving <- writeGenuineMetadataScope work ["CanonicalDependency"] fixture >>= ownedFixtureScope handles
+      _ <- readExactScopeWithOwner bounded receiving >>= either fail pure
+      forM_ (scopeInterfaces live) $ \(iface,_,_) -> do
+        bytes <- scopeInterfaceBytes live iface
+        bracket (BS.readFile (exactPath iface)) (BS.writeFile (exactPath iface)) $ \_ -> do
+          BS.writeFile (exactPath iface) (BS.singleton 0)
+          held <- scopeInterfaceBytes live iface
+          unless (held == bytes) (fail "inactive eviction dropped live original custody")
+          revalidateExactScope (prHscEnv (pprPipelineResult original)) live >>= \result ->
+            either fail pure result
+      revalidateExactScope (prHscEnv (pprPipelineResult original)) live >>= either fail pure
+    -- GHC opens FIFO descriptors nonblocking, so an already-open RDWR peer
+    -- prevents an early EOF. The reader's blocked state then establishes that
+    -- admission has started its incomplete-manifest read before cancellation.
+    python <- lookupEnv "TIDEPOOL_TEST_PYTHON" >>= maybe (fail "missing declared fixture Python") pure
+    fifo <- makeAbsolute (work </> "pending-exact-scope.cbor")
+    callProcess python ["-c","import os,sys; os.mkfifo(sys.argv[1])",fifo]
+    let script = "import os,sys; fd=os.open(sys.argv[1],os.O_RDWR); os.write(fd,b'\\x00'); print('ready',flush=True); sys.stdin.readline(); os.close(fd)"
+        peer = (proc python ["-c",script,fifo]) {std_in=CreatePipe,std_out=CreatePipe}
+    withCreateProcess peer $ \input output _ processHandle -> case (input,output) of
+      (Just commands,Just responses) -> do
+        ready <- timeout 5000000 (hGetLine responses)
+        unless (ready == Just "ready") (fail "input cancellation peer did not open its FIFO")
+        readerDone <- newEmptyMVar
+        bracket (forkIO ((try (readExactScopeWithOwner owner fifo) :: IO (Either SomeException (Either String ExactScope)))
+            >>= putMVar readerDone)) killThread $ \reader -> do
+          let await = do
+                status <- threadStatus reader
+                case status of
+                  ThreadBlocked reason -> pure reason
+                  ThreadRunning -> threadDelay 1000 >> await
+                  _ -> fail ("exact input admission did not block on its partial manifest: " ++ show status)
+          blocked <- timeout 5000000 await
+          case blocked of
+            Just reason -> putStrLn ("owned input cancelled admission blocked=" ++ show reason)
+            Nothing -> fail "exact input admission did not reach its pending read"
+          killThread reader
+          settled <- timeout 5000000 (takeMVar readerDone)
+          unless (case settled of
+            Just (Left problem) -> fromException problem == Just ThreadKilled
+            _ -> False) (fail "exact input admission swallowed cancellation or failed to settle")
+        hPutStrLn commands "release"
+        hFlush commands
+        completed <- timeout 5000000 (waitForProcess processHandle)
+        unless (completed == Just ExitSuccess) (fail "cancelled input admission retained its fixture peer")
+      _ -> fail "input cancellation peer lacks its declared pipes"
+    (_,afterCancellation) <- captureDiagnostics (readExactScopeWithOwner owner thirdPath >>= either fail pure)
+    unless (total "original_inputs.certificate.hits" afterCancellation == 2)
+      (fail "cancelled admission discarded the previous complete owner state")
+    replacement <- newExactInputOwner
+    (_,afterReplacement) <- captureDiagnostics (readExactScopeWithOwner replacement thirdPath >>= either fail pure)
+    unless (total "original_inputs.certificate.misses" afterReplacement == 2)
+      (fail "replacement owner inherited cancelled physical-worker facts")
+    putStrLn ("owned exact inputs: A/B/A reuse, deleted manifests, rotation, positive/live and zero-budget eviction, cancelled admission and replacement passed\n" ++ warm)
 
 validationTimingControl :: IO ()
 validationTimingControl = do
@@ -341,7 +434,7 @@ fixtureIssuerCountingHistories = withTiming $ withScratch $ \work -> do
   writeGenuineCandidateManifestFor ["OptionalAnchor"] work fixture
   term <- readCodecTerm (work </> "module-candidates.cbor")
   graph <- case term of
-    TList [_,_,_,_,_,TList [TList (TList [_,TString path]:_),_],_] -> pure (T.unpack path)
+    TList [_,_,_,_,_,TList [TList (TList [_,TString path]:_),_],_,_] -> pure (T.unpack path)
     _ -> fail "genuine fixture lacks an independently validated graph companion"
   graphBytes <- BS.readFile graph
   let authored = work </> "Tidepool" </> "Session" </> "Lib" </> "G1.hs"
@@ -770,47 +863,52 @@ requestInputHistories = do
       $ ioProperty (continued (BS.pack [if bit then 1 else 0 | bit <- take 64 (generated :: [Bool])]) originDrift aliasDrift)
   unless (isSuccess continuation) (fail "continued original input history property failed")
   where
-    continued values originDrift aliasDrift = withScratch $ \directory -> do
-      let bytes = values
-          historical = directory </> "previous-offer"
-          oldManifest = directory </> "previous-manifest"
-          original = directory </> "protected-origin"
-          receiving = directory </> "receiving-alias"
-          changed = bytes <> BS.singleton 123
-          reference path = OriginalInputReference path (digest bytes) (BS.length bytes) [original]
-            (either error id (ownedArenaRange path (toInteger (BS.length bytes)) 0))
-      BS.writeFile historical bytes
-      BS.writeFile oldManifest (BS.singleton 7)
-      BS.writeFile original bytes
-      (_,old) <- captureRequestInputs Nothing $ \reader -> do
-        _ <- reader oldManifest 1
-        reader historical 64
-      content <- either fail pure (selectedOriginalContent [reference historical] old)
-      removeFile historical
-      removeFile oldManifest
-      BS.writeFile receiving (if aliasDrift then changed else bytes)
-      BS.writeFile original (if originDrift then changed else bytes)
-      selected <- continueRequestInputs content [reference receiving]
-      actual <- capturedRequestInput selected receiving (digest bytes)
-      observed <- revalidateRequestInputs selected
-      unless (actual == bytes && requestInputBytes selected == toInteger (BS.length bytes))
-        (fail "continuation lost content or inherited historical accounting")
-      unless (either (const False) (const True) observed == not (originDrift || aliasDrift))
-        (fail "continuation publication disagreed with current selected-path model")
-      (_,fresh) <- captureRequestInputs Nothing (\reader -> reader receiving 65)
-      freshBytes <- capturedRequestInput fresh receiving (digest (if aliasDrift then changed else bytes))
-      unless (freshBytes == if aliasDrift then changed else bytes)
-        (fail "fresh acquisition consumed a retained original")
-      cold <- try (continueRequestInputs emptyCapturedOriginalContent [reference receiving])
-        :: IO (Either IOException RequestOriginalInputs)
-      unless (either (const False) (const True) cold == not aliasDrift)
-        (fail "rotation fallback used an unsealed materialization")
-      BS.writeFile receiving bytes
-      BS.writeFile original bytes
-      revalidateRequestInputs selected >>= either fail pure
-      rotated <- continueRequestInputs emptyCapturedOriginalContent [reference receiving]
-      revalidateRequestInputs rotated >>= either fail pure
-      pure True
+    continued values originDrift aliasDrift = withScratch $ \directory ->
+      withSealedInputBytes values $ \endpoint -> do
+        let bytes = values
+            historical = directory </> "previous-offer"
+            oldManifest = directory </> "previous-manifest"
+            original = directory </> "protected-origin"
+            receiving = directory </> "receiving-alias"
+            changed = bytes <> BS.singleton 123
+            reference path = OriginalInputReference path (digest bytes) (BS.length bytes) [original]
+              (either error id (ownedArenaRange endpoint (toInteger (BS.length bytes)) 0))
+        BS.writeFile historical bytes
+        BS.writeFile oldManifest (BS.singleton 7)
+        BS.writeFile original bytes
+        (_,old) <- captureRequestInputs Nothing $ \reader -> do
+          _ <- reader oldManifest 1
+          reader historical 64
+        content <- either fail pure (selectedOriginalContent [reference historical] old)
+        removeFile historical
+        removeFile oldManifest
+        BS.writeFile receiving (if aliasDrift then changed else bytes)
+        BS.writeFile original (if originDrift then changed else bytes)
+        selected <- continueRequestInputs content [reference receiving]
+        actual <- capturedRequestInput selected receiving (digest bytes)
+        observed <- revalidateRequestInputs selected
+        unless (actual == bytes && requestInputBytes selected == toInteger (BS.length bytes))
+          (fail "continuation lost content or inherited historical accounting")
+        unless (either (const False) (const True) observed == not (originDrift || aliasDrift))
+          (fail "continuation publication disagreed with current selected-path model")
+        (_,fresh) <- captureRequestInputs Nothing (\reader -> reader receiving 65)
+        freshBytes <- capturedRequestInput fresh receiving (digest (if aliasDrift then changed else bytes))
+        unless (freshBytes == if aliasDrift then changed else bytes)
+          (fail "fresh acquisition consumed a retained original")
+        cold <- try (continueRequestInputs emptyCapturedOriginalContent [reference receiving])
+          :: IO (Either IOException RequestOriginalInputs)
+        rotatedInput <- either (fail . show) pure cold
+        rotatedBytes <- capturedRequestInput rotatedInput receiving (digest bytes)
+        rotatedProof <- revalidateRequestInputs rotatedInput
+        unless (rotatedBytes == bytes
+            && either (const False) (const True) rotatedProof == not (originDrift || aliasDrift))
+          (fail "rotation changed owned bytes or ignored the separate current-path proof")
+        BS.writeFile receiving bytes
+        BS.writeFile original bytes
+        revalidateRequestInputs selected >>= either fail pure
+        rotated <- continueRequestInputs emptyCapturedOriginalContent [reference receiving]
+        revalidateRequestInputs rotated >>= either fail pure
+        pure True
     history steps = withScratch $ \directory -> do
       (_,empty) <- captureRequestInputs Nothing (const (pure ()))
       (_,model,owner) <- foldM (step directory) (Map.empty,Map.empty,empty) steps
@@ -863,123 +961,124 @@ requestInputHistories = do
     payload bits = BS.pack [if bit then 1 else 0 | bit <- take 64 bits]
 
 requestInputBoundaries :: IO ()
-requestInputBoundaries = withScratch $ \directory -> do
-  let path = directory </> "original"
-      other = directory </> "other"
-      bytes = BS.pack [1,2,3]
-  BS.writeFile path bytes
-  BS.writeFile other bytes
-  let reference destination = OriginalInputReference destination (digest bytes) 3 []
-        (either error id (ownedArenaRange destination 3 0))
-  (shared,counts) <- withTiming $ captureDiagnostics
-    (continueRequestInputs emptyCapturedOriginalContent [reference path,reference other])
-  left <- capturedRequestInput shared path (digest bytes)
-  right <- capturedRequestInput shared other (digest bytes)
-  unless (BSI.toForeignPtr left == BSI.toForeignPtr right
-      && requestInputBytes shared == 6
-      && sum (counterValues "original_inputs.content_misses" counts) == 1
-      && sum (counterValues "original_inputs.content_hits" counts) == 1)
-    (fail "cold continuation duplicated equal content or discarded receiving-path accounting")
-  revalidateRequestInputs shared >>= either fail pure
-  bracket (BS.readFile other) (BS.writeFile other) $ \_ -> do
-    BS.writeFile other (BS.singleton 9)
-    held <- capturedRequestInput shared other (digest bytes)
-    refused <- revalidateRequestInputs shared
-    unless (held == bytes && either (const True) (const False) refused)
-      (fail "shared backing storage erased a receiving path's terminal obligation")
-  revalidateRequestInputs shared >>= either fail pure
-  (escaped,owner) <- captureRequestInputs Nothing $ \reader -> do
-    _ <- reader path 3
-    pure reader
-  BS.writeFile path (BS.singleton 9)
-  stable <- capturedRequestInput owner path (digest bytes)
-  changed <- revalidateRequestInputs owner
-  unless (stable == bytes && either (const True) (const False) changed)
-    (fail "producer replacement changed consumption or passed terminal validation")
-  BS.writeFile path bytes
-  restored <- revalidateRequestInputs owner
-  unless (restored == Right ()) (fail "restored producer bytes remained stale in terminal validation")
-  afterSeal <- try (escaped path 3) :: IO (Either IOException BS.ByteString)
-  unless (either (const True) (const False) afterSeal) (fail "admission reader escaped its lifetime")
-  tooSmall <- try (captureRequestInputs (Just owner) (\reader -> reader path 2))
-    :: IO (Either IOException (BS.ByteString,RequestOriginalInputs))
-  unless (either (const True) (const False) tooSmall) (fail "retained bytes bypassed a stricter bound")
-  wrongSeal <- try (capturedRequestInput owner path (replicate 64 '0')) :: IO (Either IOException BS.ByteString)
-  missing <- try (capturedRequestInput owner other (digest bytes)) :: IO (Either IOException BS.ByteString)
-  unless (all (either (const True) (const False)) [wrongSeal,missing])
-    (fail "snapshot lookup reconstructed missing or conflicting authority from disk")
-  let copy = directory </> "durable-copy"
-  BS.writeFile copy bytes
-  aliased <- either fail pure (aliasRequestInputs [(copy,path,digest bytes)] owner)
-  (_,aliasedAgain) <- captureRequestInputs (Just aliased) (\reader -> reader copy 3)
-  copied <- capturedRequestInput aliasedAgain copy (digest bytes)
-  unless (copied == bytes && requestInputBytes aliasedAgain == requestInputBytes owner)
-    (fail "durable original alias retained or charged another payload")
-  unless (case aliasRequestInputs [(copy,path,replicate 64 '0')] owner of Left _ -> True; _ -> False)
-    (fail "durable original alias accepted a conflicting seal")
-  (_,independentCopy) <- captureRequestInputs Nothing (\reader -> reader copy 3)
-  transferredAlias <- either fail pure (mergeRequestInputs aliased [aliasedAgain,independentCopy])
-  unless (requestInputBytes transferredAlias == requestInputBytes owner)
-    (fail "alias transfer charged a captured copy twice")
-  removeFile copy
-  missingAlias <- revalidateRequestInputs transferredAlias
-  unless (either (const True) (const False) missingAlias)
-    (fail "terminal publication ignored a missing durable support alias")
-  stableAlias <- capturedRequestInput transferredAlias copy (digest bytes)
-  unless (stableAlias == bytes) (fail "deleted durable alias changed captured consumption")
-  BS.writeFile copy bytes
-  revalidateRequestInputs transferredAlias >>= either fail pure
-  let config = "TIDEPOOL_REQUEST_CAPTURE_BYTES"
-      restore Nothing = unsetEnv config
-      restore (Just value) = setEnv config value
-  bracket (lookupEnv config) restore $ \_ -> do
-    setEnv config "5"
-    (_,bounded) <- captureRequestInputs Nothing (\reader -> reader path 3)
-    exceeds <- try (captureRequestInputs (Just bounded) (\reader -> reader other 3))
-      :: IO (Either IOException (BS.ByteString,RequestOriginalInputs))
-    unless (either (const True) (const False) exceeds) (fail "aggregate capture budget was applied per file")
-    unless (requestInputBytes bounded == 3) (fail "encoded input accounting differs from retained bytes")
-    unless (case retainRequestEncodedBytes [captureArtifactBytes bytes] bounded of Nothing -> True; _ -> False)
-      (fail "new encoded graph bytes bypassed the request aggregate budget")
-    let graphBytes = BS.pack [4,5]
-    graphOwner <- maybe (fail "bounded encoded graph was refused") pure
-      (retainRequestEncodedBytes [captureArtifactBytes graphBytes] bounded)
-    unless (requestInputBytes graphOwner == 5
-        && fmap requestInputBytes (retainRequestEncodedBytes [captureArtifactBytes graphBytes] graphOwner) == Just 5)
-      (fail "encoded graph generations lost accounting or charged the same graph again")
-    -- A donor allowance cannot enlarge the receiver. Transfer shares bytes,
-    -- including duplicate donors, and observes no current producer path.
-    setEnv config "64"
-    (_,donor) <- captureRequestInputs Nothing (\reader -> reader other 3)
-    setEnv config "5"
-    content <- either fail pure (selectedOriginalContent [reference other] donor)
-    continued <- continueRequestInputs content [reference path]
-    unless (requestInputBytes continued == 3) (fail "continued bytes inherited the donor allowance")
-    continuationOverflow <- try (continueRequestInputs content [reference path,reference copy])
-      :: IO (Either IOException RequestOriginalInputs)
-    unless (either (const True) (const False) continuationOverflow)
-      (fail "content hits bypassed the fresh receiving aggregate budget")
-    (_,receiving) <- captureRequestInputs Nothing (const (pure ()))
-    removeFile other
-    transferred <- either fail pure (mergeRequestInputs receiving [donor,donor])
-    transferredBytes <- capturedRequestInput transferred other (digest bytes)
-    unless (transferredBytes == bytes && requestInputBytes transferred == 3)
-      (fail "capture transfer reread deleted producer bytes or charged a duplicate owner")
-    unless (case mergeRequestInputs bounded [donor] of Left _ -> True; _ -> False)
-      (fail "capture transfer inherited donor allowance instead of receiving budget")
-    BS.writeFile other (BS.singleton 7)
-    (_,conflicting) <- captureRequestInputs Nothing (\reader -> reader other 3)
-    unless (case mergeRequestInputs transferred [conflicting] of Left _ -> True; _ -> False)
-      (fail "capture transfer replaced an admitted path with conflicting owner bytes")
+requestInputBoundaries = withScratch $ \directory ->
+  withSealedInputBytes (BS.pack [1,2,3]) $ \endpoint -> do
+    let path = directory </> "original"
+        other = directory </> "other"
+        bytes = BS.pack [1,2,3]
+    BS.writeFile path bytes
     BS.writeFile other bytes
-    setEnv config "0"
-    invalid <- try (captureRequestInputs Nothing (const (pure ())))
-      :: IO (Either IOException ((),RequestOriginalInputs))
-    unless (either (const True) (const False) invalid) (fail "invalid capture budget silently selected a default")
-  cancelled <- try (captureRequestInputs Nothing (\_ -> throwIO ThreadKilled))
-    :: IO (Either AsyncException ((),RequestOriginalInputs))
-  unless (case cancelled of Left ThreadKilled -> True; _ -> False)
-    (fail "capture admission converted asynchronous cancellation")
+    let reference destination = OriginalInputReference destination (digest bytes) 3 []
+          (either error id (ownedArenaRange endpoint 3 0))
+    (shared,counts) <- withTiming $ captureDiagnostics
+      (continueRequestInputs emptyCapturedOriginalContent [reference path,reference other])
+    left <- capturedRequestInput shared path (digest bytes)
+    right <- capturedRequestInput shared other (digest bytes)
+    unless (BSI.toForeignPtr left == BSI.toForeignPtr right
+        && requestInputBytes shared == 6
+        && sum (counterValues "original_inputs.content_misses" counts) == 1
+        && sum (counterValues "original_inputs.content_hits" counts) == 1)
+      (fail "cold continuation duplicated equal content or discarded receiving-path accounting")
+    revalidateRequestInputs shared >>= either fail pure
+    bracket (BS.readFile other) (BS.writeFile other) $ \_ -> do
+      BS.writeFile other (BS.singleton 9)
+      held <- capturedRequestInput shared other (digest bytes)
+      refused <- revalidateRequestInputs shared
+      unless (held == bytes && either (const True) (const False) refused)
+        (fail "shared backing storage erased a receiving path's terminal obligation")
+    revalidateRequestInputs shared >>= either fail pure
+    (escaped,owner) <- captureRequestInputs Nothing $ \reader -> do
+      _ <- reader path 3
+      pure reader
+    BS.writeFile path (BS.singleton 9)
+    stable <- capturedRequestInput owner path (digest bytes)
+    changed <- revalidateRequestInputs owner
+    unless (stable == bytes && either (const True) (const False) changed)
+      (fail "producer replacement changed consumption or passed terminal validation")
+    BS.writeFile path bytes
+    restored <- revalidateRequestInputs owner
+    unless (restored == Right ()) (fail "restored producer bytes remained stale in terminal validation")
+    afterSeal <- try (escaped path 3) :: IO (Either IOException BS.ByteString)
+    unless (either (const True) (const False) afterSeal) (fail "admission reader escaped its lifetime")
+    tooSmall <- try (captureRequestInputs (Just owner) (\reader -> reader path 2))
+      :: IO (Either IOException (BS.ByteString,RequestOriginalInputs))
+    unless (either (const True) (const False) tooSmall) (fail "retained bytes bypassed a stricter bound")
+    wrongSeal <- try (capturedRequestInput owner path (replicate 64 '0')) :: IO (Either IOException BS.ByteString)
+    missing <- try (capturedRequestInput owner other (digest bytes)) :: IO (Either IOException BS.ByteString)
+    unless (all (either (const True) (const False)) [wrongSeal,missing])
+      (fail "snapshot lookup reconstructed missing or conflicting authority from disk")
+    let copy = directory </> "durable-copy"
+    BS.writeFile copy bytes
+    aliased <- either fail pure (aliasRequestInputs [(copy,path,digest bytes)] owner)
+    (_,aliasedAgain) <- captureRequestInputs (Just aliased) (\reader -> reader copy 3)
+    copied <- capturedRequestInput aliasedAgain copy (digest bytes)
+    unless (copied == bytes && requestInputBytes aliasedAgain == requestInputBytes owner)
+      (fail "durable original alias retained or charged another payload")
+    unless (case aliasRequestInputs [(copy,path,replicate 64 '0')] owner of Left _ -> True; _ -> False)
+      (fail "durable original alias accepted a conflicting seal")
+    (_,independentCopy) <- captureRequestInputs Nothing (\reader -> reader copy 3)
+    transferredAlias <- either fail pure (mergeRequestInputs aliased [aliasedAgain,independentCopy])
+    unless (requestInputBytes transferredAlias == requestInputBytes owner)
+      (fail "alias transfer charged a captured copy twice")
+    removeFile copy
+    missingAlias <- revalidateRequestInputs transferredAlias
+    unless (either (const True) (const False) missingAlias)
+      (fail "terminal publication ignored a missing durable support alias")
+    stableAlias <- capturedRequestInput transferredAlias copy (digest bytes)
+    unless (stableAlias == bytes) (fail "deleted durable alias changed captured consumption")
+    BS.writeFile copy bytes
+    revalidateRequestInputs transferredAlias >>= either fail pure
+    let config = "TIDEPOOL_REQUEST_CAPTURE_BYTES"
+        restore Nothing = unsetEnv config
+        restore (Just value) = setEnv config value
+    bracket (lookupEnv config) restore $ \_ -> do
+      setEnv config "5"
+      (_,bounded) <- captureRequestInputs Nothing (\reader -> reader path 3)
+      exceeds <- try (captureRequestInputs (Just bounded) (\reader -> reader other 3))
+        :: IO (Either IOException (BS.ByteString,RequestOriginalInputs))
+      unless (either (const True) (const False) exceeds) (fail "aggregate capture budget was applied per file")
+      unless (requestInputBytes bounded == 3) (fail "encoded input accounting differs from retained bytes")
+      unless (case retainRequestEncodedBytes [captureArtifactBytes bytes] bounded of Nothing -> True; _ -> False)
+        (fail "new encoded graph bytes bypassed the request aggregate budget")
+      let graphBytes = BS.pack [4,5]
+      graphOwner <- maybe (fail "bounded encoded graph was refused") pure
+        (retainRequestEncodedBytes [captureArtifactBytes graphBytes] bounded)
+      unless (requestInputBytes graphOwner == 5
+          && fmap requestInputBytes (retainRequestEncodedBytes [captureArtifactBytes graphBytes] graphOwner) == Just 5)
+        (fail "encoded graph generations lost accounting or charged the same graph again")
+      -- A donor allowance cannot enlarge the receiver. Transfer shares bytes,
+      -- including duplicate donors, and observes no current producer path.
+      setEnv config "64"
+      (_,donor) <- captureRequestInputs Nothing (\reader -> reader other 3)
+      setEnv config "5"
+      content <- either fail pure (selectedOriginalContent [reference other] donor)
+      continued <- continueRequestInputs content [reference path]
+      unless (requestInputBytes continued == 3) (fail "continued bytes inherited the donor allowance")
+      continuationOverflow <- try (continueRequestInputs content [reference path,reference copy])
+        :: IO (Either IOException RequestOriginalInputs)
+      unless (either (const True) (const False) continuationOverflow)
+        (fail "content hits bypassed the fresh receiving aggregate budget")
+      (_,receiving) <- captureRequestInputs Nothing (const (pure ()))
+      removeFile other
+      transferred <- either fail pure (mergeRequestInputs receiving [donor,donor])
+      transferredBytes <- capturedRequestInput transferred other (digest bytes)
+      unless (transferredBytes == bytes && requestInputBytes transferred == 3)
+        (fail "capture transfer reread deleted producer bytes or charged a duplicate owner")
+      unless (case mergeRequestInputs bounded [donor] of Left _ -> True; _ -> False)
+        (fail "capture transfer inherited donor allowance instead of receiving budget")
+      BS.writeFile other (BS.singleton 7)
+      (_,conflicting) <- captureRequestInputs Nothing (\reader -> reader other 3)
+      unless (case mergeRequestInputs transferred [conflicting] of Left _ -> True; _ -> False)
+        (fail "capture transfer replaced an admitted path with conflicting owner bytes")
+      BS.writeFile other bytes
+      setEnv config "0"
+      invalid <- try (captureRequestInputs Nothing (const (pure ())))
+        :: IO (Either IOException ((),RequestOriginalInputs))
+      unless (either (const True) (const False) invalid) (fail "invalid capture budget silently selected a default")
+    cancelled <- try (captureRequestInputs Nothing (\_ -> throwIO ThreadKilled))
+      :: IO (Either AsyncException ((),RequestOriginalInputs))
+    unless (case cancelled of Left ThreadKilled -> True; _ -> False)
+      (fail "capture admission converted asynchronous cancellation")
 
 freshOutputSealSetLaws :: IO ()
 freshOutputSealSetLaws = withScratch $ \work -> do

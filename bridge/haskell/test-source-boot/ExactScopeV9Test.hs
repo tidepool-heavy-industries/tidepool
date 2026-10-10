@@ -326,9 +326,9 @@ candidateCanonicalChecks :: FilePath -> FilePath -> IO ()
 candidateCanonicalChecks manifest candidateManifest = do
   scope <- readExactScope manifest >>= either fail pure
   bytes <- BS.readFile candidateManifest
-  fields <- decode bytes >>= row 7
   candidates <- readModuleCandidatesWithGraphs (scopeExecutionGraphs scope) candidateManifest
     >>= either fail pure
+  fields <- decode bytes >>= values
   when (null candidates) (fail "canonical candidate fixture must offer a native owner")
   let keys = Set.fromList [(candidateUnit candidate,candidateModule candidate) | candidate <- candidates]
       candidateInterfaces = [(ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
@@ -362,7 +362,7 @@ candidateCanonicalChecks manifest candidateManifest = do
         readModuleCandidatesWithGraphs (scopeExecutionGraphs scope) path >>= \result -> case result of
           Left _ -> pure ()
           Right _ -> fail "candidate decoder admitted invalid canonical framing"
-  forM_ ["2","4","6","7","8","9"] $ \version ->
+  forM_ ["2","4","6","7","8","9","10"] $ \version ->
     refuseWire (TList (replace 1 (TString version) fields))
   refuseWire (TList (take 6 fields))
   candidateRows <- values (fields !! 4)
@@ -375,7 +375,7 @@ candidateCanonicalChecks manifest candidateManifest = do
     refuseWire (changedRow (TList (replace 15 invalid firstRow)))
   unchanged <- BS.readFile candidateManifest
   unless (unchanged == bytes) (fail "candidate checks changed the producer offer")
-  putStrLn "canonical candidates: genuine worker10 offer, exact promotion and legacy refusal checks passed"
+  putStrLn "canonical candidates: genuine current worker offer, exact promotion and legacy refusal checks passed"
   where
     alterSeal [] = error "genuine candidate fixture has no seal"
     alterSeal (first:rest) = (if first == '0' then '1' else '0') : rest

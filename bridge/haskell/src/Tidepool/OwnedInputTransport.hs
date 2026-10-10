@@ -3,7 +3,8 @@
 -- One matched acquisition format for exact scopes and candidate offers. Logical
 -- roles and seals remain receiving authority; arena locations transport bytes.
 module Tidepool.OwnedInputTransport
-  ( OriginalInputKind(..), OriginalInputImage(..), InputAcquisition(..), decodeInputAcquisition ) where
+  ( OriginalInputKind(..), OriginalInputImage(..), InputAcquisition(..)
+  , decodeInputAcquisition, inputImageDigest, inputKindTag ) where
 
 import Codec.CBOR.Decoding
 import Codec.CBOR.Write (toStrictByteString)

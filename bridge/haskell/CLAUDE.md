@@ -490,6 +490,14 @@ completion grants no compiler authority. Candidate manifests are delivered from
 a verified packet snapshot; their work-owned graph companions retain the original
 publication identity and pass independent graph and candidate admission checks.
 
+Mutation tests first admit a genuine envelope through the production parser and
+use `CodecFixtureSupport` to retain fields outside the mutation. A file-only
+fixture proves fresh acquisition; it cannot prove continuation reuse. Reuse tests
+retain live sealed arenas through the complete read sequence, preserve the
+issuer-selected semantic rows, and read the adapted envelope through the same
+production parser. Logical path placement does not replace producer, owner or
+content admission.
+
 ## Extractor diagnostics
 
 Diagnostics are opt-in:

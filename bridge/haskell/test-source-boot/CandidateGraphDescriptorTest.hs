@@ -26,9 +26,8 @@ candidateGraphDescriptorChecks :: FilePath -> FilePath -> IO ()
 candidateGraphDescriptorChecks scopePath candidatePath = do
   scope <- readExactScope scopePath >>= either fail pure
   bytes <- BS.readFile candidatePath
-  fields <- decode bytes >>= row 7
-  unless (take 2 fields == [TString "TPMCAN", TString "11"])
-    (fail "descriptor fixture requires the genuine current candidate format")
+  fresh <- readModuleCandidates candidatePath >>= either fail pure
+  fields <- decode bytes >>= values
   nativeRows <- values (fields !! 4)
   mapM_ (row 16) nativeRows
   parcel <- row 2 (fields !! 5)
@@ -40,7 +39,6 @@ candidateGraphDescriptorChecks scopePath candidatePath = do
   unless (BS.length bytes <= 4*1024*1024 && BS.length graphBytes > 4*1024*1024
       && BS.length graphBytes <= executionSourceGraphBytesLimit)
     (fail "genuine fixture did not separate bounded metadata from its larger graph")
-  fresh <- readModuleCandidates candidatePath >>= either fail pure
   known <- readModuleCandidatesWithGraphs (scopeExecutionGraphs scope) candidatePath >>= either fail pure
   unless (not (null fresh) && fresh == known
       && all (maybe False (not . null . fst) . candidateExecutionSources) fresh)
@@ -59,7 +57,7 @@ candidateGraphDescriptorChecks scopePath candidatePath = do
       refuseParcel label value = withParcel value (refused label (readModuleCandidates candidatePath))
       descriptor sha path = TList [TString sha,TString (T.pack path)]
       references = parcel !! 1
-  forM_ ["8","9"] $ \version -> withOffer (replace 1 (TString version) fields)
+  forM_ ["8","9","10"] $ \version -> withOffer (replace 1 (TString version) fields)
     (refused "legacy candidate wire" (readModuleCandidates candidatePath))
   refuseParcel "inline graph bytes" (TList [TList [TList [TString graphSha,TBytes graphBytes]],references])
   refuseParcel "duplicate graph digest" (TList [TList (descriptors ++ descriptors),references])
@@ -95,8 +93,16 @@ candidateGraphDescriptorChecks scopePath candidatePath = do
   accepted
   let root = takeDirectory candidatePath
       outside = takeDirectory scopePath </> "outside-candidate-graph.cbor"
-  (copyFile graphPath outside >>
-      refuseParcel "graph outside request root" (TList [TList [descriptor graphSha outside],references]))
+  (do
+      copyFile graphPath outside
+      -- The offer selects the absolute read path; producer/owner/content seals
+      -- carry compiler authority independently of the manifest directory.
+      withParcel (TList [TList [descriptor graphSha outside],references]) $ do
+        accepted
+        BS.writeFile outside damaged
+        refused "corrupt explicitly selected outside graph" (readModuleCandidates candidatePath)
+        refused "corrupt outside graph hidden by known exact inventory"
+          (readModuleCandidatesWithGraphs (scopeExecutionGraphs scope) candidatePath))
     `finally` removeFile outside
   -- Sparse files prove aggregate rejection before capture; no 64 MiB buffers.
   let largeA = root </> "aggregate-a.cbor"
