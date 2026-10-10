@@ -95,15 +95,15 @@ continueRequestInputs :: CapturedOriginalContent -> [OriginalInputReference]
   -> IO RequestOriginalInputs
 continueRequestInputs (CapturedOriginalContent content) references = do
   limit <- requestCaptureByteLimit
-  foldM select (RequestOriginalInputs limit 0 Map.empty Map.empty Map.empty) references
+  fst <$> foldM select (RequestOriginalInputs limit 0 Map.empty Map.empty Map.empty,content) references
   where
-    select receiving@(RequestOriginalInputs limit used files encoded aliases) reference = do
+    select (receiving@(RequestOriginalInputs limit used files encoded aliases),available) reference = do
       timing <- readTimingEnabled
       let path = originalInputPath reference
           sha = originalInputSha256 reference
           count = originalInputLength reference
       when (count < 0 || count == maxBound) (fail "invalid original input length")
-      input <- case Map.lookup (sha,count) content of
+      input <- case Map.lookup (sha,count) available of
         Just retained -> do
           emitCount timing "original_inputs.content_hits" 1
           emitCount timing "original_inputs.content_hit_bytes" (toInteger count)
@@ -123,8 +123,11 @@ continueRequestInputs (CapturedOriginalContent content) references = do
           when (used + toInteger count > limit) (fail "continued original inputs exceed receiving byte budget")
           pure (RequestOriginalInputs limit (used + toInteger count)
             (Map.insert path input files) encoded aliases)
-      either fail pure (aliasRequestInputs
+      withOrigins <- either fail pure (aliasRequestInputs
         [(origin,path,sha) | origin <- originalInputOrigins reference] selected)
+      -- Equal image parts share one backing store even on a cold receiving
+      -- request. Path obligations and the receiving charge remain independent.
+      pure (withOrigins,Map.insert (sha,count) input available)
 
 selectedOriginalContent :: [OriginalInputReference] -> RequestOriginalInputs
   -> Either String CapturedOriginalContent

@@ -6,6 +6,7 @@ import Control.Exception (AsyncException(ThreadKilled), IOException, SomeExcepti
 import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Monad (foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
 import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (isInfixOf, isPrefixOf, nub, stripPrefix)
 import qualified Data.Map.Strict as Map
@@ -672,6 +673,24 @@ requestInputBoundaries = withScratch $ \directory -> do
       bytes = BS.pack [1,2,3]
   BS.writeFile path bytes
   BS.writeFile other bytes
+  let reference destination = OriginalInputReference destination (digest bytes) 3 []
+  (shared,counts) <- withTiming $ captureDiagnostics
+    (continueRequestInputs emptyCapturedOriginalContent [reference path,reference other])
+  left <- capturedRequestInput shared path (digest bytes)
+  right <- capturedRequestInput shared other (digest bytes)
+  unless (BSI.toForeignPtr left == BSI.toForeignPtr right
+      && requestInputBytes shared == 6
+      && sum (counterValues "original_inputs.content_misses" counts) == 1
+      && sum (counterValues "original_inputs.content_hits" counts) == 1)
+    (fail "cold continuation duplicated equal content or discarded receiving-path accounting")
+  revalidateRequestInputs shared >>= either fail pure
+  bracket (BS.readFile other) (BS.writeFile other) $ \_ -> do
+    BS.writeFile other (BS.singleton 9)
+    held <- capturedRequestInput shared other (digest bytes)
+    refused <- revalidateRequestInputs shared
+    unless (held == bytes && either (const True) (const False) refused)
+      (fail "shared backing storage erased a receiving path's terminal obligation")
+  revalidateRequestInputs shared >>= either fail pure
   (escaped,owner) <- captureRequestInputs Nothing $ \reader -> do
     _ <- reader path 3
     pure reader
@@ -736,7 +755,6 @@ requestInputBoundaries = withScratch $ \directory -> do
     setEnv config "64"
     (_,donor) <- captureRequestInputs Nothing (\reader -> reader other 3)
     setEnv config "5"
-    let reference destination = OriginalInputReference destination (digest bytes) 3 []
     content <- either fail pure (selectedOriginalContent [reference other] donor)
     continued <- continueRequestInputs content [reference path]
     unless (requestInputBytes continued == 3) (fail "continued bytes inherited the donor allowance")
