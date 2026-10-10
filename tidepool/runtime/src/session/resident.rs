@@ -8758,7 +8758,7 @@ mod custody_release_tests {
 #[cfg(test)]
 mod authored_publication_tests {
     use super::*;
-    use crate::session::{recovery, ModuleEnv, SessionId};
+    use crate::session::{ModuleEnv, SessionId};
 
     #[derive(Clone)]
     struct EmptyOutput;
@@ -10845,7 +10845,6 @@ mod authored_publication_tests {
             .public_visibility_snapshot_in(sibling_scope)
             .unwrap();
         let execution = session.begin_private_execution(public).unwrap();
-        let private = execution.private_scope();
         assert!(readiness.is_ready());
         assert!(sibling.is_ready());
 

@@ -2049,13 +2049,14 @@ where
             let result = resident
                 .publish_staged_public_manifest(ticket, &PublicationDecision::new())
                 .unwrap();
-            assert_eq!(
-                result,
-                match publication_target {
-                    ScalePublication::Ephemeral => PublicManifestCommit::Ephemeral,
-                    ScalePublication::Durable { .. } => PublicManifestCommit::Durable,
-                }
-            );
+            assert!(matches!(
+                (publication_target, result),
+                (ScalePublication::Ephemeral, PublicManifestCommit::Ephemeral)
+                    | (
+                        ScalePublication::Durable { .. },
+                        PublicManifestCommit::Durable
+                    )
+            ));
         },
     );
     assert_eq!(

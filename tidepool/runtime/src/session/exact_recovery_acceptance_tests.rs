@@ -1151,8 +1151,19 @@ fn assert_same_content(
     assert_eq!(current.snapshot_root, before.0.snapshot_root);
     assert_eq!(owners, before.1);
     assert!(current.allocation_ceiling >= before.0.allocation_ceiling);
-    assert!(current.revision >= before.0.revision);
-    assert!(current.content_revision >= before.0.content_revision);
+    assert!(current.revision.0 >= before.0.revision.0);
+    assert!(current.content_revision.0 >= before.0.content_revision.0);
+}
+
+fn persist_empty_public(recovery: &RecoveryFixture, id: u64) {
+    let mut session = PersistentSession::new(Some(library(id, recovery, &[])), 1024);
+    let public = session.mint_isolated_scope();
+    assert!(matches!(
+        session
+            .initialize_durable_public_scope(owner(1), public)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
 }
 
 #[test]
