@@ -6,7 +6,7 @@ module Tidepool.NativeOriginalCensus
   ( OriginalNativeCensus
   , readOriginalNativeCensus, readOriginalNativeCensusWith
   , nativeCensusOwner
-  , nativeCensusGroups
+  , nativeCensusGroups, ExactOriginalGroup(..), nativeCensusExactGroups, selectNativeCensusGroups
   , nativeCensusRequirements
   , nativeCensusCanonicalCertificate
   ) where
@@ -32,9 +32,30 @@ import Tidepool.ExecutionSchema
 data OriginalNativeCensus = OriginalNativeCensus
   { censusOwner :: !(String, String, String, String, String)
   , censusGroups :: ![(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])]
+  , censusExactGroups :: ![ExactOriginalGroup]
+  , censusOrdinalIndex :: !(Map.Map Word ExactOriginalGroup)
   , censusRequirements :: !(Map.Map (String, String) String)
   , censusCanonicalCertificate :: !(Maybe String)
   } deriving (Eq, Show)
+
+-- The authenticated census owns both projections once. Requests select existing
+-- group facts by ordinal; they cannot supply replacement binder/global outlines.
+data ExactOriginalGroup = ExactOriginalGroup
+  { originalOrdinal :: Word, originalBinders :: [SymbolIdentity]
+  , originalGlobals :: [(SymbolIdentity, Bool)]
+  } deriving (Eq, Show)
+
+nativeCensusExactGroups :: OriginalNativeCensus -> [ExactOriginalGroup]
+nativeCensusExactGroups = censusExactGroups
+
+selectNativeCensusGroups :: OriginalNativeCensus -> [Word] -> Either String [ExactOriginalGroup]
+selectNativeCensusGroups census ordinals
+  | length ordinals > 65536 = Left "selected native ordinal count exceeds bound"
+  | Set.size (Set.fromList ordinals) /= length ordinals = Left "duplicate selected native ordinal"
+  | otherwise = mapM find ordinals
+  where
+    find ordinal = maybe (Left "selected native ordinal is absent from its authenticated census")
+      Right (Map.lookup ordinal (censusOrdinalIndex census))
 
 nativeCensusOwner :: OriginalNativeCensus -> (String, String, String, String, String)
 nativeCensusOwner = censusOwner
@@ -277,13 +298,19 @@ validateGlobal sources packages global = case nativeImportOwner global of
       Nothing -> fail "native package global lacks its owner declaration"
 
 project :: ParsedCensus -> OriginalNativeCensus
-project parsed = OriginalNativeCensus
+project parsed = let groups =
+      [ExactOriginalGroup ordinal binders
+        [(nativeIdentity global, requiresDefinition global) | global <- globals]
+      | (ordinal, binders, globals) <- parsedGroups parsed]
+  in OriginalNativeCensus
   { censusOwner = parsedOwner parsed
   , censusGroups =
       [ (ordinal, binders,
           [(nativeIdentity global, requiresDefinition global) | global <- globals])
       | (ordinal, binders, globals) <- parsedGroups parsed
       ]
+  , censusExactGroups = groups
+  , censusOrdinalIndex = Map.fromList [(originalOrdinal group,group) | group <- groups]
   , censusRequirements = Map.fromList (parsedRequirements parsed)
   , censusCanonicalCertificate = parsedCanonicalCertificate parsed
   }

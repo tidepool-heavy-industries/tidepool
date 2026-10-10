@@ -639,7 +639,7 @@ impl From<Arc<ExactDeclarationContext>> for ExactCompileContext {
 }
 
 const EXACT_SCOPE_BYTES_LIMIT: usize = 4 << 20;
-const EXACT_SCOPE_SCHEMA_VERSION: &str = "12";
+const EXACT_SCOPE_SCHEMA_VERSION: &str = "13";
 const EXACT_SCOPE_SCHEMA_FIELDS: usize = 11;
 const EXACT_SCOPE_GRAPHS_LIMIT: usize = 4096;
 
@@ -5900,30 +5900,7 @@ impl ExactDeclarationContext {
                             Value::Array(
                                 census
                                     .into_iter()
-                                    .map(|group| {
-                                        Value::Array(vec![
-                                            Value::Integer(group.original_ordinal().into()),
-                                            Value::Array(
-                                                group.binders().iter().map(symbol_value).collect(),
-                                            ),
-                                            Value::Array(
-                                                group
-                                                    .globals()
-                                                    .iter()
-                                                    .map(|global| {
-                                                        Value::Array(vec![
-                                                            symbol_value(&global.identity),
-                                                            Value::Bool(
-                                                                global
-                                                                    .required_generation
-                                                                    .is_none(),
-                                                            ),
-                                                        ])
-                                                    })
-                                                    .collect(),
-                                            ),
-                                        ])
-                                    })
+                                    .map(|group| Value::Integer(group.original_ordinal().into()))
                                     .collect(),
                             ),
                             selected_rows[&metadata.entries[&identity(&owner.unit, &owner.module)]

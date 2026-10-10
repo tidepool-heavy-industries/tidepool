@@ -86,7 +86,8 @@ import Tidepool.PackageWitness
   , revalidateAdmittedPackageImports, validateAdmittedPackageSelection )
 import Tidepool.NativeOriginalCensus
   ( OriginalNativeCensus, readOriginalNativeCensusWith, nativeCensusOwner
-  , nativeCensusGroups, nativeCensusRequirements, nativeCensusCanonicalCertificate )
+  , ExactOriginalGroup(..), nativeCensusExactGroups, selectNativeCensusGroups
+  , nativeCensusRequirements, nativeCensusCanonicalCertificate )
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, finalizedValueInterfaceSeals, finalizedLocalAdmissions, LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedCore
@@ -435,30 +436,27 @@ scopeAvailableOriginalProducts scope =
   | selected <- scopeProducts scope]
   where AdmittedScopeInputs _ _ _ census _ = scopeInputs scope
 
-validateNativeSelection :: ExactProduct -> ExactProduct -> IO ()
-validateNativeSelection selected full = do
-  let owner = (originalUnit full,originalModule full)
-      indexed = Map.fromList [(originalOrdinal group,group) | group <- originalGroups full]
-      ordinals = map originalOrdinal (originalGroups selected)
+validateNativeSelection :: ExactProduct -> ExactProduct -> OriginalNativeCensus -> IO ()
+validateNativeSelection selected full census = do
   unless (selected {originalGroups=[]} == full {originalGroups=[]})
-    (fail ("selected native product differs from its admitted full carrier: " ++ show owner))
-  unless (Set.size (Set.fromList ordinals) == length ordinals)
-    (fail ("duplicate selected native ordinal: " ++ show owner))
-  forM_ (originalGroups selected) $ \group -> case Map.lookup (originalOrdinal group) indexed of
-    Just admitted | originalBinders group == originalBinders admitted
-      && Set.fromList (originalGlobals group) == Set.fromList (originalGlobals admitted) -> pure ()
-    _ -> fail ("selected native group differs from its admitted original census: "
-      ++ show (owner,originalOrdinal group))
+    (fail "selected native product differs from its admitted full carrier")
+  expected <- either fail pure (selectNativeCensusGroups census (map originalOrdinal (originalGroups selected)))
+  unless (originalGroups selected == expected)
+    (fail "selected native groups differ from their authenticated census")
+
+newtype NativeOrdinalSelection = NativeOrdinalSelection [Word]
+
+type OfferedNativeProduct = (ExactProduct, NativeOrdinalSelection, (FilePath,String))
 
 admitOriginalCensusWith :: RequestInputReader -> String -> Map.Map InterfaceOwner ExactInterfaceEvidence
-  -> [(ExactProduct,(FilePath,String))] -> IO (Map.Map InterfaceOwner AdmittedOriginalCensus)
+  -> [OfferedNativeProduct] -> IO (Map.Map InterfaceOwner AdmittedOriginalCensus)
 admitOriginalCensusWith readInput = admitOriginalCensusUsing (readOriginalNativeCensusWith readInput)
 
 admitOriginalCensusUsing :: (FilePath -> String -> IO OriginalNativeCensus) -> String
-  -> Map.Map InterfaceOwner ExactInterfaceEvidence -> [(ExactProduct,(FilePath,String))]
+  -> Map.Map InterfaceOwner ExactInterfaceEvidence -> [OfferedNativeProduct]
   -> IO (Map.Map InterfaceOwner AdmittedOriginalCensus)
 admitOriginalCensusUsing readFacts producer evidence offered = Map.fromList <$> forM offered
-  (\(selected,(path,sha)) -> do
+  (\(selected,NativeOrdinalSelection ordinals,(path,sha)) -> do
     native <- readFacts path sha
     let key = (originalUnit selected,originalModule selected)
         expectedOwner = (originalUnit selected,originalModule selected,originalVersion selected,
@@ -471,11 +469,18 @@ admitOriginalCensusUsing readFacts producer evidence offered = Map.fromList <$> 
         , nativeCensusCanonicalCertificate native == Just (canonicalCertificateSha256 proof)
         , nativeCensusRequirements native == canonicalRequirements proof -> pure ()
       _ -> fail ("original native certification differs from its canonical owner: " ++ show key)
-    let full = selected {originalGroups =
-          [ExactOriginalGroup ordinal binders references
-          | (ordinal,binders,references) <- nativeCensusGroups native]}
-    validateNativeSelection selected full
+    _ <- either fail pure (selectNativeCensusGroups native ordinals)
+    let full = selected {originalGroups=nativeCensusExactGroups native}
     pure (key,AdmittedOriginalCensus path sha full native))
+
+selectedCensusProducts :: [OfferedNativeProduct] -> Map.Map InterfaceOwner AdmittedOriginalCensus -> IO [ExactProduct]
+selectedCensusProducts offered admitted = forM offered $ \(product,NativeOrdinalSelection ordinals,_) -> do
+  let key = (originalUnit product,originalModule product)
+  case Map.lookup key admitted of
+    Just (AdmittedOriginalCensus _ _ _ census) -> do
+      groups <- either fail pure (selectNativeCensusGroups census ordinals)
+      pure product {originalGroups=groups}
+    Nothing -> fail "selected native owner lacks its authenticated census"
 
 rowOwner :: InterfaceRow -> InterfaceOwner
 rowOwner (iface,_,_) = (exactUnit iface,exactModule iface)
@@ -603,9 +608,9 @@ validateInputClosure producer inputs products = do
     unless (Map.lookup key seals == Just (originalIfaceSha256 product') && hasCore)
       (fail "exact interface evidence is incomplete or lacks native module proof")
   let AdmittedScopeInputs _ _ _ census _ = inputs
-  forM_ (Map.toAscList census) $ \(key,AdmittedOriginalCensus _ _ full _) ->
+  forM_ (Map.toAscList census) $ \(key,AdmittedOriginalCensus _ _ full native) ->
     case [product' | product' <- products, (originalUnit product',originalModule product') == key] of
-      [selected] -> validateNativeSelection selected full
+      [selected] -> validateNativeSelection selected full native
       _ -> fail "admitted native census lacks its unique scope product"
   where firstOfThree (value,_,_) = value
 
@@ -911,12 +916,6 @@ data ExactProduct = ExactProduct
   , originalGroups :: [ExactOriginalGroup]
   } deriving (Eq, Show)
 
-data ExactOriginalGroup = ExactOriginalGroup
-  { originalOrdinal :: Word, originalBinders :: [SymbolIdentity]
-  -- True imports need executable recovery; retained generations are boundaries.
-  , originalGlobals :: [(SymbolIdentity, Bool)]
-  } deriving (Eq, Show)
-
 originalGroupFromProjected :: ProjectedGroup -> ExactOriginalGroup
 originalGroupFromProjected group = ExactOriginalGroup
   (fromIntegral (projectedOriginalOrdinal group)) (projectedBinders group)
@@ -1170,6 +1169,7 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
          _ <- readVerified artifact (32 * 1024 * 1024) sha
          memoOriginalFact timing "original_inputs.census" nativeState sha
            (readOriginalNativeCensusWith readInput artifact sha)) producer evidence nativeDescriptors
+       selectedProducts <- selectedCensusProducts nativeDescriptors census
        roots <- extendAdmittedPackageImportsWithFacts (\(iface,artifact,sha) -> do
          payload <- readVerified artifact (4 * 1024 * 1024) sha
          _ <- readVerified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
@@ -1179,12 +1179,12 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
        let AdmittedScopeInputs order admitted _ _ _ = makeScopeInputs rows evidence roots
            inputs = AdmittedScopeInputs order admitted roots census Nothing
            sha = digest bytes
-           scope = ExactScope path sha producer semantic inputs lexical products graphs references
+           scope = ExactScope path sha producer semantic inputs lexical selectedProducts graphs references
              purpose types Set.empty (Set.fromList published)
        forM_ (scopeValueInterfaces scope) $ \iface -> do
          _ <- readVerified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
          pure ()
-       validateInputClosure producer inputs products
+       validateInputClosure producer inputs selectedProducts
        forM_ published $ \owner -> case Map.lookup owner evidence of
          Just (ModuleInterfaceEvidence proof) | isSourceOriginal (canonicalOrigin proof) -> pure ()
          _ -> fail "published original lacks its canonical source owner"
@@ -1838,7 +1838,7 @@ decodeInputAcquisition = do
     _ -> fail "unsupported exact input acquisition"
 
 validateOwnedInputImages :: OfferedScope -> [(String,FilePath)]
-  -> [((String,String),ParsedInterfaceEvidence)] -> [(ExactProduct,(FilePath,String))]
+  -> [((String,String),ParsedInterfaceEvidence)] -> [OfferedNativeProduct]
   -> [OriginalInputImage] -> IO ()
 validateOwnedInputImages (OfferedScope producer _ rows _ products _ _ _ _) graphs evidence census images = do
   let parts = [(kind,originalInputPath reference,originalInputSha256 reference)
@@ -1851,7 +1851,7 @@ validateOwnedInputImages (OfferedScope producer _ rows _ products _ _ _ _) graph
                 ++ [(InputCore,canonicalCorePath core,canonicalCoreSha256 core) | core <- maybe [] pure (descriptorCore descriptor)]
             _ -> [] | (_,proof) <- evidence]
         ++ [(InputNative,originalProductPath product,originalProductSha256 product) | product <- products]
-        ++ [(InputCensus,path,sha) | (_,(path,sha)) <- census]
+        ++ [(InputCensus,path,sha) | (_,_,(path,sha)) <- census]
         ++ [(InputGraph,path,sha) | (sha,path) <- graphs]
       ownedParts = [((exactUnit iface,exactModule iface),(kind,path,sha)) | (iface,packages,packageSha) <- rows
         , (kind,path,sha) <- [(InputInterface,exactPath iface,exactSha256 iface),(InputPackages,packages,packageSha)]]
@@ -1860,7 +1860,7 @@ validateOwnedInputImages (OfferedScope producer _ rows _ products _ _ _ _) graph
               ++ [(key,(InputCore,canonicalCorePath core,canonicalCoreSha256 core)) | core <- maybe [] pure (descriptorCore descriptor)]
             _ -> [] | (key,proof) <- evidence]
         ++ [((originalUnit product,originalModule product),(InputNative,originalProductPath product,originalProductSha256 product)) | product <- products]
-        ++ [((originalUnit product,originalModule product),(InputCensus,path,sha)) | (product,(path,sha)) <- census]
+        ++ [((originalUnit product,originalModule product),(InputCensus,path,sha)) | (product,_,(path,sha)) <- census]
       byOwner = Map.fromListWith Set.union [(key,Set.singleton part) | (key,part) <- ownedParts]
       owners = Set.fromList [(exactUnit iface,exactModule iface) | (iface,_,_) <- rows]
   unless (Set.fromList parts == Set.fromList expected)
@@ -1874,12 +1874,12 @@ validateOwnedInputImages (OfferedScope producer _ rows _ products _ _ _ _) graph
       (fail "owned original image parts differ from their exact semantic owner")
 
 decodeScope :: Decoder s (OfferedScope, [(String, FilePath)], [((String,String),ParsedInterfaceEvidence)],
-  [(ExactProduct,(FilePath,String))],InputAcquisition)
+  [OfferedNativeProduct],InputAcquisition)
 decodeScope = do
   count <- decodeListLen
   magic <- string
   version <- string
-  unless (magic == "TPEXACTSCOPE" && version == "12" && count == 11)
+  unless (magic == "TPEXACTSCOPE" && version == "13" && count == 11)
     (fail "unsupported exact scope")
   semantic <- digestField
   producer <- digestField
@@ -1924,20 +1924,13 @@ decodeScope = do
   nativeProducts <- bounded 4096 $ do
     array 8
     originalProduct <- ExactProduct <$> nonempty <*> nonempty <*> digestField
-      <*> digestField <*> digestField <*> absolute
-      <*> bounded 65536 (do
-        array 3
-        ExactOriginalGroup <$> decodeWord <*> bounded 65536 identity
-          <*> bounded 65536 (array 2 >> (,) <$> identity <*> decodeBool))
-    unique "exact original ordinals" (map originalOrdinal (originalGroups originalProduct))
-    let binders = concatMap originalBinders (originalGroups originalProduct)
-    unique "exact original binders" binders
-    unless (all (\binder -> T.unpack (symbolUnit binder) == originalUnit originalProduct
-        && T.unpack (symbolModule binder) == originalModule originalProduct) binders)
-      (fail "exact binder has another original owner")
+      <*> digestField <*> digestField <*> absolute <*> pure []
+    ordinals <- bounded 65536 decodeWord
+    unless (all (<= 4294967295) ordinals) (fail "exact native ordinal exceeds u32")
+    unique "exact original ordinals" ordinals
     descriptor <- array 2 >> (,) <$> absolute <*> canonicalDigest
-    pure (originalProduct,descriptor)
-  let products = map fst nativeProducts
+    pure (originalProduct,NativeOrdinalSelection ordinals,descriptor)
+  let products = [product | (product,_,_) <- nativeProducts]
       keys = [(exactUnit iface, exactModule iface) | (iface, _, _) <- interfaces]
       selected = map fst lexical
       productKeys = [(originalUnit originalProduct, originalModule originalProduct) | originalProduct <- products]
