@@ -825,7 +825,10 @@ fn campaign_trace_filter() -> tracing_subscriber::EnvFilter {
          tidepool_runtime::compile::modules=debug,tidepool_runtime::session::turn=info,\
          exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,\
          tidepool_codegen::prepared_compile=info,tidepool_extract_cmd::endpoint=debug,\
-         exomonad_actor::request=info,exomonad_actor::workbench_phase=info,exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,exomonad_actor::resident_tools=info,exomonad::content=off,harness::runtime_cost=debug",
+         exomonad_actor::request=info,tidepool_toolchain::module_candidates=info,\
+         tidepool_toolchain::artifacts=info,exomonad_actor::workbench_phase=info,\
+         exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,\
+         exomonad_actor::resident_tools=info,exomonad::content=off,harness::runtime_cost=debug",
     )
 }
 
@@ -1393,7 +1396,7 @@ mod tests {
     use std::future::Future;
 
     #[test]
-    fn scoped_trace_filter_retains_request_receipts_and_excludes_content() {
+    fn scoped_trace_filter_retains_campaign_metadata_and_excludes_content() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("trace.jsonl");
         let file = std::fs::File::create(&path).unwrap();
@@ -1421,6 +1424,13 @@ mod tests {
                 request = request.0, parent_actor = %parent, activation_actor = %child,
                 parent_execution = %execution, parent_attempt = %attempt,
                 "request activation origin issued");
+            tracing::info!(target: "tidepool_toolchain::module_candidates",
+                phase = "candidate_selection", elapsed_ms = 3u64,
+                exact_context = true, offered = 2u64);
+            tracing::info!(target: "tidepool_toolchain::artifacts",
+                phase = "exact_immutable_materialization", retained_entries = 2u64,
+                new_entries = 1u64, recovery_read_bytes = 4096u64,
+                "completed private artifact ownership");
             tracing::trace!(target: crate::exomonad::CONTENT_TARGET, source = "private-content");
             tracing::info!(target: crate::exomonad::CONTENT_TARGET, source = "private-content");
             tracing::warn!(target: crate::exomonad::CONTENT_TARGET, source = "private-content");
@@ -1430,7 +1440,7 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(rows.len(), 1, "only receipt metadata is retained");
+        assert_eq!(rows.len(), 3, "only campaign metadata is retained");
         assert_eq!(rows[0]["target"], "exomonad_actor::request");
         assert_eq!(
             rows[0]["span"],
@@ -1447,6 +1457,27 @@ mod tests {
                 "activation_actor": child.to_string(),
                 "parent_execution": execution.to_string(),
                 "parent_attempt": attempt.to_string(),
+            })
+        );
+        assert_eq!(rows[1]["target"], "tidepool_toolchain::module_candidates");
+        assert_eq!(
+            rows[1]["fields"],
+            serde_json::json!({
+                "phase": "candidate_selection",
+                "elapsed_ms": 3,
+                "exact_context": true,
+                "offered": 2,
+            })
+        );
+        assert_eq!(rows[2]["target"], "tidepool_toolchain::artifacts");
+        assert_eq!(
+            rows[2]["fields"],
+            serde_json::json!({
+                "message": "completed private artifact ownership",
+                "phase": "exact_immutable_materialization",
+                "retained_entries": 2,
+                "new_entries": 1,
+                "recovery_read_bytes": 4096,
             })
         );
         assert!(!captured.contains("private-content"));
