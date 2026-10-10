@@ -510,7 +510,13 @@ mod tests {
                 _ => unreachable!("complete shape test constructor family"),
             };
             t.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Fixture".into(),
+                    namespace: "constructor".into(),
+                    occurrence: name.to_owned(),
+                    record_parent: None,
+                },
                 id: DataConId(id),
                 name: name.into(),
                 tag: id as u32,
@@ -518,7 +524,8 @@ mod tests {
                 field_bangs: vec![],
                 qualified_name: Some(qualified_name),
                 type_name: String::new(),
-            }).expect("valid fixture metadata");
+            })
+            .expect("valid fixture metadata");
         }
         t
     }

@@ -7,8 +7,8 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-pub(crate) mod symbol;
 mod shared_content;
+pub(crate) mod symbol;
 use shared_content::SharedContent;
 
 use crate::session_ids::SessionVarId;

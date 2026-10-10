@@ -736,17 +736,17 @@ impl NativeImageBundle {
         let proof = certification
             .checked_activation_preview()
             .ok_or(PreparedRuntimeError::CertifiedTargetOwners)?;
-        if !proof.matches_target(&compiled.prepared) {
+        if !proof.matches_target(compiled.prepared()) {
             return Err(PreparedRuntimeError::CertifiedTargetOwners);
         }
         proof
-            .validate_table(&compiled.table)
+            .validate_table(compiled.table())
             .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?;
         proof
             .validate_yield_sites(&compiled.asks)
             .map_err(|_| PreparedRuntimeError::CertifiedTargetOwners)?;
         let target_literals =
-            immutable_literal_owners(compiled.prepared.globals(), &certification.target_owners)?;
+            immutable_literal_owners(compiled.prepared().globals(), &certification.target_owners)?;
         let outlines = certification
             .groups
             .iter()
@@ -853,7 +853,7 @@ impl NativeImageBundle {
             }
         }
         let target = CompiledProgram::prepare_target_code(
-            &compiled.prepared,
+            compiled.prepared(),
             &target_literals,
             &literals,
             registry,
@@ -861,7 +861,7 @@ impl NativeImageBundle {
         .map_err(PreparedRuntimeError::Compile)?;
         let packages = if certification
             .package_interfaces
-            .matches_target(&compiled.prepared)
+            .matches_target(compiled.prepared())
         {
             target.package_literals(|unit, module| {
                 certification
@@ -1025,11 +1025,11 @@ impl PreparedSourceEntry {
             .ok_or(super::resident::ResidentError::UnsealedStartupEntry)?;
         if !matches!(certification.purpose(), super::turn::TurnPurpose::Ordinary)
             || !proof.matches_bundle(
-                &compiled.prepared,
+                &compiled.prepared(),
                 &certification.groups,
                 &certification.target_owners,
                 &certification.package_interfaces,
-                &compiled.table,
+                &compiled.table(),
                 &compiled.asks,
             )
         {
@@ -1040,11 +1040,11 @@ impl PreparedSourceEntry {
         let state = super::persistent::PersistentSession::new(None, 0);
         let resolved = state.resolve_certification_in(
             tidepool_codegen::scope::ScopeId::ROOT,
-            &compiled.prepared,
+            &compiled.prepared(),
             certification,
         )?;
         let (target, demanded) = CertifiedTargetImage::compile_scoped(
-            compiled.prepared.as_ref().clone(),
+            compiled.prepared().as_ref().clone(),
             &resolved,
             &registry,
         )?;
@@ -10340,16 +10340,19 @@ pub(super) mod tests {
         }
     }
 
-    fn mount_table_row(id: u64, name: &str, arity: u32, qualified_name: Option<&str>) -> DataCon {
+    fn mount_table_row(constructor: &ConstructorDecl) -> DataCon {
         DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
-            id: DataConId(id),
-            name: name.into(),
-            tag: 1,
-            rep_arity: arity,
+            identity: constructor.identity.clone(),
+            id: constructor.host_id,
+            name: constructor.identity.occurrence.clone(),
+            tag: constructor.tag,
+            rep_arity: constructor.field_reps.len() as u32,
             field_bangs: Vec::new(),
-            qualified_name: qualified_name.map(str::to_owned),
-            type_name: String::new(),
+            qualified_name: Some(format!(
+                "{}.{}",
+                constructor.identity.module, constructor.identity.occurrence
+            )),
+            type_name: constructor.family.occurrence.clone(),
         }
     }
 
@@ -10769,36 +10772,14 @@ pub(super) mod tests {
 
     fn json_mount_table() -> DataConTable {
         let mut table = DataConTable::new();
-        for (id, name, arity, qualified_name) in [
-            (100, "Object", 1, Some("Tidepool.Aeson.Value.Object")),
-            (101, "Array", 1, Some("Tidepool.Aeson.Value.Array")),
-            (102, "String", 1, Some("Tidepool.Aeson.Value.String")),
-            (103, "Number", 1, Some("Tidepool.Aeson.Value.Number")),
-            (104, "Bool", 1, Some("Tidepool.Aeson.Value.Bool")),
-            (105, "Null", 0, Some("Tidepool.Aeson.Value.Null")),
-            (
-                110,
-                "Scientific",
-                2,
-                Some("Tidepool.Aeson.Scientific.Scientific"),
-            ),
-            (120, "IS", 1, Some("GHC.Num.Integer.IS")),
-            (121, "IP", 1, Some("GHC.Num.Integer.IP")),
-            (122, "IN", 1, Some("GHC.Num.Integer.IN")),
-            (130, "True", 0, Some("GHC.Types.True")),
-            (131, "False", 0, Some("GHC.Types.False")),
-            (140, "Bin", 5, Some("Data.Map.Internal.Bin")),
-            (141, "Tip", 0, Some("Data.Map.Internal.Tip")),
-            (150, "I#", 1, Some("GHC.Types.I#")),
-            (160, "Text", 3, Some("Data.Text.Internal.Text")),
-            (170, ":", 2, Some("GHC.Types.:")),
-            (171, "[]", 0, Some("GHC.Types.[]")),
-            (903, "Framed", 2, Some("Fixture.Mount.Framed")),
-        ] {
-            table
-                .insert_checked(mount_table_row(id, name, arity, qualified_name))
-                .unwrap();
-        }
+        table
+            .extend_checked(
+                json_mount_program()
+                    .constructors()
+                    .iter()
+                    .map(mount_table_row),
+            )
+            .unwrap();
         table
     }
 
@@ -12156,11 +12137,12 @@ pub(super) mod tests {
         .expect("polymorphic Maybe constructor templates");
         wire.constructor_replies =
             vec![(ConstructorId(0), ConstructorReply::Static(TypeNodeId(0)))];
+        let mut table = DataConTable::new();
+        table
+            .extend_checked(wire.constructors[1..].iter().map(mount_table_row))
+            .unwrap();
         let (mut engine, owner) =
             PreparedEngine::bootstrap(testing::prepare(wire).unwrap()).unwrap();
-        let mut table = DataConTable::new();
-        table.insert_checked(mount_table_row(78, "Nothing", 0, Some("GHC.Maybe.Nothing"))).unwrap();
-        table.insert_checked(mount_table_row(79, "Just", 1, Some("GHC.Maybe.Just"))).unwrap();
         let reply = PreparedReplyEvidence::Static {
             owner,
             constructor: DataConId(77),

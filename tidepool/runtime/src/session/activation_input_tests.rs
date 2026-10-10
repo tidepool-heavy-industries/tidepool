@@ -200,7 +200,7 @@ impl InputFixture {
             .as_ref()
             .and_then(|certificate| certificate.checked_execution())
             .expect("receiver setup has its checked native output proof");
-        assert!(checked_execution.matches_target(&receiver.prepared));
+        assert!(checked_execution.matches_target(&receiver.prepared()));
         let interface = checked_execution
             .value_interface_certificate()
             .expect("receiver setup issued its exact value-interface certificate");
@@ -366,11 +366,11 @@ fn assert_startup_origin(label: &str, compiled: &CompiledTurn, requires_input: b
         .is_some_and(|certification| {
             proof.is_some_and(|proof| {
                 proof.matches_bundle(
-                    &compiled.prepared,
+                    &compiled.prepared(),
                     &certification.groups,
                     &certification.target_owners,
                     &certification.package_interfaces,
-                    &compiled.table,
+                    &compiled.table(),
                     &compiled.asks,
                 )
             })
@@ -1293,11 +1293,11 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         .as_ref()
         .unwrap()
         .original_interface_context(
-            &fixture.producer.prepared,
+            &fixture.producer.prepared(),
             &certification.groups,
             &certification.target_owners,
             &certification.package_interfaces,
-            &fixture.producer.table,
+            &fixture.producer.table(),
             &fixture.producer.asks,
         )
         .unwrap();
@@ -2337,7 +2337,7 @@ fn activation_opaque_input_native_owner_survives_same_spelling_source_shadow() {
         .unwrap()
         .checked_execution()
         .unwrap()
-        .matches_target(&producer.prepared));
+        .matches_target(&producer.prepared()));
     let fixture = InputFixture {
         root,
         session,

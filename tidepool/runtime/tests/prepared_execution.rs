@@ -2804,3 +2804,62 @@ fn generated_haskell_importer_codec_round_trip() {
         "the generated codec fixture preserves the requested source entry"
     );
 }
+
+#[test]
+fn genuine_typeable_metadata_is_complete_and_row_removal_refuses_turn_admission() {
+    use tidepool_repr::datacon_table::ConstructorMetadataMismatch;
+    use tidepool_repr::serial::{read_metadata_for_program, write_metadata, ReadError};
+    let requirements = tidepool_toolchain::prepared_artifact::production_requirements().unwrap();
+    let prepared = Arc::new(
+        parse_program(
+            &tidepool_test_data::prepared_resources::read_target(
+                "TIDEPOOL_FREER_RESUME_FIXTURE_DIR",
+                "freerResumeEntries",
+            ),
+            &requirements,
+            DecodeLimits::default(),
+        )
+        .unwrap(),
+    );
+    let directory = std::env::var_os("TIDEPOOL_FREER_RESUME_FIXTURE_DIR")
+        .expect("declared genuine compiler fixture");
+    let metadata = std::fs::read(std::path::Path::new(&directory).join("meta.cbor")).unwrap();
+    let (table, warnings) = read_metadata_for_program(&metadata, &prepared).unwrap();
+    let typeable = prepared
+        .constructors()
+        .iter()
+        .find(|row| row.identity.occurrence == "TrNameS")
+        .expect("genuine fixture must retain its Typeable settlement constructor");
+    assert_eq!(
+        table.get(typeable.host_id).unwrap().identity,
+        typeable.identity
+    );
+    let mut incomplete = tidepool_repr::DataConTable::new();
+    incomplete
+        .extend_checked(
+            table
+                .iter()
+                .filter(|row| row.id != typeable.host_id)
+                .cloned(),
+        )
+        .unwrap();
+    let bytes = write_metadata(&incomplete, &warnings).unwrap();
+    assert!(
+        matches!(read_metadata_for_program(&bytes, &prepared), Err(ReadError::ConstructorMetadata(ConstructorMetadataMismatch::Missing { host_id, .. })) if host_id == typeable.host_id)
+    );
+    assert!(tidepool_runtime::session::CompiledTurn::from_prepared(
+        prepared.clone(),
+        incomplete,
+        warnings.clone(),
+        Vec::new()
+    )
+    .is_err());
+    let admitted = tidepool_runtime::session::CompiledTurn::from_prepared(
+        prepared.clone(),
+        table,
+        warnings,
+        Vec::new(),
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(admitted.prepared(), &prepared));
+}

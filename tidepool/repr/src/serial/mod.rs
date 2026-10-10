@@ -3,7 +3,9 @@
 pub mod read;
 pub mod write;
 
-pub use read::{read_metadata, read_metadata_for_program, read_metadata_for_programs, MetaWarnings};
+pub use read::{
+    read_metadata, read_metadata_for_program, read_metadata_for_programs, MetaWarnings,
+};
 pub use write::write_metadata;
 
 /// Errors that can occur during CBOR deserialization of constructor metadata.

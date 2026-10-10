@@ -1467,16 +1467,24 @@ mod tests {
             if table.get_by_name(name).is_some() {
                 continue;
             }
-            table.insert_checked(tidepool_repr::DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
-                id: tidepool_repr::DataConId(20_000 + offset as u64),
-                name: name.into(),
-                tag: 1,
-                rep_arity: arity,
-                field_bangs: vec![],
-                qualified_name: None,
-                type_name: String::new(),
-            }).expect("valid fixture metadata");
+            table
+                .insert_checked(tidepool_repr::DataCon {
+                    identity: tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: name.to_owned(),
+                        record_parent: None,
+                    },
+                    id: tidepool_repr::DataConId(20_000 + offset as u64),
+                    name: name.into(),
+                    tag: 1,
+                    rep_arity: arity,
+                    field_bangs: vec![],
+                    qualified_name: None,
+                    type_name: String::new(),
+                })
+                .expect("valid fixture metadata");
         }
         table
     }

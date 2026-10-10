@@ -5,28 +5,51 @@ use tidepool_repr::serial::{read_metadata, write_metadata, MetaWarnings};
 use tidepool_repr::{DataCon, DataConCollision, DataConId, DataConTable};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct LogicalRow { id: u8, unit: u8, shape: u8 }
+struct LogicalRow {
+    id: u8,
+    unit: u8,
+    shape: u8,
+}
 
 fn issued(row: &LogicalRow) -> DataCon {
     DataCon {
-        identity: SymbolIdentity { unit: format!("unit-{}", row.unit), module: "Homonymous".into(),
-            namespace: "constructor".into(), occurrence: "Ticket".into(), record_parent: None },
-        id: DataConId(row.id.into()), name: "Ticket".into(), tag: 1,
-        rep_arity: row.shape.into(), field_bangs: vec![], qualified_name: Some("Homonymous.Ticket".into()),
+        identity: SymbolIdentity {
+            unit: format!("unit-{}", row.unit),
+            module: "Homonymous".into(),
+            namespace: "constructor".into(),
+            occurrence: "Ticket".into(),
+            record_parent: None,
+        },
+        id: DataConId(row.id.into()),
+        name: "Ticket".into(),
+        tag: 1,
+        rep_arity: row.shape.into(),
+        field_bangs: vec![],
+        qualified_name: Some("Homonymous.Ticket".into()),
         type_name: "Ticket".into(),
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Refusal { HostId, NominalId, Shape }
+enum Refusal {
+    HostId,
+    NominalId,
+    Shape,
+}
 
 fn model_insert(model: &mut Vec<LogicalRow>, incoming: &LogicalRow) -> Result<(), Refusal> {
     if let Some(old) = model.iter().find(|old| old.id == incoming.id) {
-        if old.unit != incoming.unit { return Err(Refusal::HostId); }
-        if old.shape != incoming.shape { return Err(Refusal::Shape); }
+        if old.unit != incoming.unit {
+            return Err(Refusal::HostId);
+        }
+        if old.shape != incoming.shape {
+            return Err(Refusal::Shape);
+        }
         return Ok(());
     }
-    if model.iter().any(|old| old.unit == incoming.unit) { return Err(Refusal::NominalId); }
+    if model.iter().any(|old| old.unit == incoming.unit) {
+        return Err(Refusal::NominalId);
+    }
     model.push(incoming.clone());
     Ok(())
 }
@@ -48,24 +71,46 @@ fn assert_model(table: &DataConTable, model: &[LogicalRow]) {
         assert_eq!(table.get_by_identity(&expected.identity), Some(expected.id));
     }
     for arity in 0..=2 {
-        let matches: Vec<_> = model.iter().filter(|row| u32::from(row.shape) == arity).collect();
+        let matches: Vec<_> = model
+            .iter()
+            .filter(|row| u32::from(row.shape) == arity)
+            .collect();
         match matches.as_slice() {
-            [] => assert_eq!(table.get_by_qualified_name_checked("Homonymous.Ticket", arity), Ok(None)),
-            [one] => assert_eq!(table.get_by_qualified_name_checked("Homonymous.Ticket", arity), Ok(Some(DataConId(one.id.into())))),
-            _ => assert!(table.get_by_qualified_name_checked("Homonymous.Ticket", arity).is_err()),
+            [] => assert_eq!(
+                table.get_by_qualified_name_checked("Homonymous.Ticket", arity),
+                Ok(None)
+            ),
+            [one] => assert_eq!(
+                table.get_by_qualified_name_checked("Homonymous.Ticket", arity),
+                Ok(Some(DataConId(one.id.into())))
+            ),
+            _ => assert!(table
+                .get_by_qualified_name_checked("Homonymous.Ticket", arity)
+                .is_err()),
         }
     }
-    assert_eq!(table.get_by_qualified_name("Homonymous.Ticket"),
-        if model.len() == 1 { Some(DataConId(model[0].id.into())) } else { None });
+    assert_eq!(
+        table.get_by_qualified_name("Homonymous.Ticket"),
+        if model.len() == 1 {
+            Some(DataConId(model[0].id.into()))
+        } else {
+            None
+        }
+    );
 }
 
 #[derive(Clone, Debug)]
-enum Step { Batch(Vec<LogicalRow>), Recover, Retain, Release }
-
-fn row() -> impl Strategy<Value=LogicalRow> {
-    (0u8..4, 0u8..4, 0u8..3).prop_map(|(id,unit,shape)| LogicalRow { id, unit, shape })
+enum Step {
+    Batch(Vec<LogicalRow>),
+    Recover,
+    Retain,
+    Release,
 }
-fn step() -> impl Strategy<Value=Step> {
+
+fn row() -> impl Strategy<Value = LogicalRow> {
+    (0u8..4, 0u8..4, 0u8..3).prop_map(|(id, unit, shape)| LogicalRow { id, unit, shape })
+}
+fn step() -> impl Strategy<Value = Step> {
     prop_oneof![4 => prop::collection::vec(row(), 0..6).prop_map(Step::Batch),
         1 => Just(Step::Recover), 1 => Just(Step::Retain), 1 => Just(Step::Release)]
 }
@@ -116,5 +161,27 @@ proptest! {
         let mut batch = DataConTable::new();
         assert_eq!(batch.extend_checked(rows.iter().map(issued)), result);
         assert_eq!(batch, sequential);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1000))]
+    #[test]
+    fn diagnostic_alias_updates_match_fresh_recomputation(history in prop::collection::vec((0u8..4, prop::option::of(0u8..4)), 1..48)) {
+        let mut table = DataConTable::new();
+        let mut snapshot = None;
+        for (parent, alias) in history {
+            let mut row = issued(&LogicalRow { id: 0, unit: 1, shape: 0 });
+            row.type_name = format!("Parent{parent}");
+            row.qualified_name = alias.map(|value| format!("Alias{value}.Ticket"));
+            table.insert_checked(row.clone()).unwrap();
+            let mut recomputed = DataConTable::new();
+            recomputed.insert_checked(row).unwrap();
+            prop_assert_eq!(&table, &recomputed);
+            let recovered = read_metadata(&write_metadata(&table, &MetaWarnings::default()).unwrap()).unwrap().0;
+            prop_assert_eq!(&table, &recovered);
+            if let Some((retained, expected)) = &snapshot { prop_assert_eq!(retained, expected); }
+            snapshot = Some((table.clone(), recomputed));
+        }
     }
 }

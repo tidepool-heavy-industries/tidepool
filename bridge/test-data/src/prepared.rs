@@ -37,12 +37,18 @@ pub fn wire_from_prepared(
     }
 }
 
-fn constructor_identity(module: &str, occurrence: &str) -> tidepool_repr::execution_schema::SymbolIdentity {
+fn constructor_identity(
+    module: &str,
+    occurrence: &str,
+) -> tidepool_repr::execution_schema::SymbolIdentity {
     let mut identity = testing::identity(module, occurrence);
     identity.namespace = "constructor".into();
     identity
 }
-fn type_identity(module: &str, occurrence: &str) -> tidepool_repr::execution_schema::SymbolIdentity {
+fn type_identity(
+    module: &str,
+    occurrence: &str,
+) -> tidepool_repr::execution_schema::SymbolIdentity {
     let mut identity = testing::identity(module, occurrence);
     identity.namespace = "type".into();
     identity

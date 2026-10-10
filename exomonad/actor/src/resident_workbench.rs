@@ -13417,20 +13417,28 @@ pub(crate) mod request_tests {
             (103, "CompilerUnavailable", 1),
             (104, "ScopeChanged", 2),
         ] {
-            table.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
-                id: DataConId(id),
-                name: name.into(),
-                tag: 1,
-                rep_arity: arity,
-                field_bangs: Vec::new(),
-                qualified_name: Some(if name == "Left" {
-                    "Data.Either.Left".into()
-                } else {
-                    format!("Tidepool.Effects.Core.{name}")
-                }),
-                type_name: String::new(),
-            }).expect("valid fixture metadata");
+            table
+                .insert_checked(DataCon {
+                    identity: tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: name.to_owned(),
+                        record_parent: None,
+                    },
+                    id: DataConId(id),
+                    name: name.into(),
+                    tag: 1,
+                    rep_arity: arity,
+                    field_bangs: Vec::new(),
+                    qualified_name: Some(if name == "Left" {
+                        "Data.Either.Left".into()
+                    } else {
+                        format!("Tidepool.Effects.Core.{name}")
+                    }),
+                    type_name: String::new(),
+                })
+                .expect("valid fixture metadata");
         }
         table
     }
@@ -13455,16 +13463,24 @@ pub(crate) mod request_tests {
             (121, "AgentForgotten", 0),
             (122, "AgentForgetOutputPending", 1),
         ] {
-            table.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
-                id: DataConId(id),
-                name: name.into(),
-                tag: 1,
-                rep_arity: arity,
-                field_bangs: Vec::new(),
-                qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
-                type_name: String::new(),
-            }).expect("valid fixture metadata");
+            table
+                .insert_checked(DataCon {
+                    identity: tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: name.to_owned(),
+                        record_parent: None,
+                    },
+                    id: DataConId(id),
+                    name: name.into(),
+                    tag: 1,
+                    rep_arity: arity,
+                    field_bangs: Vec::new(),
+                    qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
+                    type_name: String::new(),
+                })
+                .expect("valid fixture metadata");
         }
         let answer = AgentForgetProjection::Retained {
             requests: vec![crate::RequestId(7), crate::RequestId(9)],
@@ -13559,16 +13575,24 @@ pub(crate) mod request_tests {
             (131, "UsageComplete", 0),
             (132, "ProviderUsageSummary", 8),
         ] {
-            table.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
-                id: DataConId(id),
-                name: name.into(),
-                tag: 1,
-                rep_arity: arity,
-                field_bangs: Vec::new(),
-                qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
-                type_name: String::new(),
-            }).expect("valid fixture metadata");
+            table
+                .insert_checked(DataCon {
+                    identity: tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: name.to_owned(),
+                        record_parent: None,
+                    },
+                    id: DataConId(id),
+                    name: name.into(),
+                    tag: 1,
+                    rep_arity: arity,
+                    field_bangs: Vec::new(),
+                    qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
+                    type_name: String::new(),
+                })
+                .expect("valid fixture metadata");
         }
         let summary = exomonad_model::ProviderUsageSummary {
             scope: exomonad_model::ProviderUsageScope::Thread("thread".into()),
@@ -13604,16 +13628,24 @@ pub(crate) mod request_tests {
             (143, "WorkspaceWritableBound", 0),
             (144, "ActivationRootStarted", 0),
         ] {
-            table.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
-                id: DataConId(id),
-                name: name.into(),
-                tag: 1,
-                rep_arity: arity,
-                field_bangs: Vec::new(),
-                qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
-                type_name: String::new(),
-            }).expect("valid fixture metadata");
+            table
+                .insert_checked(DataCon {
+                    identity: tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: name.to_owned(),
+                        record_parent: None,
+                    },
+                    id: DataConId(id),
+                    name: name.into(),
+                    tag: 1,
+                    rep_arity: arity,
+                    field_bangs: Vec::new(),
+                    qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
+                    type_name: String::new(),
+                })
+                .expect("valid fixture metadata");
         }
         let placement = crate::ActorPlacement {
             session: SessionId(1),
@@ -13646,16 +13678,24 @@ pub(crate) mod request_tests {
     fn collected_introspection_projection_rejects_missing_nominal_constructor() {
         use tidepool_repr::{DataCon, DataConId};
         let mut table = tidepool_test_data::standard_datacon_table();
-        table.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Data.Either".into(), namespace: "constructor".into(), occurrence: "Left".into(), record_parent: None },
-            id: DataConId(100),
-            name: "Left".into(),
-            tag: 1,
-            rep_arity: 1,
-            field_bangs: Vec::new(),
-            qualified_name: Some("Data.Either.Left".into()),
-            type_name: String::new(),
-        }).expect("valid fixture metadata");
+        table
+            .insert_checked(DataCon {
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Data.Either".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Left".into(),
+                    record_parent: None,
+                },
+                id: DataConId(100),
+                name: "Left".into(),
+                tag: 1,
+                rep_arity: 1,
+                field_bangs: Vec::new(),
+                qualified_name: Some("Data.Either.Left".into()),
+                type_name: String::new(),
+            })
+            .expect("valid fixture metadata");
         let provenance = current_provenance(1, "same");
         let error = structured_introspection_answer(
             StructuredInspectionKind::Info,
@@ -13717,16 +13757,24 @@ pub(crate) mod request_tests {
         use tidepool_repr::{DataCon, DataConId};
         let mut table = tidepool_test_data::standard_datacon_table();
         let submit = DataConId(100);
-        table.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Tidepool.Agent.Reply.Internal".into(), namespace: "constructor".into(), occurrence: "SubmitRequestWith".into(), record_parent: None },
-            id: submit,
-            name: "SubmitRequestWith".into(),
-            tag: 1,
-            rep_arity: 4,
-            field_bangs: Vec::new(),
-            qualified_name: Some("Tidepool.Agent.Reply.Internal.SubmitRequestWith".into()),
-            type_name: "Replies".into(),
-        }).expect("valid fixture metadata");
+        table
+            .insert_checked(DataCon {
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Tidepool.Agent.Reply.Internal".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "SubmitRequestWith".into(),
+                    record_parent: None,
+                },
+                id: submit,
+                name: "SubmitRequestWith".into(),
+                tag: 1,
+                rep_arity: 4,
+                field_bangs: Vec::new(),
+                qualified_name: Some("Tidepool.Agent.Reply.Internal.SubmitRequestWith".into()),
+                type_name: "Replies".into(),
+            })
+            .expect("valid fixture metadata");
         let request = HaskellValue::Con(
             submit,
             vec![
@@ -13951,12 +13999,14 @@ pub(crate) mod request_tests {
                         HostBindingAuthority::CommandJob => HostBindingType::COMMAND_JOB,
                     };
                     let original = carrier.code();
-                    let missing = TurnCode::new(
-                        std::borrow::Cow::Borrowed(original.table()),
-                        std::borrow::Cow::Borrowed(original.sites()),
-                        std::borrow::Cow::Borrowed(original.prepared()),
-                        std::borrow::Cow::Owned(None),
-                    );
+                    let missing = tidepool_runtime::session::CompiledTurn::from_prepared(
+                        Arc::new(original.prepared().clone()),
+                        original.table().clone(),
+                        Default::default(),
+                        original.sites().to_vec(),
+                    )
+                    .unwrap()
+                    .into_code();
                     assert!(matches!(
                         HostCarrier::from_checked(
                             reservation.clone(),
@@ -17918,27 +17968,31 @@ pub(crate) mod request_tests {
         *body = 1;
         let mut table = DataConTable::new();
         for constructor in &wire.constructors {
-            table.insert_checked(tidepool_repr::DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (constructor.identity.occurrence.clone()).clone(), record_parent: None },
-                id: constructor.host_id,
-                name: constructor.identity.occurrence.clone(),
-                tag: constructor.tag,
-                rep_arity: constructor.field_reps.len() as u32,
-                field_bangs: vec![],
-                qualified_name: Some(format!(
-                    "{}.{}",
-                    constructor.identity.module, constructor.identity.occurrence
-                )),
-                type_name: constructor.family.occurrence.clone(),
-            }).expect("valid fixture metadata");
+            table
+                .insert_checked(tidepool_repr::DataCon {
+                    identity: constructor.identity.clone(),
+                    id: constructor.host_id,
+                    name: constructor.identity.occurrence.clone(),
+                    tag: constructor.tag,
+                    rep_arity: constructor.field_reps.len() as u32,
+                    field_bangs: vec![],
+                    qualified_name: Some(format!(
+                        "{}.{}",
+                        constructor.identity.module, constructor.identity.occurrence
+                    )),
+                    type_name: constructor.family.occurrence.clone(),
+                })
+                .expect("valid fixture metadata");
         }
-        Arc::new(tidepool_runtime::session::CompiledTurn::new(
-            table,
-            Default::default(),
-            Vec::new(),
-            Arc::new(testing::prepare(wire).unwrap()),
-            None,
-        ))
+        Arc::new(
+            tidepool_runtime::session::CompiledTurn::from_prepared(
+                Arc::new(testing::prepare(wire).unwrap()),
+                table,
+                Default::default(),
+                Vec::new(),
+            )
+            .unwrap(),
+        )
     }
 
     struct ChildOutputLifetime(Arc<tokio::sync::Notify>);

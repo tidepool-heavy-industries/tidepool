@@ -91,7 +91,13 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
                 continue;
             }
             t.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (parsed.name).clone(), record_parent: None },
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Fixture".into(),
+                    namespace: "constructor".into(),
+                    occurrence: (parsed.name).clone(),
+                    record_parent: None,
+                },
                 id: DataConId(next_id),
                 name: parsed.name,
                 tag: 1,
@@ -99,7 +105,8 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
                 field_bangs: vec![],
                 qualified_name: None,
                 type_name: String::new(),
-            }).expect("valid fixture metadata");
+            })
+            .expect("valid fixture metadata");
             next_id += 1;
         }
     }
@@ -183,7 +190,13 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
             continue;
         }
         t.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Tuple".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
+            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "GHC.Tuple".into(),
+                namespace: "constructor".into(),
+                occurrence: name.to_owned(),
+                record_parent: None,
+            },
             id: DataConId(next_id),
             name: name.into(),
             tag: 1,
@@ -195,7 +208,8 @@ pub(crate) fn full_effect_test_table() -> DataConTable {
                 _ => None,
             },
             type_name: String::new(),
-        }).expect("valid fixture metadata");
+        })
+        .expect("valid fixture metadata");
         next_id += 1;
     }
     let role = |name: &str| {

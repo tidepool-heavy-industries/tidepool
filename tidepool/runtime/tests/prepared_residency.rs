@@ -923,16 +923,11 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
         HostCarrier::from_compiled(&wrong_root, compiled.code(), HostBindingType::JSON_VALUE)
             .is_err()
     );
-    let missing_table = tidepool_runtime::session::TurnCode::new(
-        std::borrow::Cow::Owned(tidepool_repr::DataConTable::new()),
-        std::borrow::Cow::Borrowed(compiled.sites()),
-        std::borrow::Cow::Borrowed(compiled.prepared().as_ref()),
-        std::borrow::Cow::Owned(compiled.certification().cloned()),
-    );
-    assert!(HostCarrier::from_compiled(
-        json_anchor_binder,
-        missing_table,
-        HostBindingType::JSON_VALUE
+    assert!(CompiledTurn::from_prepared(
+        std::sync::Arc::clone(compiled.prepared()),
+        tidepool_repr::DataConTable::new(),
+        compiled.warnings.clone(),
+        compiled.sites().to_vec(),
     )
     .is_err());
     assert!(compiled.certification().is_some());

@@ -199,19 +199,30 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
             }
         };
 
-        let identity = crate::execution_schema::symbol::decode(&arr[9], |value, what| {
-            match value {
+        let identity =
+            crate::execution_schema::symbol::decode(&arr[9], |value, what| match value {
                 Value::Text(text) => Ok(text.clone()),
-                _ => Err(crate::execution_schema::ParseError::Malformed(format!("{what} must be text"))),
-            }
-        }).map_err(|error| ReadError::MalformedMetadataField {
-            field: "identity", detail: error.to_string(),
-        })?;
-        if identity.unit.is_empty() || identity.module.is_empty() || identity.occurrence.is_empty()
-            || identity.namespace != "constructor" || identity.occurrence != name
-            || identity.record_parent.as_ref().is_some_and(|parent| parent.is_empty()) {
+                _ => Err(crate::execution_schema::ParseError::Malformed(format!(
+                    "{what} must be text"
+                ))),
+            })
+            .map_err(|error| ReadError::MalformedMetadataField {
+                field: "identity",
+                detail: error.to_string(),
+            })?;
+        if identity.unit.is_empty()
+            || identity.module.is_empty()
+            || identity.occurrence.is_empty()
+            || identity.namespace != "constructor"
+            || identity.occurrence != name
+            || identity
+                .record_parent
+                .as_ref()
+                .is_some_and(|parent| parent.is_empty())
+        {
             return Err(ReadError::MalformedMetadataField {
-                field: "identity", detail: "expected a complete constructor symbol agreeing with its name".into(),
+                field: "identity",
+                detail: "expected a complete constructor symbol agreeing with its name".into(),
             });
         }
         let id = DataConId(dcid);
@@ -234,14 +245,16 @@ pub fn read_metadata(bytes: &[u8]) -> Result<(crate::DataConTable, MetaWarnings)
 
 /// Decode a complete joint artifact at the owning nominal-admission boundary.
 pub fn read_metadata_for_program(
-    bytes: &[u8], program: &crate::execution_schema::PreparedProgram,
+    bytes: &[u8],
+    program: &crate::execution_schema::PreparedProgram,
 ) -> Result<(crate::DataConTable, MetaWarnings), ReadError> {
     read_metadata_for_programs(bytes, &[program])
 }
 
 /// One metadata transaction may cover several independently emitted targets.
 pub fn read_metadata_for_programs(
-    bytes: &[u8], programs: &[&crate::execution_schema::PreparedProgram],
+    bytes: &[u8],
+    programs: &[&crate::execution_schema::PreparedProgram],
 ) -> Result<(crate::DataConTable, MetaWarnings), ReadError> {
     let (table, warnings) = read_metadata(bytes)?;
     for program in programs {

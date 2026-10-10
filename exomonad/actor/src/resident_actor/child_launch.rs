@@ -1338,26 +1338,30 @@ mod tests {
         *body = 1;
         let mut table = DataConTable::new();
         for constructor in &wire.constructors {
-            table.insert_checked(tidepool_repr::DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (constructor.identity.occurrence.clone()).clone(), record_parent: None },
-                id: constructor.host_id,
-                name: constructor.identity.occurrence.clone(),
-                tag: constructor.tag,
-                rep_arity: constructor.field_reps.len() as u32,
-                field_bangs: vec![],
-                qualified_name: Some(format!(
-                    "{}.{}",
-                    constructor.identity.module, constructor.identity.occurrence
-                )),
-                type_name: constructor.family.occurrence.clone(),
-            }).expect("valid fixture metadata");
+            table
+                .insert_checked(tidepool_repr::DataCon {
+                    identity: constructor.identity.clone(),
+                    id: constructor.host_id,
+                    name: constructor.identity.occurrence.clone(),
+                    tag: constructor.tag,
+                    rep_arity: constructor.field_reps.len() as u32,
+                    field_bangs: vec![],
+                    qualified_name: Some(format!(
+                        "{}.{}",
+                        constructor.identity.module, constructor.identity.occurrence
+                    )),
+                    type_name: constructor.family.occurrence.clone(),
+                })
+                .expect("valid fixture metadata");
         }
-        Arc::new(tidepool_runtime::session::CompiledTurn::new(
-            table,
-            Default::default(),
-            Vec::new(),
-            Arc::new(testing::prepare(wire).unwrap()),
-            None,
-        ))
+        Arc::new(
+            tidepool_runtime::session::CompiledTurn::from_prepared(
+                Arc::new(testing::prepare(wire).unwrap()),
+                table,
+                Default::default(),
+                Vec::new(),
+            )
+            .unwrap(),
+        )
     }
 }

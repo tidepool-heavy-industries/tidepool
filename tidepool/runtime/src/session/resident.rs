@@ -100,19 +100,19 @@ impl CompiledProvenancePlan {
             let original = match certification.purpose() {
                 TurnPurpose::Execution { execution, .. }
                 | TurnPurpose::HostPrototype(execution) => {
-                    Some(execution.original_contexts(&code.prepared, &code.table, &code.sites))
+                    Some(execution.original_contexts(code.prepared(), code.table(), &code.sites))
                 }
                 TurnPurpose::ActivationPreview(proof) => {
-                    Some(proof.original_contexts(&code.prepared, &code.table, &code.sites))
+                    Some(proof.original_contexts(code.prepared(), code.table(), &code.sites))
                 }
                 TurnPurpose::Ordinary => {
                     certification.original_compile_input.as_ref().map(|proof| {
                         proof.original_contexts(
-                            &code.prepared,
+                            code.prepared(),
                             &certification.groups,
                             &certification.target_owners,
                             &certification.package_interfaces,
-                            &code.table,
+                            code.table(),
                             &code.sites,
                         )
                     })
@@ -128,7 +128,7 @@ impl CompiledProvenancePlan {
         };
         if let Some(original_interfaces) = original_interfaces {
             provenance.fresh_completion_sites.extend(
-                code.prepared
+                code.prepared()
                     .sites()
                     .iter()
                     .filter(|site| {
@@ -154,7 +154,7 @@ impl CompiledProvenancePlan {
                     _ => None,
                 });
             let mut selected_sites = code
-                .prepared
+                .prepared()
                 .sites()
                 .iter()
                 .map(|site| site.site)
@@ -681,7 +681,7 @@ impl HostCarrier {
         refuse_checked_turn(&code)?;
         let (root, representation) = host_representation(binder, &code, host_type)?;
         Ok(Self {
-            code: Arc::new(own_host_code(code)),
+            code: Arc::new(code.into_owned()),
             representation,
             origin: HostCarrierOrigin::Reusable(HostCarrierShape {
                 tier: binder.tier,
@@ -721,10 +721,10 @@ impl HostCarrier {
             return Err(ResidentError::UnsupportedCheckedTurn);
         }
         certification
-            .validate_checked_table(&code.table)
+            .validate_checked_table(code.table())
             .map_err(SessionError::Compile)?;
         certification
-            .validate_checked_bind(&code.prepared, generation.0, std::slice::from_ref(&binder))
+            .validate_checked_bind(code.prepared(), generation.0, std::slice::from_ref(&binder))
             .map_err(SessionError::Compile)?;
         let interface = execution
             .value_interface_certificate()
@@ -734,7 +734,7 @@ impl HostCarrier {
         }
         let (_, representation) = host_representation(&binder, &code, expected)?;
         Ok(Self {
-            code: Arc::new(own_host_code(code)),
+            code: Arc::new(code.into_owned()),
             representation,
             origin: HostCarrierOrigin::Checked { admission, binder },
         })
@@ -794,13 +794,7 @@ impl HostCarrier {
         let prototype = &admission.prototype;
         let (_, representation) = host_representation(
             &binder,
-            &TurnCode {
-                provenance: prototype.code.provenance.clone(),
-                table: std::borrow::Cow::Borrowed(prototype.code.table.as_ref()),
-                sites: std::borrow::Cow::Borrowed(prototype.code.sites.as_ref()),
-                prepared: std::borrow::Cow::Borrowed(prototype.code.prepared.as_ref()),
-                certification: std::borrow::Cow::Borrowed(prototype.code.certification.as_ref()),
-            },
+            &prototype.code.borrowed(),
             prototype.representation.host_type(),
         )?;
         Ok(Self {
@@ -816,13 +810,7 @@ impl HostCarrier {
 
     /// Borrow the immutable compiler proof without changing carrier ownership.
     pub fn code(&self) -> TurnCode<'_> {
-        TurnCode {
-            provenance: self.code.provenance.clone(),
-            table: std::borrow::Cow::Borrowed(self.code.table.as_ref()),
-            sites: std::borrow::Cow::Borrowed(self.code.sites.as_ref()),
-            prepared: std::borrow::Cow::Borrowed(self.code.prepared.as_ref()),
-            certification: std::borrow::Cow::Borrowed(self.code.certification.as_ref()),
-        }
+        self.code.borrowed()
     }
 
     /// The hand-written source stub a mount under `module_name`/`binder_name`
@@ -897,16 +885,6 @@ fn json_runtime_layout(prepared: &PreparedProgram) -> Result<JsonLayout<DataConI
     })
 }
 
-fn own_host_code(code: TurnCode<'_>) -> TurnCode<'static> {
-    TurnCode {
-        provenance: code.provenance,
-        table: std::borrow::Cow::Owned(code.table.into_owned()),
-        sites: std::borrow::Cow::Owned(code.sites.into_owned()),
-        prepared: std::borrow::Cow::Owned(code.prepared.into_owned()),
-        certification: std::borrow::Cow::Owned(code.certification.into_owned()),
-    }
-}
-
 fn host_mount_failure(detail: impl Into<String>) -> ResidentError {
     ResidentError::Run(RuntimeError::Jit(EffectError::Handler(detail.into())))
 }
@@ -917,7 +895,7 @@ fn exact_host_constructor(
     occurrence: &str,
     fields: &[RuntimeRep],
 ) -> Result<DataConId, ResidentError> {
-    let mut rows = code.prepared.constructors().iter().filter(|row| {
+    let mut rows = code.prepared().constructors().iter().filter(|row| {
         row.family.unit == root.unit
             && row.family.module == root.module
             && row.family.namespace == "type"
@@ -940,7 +918,10 @@ fn exact_host_constructor(
         || row.field_reps != fields
         || row.tag != 1
         || row.family_size != 1
-        || code.table.validate_constructors(std::slice::from_ref(row)).is_err()
+        || code
+            .table()
+            .validate_constructors(std::slice::from_ref(row))
+            .is_err()
     {
         return Err(host_mount_failure(
             "host constructor differs from its authenticated table",
@@ -954,7 +935,7 @@ fn exact_host_constructor(
 // these rows; the wire carries physical fields, not their boxed nominal types.
 // A second same-spelling Text owner makes this bundle ambiguous and is refused.
 fn authenticated_text_constructor(code: &TurnCode<'_>) -> Result<DataConId, ResidentError> {
-    let mut roots = code.prepared.constructors().iter().filter(|row| {
+    let mut roots = code.prepared().constructors().iter().filter(|row| {
         !row.family.unit.is_empty()
             && row.family.module == "Data.Text.Internal"
             && row.family.namespace == "type"
@@ -1000,17 +981,21 @@ fn host_representation(
     }
     let representation = match expected.authority {
         HostBindingAuthority::JsonValue => {
-            let layout = json_runtime_layout(&code.prepared)?;
-            let constructors = code.prepared.constructors();
+            let layout = json_runtime_layout(code.prepared())?;
+            let constructors = code.prepared().constructors();
             (*code
-                .prepared
+                .prepared()
                 .json_layout()
                 .ok_or_else(|| host_mount_failure("host JSON layout missing"))?)
             .try_map(|id| {
                 let row = constructors
                     .get(id.0 as usize)
                     .ok_or_else(|| host_mount_failure("host JSON layout constructor missing"))?;
-                if code.table.validate_constructors(std::slice::from_ref(row)).is_err() {
+                if code
+                    .table()
+                    .validate_constructors(std::slice::from_ref(row))
+                    .is_err()
+                {
                     return Err(host_mount_failure(
                         "host JSON layout differs from its compiler table",
                     ));
@@ -5064,20 +5049,10 @@ where
         let compiler =
             tidepool_toolchain::checked_cell::ExactHostBindingPrototype::from_checked(execution)
                 .map_err(SessionError::Compile)?;
-        let mut code = own_host_code(carrier.code());
-        let certification = code
-            .certification
-            .as_ref()
-            .as_ref()
-            .ok_or(ResidentError::UnsupportedCheckedTurn)?
-            .host_prototype()
+        let code = carrier
+            .code()
+            .into_host_prototype()
             .map_err(SessionError::Compile)?;
-        code = TurnCode::new(
-            code.table,
-            code.sites,
-            code.prepared,
-            std::borrow::Cow::Owned(Some(certification)),
-        );
         let prototype = Arc::new(HostBindingPrototype {
             compiler,
             code: Arc::new(code),
@@ -5543,13 +5518,13 @@ where
         self.state
             .validate_new_binding_ids([SessionVarId::from_extract(binder.var_id)])?;
         let table = code
-            .table
-            .with_json_layout(json_runtime_layout_optional(&code.prepared));
+            .table()
+            .with_json_layout(json_runtime_layout_optional(code.prepared()));
         self.state
             .merge_table(&table)
             .map_err(ResidentError::TableCollision)?;
-        let prepared = code.prepared.into_owned();
-        let (program, source_keys) = if let Some(certification) = code.certification.as_ref() {
+        let (_constructor_table, _sites, prepared, certification) = code.into_parts();
+        let (program, source_keys) = if let Some(certification) = certification.as_ref() {
             let resolved = self
                 .state
                 .resolve_certification_in(scope, &prepared, certification)?;
@@ -6177,7 +6152,7 @@ where
             || !compiled
                 .renderer
                 .proof
-                .matches_target(&compiled.renderer.compiled.prepared)
+                .matches_target(&compiled.renderer.compiled.prepared())
             || compiled
                 .renderer
                 .compiled
@@ -6196,7 +6171,7 @@ where
         compiled
             .renderer
             .proof
-            .validate_table(&compiled.renderer.compiled.table)
+            .validate_table(&compiled.renderer.compiled.table())
             .map_err(SessionError::Compile)?;
         compiled
             .renderer
@@ -6255,8 +6230,8 @@ where
         let provenance = self.provenance_for(&code)?;
         let checked = checked_turn_plan(
             code.certification.as_ref(),
-            code.prepared.as_ref(),
-            &code.table,
+            code.prepared(),
+            code.table(),
             &mode,
         )?;
         let lexical_scope = self.run_context.lexical_scope;
@@ -6291,10 +6266,10 @@ where
                 (None, scope, Some(lease), Some(images))
             }
         };
-        let prepared = code.prepared.into_owned();
+        let (constructor_table, _sites, prepared, certification) = code.into_parts();
         if retained_images.is_none() {
             self.state
-                .merge_table(&code.table)
+                .merge_table(&constructor_table)
                 .map_err(ResidentError::TableCollision)?;
         }
         if let PreparedTurnMode::Binding { generation, .. }
@@ -6309,11 +6284,11 @@ where
         let (program, source_keys) = self.install_turn_program_in_with_images(
             lexical_scope,
             prepared,
-            code.certification.as_ref().as_ref(),
+            certification.as_ref().as_ref(),
             match retained_images {
                 Some(bundle) => TurnImageAcquisition::Ready {
                     bundle,
-                    table: code.table.as_ref(),
+                    table: constructor_table.as_ref(),
                 },
                 None => TurnImageAcquisition::Compile,
             },
@@ -6456,11 +6431,11 @@ where
             .as_ref()
             .ok_or(ResidentError::UnsealedStartupEntry)?;
         if !proof.matches_bundle(
-            &code.prepared,
+            code.prepared(),
             &certification.groups,
             &certification.target_owners,
             &certification.package_interfaces,
-            &code.table,
+            code.table(),
             &code.sites,
         ) {
             return Err(ResidentError::UnsealedStartupEntry);
@@ -6480,14 +6455,12 @@ where
             return Err(PreparedRuntimeError::SourceScopeAdmission.into());
         }
         let provenance = self.provenance_for(&code)?;
+        let (constructor_table, _sites, prepared, certification) = code.into_parts();
         self.state
-            .merge_table(&code.table)
+            .merge_table(&constructor_table)
             .map_err(ResidentError::TableCollision)?;
-        let (program, source_keys) = self.install_turn_program_in(
-            scope,
-            code.prepared.into_owned(),
-            code.certification.as_ref().as_ref(),
-        )?;
+        let (program, source_keys) =
+            self.install_turn_program_in(scope, prepared, certification.as_ref().as_ref())?;
         let admitted = self
             .state
             .public_visibility_snapshot_in(scope)
@@ -6613,14 +6586,14 @@ where
             .validate_new_binding_ids(binding_ids_of(&mode.as_mode()))?;
         let checked = checked_turn_plan(
             code.certification.as_ref(),
-            code.prepared.as_ref(),
-            &code.table,
+            code.prepared(),
+            code.table(),
             &mode.as_mode(),
         )?;
         let provenance = self.provenance_for(&code)?;
-        let prepared = code.prepared.into_owned();
+        let (constructor_table, _sites, prepared, certification) = code.into_parts();
         self.state
-            .merge_table(&code.table)
+            .merge_table(&constructor_table)
             .map_err(ResidentError::TableCollision)?;
         if let Some(generation) = mode.generation() {
             // Claim the value-module identity before the turn runs.
@@ -6631,7 +6604,7 @@ where
         // contract is not honored, since `PreparedRuntimeError` already has
         // a variant for exactly this precondition.
         let lexical_scope = self.run_context.lexical_scope;
-        let snapshot = if let Some(certification) = code.certification.as_ref() {
+        let snapshot = if let Some(certification) = certification.as_ref() {
             let admitted_public = self
                 .state
                 .public_visibility_snapshot_in(lexical_scope)
@@ -8594,7 +8567,6 @@ mod authored_publication_tests {
     }
 
     fn startup_code_with_value(fail: bool, value: Option<i64>) -> TurnCode<'static> {
-        use std::borrow::Cow;
         use tidepool_repr::execution_schema::{
             testing, Atom, CheckedLayout, ConstructorDecl, ConstructorId, ExprFrame, FieldLayout,
             Group, HeapBinding, HeapRhs, ResultContract, RuntimeRep, ScalarLiteral, ValueId,
@@ -8698,27 +8670,30 @@ mod authored_publication_tests {
         *body = if fail { 0 } else { 1 };
         let mut table = DataConTable::new();
         for constructor in &wire.constructors {
-            table.insert_checked(tidepool_repr::DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (constructor.identity.occurrence.clone()).clone(), record_parent: None },
-                id: constructor.host_id,
-                name: constructor.identity.occurrence.clone(),
-                tag: constructor.tag,
-                rep_arity: constructor.field_reps.len() as u32,
-                field_bangs: vec![],
-                qualified_name: Some(format!(
-                    "{}.{}",
-                    constructor.identity.module, constructor.identity.occurrence
-                )),
-                type_name: constructor.family.occurrence.clone(),
-            }).expect("valid fixture metadata");
+            table
+                .insert_checked(tidepool_repr::DataCon {
+                    identity: constructor.identity.clone(),
+                    id: constructor.host_id,
+                    name: constructor.identity.occurrence.clone(),
+                    tag: constructor.tag,
+                    rep_arity: constructor.field_reps.len() as u32,
+                    field_bangs: vec![],
+                    qualified_name: Some(format!(
+                        "{}.{}",
+                        constructor.identity.module, constructor.identity.occurrence
+                    )),
+                    type_name: constructor.family.occurrence.clone(),
+                })
+                .expect("valid fixture metadata");
         }
-        TurnCode {
-            provenance: Arc::default(),
-            prepared: Cow::Owned(testing::prepare(wire).unwrap()),
-            table: Cow::Owned(table),
-            sites: Cow::Borrowed(&[]),
-            certification: Cow::Owned(None),
-        }
+        crate::session::turn::CompiledTurn::from_prepared(
+            Arc::new(testing::prepare(wire).unwrap()),
+            table,
+            Default::default(),
+            Vec::new(),
+        )
+        .unwrap()
+        .into_code()
     }
 
     fn integer_capsule_session() -> (tempfile::TempDir, TestSession) {
@@ -9816,7 +9791,6 @@ mod authored_publication_tests {
 
     #[test]
     fn native_binding_identity_conflicts_refuse_before_install_and_snapshot() {
-        use std::borrow::Cow;
         use tidepool_repr::execution_schema::testing;
 
         let root = tempfile::tempdir().unwrap();
@@ -9838,13 +9812,14 @@ mod authored_publication_tests {
         let roots = session.state.persistent_roots_count();
         let table = session.state.session_table().clone();
         let prepared = testing::prepare(testing::wire_program()).unwrap();
-        let code = TurnCode {
-            provenance: Arc::default(),
-            prepared: Cow::Owned(prepared),
-            table: Cow::Owned(table.clone()),
-            sites: Cow::Borrowed(&[]),
-            certification: Cow::Owned(None),
-        };
+        let code = crate::session::turn::CompiledTurn::from_prepared(
+            Arc::new(prepared),
+            table.clone(),
+            Default::default(),
+            Vec::new(),
+        )
+        .unwrap()
+        .into_code();
         let occupied = BoundBinder {
             name: "replacement".into(),
             var_id: id.raw(),
@@ -10831,7 +10806,7 @@ mod compiled_provenance_plan_tests {
                 modules: vec![], heads: vec![], inputs: vec![], input_type_witnesses: vec![],
                 reply_declaration: None, request_type_signatures: None,
             }).collect::<Vec<_>>();
-            let code = TurnCode::new(std::borrow::Cow::Owned(DataConTable::new()), std::borrow::Cow::Owned(sites.clone()), std::borrow::Cow::Owned(tidepool_repr::execution_schema::testing::prepare(tidepool_repr::execution_schema::testing::wire_program()).unwrap()), std::borrow::Cow::Owned(None));
+            let code = super::turn::CompiledTurn::from_prepared(Arc::new(tidepool_repr::execution_schema::testing::prepare(tidepool_repr::execution_schema::testing::wire_program()).unwrap()), DataConTable::new(), Default::default(), sites.clone()).unwrap().into_code();
             let plan = CompiledProvenancePlan::build(&code).unwrap();
             let expected = sites.into_iter().map(|site| (site.site, site)).collect::<BTreeMap<_, _>>();
             for _ in 0..copies {

@@ -7,16 +7,24 @@ fn get_table() -> DataConTable {
     // that this suite doesn't need); append the 3-tuple it lacks, with a
     // fresh id, for test_arity_mismatch_tuple.
     let mut table = tidepool_test_data::standard_datacon_table();
-    table.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Tuple".into(), namespace: "constructor".into(), occurrence: "(,,)".into(), record_parent: None },
-        id: DataConId(100),
-        name: "(,,)".to_string(),
-        tag: 1,
-        rep_arity: 3,
-        field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-        qualified_name: Some("GHC.Tuple.(,,)".into()),
-        type_name: String::new(),
-    }).expect("valid fixture metadata");
+    table
+        .insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "GHC.Tuple".into(),
+                namespace: "constructor".into(),
+                occurrence: "(,,)".into(),
+                record_parent: None,
+            },
+            id: DataConId(100),
+            name: "(,,)".to_string(),
+            tag: 1,
+            rep_arity: 3,
+            field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
+            qualified_name: Some("GHC.Tuple.(,,)".into()),
+            type_name: String::new(),
+        })
+        .expect("valid fixture metadata");
     table
 }
 

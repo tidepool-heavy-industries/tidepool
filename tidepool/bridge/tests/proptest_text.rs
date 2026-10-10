@@ -10,28 +10,44 @@ fn get_table() -> &'static DataConTable {
     TABLE.get_or_init(|| {
         let mut table = DataConTable::new();
         // Text
-        table.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Data.Text".into(), namespace: "constructor".into(), occurrence: "Text".into(), record_parent: None },
-            id: DataConId(14),
-            name: "Text".to_string(),
-            tag: 1,
-            rep_arity: 3,
-            field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
-            qualified_name: Some("Data.Text.Text".into()),
-            type_name: String::new(),
-        }).expect("valid fixture metadata");
+        table
+            .insert_checked(DataCon {
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Data.Text".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Text".into(),
+                    record_parent: None,
+                },
+                id: DataConId(14),
+                name: "Text".to_string(),
+                tag: 1,
+                rep_arity: 3,
+                field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
+                qualified_name: Some("Data.Text.Text".into()),
+                type_name: String::new(),
+            })
+            .expect("valid fixture metadata");
         // I# (needed for i64/Int# fields of Text if they were boxed,
         // but current impl uses literals for off/len)
-        table.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Types".into(), namespace: "constructor".into(), occurrence: "I#".into(), record_parent: None },
-            id: DataConId(7),
-            name: "I#".to_string(),
-            tag: 1,
-            rep_arity: 1,
-            field_bangs: vec![SrcBang::NoSrcBang],
-            qualified_name: Some("GHC.Types.I#".into()),
-            type_name: String::new(),
-        }).expect("valid fixture metadata");
+        table
+            .insert_checked(DataCon {
+                identity: tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Types".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "I#".into(),
+                    record_parent: None,
+                },
+                id: DataConId(7),
+                name: "I#".to_string(),
+                tag: 1,
+                rep_arity: 1,
+                field_bangs: vec![SrcBang::NoSrcBang],
+                qualified_name: Some("GHC.Types.I#".into()),
+                type_name: String::new(),
+            })
+            .expect("valid fixture metadata");
         table
     })
 }

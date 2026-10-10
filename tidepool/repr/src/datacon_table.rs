@@ -10,13 +10,30 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DataConCollision {
     #[error("invalid constructor symbol {identity:?}: {detail}")]
-    InvalidIdentity { identity: SymbolIdentity, detail: &'static str },
+    InvalidIdentity {
+        identity: SymbolIdentity,
+        detail: &'static str,
+    },
     #[error("DataConId {id:?} belongs to {first:?}, not {second:?}")]
-    Id { id: DataConId, first: SymbolIdentity, second: SymbolIdentity },
+    Id {
+        id: DataConId,
+        first: SymbolIdentity,
+        second: SymbolIdentity,
+    },
     #[error("constructor {identity:?} has conflicting tags or arities: {first_tag}/{first_arity}, {second_tag}/{second_arity}")]
-    Shape { identity: SymbolIdentity, first_tag: u32, first_arity: u32, second_tag: u32, second_arity: u32 },
+    Shape {
+        identity: SymbolIdentity,
+        first_tag: u32,
+        first_arity: u32,
+        second_tag: u32,
+        second_arity: u32,
+    },
     #[error("constructor {identity:?} claims two DataConIds: {first_id:?}, {second_id:?}")]
-    Identity { identity: SymbolIdentity, first_id: DataConId, second_id: DataConId },
+    Identity {
+        identity: SymbolIdentity,
+        first_id: DataConId,
+        second_id: DataConId,
+    },
 }
 
 /// A diagnostic spelling has several possible nominal owners.
@@ -32,11 +49,21 @@ pub struct AmbiguousDataCon {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ConstructorMetadataMismatch {
     #[error("constructor {identity:?} has no metadata at {host_id:?}")]
-    Missing { host_id: DataConId, identity: SymbolIdentity },
+    Missing {
+        host_id: DataConId,
+        identity: SymbolIdentity,
+    },
     #[error("constructor {prepared:?} at {host_id:?} resolves to {metadata:?}")]
-    Identity { host_id: DataConId, prepared: SymbolIdentity, metadata: SymbolIdentity },
+    Identity {
+        host_id: DataConId,
+        prepared: SymbolIdentity,
+        metadata: SymbolIdentity,
+    },
     #[error("constructor {identity:?} at {host_id:?} has conflicting tag/arity metadata")]
-    Shape { host_id: DataConId, identity: SymbolIdentity },
+    Shape {
+        host_id: DataConId,
+        identity: SymbolIdentity,
+    },
 }
 
 /// Lookup table for data constructor metadata.
@@ -57,7 +84,7 @@ struct DataConMetadata {
     by_id: HashMap<DataConId, DataCon>,
     /// Mapping from unqualified name to all DataConIds sharing that name.
     by_name: HashMap<String, Vec<DataConId>>,
-    /// Mapping from module-qualified name to its DataConId.
+    /// All nominal candidates for one diagnostic module-qualified spelling.
     by_qualified_name: HashMap<String, Vec<DataConId>>,
     /// The exact defining symbol, independently of diagnostic aliases.
     by_identity: HashMap<SymbolIdentity, DataConId>,
@@ -110,29 +137,46 @@ impl DataConTable {
 
     fn check_collision(&self, dc: &DataCon) -> Result<(), DataConCollision> {
         let identity = &dc.identity;
-        if identity.unit.is_empty() || identity.module.is_empty() || identity.occurrence.is_empty()
-            || identity.namespace != "constructor" || identity.occurrence != dc.name
-            || identity.record_parent.as_ref().is_some_and(|parent| parent.is_empty()) {
+        if identity.unit.is_empty()
+            || identity.module.is_empty()
+            || identity.occurrence.is_empty()
+            || identity.namespace != "constructor"
+            || identity.occurrence != dc.name
+            || identity
+                .record_parent
+                .as_ref()
+                .is_some_and(|parent| parent.is_empty())
+        {
             return Err(DataConCollision::InvalidIdentity {
-                identity: identity.clone(), detail: "expected a complete constructor symbol agreeing with its name",
+                identity: identity.clone(),
+                detail: "expected a complete constructor symbol agreeing with its name",
             });
         }
         if let Some(existing) = self.metadata.by_id.get(&dc.id) {
             if existing.identity != dc.identity {
                 return Err(DataConCollision::Id {
-                    id: dc.id, first: existing.identity.clone(), second: dc.identity.clone(),
+                    id: dc.id,
+                    first: existing.identity.clone(),
+                    second: dc.identity.clone(),
                 });
             }
             if existing.tag != dc.tag || existing.rep_arity != dc.rep_arity {
                 return Err(DataConCollision::Shape {
-                    identity: identity.clone(), first_tag: existing.tag, first_arity: existing.rep_arity,
-                    second_tag: dc.tag, second_arity: dc.rep_arity,
+                    identity: identity.clone(),
+                    first_tag: existing.tag,
+                    first_arity: existing.rep_arity,
+                    second_tag: dc.tag,
+                    second_arity: dc.rep_arity,
                 });
             }
         }
         if let Some(&first_id) = self.metadata.by_identity.get(identity) {
             if first_id != dc.id {
-                return Err(DataConCollision::Identity { identity: identity.clone(), first_id, second_id: dc.id });
+                return Err(DataConCollision::Identity {
+                    identity: identity.clone(),
+                    first_id,
+                    second_id: dc.id,
+                });
             }
         }
         Ok(())
@@ -140,22 +184,38 @@ impl DataConTable {
 
     /// Joint admission is complete only after its producer has emitted all
     /// declarations and their metadata from the same lowering transaction.
-    pub fn validate_program(&self, program: &PreparedProgram) -> Result<(), ConstructorMetadataMismatch> {
+    pub fn validate_program(
+        &self,
+        program: &PreparedProgram,
+    ) -> Result<(), ConstructorMetadataMismatch> {
         self.validate_constructors(program.constructors())
     }
 
-    pub fn validate_constructors(&self, constructors: &[ConstructorDecl]) -> Result<(), ConstructorMetadataMismatch> {
+    pub fn validate_constructors(
+        &self,
+        constructors: &[ConstructorDecl],
+    ) -> Result<(), ConstructorMetadataMismatch> {
         for declared in constructors {
             let Some(metadata) = self.get(declared.host_id) else {
-                return Err(ConstructorMetadataMismatch::Missing { host_id: declared.host_id, identity: declared.identity.clone() });
+                return Err(ConstructorMetadataMismatch::Missing {
+                    host_id: declared.host_id,
+                    identity: declared.identity.clone(),
+                });
             };
             if metadata.identity != declared.identity {
                 return Err(ConstructorMetadataMismatch::Identity {
-                    host_id: declared.host_id, prepared: declared.identity.clone(), metadata: metadata.identity.clone(),
+                    host_id: declared.host_id,
+                    prepared: declared.identity.clone(),
+                    metadata: metadata.identity.clone(),
                 });
             }
-            if metadata.tag != declared.tag || metadata.rep_arity as usize != declared.field_reps.len() {
-                return Err(ConstructorMetadataMismatch::Shape { host_id: declared.host_id, identity: declared.identity.clone() });
+            if metadata.tag != declared.tag
+                || metadata.rep_arity as usize != declared.field_reps.len()
+            {
+                return Err(ConstructorMetadataMismatch::Shape {
+                    host_id: declared.host_id,
+                    identity: declared.identity.clone(),
+                });
             }
         }
         Ok(())
@@ -165,7 +225,7 @@ impl DataConTable {
     /// `by_type_name` bucket sort, returning the type_name whose bucket was
     /// touched (appended to on a new/type-changed entry, or simply left
     /// containing `id` with a possibly-changed tag). Callers are responsible
-    /// for sorting that bucket afterward — [`Self::insert`] does so
+    /// for sorting that bucket afterward — [`Self::insert_checked`] does so
     /// immediately; [`Self::extend_checked`] batches it across many calls.
     /// Shared by both so there is exactly one implementation of the
     /// retain/re-push bookkeeping.
@@ -178,26 +238,58 @@ impl DataConTable {
                 if let Some(bucket) = metadata.by_type_name.get_mut(&old.type_name) {
                     bucket.retain(|value| *value != id);
                 }
-                metadata.by_type_name.entry(type_name.clone()).or_default().push(id);
+                metadata.by_type_name.retain(|_, bucket| !bucket.is_empty());
+                metadata
+                    .by_type_name
+                    .entry(type_name.clone())
+                    .or_default()
+                    .push(id);
             }
             if old.qualified_name != dc.qualified_name {
                 if let Some(alias) = &old.qualified_name {
                     if let Some(bucket) = metadata.by_qualified_name.get_mut(alias) {
                         bucket.retain(|value| *value != id);
                     }
+                    metadata
+                        .by_qualified_name
+                        .retain(|_, bucket| !bucket.is_empty());
                 }
                 if let Some(alias) = &dc.qualified_name {
-                    metadata.by_qualified_name.entry(alias.clone()).or_default().push(id);
-                    metadata.by_qualified_name.get_mut(alias).unwrap().sort_unstable();
+                    metadata
+                        .by_qualified_name
+                        .entry(alias.clone())
+                        .or_default()
+                        .push(id);
+                    metadata
+                        .by_qualified_name
+                        .get_mut(alias)
+                        .unwrap()
+                        .sort_unstable();
                 }
             }
         } else {
-            metadata.by_name.entry(dc.name.clone()).or_default().push(id);
+            metadata
+                .by_name
+                .entry(dc.name.clone())
+                .or_default()
+                .push(id);
             metadata.by_name.get_mut(&dc.name).unwrap().sort_unstable();
-            metadata.by_type_name.entry(type_name.clone()).or_default().push(id);
+            metadata
+                .by_type_name
+                .entry(type_name.clone())
+                .or_default()
+                .push(id);
             if let Some(alias) = &dc.qualified_name {
-                metadata.by_qualified_name.entry(alias.clone()).or_default().push(id);
-                    metadata.by_qualified_name.get_mut(alias).unwrap().sort_unstable();
+                metadata
+                    .by_qualified_name
+                    .entry(alias.clone())
+                    .or_default()
+                    .push(id);
+                metadata
+                    .by_qualified_name
+                    .get_mut(alias)
+                    .unwrap()
+                    .sort_unstable();
             }
             metadata.by_identity.insert(dc.identity.clone(), id);
         }
@@ -205,16 +297,8 @@ impl DataConTable {
         type_name
     }
 
-    /// Sort one `by_type_name` bucket by (tag, id). `by_type_name` orders by
-    /// constructor TAG, not insertion order: the Haskell-side merge
-    /// (`mergeMetaPreserving`) re-sorts entries by varId before they ever
-    /// reach the wire, so insertion order at load time carries no
-    /// declaration-order information. `dataConTag` is 1-based per-type
-    /// declaration order by construction, so re-sorting the bucket keeps
-    /// `constructors_of_type` correct regardless of what order entries arrive
-    /// in (and keeps the table canonical/order-independent for equality
-    /// comparisons). Must be called for every bucket an upsert touched, even
-    /// when the id was already in it — an overwrite may have changed its tag.
+    /// Preserve constructor declaration order independently of wire row order.
+    /// Equal tags use the host ID as a deterministic tie breaker for aliases.
     fn sort_type_name_bucket(&mut self, type_name: &str) {
         let metadata = Arc::make_mut(&mut self.metadata);
         if let Some(bucket) = metadata.by_type_name.get_mut(type_name) {
@@ -277,7 +361,11 @@ impl DataConTable {
     }
 
     /// A spelling narrows candidates; it never chooses between nominal owners.
-    pub fn get_by_qualified_name_checked(&self, name: &str, arity: u32) -> Result<Option<DataConId>, AmbiguousDataCon> {
+    pub fn get_by_qualified_name_checked(
+        &self,
+        name: &str,
+        arity: u32,
+    ) -> Result<Option<DataConId>, AmbiguousDataCon> {
         self.unique_candidate(self.metadata.by_qualified_name.get(name), name, arity)
     }
 
@@ -344,21 +432,40 @@ impl DataConTable {
     }
 
     /// Refuse ambiguity instead of depending on insertion order.
-    pub fn get_by_name_arity_checked(&self, name: &str, arity: u32) -> Result<Option<DataConId>, AmbiguousDataCon> {
+    pub fn get_by_name_arity_checked(
+        &self,
+        name: &str,
+        arity: u32,
+    ) -> Result<Option<DataConId>, AmbiguousDataCon> {
         self.unique_candidate(self.metadata.by_name.get(name), name, arity)
     }
 
-    fn unique_candidate(&self, ids: Option<&Vec<DataConId>>, name: &str, arity: u32) -> Result<Option<DataConId>, AmbiguousDataCon> {
-        let Some(ids) = ids else { return Ok(None); };
-        let candidates: Vec<&DataCon> = ids.iter().filter_map(|id| self.get(*id))
-            .filter(|dc| dc.rep_arity == arity).collect();
+    fn unique_candidate(
+        &self,
+        ids: Option<&Vec<DataConId>>,
+        name: &str,
+        arity: u32,
+    ) -> Result<Option<DataConId>, AmbiguousDataCon> {
+        let Some(ids) = ids else {
+            return Ok(None);
+        };
+        let candidates: Vec<&DataCon> = ids
+            .iter()
+            .filter_map(|id| self.get(*id))
+            .filter(|dc| dc.rep_arity == arity)
+            .collect();
         match candidates.as_slice() {
             [] => Ok(None),
             [dc] => Ok(Some(dc.id)),
             _ => {
-                let mut identities: Vec<_> = candidates.iter().map(|dc| dc.identity.clone()).collect();
+                let mut identities: Vec<_> =
+                    candidates.iter().map(|dc| dc.identity.clone()).collect();
                 identities.sort();
-                Err(AmbiguousDataCon { name: name.to_owned(), arity, candidates: identities })
+                Err(AmbiguousDataCon {
+                    name: name.to_owned(),
+                    arity,
+                    candidates: identities,
+                })
             }
         }
     }
@@ -411,7 +518,9 @@ mod tests {
     #[test]
     fn response_contexts_share_metadata_but_replace_json_authority() {
         let mut table = DataConTable::new();
-        table.insert_checked(make_datacon(1, "Example", 1, 0)).expect("valid fixture metadata");
+        table
+            .insert_checked(make_datacon(1, "Example", 1, 0))
+            .expect("valid fixture metadata");
         let layout = JsonLayout {
             object: 1,
             array: 2,
@@ -450,7 +559,9 @@ mod tests {
     #[test]
     fn shared_table_mutation_keeps_snapshots_and_indexes_independent() {
         let mut table = DataConTable::new();
-        table.insert_checked(make_datacon_typed(1, "First", 1, 1, "Example")).expect("valid fixture metadata");
+        table
+            .insert_checked(make_datacon_typed(1, "First", 1, 1, "Example"))
+            .expect("valid fixture metadata");
         table.set_field_labels(DataConId(1), vec!["original".into()]);
         table.set_field_types(DataConId(1), vec!["Int".into()]);
         let snapshot = table.clone();
@@ -500,11 +611,19 @@ mod tests {
     fn nominal_row(id: u64, unit: &str, module: &str, occurrence: &str, arity: u32) -> DataCon {
         DataCon {
             identity: SymbolIdentity {
-                unit: unit.into(), module: module.into(), namespace: "constructor".into(),
-                occurrence: occurrence.into(), record_parent: None,
+                unit: unit.into(),
+                module: module.into(),
+                namespace: "constructor".into(),
+                occurrence: occurrence.into(),
+                record_parent: None,
             },
-            id: DataConId(id), name: occurrence.into(), tag: 1, rep_arity: arity,
-            field_bangs: vec![], qualified_name: Some("Shared.Ticket".into()), type_name: "Ticket".into(),
+            id: DataConId(id),
+            name: occurrence.into(),
+            tag: 1,
+            rep_arity: arity,
+            field_bangs: vec![],
+            qualified_name: Some("Shared.Ticket".into()),
+            type_name: "Ticket".into(),
         }
     }
 
@@ -515,7 +634,10 @@ mod tests {
         let mut table = DataConTable::new();
         table.insert_checked(first.clone()).unwrap();
         let snapshot = table.clone();
-        assert!(matches!(table.insert_checked(second), Err(DataConCollision::Id { .. })));
+        assert!(matches!(
+            table.insert_checked(second),
+            Err(DataConCollision::Id { .. })
+        ));
         assert_eq!(table, snapshot);
         assert_eq!(table.get_by_identity(&first.identity), Some(first.id));
     }
@@ -525,21 +647,31 @@ mod tests {
         let first = nominal_row(1, "unit-one", "Homonymous", "Ticket", 0);
         let second = nominal_row(2, "unit-two", "Homonymous", "Ticket", 0);
         let mut table = DataConTable::new();
-        table.extend_checked([first.clone(), second.clone()]).unwrap();
+        table
+            .extend_checked([first.clone(), second.clone()])
+            .unwrap();
         assert_eq!(table.get_by_identity(&first.identity), Some(first.id));
         assert_eq!(table.get_by_identity(&second.identity), Some(second.id));
         assert_eq!(table.get_by_qualified_name("Shared.Ticket"), None);
-        assert!(table.get_by_qualified_name_checked("Shared.Ticket", 0).is_err());
+        assert!(table
+            .get_by_qualified_name_checked("Shared.Ticket", 0)
+            .is_err());
         assert!(table.get_by_name_arity_checked("Ticket", 0).is_err());
     }
 
     #[test]
     fn one_exact_identity_cannot_claim_two_host_ids() {
         let first = nominal_row(1, "unit-one", "Homonymous", "Ticket", 0);
-        let second = DataCon { id: DataConId(2), ..first.clone() };
+        let second = DataCon {
+            id: DataConId(2),
+            ..first.clone()
+        };
         let mut table = DataConTable::new();
         table.insert_checked(first).unwrap();
-        assert!(matches!(table.insert_checked(second), Err(DataConCollision::Identity { .. })));
+        assert!(matches!(
+            table.insert_checked(second),
+            Err(DataConCollision::Identity { .. })
+        ));
     }
 
     #[test]
@@ -550,8 +682,20 @@ mod tests {
         let snapshot = table.clone();
         table.insert_checked(first.clone()).unwrap();
         assert_eq!(table, snapshot);
-        assert!(matches!(table.insert_checked(DataCon { tag: 2, ..first.clone() }), Err(DataConCollision::Shape { .. })));
-        assert!(matches!(table.insert_checked(DataCon { rep_arity: 1, ..first }), Err(DataConCollision::Shape { .. })));
+        assert!(matches!(
+            table.insert_checked(DataCon {
+                tag: 2,
+                ..first.clone()
+            }),
+            Err(DataConCollision::Shape { .. })
+        ));
+        assert!(matches!(
+            table.insert_checked(DataCon {
+                rep_arity: 1,
+                ..first
+            }),
+            Err(DataConCollision::Shape { .. })
+        ));
         assert_eq!(table, snapshot);
     }
 
@@ -560,7 +704,10 @@ mod tests {
         let mut row = nominal_row(1, "unit-one", "Homonymous", "Ticket", 0);
         row.identity.unit.clear();
         let mut table = DataConTable::new();
-        assert!(matches!(table.insert_checked(row), Err(DataConCollision::InvalidIdentity { .. })));
+        assert!(matches!(
+            table.insert_checked(row),
+            Err(DataConCollision::InvalidIdentity { .. })
+        ));
         assert!(table.is_empty());
     }
 
@@ -571,7 +718,9 @@ mod tests {
         let conflict = nominal_row(1, "unit-three", "Homonymous", "Ticket", 0);
         let untouched = nominal_row(3, "unit-four", "Homonymous", "Ticket", 0);
         let mut table = DataConTable::new();
-        assert!(table.extend_checked([first.clone(), second.clone(), conflict, untouched]).is_err());
+        assert!(table
+            .extend_checked([first.clone(), second.clone(), conflict, untouched])
+            .is_err());
         assert_eq!(table.len(), 2);
         assert_eq!(table.constructors_of_type("Ticket"), [first.id, second.id]);
         assert_eq!(table.get(DataConId(3)), None);
@@ -579,11 +728,20 @@ mod tests {
 
     #[test]
     fn freer_union_collision_preserves_both_existing_indexes() {
-        let union = nominal_row(0xFFFF, "freer-simple", "Data.OpenUnion.Internal", "Union", 1);
+        let union = nominal_row(
+            0xFFFF,
+            "freer-simple",
+            "Data.OpenUnion.Internal",
+            "Union",
+            1,
+        );
         let other = nominal_row(0xFFFF, "ghc", "GHC.Driver.Session", "DynFlags", 0);
         let mut table = DataConTable::new();
         table.insert_checked(union.clone()).unwrap();
-        assert!(matches!(table.insert_checked(other), Err(DataConCollision::Id { .. })));
+        assert!(matches!(
+            table.insert_checked(other),
+            Err(DataConCollision::Id { .. })
+        ));
         assert_eq!(table.get_by_identity(&union.identity), Some(union.id));
         assert_eq!(table.get_by_name("Union"), Some(union.id));
     }

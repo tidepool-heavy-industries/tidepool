@@ -141,26 +141,42 @@ mod tests {
         // A user `Data.Tree.Node` collides on the bare name with the freer
         // continuation `Node` — `get_by_name` returns `None` for the
         // collision, so only the qualified lookup can disambiguate.
-        table.insert_checked(DataCon {
-            identity: crate::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Data.Tree".into(), namespace: "constructor".into(), occurrence: "Node".into(), record_parent: None },
-            id: DataConId(1),
-            name: "Node".to_string(),
-            tag: 0,
-            rep_arity: 2,
-            field_bangs: vec![],
-            qualified_name: Some("Data.Tree.Node".to_string()),
-            type_name: String::new(),
-        }).expect("valid fixture metadata");
-        table.insert_checked(DataCon {
-            identity: crate::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "Node".into(), record_parent: None },
-            id: DataConId(2),
-            name: "Node".to_string(),
-            tag: 1,
-            rep_arity: 2,
-            field_bangs: vec![],
-            qualified_name: Some(NODE_QUALIFIED.to_string()),
-            type_name: String::new(),
-        }).expect("valid fixture metadata");
+        table
+            .insert_checked(DataCon {
+                identity: crate::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Data.Tree".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Node".into(),
+                    record_parent: None,
+                },
+                id: DataConId(1),
+                name: "Node".to_string(),
+                tag: 0,
+                rep_arity: 2,
+                field_bangs: vec![],
+                qualified_name: Some("Data.Tree.Node".to_string()),
+                type_name: String::new(),
+            })
+            .expect("valid fixture metadata");
+        table
+            .insert_checked(DataCon {
+                identity: crate::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Fixture".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Node".into(),
+                    record_parent: None,
+                },
+                id: DataConId(2),
+                name: "Node".to_string(),
+                tag: 1,
+                rep_arity: 2,
+                field_bangs: vec![],
+                qualified_name: Some(NODE_QUALIFIED.to_string()),
+                type_name: String::new(),
+            })
+            .expect("valid fixture metadata");
         assert_eq!(table.get_by_name("Node"), None, "bare name is ambiguous");
         assert_eq!(
             resolve(&table, NODE_QUALIFIED, NODE),
@@ -172,16 +188,24 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_bare_when_qualified_absent() {
         let mut table = DataConTable::new();
-        table.insert_checked(DataCon {
-            identity: crate::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "Leaf".into(), record_parent: None },
-            id: DataConId(1),
-            name: "Leaf".to_string(),
-            tag: 0,
-            rep_arity: 1,
-            field_bangs: vec![],
-            qualified_name: None,
-            type_name: String::new(),
-        }).expect("valid fixture metadata");
+        table
+            .insert_checked(DataCon {
+                identity: crate::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Fixture".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Leaf".into(),
+                    record_parent: None,
+                },
+                id: DataConId(1),
+                name: "Leaf".to_string(),
+                tag: 0,
+                rep_arity: 1,
+                field_bangs: vec![],
+                qualified_name: None,
+                type_name: String::new(),
+            })
+            .expect("valid fixture metadata");
         assert_eq!(resolve(&table, LEAF_QUALIFIED, LEAF), Some(DataConId(1)));
     }
 }

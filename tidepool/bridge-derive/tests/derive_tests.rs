@@ -47,7 +47,13 @@ enum NullaryTuple {
 fn test_table() -> DataConTable {
     let mut t = standard_datacon_table();
     t.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "()".into(), record_parent: None },
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "()".into(),
+            record_parent: None,
+        },
         id: DataConId(20),
         name: "()".into(),
         tag: 1,
@@ -55,9 +61,16 @@ fn test_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    }).expect("valid fixture metadata");
+    })
+    .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "Triple".into(), record_parent: None },
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "Triple".into(),
+            record_parent: None,
+        },
         id: DataConId(21),
         name: "Triple".into(),
         tag: 1,
@@ -65,9 +78,16 @@ fn test_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    }).expect("valid fixture metadata");
+    })
+    .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "GetBranch".into(), record_parent: None },
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "GetBranch".into(),
+            record_parent: None,
+        },
         id: DataConId(22),
         name: "GetBranch".into(),
         tag: 1,
@@ -75,9 +95,16 @@ fn test_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    }).expect("valid fixture metadata");
+    })
+    .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "UnitStruct".into(), record_parent: None },
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "UnitStruct".into(),
+            record_parent: None,
+        },
         id: DataConId(23),
         name: "UnitStruct".into(),
         tag: 1,
@@ -85,9 +112,16 @@ fn test_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    }).expect("valid fixture metadata");
+    })
+    .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "Pair".into(), record_parent: None },
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "Pair".into(),
+            record_parent: None,
+        },
         id: DataConId(24),
         name: "Pair".into(),
         tag: 1,
@@ -95,9 +129,16 @@ fn test_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    }).expect("valid fixture metadata");
+    })
+    .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "Budget".into(), record_parent: None },
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "Budget".into(),
+            record_parent: None,
+        },
         id: DataConId(25),
         name: "Budget".into(),
         tag: 1,
@@ -105,9 +146,16 @@ fn test_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    }).expect("valid fixture metadata");
+    })
+    .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "NullaryDetail".into(), record_parent: None },
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "NullaryDetail".into(),
+            record_parent: None,
+        },
         id: DataConId(26),
         name: "NullaryDetail".into(),
         tag: 1,
@@ -115,7 +163,8 @@ fn test_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    }).expect("valid fixture metadata");
+    })
+    .expect("valid fixture metadata");
     t
 }
 
@@ -198,7 +247,8 @@ fn test_unknown_variant() {
 fn nested_unknown_constructor_keeps_the_matched_outer_context() {
     let table = test_table();
     let outer = table
-        .get_by_name_arity_checked("Just", 1).unwrap()
+        .get_by_name_arity_checked("Just", 1)
+        .unwrap()
         .expect("Just constructor");
     let unknown = DataConId(100);
     let value = HaskellValue::Con(outer, vec![HaskellValue::Con(unknown, vec![])]);
@@ -377,16 +427,24 @@ enum NamedVariant {
 #[test]
 fn named_variant_round_trips_in_haskell_field_order() {
     let mut table = standard_datacon_table();
-    table.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "NamedFields".into(), record_parent: None },
-        id: DataConId(51),
-        name: "NamedFields".into(),
-        tag: 1,
-        rep_arity: 2,
-        field_bangs: vec![],
-        qualified_name: None,
-        type_name: String::new(),
-    }).expect("valid fixture metadata");
+    table
+        .insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                namespace: "constructor".into(),
+                occurrence: "NamedFields".into(),
+                record_parent: None,
+            },
+            id: DataConId(51),
+            name: "NamedFields".into(),
+            tag: 1,
+            rep_arity: 2,
+            field_bangs: vec![],
+            qualified_name: None,
+            type_name: String::new(),
+        })
+        .expect("valid fixture metadata");
     let original = NamedVariant::NamedFields {
         left: 7,
         right: "named".into(),
@@ -403,7 +461,13 @@ fn named_variant_round_trips_in_haskell_field_order() {
 fn partial_two_variant_table() -> DataConTable {
     let mut t = standard_datacon_table();
     t.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "SecondVariant".into(), record_parent: None },
+        identity: tidepool_repr::execution_schema::SymbolIdentity {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            namespace: "constructor".into(),
+            occurrence: "SecondVariant".into(),
+            record_parent: None,
+        },
         id: DataConId(50),
         name: "SecondVariant".into(),
         tag: 1,
@@ -411,7 +475,8 @@ fn partial_two_variant_table() -> DataConTable {
         field_bangs: vec![],
         qualified_name: None,
         type_name: String::new(),
-    }).expect("valid fixture metadata");
+    })
+    .expect("valid fixture metadata");
     t
 }
 

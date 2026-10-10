@@ -36,9 +36,13 @@ fn entry(dcid: u64, name: &str, qualified_name: Cbor, field_labels: Cbor) -> Cbo
 }
 
 fn symbol(name: &str) -> Cbor {
-    Cbor::Array(vec![Cbor::Text("fixture".into()), Cbor::Text("Fixture".into()),
-        Cbor::Text("constructor".into()), Cbor::Text(name.into()),
-        Cbor::Array(vec![Cbor::Integer(0.into())])])
+    Cbor::Array(vec![
+        Cbor::Text("fixture".into()),
+        Cbor::Text("Fixture".into()),
+        Cbor::Text("constructor".into()),
+        Cbor::Text(name.into()),
+        Cbor::Array(vec![Cbor::Integer(0.into())]),
+    ])
 }
 
 fn plain_entry(dcid: u64, name: &str) -> Cbor {
@@ -281,27 +285,43 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
     // No qualified name (writer emits "" -> reader None) and no field labels
     // (writer emits [] -> reader empty Vec) — the exact placeholder shapes
     // strictness must still accept.
-    table.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "Nothing".into(), record_parent: None },
-        id: DataConId(1),
-        name: "Nothing".to_string(),
-        tag: 1,
-        rep_arity: 0,
-        field_bangs: vec![],
-        qualified_name: None,
-        type_name: "Maybe".to_string(),
-    }).expect("valid fixture metadata");
+    table
+        .insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                namespace: "constructor".into(),
+                occurrence: "Nothing".into(),
+                record_parent: None,
+            },
+            id: DataConId(1),
+            name: "Nothing".to_string(),
+            tag: 1,
+            rep_arity: 0,
+            field_bangs: vec![],
+            qualified_name: None,
+            type_name: "Maybe".to_string(),
+        })
+        .expect("valid fixture metadata");
     // With a qualified name, field labels, and field types.
-    table.insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Tidepool.Records".into(), namespace: "constructor".into(), occurrence: "Hit".into(), record_parent: None },
-        id: DataConId(2),
-        name: "Hit".to_string(),
-        tag: 1,
-        rep_arity: 2,
-        field_bangs: vec![],
-        qualified_name: Some("Tidepool.Records.Hit".to_string()),
-        type_name: "Hit".to_string(),
-    }).expect("valid fixture metadata");
+    table
+        .insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Tidepool.Records".into(),
+                namespace: "constructor".into(),
+                occurrence: "Hit".into(),
+                record_parent: None,
+            },
+            id: DataConId(2),
+            name: "Hit".to_string(),
+            tag: 1,
+            rep_arity: 2,
+            field_bangs: vec![],
+            qualified_name: Some("Tidepool.Records.Hit".to_string()),
+            type_name: "Hit".to_string(),
+        })
+        .expect("valid fixture metadata");
     table.set_field_labels(DataConId(2), vec!["path".to_string(), "line".to_string()]);
     table.set_field_types(DataConId(2), vec!["Text".to_string(), "Int".to_string()]);
 
@@ -325,24 +345,81 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
 fn old_ambiguous_metadata_version_is_rejected() {
     let mut bytes = meta_bytes(vec![plain_entry(1, "Ticket")], vec![has_io_false()]);
     bytes[4..6].copy_from_slice(&4u16.to_be_bytes());
-    assert!(matches!(read_metadata(&bytes), Err(ReadError::UnsupportedVersion(4, 0))));
+    assert!(matches!(
+        read_metadata(&bytes),
+        Err(ReadError::UnsupportedVersion(4, 0))
+    ));
 }
 
 #[test]
 fn mandatory_constructor_symbol_rejects_missing_owner_and_spelling_mismatch() {
     for (field, malformed) in [(0, ""), (1, ""), (2, "value"), (3, "Other")] {
         let mut entry = plain_entry(1, "Ticket");
-        let Cbor::Array(row) = &mut entry else { unreachable!() };
-        let Cbor::Array(identity) = &mut row[9] else { unreachable!() };
+        let Cbor::Array(row) = &mut entry else {
+            unreachable!()
+        };
+        let Cbor::Array(identity) = &mut row[9] else {
+            unreachable!()
+        };
         identity[field] = Cbor::Text(malformed.into());
-        assert_malformed(read_metadata(&meta_bytes(vec![entry], vec![has_io_false()])), "identity");
+        assert_malformed(
+            read_metadata(&meta_bytes(vec![entry], vec![has_io_false()])),
+            "identity",
+        );
     }
 }
 
 #[test]
 fn current_header_cannot_hide_a_nine_field_ambiguous_row() {
     let mut entry = plain_entry(1, "Ticket");
-    let Cbor::Array(row) = &mut entry else { unreachable!() };
+    let Cbor::Array(row) = &mut entry else {
+        unreachable!()
+    };
     row.pop();
-    assert!(matches!(read_metadata(&meta_bytes(vec![entry], vec![has_io_false()])), Err(ReadError::InvalidStructure(_))));
+    assert!(matches!(
+        read_metadata(&meta_bytes(vec![entry], vec![has_io_false()])),
+        Err(ReadError::InvalidStructure(_))
+    ));
+}
+
+#[test]
+fn paired_admission_requires_complete_rows_and_full_nominal_agreement() {
+    use tidepool_repr::execution_schema::testing;
+    use tidepool_repr::serial::read_metadata_for_program;
+    use tidepool_repr::{ConstructorMetadataMismatch, DataCon, DataConTable};
+    let wire = tidepool_test_data::prepared::constructor_program();
+    let program = testing::prepare(wire).unwrap();
+    let declared = &program.constructors()[0];
+    let row = DataCon {
+        identity: declared.identity.clone(),
+        id: declared.host_id,
+        name: declared.identity.occurrence.clone(),
+        tag: declared.tag,
+        rep_arity: declared.field_reps.len() as u32,
+        field_bangs: vec![],
+        qualified_name: Some("Fixture.Box".into()),
+        type_name: "Box".into(),
+    };
+    let mut table = DataConTable::new();
+    table.insert_checked(row.clone()).unwrap();
+    let metadata = write_metadata(&table, &MetaWarnings::default()).unwrap();
+    assert!(read_metadata_for_program(&metadata, &program).is_ok());
+    let empty = write_metadata(&DataConTable::new(), &MetaWarnings::default()).unwrap();
+    assert!(matches!(
+        read_metadata_for_program(&empty, &program),
+        Err(ReadError::ConstructorMetadata(
+            ConstructorMetadataMismatch::Missing { .. }
+        ))
+    ));
+    let mut other = row;
+    other.identity.unit.push_str("-other");
+    let mut table = DataConTable::new();
+    table.insert_checked(other).unwrap();
+    let metadata = write_metadata(&table, &MetaWarnings::default()).unwrap();
+    assert!(matches!(
+        read_metadata_for_program(&metadata, &program),
+        Err(ReadError::ConstructorMetadata(
+            ConstructorMetadataMismatch::Identity { .. }
+        ))
+    ));
 }

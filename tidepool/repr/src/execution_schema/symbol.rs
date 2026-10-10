@@ -1,7 +1,7 @@
 //! The shared wire grammar for a complete nominal symbol.
 
-use ciborium::value::Value;
 use super::{ParseError, SymbolIdentity};
+use ciborium::value::Value;
 
 pub(crate) fn encode(value: &SymbolIdentity) -> Value {
     Value::Array(vec![
@@ -22,19 +22,30 @@ pub(crate) fn decode(
     mut text: impl FnMut(&Value, &str) -> Result<String, ParseError>,
 ) -> Result<SymbolIdentity, ParseError> {
     let Value::Array(fields) = value else {
-        return Err(ParseError::Malformed("symbol must be a five-element array".into()));
+        return Err(ParseError::Malformed(
+            "symbol must be a five-element array".into(),
+        ));
     };
     if fields.len() != 5 {
         return Err(ParseError::Malformed("symbol must have five fields".into()));
     }
-    let record_parent = match &fields[4] {
-        Value::Array(parent) => match parent.as_slice() {
-            [Value::Integer(tag)] if u64::try_from(*tag).ok() == Some(0) => None,
-            [Value::Integer(tag), parent] if u64::try_from(*tag).ok() == Some(1) =>
-                Some(text(parent, "record parent")?),
-            _ => return Err(ParseError::Malformed("invalid record parent".into())),
-        },
-        _ => return Err(ParseError::Malformed("invalid record parent".into())),
+    let Value::Array(parent) = &fields[4] else {
+        return Err(ParseError::Malformed(
+            "record parent must be an array".into(),
+        ));
+    };
+    let Some(Value::Integer(tag)) = parent.first() else {
+        return Err(ParseError::Malformed(
+            "record parent tag must be unsigned integer".into(),
+        ));
+    };
+    let tag = u64::try_from(*tag)
+        .map_err(|_| ParseError::Malformed("record parent tag must be unsigned integer".into()))?;
+    let record_parent = match (tag, parent.as_slice()) {
+        (0, [_]) => None,
+        (1, [_, value]) => Some(text(value, "record parent")?),
+        (0 | 1, _) => return Err(ParseError::Malformed("invalid record parent".into())),
+        (tag, _) => return Err(ParseError::InvalidTag(tag)),
     };
     Ok(SymbolIdentity {
         unit: text(&fields[0], "symbol unit")?,

@@ -984,7 +984,8 @@ impl ModuleCandidateOffer {
         let sites = decode_turn_yield_sites(site_observations)?;
         let mut output = read_native_turn_artifacts(directory, turn.clone(), source.to_owned())?;
         let deserialize_start = Instant::now();
-        let (table, warnings) = tidepool_repr::serial::read_metadata_for_program(&output.metadata, &output.target)?;
+        let (table, warnings) =
+            tidepool_repr::serial::read_metadata_for_program(&output.metadata, &output.target)?;
         timing::record_stage(
             timing::NO_NODE,
             timing::NO_ROUND,
@@ -5587,11 +5588,16 @@ pub struct ConstructorIdentityMismatch {
 /// All emitted constructors, including settlement and external declarations,
 /// receive metadata from their owning projection transaction.
 pub fn check_constructor_identity_agreement(
-    target: &str, artifact: &PreparedArtifact, table: &DataConTable,
+    target: &str,
+    artifact: &PreparedArtifact,
+    table: &DataConTable,
 ) -> Result<(), ConstructorIdentityMismatch> {
-    table.validate_program(artifact.prepared()).map_err(|mismatch| ConstructorIdentityMismatch {
-        target: target.to_owned(), mismatch,
-    })
+    table
+        .validate_program(artifact.prepared())
+        .map_err(|mismatch| ConstructorIdentityMismatch {
+            target: target.to_owned(),
+            mismatch,
+        })
 }
 
 /// Deserialize a `(meta_bytes, raw)` pair — from a fresh spawn or a memo hit
@@ -5616,7 +5622,8 @@ pub(crate) fn assemble(
         })
         .collect::<Result<_, _>>()?;
     let programs: Vec<_> = prepared.iter().map(PreparedArtifact::prepared).collect();
-    let (table, warnings) = tidepool_repr::serial::read_metadata_for_programs(meta_bytes, &programs)?;
+    let (table, warnings) =
+        tidepool_repr::serial::read_metadata_for_programs(meta_bytes, &programs)?;
     on_stage(
         timing::STAGE_CBOR_DESERIALIZE,
         deserialize_start.elapsed(),
@@ -8319,7 +8326,9 @@ mod constructor_identity_tests {
 
         let mut table = DataConTable::new();
         for decl in artifact.prepared().constructors() {
-            table.insert_checked(matching_dc(decl)).expect("valid fixture metadata");
+            table
+                .insert_checked(matching_dc(decl))
+                .expect("valid fixture metadata");
         }
         let meta_bytes = write_metadata(&table, &MetaWarnings::default()).unwrap();
         let raw = vec![raw_target("entry", prepared_bytes)];
@@ -8330,11 +8339,18 @@ mod constructor_identity_tests {
     #[test]
     fn removing_a_required_constructor_rejects_joint_admission() {
         let prepared_bytes = prepared_fixture_bytes();
-        let artifact = PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
-        let missing = artifact.prepared().constructors().first().expect("fixture has constructors");
+        let artifact =
+            PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
+        let missing = artifact
+            .prepared()
+            .constructors()
+            .first()
+            .expect("fixture has constructors");
         let mut table = DataConTable::new();
         for declared in artifact.prepared().constructors() {
-            if declared.host_id != missing.host_id { table.insert_checked(matching_dc(declared)).unwrap(); }
+            if declared.host_id != missing.host_id {
+                table.insert_checked(matching_dc(declared)).unwrap();
+            }
         }
         let metadata = write_metadata(&table, &MetaWarnings::default()).unwrap();
         let raw = vec![raw_target("entry", prepared_bytes)];
@@ -8374,34 +8390,50 @@ mod constructor_identity_tests {
         };
         assert!(matches!(
             err,
-            CompileError::ReadError(tidepool_repr::serial::ReadError::ConstructorMetadata(tidepool_repr::ConstructorMetadataMismatch::Identity { .. }))
+            CompileError::ReadError(tidepool_repr::serial::ReadError::ConstructorMetadata(
+                tidepool_repr::ConstructorMetadataMismatch::Identity { .. }
+            ))
         ));
     }
 
     #[test]
     fn tag_disagreement_rejects_joint_admission() {
         let prepared_bytes = prepared_fixture_bytes();
-        let artifact = PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
+        let artifact =
+            PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
         let declared = artifact.prepared().constructors().first().unwrap();
         let table = table_with_one_entry_mutated(&artifact, declared, |dc| dc.tag += 1);
         let metadata = write_metadata(&table, &MetaWarnings::default()).unwrap();
         let raw = vec![raw_target("entry", prepared_bytes)];
-        assert!(matches!(assemble(&metadata, &raw, |_,_,_| {}),
-            Err(CompileError::ReadError(tidepool_repr::serial::ReadError::ConstructorMetadata(
-                tidepool_repr::ConstructorMetadataMismatch::Shape { .. })))));
+        assert!(matches!(
+            assemble(&metadata, &raw, |_, _, _| {}),
+            Err(CompileError::ReadError(
+                tidepool_repr::serial::ReadError::ConstructorMetadata(
+                    tidepool_repr::ConstructorMetadataMismatch::Shape { .. }
+                )
+            ))
+        ));
     }
 
     #[test]
     fn cross_paired_table_unit_only_difference_rejects() {
         let prepared_bytes = prepared_fixture_bytes();
-        let artifact = PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
+        let artifact =
+            PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
         let declared = artifact.prepared().constructors().first().unwrap();
-        let table = table_with_one_entry_mutated(&artifact, declared, |dc| dc.identity.unit.push_str("-other"));
+        let table = table_with_one_entry_mutated(&artifact, declared, |dc| {
+            dc.identity.unit.push_str("-other")
+        });
         let metadata = write_metadata(&table, &MetaWarnings::default()).unwrap();
         let raw = vec![raw_target("entry", prepared_bytes)];
-        assert!(matches!(assemble(&metadata, &raw, |_,_,_| {}),
-            Err(CompileError::ReadError(tidepool_repr::serial::ReadError::ConstructorMetadata(
-                tidepool_repr::ConstructorMetadataMismatch::Identity { .. })))));
+        assert!(matches!(
+            assemble(&metadata, &raw, |_, _, _| {}),
+            Err(CompileError::ReadError(
+                tidepool_repr::serial::ReadError::ConstructorMetadata(
+                    tidepool_repr::ConstructorMetadataMismatch::Identity { .. }
+                )
+            ))
+        ));
     }
 
     /// Arity IS checked: a table entry agreeing on id and name but declaring
@@ -8430,7 +8462,9 @@ mod constructor_identity_tests {
         };
         assert!(matches!(
             err,
-            CompileError::ReadError(tidepool_repr::serial::ReadError::ConstructorMetadata(tidepool_repr::ConstructorMetadataMismatch::Shape { .. }))
+            CompileError::ReadError(tidepool_repr::serial::ReadError::ConstructorMetadata(
+                tidepool_repr::ConstructorMetadataMismatch::Shape { .. }
+            ))
         ));
     }
 }

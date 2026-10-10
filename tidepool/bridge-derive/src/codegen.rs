@@ -63,15 +63,9 @@ fn is_phantom_data(ty: &Type) -> bool {
     false
 }
 
-/// Emit the DataCon lookup expression for a derive site. When `module` is
-/// `Some`, the lookup uses `DataConTable::get_by_qualified_name` (full
-/// `Module.Constructor` path) and the error variant carries the qualified
-/// name. When `module` is `None`, it falls back to the existing
-/// name+arity lookup for backward compatibility. The lookup returns a
-/// `Result<DataConId, BridgeError>`; arity validation still happens at the
-/// call site via the existing field-count check so mismatched arities are
-/// surfaced as `ArityMismatch` (qualified-name lookup does not pre-filter by
-/// arity).
+/// Resolve a diagnostic spelling and arity only when its nominal owner is
+/// unique. Qualified spelling narrows the candidates but cannot choose a unit.
+/// Missing qualified and unqualified spellings retain their distinct errors.
 ///
 /// `question_mark` selects whether the emitted expression ends in `?`
 /// (unwrap-or-propagate — the right call for a single-shape decode/encode
@@ -99,14 +93,17 @@ fn emit_datacon_lookup(
     } else {
         quote! { table.get_by_name_arity_checked(#haskell_name, #haskell_arity_u32) }
     };
-    let _ = haskell_arity_usize;
+    let missing = if let Some(module) = module {
+        let qualified = format!("{}.{}", module, haskell_name);
+        quote! { tidepool_bridge::BridgeError::UnknownDataConQualified { qualified_name: #qualified.to_string() } }
+    } else {
+        quote! { tidepool_bridge::BridgeError::UnknownDataConNameArity { name: #haskell_name.to_string(), arity: #haskell_arity_usize } }
+    };
     quote! {
         match #lookup {
             ::std::result::Result::Ok(::std::option::Option::Some(id)) => ::std::result::Result::Ok(id),
             ::std::result::Result::Ok(::std::option::Option::None) => {
-                ::std::result::Result::Err(tidepool_bridge::BridgeError::UnknownDataConNameArity {
-                    name: #haskell_name.to_string(), arity: #haskell_arity_u32 as usize,
-                })
+                ::std::result::Result::Err(#missing)
             }
             ::std::result::Result::Err(ambiguous) => {
                 ::std::result::Result::Err(tidepool_bridge::BridgeError::AmbiguousDataConNameArity {

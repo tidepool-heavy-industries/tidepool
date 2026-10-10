@@ -1,7 +1,7 @@
 //! Data constructor metadata for Tidepool IR.
 
-use crate::types::DataConId;
 use crate::execution_schema::SymbolIdentity;
+use crate::types::DataConId;
 
 /// Strictness annotation for a data constructor field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

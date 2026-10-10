@@ -13,6 +13,8 @@ import Control.Exception (bracket, evaluate, finally, try)
 import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (stripPrefix)
+import Data.ByteString qualified as BS
+import Tidepool.CborEncode (encodeMetadata)
 import Data.Maybe (isJust)
 import Data.IORef (newIORef, readIORef, modifyIORef')
 import System.Mem.StableName (makeStableName)
@@ -161,11 +163,21 @@ homonymousUnitProperty = bracket scratch removePathForcibly $ \directory -> do
         , projectionJsonAuthority = Nothing, projectionTextUnit = Nothing }
       ticketRows = [[row | row <- rows, dcmName row == "Ticket"] | (_,_,_,rows) <- issued]
   assert (roots !! 0 /= roots !! 1) "independent units collapsed their exact root identity"
-  -- This is a projection-only limitation of legacy metadata. The combined
-  -- compiler batch has a nominal guard even when independent host projections agree.
+  let issuedSymbols = [[dcmIdentity row | row <- rows] | rows <- ticketRows]
+  assert (map (map symbolUnit) issuedSymbols == [["unit-one"],["unit-two"]])
+    "metadata dropped the actual independently issued GHC units"
+  assert (issuedSymbols !! 0 /= issuedSymbols !! 1)
+    "metadata collapsed full nominal constructor identity"
+  let encoded = [encodeMetadata rows False Nothing [] | rows <- ticketRows]
+  assert (encoded !! 0 /= encoded !! 1)
+    "metadata wire erased the independently issued unit distinction"
+  assert (all ((== BS.pack [0x54,0x50,0x4c,0x52,0,5,0,0]) . BS.take 8) encoded)
+    "actual constructor producer emitted an obsolete metadata format"
+  -- Runtime host ids and public aliases remain shared projections. Full
+  -- nominal identity survives independently of both, and conflicting ids refuse.
   let hostSpellings = [[(dcmId row,dcmQualName row) | row <- rows] | rows <- ticketRows]
   assert (hostSpellings !! 0 == hostSpellings !! 1 && length (head hostSpellings) == 1)
-    "homonymous control no longer exercises the shared legacy host projection"
+    "homonymous control no longer exercises the shared runtime host projection"
   forM_ [issued, reverse issued] $ \ordered -> do
     let constructors = concat [cons | (_,_,cons,_) <- ordered]
     case metadataForConstructors [] constructors of

@@ -181,6 +181,7 @@ filegroup(
         "tidepool/repr/src/execution_schema/decode.rs": "src/execution_schema/decode.rs",
         "tidepool/repr/src/execution_schema/link.rs": "src/execution_schema/link.rs",
         "tidepool/repr/src/execution_schema/shared_content.rs": "src/execution_schema/shared_content.rs",
+        "tidepool/repr/src/execution_schema/symbol.rs": "src/execution_schema/symbol.rs",
         "tidepool/repr/src/execution_schema/testing.rs": "src/execution_schema/testing.rs",
         "tidepool/repr/src/execution_schema/validation.rs": "src/execution_schema/validation.rs",
         "tidepool/repr/src/freer_names.rs": "src/freer_names.rs",
