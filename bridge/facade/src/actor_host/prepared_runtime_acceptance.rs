@@ -715,11 +715,12 @@ async fn prepared_children_execute_original_native_probe(
                 assert!(bundle.iter().any(|image| image["role"] == "source"), "the fixture exercises original home-source code custody");
                 assert!(bundle.iter().filter(|image| image["role"] == "source").any(|image| state.native_images[&image["image_instance"].parse::<u64>().unwrap()]["literal_storage_entries"].parse::<usize>().unwrap() > 0), "the original home-source image owns actual literal storage");
                 assert!(images.iter().any(|image| state.native_images[image]["constructors"].parse::<usize>().unwrap() > 0), "the complete retained bundle owns actual constructor declarations");
+                let custody = images.iter().map(|image| state.native_images[image].clone()).collect::<Vec<_>>();
                 match &shared_renderer_images {
                     Some(shared) => assert_eq!(&images, shared, "independent child machines reuse every retained native image"),
                     None => shared_renderer_images = Some(images),
                 }
-                (renderer.fields.clone(), images.iter().map(|image| state.native_images[image].clone()).collect::<Vec<_>>())
+                (renderer.fields.clone(), custody)
             };
             progress.distinct_installation_scopes = scopes.len();
             progress.compiler_requests_during_setup += compiler_requests.len();
