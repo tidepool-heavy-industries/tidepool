@@ -10043,6 +10043,517 @@ mod tests {
         assert_eq!(machine.disposition(), MachineDisposition::Reusable);
     }
 
+    fn declaring_site_image(site: u64) -> Arc<CompiledProgram> {
+        use tidepool_repr::execution_schema::{SiteDelivery, SiteRow, TypeNodeId};
+        let mut wire = testing::wire_program();
+        wire.types = testing::closed_type_graph(
+            testing::identity("DeclaringSite", "Reply"),
+            tidepool_repr::type_graph::DeclarationForm::Text,
+        );
+        wire.sites.push(SiteRow {
+            site,
+            origin: "DeclaringSite.hs:1".into(),
+            ordinal: 0,
+            delivery: SiteDelivery::HostAnswer,
+            wire: TypeNodeId(0),
+            inputs: vec![TypeNodeId(0)],
+        });
+        Arc::new(
+            CompiledProgram::compile(
+                &link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap(),
+            )
+            .unwrap(),
+        )
+    }
+
+    fn claim_declaring_site(
+        machine: &mut PreparedMachine<'_>,
+        issuer: ProgramId,
+        runner: ProgramId,
+        payload: PreparedHandle,
+        static_with_site: bool,
+    ) -> PreparedHandle {
+        let realm = RealmId::fresh();
+        let continuation = machine.retain_top(runner, ValueId(0)).unwrap();
+        assert!(machine.rehome_handle(continuation.raw(), realm));
+        let reply = if static_with_site {
+            crate::resource_ledger::PreparedReplyEvidence::StaticWithSite {
+                owner: runner,
+                constructor: DataConId(0),
+                node: tidepool_repr::execution_schema::TypeNodeId(0),
+                site_owner: issuer,
+                site_row: 0,
+                payload_field: 0,
+                capture_input: Some(0),
+            }
+        } else {
+            crate::resource_ledger::PreparedReplyEvidence::AtSite {
+                owner: issuer,
+                row: 0,
+            }
+        };
+        let frame = machine
+            .park(
+                continuation,
+                realm,
+                Some(payload),
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::ValueField(0),
+                    evidence: PreparedFrameEvidence {
+                        reply,
+                        runner,
+                        resume_entry: ValueId(0),
+                        continuation_rep: continuation.rep(),
+                    },
+                },
+            )
+            .unwrap();
+        let raw = machine
+            .take_live_payload_handle_owned_by(frame, Some(RealmId::ROOT))
+            .unwrap()
+            .unwrap();
+        let value = machine.prepared_handle_of(raw).unwrap();
+        let duplicate = machine.retain_handle_value(value, RealmId::ROOT).unwrap();
+        assert!(machine.release(value));
+        let (resumed, _) = machine.take_parked(frame).unwrap();
+        assert!(machine
+            .handles
+            .handle(resumed.raw())
+            .unwrap()
+            .sites
+            .iter()
+            .any(|site| site.owner() == issuer));
+        assert!(machine.release(resumed));
+        assert_eq!(machine.close_realm(realm), (0, 0));
+        duplicate
+    }
+
+    #[test]
+    fn declaring_site_custody_survives_claim_gc_transfer_and_reexport() {
+        let options = PreparedMachineOptions { nursery_bytes: 128 };
+        let callable = Arc::new(scalar_returning_function_program());
+        let issuer_image = declaring_site_image(550_161_057_254);
+        for static_with_site in [false, true] {
+            let (mut sender, producer) =
+                PreparedMachine::new_shared(callable.clone(), options).unwrap();
+            let issuer = sender
+                .install_shared(issuer_image.clone(), ImportBindings::new())
+                .unwrap();
+            let runner = sender
+                .install_shared(
+                    Arc::new(scalar_returning_function_program()),
+                    ImportBindings::new(),
+                )
+                .unwrap();
+            let unrelated_image = declaring_site_image(999);
+            let unrelated = sender
+                .install_shared(unrelated_image.clone(), ImportBindings::new())
+                .unwrap();
+            let payload = sender.retain_top(producer, ValueId(0)).unwrap();
+            let retained =
+                claim_declaring_site(&mut sender, issuer, runner, payload, static_with_site);
+            let retired = sender.collect_major(sender.quiesce().unwrap()).unwrap();
+            assert!(retired.programs.contains(&runner));
+            assert!(retired.programs.contains(&unrelated));
+            assert!(!retired.programs.contains(&issuer));
+            assert_eq!(sender.handle_count(), 1);
+            let parcel = sender.export_parcel(retained).unwrap();
+            assert_eq!(parcel.images().len(), 2);
+            assert!(parcel
+                .images()
+                .iter()
+                .any(|image| Arc::ptr_eq(&image.image, &issuer_image)));
+            assert!(!parcel
+                .images()
+                .iter()
+                .any(|image| Arc::ptr_eq(&image.image, &unrelated_image)));
+            assert!(sender.release(retained));
+            assert_eq!(sender.handle_count(), 0);
+            drop(sender);
+            let (mut receiver, caller) = PreparedMachine::new_shared(
+                Arc::new(CompiledProgram::compile(&scalar_dynamic_caller_program()).unwrap()),
+                options,
+            )
+            .unwrap();
+            for _ in 0..3 {
+                receiver
+                    .install_shared(
+                        Arc::new(scalar_returning_function_program()),
+                        ImportBindings::new(),
+                    )
+                    .unwrap();
+            }
+            let imported = receiver.import_parcel(parcel, RealmId::ROOT).unwrap();
+            let dependency = *receiver
+                .handles
+                .handle(imported.value.raw())
+                .unwrap()
+                .sites
+                .iter()
+                .next()
+                .unwrap();
+            assert_ne!(dependency.owner(), issuer);
+            assert_eq!(
+                receiver.programs[&dependency.owner()]
+                    .program
+                    .get()
+                    .definition_facts()
+                    .sites[dependency.row()]
+                .site,
+                550_161_057_254
+            );
+            assert_eq!(
+                receiver
+                    .run_entry_retained(
+                        caller,
+                        ValueId(0),
+                        &[PreparedInput::Managed(imported.value)],
+                        PreparedCallOptions {
+                            observation_budget: 100,
+                            collect_before_observation: true
+                        },
+                        RealmId::ROOT
+                    )
+                    .unwrap()
+                    .values,
+                vec![PreparedResult::Scalar(7)]
+            );
+            receiver.collect_major(receiver.quiesce().unwrap()).unwrap();
+            let repeated = receiver.export_parcel(imported.value).unwrap();
+            assert_eq!(repeated.images().len(), 2);
+            assert!(receiver.release(imported.value));
+            drop(receiver);
+            let (mut final_machine, _) =
+                PreparedMachine::new_shared(Arc::new(scalar_returning_function_program()), options)
+                    .unwrap();
+            let third = final_machine
+                .import_parcel(repeated, RealmId::fresh())
+                .unwrap();
+            let owner = final_machine.handle_realm(third.value).unwrap();
+            assert_eq!(final_machine.close_realm(owner), (0, 1));
+            let retired = final_machine
+                .collect_major(final_machine.quiesce().unwrap())
+                .unwrap();
+            assert_eq!(final_machine.handle_count(), 0);
+            assert!(retired.programs.iter().any(|program| third
+                .programs
+                .iter()
+                .any(|(imported, _)| imported == program)));
+            assert_eq!(final_machine.residency().root_cells, 0);
+        }
+    }
+
+    #[test]
+    fn declaring_site_custody_follows_selected_construction_and_installed_imports() {
+        let options = PreparedMachineOptions { nursery_bytes: 128 };
+        let (mut machine, producer) =
+            PreparedMachine::new_shared(Arc::new(scalar_returning_function_program()), options)
+                .unwrap();
+        let issuer = machine
+            .install_shared(declaring_site_image(551), ImportBindings::new())
+            .unwrap();
+        let other_issuer = machine
+            .install_shared(declaring_site_image(552), ImportBindings::new())
+            .unwrap();
+        let payload = machine.retain_top(producer, ValueId(0)).unwrap();
+        let first = claim_declaring_site(&mut machine, issuer, producer, payload, true);
+        let second_payload = machine.retain_top(producer, ValueId(0)).unwrap();
+        let second =
+            claim_declaring_site(&mut machine, other_issuer, producer, second_payload, false);
+        let shape = machine
+            .install_shared(
+                Arc::new(boxed_shape_program(930, 931)),
+                ImportBindings::new(),
+            )
+            .unwrap();
+        let mut builder = machine.managed_builder().unwrap();
+        let _unused = builder
+            .constructor(DataConId(931), &[ManagedField::Handle(second)])
+            .unwrap();
+        let selected = builder
+            .constructor(DataConId(931), &[ManagedField::Handle(first)])
+            .unwrap();
+        let wrapper = builder.finish(RealmId::ROOT, selected).unwrap();
+        let PreparedOuter::Constructor { fields, .. } =
+            machine.inspect_outer(wrapper, RealmId::ROOT).unwrap();
+        let [PreparedResult::Managed(selected)] = fields.as_slice() else {
+            panic!("managed field")
+        };
+        assert!(machine.release(first));
+        assert!(machine.release(second));
+        assert!(machine.release(wrapper));
+        let identity = testing::identity("DeclaringSite", "saved");
+        let linked = s3_closure_import_holder_program(identity.clone());
+        let holder = install_linked(
+            &mut machine,
+            &linked,
+            [(identity, *selected)].into_iter().collect(),
+        )
+        .unwrap();
+        let entry = machine.retain_top(holder, ValueId(0)).unwrap();
+        assert!(machine.release(*selected));
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert!(retired.programs.contains(&other_issuer));
+        assert!(retired.programs.contains(&shape));
+        assert!(!retired.programs.contains(&issuer));
+        let result = machine
+            .run_entry_retained(
+                holder,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 100,
+                    collect_before_observation: true,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Managed(result)] = result.values.as_slice() else {
+            panic!("return import")
+        };
+        assert!(machine
+            .handles
+            .handle(result.raw())
+            .unwrap()
+            .sites
+            .iter()
+            .all(|site| site.owner() == issuer));
+        assert!(machine.release(*result));
+        let parcel = machine.export_parcel(entry).unwrap();
+        assert_eq!(parcel.images().len(), 3);
+        drop(machine);
+        let (mut receiver, _) =
+            PreparedMachine::new_shared(Arc::new(scalar_returning_function_program()), options)
+                .unwrap();
+        let imported = receiver.import_parcel(parcel, RealmId::ROOT).unwrap();
+        for (_, handle) in imported.imports {
+            assert!(receiver.release(handle));
+        }
+        let second_parcel = receiver.export_parcel(imported.value).unwrap();
+        assert_eq!(second_parcel.images().len(), 3);
+        assert!(second_parcel.images().iter().any(|image| image
+            .image
+            .definition_facts()
+            .sites
+            .iter()
+            .any(|site| site.site == 551)));
+        assert!(!second_parcel.images().iter().any(|image| image
+            .image
+            .definition_facts()
+            .sites
+            .iter()
+            .any(|site| site.site == 552)));
+        assert!(receiver.release(imported.value));
+        receiver.collect_major(receiver.quiesce().unwrap()).unwrap();
+        assert_eq!(receiver.residency().root_cells, 0);
+    }
+
+    #[test]
+    fn ordinary_numeric_site_lookalikes_have_no_declaring_image_custody() {
+        let mut wire = testing::wire_program();
+        wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
+        wire.constructors.push(ConstructorDecl {
+            identity: testing::identity("NumericSite", "Number"),
+            family: testing::identity("NumericSite", "Number"),
+            host_id: DataConId(40_501),
+            result_rep: RuntimeRep::LiftedRef,
+            tag: 1,
+            family_size: 1,
+            field_reps: vec![RuntimeRep::Int(64)],
+            strict_fields: vec![true],
+            layout: CheckedLayout {
+                fields: vec![FieldLayout {
+                    rep: RuntimeRep::Int(64),
+                    offset: 0,
+                }],
+                alignment: 8,
+                payload_size: 8,
+                root_mask: vec![false],
+            },
+        });
+        wire.expressions.nodes[0] = ExprFrame::Construct {
+            constructor: ConstructorId(0),
+            fields: vec![Atom::Scalar(ScalarLiteral::Int {
+                bits: 64,
+                bytes: 551_i64.to_be_bytes().to_vec(),
+            })],
+        };
+        let code = Arc::new(
+            CompiledProgram::compile(
+                &link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap(),
+            )
+            .unwrap(),
+        );
+        let options = PreparedMachineOptions { nursery_bytes: 128 };
+        let (mut machine, producer) = PreparedMachine::new_shared(code, options).unwrap();
+        let issuer = machine
+            .install_shared(declaring_site_image(551), ImportBindings::new())
+            .unwrap();
+        let batch = machine
+            .run_entry_retained(
+                producer,
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 100,
+                    collect_before_observation: true,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Managed(value)] = batch.values.as_slice() else {
+            panic!("boxed numeric value")
+        };
+        assert!(machine
+            .handles
+            .handle(value.raw())
+            .unwrap()
+            .sites
+            .is_empty());
+        let parcel = machine.export_parcel(*value).unwrap();
+        assert!(
+            parcel.images().is_empty(),
+            "interned constructor and integer need no image"
+        );
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert!(retired.programs.contains(&issuer));
+        assert!(machine.release(*value));
+        machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert_eq!(machine.residency().root_cells, 0);
+    }
+
+    #[test]
+    fn malformed_declaring_site_manifest_refuses_before_native_import() {
+        let options = PreparedMachineOptions { nursery_bytes: 128 };
+        let callable = Arc::new(scalar_returning_function_program());
+        let (mut sender, producer) =
+            PreparedMachine::new_shared(callable.clone(), options).unwrap();
+        let issuer_image = declaring_site_image(551);
+        let issuer = sender
+            .install_shared(issuer_image.clone(), ImportBindings::new())
+            .unwrap();
+        let payload = sender.retain_top(producer, ValueId(0)).unwrap();
+        let value = claim_declaring_site(&mut sender, issuer, producer, payload, true);
+        let mut parcel = sender.export_parcel(value).unwrap();
+        parcel
+            .images_mut()
+            .iter_mut()
+            .find(|image| Arc::ptr_eq(&image.image, &issuer_image))
+            .unwrap()
+            .image = callable.clone();
+        let (mut receiver, _) = PreparedMachine::new_shared(callable, options).unwrap();
+        let before = receiver.residency();
+        assert!(matches!(
+            receiver.import_parcel(parcel, RealmId::ROOT),
+            Err(ExecutionError::Invariant(
+                "import_parcel: declaring site row is absent"
+            ))
+        ));
+        assert_eq!(receiver.residency().programs, before.programs);
+        assert_eq!(receiver.residency().root_cells, before.root_cells);
+        assert_eq!(receiver.handle_count(), 0);
+        assert_eq!(receiver.disposition(), MachineDisposition::Reusable);
+        assert!(sender.release(value));
+        sender.collect_major(sender.quiesce().unwrap()).unwrap();
+        assert_eq!(sender.residency().root_cells, 0);
+    }
+
+    #[test]
+    fn declaring_site_transfer_histories_preserve_only_issued_dependencies() {
+        use proptest::prelude::*;
+        let options = PreparedMachineOptions { nursery_bytes: 128 };
+        let callable = Arc::new(scalar_returning_function_program());
+        let issuer_images = [declaring_site_image(551), declaring_site_image(552)];
+        let mut config = proptest::test_runner::Config::default();
+        if std::env::var_os("PROPTEST_CASES").is_none() {
+            config.cases = 32;
+        }
+        config.max_shrink_iters = 256;
+        let mut runner = proptest::test_runner::TestRunner::new(config);
+        runner
+            .run(&proptest::collection::vec(0_u8..5, 1..12), |operations| {
+                let (mut machine, producer) =
+                    PreparedMachine::new_shared(callable.clone(), options).unwrap();
+                let issuer = machine
+                    .install_shared(issuer_images[0].clone(), ImportBindings::new())
+                    .unwrap();
+                let payload = machine.retain_top(producer, ValueId(0)).unwrap();
+                let mut value = claim_declaring_site(&mut machine, issuer, producer, payload, true);
+                let mut expected = BTreeSet::from([551]);
+                for operation in operations {
+                    match operation {
+                        0 => {
+                            let duplicate =
+                                machine.retain_handle_value(value, RealmId::ROOT).unwrap();
+                            prop_assert!(machine.release(value));
+                            value = duplicate;
+                        }
+                        1 => {
+                            let previous = machine.handle_realm(value).unwrap();
+                            let next = RealmId::fresh();
+                            prop_assert!(machine.rehome_handle(value.raw(), next));
+                            prop_assert_eq!(machine.close_realm(previous), (0, 0));
+                        }
+                        2 => {
+                            machine.collect_major(machine.quiesce().unwrap()).unwrap();
+                        }
+                        3 => {
+                            let parcel = machine.export_parcel(value).unwrap();
+                            prop_assert_eq!(parcel.images().len(), expected.len() + 1);
+                            prop_assert!(machine.release(value));
+                            drop(machine);
+                            let (mut receiver, _) =
+                                PreparedMachine::new_shared(callable.clone(), options).unwrap();
+                            receiver
+                                .install_shared(
+                                    Arc::new(scalar_returning_function_program()),
+                                    ImportBindings::new(),
+                                )
+                                .unwrap();
+                            let imported = receiver.import_parcel(parcel, RealmId::ROOT).unwrap();
+                            value = imported.value;
+                            machine = receiver;
+                        }
+                        4 if !expected.contains(&552) => {
+                            // A payload carrying an older issued site crosses a new
+                            // frame at a different site; both exact origins survive.
+                            let current = machine
+                                .install_shared(issuer_images[1].clone(), ImportBindings::new())
+                                .unwrap();
+                            value =
+                                claim_declaring_site(&mut machine, current, current, value, false);
+                            expected.insert(552);
+                        }
+                        _ => {}
+                    }
+                    let actual = machine
+                        .handles
+                        .handle(value.raw())
+                        .unwrap()
+                        .sites
+                        .iter()
+                        .map(|site| {
+                            machine.programs[&site.owner()]
+                                .program
+                                .get()
+                                .definition_facts()
+                                .sites[site.row()]
+                            .site
+                        })
+                        .collect::<BTreeSet<_>>();
+                    prop_assert_eq!(&actual, &expected);
+                    prop_assert_eq!(machine.handle_count(), 1);
+                }
+                prop_assert!(machine.release(value));
+                machine.collect_major(machine.quiesce().unwrap()).unwrap();
+                prop_assert_eq!(machine.residency().root_cells, 0);
+                Ok(())
+            })
+            .unwrap();
+    }
+
     fn park_payload_for_test(
         machine: &mut PreparedMachine<'_>,
         program: ProgramId,
