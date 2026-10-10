@@ -287,14 +287,15 @@ edits. Resource admission remains with `swarm-build`, and the launcher preserves
 that process's cgroup and exit status.
 
 Optional host Haskell test outputs require `--tests`. Browser driver and Chromium
-outputs require `--browser`, independently of `--tests`; select both for the
-explicit broad facade test group. Ordinary configuration leaves these optional
+outputs require `--browser`, independently of `--tests`; native runtime bundles
+also require it through their browser driver dependency. Select both for release
+qualification or the explicit broad facade test group. Ordinary configuration leaves these optional
 resources empty, and targets requiring them refuse the missing selection. The
 embedded web asset tools remain ordinary inputs for native bundle assembly.
 Catalog products retain their independent qualification owner.
 
 The default development shell selects the production Haskell package environment.
-`bash scripts/dev-shell.sh --tests COMMAND...` selects the additional Tasty and
+`bash scripts/dev-shell.sh --tests COMMAND...` selects the additional Tasty providers and
 QuickCheck packages from the same pinned compiler/package universe. Configure
 enters the default shell and realizes its explicit `--tests` outputs separately.
 

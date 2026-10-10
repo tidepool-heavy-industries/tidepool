@@ -280,7 +280,7 @@ set `TYPESAFE_API_KEY` before launching.
 git clone --recurse-submodules https://github.com/tidepool-heavy-industries/tidepool.git
 cd tidepool
 # After provisioning this checkout's buck-out bind mount:
-bash scripts/buck2-configure.sh --tests
+bash scripts/buck2-configure.sh --tests --browser
 just exomonad-build
 ```
 

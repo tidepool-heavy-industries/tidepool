@@ -2,6 +2,8 @@
 carries Buck's host, libtest, extractor frontend and worker, declared shared
 libraries, browser assets, the authenticated native catalog and a complete
 original root entry. It requires the retained source and compiler selection.
+Configure with `bash scripts/buck2-configure.sh --tests --browser` before
+bundle assembly and qualification; the bundle owns the browser driver dependency.
 
 `//build/package:native_catalog_runtime_bundle` selects the same prepared
 assembly. `//build/package:source_backed_developer_bundle` is an unprepared

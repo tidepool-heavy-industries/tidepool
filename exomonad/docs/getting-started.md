@@ -40,7 +40,7 @@ describes admission and output provisioning.
 git clone --recurse-submodules https://github.com/tidepool-heavy-industries/tidepool.git
 cd tidepool
 # After provisioning this checkout's buck-out mount:
-bash scripts/buck2-configure.sh --tests
+bash scripts/buck2-configure.sh --tests --browser
 just exomonad-build
 just build //build/testing/browser:driver_bundle
 ```
