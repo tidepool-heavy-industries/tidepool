@@ -8480,7 +8480,9 @@ mod custody_release_tests {
             ));
         }
         assert!(matches!(
-            destination.resume_handle_classified(hole, foreign),
+            tidepool_testing::with_settlement(
+                |settlement| destination.resume_handle_classified(hole, foreign, settlement)
+            ),
             Err(ResidentResumeError::Rejected(ResidentError::ForeignCustody))
         ));
         source.settle_dropped_custody();
@@ -8503,13 +8505,14 @@ mod custody_release_tests {
             host_authority: None,
         };
         assert!(matches!(
-            destination.mount_compiled_binding_in(
+            tidepool_testing::with_settlement(|settlement| destination.mount_compiled_binding_in(
                 ScopeId::ROOT,
                 &binder,
                 Generation(47),
                 &DataConTable::default(),
-                foreign
-            ),
+                foreign,
+                settlement
+            )),
             Err(ResidentError::ForeignCustody)
         ));
         assert_eq!(destination.value_handle_count(), before);
@@ -11358,7 +11361,7 @@ mod compiled_provenance_plan_tests {
                 modules: vec![], heads: vec![], inputs: vec![], input_type_witnesses: vec![],
                 reply_declaration: None, request_type_signatures: None,
             }).collect::<Vec<_>>();
-            let code = super::turn::CompiledTurn::from_prepared(Arc::new(tidepool_repr::execution_schema::testing::prepare(tidepool_repr::execution_schema::testing::wire_program()).unwrap()), DataConTable::new(), Default::default(), sites.clone()).unwrap().into_code();
+            let code = crate::session::turn::CompiledTurn::from_prepared(Arc::new(tidepool_repr::execution_schema::testing::prepare(tidepool_repr::execution_schema::testing::wire_program()).unwrap()), DataConTable::new(), Default::default(), sites.clone()).unwrap().into_code();
             let plan = CompiledProvenancePlan::build(&code).unwrap();
             let expected = sites.into_iter().map(|site| (site.site, site)).collect::<BTreeMap<_, _>>();
             for _ in 0..copies {

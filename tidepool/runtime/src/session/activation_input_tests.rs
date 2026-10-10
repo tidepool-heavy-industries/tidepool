@@ -2906,11 +2906,11 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         let incomplete = bundle.omitting_target_image();
         let refused = resident.install_turn_program_in_with_images(
             compiled.admission.scope_lease.scope(),
-            compiled.renderer.compiled.prepared.as_ref().clone(),
+            compiled.renderer.compiled.prepared().as_ref().clone(),
             compiled.renderer.compiled.certification.as_ref(),
             TurnImageAcquisition::Ready {
                 bundle: &incomplete,
-                table: &compiled.renderer.compiled.table,
+                table: compiled.renderer.compiled.table(),
             },
         );
         assert!(
