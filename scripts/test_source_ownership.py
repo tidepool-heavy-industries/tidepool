@@ -11,6 +11,7 @@ import re
 
 TEST_ONLY_MODULES = {
     'exomonad-node': frozenset({
+        'exomonad/node/src/command_resources/custody_tests.rs',
         'exomonad/node/src/inbox/history_properties.rs',
     }),
     'exomonad-worktree': frozenset({

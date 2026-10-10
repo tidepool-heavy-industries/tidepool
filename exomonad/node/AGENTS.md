@@ -12,6 +12,11 @@ choices.
 - An ack means the final consumer accepted the exact sequence. Never advance a
   cursor before the last hop succeeds.
 - Keep payloads typed until a concrete transport boundary renders them.
+- Command allocation custody distinguishes issued launch grants from unissued
+  setup allocations. Preserve the exact leaf and cleanup evidence after partial
+  acquisition; admission records own recovery identity when controls are incomplete.
+  Unissued leaves release command memory admission, but acknowledgement and
+  producer sealing require confirmed removal and terminal publication.
 - `ProcessMountBoundary` presents one real checkout at a stable model-visible
   path. Worker composition makes its linked working tree writable while
   protecting source and sibling working files; shared Git metadata remains
