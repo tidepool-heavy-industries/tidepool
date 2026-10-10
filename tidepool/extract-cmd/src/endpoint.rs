@@ -170,7 +170,7 @@ pub struct CompilerTransactionCloseEvidence {
     pub reason: CompilerTransactionCloseReason,
     pub retirement: CompilerTransactionRetirement,
     pub earlier: Vec<CompilerTransactionCloseEvidence>,
-    input_files: CompilerInputFiles,
+    input_custody: CompilerInputCustody,
 }
 
 impl CompilerTransactionCloseEvidence {
@@ -182,40 +182,60 @@ impl CompilerTransactionCloseEvidence {
             reason,
             retirement,
             earlier: Vec::new(),
-            input_files: CompilerInputFiles::default(),
+            input_custody: CompilerInputCustody::default(),
         }
     }
 }
 
 /// Physical input custody only; artifact selection and validation belong to the
-/// caller. Keeping the original descriptor preserves its published /proc path.
+/// caller. Descriptors preserve published /proc paths; directory owners preserve
+/// path-based inputs and their companion lookup files.
 #[derive(Clone, Debug, Default)]
-struct CompilerInputFiles(BTreeMap<RawFd, Arc<File>>);
+struct CompilerInputCustody {
+    files: BTreeMap<RawFd, Arc<File>>,
+    directories: BTreeMap<usize, Arc<tempfile::TempDir>>,
+}
 
-impl CompilerInputFiles {
+impl CompilerInputCustody {
     fn insert(&mut self, file: Arc<File>) {
-        self.0.entry(file.as_raw_fd()).or_insert(file);
+        self.files.entry(file.as_raw_fd()).or_insert(file);
+    }
+
+    fn insert_directory(&mut self, directory: Arc<tempfile::TempDir>) {
+        self.directories
+            .entry(Arc::as_ptr(&directory) as usize)
+            .or_insert(directory);
     }
 
     fn extend(&mut self, files: Self) {
-        for file in files.0.into_values() {
+        for directory in files.directories.into_values() {
+            self.insert_directory(directory);
+        }
+        for file in files.files.into_values() {
             self.insert(file);
         }
     }
 }
 
-impl PartialEq for CompilerInputFiles {
+impl PartialEq for CompilerInputCustody {
     fn eq(&self, other: &Self) -> bool {
-        self.0.len() == other.0.len()
-            && self.0.iter().all(|(fd, file)| {
+        self.files.len() == other.files.len()
+            && self.directories.len() == other.directories.len()
+            && self.directories.iter().all(|(key, directory)| {
                 other
-                    .0
+                    .directories
+                    .get(key)
+                    .is_some_and(|other| Arc::ptr_eq(directory, other))
+            })
+            && self.files.iter().all(|(fd, file)| {
+                other
+                    .files
                     .get(fd)
                     .is_some_and(|other| Arc::ptr_eq(file, other))
             })
     }
 }
-impl Eq for CompilerInputFiles {}
+impl Eq for CompilerInputCustody {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompilerTransactionCloseReason {
@@ -943,7 +963,7 @@ impl Drop for DirectEndpoint {
                             ),
                             retirement: CompilerTransactionRetirement::Direct(retirement.clone()),
                             earlier: Vec::new(),
-                            input_files: CompilerInputFiles::default(),
+                            input_custody: CompilerInputCustody::default(),
                         });
                 }
             }
@@ -1213,7 +1233,7 @@ impl CompilerEndpoint {
                                                 disconnect: None,
                                             },
                                         earlier: Vec::new(),
-                                        input_files: CompilerInputFiles::default(),
+                                        input_custody: CompilerInputCustody::default(),
                                     });
                             }
                         });
@@ -1274,10 +1294,39 @@ impl CompilerEndpoint {
         })
     }
 
+    /// Keep path-based compiler inputs under their issuing temporary directory.
+    /// A confirmed close releases the directory; uncertain close evidence owns
+    /// it until the last observer releases that evidence.
+    pub fn execute_with_input_directories(
+        self,
+        cmd: &ExtractCmd,
+        input_directories: Vec<Arc<tempfile::TempDir>>,
+        close_sink: impl FnOnce(CompilerTransactionClose),
+    ) -> CompilerTransactionOutcome<Result<ExtractRun, SpawnError>> {
+        self.invoke_with_input_resources(
+            cmd,
+            Vec::new(),
+            input_directories,
+            close_sink,
+            |endpoint| endpoint.execute(cmd),
+        )
+    }
+
     fn invoke_with_input_files<T>(
         self,
         cmd: &ExtractCmd,
         input_files: Vec<Arc<File>>,
+        close_sink: impl FnOnce(CompilerTransactionClose),
+        action: impl FnOnce(CompilerEndpoint) -> Result<T, SpawnError>,
+    ) -> CompilerTransactionOutcome<Result<T, SpawnError>> {
+        self.invoke_with_input_resources(cmd, input_files, Vec::new(), close_sink, action)
+    }
+
+    fn invoke_with_input_resources<T>(
+        self,
+        cmd: &ExtractCmd,
+        input_files: Vec<Arc<File>>,
+        input_directories: Vec<Arc<tempfile::TempDir>>,
         close_sink: impl FnOnce(CompilerTransactionClose),
         action: impl FnOnce(CompilerEndpoint) -> Result<T, SpawnError>,
     ) -> CompilerTransactionOutcome<Result<T, SpawnError>> {
@@ -1287,7 +1336,10 @@ impl CompilerEndpoint {
                 let mut scope = scope.borrow_mut();
                 let scope = scope.as_mut().expect("owned compiler invocation scope");
                 for file in input_files {
-                    scope.input_files.insert(file);
+                    scope.input_custody.insert(file);
+                }
+                for directory in input_directories {
+                    scope.input_custody.insert_directory(directory);
                 }
             });
             action(endpoint)
@@ -1488,7 +1540,7 @@ struct TransactionScope {
     compiler: ScopedCompiler,
     cancellation: Option<CompilerTransactionCancellation>,
     admission_close: Vec<CompilerTransactionCloseEvidence>,
-    input_files: CompilerInputFiles,
+    input_custody: CompilerInputCustody,
 }
 
 thread_local! {
@@ -1509,7 +1561,7 @@ pub fn retain_compiler_input_file(file: Arc<File>) -> bool {
         let Some(scope) = scope.as_mut() else {
             return false;
         };
-        scope.input_files.insert(file);
+        scope.input_custody.insert(file);
         true
     })
 }
@@ -1760,7 +1812,7 @@ fn finish_scope(abandoned: bool) -> CompilerTransactionClose {
     };
     let mut close = retain_earlier_close(close, scope.admission_close);
     if let CompilerTransactionClose::Unconfirmed(evidence) = &mut close {
-        evidence.input_files.extend(scope.input_files);
+        evidence.input_custody.extend(scope.input_custody);
     }
     close
 }
@@ -1854,7 +1906,7 @@ fn with_compiler_transaction_inner<T>(
             compiler: ScopedCompiler::Unbound,
             cancellation,
             admission_close: Vec::new(),
-            input_files: CompilerInputFiles::default(),
+            input_custody: CompilerInputCustody::default(),
         });
     });
     let guard = TransactionScopeGuard {
@@ -1995,7 +2047,7 @@ impl CompilerTransaction {
                         reason,
                         retirement: CompilerTransactionRetirement::Direct(endpoint.abort()),
                         earlier: Vec::new(),
-                        input_files: CompilerInputFiles::default(),
+                        input_custody: CompilerInputCustody::default(),
                     })
                 } else {
                     let end = endpoint
@@ -2066,7 +2118,7 @@ impl CompilerTransaction {
                             reason,
                             retirement: CompilerTransactionRetirement::Direct(retirement),
                             earlier: Vec::new(),
-                            input_files: CompilerInputFiles::default(),
+                            input_custody: CompilerInputCustody::default(),
                         })
                     }
                 }
@@ -2092,7 +2144,7 @@ impl CompilerTransaction {
                             disconnect: Some(disconnect),
                         },
                         earlier: Vec::new(),
-                        input_files: CompilerInputFiles::default(),
+                        input_custody: CompilerInputCustody::default(),
                     })
                 } else {
                     match daemon::end_transaction(&mut transaction) {
@@ -2118,7 +2170,7 @@ impl CompilerTransaction {
                                     ),
                                 },
                                 earlier: Vec::new(),
-                                input_files: CompilerInputFiles::default(),
+                                input_custody: CompilerInputCustody::default(),
                             },
                         ),
                     }
@@ -2614,6 +2666,82 @@ mod tests {
         let file = compiler_input_file(b"standalone compiler input");
         std::fs::write(directory.join("input-at-end"), compiler_input_path(&file)).unwrap();
         (endpoint, command, file)
+    }
+
+    fn standalone_directory_fixture(
+        phase: u8,
+    ) -> (
+        tempfile::TempDir,
+        CompilerEndpoint,
+        ExtractCmd,
+        Arc<tempfile::TempDir>,
+        PathBuf,
+    ) {
+        let fixture = tempfile::tempdir().unwrap();
+        let (endpoint, command, _) = standalone_input_fixture(fixture.path(), phase);
+        let inputs = Arc::new(tempfile::tempdir().unwrap());
+        let input = inputs.path().join("original.hi");
+        std::fs::write(&input, b"owned directory input").unwrap();
+        std::fs::write(fixture.path().join("input-at-end"), input.to_str().unwrap()).unwrap();
+        (fixture, endpoint, command, inputs, input)
+    }
+
+    #[test]
+    fn standalone_directory_inputs_survive_until_actual_clean_end() {
+        let (fixture, endpoint, command, directory, path) = standalone_directory_fixture(5);
+        let weak = Arc::downgrade(&directory);
+        let observed = RefCell::new(None);
+        let outcome = endpoint.execute_with_input_directories(&command, vec![directory], |close| {
+            *observed.borrow_mut() = Some(close)
+        });
+        assert_eq!(observed.into_inner(), Some(outcome.close.clone()));
+        assert!(outcome.action.unwrap().success());
+        assert!(outcome.close.is_clean());
+        assert_eq!(
+            std::fs::read(fixture.path().join("observed-input")).unwrap(),
+            b"owned directory input"
+        );
+        assert!(weak.upgrade().is_none());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn standalone_directory_inputs_follow_last_uncertain_close_observer() {
+        let (_fixture, endpoint, command, directory, path) = standalone_directory_fixture(6);
+        let observed = RefCell::new(None);
+        let outcome = endpoint.execute_with_input_directories(&command, vec![directory], |close| {
+            *observed.borrow_mut() = Some(close)
+        });
+        assert!(matches!(
+            outcome.close,
+            CompilerTransactionClose::Unconfirmed(_)
+        ));
+        let observer = observed.into_inner().unwrap();
+        drop(outcome);
+        assert_eq!(std::fs::read(&path).unwrap(), b"owned directory input");
+        drop(observer);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn standalone_directory_unwind_transfers_path_custody_to_affine_sink() {
+        let (_fixture, endpoint, command, directory, path) = standalone_directory_fixture(6);
+        let observed = RefCell::new(None);
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            endpoint.invoke_with_input_resources::<()>(
+                &command,
+                Vec::new(),
+                vec![directory],
+                |close| *observed.borrow_mut() = Some(close),
+                |_| panic!("unwind after directory submission"),
+            );
+        }));
+        assert!(unwind.is_err());
+        let observer = observed.into_inner().unwrap();
+        assert!(matches!(observer, CompilerTransactionClose::Unconfirmed(_)));
+        assert!(path.exists());
+        drop(observer);
+        assert!(!path.exists());
     }
 
     #[test]
@@ -3447,7 +3575,7 @@ mod tests {
             "same owner can subsequently observe actual reap"
         );
         assert!(actual._retained_child.is_none());
-        drop(evidence.input_files);
+        drop(evidence.input_custody);
         assert!(input.upgrade().is_none());
     }
 

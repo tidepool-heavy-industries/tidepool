@@ -82,6 +82,7 @@ pub fn certify_recovered_declaration_tip(
     joins: &[crate::recovery_artifacts::RecoveryJoinRef],
     selection: RecoveryDeclarationSelection,
     includes: &[PathBuf],
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<RecoveredDeclarationTip, CompileError> {
     certify_recovered_declaration_tip_with_value_interfaces(
         recovery_root,
@@ -91,6 +92,7 @@ pub fn certify_recovered_declaration_tip(
         &[],
         selection,
         includes,
+        settlement,
     )
 }
 
@@ -102,6 +104,7 @@ pub fn certify_recovered_declaration_tip_with_value_interfaces(
     values: &[crate::recovery_artifacts::RecoveryValueInterfaceRef],
     mut selection: RecoveryDeclarationSelection,
     includes: &[PathBuf],
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<RecoveredDeclarationTip, CompileError> {
     let context = Arc::new(
         ExactDeclarationContext::capture_recovery_with_value_interfaces(
@@ -113,7 +116,7 @@ pub fn certify_recovered_declaration_tip_with_value_interfaces(
             std::mem::take(&mut selection.lexical),
         )?,
     );
-    certify_recovered_declaration_tip_in_context(context, selection, includes)
+    certify_recovered_declaration_tip_in_context(context, selection, includes, settlement)
 }
 
 pub fn certify_recovered_declaration_tip_with_inventory(
@@ -132,6 +135,7 @@ pub fn certify_recovered_declaration_tip_with_inventory(
     compiler_roles: &[crate::artifact_inventory::CompilerInputRole],
     mut selection: RecoveryDeclarationSelection,
     includes: &[PathBuf],
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<RecoveredDeclarationTip, CompileError> {
     let context = Arc::new(ExactDeclarationContext::capture_recovery_with_inventory(
         recovery_root,
@@ -145,7 +149,7 @@ pub fn certify_recovered_declaration_tip_with_inventory(
         compiler_roles,
         std::mem::take(&mut selection.lexical),
     )?);
-    certify_recovered_declaration_tip_in_context(context, selection, includes)
+    certify_recovered_declaration_tip_in_context(context, selection, includes, settlement)
 }
 /// Certify durable selectors against an already authenticated scoped inventory.
 /// The context retains original type evidence and exact native requirements;
@@ -154,6 +158,7 @@ pub fn certify_recovered_declaration_tip_in_context(
     context: Arc<ExactDeclarationContext>,
     selection: RecoveryDeclarationSelection,
     includes: &[PathBuf],
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<RecoveredDeclarationTip, CompileError> {
     if context.toolchain_identity_sha256() == [0; 32]
         || !context
@@ -177,7 +182,7 @@ pub fn certify_recovered_declaration_tip_in_context(
             "recovered join root has no certified lexical-join role",
         ));
     }
-    let scratch = tempfile::tempdir()?;
+    let scratch = Arc::new(tempfile::tempdir()?);
     let materialized = context.materialize_scratch(&scratch)?;
     let roots = materialized
         .artifacts
@@ -197,6 +202,8 @@ pub fn certify_recovered_declaration_tip_in_context(
         includes,
         scratch.path(),
         Some(context.toolchain_identity_sha256()),
+        scratch.clone(),
+        settlement,
     )?;
     context.validate_artifacts(&materialized.artifacts)?;
     if let JoinDecision::Rejected { diagnostic, .. } = outcome.decision {

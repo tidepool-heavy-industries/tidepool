@@ -18,6 +18,7 @@ path = "src/main.rs"
 # identity/execution race this crate owns.  `blake3` is already in the proc
 # macro's build graph; keeping the digest here avoids any runtime dependency.
 [dependencies]
+tempfile = "3"
 tidepool-atomic-write.workspace = true
 libc.workspace = true
 blake3 = "=1.8.6"
@@ -30,7 +31,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # from the graph every dependent builds.
 [dev-dependencies]
 serde_json = "1"
-tempfile = "3"
 proptest.workspace = true
 
 [lints]

@@ -202,22 +202,25 @@ impl SessionLib {
     pub fn attach_recovery_graph_v2(
         &mut self,
         path: impl Into<PathBuf>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), SessionError> {
-        self.attach_recovery_graph(path.into(), None)
+        self.attach_recovery_graph(path.into(), None, settlement)
     }
 
     pub fn attach_owned_recovery_graph_v3(
         &mut self,
         path: impl Into<PathBuf>,
         authority: Arc<dyn RecoveryRunAuthority>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), SessionError> {
-        self.attach_recovery_graph(path.into(), Some(authority))
+        self.attach_recovery_graph(path.into(), Some(authority), settlement)
     }
 
     fn attach_recovery_graph(
         &mut self,
         path: PathBuf,
         authority: Option<Arc<dyn RecoveryRunAuthority>>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), SessionError> {
         let invalid = |detail: String| SessionError::RecoveryManifest {
             path: path.clone(),
@@ -322,7 +325,7 @@ impl SessionLib {
         if let Some(owner) = &owner {
             owner.validate_read()?;
         }
-        let recovered_log = self.hydrate_recovery_graph(&graph, &root, inventory)?;
+        let recovered_log = self.hydrate_recovery_graph(&graph, &root, inventory, settlement)?;
         if let Some(owner) = &owner {
             owner.validate_read()?;
         }
@@ -341,6 +344,7 @@ impl SessionLib {
         graph: &recovery::RecoveryGraph,
         recovery_root: &Path,
         inventory: RecoveredArtifactInventory,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<DeclLog, SessionError> {
         let invalid = |detail: String| SessionError::RecoveryManifest {
             path: recovery_root.to_path_buf(),
@@ -433,6 +437,7 @@ impl SessionLib {
                     family_closure,
                 },
                 &self.extra_include,
+                settlement,
             )?);
             let source_roots = node
                 .lexical

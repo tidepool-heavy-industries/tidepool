@@ -11006,18 +11006,23 @@ fn compile_host_binding_off_checkout(
             vec![binding.to_owned()],
         )
     };
-    let result = run_turn(TurnRequest {
-        exact_context: view.exact_compile_context(),
-        session_id: Some(view.session_id()),
-        turn_text: &turn,
-        templates: &templates,
-        include: &include,
-        session_root: view.session_root(),
-        inject_modules: &prepared.injected,
-        gen: generation.0,
-        verdict: Some(generated_binds_verdict(&expected_binders)),
-        target: None,
-        retained_imports,
+    let result = tidepool_testing::with_settlement(|settlement| {
+        run_turn(
+            TurnRequest {
+                exact_context: view.exact_compile_context(),
+                session_id: Some(view.session_id()),
+                turn_text: &turn,
+                templates: &templates,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &prepared.injected,
+                gen: generation.0,
+                verdict: Some(generated_binds_verdict(&expected_binders)),
+                target: None,
+                retained_imports,
+            },
+            settlement,
+        )
     })
     .map_err(|failure| {
         ResidentActorWorkbenchError::InputMount(
@@ -14484,22 +14489,22 @@ pub(crate) mod request_tests {
             let uncoupled = tidepool_runtime::session::HaskellTypeSource::from(
                 context.haskell_effects_alias.expression());
             let include = prepared.include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-            let rejected = run_inspections(InspectionRequest {
+            let rejected = tidepool_testing::with_settlement(|settlement| run_inspections(InspectionRequest {
                 exact_context: None, preamble: &preamble, imports: "", include: &include,
                 session_root: view.session_root(), inject_modules: &[],
                 queries: &[InspectionQuery::Info("checkpoint".into())], effects: Some(&uncoupled),
-            }).unwrap();
+            }, settlement)).unwrap();
             assert!(matches!(&rejected[..], [tidepool_runtime::session::InspectionResult::Rejected { .. }]));
             if let tidepool_runtime::session::InspectionResult::Rejected { diagnostic } = &rejected[0] {
                 assert!(diagnostic.contains("Tidepool.Agent.Watch.Internal.Watches"));
                 assert!(diagnostic.contains("Tidepool.Agent.Reply.Internal.Replies"));
             }
             // Standalone inspection carries no actor row and remains legitimate.
-            let standalone = run_inspections(InspectionRequest {
+            let standalone = tidepool_testing::with_settlement(|settlement| run_inspections(InspectionRequest {
                 exact_context: None, preamble: &preamble, imports: "", include: &include,
                 session_root: view.session_root(), inject_modules: &[],
                 queries: &[InspectionQuery::Info("checkpoint".into())], effects: None,
-            }).unwrap();
+            }, settlement)).unwrap();
             assert!(matches!(&standalone[..], [tidepool_runtime::session::InspectionResult::Info { .. }]));
         }).await;
     }
@@ -17012,25 +17017,29 @@ pub(crate) mod request_tests {
         );
         let scratch = tempfile::tempdir().unwrap();
         let include = roots.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let ordinary =
-            tidepool_runtime::session::run_turn(tidepool_runtime::session::TurnRequest {
-                exact_context: None,
-                session_id: None,
-                turn_text: &installation.expression,
-                templates: &templates,
-                include: &include,
-                session_root: scratch.path(),
-                inject_modules: &[],
-                gen: 1,
-                verdict: Some(tidepool_runtime::session::TurnClassification {
-                    kind: tidepool_runtime::session::TurnKind::Bind,
-                    binders: Vec::new(),
-                    items: Vec::new(),
-                }),
-                target: None,
-                retained_imports: &[],
-            })
-            .unwrap();
+        let ordinary = tidepool_testing::with_settlement(|settlement| {
+            tidepool_runtime::session::run_turn(
+                tidepool_runtime::session::TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: &installation.expression,
+                    templates: &templates,
+                    include: &include,
+                    session_root: scratch.path(),
+                    inject_modules: &[],
+                    gen: 1,
+                    verdict: Some(tidepool_runtime::session::TurnClassification {
+                        kind: tidepool_runtime::session::TurnKind::Bind,
+                        binders: Vec::new(),
+                        items: Vec::new(),
+                    }),
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
+        })
+        .unwrap();
         let tidepool_runtime::session::TurnResult::Bind {
             compiled,
             wrapped_source,
@@ -17188,12 +17197,12 @@ pub(crate) mod request_tests {
             let preamble = insert_preamble_imports(&source.preamble, "qualified CapturedSpecInstaller");
             let templates = resident_workbench_templates(&preamble, context.haskell_effects_alias.expression(), "");
             let include = source.base_include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-            let turn = run_turn(TurnRequest {
+            let turn = tidepool_testing::with_settlement(|settlement| run_turn(TurnRequest {
                 exact_context: None, session_id: Some(context.placement.session),
                 turn_text: "installer <- pure (CapturedSpecInstaller.installer \"retained notebook value\")",
                 templates: &templates, include: &include, session_root: root.path(),
                 inject_modules: &[], gen: 1, verdict: None, target: None, retained_imports: &[],
-            }).unwrap();
+            }, settlement)).unwrap();
             let TurnResult::Bind { bound, compiled, .. } = turn else { panic!("installer bind") };
             assert!(matches!(session.run_bind_with_sites("installer_capture", compiled.code(), &bound[0], tidepool_repr::Generation(1)).unwrap(), ResidentOutcome::Completed { .. }));
             let installer = Arc::new(session.retain_binding_custody_in(
@@ -18177,18 +18186,23 @@ pub(crate) mod request_tests {
             .map(PathBuf::as_path)
             .collect();
         let text = format!("{name} <- pure ({expr})");
-        let result = run_turn(TurnRequest {
-            exact_context: None,
-            session_id: Some(session_id),
-            turn_text: &text,
-            templates: &templates,
-            include: &include,
-            session_root,
-            inject_modules: &[],
-            gen: generation,
-            verdict: None,
-            target: None,
-            retained_imports: &[],
+        let result = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: Some(session_id),
+                    turn_text: &text,
+                    templates: &templates,
+                    include: &include,
+                    session_root,
+                    inject_modules: &[],
+                    gen: generation,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
         })
         .unwrap_or_else(|failure| {
             panic!(
@@ -18447,18 +18461,23 @@ pub(crate) mod request_tests {
             .iter()
             .map(PathBuf::as_path)
             .collect();
-        let bootstrap = run_turn(TurnRequest {
-            exact_context: None,
-            session_id: Some(parent_id),
-            turn_text: "startupBootstrap <- pure (0 :: Int)",
-            templates: &templates,
-            include: &include,
-            session_root: parent_root.path(),
-            inject_modules: &[],
-            gen: 2,
-            verdict: None,
-            target: None,
-            retained_imports: &[],
+        let bootstrap = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: Some(parent_id),
+                    turn_text: "startupBootstrap <- pure (0 :: Int)",
+                    templates: &templates,
+                    include: &include,
+                    session_root: parent_root.path(),
+                    inject_modules: &[],
+                    gen: 2,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
         })
         .expect("child bootstrap compiles");
         let TurnResult::Bind { compiled, .. } = bootstrap else {
@@ -18587,18 +18606,23 @@ pub(crate) mod request_tests {
         let mut include = surface.include_path_refs();
         include.push(root.path());
         let statement = format!("projected <- AwaitRuntime.{entry}");
-        let TurnResult::Bind { compiled, .. } = run_turn(TurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: &statement,
-            templates: &templates,
-            include: &include,
-            session_root: root.path(),
-            inject_modules: &[],
-            gen: 1,
-            verdict: None,
-            target: None,
-            retained_imports: &[],
+        let TurnResult::Bind { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: &statement,
+                    templates: &templates,
+                    include: &include,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    gen: 1,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
         })
         .unwrap() else {
             panic!("named-watch fixture must compile a bind");
@@ -18817,18 +18841,23 @@ pub(crate) mod request_tests {
             };
             let TurnResult::Bind {
                 compiled, bound, ..
-            } = run_turn(TurnRequest {
-                exact_context: None,
-                session_id: None,
-                turn_text: text,
-                templates,
-                include: &include,
-                session_root: publisher_root.path(),
-                inject_modules: &[],
-                gen: 1,
-                verdict: None,
-                target: None,
-                retained_imports: &[],
+            } = tidepool_testing::with_settlement(|settlement| {
+                run_turn(
+                    TurnRequest {
+                        exact_context: None,
+                        session_id: None,
+                        turn_text: text,
+                        templates,
+                        include: &include,
+                        session_root: publisher_root.path(),
+                        inject_modules: &[],
+                        gen: 1,
+                        verdict: None,
+                        target: None,
+                        retained_imports: &[],
+                    },
+                    settlement,
+                )
             })
             .unwrap()
             else {
@@ -20830,18 +20859,23 @@ pub(crate) mod request_tests {
             compiled: producer,
             bound: producer_bound,
             ..
-        } = tidepool_runtime::session::turn::run_turn(TurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: &producer_text,
-            templates: &templates,
-            include: &include,
-            session_root: view.session_root(),
-            inject_modules: &[],
-            gen: view.next_value_generation().0,
-            verdict: None,
-            target: None,
-            retained_imports: &[],
+        } = tidepool_testing::with_settlement(|settlement| {
+            tidepool_runtime::session::turn::run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: &producer_text,
+                    templates: &templates,
+                    include: &include,
+                    session_root: view.session_root(),
+                    inject_modules: &[],
+                    gen: view.next_value_generation().0,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
         })
         .unwrap()
         else {
@@ -20925,9 +20959,13 @@ pub(crate) mod request_tests {
                 None,
             )
             .unwrap();
-        let (checked, program) =
-            tidepool_runtime::session::turn::compile_cell_program_admitted(admission.clone())
-                .unwrap();
+        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+            tidepool_runtime::session::turn::compile_cell_program_admitted(
+                admission.clone(),
+                settlement,
+            )
+        })
+        .unwrap();
         assert_eq!(
             checked.items.len(),
             1,

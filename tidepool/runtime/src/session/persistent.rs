@@ -1710,8 +1710,12 @@ impl PersistentSession {
     /// `Val.G<g>` per still-live name are imported unqualified, every live
     /// `Val.G<g>` is injected for validation. The persistent declaration environment analogue of GHCi
     /// seeing earlier bindings from a new top-level definition.
-    pub fn define_scoped(&mut self, decl_texts: &[&str]) -> Result<Generation, SessionError> {
-        self.define_scoped_in(ScopeId::ROOT, decl_texts)
+    pub fn define_scoped(
+        &mut self,
+        decl_texts: &[&str],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Generation, SessionError> {
+        self.define_scoped_in(ScopeId::ROOT, decl_texts, settlement)
     }
 
     /// Scoped [`Self::define_scoped`]: append to `scope`'s own decl tip,
@@ -1727,8 +1731,9 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
         decl_texts: &[&str],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Generation, SessionError> {
-        self.define_scoped_with_imports_in(scope, decl_texts, &SourceImports::new())
+        self.define_scoped_with_imports_in(scope, decl_texts, &SourceImports::new(), settlement)
     }
 
     /// Scoped declaration commit with frontend-owned persistent imports.
@@ -1739,8 +1744,9 @@ impl PersistentSession {
         scope: ScopeId,
         decl_texts: &[&str],
         external: &SourceImports,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Generation, SessionError> {
-        self.commit_declarations_in(scope, decl_texts, external)
+        self.commit_declarations_in(scope, decl_texts, external, settlement)
             .map(|receipt| receipt.generation)
     }
 
@@ -1793,6 +1799,7 @@ impl PersistentSession {
         receipt: &super::DeclarationReceipt,
         external: &SourceImports,
         source_layer: &[PathBuf],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<super::StagedDeclaration, SessionError> {
         let (persistent_imports, import_modules, visible_values) =
             self.declaration_staging_context_in(scope, receipt, external)?;
@@ -1808,7 +1815,7 @@ impl PersistentSession {
                 &live_modules,
             )?
             .with_source_layer(source_layer);
-        super::validate_declaration_candidate(candidate, &lib.root)
+        super::validate_declaration_candidate(candidate, &lib.root, settlement)
             .map(|staged| staged.with_visible_values(visible_values))
     }
 
@@ -1920,8 +1927,12 @@ impl PersistentSession {
 
     /// Retract `name` from the persistent declaration environment (its binding migrated to the
     /// binding store). No-op when `name` is not a current declaration head.
-    pub fn retract(&mut self, name: &str) -> Result<(), SessionError> {
-        self.retract_in(ScopeId::ROOT, name)
+    pub fn retract(
+        &mut self,
+        name: &str,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<(), SessionError> {
+        self.retract_in(ScopeId::ROOT, name, settlement)
     }
 
     /// Scoped [`Self::retract`]: retract `name` from `scope`'s decl tip only.
@@ -1931,8 +1942,13 @@ impl PersistentSession {
     /// `helper` must not retract the parent's persistent declaration environment
     /// `helper` — the parent's name is still the parent's, and nothing ever
     /// walks downward.
-    pub fn retract_in(&mut self, scope: ScopeId, name: &str) -> Result<(), SessionError> {
-        self.retract_many_in(scope, &[name.to_string()])
+    pub fn retract_in(
+        &mut self,
+        scope: ScopeId,
+        name: &str,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<(), SessionError> {
+        self.retract_many_in(scope, &[name.to_string()], settlement)
     }
 
     /// Retract current declaration heads in one generation while retaining
@@ -1942,8 +1958,9 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
         names: &[String],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), SessionError> {
-        self.retract_heads_in(scope, names, None)
+        self.retract_heads_in(scope, names, None, settlement)
     }
 
     /// Retract a set of declaration heads through one durable declaration
@@ -1953,11 +1970,13 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
         names: &[String],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), SessionError> {
         self.retract_heads_in(
             scope,
             names,
             Some(tidepool_toolchain::declaration_join::ExportNamespace::Value),
+            settlement,
         )
     }
 
@@ -1966,6 +1985,7 @@ impl PersistentSession {
         scope: ScopeId,
         names: &[String],
         namespace: Option<tidepool_toolchain::declaration_join::ExportNamespace>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), SessionError> {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
@@ -1973,7 +1993,7 @@ impl PersistentSession {
         let Some(lib) = self.lib.as_mut() else {
             return Ok(());
         };
-        if let Some(staged) = lib.prepare_retraction_in(scope, names, namespace)? {
+        if let Some(staged) = lib.prepare_retraction_in(scope, names, namespace, settlement)? {
             let visible_values = self
                 .bindings
                 .iter_current_in(&self.scopes, scope)
@@ -3278,8 +3298,9 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
         entry: BindingEntry,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ValuePlaneCommit, SessionError> {
-        let receipt = self.bind_replacing_decls_in(scope, vec![entry])?;
+        let receipt = self.bind_replacing_decls_in(scope, vec![entry], settlement)?;
         #[allow(clippy::expect_used, reason = "one entry yields one receipt")]
         Ok(receipt
             .bindings
@@ -3296,13 +3317,14 @@ impl PersistentSession {
         scope: ScopeId,
         entry: BindingEntry,
         source: SessionVarId,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ValuePlaneCommit, SessionError> {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
         let name = entry.name.0.clone();
         self.bindings.validate_bind_in(scope, &entry)?;
-        self.retract_value_heads_in(scope, std::slice::from_ref(&name))?;
+        self.retract_value_heads_in(scope, std::slice::from_ref(&name), settlement)?;
         let receipt = ValuePlaneCommit {
             name,
             module: entry.module,
@@ -3329,8 +3351,9 @@ impl PersistentSession {
     pub fn bind_replacing_decl(
         &mut self,
         entry: BindingEntry,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ValuePlaneCommit, SessionError> {
-        self.bind_replacing_decl_in(ScopeId::ROOT, entry)
+        self.bind_replacing_decl_in(ScopeId::ROOT, entry, settlement)
     }
 
     /// Atomically materialize a whole binding set. The declaration-environment
@@ -3346,6 +3369,7 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
         entries: Vec<BindingEntry>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<MaterializationSetCommit, SessionError> {
         if let Err(error) = self.validate_binding_set_in(scope, &entries) {
             self.discard_unbound_entries(entries);
@@ -3356,7 +3380,7 @@ impl PersistentSession {
             .filter(|entry| self.bindings.get(entry.id).is_none())
             .map(|entry| entry.name.0.clone())
             .collect();
-        if let Err(error) = self.retract_value_heads_in(scope, &names) {
+        if let Err(error) = self.retract_value_heads_in(scope, &names, settlement) {
             self.discard_unbound_entries(entries);
             return Err(error);
         }
@@ -3468,8 +3492,9 @@ impl PersistentSession {
     pub fn bind_replacing_decls(
         &mut self,
         entries: Vec<BindingEntry>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<MaterializationSetCommit, SessionError> {
-        self.bind_replacing_decls_in(ScopeId::ROOT, entries)
+        self.bind_replacing_decls_in(ScopeId::ROOT, entries, settlement)
     }
 
     /// Dispose roots that were produced by a completed materialization but
@@ -3511,8 +3536,9 @@ impl PersistentSession {
         &mut self,
         scope: ScopeId,
         decl_texts: &[&str],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<DeclarationPlaneCommit, SessionError> {
-        self.commit_declarations_in(scope, decl_texts, &SourceImports::new())
+        self.commit_declarations_in(scope, decl_texts, &SourceImports::new(), settlement)
     }
 
     /// Own declaration validation, capture retention, and value-name replacement
@@ -3522,13 +3548,14 @@ impl PersistentSession {
         scope: ScopeId,
         decl_texts: &[&str],
         external: &SourceImports,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<DeclarationPlaneCommit, SessionError> {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
         #[allow(clippy::expect_used, reason = "decl plane present")]
         let lib = self.lib.as_ref().expect("decl plane present");
-        let Some(receipt) = lib.declaration_receipt(decl_texts)? else {
+        let Some(receipt) = lib.declaration_receipt(decl_texts, settlement)? else {
             let generation = lib.scope_tip(scope);
             return Ok(DeclarationPlaneCommit {
                 generation,
@@ -3537,7 +3564,7 @@ impl PersistentSession {
                 evicted_values: Vec::new(),
             });
         };
-        self.commit_declaration_receipt_in(scope, &receipt, external)
+        self.commit_declaration_receipt_in(scope, &receipt, external, settlement)
     }
 
     /// Consume compiler-owned source facts through the same capture and
@@ -3547,12 +3574,13 @@ impl PersistentSession {
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
         external: &SourceImports,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<DeclarationPlaneCommit, SessionError> {
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
         if self.lib().durable_graph.is_some() {
-            let staged = self.stage_declarations_in(scope, receipt, external, &[])?;
+            let staged = self.stage_declarations_in(scope, receipt, external, &[], settlement)?;
             return self.adopt_staged_declaration_in(staged);
         }
         let next_epoch = self.prepare_public_visibility_advance(scope)?;
@@ -3610,6 +3638,7 @@ impl PersistentSession {
                 receipt,
                 &import_modules,
                 &inject_modules,
+                settlement,
             )?;
         // GHC may compile these declaration bodies later. Their exact imported
         // value environment must outlive that future use, including any saved
@@ -3631,8 +3660,9 @@ impl PersistentSession {
     pub fn define_replacing_values(
         &mut self,
         decl_texts: &[&str],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<DeclarationPlaneCommit, SessionError> {
-        self.define_replacing_values_in(ScopeId::ROOT, decl_texts)
+        self.define_replacing_values_in(ScopeId::ROOT, decl_texts, settlement)
     }
 
     /// Resolve `name` as seen FROM `scope`: local frame first, then each

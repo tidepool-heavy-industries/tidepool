@@ -6428,15 +6428,18 @@ pub(super) mod tests {
             include_str!("../../tests/fixtures/ScientificQuoted.hs"),
         ]
         .map(|source| {
-            compile_invocation(
-                &CompileInvocation {
-                    source,
-                    targets: &["result"],
-                    include: &include,
-                    fallback_module_name: "Input",
-                },
-                |_, _, _| {},
-            )
+            tidepool_testing::with_settlement(|settlement| {
+                compile_invocation(
+                    &CompileInvocation {
+                        source,
+                        targets: &["result"],
+                        include: &include,
+                        fallback_module_name: "Input",
+                    },
+                    |_, _, _| {},
+                    settlement,
+                )
+            })
             .expect("compile Scientific fixture with its certified closure")
         });
         let programs = artifacts

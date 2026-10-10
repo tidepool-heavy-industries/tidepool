@@ -182,8 +182,9 @@ pub fn check_source(
 pub fn parse_cell_plan(
     specification: Arc<crate::checked_cell::CheckedCellSpecification>,
     include_paths: &[PathBuf],
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<Arc<crate::cell_plan::ParsedCellPlan>, CompileError> {
-    crate::cell_plan::parse(specification, include_paths)
+    crate::cell_plan::parse(specification, include_paths, settlement)
 }
 
 /// One compiler sidecar entry: a typed suspension-site id, its rendered answer

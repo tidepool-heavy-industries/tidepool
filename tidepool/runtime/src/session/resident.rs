@@ -3771,8 +3771,9 @@ where
     pub fn define_scoped(
         &mut self,
         decls: &[&str],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<tidepool_repr::Generation, SessionError> {
-        self.define_scoped_in(ScopeId::ROOT, decls)
+        self.define_scoped_in(ScopeId::ROOT, decls, settlement)
     }
 
     /// Scoped [`Self::define_scoped`]: append to `scope`'s own decl tip, which
@@ -3783,8 +3784,9 @@ where
         &mut self,
         scope: ScopeId,
         decls: &[&str],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<tidepool_repr::Generation, SessionError> {
-        self.state.define_scoped_in(scope, decls)
+        self.state.define_scoped_in(scope, decls, settlement)
     }
 
     /// Commit declarations against frontend-owned imports without recording
@@ -3794,9 +3796,10 @@ where
         scope: ScopeId,
         decls: &[&str],
         imports: &SourceImports,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<tidepool_repr::Generation, SessionError> {
         self.state
-            .define_scoped_with_imports_in(scope, decls, imports)
+            .define_scoped_with_imports_in(scope, decls, imports, settlement)
     }
 
     pub fn stage_declarations_in(
@@ -3805,9 +3808,10 @@ where
         receipt: &super::DeclarationReceipt,
         imports: &super::SourceImports,
         source_layer: &[PathBuf],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<super::StagedDeclaration, SessionError> {
         self.state
-            .stage_declarations_in(scope, receipt, imports, source_layer)
+            .stage_declarations_in(scope, receipt, imports, source_layer, settlement)
     }
 
     /// The checkout-only half of staging a declaration off-checkout: see
@@ -3833,9 +3837,10 @@ where
         scope: ScopeId,
         receipt: &super::DeclarationReceipt,
         imports: &SourceImports,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<super::DeclarationPlaneCommit, SessionError> {
         self.state
-            .commit_declaration_receipt_in(scope, receipt, imports)
+            .commit_declaration_receipt_in(scope, receipt, imports, settlement)
     }
 
     pub fn adopt_staged_declaration_in(
@@ -3978,6 +3983,7 @@ where
         alias: &BoundBinder,
         generation: Generation,
         lease: &BindingLease,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<super::ValuePlaneCommit, ResidentError> {
         self.settle_dropped_custody();
         if !self.state.scope_tree().is_live(scope) {
@@ -4037,6 +4043,7 @@ where
                 scope,
             },
             source,
+            settlement,
         )?;
         self.state.set_val_gen(generation);
         self.advance_public_visibility(scope);
@@ -4724,8 +4731,9 @@ where
         &mut self,
         hole: ResidentHole,
         custody: RootCustody,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.resume_handle_classified(hole, custody)
+        self.resume_handle_classified(hole, custody, settlement)
             .map_err(ResidentResumeError::into_inner)
     }
 
@@ -4735,6 +4743,7 @@ where
         &mut self,
         hole: ResidentHole,
         custody: RootCustody,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentResumeError> {
         self.settle_dropped_custody();
         let seed = hole.seed();
@@ -4766,6 +4775,7 @@ where
             ResidentResumeInput::Handle(transfer.handle),
             seed,
             Some(&provenance),
+            settlement,
         );
         if result.is_ok() {
             transfer.commit();
@@ -4820,6 +4830,7 @@ where
         &mut self,
         owner: RuntimeActivationInputAdmission,
         interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<MountedActivationInput, ResidentError> {
         self.settle_dropped_custody();
         let reservation = &owner.reservation;
@@ -4892,6 +4903,7 @@ where
             generation,
             owner.input.custody,
             ValueInterfaceSource::Staged(staged),
+            settlement,
         )
         .map_err(|source| ResidentError::ActivationInputConsumed {
             binding,
@@ -4925,6 +4937,7 @@ where
         gen: Generation,
         table: &DataConTable,
         custody: RootCustody,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         self.settle_dropped_custody();
         if !self.state.scope_tree().is_live(scope) {
@@ -4957,6 +4970,7 @@ where
             gen,
             custody,
             ValueInterfaceSource::LegacyDisk,
+            settlement,
         )
     }
 
@@ -4971,6 +4985,7 @@ where
         gen: Generation,
         code: TurnCode<'_>,
         value: &serde_json::Value,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         refuse_checked_turn(&code)?;
         self.settle_dropped_custody();
@@ -4981,9 +4996,14 @@ where
             &code,
             HostBindingType::JSON_VALUE,
         )?;
-        self.mount_host_value_in(scope, binder, gen, code, |engine, realm, _| {
-            representation.build(engine, realm, HostPayload::Json(value))
-        })
+        self.mount_host_value_in(
+            scope,
+            binder,
+            gen,
+            code,
+            |engine, realm, _| representation.build(engine, realm, HostPayload::Json(value)),
+            settlement,
+        )
     }
 
     /// The `Text` sibling of [`Self::mount_json_binding_in`]. It is for host
@@ -4997,14 +5017,20 @@ where
         gen: Generation,
         code: TurnCode<'_>,
         text: &str,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         refuse_checked_turn(&code)?;
         self.settle_dropped_custody();
         let representation =
             self.validate_compiled_mount_target(scope, binder, gen, &code, HostBindingType::TEXT)?;
-        self.mount_host_value_in(scope, binder, gen, code, |engine, realm, _| {
-            representation.build(engine, realm, HostPayload::Text(text))
-        })
+        self.mount_host_value_in(
+            scope,
+            binder,
+            gen,
+            code,
+            |engine, realm, _| representation.build(engine, realm, HostPayload::Text(text)),
+            settlement,
+        )
     }
 
     /// Build and mount a compiler-typed structural host value. The caller's
@@ -5018,6 +5044,7 @@ where
         code: TurnCode<'_>,
         expected: HostBindingType,
         value: &T,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError>
     where
         T: tidepool_bridge::ToHaskell,
@@ -5025,9 +5052,14 @@ where
         refuse_checked_turn(&code)?;
         self.settle_dropped_custody();
         self.validate_compiled_mount_target(scope, binder, gen, &code, expected)?;
-        self.mount_host_value_in(scope, binder, gen, code, |engine, realm, table| {
-            engine.build_host_value(realm, value, table)
-        })
+        self.mount_host_value_in(
+            scope,
+            binder,
+            gen,
+            code,
+            |engine, realm, table| engine.build_host_value(realm, value, table),
+            settlement,
+        )
     }
 
     /// Retain a prototype only from this machine's original checked host mount.
@@ -5105,6 +5137,7 @@ where
         &mut self,
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<super::PendingHostValueWrite, ResidentError> {
         let HostCarrierOrigin::Interface {
             admission,
@@ -5138,6 +5171,7 @@ where
             carrier.code(),
             ValueInterfaceSource::Staged(staged),
             move |engine, realm, _| representation.build(engine, realm, payload),
+            settlement,
         )?;
         match super::PendingHostValueWrite::mounted_host_interface(
             &self.state,
@@ -5158,9 +5192,10 @@ where
         &mut self,
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<super::PendingHostValueWrite, ResidentError> {
         if matches!(&carrier.origin, HostCarrierOrigin::Interface { .. }) {
-            return self.mount_host_interface_input(carrier, payload);
+            return self.mount_host_interface_input(carrier, payload, settlement);
         }
         let (admission, binder) = carrier.checked_binding()?;
         if !carrier.representation.matches_payload(&payload) {
@@ -5204,6 +5239,7 @@ where
             carrier.code(),
             ValueInterfaceSource::Staged(staged),
             move |engine, realm, _| representation.build(engine, realm, payload),
+            settlement,
         )?;
         match super::PendingHostValueWrite::mounted(&self.state, scope, binder, execution) {
             Ok(write) => Ok(write),
@@ -5260,6 +5296,7 @@ where
         gen: Generation,
         carrier: &HostCarrier,
         payload: HostPayload<'_>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<BoundBinder, ResidentError> {
         let HostCarrierOrigin::Reusable(shape) = &carrier.origin else {
             return Err(ResidentError::UnsupportedCheckedTurn);
@@ -5308,10 +5345,14 @@ where
         // that source has never been marked a stub generation, so it would
         // sit on the include path as an ordinary, undocumented home module.
         let representation = carrier.representation;
-        let mount_result =
-            self.mount_host_value_in(scope, &binder, gen, carrier.code(), |engine, realm, _| {
-                representation.build(engine, realm, payload)
-            });
+        let mount_result = self.mount_host_value_in(
+            scope,
+            &binder,
+            gen,
+            carrier.code(),
+            |engine, realm, _| representation.build(engine, realm, payload),
+            settlement,
+        );
         if let Err(error) = mount_result {
             std::fs::remove_file(&stub_path).ok();
             return Err(error);
@@ -5490,6 +5531,7 @@ where
             RealmId,
             &DataConTable,
         ) -> Result<PreparedHandle, PreparedRuntimeError>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         refuse_checked_turn(&code)?;
         self.mount_host_value_with_interface_in(
@@ -5499,6 +5541,7 @@ where
             code,
             ValueInterfaceSource::LegacyDisk,
             build,
+            settlement,
         )
     }
 
@@ -5514,6 +5557,7 @@ where
             RealmId,
             &DataConTable,
         ) -> Result<PreparedHandle, PreparedRuntimeError>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         self.state
             .validate_new_binding_ids([SessionVarId::from_extract(binder.var_id)])?;
@@ -5549,7 +5593,14 @@ where
                 let engine = self.state.require_prepared()?;
                 build(engine, realm, &table)?
             };
-            self.mount_host_handle_prepared(scope, binder, gen, handle, interface_source)
+            self.mount_host_handle_prepared(
+                scope,
+                binder,
+                gen,
+                handle,
+                interface_source,
+                settlement,
+            )
         })();
         if let Some(engine) = self.state.prepared_mut() {
             engine.unpin(program);
@@ -5570,6 +5621,7 @@ where
         gen: Generation,
         handle: PreparedHandle,
         interface_source: ValueInterfaceSource,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         let engine = self.state.require_prepared()?;
         let Some(program) = engine.hosting_program(handle) else {
@@ -5585,6 +5637,7 @@ where
             &[(binder, handle)],
             None,
             interface_source,
+            settlement,
         )?;
         self.binding_provenance
             .insert(binder.var_id, Arc::new(ProgramProvenance::default()));
@@ -5601,6 +5654,7 @@ where
         gen: Generation,
         custody: RootCustody,
         interface_source: ValueInterfaceSource,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         let transfer = custody.into_transfer();
         let provenance = Arc::clone(&transfer.provenance);
@@ -5623,6 +5677,7 @@ where
             &[(binder, handle)],
             None,
             interface_source,
+            settlement,
         )?;
         self.binding_provenance.insert(binder.var_id, provenance);
         Ok(())
@@ -5637,8 +5692,9 @@ where
         custody: &RootCustody,
         constructor: tidepool_repr::DataConId,
         prefix: Vec<HaskellValue>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.resume_framed_custody_classified(hole, custody, constructor, prefix)
+        self.resume_framed_custody_classified(hole, custody, constructor, prefix, settlement)
             .map_err(ResidentResumeError::into_inner)
     }
 
@@ -5650,6 +5706,7 @@ where
         custody: &RootCustody,
         constructor: tidepool_repr::DataConId,
         prefix: Vec<HaskellValue>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentResumeError> {
         let Some(handle) = custody.handle else {
             unreachable!("live custody always contains its handle");
@@ -5669,6 +5726,7 @@ where
             },
             seed,
             Some(&custody.provenance),
+            settlement,
         )
     }
 
@@ -5682,6 +5740,7 @@ where
         custody: &RootCustody,
         constructor: tidepool_repr::DataConId,
         prefix: Vec<T>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentResumeError>
     where
         T: tidepool_bridge::ToHaskell + Send + 'static,
@@ -5707,6 +5766,7 @@ where
             },
             seed,
             Some(&custody.provenance),
+            settlement,
         )
     }
 
@@ -5981,8 +6041,9 @@ where
         &mut self,
         name_hint: &str,
         code: TurnCode<'_>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.run_transient_with_sites(name_hint, code)
+        self.run_transient_with_sites(name_hint, code, settlement)
     }
 
     /// Evaluate a compiler-checked pure inspection of retained values without
@@ -5991,8 +6052,9 @@ where
     pub fn run_inspection_with_sites(
         &mut self,
         code: TurnCode<'_>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.run_transient_with_sites("actor_observation_preview", code)
+        self.run_transient_with_sites("actor_observation_preview", code, settlement)
     }
 
     /// Run a compiler-generated pure preview against a committed binding.
@@ -6001,6 +6063,7 @@ where
         &mut self,
         code: TurnCode<'_>,
         binding: SessionVarId,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         let entry = self
             .state
@@ -6008,7 +6071,7 @@ where
             .get(binding)
             .ok_or(BindingAliasError::MissingSource(binding))?;
         let BoundValue { handle, .. } = &entry.value;
-        self.run_prepared_with_argument(code, PreparedTurnMode::Value, Some(*handle))
+        self.run_prepared_with_argument(code, PreparedTurnMode::Value, Some(*handle), settlement)
     }
 
     fn validate_mounted_activation_input(
@@ -6136,6 +6199,7 @@ where
     pub fn run_activation_preview(
         &mut self,
         compiled: CompiledActivationPreview,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
         let ActivationRendererNative::Renderable(images) = &compiled.renderer.native else {
@@ -6197,6 +6261,7 @@ where
                 images,
             },
             provenance,
+            settlement,
         )
     }
 
@@ -6216,8 +6281,9 @@ where
         &mut self,
         code: TurnCode<'_>,
         mode: PreparedTurnMode<'_>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.run_prepared_with_argument(code, mode, None)
+        self.run_prepared_with_argument(code, mode, None, settlement)
     }
 
     fn run_prepared_with_argument(
@@ -6225,6 +6291,7 @@ where
         code: TurnCode<'_>,
         mode: PreparedTurnMode<'_>,
         argument: Option<PreparedHandle>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         self.state.validate_new_binding_ids(binding_ids_of(&mode))?;
         let provenance = self.provenance_for(&code)?;
@@ -6244,6 +6311,7 @@ where
             argument,
             PreparedExecutionPurpose::Authored(checked),
             provenance,
+            settlement,
         )
     }
 
@@ -6254,6 +6322,7 @@ where
         argument: Option<PreparedHandle>,
         purpose: PreparedExecutionPurpose<'_>,
         provenance: Arc<ProgramProvenance>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         let (checked, lexical_scope, _execution_scope_lease, retained_images) = match purpose {
             PreparedExecutionPurpose::Authored(checked) => {
@@ -6339,7 +6408,16 @@ where
                 return Err(error);
             }
         };
-        self.complete_prepared(run, mode, program, lexical_scope, provenance, None, checked)
+        self.complete_prepared(
+            run,
+            mode,
+            program,
+            lexical_scope,
+            provenance,
+            None,
+            checked,
+            settlement,
+        )
     }
 
     fn install_turn_program_in(
@@ -6484,6 +6562,7 @@ where
     pub fn run_startup_entry(
         &mut self,
         mut entry: PreparedStartupEntry,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
         if !Arc::ptr_eq(&entry.cleanup, &self.custody_cleanup) {
@@ -6547,6 +6626,7 @@ where
             provenance,
             None,
             None,
+            settlement,
         )
     }
 
@@ -6655,6 +6735,7 @@ where
     pub fn revalidate_and_run_prepared(
         &mut self,
         ready: ReadyPreparedInstall,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Option<ResidentOutcome>, ResidentError> {
         let ReadyPreparedInstall { source, metadata } = ready;
         let PreparedInstallMetadata {
@@ -6757,6 +6838,7 @@ where
             provenance,
             None,
             checked_completion,
+            settlement,
         )?))
     }
 
@@ -6773,6 +6855,7 @@ where
         provenance: Arc<ProgramProvenance>,
         resumed: Option<&str>,
         checked: Option<Arc<CheckedTurnCompletion>>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         let seed = hole_seed_of(&mode, lexical_scope, checked.clone());
         let outcome = match run {
@@ -6794,6 +6877,7 @@ where
                             &[(binder, handle)],
                             checked.as_deref(),
                             ValueInterfaceSource::for_checked(checked.is_some()),
+                            settlement,
                         )?;
                         self.binding_provenance
                             .insert(binder.var_id, Arc::clone(&provenance));
@@ -6839,6 +6923,7 @@ where
                     &bound,
                     checked.as_deref(),
                     ValueInterfaceSource::for_checked(checked.is_some()),
+                    settlement,
                 )?;
                 for binder in binders {
                     self.binding_provenance
@@ -6906,6 +6991,7 @@ where
         bound: &[(&BoundBinder, PreparedHandle)],
         checked: Option<&CheckedTurnCompletion>,
         interface_source: ValueInterfaceSource,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), ResidentError> {
         if let ValueInterfaceSource::Staged(staged) = &interface_source {
             let validated = self
@@ -6993,7 +7079,8 @@ where
             self.state
                 .bind_checked_private_values_in(completion, scope, entries, &binders)?;
         } else {
-            self.state.bind_replacing_decls_in(scope, entries)?;
+            self.state
+                .bind_replacing_decls_in(scope, entries, settlement)?;
         }
         // Ordinary fragments retain their established filesystem interface
         // contract. Checked settlements register their sealed artifact instead.
@@ -7017,8 +7104,9 @@ where
         &mut self,
         _name_hint: &str,
         code: TurnCode<'_>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.run_prepared(code, PreparedTurnMode::Value)
+        self.run_prepared(code, PreparedTurnMode::Value, settlement)
     }
 
     /// Run a persistent-binding BIND turn (`x <- e`): seed the env from prior bindings,
@@ -7035,8 +7123,9 @@ where
         code: TurnCode<'_>,
         binder: &BoundBinder,
         gen: Generation,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.run_binding_with_sites(name_hint, code, binder, gen, None)
+        self.run_binding_with_sites(name_hint, code, binder, gen, None, settlement)
     }
 
     /// Capture a bare workbench result using the same suspendable
@@ -7048,9 +7137,17 @@ where
         binder: &BoundBinder,
         gen: Generation,
         effectful: bool,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         let _ = effectful;
-        self.run_binding_with_sites("actor_observation", code, binder, gen, Some(Vec::new()))
+        self.run_binding_with_sites(
+            "actor_observation",
+            code,
+            binder,
+            gen,
+            Some(Vec::new()),
+            settlement,
+        )
     }
 
     fn run_binding_with_sites(
@@ -7060,6 +7157,7 @@ where
         binder: &BoundBinder,
         gen: Generation,
         observation: Option<Vec<tidepool_repr::VarId>>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         self.run_prepared(
             code,
@@ -7068,6 +7166,7 @@ where
                 generation: gen,
                 observation,
             },
+            settlement,
         )
     }
 
@@ -7091,6 +7190,7 @@ where
         code: TurnCode<'_>,
         binders: &[BoundBinder],
         gen: Generation,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         if binders.is_empty() {
             return Err(PreparedRuntimeError::ProjectionShape {
@@ -7105,6 +7205,7 @@ where
                 binders,
                 generation: gen,
             },
+            settlement,
         )
     }
 
@@ -7138,9 +7239,10 @@ where
         argument: i64,
         realm: RealmId,
         run_table: Option<&DataConTable>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
-        let outcome =
-            self.run_rooted_entry_borrowed(name_hint, &entry, argument, realm, run_table)?;
+        let outcome = self
+            .run_rooted_entry_borrowed(name_hint, &entry, argument, realm, run_table, settlement)?;
         entry.into_transfer().commit();
         Ok(outcome)
     }
@@ -7153,6 +7255,7 @@ where
         argument: i64,
         realm: RealmId,
         run_table: Option<&DataConTable>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
         if !Arc::ptr_eq(&entry.cleanup.0, &self.custody_cleanup) {
@@ -7163,7 +7266,7 @@ where
             unreachable!("live custody contains its handle");
         };
 
-        self.run_rooted_entry_prepared(entry, argument, realm, run_table, provenance)
+        self.run_rooted_entry_prepared(entry, argument, realm, run_table, provenance, settlement)
     }
 
     /// Apply one rooted Haskell function to one rooted Haskell argument and
@@ -7183,6 +7286,7 @@ where
         argument: &RootCustody,
         realm: RealmId,
         run_table: Option<&DataConTable>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
         if !Arc::ptr_eq(&function.cleanup.0, &self.custody_cleanup)
@@ -7206,6 +7310,7 @@ where
             realm,
             run_table,
             Arc::new(provenance),
+            settlement,
         )
     }
 
@@ -7255,6 +7360,7 @@ where
         realm: RealmId,
         run_table: Option<&DataConTable>,
         provenance: Arc<ProgramProvenance>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         let table = run_table
             .cloned()
@@ -7270,7 +7376,7 @@ where
             ))
         })?;
         let (program, run) = ran?;
-        self.finish_rooted_prepared(run, program, provenance)
+        self.finish_rooted_prepared(run, program, provenance, settlement)
     }
 
     /// [`Self::run_rooted_entry_prepared`], but applying one rooted value to
@@ -7283,6 +7389,7 @@ where
         realm: RealmId,
         run_table: Option<&DataConTable>,
         provenance: Arc<ProgramProvenance>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         let table = run_table
             .cloned()
@@ -7298,7 +7405,7 @@ where
             ))
         })?;
         let (program, run) = ran?;
-        self.finish_rooted_prepared(run, program, provenance)
+        self.finish_rooted_prepared(run, program, provenance, settlement)
     }
 
     /// Finish a rooted apply's settled layer through the same
@@ -7315,6 +7422,7 @@ where
         run: PreparedRun,
         program: ProgramId,
         provenance: Arc<ProgramProvenance>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         let lexical_scope = self.run_context.lexical_scope;
         self.complete_prepared(
@@ -7325,6 +7433,7 @@ where
             provenance,
             None,
             None,
+            settlement,
         )
     }
 
@@ -7347,11 +7456,12 @@ where
         &mut self,
         hole: ResidentHole,
         answer: T,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError>
     where
         T: tidepool_bridge::ToHaskell + Send + 'static,
     {
-        self.resume_classified(hole, answer)
+        self.resume_classified(hole, answer, settlement)
             .map_err(ResidentResumeError::into_inner)
     }
 
@@ -7361,11 +7471,12 @@ where
         &mut self,
         hole: ResidentHole,
         answer: T,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentResumeError>
     where
         T: tidepool_bridge::ToHaskell + Send + 'static,
     {
-        self.resume_response_classified(hole, Response::new(answer))
+        self.resume_response_classified(hole, Response::new(answer), settlement)
     }
 
     /// Resume a suspended turn from one owned structural source. Conversion
@@ -7375,8 +7486,9 @@ where
         &mut self,
         hole: ResidentHole,
         answer: Response,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.resume_response_classified(hole, answer)
+        self.resume_response_classified(hole, answer, settlement)
             .map_err(ResidentResumeError::into_inner)
     }
 
@@ -7387,6 +7499,7 @@ where
         &mut self,
         hole: ResidentHole,
         answer: Response,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentResumeError> {
         let seed = hole.seed();
         let id = match hole {
@@ -7394,7 +7507,13 @@ where
             ResidentHole::Binding(h) => h.id,
             ResidentHole::ProjectedBinding(h) => h.id,
         };
-        self.reenter(&id, ResidentResumeInput::Response(answer), seed, None)
+        self.reenter(
+            &id,
+            ResidentResumeInput::Response(answer),
+            seed,
+            None,
+            settlement,
+        )
     }
 
     /// Abort the suspended turn WITHOUT running the continuation — the ask
@@ -7407,6 +7526,7 @@ where
         &mut self,
         cont_id: &str,
         reason: String,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         self.reenter(
             cont_id,
@@ -7416,6 +7536,7 @@ where
                 checked: None,
             },
             None,
+            settlement,
         )
         .map_err(ResidentResumeError::into_inner)
     }
@@ -7426,6 +7547,7 @@ where
         input: ResidentResumeInput,
         seed: HoleSeed,
         additional_provenance: Option<&ProgramProvenance>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentResumeError> {
         // Validate BEFORE consuming: `cont_id` must be a MEMBER of the parked
         // set (any-order resume — the machine imposes no order and neither do
@@ -7457,7 +7579,7 @@ where
         // re-declaration here (`bind` is only used for materialization
         // below). Completion handles likewise belong to the frame's retained
         // realm, which must be captured before resume consumes that frame.
-        self.reenter_prepared(cont_id, frame_id, input, seed, provenance)
+        self.reenter_prepared(cont_id, frame_id, input, seed, provenance, settlement)
             .map_err(|error| {
                 if self.state.parked_ids().contains(&frame_id) {
                     ResidentResumeError::Rejected(error)
@@ -7738,6 +7860,7 @@ where
         input: ResidentResumeInput,
         seed: HoleSeed,
         provenance: Arc<ProgramProvenance>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
         let HoleSeed {
             obligation,
@@ -7852,6 +7975,7 @@ where
             provenance,
             Some(cont_id),
             checked,
+            settlement,
         )
     }
 
@@ -7934,6 +8058,7 @@ where
         expected: SessionVarId,
         constructor: tidepool_repr::DataConId,
         prefix: Vec<T>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Option<ResidentOutcome>, ResidentResumeError>
     where
         T: tidepool_bridge::ToHaskell + Send + 'static,
@@ -7962,6 +8087,7 @@ where
             },
             seed,
             Some(&provenance),
+            settlement,
         )
         .map(Some)
     }
@@ -8397,7 +8523,10 @@ mod authored_publication_tests {
                 None,
             )
             .unwrap();
-        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(admission.clone(), settlement)
+        })
+        .unwrap();
         let first = checked.checked_item(0).unwrap();
         let prefix = state
             .begin_cell_program(admission, program)
@@ -9932,7 +10061,10 @@ mod authored_publication_tests {
                 None,
             )
             .unwrap();
-        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(admission.clone(), settlement)
+        })
+        .unwrap();
         let item = checked.checked_item(0).unwrap();
         let prefix = session
             .begin_cell_program(admission, program)
@@ -10085,18 +10217,23 @@ mod authored_publication_tests {
         let mut includes = effects.include_paths().to_vec();
         includes.push(root.path().to_path_buf());
         let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let TurnResult::Bind { compiled, .. } = run_turn(TurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: "let retained = (42 :: Int)",
-            templates: &templates,
-            include: &includes,
-            session_root: root.path(),
-            inject_modules: &[],
-            gen: 1,
-            verdict: None,
-            target: None,
-            retained_imports: &[],
+        let TurnResult::Bind { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: "let retained = (42 :: Int)",
+                    templates: &templates,
+                    include: &includes,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    gen: 1,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
         })
         .unwrap() else {
             panic!("expected compiler-owned binding");
@@ -10652,8 +10789,9 @@ where
         hole: Self::Hole,
         answer: Self::Answer,
         (): Self::Context,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Self::Outcome, Self::Error> {
-        Self::resume(self, hole, answer)
+        Self::resume(self, hole, answer, settlement)
     }
 
     fn abort(
@@ -10661,8 +10799,9 @@ where
         hole: Self::Hole,
         reason: String,
         (): Self::Context,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Self::Outcome, Self::Error> {
-        Self::abort(self, hole.cont_id(), reason)
+        Self::abort(self, hole.cont_id(), reason, settlement)
     }
 }
 

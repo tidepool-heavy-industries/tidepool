@@ -156,6 +156,7 @@ impl ParsedCellPlan {
 pub(crate) fn parse(
     specification: Arc<CheckedCellSpecification>,
     include_paths: &[PathBuf],
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<Arc<ParsedCellPlan>, CompileError> {
     if specification.cell_source.len() > (2 << 20)
         || specification.template_source.len() > (2 << 20)
@@ -187,7 +188,7 @@ pub(crate) fn parse(
     {
         return Err(CellPlanInputRejection::InjectedInventory.error());
     }
-    let scratch = crate::artifacts::compiler_scratch_directory()?;
+    let scratch = Arc::new(crate::artifacts::compiler_scratch_directory()?);
     let source = scratch.path().join("cell.txt");
     let template = scratch.path().join("cell-template.hs");
     let output = scratch.path().join("cell-plan.cbor");
@@ -214,9 +215,10 @@ pub(crate) fn parse(
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     let producer = *endpoint.identity().producer_bytes();
     let diagnostics = crate::artifacts::CompilerDiagnosticCapture::start(scratch.path(), &command);
-    let run = endpoint
-        .execute(&command)
-        .map_err(|error| CompileError::Io(crate::extract_spawn_error(error.source)))?;
+    let run =
+        endpoint.execute_with_input_directories(&command, vec![scratch.clone()], |close| {
+            settlement(close)
+        })?;
     diagnostics.completed(scratch.path(), &command, run.success(), &run.output.stderr);
     crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)?;
     let receipt = crate::checked_cell::read(output, RECEIPT_LIMIT)?;

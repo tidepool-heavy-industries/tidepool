@@ -2575,8 +2575,11 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
 /// This lower-level check returns diagnostic observations. Admitted execution
 /// uses the complete cell program.
 #[tracing::instrument(name = "cell_check", level = "info", skip_all, fields(cell_bytes = req.cell_text.len()))]
-pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailure> {
-    check_cell_impl(req)
+pub fn check_cell(
+    req: CellCheckRequest<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<CellCheck, CellCheckFailure> {
+    check_cell_impl(req, settlement)
 }
 
 /// Result of preparing the original-type display after the live binding commits.
@@ -2640,6 +2643,7 @@ pub fn compile_activation_renderer(
     template_source: &str,
     budget: u64,
     includes: &[PathBuf],
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<super::SharedActivationRenderer, ActivationRendererFailure> {
     use tidepool_toolchain::activation_preview::{
         ActivationPreviewSelection, ActivationPreviewSpecification,
@@ -2679,8 +2683,10 @@ pub fn compile_activation_renderer(
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
     let run = endpoint
-        .execute(&cmd)
-        .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, map_notfound(error)))?;
+        .execute_with_input_files(&cmd, offer.input_transport_files(), |close| {
+            settlement(close)
+        })
+        .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, error))?;
     diagnostics.completed(temp.path(), &cmd, run.success(), &run.output.stderr);
     timing::log_interface_counts(&run.output.stderr);
     forward_extract_timing(&String::from_utf8_lossy(&run.output.stderr), "extract");
@@ -2757,6 +2763,7 @@ pub fn compile_activation_renderer(
 /// program, including original declaration and Val interface identities.
 pub fn compile_cell_program_admitted(
     admission: Arc<super::RuntimeCellAdmission>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<
     (
         CellCheck,
@@ -2768,6 +2775,7 @@ pub fn compile_cell_program_admitted(
         admission,
         #[cfg(test)]
         CellProgramAudit::None,
+        settlement,
     )
 }
 
@@ -2782,7 +2790,13 @@ fn compile_cell_program_admitted_receipt_controls(
     ),
     CellCheckFailure,
 > {
-    compile_cell_program_admitted_inner(admission, CellProgramAudit::Receipts(test_name))
+    tidepool_testing::with_settlement(|settlement| {
+        compile_cell_program_admitted_inner(
+            admission,
+            CellProgramAudit::Receipts(test_name),
+            settlement,
+        )
+    })
 }
 
 #[cfg(test)]
@@ -2806,10 +2820,13 @@ fn compile_cell_program_admitted_native_emission_controls(
     ),
     CellCheckFailure,
 > {
-    compile_cell_program_admitted_inner(
-        admission,
-        CellProgramAudit::NativeEmissionOwnersAbsent(old_owners),
-    )
+    tidepool_testing::with_settlement(|settlement| {
+        compile_cell_program_admitted_inner(
+            admission,
+            CellProgramAudit::NativeEmissionOwnersAbsent(old_owners),
+            settlement,
+        )
+    })
 }
 
 #[cfg(test)]
@@ -2919,13 +2936,20 @@ fn compile_cell_program_admitted_work_controls(
     ),
     CellCheckFailure,
 > {
-    compile_cell_program_admitted_inner(admission, CellProgramAudit::WorkCounts(expected_shape))
+    tidepool_testing::with_settlement(|settlement| {
+        compile_cell_program_admitted_inner(
+            admission,
+            CellProgramAudit::WorkCounts(expected_shape),
+            settlement,
+        )
+    })
 }
 
 #[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.prepare", level = "debug", skip_all, fields(inclusive = true, cell_bytes = tracing::field::Empty))]
 fn compile_cell_program_admitted_inner(
     admission: Arc<super::RuntimeCellAdmission>,
     #[cfg(test)] audit: CellProgramAudit<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<
     (
         CellCheck,
@@ -3014,8 +3038,8 @@ fn compile_cell_program_admitted_inner(
     let diagnostics = CompilerDiagnosticCapture::start(scratch.path(), &command);
     drop(offer_span);
     let run = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.execute", inclusive = true)
-        .in_scope(|| endpoint.execute(&command)).map_err(|error| {
-        offer.retain_execution_failure(scratch.path(), &command, map_notfound(error))
+        .in_scope(|| endpoint.execute_with_input_files(&command, offer.input_transport_files(), |close| settlement(close))).map_err(|error| {
+        offer.retain_execution_failure(scratch.path(), &command, error)
     })?;
     let admission_span = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.admit", inclusive = true).entered();
     diagnostics.completed(scratch.path(), &command, run.success(), &run.output.stderr);
@@ -3072,14 +3096,17 @@ fn compile_cell_program_admitted_inner(
     checked.warnings = report.diagnostics;
     drop(admission_span);
     tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.declaration_projections", inclusive = true)
-        .in_scope(|| admission.prepare_declaration_projections(program.checked_cell()))
+        .in_scope(|| admission.prepare_declaration_projections(program.checked_cell(), settlement))
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     checked.authority = Some(program.checked_cell().clone());
     checked.admission = Some(admission);
     Ok((checked, program))
 }
 
-fn check_cell_impl(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailure> {
+fn check_cell_impl(
+    req: CellCheckRequest<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<CellCheck, CellCheckFailure> {
     let temp = compiler_scratch_directory()?;
     let cell_path = temp.path().join("cell.txt");
     let template_path = temp.path().join("CellCheckTemplate.hs");
@@ -3115,8 +3142,10 @@ fn check_cell_impl(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFail
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
     let run = endpoint
-        .execute(&cmd)
-        .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, map_notfound(error)))?;
+        .execute_with_input_files(&cmd, offer.input_transport_files(), |close| {
+            settlement(close)
+        })
+        .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, error))?;
     let output = &run.output;
     diagnostics.completed(temp.path(), &cmd, run.success(), &output.stderr);
     timing::log_interface_counts(&output.stderr);
@@ -3185,8 +3214,11 @@ fn check_cell_impl(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFail
 ///
 /// When `req.verdict` is supplied, a missing template for the verdict's
 /// selector is caught here, before any process is spawned.
-pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
-    compile_turn(req)
+pub fn run_turn(
+    req: TurnRequest<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<TurnResult, TurnFailure> {
+    compile_turn(req, settlement)
 }
 
 /// Select the precompiled native item from the complete immutable program.
@@ -4070,7 +4102,10 @@ pub fn assemble_activation_preview_module(budget: u64) -> String {
         kind = req.verdict.as_ref().map_or("", |verdict| turn_kind_wire_name(verdict.kind)),
     )
 )]
-fn compile_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
+fn compile_turn(
+    req: TurnRequest<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<TurnResult, TurnFailure> {
     let verdict_arg = match &req.verdict {
         Some(TurnClassification { kind, binders, .. }) => {
             #[allow(
@@ -4150,11 +4185,15 @@ fn compile_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
     let diagnostics =
         (!ordinary_admitted).then(|| CompilerDiagnosticCapture::start(temp.path(), &cmd));
     let run = if ordinary_admitted {
-        TurnCompilerOutput::Admitted(offer.execute_admitted_turn(endpoint, &mut cmd)?)
+        TurnCompilerOutput::Admitted(offer.execute_admitted_turn(endpoint, &mut cmd, settlement)?)
     } else {
-        TurnCompilerOutput::Direct(endpoint.execute(&cmd).map_err(|error| {
-            offer.retain_execution_failure(temp.path(), &cmd, map_notfound(error))
-        })?)
+        TurnCompilerOutput::Direct(
+            endpoint
+                .execute_with_input_files(&cmd, offer.input_transport_files(), |close| {
+                    settlement(close)
+                })
+                .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, error))?,
+        )
     };
     let (output, elapsed, output_dir) = match &run {
         TurnCompilerOutput::Admitted(run) => {
@@ -4986,7 +5025,10 @@ fn decode_turn_out(bytes: &[u8]) -> Result<DecodedTurnOut, CompileError> {
 /// statement item may reference decls earlier in the same block), so it
 /// classifies the block in one spawn rather than one spawn per item. One GHC
 /// session boots for the whole batch.
-pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, CompileError> {
+pub fn classify_block(
+    items: &[&str],
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<Vec<TurnClassification>, CompileError> {
     if items.is_empty() {
         // With no positional files the extract falls through to its usage
         // branch, exits 0, and writes no `--classify-out` file — spawning
@@ -5012,7 +5054,7 @@ pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, Compile
     let endpoint = bind_extract_cmd(&cmd)?;
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
-    let run = endpoint.execute(&cmd).map_err(map_notfound)?;
+    let run = endpoint.execute_with_input_files(&cmd, Vec::new(), |close| settlement(close))?;
     diagnostics.completed(temp.path(), &cmd, run.success(), &run.output.stderr);
     let output = &run.output;
     // A failed classification still cost a real subprocess spawn — attribute
@@ -5868,7 +5910,10 @@ mod tests {
             compile_generation: 0,
             compile_view_evidence: "",
         };
-        let error = check_cell(request()).unwrap_err().error;
+        let error =
+            tidepool_testing::with_settlement(|settlement| check_cell(request(), settlement))
+                .unwrap_err()
+                .error;
         assert!(matches!(error, CompileError::ExtractFailed(ref message)
             if message.contains("no configured deployment authority")));
         assert!(!executed.exists());
@@ -5884,7 +5929,10 @@ mod tests {
         };
         std::fs::write(&manifest, serde_json::to_vec(&configuration).unwrap()).unwrap();
         let _configuration = TestEnvGuard::set("TIDEPOOL_COMPILER_DEPLOYMENT", manifest);
-        let error = check_cell(request()).unwrap_err().error;
+        let error =
+            tidepool_testing::with_settlement(|settlement| check_cell(request(), settlement))
+                .unwrap_err()
+                .error;
         assert!(matches!(error, CompileError::ExtractFailed(ref message)
             if message.contains("bound producer differs from configured deployment")));
         assert!(
@@ -6029,8 +6077,10 @@ mod tests {
                     None,
                 )
                 .unwrap();
-            let (checked, program) = compile_cell_program_admitted(admission.clone())
-                .map_err(|failure| failure.error)?;
+            let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+                compile_cell_program_admitted(admission.clone(), settlement)
+            })
+            .map_err(|failure| failure.error)?;
             Ok(CheckedHomeCell {
                 admission,
                 checked,
@@ -6669,9 +6719,11 @@ mod tests {
                 None,
             )
             .unwrap();
-        let failure = compile_cell_program_admitted(admission.clone())
-            .unwrap_err()
-            .error;
+        let failure = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(admission.clone(), settlement)
+        })
+        .unwrap_err()
+        .error;
         assert_eq!(
             crate::failclass::classify_compile(&failure).class,
             crate::failclass::FailureClass::UserHaskell
@@ -6695,7 +6747,10 @@ mod tests {
             include_str!("fixtures/checked-search-original.hs"),
         )
         .unwrap();
-        let (_, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+        let (_, program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(admission.clone(), settlement)
+        })
+        .unwrap();
         state
             .begin_cell_program(admission, program)
             .unwrap()
@@ -6821,7 +6876,10 @@ mod tests {
                 None,
             )
             .unwrap();
-        let (_, alternate_program) = compile_cell_program_admitted(alternate.clone()).unwrap();
+        let (_, alternate_program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(alternate.clone(), settlement)
+        })
+        .unwrap();
         assert_eq!(
             alternate_program.items()[0].checked_item().include_paths(),
             alternate.include_paths()
@@ -6829,7 +6887,10 @@ mod tests {
         assert!(state
             .begin_cell_program(admission.clone(), alternate_program)
             .is_err());
-        let (_, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+        let (_, program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(admission.clone(), settlement)
+        })
+        .unwrap();
         state
             .begin_cell_program(admission, program)
             .expect("refusal must leave original admission unclaimed")
@@ -6952,10 +7013,13 @@ mod tests {
                 None,
             )
             .unwrap();
-        let (_, program) = compile_cell_program_admitted_inner(
-            admission.clone(),
-            CellProgramAudit::PublicationRefusal(cache.path()),
-        )
+        let (_, program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted_inner(
+                admission.clone(),
+                CellProgramAudit::PublicationRefusal(cache.path()),
+                settlement,
+            )
+        })
         .unwrap();
         assert_eq!(program.items().len(), 1);
         assert!(program.items()[0].native().is_some());
@@ -7036,7 +7100,10 @@ mod tests {
                 )
                 .unwrap();
             let started = std::time::Instant::now();
-            let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+            let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+                compile_cell_program_admitted(admission.clone(), settlement)
+            })
+            .unwrap();
             let item = checked.checked_item(0).unwrap();
             let prefix = session
                 .begin_cell_program(admission.clone(), program)
@@ -7181,7 +7248,9 @@ mod tests {
                 ),
             }
             .unwrap();
-            let checked = compile_cell_program_admitted(admission.clone());
+            let checked = tidepool_testing::with_settlement(|settlement| {
+                compile_cell_program_admitted(admission.clone(), settlement)
+            });
             let original = session.public_visibility_snapshot_in(scope).unwrap();
             assert_eq!(original.declaration_tip, Generation(0));
             assert_eq!(original.epoch, 0);
@@ -7346,7 +7415,10 @@ mod tests {
                 ItemKind::Expression
             ],
         );
-        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(admission.clone(), settlement)
+        })
+        .unwrap();
         assert_eq!(checked.items.len(), 5);
         let prologue = checked.checked_item(0).unwrap();
         assert!(prologue
@@ -7743,10 +7815,15 @@ mod tests {
         let (candidate, values) = session
             .render_declaration_candidate_in(private, &receipt, &SourceImports::new())
             .unwrap();
-        let staged =
-            crate::session::validate_declaration_candidate(candidate, session.lib().include_dir())
-                .unwrap()
-                .with_visible_values(values);
+        let staged = tidepool_testing::with_settlement(|settlement| {
+            crate::session::validate_declaration_candidate(
+                candidate,
+                session.lib().include_dir(),
+                settlement,
+            )
+        })
+        .unwrap()
+        .with_visible_values(values);
         session.adopt_staged_declaration_in(staged).unwrap();
         let original_generation = session.lib().scope_tip(private);
         let original = session
@@ -7848,17 +7925,24 @@ mod tests {
         let hidden_queries = [InspectionQuery::TypeOf(
             "HiddenOriginal.answer (41 :: Int)".into(),
         )];
-        let hidden = run_inspections(InspectionRequest {
-            exact_context: Some(Arc::new(
-                tidepool_toolchain::declaration_join::ExactCompileContext::new(context.clone()),
-            )),
-            preamble: effects.preamble(),
-            imports: &hidden_imports,
-            include: &include,
-            session_root: view.session_root(),
-            inject_modules: &injected,
-            queries: &hidden_queries,
-            effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
+        let hidden = tidepool_testing::with_settlement(|settlement| {
+            run_inspections(
+                InspectionRequest {
+                    exact_context: Some(Arc::new(
+                        tidepool_toolchain::declaration_join::ExactCompileContext::new(
+                            context.clone(),
+                        ),
+                    )),
+                    preamble: effects.preamble(),
+                    imports: &hidden_imports,
+                    include: &include,
+                    session_root: view.session_root(),
+                    inject_modules: &injected,
+                    queries: &hidden_queries,
+                    effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
+                },
+                settlement,
+            )
         });
         match hidden {
             Err(_) => {}
@@ -7876,17 +7960,24 @@ mod tests {
             InspectionQuery::TypeOf("answer (41 :: Int)".into()),
             InspectionQuery::TypeOf("(undefined :: HiddenResult)".into()),
         ];
-        let mixed = run_inspections(InspectionRequest {
-            exact_context: Some(Arc::new(
-                tidepool_toolchain::declaration_join::ExactCompileContext::new(context.clone()),
-            )),
-            preamble: effects.preamble(),
-            imports: &imports,
-            include: &include,
-            session_root: view.session_root(),
-            inject_modules: &injected,
-            queries: &mixed_queries,
-            effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
+        let mixed = tidepool_testing::with_settlement(|settlement| {
+            run_inspections(
+                InspectionRequest {
+                    exact_context: Some(Arc::new(
+                        tidepool_toolchain::declaration_join::ExactCompileContext::new(
+                            context.clone(),
+                        ),
+                    )),
+                    preamble: effects.preamble(),
+                    imports: &imports,
+                    include: &include,
+                    session_root: view.session_root(),
+                    inject_modules: &injected,
+                    queries: &mixed_queries,
+                    effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
+                },
+                settlement,
+            )
         })
         .unwrap();
         assert!(matches!(&mixed[0], InspectionResult::Info { entries, .. } if !entries.is_empty()));
@@ -7901,17 +7992,24 @@ mod tests {
             InspectionQuery::TypeOf("answer".into()),
             InspectionQuery::TypeOf("answer (42 :: Int)".into()),
         ];
-        let batch = run_inspections(InspectionRequest {
-            exact_context: Some(Arc::new(
-                tidepool_toolchain::declaration_join::ExactCompileContext::new(context.clone()),
-            )),
-            preamble: effects.preamble(),
-            imports: &imports,
-            include: &include,
-            session_root: view.session_root(),
-            inject_modules: &injected,
-            queries: &batch_queries,
-            effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
+        let batch = tidepool_testing::with_settlement(|settlement| {
+            run_inspections(
+                InspectionRequest {
+                    exact_context: Some(Arc::new(
+                        tidepool_toolchain::declaration_join::ExactCompileContext::new(
+                            context.clone(),
+                        ),
+                    )),
+                    preamble: effects.preamble(),
+                    imports: &imports,
+                    include: &include,
+                    session_root: view.session_root(),
+                    inject_modules: &injected,
+                    queries: &batch_queries,
+                    effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
+                },
+                settlement,
+            )
         })
         .unwrap();
         assert!(batch
@@ -7950,7 +8048,10 @@ mod tests {
                 None,
             )
             .unwrap();
-        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(admission.clone(), settlement)
+        })
+        .unwrap();
         assert_eq!(context.semantic_sha256(), published_context_digest);
         assert_eq!(checked.items.len(), 1);
         let item = checked.checked_item(0).unwrap();
@@ -8056,7 +8157,10 @@ mod tests {
             )
             .unwrap();
         let (expression_check, expression_program) =
-            compile_cell_program_admitted(expression_admission.clone()).unwrap();
+            tidepool_testing::with_settlement(|settlement| {
+                compile_cell_program_admitted(expression_admission.clone(), settlement)
+            })
+            .unwrap();
         let expression_item = expression_check.checked_item(0).unwrap();
         assert!(expression_item.signatures()[0]
             .names()
@@ -8132,7 +8236,7 @@ mod tests {
                 crate::session::RuntimePlannedCellItemKind::Bind
             ]
         );
-        let refusal = compile_cell_program_admitted(hidden_admission).err().expect(
+        let refusal = tidepool_testing::with_settlement(|settlement| compile_cell_program_admitted(hidden_admission, settlement)).err().expect(
             "private original code availability must not authorize an authored import of its hidden owner"
         );
         eprintln!("whole-cell hidden original import refusal: {refusal:?}");
@@ -8252,12 +8356,12 @@ mod tests {
         std::fs::write(&path, include_str!("fixtures/constraint-tuple-G1.hs")).unwrap();
         let mut includes = vec![source_root.path().to_path_buf()];
         includes.extend_from_slice(surface.include_paths());
-        let artifacts = compile_invocation(&CompileInvocation {
+        let artifacts = tidepool_testing::with_settlement(|settlement| compile_invocation(&CompileInvocation {
             source: "module TidepoolConstraintTupleProbe where\nimport qualified Tidepool.Session.Lib.G1 as Original\nresult = Original.policy\n",
             targets: &["result"],
             include: &includes,
             fallback_module_name: "TidepoolConstraintTupleProbe",
-        }, |_, _, _| {}).expect("generic policy must retain a complete package witness");
+        }, |_, _, _| {}, settlement)).expect("generic policy must retain a complete package witness");
         let imports = artifacts
             .certified_groups
             .iter()
@@ -8384,16 +8488,21 @@ mod tests {
             "let value = h + (1 :: Int)\n",
             "value\n",
         );
-        let checked = check_cell(CellCheckRequest {
-            exact_context: None,
-            session_id: None,
-            cell_text: cell,
-            template,
-            include: &include,
-            session_root: root.path(),
-            inject_modules: &[],
-            compile_generation: 0,
-            compile_view_evidence: "",
+        let checked = tidepool_testing::with_settlement(|settlement| {
+            check_cell(
+                CellCheckRequest {
+                    exact_context: None,
+                    session_id: None,
+                    cell_text: cell,
+                    template,
+                    include: &include,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    compile_generation: 0,
+                    compile_view_evidence: "",
+                },
+                settlement,
+            )
         })
         .unwrap();
         assert_eq!(checked.items.len(), 3);
@@ -8440,16 +8549,21 @@ mod tests {
             "let fixed = h :: Maybe G\n",
             "fixed\n",
         );
-        let checked = check_cell(CellCheckRequest {
-            exact_context: None,
-            session_id: None,
-            cell_text: cell,
-            template,
-            include: &include,
-            session_root: root.path(),
-            inject_modules: &[],
-            compile_generation: 0,
-            compile_view_evidence: "",
+        let checked = tidepool_testing::with_settlement(|settlement| {
+            check_cell(
+                CellCheckRequest {
+                    exact_context: None,
+                    session_id: None,
+                    cell_text: cell,
+                    template,
+                    include: &include,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    compile_generation: 0,
+                    compile_view_evidence: "",
+                },
+                settlement,
+            )
         })
         .unwrap();
         let pins = checked
@@ -8542,16 +8656,21 @@ mod tests {
         );
         let declaration = "data MergeRequest = MergeRequest { mergeSourceHead :: Int, mergeSourceWorktree :: Int }\n";
         let partial = format!("{declaration}request = MergeRequest {{ mergeSourceHead = 1 }}\n");
-        let checked = check_cell(CellCheckRequest {
-            exact_context: None,
-            session_id: None,
-            cell_text: &partial,
-            template: &template,
-            include: &include,
-            session_root: root.path(),
-            inject_modules: &[],
-            compile_generation: 0,
-            compile_view_evidence: "",
+        let checked = tidepool_testing::with_settlement(|settlement| {
+            check_cell(
+                CellCheckRequest {
+                    exact_context: None,
+                    session_id: None,
+                    cell_text: &partial,
+                    template: &template,
+                    include: &include,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    compile_generation: 0,
+                    compile_view_evidence: "",
+                },
+                settlement,
+            )
         })
         .expect("partial record is a valid declaration");
         assert!(
@@ -8579,16 +8698,21 @@ mod tests {
         let complete = format!(
             "{declaration}request = MergeRequest {{ mergeSourceHead = 1, mergeSourceWorktree = 2 }}\n"
         );
-        let checked = check_cell(CellCheckRequest {
-            exact_context: None,
-            session_id: None,
-            cell_text: &complete,
-            template: &template,
-            include: &include,
-            session_root: root.path(),
-            inject_modules: &[],
-            compile_generation: 0,
-            compile_view_evidence: "",
+        let checked = tidepool_testing::with_settlement(|settlement| {
+            check_cell(
+                CellCheckRequest {
+                    exact_context: None,
+                    session_id: None,
+                    cell_text: &complete,
+                    template: &template,
+                    include: &include,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    compile_generation: 0,
+                    compile_view_evidence: "",
+                },
+                settlement,
+            )
         })
         .expect("complete record declaration");
         assert!(
@@ -8631,16 +8755,21 @@ mod tests {
             ("pure const\n", ExpressionLift::Effectful),
         ] {
             let evidence = "compile-view-a";
-            let checked = check_cell(CellCheckRequest {
-                exact_context: None,
-                session_id: None,
-                cell_text: cell,
-                template: &template,
-                include: &include,
-                session_root: root.path(),
-                inject_modules: &[],
-                compile_generation: 7,
-                compile_view_evidence: evidence,
+            let checked = tidepool_testing::with_settlement(|settlement| {
+                check_cell(
+                    CellCheckRequest {
+                        exact_context: None,
+                        session_id: None,
+                        cell_text: cell,
+                        template: &template,
+                        include: &include,
+                        session_root: root.path(),
+                        inject_modules: &[],
+                        compile_generation: 7,
+                        compile_view_evidence: evidence,
+                    },
+                    settlement,
+                )
             })
             .unwrap_or_else(|failure| panic!("{cell:?}: {:?}", failure.error));
             let index = checked.items.len() - 1;
@@ -8696,16 +8825,21 @@ mod tests {
 
         // Named class defaulting selects the exact effect row in the first
         // whole-cell check; no diagnostic-triggered retry is involved.
-        let checked = check_cell(CellCheckRequest {
-            exact_context: None,
-            session_id: None,
-            cell_text: &cell,
-            template: &template,
-            include: &include,
-            session_root: root.path(),
-            inject_modules: &[],
-            compile_generation: 0,
-            compile_view_evidence: "",
+        let checked = tidepool_testing::with_settlement(|settlement| {
+            check_cell(
+                CellCheckRequest {
+                    exact_context: None,
+                    session_id: None,
+                    cell_text: &cell,
+                    template: &template,
+                    include: &include,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    compile_generation: 0,
+                    compile_view_evidence: "",
+                },
+                settlement,
+            )
         })
         .expect("a final `pure <expr>` cell must default in the compiler-owned row");
         let final_item = checked.items.last().expect("cell has at least one item");
@@ -8745,16 +8879,21 @@ mod tests {
         );
         let cell = format!("{EFF_DECLS}1 + 1 :: Int\n");
 
-        let checked = check_cell(CellCheckRequest {
-            exact_context: None,
-            session_id: None,
-            cell_text: &cell,
-            template: &template,
-            include: &include,
-            session_root: root.path(),
-            inject_modules: &[],
-            compile_generation: 0,
-            compile_view_evidence: "",
+        let checked = tidepool_testing::with_settlement(|settlement| {
+            check_cell(
+                CellCheckRequest {
+                    exact_context: None,
+                    session_id: None,
+                    cell_text: &cell,
+                    template: &template,
+                    include: &include,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    compile_generation: 0,
+                    compile_view_evidence: "",
+                },
+                settlement,
+            )
         })
         .expect("a genuinely pure final expression must still be accepted outright");
         let final_item = checked.items.last().expect("cell has at least one item");
@@ -8767,16 +8906,21 @@ mod tests {
         assert_eq!(final_item.source, "1 + 1 :: Int\n");
 
         // Repeating the same request makes the same compiler-owned decision.
-        let repeated = check_cell(CellCheckRequest {
-            exact_context: None,
-            session_id: None,
-            cell_text: &cell,
-            template: &template,
-            include: &include,
-            session_root: root.path(),
-            inject_modules: &[],
-            compile_generation: 0,
-            compile_view_evidence: "",
+        let repeated = tidepool_testing::with_settlement(|settlement| {
+            check_cell(
+                CellCheckRequest {
+                    exact_context: None,
+                    session_id: None,
+                    cell_text: &cell,
+                    template: &template,
+                    include: &include,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    compile_generation: 0,
+                    compile_view_evidence: "",
+                },
+                settlement,
+            )
         })
         .expect("the repeated check must accept the same source");
         assert_eq!(repeated.items.last().unwrap().source, final_item.source);
@@ -8887,7 +9031,9 @@ mod tests {
         let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
         let _extract = TestEnvGuard::set("TIDEPOOL_EXTRACT", "/nonexistent/tidepool-extract-test");
 
-        let result = classify_block(&[]).unwrap();
+        let result =
+            tidepool_testing::with_settlement(|settlement| classify_block(&[], settlement))
+                .unwrap();
         assert!(result.is_empty());
     }
 
@@ -9172,7 +9318,8 @@ mod tests {
             target: None,
             retained_imports: &[],
         };
-        let err = run_turn(req).unwrap_err();
+        let err =
+            tidepool_testing::with_settlement(|settlement| run_turn(req, settlement)).unwrap_err();
         assert!(
             matches!(err.error, CompileError::ExtractFailed(_)),
             "expected a clean ExtractFailed, got {err:?}"
@@ -9206,22 +9353,27 @@ mod tests {
                 ),
             },
         ];
-        let result = run_turn(TurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: "((+ 1) :: Int -> Int)",
-            templates: &templates,
-            include: &effects.include_path_refs(),
-            session_root: session_root.path(),
-            inject_modules: &[],
-            gen: 0,
-            verdict: Some(TurnClassification {
-                kind: TurnKind::Expr,
-                binders: Vec::new(),
-                items: Vec::new(),
-            }),
-            target: None,
-            retained_imports: &[],
+        let result = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: "((+ 1) :: Int -> Int)",
+                    templates: &templates,
+                    include: &effects.include_path_refs(),
+                    session_root: session_root.path(),
+                    inject_modules: &[],
+                    gen: 0,
+                    verdict: Some(TurnClassification {
+                        kind: TurnKind::Expr,
+                        binders: Vec::new(),
+                        items: Vec::new(),
+                    }),
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
         })
         .unwrap();
         let TurnResult::Expr {
@@ -9259,22 +9411,27 @@ mod tests {
                 source: "module Expr where\n__result = {{TURN}}\n".to_string(),
             },
         ];
-        let err = run_turn(TurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: "1 :: Int",
-            templates: &templates,
-            include: &[],
-            session_root: session_root.path(),
-            inject_modules: &[],
-            gen: 0,
-            verdict: Some(TurnClassification {
-                kind: TurnKind::Expr,
-                binders: Vec::new(),
-                items: Vec::new(),
-            }),
-            target: None,
-            retained_imports: &[],
+        let err = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: "1 :: Int",
+                    templates: &templates,
+                    include: &[],
+                    session_root: session_root.path(),
+                    inject_modules: &[],
+                    gen: 0,
+                    verdict: Some(TurnClassification {
+                        kind: TurnKind::Expr,
+                        binders: Vec::new(),
+                        items: Vec::new(),
+                    }),
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
         })
         .expect_err("an infrastructure exception must not select the valid fallback template");
         assert!(
@@ -9299,22 +9456,27 @@ mod tests {
             kind: TemplateSelector::Expr,
             source: format!("module Expr where\n__result = {name}\n"),
         });
-        let failure = run_turn(TurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: "()",
-            templates: &templates,
-            include: &[],
-            session_root: session_root.path(),
-            inject_modules: &[],
-            gen: 0,
-            verdict: Some(TurnClassification {
-                kind: TurnKind::Expr,
-                binders: vec![],
-                items: vec![],
-            }),
-            target: None,
-            retained_imports: &[],
+        let failure = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: "()",
+                    templates: &templates,
+                    include: &[],
+                    session_root: session_root.path(),
+                    inject_modules: &[],
+                    gen: 0,
+                    verdict: Some(TurnClassification {
+                        kind: TurnKind::Expr,
+                        binders: vec![],
+                        items: vec![],
+                    }),
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
         })
         .expect_err("both typed alternatives are rejected");
         assert_eq!(
@@ -9757,7 +9919,10 @@ mod compiler_packet_replay {
             Some(("job1", HostBindingType::COMMAND_JOB))
         );
         let view = admission.view();
-        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(admission.clone(), settlement)
+        })
+        .unwrap();
         assert_eq!(checked.items.len(), 1);
         assert_eq!(program.items().len(), 1);
         let item = &program.items()[0];

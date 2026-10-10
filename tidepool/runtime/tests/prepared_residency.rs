@@ -132,18 +132,23 @@ impl Notebook {
         let retained = self.session.prepared_retained();
         let templates = self.templates();
         let include: Vec<&Path> = self.include.iter().map(PathBuf::as_path).collect();
-        run_turn(TurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: text,
-            templates: &templates,
-            include: &include,
-            session_root: self.root.path(),
-            inject_modules: &self.injected,
-            gen: self.generation,
-            verdict: None,
-            target: None,
-            retained_imports: &retained,
+        tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: text,
+                    templates: &templates,
+                    include: &include,
+                    session_root: self.root.path(),
+                    inject_modules: &self.injected,
+                    gen: self.generation,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &retained,
+                },
+                settlement,
+            )
         })
         .unwrap_or_else(|failure| {
             panic!(
@@ -180,18 +185,23 @@ impl Notebook {
         let include: Vec<&Path> = self.include.iter().map(PathBuf::as_path).collect();
         let injected = self.session.inject_val_modules();
         let retained = self.session.prepared_retained();
-        run_turn(TurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: text,
-            templates: &templates,
-            include: &include,
-            session_root: self.root.path(),
-            inject_modules: &injected,
-            gen: self.generation,
-            verdict: None,
-            target: None,
-            retained_imports: &retained,
+        tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: text,
+                    templates: &templates,
+                    include: &include,
+                    session_root: self.root.path(),
+                    inject_modules: &injected,
+                    gen: self.generation,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &retained,
+                },
+                settlement,
+            )
         })
         .unwrap_or_else(|failure| {
             panic!(
@@ -867,18 +877,23 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
         let include: Vec<&Path> = notebook.include.iter().map(PathBuf::as_path).collect();
         let injected = notebook.session.inject_val_modules();
         let retained = notebook.session.prepared_retained();
-        run_turn(TurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: text,
-            templates: &templates,
-            include: &include,
-            session_root: notebook.root.path(),
-            inject_modules: &injected,
-            gen: notebook.generation,
-            verdict: None,
-            target: None,
-            retained_imports: &retained,
+        tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: text,
+                    templates: &templates,
+                    include: &include,
+                    session_root: notebook.root.path(),
+                    inject_modules: &injected,
+                    gen: notebook.generation,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &retained,
+                },
+                settlement,
+            )
         })
         .unwrap_or_else(|failure| {
             panic!(
@@ -1344,18 +1359,23 @@ impl Incarnation {
         let include: Vec<&Path> = self.include.iter().map(PathBuf::as_path).collect();
         let injected = self.session.inject_val_modules();
         let retained = self.session.prepared_retained();
-        run_turn(TurnRequest {
-            exact_context: None,
-            session_id: self.send_incarnation.then_some(self.id),
-            turn_text: text,
-            templates: &templates,
-            include: &include,
-            session_root: &self.root,
-            inject_modules: &injected,
-            gen: self.generation,
-            verdict: None,
-            target: None,
-            retained_imports: &retained,
+        tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: self.send_incarnation.then_some(self.id),
+                    turn_text: text,
+                    templates: &templates,
+                    include: &include,
+                    session_root: &self.root,
+                    inject_modules: &injected,
+                    gen: self.generation,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &retained,
+                },
+                settlement,
+            )
         })
         .unwrap_or_else(|failure| {
             panic!(

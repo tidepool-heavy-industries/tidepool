@@ -30,8 +30,10 @@ requests. Matched measurement tests are the evidence for costs and savings.
 Runtime, exact, authored and retained-entry policies carry a borrowed caller-owned
 compiler settlement recipient. It retains independent close evidence through
 operation unwind; each known-unsubmitted retry forwards another affine observation
-to the same recipient. Actual execution transfers selected sealed input files to
-the endpoint transaction owner. Keep `CompilerCloseUnconfirmed` and its completed
+to the same recipient. Actual execution transfers selected sealed input files or owned lookup directories to
+the endpoint transaction owner. Cell parsing, declaration joins and original interface
+inventory require the same settlement recipient. Path-based join inputs must belong
+to the supplied owned directory; its custody follows uncertain close evidence. Keep `CompilerCloseUnconfirmed` and its completed
 action typed, and never replay it. Declared build actions use their file-only
 isolated invocation and do not acquire owned request transport.
 

@@ -614,14 +614,17 @@ fn typed_site_surface_callers_have_returning_contracts() {
         "childProbe",
         "childProgressProbe",
     ];
-    let artifacts = tidepool_runtime::compile_targets(
-        &tidepool_testing::fixture_source(
-            "bridge/facade/src/actor_host/typed_site_return_contract.hs",
-        ),
-        &names,
-        &sources.include,
-        |_, _, _| {},
-    )
+    let artifacts = tidepool_testing::with_settlement(|settlement| {
+        tidepool_runtime::compile_targets(
+            &tidepool_testing::fixture_source(
+                "bridge/facade/src/actor_host/typed_site_return_contract.hs",
+            ),
+            &names,
+            &sources.include,
+            |_, _, _| {},
+            settlement,
+        )
+    })
     .unwrap();
     for name in names {
         let program = artifacts.targets[name].prepared.prepared();

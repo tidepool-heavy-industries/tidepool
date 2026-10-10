@@ -19,18 +19,23 @@ fn probe(label: &str, text: &str, gen: u64) {
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let root = tempfile::tempdir().unwrap();
-    let result = run_turn(TurnRequest {
-        exact_context: None,
-        session_id: None,
-        turn_text: text,
-        templates: &templates,
-        include: &include_refs,
-        session_root: root.path(),
-        inject_modules: &[],
-        gen,
-        verdict: None,
-        target: None,
-        retained_imports: &[],
+    let result = tidepool_testing::with_settlement(|settlement| {
+        run_turn(
+            TurnRequest {
+                exact_context: None,
+                session_id: None,
+                turn_text: text,
+                templates: &templates,
+                include: &include_refs,
+                session_root: root.path(),
+                inject_modules: &[],
+                gen,
+                verdict: None,
+                target: None,
+                retained_imports: &[],
+            },
+            settlement,
+        )
     })
     .unwrap_or_else(|error| panic!("{label}: turn failed: {error}"));
     let compiled = match &result {
