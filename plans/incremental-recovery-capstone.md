@@ -1,170 +1,206 @@
-# Incremental recovery capstone
+# Crate-backed recovery and M2/M3 completion
 
-## Outcome and delivery order
+## Outcome and accepted decisions
 
-Finish the current correctness and performance work and deliver a qualified
-human-testable engine/Harness. The immediate baseline is the reviewed schema-11
-recovery codec joined at `bfe3822cde`. Its component evidence is 69 passing checks;
-joined release qualification remains required. Qualify and preserve that bundle
-while the structural replacement below is developed. Do not transfer its
-acceptance to the later format.
+Replace bespoke snapshot journals and cumulative recovery manifests with library
+persistent maps and one run-owned SQLite store. Preserve exact compiler authority,
+independent captures, atomic publication and completed-effect receipts. The frozen
+36f82f312668 baseline executed 29 checks: 14 passed and 15 failed; it is unqualified.
+The retained baseline is evidence, not acceptance for the replacement.
 
-The structural release replaces cumulative proof hashing and complete recovery
-manifest publication. It does not add a parallel persistence framework. Keep
-one compiler evidence owner and one runtime transaction owner. Every parcel
-compiles affected production and test consumers and executes focused tests
-before integration. Root owns integration and matched bundle qualification.
-Use the provisioned independent checkouts and current admitted parallel build
-policy in `docs/swarm-builds.md`.
+Accepted simplifications: one database per run with independent machine-session
+domains; immutable blocks retained until run retirement; content-addressed snapshot
+roots instead of predecessor replay; historical contexts opened on demand; SQLite
+constraints and RAII transactions; a fresh-format cutover. Unknown commit outcomes
+fence the run store and require authenticated reopen, without effect replay.
 
-## Compiler evidence contract
+## Dependencies and encoding contract
 
-The toolchain issues immutable **binding-scope proofs**. A v3 scope identifier
-hashes the newly bound source nodes and their complete labeled outgoing rows,
-including zero-edge nodes. Typed local references are normalized for hashing;
-external references retain their exact earlier scope identifiers. Unrelated
-inherited rows are excluded. An admission with no new bindings issues no proof.
-Already bound outgoing rows cannot change. Artifact cycles inside one issued
-scope remain valid. Scope ancestry points to older immutable scopes.
+Use exact direct pins imbl 7.0.2 (no optional features), fvm_ipld_hamt 0.10.6,
+fvm_ipld_blockstore 0.3.2, fvm_ipld_encoding 0.5.4, cid 0.11.3 (std and serde),
+and multihash-codetable 0.2.2 (blake2b, no default features). The compatible lock
+uses serde_ipld_dagcbor 0.6.4, not 0.7. Keep existing petgraph and proptest.
 
-A native group can belong to a different scope from its artifact carrier.
-Never construct an artifact occurrence from a group's scope alone. Proof
-retention is independent of selected payload/native custody: unselected witness
-rows neither require available payloads nor authorize them.
+Upgrade Tidepool and the matched Harness together to rusqlite 0.40.2, using
+bundled, cache and fallible_uint with defaults disabled; lock libsqlite3-sys
+0.38.2. This published bundle contains SQLite 3.53.2, including the WAL-reset
+fix missing from the old 3.46.0. It is not the latest SQLite release. Verify
+sqlite_version() and sqlite_source_id() from actual Buck-linked binaries.
+Regenerate Cargo and Buck through their owners and retain dependency notices.
 
-Keep these identities distinct in the types:
+Fix durable maps to HAMT V3 with bit_width=5, min_data_depth=0,
+max_array_width=3. Key routing is SHA-256; block identity is CIDv1,
+DAG-CBOR codec 0x71 and BLAKE2b-256 multihash 0xb220. Scope IDs and compiler
+artifact identities keep their own explicitly distinct hashing contracts.
+Encode compound keys as stable typed tuples into BytesKey; never use rendered
+names or complex-key CBOR maps. Ordered adjacency uses sorted tuple arrays.
 
-- The immutable binding-scope identity.
-- A durable reference to an exact context and its available locator.
-- A semantic observation digest of the selected context.
+## Shared ownership and integration contracts
 
-An exact context carries the compiler namespace, typed artifact and group roots,
-native custody, compiler roles, and lexical facts. Store it compositionally as
-one exact predecessor plus typed additions, removals and replacements, including
-facts imported from another branch. Changes originate at the issuing owner;
-the persistence layer must not recover them by diffing cumulative snapshots.
-Explicit empty selections stay empty. Do not union ambient inventory.
+The toolchain owns exact semantic facts, scope proofs, immutable snapshot maps,
+typed SelectionRoot and ContextRoot references, FVM materialization and semantic
+rehydration. The runtime owns run storage, domain identity, publication,
+allocation, public surface facts and host recovery. Toolchain must not depend on
+runtime. Use upstream Blockstore at the storage boundary; no additional generic
+persistence framework or second independently updated model.
 
-Use existing persistent resident maps and iterative cold reconstruction with
-shared validated prefixes. A growing predecessor chain must not become recursive
-stack growth or repeated quadratic replay. Batch immutable evidence through the
-existing materialization owner; do not create a file per graph vertex. A held
-durable materialization receipt can be reused under its owning lifetime; a fresh
-acquisition or cold recovery still authenticates its input. Disk facts alone
-never mint source-compilation-instance authority.
+The materializer stages immutable blocks and returns their typed root references
+while retaining their bytes. The runtime commits blocks and roots in its existing
+publication owner; only successful commit issues a durable receipt. A staged or
+decoded CID is neither a durable receipt nor compiler authority. Exact compiler
+reissuance continues through authenticated artifact custody and existing owners.
 
-V3 intentionally changes identity semantics. Update every affected evidence,
-production-entry and prepared container format and observation domain together.
-Fresh runs use the new format; old runs retain their matching old readers.
-Regenerable caches may rebuild after explicit format refusal.
+Resident exact facts use imbl::OrdMap with immutable, compact Eq values.
+Keep the actual shared base and next snapshots; consume their structural diff
+to update operation-local FVM HAMTs. No collecting whole maps to reconstruct
+changes and no separately recorded mutation journal. Short-lived HAMTs do not
+cross shared Send/Sync boundaries; shared resident receipts retain imbl maps and
+immutable facts. General-purpose persisted maps must serve both compiler and
+runtime snapshot consumers through this one implementation.
 
-## Cold validation
+Large proofs, roles and lexical facts are CID-valued leaves; selected roots and
+custody sets use compact identities/unit values. Published-source roles reference
+a graph-only SelectionRoot, never their containing full ContextRoot. Preserve
+the distinction between whole-context content identity and the semantic
+selection observation used by compilation. Proof-only ancestors do not affect
+an observation of an otherwise unchanged selected context.
 
-Validate complete labeled outgoing rows against authenticated certified
-requirements once per selected source. Preserve original/canonical carriers,
-interface seals, producers, full native labels, exact owner keys and ordinals.
-Never resolve an edge through an available-owner inventory.
+## Exact compiler meaning
 
-Preserve the existing per-source transitive conflict rule without a traversal
-for every source: group selected payloads by the existing interface
-`ExactModuleIdentity` and native `NativeOwnerKey` keys. Only keys with distinct
-competing payload IDs need reverse reachability. Seed every selected typed
-occurrence (artifact and group), include the seed, and traverse every dependency
-kind. Refuse when an ancestor reaches competing versions. Equal payloads in
-different scopes are not conflicts; disconnected conflicting versions remain
-valid when no ancestor reaches both. Namespace uniqueness and root/custody
-closure remain separate checks. Unselected proof rows supply only structural
-and digest evidence.
+V3 scope identity hashes every newly bound node and its complete labeled
+adjacency, including zero-edge nodes. Normalize typed local endpoints for
+hashing; external endpoints retain their exact previous scope IDs. Existing
+outgoing rows are immutable. No new binding means no new scope proof.
+Semantic cycles inside one scope remain typed references, not CID cycles.
 
-Retain the slow transitive algorithm as a small-graph independent property oracle.
-The unique-owner case avoids repeated searches; report competing-version work
-honestly rather than claiming universal linear complexity.
+Carry issuer-selected NativeGroupBinding through admission inheritance,
+selection, support extraction, merge and recovery. A group has an independent
+issuing scope; its explicit carrier edge may reference an older artifact scope.
+Never reconstruct a selected group from carrier plus ordinal or pick an
+arbitrary match. Preserve ambiguity refusal when input is genuinely unqualified.
 
-## Runtime transaction contract
+Proof availability, selected payload custody, namespace, compiler roles and
+executable demand remain distinct. An unselected proof row need not have an
+available payload and grants none. Retain the reviewed direct-row cold validator
+and its independent old traversal oracle, including exact per-source conflict
+semantics.
 
-One SQLite database per existing recovery domain replaces authoritative JSON
-manifest rewrites. SQLite owns its WAL, transactions and indexes. Every writer
-connection uses fixed WAL/FULL durability. Checkpoint maintenance cannot turn a
-successful commit into a failed semantic operation.
+## Run storage and publication
 
-Store immutable declaration records and exact-context references, changed
-binding winners/tombstones, source-instance facts, actor owners, public epochs,
-the store revision and the durable allocation ceiling. Preserve full `u64`
-values without signed narrowing, using an exact representation such as
-eight-byte big-endian blobs. Do not hide cumulative JSON snapshots in SQL rows.
+Use four SQL responsibilities only:
+- store_meta: database identity and format/encoding contract;
+- blocks: immutable authenticated CID-to-bytes;
+- recovery_domains: domain identity, lineage, revision, content revision,
+  durable allocation ceiling and domain snapshot root;
+- public_owners: domain plus public owner, epoch and immutable surface root.
 
-Publish raw artifacts and immutable evidence durably before committing their
-references. Retain and account for abandoned staged objects; there is no new
-online collector or publication-time deletion in this work.
+Declarations live once as immutable blocks addressed by a domain declaration-map
+root. Surface blocks reference declaration tip, compiler context, binding-winner
+map and source-instance map. Public owner/epoch stay outside immutable surface
+content so authorized owner transfer can preserve the content root. Delete
+duplicate SQL artifacts, edges, winners, source and staging tables: they have no
+independent query consumer.
 
-The issuer prepares `PreparedRecoveryDelta` from changed facts, an exact base
-owner/revision and already prepared resident changes. The store exposes typed
-not-committed, committed, visible-but-durability-unconfirmed and outcome-unknown
-dispositions. Unknown/unconfirmed dispositions fence further publication and
-allocation until reconciled. Do not replay compiler work or effects.
+A stable root-domain identity survives root host reincarnation. Fresh independent
+machines use the existing SessionId issuer and refuse collisions; actors sharing
+a machine share its domain. Qualify every mutable SQL key/CAS by domain.
+Database location, canonical host run root and exact compiler artifact directory
+are distinct inputs. Preserve child directory and held host lease checks.
+Startup tests domain absence, not database-file absence.
 
-After successful COMMIT, install preprepared live state without an ordinary
-fallible operation or checkpoint between commit and activation. A later cleanup
-or activation problem must preserve the committed disposition. Compare the
-relevant exact owner/public epoch/store revision; stale staging can retry held
-facts without rerunning effects.
+One run-owned store serializes its short write transactions; no compiler work,
+evidence construction or long-lived capture runs inside a transaction.
+Use TransactionBehavior::Immediate, prepared statements and SQLite constraints.
+Full-u64 scalars use big-endian eight-byte BLOBs with strict storage-class/length
+checks. Prepare artifacts durably, encoded blocks and next resident state before
+the transaction. Commit immutable inserts, domain root/revision and changed
+public owner roots atomically with expected revision/epoch checks.
 
-## Generation range leases
+Publication returns Committed, Refused or RecoveryRequired. Known refusal before
+commit requires confirmed transaction closure. Any COMMIT error or failed
+rollback conservatively fences the store and invalidates outstanding publication
+tickets/leases until authenticated reopen. Do not use DropBehavior::Commit or
+infer durability from a revision SELECT. Successful WAL/FULL commit immediately
+installs already prepared resident state, without a fallible checkpoint or
+materialization step. Checkpointing is maintenance.
 
-An opaque non-cloneable lease belongs to one SessionLib/store/admission owner.
-Keep durable reserved ceiling `C` separate from consumed generation `U`;
-`DeclLog::generation()` and `next_module()` retain consumed-cursor semantics.
-Prepare only the requested reserved slots. For request `n`, checked-add `U+n`;
-if it exceeds `C`, durably extend by at least the shortage and normally 64 IDs,
-capped at the remaining `u64` space. Requests larger than 64 and a final partial
-range are valid. Consume a confirmed tail at `u64::MAX`, then return typed
-exhaustion. Remove unchecked prediction arithmetic.
+Keep consumed generation U distinct from durable reserved ceiling C. Reserve
+normally 64 IDs before exposure; support larger requests and the last partial
+range with checked full-u64 arithmetic. In-range consumption writes no metadata.
+Reopen starts at C, burning the unused tail. Children inherit a conservative
+floor, not a parent's lease. Install imported floors before local issuance.
+Publication never lowers C to U.
 
-Consumption inside a confirmed range writes no durable metadata. Restart sets
-the consumed floor to the durable ceiling, burning the unused tail. Ordinary
-publication cannot lower the ceiling to the live cursor. Unconfirmed visible
-reservations expose no IDs and fence use pending confirmation; unknown outcomes
-also fence. A child inherits a conservative durable floor, never its parent's
-lease. Imported floors are installed before local issuance. An unused lease may
-be discarded and raised; a floor change cannot repair already exposed collisions.
+## Recovery, retention and catalogs
 
-## Harness and test tooling
+Keep immutable blocks for the run lifetime and account disk/orphan usage; no
+online collector or per-block refcount protocol. Native/mutable resources retain
+their existing lifetime owners. Verify CID bytes on fresh reads/keyed writes and
+retain verification with the owning immutable receipt. Distinguish missing
+blocks, storage errors, malformed encoding and integrity refusal.
 
-On the compatible Harness lineage, establish fixed FULL writer durability and
-an admission barrier for stores previously written with NORMAL. Remove the
-per-binding full checkpoint and mode restoration from successful acknowledgement.
-Keep exact retry authorization and typed committed outcomes. Measure ordinary
-write impact. Pin only the reviewed compatible commit; canonical Harness main
-has independent unjoined API changes and is not an interchangeable ancestor.
+Hydrate active/public selected closures and requested captures. Historical
+declarations retain typed roots rather than eagerly expanded contexts. Shared
+block/proof observations are reused in one recovery acquisition; no long-lived
+SQL read transaction belongs to a capture.
 
-Repair property runner source/persistence identity through the owning runner.
-Prove a deliberately failing case writes a replayable seed through the declared
-native command, then replay it. Absence of a warning alone is insufficient.
+Production roots come only from the pinned owning materializer or authenticated
+matched catalog producer. Verify content, library shape and exact semantic
+facts/custody. Do not rebuild canonical HAMTs during ordinary cold recovery.
+Canonical rebuild and independent lookup/enumeration checks belong to properties
+and qualification. This work does not add arbitrary external-root admission.
 
-## Acceptance and bounded completion
+Catalog evidence uses the same blocks/encoding in a closed self-contained
+read-only SQLite block image. Verify/import the reachable closure once into run
+blocks; children share roots thereafter. Keep raw GHC/native file materialization
+under its existing owner. Publish the image in DELETE journal format; never
+copy only a live WAL database's main file.
 
-Use production issuers and independently expressed models. Cover graph cycles,
-diamonds, sharing, shadowing, group/carrier scope differences, explicit empty
-contexts, cross-branch histories, retirement and cold reopening. Mutate valid
-facts to prove refusal sensitivity. Cover fault schedules around evidence
-durability, transaction commit and activation; cancellation, stale and sibling
-publication; and range no-reuse, overflow and restart histories.
+Bump affected recovery, exact evidence and catalog contracts together through
+their owning writers. Refuse incompatible state before writer PRAGMAs. Old runs
+keep matching old binaries; no migration or dual writers. Regenerable caches may
+rebuild after explicit format refusal.
 
-Record bytes encoded, hashed, validated, read and written and rows/edges visited
-separately. Small publication/reservation work must be bounded by changed facts
-rather than retained history. Measure cold reconstruction independently.
+## Delivery and acceptance
 
-The matched release requires the current 29 correctness cases, the one-child
-preflight before prepared-child acceptance, catalog acceptance, affected prepared
-corpus checks, both Harness performance workloads and the staged real Sol root,
-two Luna children and one Luna grandchild exercise. Use the central frozen bundle
-owner for exact source/profile/compiler/assets, counts, deadlines and cleanup.
-Finish the existing paired fast-dev/production performance campaign in
-`plans/compiler-harness-reuse.md`; separate queue, service, wall, allocation and
-retained RSS. Parallel correctness timing is shared-load evidence.
+Use separate provisioned worktrees. Each implementation owner compiles changed
+production and test consumers and executes focused counted checks before
+integration. Root integrates and verifies cross-boundary behavior. No build-owner
+permission queue: parallelize against measured host/cgroup headroom.
 
-Deliver the baseline when qualified; qualify and annotate the final structural
-release independently. Remove obsolete writers, cumulative proof encoders,
-duplicate test setup and superseded plan material on final integration. Additional
-work in this capstone requires a concrete failure, required integration repair or
-measured regression; retain unrelated audit leads without extending the gate.
+Parallel owners: exact identity/scope; persistent snapshots/materializer;
+run database/publication; leases and recovery consumers; catalog deployment;
+Harness/SQLite dependencies; properties and diagnostics. Publish concrete shared
+interfaces early. Preserve old WIP branches while deleting obsolete machinery
+from the integrated implementation.
+
+Use independent BTreeMap/recomputed graph oracles, small key domains, branching,
+replacement, deletion/reinsertion, shared-tree boundaries, cold reopen and
+equivalent histories. Compare incremental roots to canonical rebuilds and check
+lookup/enumeration agreement. Exercise actual issuer-to-consumer paths for
+duplicate carrier/ordinal groups, custody, narrow/merge/capture and recovery.
+
+Inject refusal and crash schedules around artifact durability, commit and
+activation. Check stale and sibling publication, owner transfer, cancellation,
+generation no-reuse/exhaustion, missing/corrupt blocks, format refusal and catalog
+relocation. Repair/reuse the qualified property persistence runner. Production
+fixtures come from current issuers, not handwritten blobs or authority factories.
+
+Measure encoded/hashed/read/written bytes, blocks/SQL work, allocation and wall
+time separately over growing histories. Unchanged snapshots emit no new blocks;
+confirmed range consumption emits no SQL; sparse edits do not serialize history.
+imbl diff cost follows unshared structure: cold rebuilt or broadly edited/undone
+maps can require linear work, which must be reported honestly.
+
+Require all 29 baseline cases, one-child preflight/prepared-child acceptance,
+affected corpus checks, both Harness perf workloads, and the short real Sol-root,
+two Luna-child and Luna-grandchild exercise with complete cleanup. Diagnose the
+remaining timeout/assertion failures rather than presuming storage repairs fix
+them. Qualify one exact frozen source/profile/compiler/assets bundle. Preserve
+existing human sessions until replacement qualification. Merge/push qualified
+work and create an annotated tag binding exact revisions, bundle and evidence.
+
+Completion deletes cumulative manifests/witness encoders, custom issued-delta
+chains and replay, duplicated SQL fact hydration, online commit reconciliation
+and obsolete caller/test paths. Replace superseded plan material. Additional work
+requires a concrete failure, integration repair or measured regression.
