@@ -6940,7 +6940,9 @@ mod tests {
         missing_witness.selections.clear();
         assert!(restore(&missing_witness).is_err());
         let mut altered_witness = selections[0].clone();
-        altered_witness.selections[0].dependencies.clear();
+        Arc::make_mut(&mut altered_witness.selections[0])
+            .dependencies
+            .clear();
         assert!(restore(&altered_witness).is_err());
         let mut missing_binding = bindings.clone();
         missing_binding.pop();
@@ -7206,7 +7208,7 @@ mod tests {
                     }
                     4 => {
                         let mut changed = pair.selections[index].clone();
-                        changed.selections[0].selection.0[0] ^= 1;
+                        Arc::make_mut(&mut changed.selections[0]).selection.0[0] ^= 1;
                         proptest::prop_assert!(pair.restore(&changed).is_err());
                     }
                     _ => held[index] = Some(pair.restore(&pair.selections[index]).unwrap()),

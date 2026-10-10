@@ -84,7 +84,11 @@ pub enum ArtifactBindingNode {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactGraphSelection {
-    pub selections: Vec<ArtifactSelectionPlan>,
+    #[serde(
+        serialize_with = "serialize_selection_plans",
+        deserialize_with = "deserialize_selection_plans"
+    )]
+    pub selections: Vec<Arc<ArtifactSelectionPlan>>,
     pub bindings: Vec<ArtifactBinding>,
     pub namespace: Vec<ArtifactBinding>,
     pub roots: Vec<ArtifactBinding>,
@@ -100,6 +104,25 @@ pub struct ArtifactSelectionPlan {
     pub selection: ArtifactSelectionId,
     pub nodes: Vec<ArtifactBindingNode>,
     pub dependencies: Vec<(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)>,
+}
+
+fn serialize_selection_plans<S: serde::Serializer>(
+    plans: &[Arc<ArtifactSelectionPlan>],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+    let mut sequence = serializer.serialize_seq(Some(plans.len()))?;
+    for plan in plans {
+        sequence.serialize_element(plan.as_ref())?;
+    }
+    sequence.end()
+}
+
+fn deserialize_selection_plans<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<Arc<ArtifactSelectionPlan>>, D::Error> {
+    Vec::<ArtifactSelectionPlan>::deserialize(deserializer)
+        .map(|plans| plans.into_iter().map(Arc::new).collect())
 }
 
 /// Content-bound original group selection. These serialized facts grant no
@@ -2252,7 +2275,7 @@ impl ArtifactInventory {
             }
             if selection_identity(&complete, witness.selection) != witness.selection
                 || witnesses
-                    .insert(witness.selection, (Arc::new(witness.clone()), complete))
+                    .insert(witness.selection, (Arc::clone(witness), complete))
                     .is_some()
             {
                 return Err(failure(
@@ -3003,11 +3026,12 @@ impl ArtifactView {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .map(|selection| {
-                    (**state
-                        .selection_plans
-                        .get(&selection)
-                        .expect("issued selection plan"))
-                    .clone()
+                    Arc::clone(
+                        state
+                            .selection_plans
+                            .get(&selection)
+                            .expect("issued selection plan"),
+                    )
                 })
                 .collect(),
             bindings: nodes
@@ -4852,11 +4876,29 @@ mod tests {
                 vec![entry("Root", &["Child"]), entry("Child", &[])],
             )
             .unwrap();
+        let issued = ExactArtifactSelection::capture(&view);
+        assert!(Arc::ptr_eq(
+            &issued.graph_selection().selections[0],
+            &view.capture_graph_selection().selections[0],
+        ));
+        let encoded = serde_json::to_vec(issued.graph_selection()).unwrap();
+        let decoded = ExactArtifactSelection::from_recovered_graph_selection(
+            serde_json::from_slice(&encoded).unwrap(),
+        );
+        assert_eq!(decoded, issued);
+        let reopened = view.select_issued(view.artifact_ids(), &decoded).unwrap();
+        assert_eq!(
+            reopened.capture_graph_selection(),
+            view.capture_graph_selection()
+        );
         for mutation in 0..3 {
             let mut graph = view.capture_graph_selection();
             let mut edges = view.binding_dependencies();
             match mutation {
-                0 => graph.selections[0].selection = ArtifactSelectionId([0xee; 32]),
+                0 => {
+                    Arc::make_mut(&mut graph.selections[0]).selection =
+                        ArtifactSelectionId([0xee; 32])
+                }
                 1 => edges.clear(),
                 _ => {
                     let extra = ArtifactInventory::default();
@@ -4868,12 +4910,81 @@ mod tests {
                         .extend(extra.capture_graph_selection().selections);
                 }
             }
+            let transported = ExactArtifactSelection::from_recovered_graph_selection(
+                serde_json::from_slice(&serde_json::to_vec(&graph).unwrap()).unwrap(),
+            );
             let recovered = ArtifactInventory::default();
             assert!(recovered
-                .recover_selection(&recovered.empty_view(), view.entries(), &graph, &edges)
+                .recover_selection(
+                    &recovered.empty_view(),
+                    view.entries(),
+                    transported.graph_selection(),
+                    &edges,
+                )
                 .is_err());
             assert_eq!(recovered.node_count(), 0, "mutation={mutation}");
         }
+    }
+
+    #[test]
+    fn incremental_binding_plans_keep_complete_inherited_witnesses() {
+        let inventory = ArtifactInventory::default();
+        let mut view = inventory
+            .admit(
+                &inventory.empty_view(),
+                (0..12)
+                    .map(|index| entry(&format!("Base{index}"), &[]))
+                    .collect(),
+            )
+            .unwrap();
+        for generation in 0..4 {
+            if generation != 0 {
+                view = inventory
+                    .admit(&view, vec![entry(&format!("Added{generation}"), &[])])
+                    .unwrap();
+            }
+            let graph = view.capture_graph_selection();
+            let observed = view.capture_graph_selection();
+            for (issued, borrowed) in graph.selections.iter().zip(&observed.selections) {
+                assert!(Arc::ptr_eq(issued, borrowed));
+            }
+            let mut plan_sizes = graph
+                .selections
+                .iter()
+                .map(|plan| plan.nodes.len())
+                .collect::<Vec<_>>();
+            plan_sizes.sort();
+            assert_eq!(plan_sizes, (12..=12 + generation).collect::<Vec<_>>());
+            assert_eq!(graph.bindings.len(), 12 + generation);
+            let unique_witness_bytes = graph
+                .selections
+                .iter()
+                .map(|plan| serde_json::to_vec(plan.as_ref()).unwrap().len())
+                .sum::<usize>();
+            eprintln!("binding-plan-history generation={generation} live_bindings={} plans={} unique_witness_nodes={} unique_witness_bytes={unique_witness_bytes}",
+                graph.bindings.len(), graph.selections.len(), plan_sizes.iter().sum::<usize>());
+            let restored_inventory = ArtifactInventory::default();
+            let restored = restored_inventory
+                .recover_selection(
+                    &restored_inventory.empty_view(),
+                    view.entries(),
+                    &graph,
+                    &view.binding_dependencies(),
+                )
+                .unwrap();
+            assert_eq!(restored.capture_graph_selection(), graph);
+            for (issued, restored) in graph
+                .selections
+                .iter()
+                .zip(&restored.capture_graph_selection().selections)
+            {
+                assert!(Arc::ptr_eq(issued, restored));
+            }
+            drop(restored);
+            assert_eq!(restored_inventory.node_count(), 0);
+        }
+        drop(view);
+        assert_eq!(inventory.node_count(), 0);
     }
 
     proptest::proptest! {
