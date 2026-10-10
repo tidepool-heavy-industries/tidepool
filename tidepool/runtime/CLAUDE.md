@@ -61,3 +61,10 @@ Recovery publication reuses canonical interface references emitted by native
 product materialization only for the exact artifact identity in that same
 compiler context. The materialization owner preserves durable filenames and
 independent interfaces; callers do not supply unverified references to skip IO.
+
+Execution intent retains the exact original declaration and value identities.
+A declaration publication attempt captures its current public predecessors
+before issuing its own join identity. Restaging allocates a fresh attempt;
+stale, refused and cancelled attempts burn their reservations without rerunning
+private execution. Recovery declarations remain an append-only causal DAG:
+parents and implementation references identify previously issued declarations.

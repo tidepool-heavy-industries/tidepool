@@ -46,7 +46,8 @@ struct AuthoredWrite {
 }
 
 /// Immutable final execution writes. A public retry changes only its merge
-/// baseline, never this private suffix, exact winners, leases, or reserved ID.
+/// baseline, never this private suffix, exact winners, leases, or effects.
+/// Each captured publication attempt reserves its own causal join identity.
 /// The private scope keeps live roots owned until publication or abandonment.
 pub struct FinalExecutionIntent {
     owner: Arc<super::admission::RuntimeAdmissionOwner>,
@@ -64,7 +65,6 @@ pub struct FinalExecutionIntent {
     source_keys: Vec<SourceLeaseKey>,
     head_replacements: Vec<DeclarationHeadReplacement>,
     _completed_values: Vec<super::admission::CertifiedPrivateValueProof>,
-    reserved: Generation,
 }
 
 /// Name-winning publication is separate from an exact withdrawal. A runtime
@@ -440,9 +440,6 @@ impl FinalExecutionIntent {
         &self.write_ids
     }
 
-    pub fn reserved_generation(&self) -> Generation {
-        self.reserved
-    }
     pub fn admitted_public(&self) -> &PublicVisibilitySnapshot {
         &self.admitted
     }
@@ -682,11 +679,6 @@ impl PersistentSession {
                 &source_keys,
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
-        let reserved = if self.lib().durable_graph.is_some() {
-            self.lib_mut().reserve_join_generation_durable()?
-        } else {
-            self.lib_mut().log.reserve()
-        };
         Ok(Arc::new(FinalExecutionIntent {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
@@ -706,7 +698,6 @@ impl PersistentSession {
             write_ids,
             source_keys,
             head_replacements,
-            reserved,
         }))
     }
 
@@ -769,15 +760,14 @@ impl PersistentSession {
         if intent.durable_owner != owner {
             return Err(SessionError::WrongPublicManifestTicket);
         }
-        let public = self.snapshot_publication_target(
+        let mut public = self.snapshot_publication_target(
             owner,
             intent.admitted.scope,
             intent.private.scope,
             intent.write_ids.clone(),
             intent.source_keys.clone(),
         )?;
-        if public.expected_private != intent.private || !self.lib().log.is_reserved(intent.reserved)
-        {
+        if public.expected_private != intent.private {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let current_public = tip(self.lib(), public.expected_public.declaration_tip)?;
@@ -791,9 +781,10 @@ impl PersistentSession {
         for write in &intent.writes {
             surface = extend_admitted_surface(&write.evidence, surface)?;
         }
+        let reserved = self.lib_mut().reserve_join_for_publication(&mut public)?;
         let expected_public_version = paired_version(&public);
         Ok(DeclarationPublicationBase {
-            reserved: intent.reserved,
+            reserved,
             public,
             intent,
             current_public,
@@ -1116,6 +1107,9 @@ impl DeclarationPublicationBase {
 }
 
 impl AcceptedDeclarationPublication {
+    pub fn reserved_generation(&self) -> Generation {
+        self.base.reserved
+    }
     pub fn intent(&self) -> &Arc<FinalExecutionIntent> {
         &self.base.intent
     }
@@ -1599,6 +1593,7 @@ mod tests {
                 publication.receipt,
                 PublicationEvidence::ReusedProjection { .. }
             ));
+            let published_generation = publication.reserved_generation();
             let commit = session
                 .publish_staged_public_manifest(publication.stage().unwrap(), &decision)
                 .unwrap();
@@ -1607,10 +1602,7 @@ mod tests {
                 PublicManifestCommit::Ephemeral | PublicManifestCommit::Durable
             ));
             assert_eq!(decision.phase(), PublicationPhase::Published);
-            assert_eq!(
-                session.lib().scope_tip(public),
-                intent.reserved_generation()
-            );
+            assert_eq!(session.lib().scope_tip(public), published_generation);
             assert_eq!(
                 session.lib().import_line_in(public).unwrap(),
                 format!("import {}", projection.module_name())
@@ -1642,7 +1634,7 @@ mod tests {
                     session.public_visibility_snapshot_in(public).unwrap().epoch
                 );
                 let graph = crate::session::recovery_test_fixture::graph(session.lib());
-                let summary = graph.node(intent.reserved_generation()).unwrap().unwrap();
+                let summary = graph.node(published_generation).unwrap().unwrap();
                 assert_eq!(summary.kind, recovery::RecoveryNodeKind::Join);
                 assert_eq!(summary.parent, None);
             }
@@ -1700,6 +1692,7 @@ mod tests {
             PublicationEvidence::ReusedProjection { .. }
         ));
         let module = publication.receipt.reserved().module.clone();
+        let published_generation = publication.reserved_generation();
         assert!(matches!(
             session
                 .publish_staged_public_manifest(
@@ -1724,10 +1717,7 @@ mod tests {
         .unwrap();
         let mut reopened = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = reopened.recover_public_scope(&owner).unwrap();
-        assert_eq!(
-            reopened.lib().scope_tip(public),
-            intent.reserved_generation()
-        );
+        assert_eq!(reopened.lib().scope_tip(public), published_generation);
         assert_eq!(
             reopened.lib().import_line_in(public).unwrap(),
             format!("import {module}")
@@ -1735,7 +1725,7 @@ mod tests {
         let exports = reopened
             .lib()
             .log
-            .certified_exports_at(intent.reserved_generation())
+            .certified_exports_at(published_generation)
             .unwrap();
         assert_eq!(
             exports
@@ -1762,6 +1752,7 @@ mod tests {
             &publication.receipt,
             PublicationEvidence::ReusedProjection { .. }
         ));
+        let continuation_generation = publication.reserved_generation();
         assert!(matches!(
             reopened
                 .publish_staged_public_manifest(
@@ -1771,10 +1762,7 @@ mod tests {
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
-        assert_eq!(
-            reopened.lib().scope_tip(public),
-            continuation.reserved_generation()
-        );
+        assert_eq!(reopened.lib().scope_tip(public), continuation_generation);
     }
 
     #[test]
@@ -1867,6 +1855,7 @@ mod tests {
             .children
             .iter()
             .any(|child| child.occurrence == "PublicFamily"));
+        let published_generation = publication.reserved_generation();
         assert!(matches!(
             session
                 .publish_staged_public_manifest(
@@ -1882,7 +1871,7 @@ mod tests {
             format!("import {}", projection.module_name())
         );
         let graph = crate::session::recovery_test_fixture::graph(session.lib());
-        let summary = graph.node(intent.reserved_generation()).unwrap().unwrap();
+        let summary = graph.node(published_generation).unwrap().unwrap();
         assert_eq!(summary.instances.classes.len(), 1);
         assert_eq!(summary.instances.selected_family_axioms.len(), 1);
         assert_eq!(
@@ -1908,28 +1897,63 @@ mod tests {
             tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement)).unwrap();
             let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
             let public = session.mint_scope(ScopeId::ROOT).unwrap();
+            let owner = RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse("root/generated-attempts").unwrap(), 1).unwrap();
+            session.initialize_durable_public_scope(owner.clone(), public).unwrap();
             let execution = session.begin_private_execution(public).unwrap();
             let mut winners = BTreeMap::new();
+            let mut insertion_order = Vec::new();
+            let mut private_generations = Vec::new();
             for (name, value) in writes {
                 let occurrence = format!("answer{name}");
                 let generation = commit_certified_source(&mut session, execution.private_scope(), &format!("{occurrence} :: Int\n{occurrence} = {value}"));
                 winners.insert(occurrence, generation);
+                insertion_order.push(generation);
+                private_generations.push(generation);
             }
             let intent = session.freeze_execution_intent(&execution, vec![], vec![]).unwrap();
+            let private = session.public_visibility_snapshot_in(execution.private_scope()).unwrap();
+            let old = accepted(session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap());
+            let old_generation = old.reserved_generation();
+            let old = old.stage().unwrap();
+            let mut current_public_generation = None;
             if contended {
                 let concurrent = session.begin_private_execution(public).unwrap();
-                commit_certified_source(&mut session, concurrent.private_scope(), "concurrent :: Int\nconcurrent = 7");
+                let original = commit_certified_source(&mut session, concurrent.private_scope(), "concurrent :: Int\nconcurrent = 7");
+                insertion_order.push(original);
                 let concurrent_intent = session.freeze_execution_intent(&concurrent, vec![], vec![]).unwrap();
-                let ExecutionPublication::Declarations(base) = session.restage_ephemeral_execution_publication(concurrent_intent).unwrap() else { panic!("concurrent declaration") };
+                let base = session.restage_declaration_publication(owner.clone(), concurrent_intent).unwrap();
                 let concurrent_publication = accepted(base);
                 proptest::prop_assert!(matches!(&concurrent_publication.receipt, PublicationEvidence::ReusedProjection { .. }), "concurrent winner itself is unchanged");
-                session.publish_staged_public_manifest(concurrent_publication.stage().unwrap(), &PublicationDecision::new()).unwrap();
+                let generation = concurrent_publication.reserved_generation();
+                proptest::prop_assert!(matches!(session.publish_staged_public_manifest(concurrent_publication.stage().unwrap(), &PublicationDecision::new()).unwrap(), PublicManifestCommit::Durable));
+                insertion_order.push(generation);
+                current_public_generation = Some(generation);
             }
-            let ExecutionPublication::Declarations(base) = session.restage_ephemeral_execution_publication(intent.clone()).unwrap() else { panic!("authored publication") };
+            let old_decision = PublicationDecision::new();
+            if !contended { old_decision.request_cancellation(); }
+            let old_outcome = session.publish_staged_public_manifest(old, &old_decision).unwrap();
+            proptest::prop_assert!(matches!(old_outcome, PublicManifestCommit::Stale) && contended || matches!(old_outcome, PublicManifestCommit::Cancelled) && !contended);
+            let cancelled = accepted(session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap());
+            let cancelled_generation = cancelled.reserved_generation();
+            proptest::prop_assert!(Arc::ptr_eq(cancelled.intent(), &intent));
+            let cancellation = PublicationDecision::new(); cancellation.request_cancellation();
+            proptest::prop_assert!(matches!(session.publish_staged_public_manifest(cancelled.stage().unwrap(), &cancellation).unwrap(), PublicManifestCommit::Cancelled));
+            let refused = accepted(session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap());
+            let refused_generation = refused.reserved_generation();
+            let refused = refused.stage().unwrap();
+            let before_refusal = recovery.state();
+            recovery.store.inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
+            proptest::prop_assert!(matches!(session.publish_staged_public_manifest(refused, &PublicationDecision::new()).unwrap(), PublicManifestCommit::Refused { .. }), "known pre-COMMIT refusal");
+            proptest::prop_assert_eq!(recovery.state(), before_refusal);
+            proptest::prop_assert_eq!(session.public_visibility_snapshot_in(execution.private_scope()).unwrap(), private);
+            let base = session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap();
             let selection = base.selected_facts().unwrap();
             let CertifiedDeclarationPublication::Accepted(oracle) = tidepool_testing::with_settlement(|settlement| base.certify_new_join(selection, settlement)).unwrap() else { panic!("GHC oracle refused") };
-            let ExecutionPublication::Declarations(base) = session.restage_ephemeral_execution_publication(intent.clone()).unwrap() else { panic!("authored publication") };
+            let base = session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap();
             let reused = accepted(base);
+            let generation = reused.reserved_generation();
+            proptest::prop_assert!(generation > refused_generation && refused_generation > cancelled_generation && cancelled_generation > old_generation);
+            proptest::prop_assert!(Arc::ptr_eq(reused.intent(), &intent));
             proptest::prop_assert_eq!(matches!(&reused.receipt, PublicationEvidence::ReusedProjection { .. }), !contended, "full changed public snapshot must force a new join");
             proptest::prop_assert_eq!(canonical_exports(reused.receipt.exports()), canonical_exports(oracle.receipt.exports()));
             proptest::prop_assert_eq!(reused.receipt.instances(), oracle.receipt.instances());
@@ -1938,7 +1962,22 @@ mod tests {
                 let export = reused.receipt.exports().iter().find(|export| export.head.occurrence == name).unwrap();
                 proptest::prop_assert_eq!(&export.head.module, &SessionModule::lib(generation).module_name());
             }
-            proptest::prop_assert!(matches!(session.publish_staged_public_manifest(reused.stage().unwrap(), &PublicationDecision::new()).unwrap(), PublicManifestCommit::Ephemeral));
+            proptest::prop_assert!(matches!(session.publish_staged_public_manifest(reused.stage().unwrap(), &PublicationDecision::new()).unwrap(), PublicManifestCommit::Durable));
+            insertion_order.push(generation);
+            let cold = recovery::load_domain_graph(Arc::new(crate::session::RunRecoveryStore::open(recovery.store.path()).unwrap()), crate::session::RecoveryDomainId::Root).unwrap();
+            let node = cold.node(generation).unwrap().unwrap();
+            let expected_refs = private_generations.into_iter().chain(current_public_generation).collect::<Vec<_>>();
+            proptest::prop_assert_eq!(&node.implementation_refs, &expected_refs);
+            // The independent model records when facts became durable. It does
+            // not duplicate the writer's numeric generation predicate.
+            for dependency in &node.implementation_refs {
+                proptest::prop_assert!(insertion_order.iter().position(|id| id == dependency).unwrap() < insertion_order.iter().position(|id| *id == generation).unwrap());
+            }
+            proptest::prop_assert!(cold.node(old_generation).unwrap().is_none());
+            proptest::prop_assert!(cold.node(cancelled_generation).unwrap().is_none());
+            proptest::prop_assert!(cold.node(refused_generation).unwrap().is_none());
+            proptest::prop_assert_eq!(cold.surface(&owner).unwrap().unwrap().declaration_root, Some(generation));
+            cold.context(&node.context_root).unwrap();
         }
     }
 
@@ -2427,6 +2466,7 @@ mod tests {
             .iter()
             .any(|export| export.head.occurrence == "laterUnrelated"
                 && export.head.module == SessionModule::lib(original).module_name()));
+        let published_generation = publication.reserved_generation();
         assert!(matches!(
             session
                 .publish_staged_public_manifest(
@@ -2436,10 +2476,7 @@ mod tests {
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
-        assert_eq!(
-            session.lib().scope_tip(public),
-            intent.reserved_generation()
-        );
+        assert_eq!(session.lib().scope_tip(public), published_generation);
         assert!(session
             .public_visibility_snapshot_in(public)
             .unwrap()
@@ -3217,14 +3254,13 @@ mod tests {
         assert!(Arc::ptr_eq(&intent, &repeated));
         assert_eq!(session.lib().log.generation(), high_water);
         assert!(session.freeze_execution_intent(&a, vec![], vec![]).is_err());
-        let reserved = intent.reserved_generation();
         let old_a = accepted(
             session
                 .restage_declaration_publication(owner.clone(), intent.clone())
                 .unwrap(),
-        )
-        .stage()
-        .unwrap();
+        );
+        let original_attempt = old_a.reserved_generation();
+        let old_a = old_a.stage().unwrap();
 
         let b_original = commit_source(
             &mut session,
@@ -3242,7 +3278,8 @@ mod tests {
                 )
                 .unwrap(),
         );
-        assert!(b_publication.base.reserved > reserved);
+        let b_generation = b_publication.reserved_generation();
+        assert!(b_generation > original_attempt);
         assert!(matches!(
             session
                 .publish_staged_public_manifest(
@@ -3260,12 +3297,64 @@ mod tests {
             PublicManifestCommit::Stale
         ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
+        let cancelled = accepted(
+            session
+                .restage_declaration_publication(owner.clone(), intent.clone())
+                .unwrap(),
+        );
+        let cancelled_generation = cancelled.reserved_generation();
+        assert!(cancelled_generation > b_generation);
+        assert!(Arc::ptr_eq(cancelled.intent(), &intent));
+        let cancellation = PublicationDecision::new();
+        cancellation.request_cancellation();
+        assert!(matches!(
+            session
+                .publish_staged_public_manifest(cancelled.stage().unwrap(), &cancellation)
+                .unwrap(),
+            PublicManifestCommit::Cancelled
+        ));
+        assert_eq!(session.lib().scope_tip(public), b_generation);
+        let refused = accepted(
+            session
+                .restage_declaration_publication(owner.clone(), intent.clone())
+                .unwrap(),
+        );
+        let refused_generation = refused.reserved_generation();
+        assert!(refused_generation > cancelled_generation);
+        assert!(Arc::ptr_eq(refused.intent(), &intent));
+        let refused = refused.stage().unwrap();
+        let before_refusal = recovery.state();
+        recovery
+            .store
+            .inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
+        assert!(matches!(
+            session
+                .publish_staged_public_manifest(refused, &PublicationDecision::new())
+                .unwrap(),
+            PublicManifestCommit::Refused { .. }
+        ));
+        assert_eq!(recovery.state(), before_refusal);
+        assert_eq!(session.lib().scope_tip(public), b_generation);
+        assert_eq!(
+            session.public_visibility_snapshot_in(a.private_scope()),
+            Some(intent.private.clone())
+        );
+        // A new attempt may refill its allocation range. Its ticket must pin
+        // the post-reservation scalar revisions without changing causal facts.
+        let old_ceiling = session.lib().durable_allocation_ceiling().unwrap();
+        let remaining = usize::try_from(old_ceiling.0 - session.lib().generation().0).unwrap();
+        session
+            .lib_mut()
+            .reserve_declaration_generations_durable(remaining)
+            .unwrap();
         let publication = accepted(
             session
                 .restage_declaration_publication(owner.clone(), intent.clone())
                 .unwrap(),
         );
-        assert_eq!(publication.base.reserved, reserved);
+        let reserved = publication.reserved_generation();
+        assert!(reserved > old_ceiling);
+        assert!(reserved > refused_generation);
         assert!(Arc::ptr_eq(publication.intent(), &intent));
         let proof = publication.receipt.clone();
         assert_eq!(proof.instances().classes.len(), 2);
@@ -3323,15 +3412,40 @@ mod tests {
         assert!(node
             .implementation_refs
             .iter()
-            .any(|reference| *reference > reserved));
+            .all(|reference| *reference < reserved));
+        assert!(node.implementation_refs.contains(&b_generation));
         assert_eq!(node.instances.classes.len(), 2);
+        for write in &intent.writes {
+            assert!(Arc::ptr_eq(
+                &session
+                    .lib()
+                    .log
+                    .certified_authored_arc_at(write.generation)
+                    .unwrap(),
+                &write.evidence
+            ));
+        }
+        assert_eq!(intent.write_ids, [value_id]);
+        let cold = recovery::load_domain_graph(
+            Arc::new(crate::session::RunRecoveryStore::open(recovery.store.path()).unwrap()),
+            crate::session::RecoveryDomainId::Root,
+        )
+        .unwrap();
+        let cold_node = cold.node(reserved).unwrap().unwrap();
+        assert_eq!(*cold_node, *node);
+        assert!(cold.node(original_attempt).unwrap().is_none());
+        assert!(cold.node(cancelled_generation).unwrap().is_none());
+        assert!(cold.node(refused_generation).unwrap().is_none());
+        let cold_surface = cold.surface(&owner).unwrap().unwrap();
+        assert_eq!(cold_surface.declaration_root, Some(reserved));
         assert_eq!(
-            session
-                .lib()
-                .current_declaration_projection_in(public)
-                .unwrap()
-                .module_name(),
-            SessionModule::lib(reserved).module_name()
+            cold_surface.bindings["retractValue"].variable,
+            value_id.raw()
+        );
+        cold.context(&cold_node.context_root).unwrap();
+        assert_eq!(
+            session.lib().import_line_in(public).unwrap(),
+            format!("import {}", SessionModule::lib(reserved).module_name())
         );
         session.retire_scope(a.private_scope());
         assert!(session.bindings().get(value_id).is_some());

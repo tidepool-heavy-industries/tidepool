@@ -2019,7 +2019,7 @@ where
             let CertifiedDeclarationPublication::Accepted(accepted) = certified else {
                 panic!("actual original declaration/prefix publication was rejected")
             };
-            assert_eq!(accepted.intent().reserved_generation(), reserved);
+            assert_eq!(accepted.reserved_generation(), reserved);
             certification_requests = tidepool_extract_cmd::extract_spawn_count()
                 .checked_sub(submissions_before_publication)
                 .unwrap();

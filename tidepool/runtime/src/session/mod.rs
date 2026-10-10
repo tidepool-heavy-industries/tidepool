@@ -1274,6 +1274,43 @@ impl SessionLib {
         }
     }
 
+    /// Reserve the join after capturing its causal predecessors. This runs
+    /// under the same exclusive checkout, so only allocation metadata changes;
+    /// original declarations, bindings and the captured visibility stay fixed.
+    fn reserve_join_for_publication(
+        &mut self,
+        base: &mut PublicManifestBase,
+    ) -> Result<Generation, SessionError> {
+        if !self.publication_baseline_is_current(base)? {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        let reserved = if self.durable_graph.is_some() {
+            self.reserve_join_generation_durable()?
+        } else {
+            self.log.reserve()
+        };
+        base.log_revision = self
+            .log
+            .publication_revision()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        if let PublicPublicationBaseline::Durable {
+            graph,
+            store_revision,
+            allocation_ceiling,
+            ..
+        } = &mut base.target
+        {
+            let state = self
+                .durable_graph
+                .as_ref()
+                .expect("validated publication attachment");
+            *graph = state.graph.clone();
+            *store_revision = state.store_revision;
+            *allocation_ceiling = state.allocation_ceiling;
+        }
+        Ok(reserved)
+    }
+
     fn public_manifest_baseline_is_current(
         &self,
         session: SessionId,
