@@ -48,13 +48,14 @@ impl Caller {
 
 #[derive(Clone, Copy, Debug)]
 enum NativeOutcome {
-    Visible,
-    BeforeRename,
+    Committed,
+    Refused,
+    RecoveryRequired,
 }
 
 impl NativeOutcome {
-    fn visible(self) -> bool {
-        matches!(self, Self::Visible)
+    fn committed(self) -> bool {
+        matches!(self, Self::Committed)
     }
 }
 
@@ -143,8 +144,9 @@ fn op(request: usize, action: Action) -> Operation {
 
 fn operations() -> impl Strategy<Value = Operation> {
     let outcome = prop_oneof![
-        Just(NativeOutcome::Visible),
-        Just(NativeOutcome::BeforeRename)
+        Just(NativeOutcome::Committed),
+        Just(NativeOutcome::Refused),
+        Just(NativeOutcome::RecoveryRequired)
     ];
     let action = prop_oneof![
         6 => any::<bool>().prop_map(Action::Claim),
@@ -186,7 +188,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             op(0, Cancel),
             op(0, BeginAck),
             op(0, LoseWaiter),
-            op(0, Finish(NativeOutcome::Visible)),
+            op(0, Finish(NativeOutcome::Committed)),
             op(0, Deliver),
             op(0, BeginAck),
             op(0, FinishAck),
@@ -205,7 +207,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
         3 => vec![
             claim,
             op(0, LoseWaiter),
-            op(0, Finish(NativeOutcome::Visible)),
+            op(0, Finish(NativeOutcome::Committed)),
             op(0, Reconcile),
             op(0, BeginReply),
             op(0, ObserveOwner),
@@ -217,7 +219,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             claim,
             op(0, Cancel),
             op(0, BeginAck),
-            op(0, Finish(NativeOutcome::BeforeRename)),
+            op(0, Finish(NativeOutcome::Refused)),
             op(0, BeginAck),
             op(0, RollbackAck),
             op(0, BeginAck),
@@ -227,7 +229,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
         ],
         5 => vec![
             claim,
-            op(0, Finish(NativeOutcome::Visible)),
+            op(0, Finish(NativeOutcome::Committed)),
             op(0, Deliver),
             op(0, Publish),
             op(0, Claim(true)),
@@ -239,7 +241,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             claim,
             op(0, RetireTarget),
             op(0, Forget),
-            op(0, Finish(NativeOutcome::Visible)),
+            op(0, Finish(NativeOutcome::Committed)),
             op(0, ObserveOwner),
             op(0, Deliver),
             op(0, Publish),
@@ -249,7 +251,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
         7 => vec![
             claim,
             op(0, RetireOwner),
-            op(0, Finish(NativeOutcome::Visible)),
+            op(0, Finish(NativeOutcome::Committed)),
             op(0, Deliver),
             op(0, Publish),
             op(0, BeginReply),
@@ -260,14 +262,14 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             op(0, Claim(false)),
             claim,
             op(0, Claim(true)),
-            op(0, Finish(NativeOutcome::BeforeRename)),
+            op(0, Finish(NativeOutcome::Refused)),
             op(0, Deliver),
             op(0, Publish),
             op(0, BeginReply),
         ],
         9 => vec![
             claim,
-            op(0, Finish(NativeOutcome::BeforeRename)),
+            op(0, Finish(NativeOutcome::Refused)),
             op(0, Claim(true)),
             op(0, Deliver),
             op(0, Publish),
@@ -278,7 +280,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             op(1, Claim(true)),
             op(0, RetireTarget),
             op(1, LoseWaiter),
-            op(1, Finish(NativeOutcome::Visible)),
+            op(1, Finish(NativeOutcome::Committed)),
             op(1, Deliver),
             op(1, Publish),
             op(0, DropNativeLease),
@@ -297,7 +299,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             }
             core.extend([
                 claim,
-                op(0, Finish(NativeOutcome::Visible)),
+                op(0, Finish(NativeOutcome::Committed)),
                 op(0, Cancel),
                 op(0, BeginAck),
                 op(0, ObserveOwner),
@@ -311,7 +313,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
         12 => vec![
             claim,
             op(0, LoseWaiter),
-            op(0, Decide(NativeOutcome::Visible)),
+            op(0, Decide(NativeOutcome::Committed)),
             op(0, BeginReply),
             op(0, FinishToken),
             op(0, Deliver),
@@ -321,7 +323,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
         13 => vec![
             claim,
             op(0, LoseWaiter),
-            op(0, Decide(NativeOutcome::Visible)),
+            op(0, Decide(NativeOutcome::Committed)),
             op(0, Cancel),
             op(0, BeginAck),
             op(0, ObserveOwner),
@@ -341,7 +343,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             op(0, FinishToken),
             op(0, Deliver),
             op(0, Publish),
-            op(0, Decide(NativeOutcome::BeforeRename)),
+            op(0, Decide(NativeOutcome::Refused)),
             op(0, Reconcile),
             op(0, BeginReply),
         ],
@@ -349,7 +351,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             claim,
             op(1, Claim(true)),
             op(0, DropNativeLease),
-            op(1, Decide(NativeOutcome::Visible)),
+            op(1, Decide(NativeOutcome::Committed)),
             op(0, ObserveOwner),
             op(0, Reconcile),
             op(1, Reconcile),
@@ -360,7 +362,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
         ],
         17 => vec![
             claim,
-            op(0, Finish(NativeOutcome::Visible)),
+            op(0, Finish(NativeOutcome::Committed)),
             op(0, FenceOwner),
             op(0, ObserveOwner),
             op(0, Reconcile),
@@ -373,7 +375,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             op(0, LoseWaiter),
             op(0, FenceOwner),
             op(0, ObserveOwner),
-            op(0, Finish(NativeOutcome::Visible)),
+            op(0, Finish(NativeOutcome::Committed)),
             op(0, Deliver),
             op(0, Reconcile),
             op(0, BeginReply),
@@ -439,7 +441,7 @@ enum NativeFact {
     LeaseLost,
     CancellationRequested,
     Decided(NativeOutcome),
-    Reconciled { owner_ready: bool },
+    Reconciled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -447,17 +449,13 @@ enum ExpectedNative {
     NotClaimed,
     InFlight,
     Unknown,
-    VisibleUnconfirmed,
-    VisibleConfirmed,
+    Committed,
     Refused,
 }
 
 impl ExpectedNative {
     fn fenced(self) -> bool {
-        matches!(
-            self,
-            Self::InFlight | Self::Unknown | Self::VisibleUnconfirmed
-        )
+        matches!(self, Self::InFlight | Self::Unknown)
     }
 }
 
@@ -486,8 +484,8 @@ impl NativeFacts {
     }
 
     // Accepted native outcomes are independent of waiter/token lifetime and
-    // registry cache refresh. Owner readiness alone cannot supply visibility.
-    fn observed(&self, owner_ready: bool) -> ExpectedNative {
+    // registry cache refresh. A confirmed transaction remains authoritative after a fence.
+    fn observed(&self) -> ExpectedNative {
         if !self
             .accepted
             .iter()
@@ -496,14 +494,9 @@ impl NativeFacts {
             return ExpectedNative::NotClaimed;
         }
         match self.decision() {
-            Some((_, outcome)) if outcome.visible() => {
-                if owner_ready || self.cache() == ExpectedCache::Published {
-                    ExpectedNative::VisibleConfirmed
-                } else {
-                    ExpectedNative::VisibleUnconfirmed
-                }
-            }
-            Some(_) => ExpectedNative::Refused,
+            Some((_, outcome)) if outcome.committed() => ExpectedNative::Committed,
+            Some((_, NativeOutcome::Refused)) => ExpectedNative::Refused,
+            Some((_, NativeOutcome::RecoveryRequired)) => ExpectedNative::Unknown,
             None if self
                 .accepted
                 .iter()
@@ -527,11 +520,11 @@ impl NativeFacts {
         }
         if let Some((index, outcome)) = self.decision() {
             let terminal = self.accepted[index + 1..].iter().any(|fact| match fact {
-                NativeFact::Reconciled { owner_ready } => !outcome.visible() || *owner_ready,
+                NativeFact::Reconciled => !matches!(outcome, NativeOutcome::RecoveryRequired),
                 _ => false,
             });
             if terminal {
-                return if outcome.visible() {
+                return if outcome.committed() {
                     ExpectedCache::Published
                 } else {
                     ExpectedCache::Refused
@@ -541,8 +534,8 @@ impl NativeFacts {
         ExpectedCache::Retained
     }
 
-    fn reconcile(&mut self, owner_ready: bool) {
-        self.accepted.push(NativeFact::Reconciled { owner_ready });
+    fn reconcile(&mut self) {
+        self.accepted.push(NativeFact::Reconciled);
     }
 }
 
@@ -698,13 +691,13 @@ struct Coverage {
     confirmations_after_lost_waiter: usize,
     deliveries_to_lost_waiter: usize,
     unknown_with_ready_owner: usize,
-    known_unconfirmed_with_pending_owner: usize,
+    unknown_with_fenced_owner: usize,
     fenced_replies: usize,
     fenced_acknowledgements: usize,
     native_finishes: BTreeMap<&'static str, usize>,
     owner_observations: usize,
     owner_fences: usize,
-    claims_refused_after_fence: usize,
+    tentative_claims_after_fence: usize,
     confirmed_outcomes_preserved_after_fence: usize,
     native_cancellations: usize,
     releases_without_token_finish: usize,
@@ -794,13 +787,13 @@ fn run_history(
                         model
                             .target_eligibility()
                             .map_err(ExpectedClaimRefusal::Request)?;
-                        if model.native.observed(owner_ready) != ExpectedNative::NotClaimed {
+                        if model.native.observed() != ExpectedNative::NotClaimed {
                             return Err(ExpectedClaimRefusal::Request(ReplyError::AlreadySettled));
                         }
                         if shutdown[key] {
                             Err(ExpectedClaimRefusal::Retired)
                         } else {
-                            Ok(permit && owner_ready)
+                            Ok(permit)
                         }
                     });
                 let (resources, decision) = fixture.fresh_resources();
@@ -865,9 +858,9 @@ fn run_history(
                         sender: Some(sender),
                     });
                     coverage.claims += 1;
+                    coverage.tentative_claims_after_fence += usize::from(!owner_ready);
                 } else if actual_result == Ok(false) {
                     coverage.claim_control_refusals += 1;
-                    coverage.claims_refused_after_fence += usize::from(!owner_ready);
                 }
             }
             Action::Finish(outcome) | Action::Decide(outcome) => {
@@ -876,25 +869,39 @@ fn run_history(
                     .filter(|cap| cap.claim.is_some())
                 {
                     let model = &mut facts[cap.request];
-                    let claim = cap.claim.take().unwrap();
-                    if outcome.visible() {
-                        claim.published();
+                    let outcome = if matches!(outcome, NativeOutcome::Committed) && !owner_ready {
+                        NativeOutcome::RecoveryRequired
                     } else {
-                        claim.before_rename_failure();
+                        outcome
+                    };
+                    if matches!(outcome, NativeOutcome::RecoveryRequired) && owner_ready {
+                        fixture.make_pending();
+                        owner_ready = false;
+                        coverage.owner_fences += 1;
+                    }
+                    let claim = cap.claim.take().unwrap();
+                    match outcome {
+                        NativeOutcome::Committed => {
+                            claim.published();
+                        }
+                        NativeOutcome::Refused => {
+                            claim.before_rename_failure();
+                        }
+                        NativeOutcome::RecoveryRequired => drop(claim),
                     }
                     model.native.accepted.push(NativeFact::Decided(outcome));
                     if matches!(action, Action::Finish(_)) {
                         if let Some(lease) = cap.lease.take() {
                             cap.completion = Some(lease.finish());
-                            model.native.reconcile(owner_ready);
+                            model.native.reconcile();
                         }
                     }
                     coverage.finishes_after_lost_waiter += usize::from(cap.waiter_lost);
                     coverage.completion_after_forgetting += usize::from(model.forgotten());
                     let partition = match outcome {
-                        NativeOutcome::Visible if owner_ready => "visible_confirmed",
-                        NativeOutcome::Visible => "visible_unconfirmed",
-                        NativeOutcome::BeforeRename => "before_rename",
+                        NativeOutcome::Committed => "committed",
+                        NativeOutcome::RecoveryRequired => "recovery_required",
+                        NativeOutcome::Refused => "refused",
                     };
                     *coverage.native_finishes.entry(partition).or_default() += 1;
                 } else {
@@ -907,7 +914,7 @@ fn run_history(
                     .filter(|cap| cap.lease.is_some())
                 {
                     cap.completion = Some(cap.lease.take().unwrap().finish());
-                    facts[cap.request].native.reconcile(owner_ready);
+                    facts[cap.request].native.reconcile();
                 } else {
                     *coverage.logical_refusals.entry(action.name()).or_default() += 1;
                 }
@@ -919,7 +926,7 @@ fn run_history(
                 {
                     if cap.lease.is_some() {
                         drop(cap.lease.take());
-                        facts[cap.request].native.reconcile(owner_ready);
+                        facts[cap.request].native.reconcile();
                     }
                     drop(cap.claim.take());
                     facts[cap.request]
@@ -947,13 +954,15 @@ fn run_history(
                     use tidepool_runtime::session::PublicationCancellation;
                     let model = &mut facts[cap.request];
                     let expected = match model.native.decision() {
-                        Some((_, NativeOutcome::Visible)) => {
+                        Some((_, NativeOutcome::Committed)) => {
                             PublicationCancellation::AlreadyPublished
                         }
-                        Some((_, NativeOutcome::BeforeRename)) => {
+                        Some((_, NativeOutcome::Refused)) => {
                             PublicationCancellation::AlreadyTerminated
                         }
-                        None => PublicationCancellation::PendingCommitOutcome,
+                        Some((_, NativeOutcome::RecoveryRequired)) | None => {
+                            PublicationCancellation::PendingCommitOutcome
+                        }
                     };
                     prop_assert_eq!(cap.decision.request_cancellation(), expected);
                     coverage.native_cancellations += 1;
@@ -1019,7 +1028,7 @@ fn run_history(
                         }
                         Err(completion) => {
                             drop(completion);
-                            facts[cap.request].native.reconcile(owner_ready);
+                            facts[cap.request].native.reconcile();
                             coverage.deliveries_to_lost_waiter += 1;
                         }
                     }
@@ -1034,12 +1043,11 @@ fn run_history(
                 {
                     let model = &mut facts[cap.request];
                     if !model.forgotten() {
-                        model.native.reconcile(owner_ready);
+                        model.native.reconcile();
                     }
                     let expected = if model.forgotten() {
                         Err(ReplyError::Stale)
-                    } else if model.native.observed(owner_ready) != ExpectedNative::VisibleConfirmed
-                    {
+                    } else if model.native.observed() != ExpectedNative::Committed {
                         Err(ReplyError::Stale)
                     } else {
                         model.target_eligibility()
@@ -1050,7 +1058,7 @@ fn run_history(
                     });
                     // The consuming token's destructor also reconciles, including
                     // refused publication. It cannot turn an unknown claim into proof.
-                    model.native.reconcile(owner_ready);
+                    model.native.reconcile();
                     prop_assert_eq!(invoked, expected.is_ok());
                     coverage.provider_publications += usize::from(expected.is_ok());
                     coverage.suppressed_provider_publications += usize::from(expected.is_err());
@@ -1065,7 +1073,7 @@ fn run_history(
                 if let Some(record) = state.requests.get_mut(&ids[key]) {
                     if let Some(activation) = record.activation.as_mut() {
                         activation.reconcile();
-                        facts[key].native.reconcile(owner_ready);
+                        facts[key].native.reconcile();
                     }
                 }
             }
@@ -1073,8 +1081,8 @@ fn run_history(
                 let model = &mut facts[key];
                 let expected = caller.authorize(model.forgotten()).and_then(|()| {
                     model.target_eligibility()?;
-                    model.native.reconcile(owner_ready);
-                    if model.native.observed(owner_ready).fenced() {
+                    model.native.reconcile();
+                    if model.native.observed().fenced() {
                         Err(ReplyError::UpdatePending)
                     } else {
                         Ok(())
@@ -1155,8 +1163,8 @@ fn run_history(
                     if !model.cancelled() || model.ack_claimed() {
                         return Err(ReplyError::Stale);
                     }
-                    model.native.reconcile(owner_ready);
-                    if model.native.observed(owner_ready).fenced() {
+                    model.native.reconcile();
+                    if model.native.observed().fenced() {
                         Err(ReplyError::UpdatePending)
                     } else {
                         Ok(CancellationReason::RequesterCancelled)
@@ -1255,14 +1263,16 @@ fn run_history(
         for cap in &capabilities {
             let model = &facts[cap.request].native;
             let expected = match model.decision() {
-                Some((_, NativeOutcome::Visible)) => PublicationPhase::Published,
-                Some((_, NativeOutcome::BeforeRename)) => PublicationPhase::Terminated,
-                None => PublicationPhase::CommitClaimed {
-                    cancellation_pending: model
-                        .accepted
-                        .iter()
-                        .any(|fact| matches!(fact, NativeFact::CancellationRequested)),
-                },
+                Some((_, NativeOutcome::Committed)) => PublicationPhase::Published,
+                Some((_, NativeOutcome::Refused)) => PublicationPhase::Terminated,
+                Some((_, NativeOutcome::RecoveryRequired)) | None => {
+                    PublicationPhase::CommitClaimed {
+                        cancellation_pending: model
+                            .accepted
+                            .iter()
+                            .any(|fact| matches!(fact, NativeFact::CancellationRequested)),
+                    }
+                }
             };
             prop_assert_eq!(
                 cap.resources.phase(),
@@ -1279,7 +1289,7 @@ fn run_history(
                 prop_assert!(!state.requests.contains_key(&ids[key]));
             } else {
                 let record = state.requests.get(&ids[key]).unwrap();
-                let expected = model.native.observed(owner_ready);
+                let expected = model.native.observed();
                 let actual_cache =
                     record
                         .activation
@@ -1308,10 +1318,7 @@ fn run_history(
                             ExpectedNative::Unknown
                         }
                         PublicationPhase::CommitClaimed { .. } => ExpectedNative::InFlight,
-                        PublicationPhase::Published if owner_ready => {
-                            ExpectedNative::VisibleConfirmed
-                        }
-                        PublicationPhase::Published => ExpectedNative::VisibleUnconfirmed,
+                        PublicationPhase::Published => ExpectedNative::Committed,
                         PublicationPhase::Terminated => ExpectedNative::Refused,
                         other => {
                             return Err(TestCaseError::fail(format!(
@@ -1331,9 +1338,9 @@ fn run_history(
                 coverage.unknown_with_ready_owner +=
                     usize::from(owner_ready && expected == ExpectedNative::Unknown);
                 coverage.confirmed_outcomes_preserved_after_fence +=
-                    usize::from(!owner_ready && expected == ExpectedNative::VisibleConfirmed);
-                coverage.known_unconfirmed_with_pending_owner +=
-                    usize::from(!owner_ready && expected == ExpectedNative::VisibleUnconfirmed);
+                    usize::from(!owner_ready && expected == ExpectedNative::Committed);
+                coverage.unknown_with_fenced_owner +=
+                    usize::from(!owner_ready && expected == ExpectedNative::Unknown);
             }
             drop(state);
             for caller in [Caller::Exact, Caller::Foreign, Caller::Restarted] {
@@ -1434,13 +1441,11 @@ async fn request_activation_phase_support_covers_contract_partitions() {
     assert!(coverage.claims > 0 && coverage.claim_control_refusals > 0);
     assert!(coverage.lost_waiters > 0 && coverage.finishes_after_lost_waiter > 0);
     assert!(coverage.confirmations_after_lost_waiter > 0 && coverage.deliveries_to_lost_waiter > 0);
-    assert!(
-        coverage.unknown_with_ready_owner > 0 && coverage.known_unconfirmed_with_pending_owner > 0
-    );
+    assert!(coverage.unknown_with_ready_owner > 0 && coverage.unknown_with_fenced_owner > 0);
     assert!(coverage.fenced_replies > 0 && coverage.fenced_acknowledgements > 0);
     assert!(coverage.owner_observations > 0 && coverage.provider_publications > 0);
     assert!(coverage.native_cancellations > 0);
-    assert!(coverage.owner_fences > 0 && coverage.claims_refused_after_fence > 0);
+    assert!(coverage.owner_fences > 0 && coverage.tentative_claims_after_fence > 0);
     assert!(coverage.confirmed_outcomes_preserved_after_fence > 0);
     assert!(
         coverage.suppressed_provider_publications > 0 && coverage.shared_target_retirements > 0
@@ -1448,7 +1453,7 @@ async fn request_activation_phase_support_covers_contract_partitions() {
     assert!(coverage.forgotten_with_native_lease > 0 && coverage.completion_after_forgetting > 0);
     assert!(coverage.releases_without_token_finish > 0 && coverage.retirement_claim_refusals > 0);
     assert!(coverage.owner_authority_refusals > 0);
-    for partition in ["visible_confirmed", "visible_unconfirmed", "before_rename"] {
+    for partition in ["committed", "recovery_required", "refused"] {
         assert!(
             coverage
                 .native_finishes

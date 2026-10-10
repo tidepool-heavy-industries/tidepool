@@ -20,7 +20,7 @@ impl ActivationRecord {
             return;
         };
         match resources.phase() {
-            PublicationPhase::Published if resources.confirmed() => *self = Self::Published,
+            PublicationPhase::Published => *self = Self::Published,
             PublicationPhase::Terminated => *self = Self::Refused,
             // CommitClaimed stays fenced even when the native graph is ready:
             // only the original native publisher can establish local promotion.
