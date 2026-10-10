@@ -9,10 +9,7 @@ fn owner(incarnation: u64) -> RecoveryPublicOwner {
     RecoveryPublicOwner::new(&ActorPath::parse("root/recovered").unwrap(), incarnation).unwrap()
 }
 
-pub(super) struct TestRunOwner {
-    root: PathBuf,
-    _lock: std::fs::File,
-}
+pub(super) use super::recovery_test_fixture::{run_owner, TestRunOwner};
 
 #[derive(Clone)]
 struct EmptyOutput;
@@ -24,27 +21,6 @@ impl OutputSink for EmptyOutput {
         Vec::new()
     }
 }
-impl RecoveryRunAuthority for TestRunOwner {
-    fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
-        Ok(root.canonicalize()? == self.root)
-    }
-}
-
-pub(super) fn run_owner(root: &Path) -> Arc<TestRunOwner> {
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(root.join("test-run-owner.lock"))
-        .unwrap();
-    lock.try_lock().unwrap();
-    Arc::new(TestRunOwner {
-        root: root.canonicalize().unwrap(),
-        _lock: lock,
-    })
-}
-
 struct TestSuccessor {
     run: Arc<TestRunOwner>,
     session: SessionId,

@@ -27,6 +27,8 @@ mod exact_recovery_acceptance_tests;
 pub mod facade;
 mod lexical_projection;
 mod published_source;
+#[cfg(test)]
+mod recovery_test_fixture;
 pub use lexical_projection::CertifiedDeclarationProjection;
 pub use published_source::PendingPublishedSourceOriginals;
 pub mod inspection;
