@@ -5970,14 +5970,22 @@ impl ExactDeclarationContext {
                         });
                     }
                 }
+                // Inherited rows own the unchanged materialized aliases. A new
+                // admission can strengthen provenance for equal bytes, so the
+                // receiving image observes the current selected payload owner.
+                let original_origins = match &entry.payload {
+                    ArtifactPayload::Canonical(interface) => interface.original_input_origins(),
+                    ArtifactPayload::Original(product) => product
+                        .module_interface()
+                        .and_then(|interface| interface.original_input_origins()),
+                    ArtifactPayload::Interface(..) => None,
+                };
                 original_inputs::encode_image(
                     &image_producer,
                     &entry.descriptor.owner.unit,
                     &entry.descriptor.owner.module,
                     parts,
-                    row.canonical_custody
-                        .as_ref()
-                        .and_then(|canonical| canonical.original_input_origins()),
+                    original_origins,
                 )
             })
             .collect::<Result<Vec<_>, CompileError>>()?;
