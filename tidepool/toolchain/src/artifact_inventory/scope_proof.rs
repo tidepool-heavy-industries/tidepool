@@ -246,25 +246,5 @@ pub(super) fn install(
     }
 }
 
-pub(super) fn capture(
-    state: &InventoryState,
-    selected: &BTreeSet<ArtifactBindingNode>,
-) -> Vec<Arc<ScopeProofV3>> {
-    let mut scopes = BTreeSet::new();
-    let mut pending = selected
-        .iter()
-        .map(|node| node.selection())
-        .collect::<Vec<_>>();
-    while let Some(scope) = pending.pop() {
-        if scopes.insert(scope) {
-            pending.extend(state.selection_plans[&scope].scope_dependencies());
-        }
-    }
-    scopes
-        .into_iter()
-        .map(|scope| Arc::clone(&state.selection_plans[&scope]))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests;

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::declaration_join::{ExactInterfaceOwner, ExactModuleIdentity};
+use crate::exact_context::{ExactSelectionSnapshot, ImmutableScopeProofRef};
 use crate::recovery_artifacts::{CertifiedJoinedInterface, CertifiedRecoveryProduct};
 use crate::CompileError;
 
@@ -1663,9 +1664,16 @@ impl ArtifactInventory {
         ) {
             *state.roots.entry(id).or_default() += 1;
         }
+        let selection = selection_snapshot_for_lease(
+            &state,
+            &BTreeMap::new(),
+            &roots,
+            &native_custody,
+            &parents,
+        );
         drop(state);
         ArtifactView::new(ViewLease {
-            namespace: BTreeMap::new(),
+            selection,
             inventory: self.clone(),
             roots,
             native_custody,
@@ -2172,13 +2180,16 @@ impl ArtifactInventory {
         ) {
             *state.roots.entry(key).or_default() += 1;
         }
+        let parents = vec![Arc::clone(&parent.lease)];
+        let snapshot =
+            selection_snapshot_for_lease(&state, &namespace, &roots, &native_custody, &parents);
         drop(state);
         Ok(ArtifactView::new(ViewLease {
-            namespace,
+            selection: snapshot,
             inventory: self.clone(),
             roots,
             native_custody,
-            parents: vec![Arc::clone(&parent.lease)],
+            parents,
             issuing_payloads,
             materialization_parents,
             materialization: Mutex::new(BTreeMap::new()),
@@ -2309,9 +2320,16 @@ impl ArtifactInventory {
         ) {
             *state.roots.entry(key).or_default() += 1;
         }
+        let snapshot = selection_snapshot_for_lease(
+            &state,
+            &namespace,
+            &roots,
+            &selection.native_custody,
+            &[],
+        );
         drop(state);
         Ok(ArtifactView::new(ViewLease {
-            namespace,
+            selection: snapshot,
             inventory: self.clone(),
             roots,
             native_custody: selection.native_custody.clone(),
@@ -2343,7 +2361,7 @@ impl ArtifactInventory {
 }
 
 struct ViewLease {
-    namespace: BTreeMap<ArtifactId, ArtifactBinding>,
+    selection: Arc<ExactSelectionSnapshot>,
     inventory: ArtifactInventory,
     roots: Vec<InventoryNodeKey>,
     /// Exact dependency carriers needed by currently unselected bodies. These
@@ -2359,6 +2377,85 @@ struct ViewLease {
     materialization_parents: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
     materialization:
         Mutex<BTreeMap<[u8; 32], Arc<crate::declaration_context::RetainedArtifactMaterialization>>>,
+}
+
+fn replace_snapshot_namespace(
+    snapshot: &mut ExactSelectionSnapshot,
+    namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
+) {
+    let removed = snapshot
+        .namespace
+        .keys()
+        .filter(|id| !namespace.contains_key(id))
+        .copied()
+        .collect::<Vec<_>>();
+    for id in removed {
+        snapshot.namespace.remove(&id);
+    }
+    for (id, binding) in namespace {
+        if snapshot.namespace.get(id) != Some(binding) {
+            snapshot.namespace.insert(*id, *binding);
+        }
+    }
+}
+
+/// Persistent facts are changed at their issuing operation. Native leases keep
+/// their separate local root counts; snapshots share immutable selected facts.
+fn selection_snapshot_for_lease(
+    state: &InventoryState,
+    namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
+    roots: &[InventoryNodeKey],
+    custody: &[ArtifactBinding],
+    parents: &[Arc<ViewLease>],
+) -> Arc<ExactSelectionSnapshot> {
+    let mut snapshot = parents
+        .first()
+        .map(|parent| parent.selection.as_ref().clone())
+        .unwrap_or_default();
+    for parent in parents.iter().skip(1) {
+        for (scope, proof) in &parent.selection.scopes {
+            if !snapshot.scopes.contains_key(scope) {
+                snapshot.scopes.insert(*scope, proof.clone());
+            }
+        }
+        for root in parent.selection.roots.keys() {
+            if !snapshot.roots.contains_key(root) {
+                snapshot.roots.insert(*root, ());
+            }
+        }
+        for binding in parent.selection.native_custody.keys() {
+            if !snapshot.native_custody.contains_key(binding) {
+                snapshot.native_custody.insert(*binding, ());
+            }
+        }
+    }
+    replace_snapshot_namespace(&mut snapshot, namespace);
+    for root in roots {
+        if !snapshot.roots.contains_key(root) {
+            snapshot.roots.insert(*root, ());
+        }
+    }
+    for binding in custody {
+        if !snapshot.native_custody.contains_key(binding) {
+            snapshot.native_custody.insert(*binding, ());
+        }
+    }
+    let mut pending = roots
+        .iter()
+        .map(|root| root.selection())
+        .chain(custody.iter().map(|binding| binding.selection))
+        .collect::<Vec<_>>();
+    while let Some(scope) = pending.pop() {
+        if snapshot.scopes.contains_key(&scope) {
+            continue;
+        }
+        let proof = Arc::clone(&state.selection_plans[&scope]);
+        pending.extend(proof.scope_dependencies());
+        snapshot
+            .scopes
+            .insert(scope, ImmutableScopeProofRef::from_issued(proof));
+    }
+    Arc::new(snapshot)
 }
 
 /// Parent custody retains roots and materializations without retaining derived
@@ -2903,7 +3000,13 @@ impl ArtifactView {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let nodes = &self.read_projection(&state).nodes;
         ArtifactGraphSelection {
-            selections: scope_proof::capture(&state, nodes),
+            selections: self
+                .lease
+                .selection
+                .scopes
+                .values()
+                .map(|reference| Arc::clone(reference.proof()))
+                .collect(),
             bindings: nodes
                 .iter()
                 .filter_map(|key| match key {
@@ -2917,7 +3020,7 @@ impl ArtifactView {
                 .filter(|binding| nodes.contains(&InventoryNodeKey::Artifact(**binding)))
                 .copied()
                 .collect(),
-            roots: self.roots().to_vec(),
+            roots: self.lease.selection.roots.keys().copied().collect(),
             native_groups: nodes
                 .iter()
                 .filter_map(|key| match key {
@@ -2925,7 +3028,13 @@ impl ArtifactView {
                     _ => None,
                 })
                 .collect(),
-            native_custody: self.native_custody().to_vec(),
+            native_custody: self
+                .lease
+                .selection
+                .native_custody
+                .keys()
+                .copied()
+                .collect(),
         }
     }
     pub fn binding_dependencies(
@@ -3195,14 +3304,28 @@ impl ArtifactView {
     }
 
     fn namespace(&self) -> BTreeMap<ArtifactId, ArtifactBinding> {
-        self.lease.namespace.clone()
+        self.lease
+            .selection
+            .namespace
+            .iter()
+            .map(|(id, binding)| (*id, *binding))
+            .collect()
+    }
+
+    pub(crate) fn selection_snapshot(&self) -> &Arc<ExactSelectionSnapshot> {
+        &self.lease.selection
+    }
+
+    fn replace_namespace(&mut self, namespace: &BTreeMap<ArtifactId, ArtifactBinding>) {
+        let lease = Arc::get_mut(&mut self.lease).expect("new selection lease");
+        replace_snapshot_namespace(Arc::make_mut(&mut lease.selection), namespace);
     }
     fn resolve_binding(
         &self,
         id: ArtifactId,
         owned: &BTreeSet<InventoryNodeKey>,
     ) -> Result<ArtifactBinding, CompileError> {
-        if let Some(binding) = self.lease.namespace.get(&id) {
+        if let Some(binding) = self.lease.selection.namespace.get(&id) {
             if owned.contains(&InventoryNodeKey::Artifact(*binding)) {
                 return Ok(*binding);
             }
@@ -3467,21 +3590,16 @@ impl ArtifactView {
             .lease
             .inventory
             .retain(selected, custody, Vec::new(), Vec::new());
-        Arc::get_mut(&mut retained.lease)
-            .expect("new selection lease")
-            .namespace = namespace;
-        self.retain_projected_materializations(retained)
+        retained.replace_namespace(&namespace);
+        let mut retained = self.retain_projected_materializations(retained)?;
+        retained.replace_namespace(&namespace);
+        Ok(retained)
     }
 
     fn retain_projected_materializations(&self, mut retained: Self) -> Result<Self, CompileError> {
-        if retained.lease.namespace.is_empty() {
-            Arc::get_mut(&mut retained.lease)
-                .expect("new selection lease")
-                .namespace = self.namespace();
-        }
         {
             let state = self.lease.inventory.0.lock().expect("inventory lock");
-            let selected = artifact_ids(&admitted_closure(
+            let nodes = admitted_closure(
                 &state,
                 retained.roots().iter().copied().chain(
                     retained
@@ -3490,7 +3608,16 @@ impl ArtifactView {
                         .copied()
                         .map(InventoryNodeKey::Artifact),
                 ),
-            ));
+            );
+            let selected = artifact_ids(&nodes);
+            if retained.lease.selection.namespace.is_empty() {
+                let namespace = self
+                    .namespace()
+                    .into_iter()
+                    .filter(|(_, binding)| nodes.contains(&InventoryNodeKey::Artifact(*binding)))
+                    .collect();
+                retained.replace_namespace(&namespace);
+            }
             Arc::get_mut(&mut retained.lease)
                 .expect("new selection lease")
                 .issuing_payloads = self
@@ -3558,15 +3685,11 @@ impl ArtifactView {
             Vec::new(),
             Vec::new(),
         );
-        Arc::get_mut(&mut retained.lease)
-            .expect("new original custody lease")
-            .namespace = namespace.clone();
+        retained.replace_namespace(&namespace);
         let mut retained = self.retain_projected_materializations(retained)?;
         // An empty selected namespace is also an issued fact, never a request
         // to inherit the source's broader compiler roles.
-        Arc::get_mut(&mut retained.lease)
-            .expect("new original custody lease")
-            .namespace = namespace;
+        retained.replace_namespace(&namespace);
         Ok(retained)
     }
 
@@ -3584,7 +3707,7 @@ impl ArtifactView {
             .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
             .map(|id| self.resolve_binding(id, nodes).map(|binding| (id, binding)))
             .collect::<Result<BTreeMap<_, _>, _>>()?;
-        if namespace == self.lease.namespace {
+        if namespace == self.namespace() {
             return Ok(self.clone());
         }
         let entries = namespace
@@ -3592,13 +3715,15 @@ impl ArtifactView {
             .map(|id| (*id, Arc::clone(&state.payloads[id])))
             .collect();
         SelectedOwners::new(&state, &entries, &BTreeSet::new())?;
+        let parents = vec![Arc::clone(&self.lease)];
+        let selection = selection_snapshot_for_lease(&state, &namespace, &[], &[], &parents);
         drop(state);
         Ok(ArtifactView::new(ViewLease {
-            namespace,
+            selection,
             inventory: self.lease.inventory.clone(),
             roots: vec![],
             native_custody: vec![],
-            parents: vec![Arc::clone(&self.lease)],
+            parents,
             issuing_payloads: BTreeMap::new(),
             materialization_parents: vec![],
             materialization: Mutex::new(BTreeMap::new()),
@@ -3640,13 +3765,15 @@ impl ArtifactView {
             .map(|id| (*id, Arc::clone(&state.payloads[id])))
             .collect();
         SelectedOwners::new(&state, &entries, &BTreeSet::new())?;
+        let parents = vec![Arc::clone(&self.lease), Arc::clone(&other.lease)];
+        let selection = selection_snapshot_for_lease(&state, &namespace, &[], &[], &parents);
         drop(state);
         Ok(ArtifactView::new(ViewLease {
-            namespace,
+            selection,
             inventory: self.lease.inventory.clone(),
             roots: vec![],
             native_custody: vec![],
-            parents: vec![Arc::clone(&self.lease), Arc::clone(&other.lease)],
+            parents,
             issuing_payloads: BTreeMap::new(),
             materialization_parents: vec![],
             materialization: Mutex::new(BTreeMap::new()),
@@ -3698,17 +3825,17 @@ impl ArtifactView {
                 &entries,
                 &native_groups(&nodes),
             )?;
+            let parents = vec![Arc::clone(&self.lease), Arc::clone(&other.lease)];
+            let mut namespace = self.namespace();
+            namespace.extend(other.namespace());
+            let selection = selection_snapshot_for_lease(&state, &namespace, &[], &[], &parents);
             drop(state);
             Ok(ArtifactView::new(ViewLease {
-                namespace: {
-                    let mut namespace = self.namespace();
-                    namespace.extend(other.namespace());
-                    namespace
-                },
+                selection,
                 inventory: self.lease.inventory.clone(),
                 roots: Vec::new(),
                 native_custody: Vec::new(),
-                parents: vec![Arc::clone(&self.lease), Arc::clone(&other.lease)],
+                parents,
                 issuing_payloads,
                 materialization_parents: Vec::new(),
                 materialization: Mutex::new(BTreeMap::new()),
