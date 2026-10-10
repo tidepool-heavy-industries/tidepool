@@ -212,6 +212,16 @@ source obligations. `just check` links native consumers without running tests;
 Empty Cargo harnesses remain compile-only and cannot count as passing tests.
 See `bridge/haskell/tests.md` for current suite/resource interfaces.
 
+Use `just check-plan PACKAGE...` to inspect a bounded package selection and
+`swarm-build just check PACKAGE...` to compile its production, unit, binary-test
+and integration consumers from `build/native-targets.json`. Omitting packages
+retains the complete compile check. A focused `test-lib` run does not compile
+integration callers of the same public API; include their owning packages in
+the compile selection when that API changes. The generated roster and runner
+discovery own target labels and test names; do not infer a `:unit_tests` label
+from a package name. Continue with the smallest counted behavioral selections
+after compilation.
+
 Additional focused execution targets include:
 
 | Target | Execution boundary |

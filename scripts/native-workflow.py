@@ -21,6 +21,7 @@ QUICK_PACKAGES = (
     "tidepool-codegen",
 )
 PROFILES = ("fast-dev", "debug", "production")
+TARGET_KINDS = ("libraries", "binaries", "integration")
 
 
 def roster():
@@ -33,6 +34,8 @@ def roster():
 def package_target(packages, package, kind, target=None):
     if package not in packages:
         raise ValueError(f"unsupported native package {package!r}")
+    if kind not in TARGET_KINDS:
+        raise ValueError(f"unsupported native target kind {kind!r}")
     targets = packages[package][kind]
     if target is None:
         if len(targets) != 1:
@@ -41,6 +44,35 @@ def package_target(packages, package, kind, target=None):
     if target not in targets:
         raise ValueError(f"{package}: unsupported {kind} target {target!r}; available: {sorted(targets)}")
     return targets[target]
+
+
+def compile_labels(packages, selected):
+    """Resolve production and test consumers from the generated Cargo roster."""
+    labels = set()
+    for name in selected or sorted(packages):
+        if name not in packages:
+            raise ValueError(f"unsupported native package {name!r}")
+        package = packages[name]
+        if set(package) - {"directory", *TARGET_KINDS}:
+            raise ValueError(f"{name}: unsupported native target kind; regenerate the complete graph")
+        for kind in TARGET_KINDS:
+            for target_name, target in package[kind].items():
+                required = {"test", "test_build"} if kind == "integration" else {"build"}
+                if "test" in target or "test_build" in target:
+                    required.update(("test", "test_build"))
+                if not required <= target.keys():
+                    raise ValueError(f"{name}/{kind}/{target_name}: missing native target labels {sorted(required - target.keys())}; regenerate the complete graph")
+                for key in required:
+                    label = target[key]
+                    if not isinstance(label, str):
+                        raise ValueError(f"{name}/{kind}/{target_name}: invalid {key} label {label!r}")
+                    directory, separator, target_label = label.removeprefix("//").partition(":")
+                    if not label.startswith("//") or not directory or not separator or not target_label:
+                        raise ValueError(f"{name}/{kind}/{target_name}: invalid {key} label {label!r}")
+                labels.update(target[key] for key in ("build", "test_build") if key in target)
+    if not labels:
+        raise ValueError("no declared native consumers selected")
+    return sorted(labels)
 
 
 def buck(command, labels, extra=(), *, profile="fast-dev"):
@@ -80,7 +112,8 @@ def main(argv=None):
     for name in ("suite", "suite-plan"):
         commands.add_parser(name).add_argument("package")
     commands.add_parser("quick")
-    commands.add_parser("check")
+    for name in ("check", "check-plan"):
+        commands.add_parser(name).add_argument("packages", nargs="*")
     commands.add_parser("lint")
     commands.add_parser("verify")
     commands.add_parser("fixtures-check").add_argument("cohorts", nargs="*")
@@ -92,6 +125,13 @@ def main(argv=None):
             arguments = arguments[1:]
         return execute("run", [options.target], arguments)
     packages = roster()
+    if options.command in ("check", "check-plan"):
+        labels = compile_labels(packages, options.packages)
+        if options.command == "check-plan":
+            print("\n".join(labels))
+            return 0
+        print("Native compile consumers:\n" + "\n".join(labels), file=sys.stderr, flush=True)
+        return execute("build", labels)
     if options.command in ("test-lib", "test-target", "test-bin", "test-list"):
         kind = getattr(options, "kind", {"test-lib": "libraries", "test-target": "integration", "test-bin": "binaries"}.get(options.command))
         target = package_target(packages, options.package, kind, getattr(options, "target", None))
@@ -124,21 +164,14 @@ def main(argv=None):
         probe_status = execute("build", ["//bridge/haskell:probe_opacity"])
         test_status = execute("test", labels)
         return probe_status or test_status
-    build_labels = set()
     test_labels = set()
     for package in packages.values():
-        for kind in ("libraries", "binaries", "integration"):
+        for kind in TARGET_KINDS:
             for target in package[kind].values():
-                if "build" in target:
-                    build_labels.add(target["build"])
-                if "test_build" in target:
-                    build_labels.add(target["test_build"])
                 if "test" in target:
                     test_labels.add(target["test"])
     if options.command == "lint":
         return execute("build", ["//build/rust:native_checks"])
-    if options.command == "check":
-        return execute("build", sorted(build_labels))
     if options.command == "verify":
         test_labels.update("//bridge/haskell:corpus_" + cohort.replace("-", "_") + "_test" for cohort in COHORTS)
         test_labels.update((

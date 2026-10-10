@@ -49,9 +49,14 @@ suite-plan package:
 quick:
     python3 scripts/native-workflow.py --profile {{quote(native_profile)}} quick
 
-# Link all registered native consumers. This compiles harnesses without executing them.
-check:
-    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} check
+# Link selected packages' registered native consumers; no packages selects the full graph.
+[positional-arguments]
+check *packages:
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} check "$@"
+
+[positional-arguments]
+check-plan *packages:
+    python3 scripts/native-workflow.py --profile {{quote(native_profile)}} check-plan "$@"
 
 lint:
     python3 scripts/native-workflow.py --profile {{quote(native_profile)}} lint

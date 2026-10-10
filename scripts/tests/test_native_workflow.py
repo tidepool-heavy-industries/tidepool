@@ -1,6 +1,7 @@
 """Selection contracts for thin native frontends, without invoking Buck."""
 import importlib.util
 import contextlib
+import copy
 import io
 import os
 import shutil
@@ -45,6 +46,48 @@ class NativeWorkflowTests(unittest.TestCase):
     def test_compile_check_does_not_execute_harnesses(self):
         _, calls = self.invoke(["check"])
         self.assertEqual(calls[0].args, ("build", ["//pkg:example", "//pkg:scenario_binary", "//pkg:unit"]))
+
+    def test_package_check_compiles_all_consumer_kinds_without_unselected_packages(self):
+        packages = copy.deepcopy(ROSTER)
+        packages["example"]["binaries"]["tool"] = {
+            "build": "//pkg:tool", "test": "//pkg:tool_tests", "test_build": "//pkg:tool_tests_binary"}
+        packages["example"]["binaries"]["without_harness"] = {"build": "//pkg:without_harness"}
+        packages["unselected"] = {"libraries": {"other": {"build": "//other:other"}}, "binaries": {}, "integration": {}}
+        expected = ["//pkg:example", "//pkg:scenario_binary", "//pkg:tool", "//pkg:tool_tests_binary", "//pkg:unit", "//pkg:without_harness"]
+        with patch.object(workflow, "roster", return_value=packages), patch.object(workflow, "buck", return_value=0) as buck, contextlib.redirect_stderr(io.StringIO()) as report:
+            self.assertEqual(workflow.main(["check", "example", "example"]), 0)
+        self.assertEqual(buck.call_args.args, ("build", expected))
+        self.assertEqual(report.getvalue().splitlines()[1:], expected)
+
+    def test_compile_plan_prints_the_same_selection_without_launching_buck(self):
+        with patch.object(workflow, "roster", return_value=ROSTER), patch.object(workflow, "buck") as buck, contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(workflow.main(["check-plan", "example"]), 0)
+        buck.assert_not_called()
+        self.assertEqual(output.getvalue().splitlines(), workflow.compile_labels(ROSTER, ["example"]))
+
+    def test_unknown_package_and_kind_refuse_before_compile(self):
+        packages = copy.deepcopy(ROSTER)
+        packages["example"]["invented"] = {"hidden_consumer": {"build": "//pkg:hidden"}}
+        for roster, arguments in ((ROSTER, ["check", "missing"]), (ROSTER, ["check-plan", "missing"]), (packages, ["check", "example"])):
+            with self.subTest(arguments=arguments), patch.object(workflow, "roster", return_value=roster), patch.object(workflow, "buck") as buck:
+                with self.assertRaises(ValueError):
+                    workflow.main(arguments)
+                buck.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "target kind"):
+            workflow.package_target(ROSTER, "example", "unit_tests")
+
+    def test_missing_or_invalid_compile_labels_cannot_silently_skip_a_consumer(self):
+        for kind, name, key in (("libraries", "example", "build"), ("libraries", "example", "test_build"), ("integration", "scenario", "test_build"), ("integration", "scenario", "test")):
+            for invalid in (None, "", "//pkg:", "unit_tests"):
+                packages = copy.deepcopy(ROSTER)
+                if invalid is None:
+                    del packages["example"][kind][name][key]
+                else:
+                    packages["example"][kind][name][key] = invalid
+                with self.subTest(kind=kind, key=key, invalid=invalid), patch.object(workflow, "roster", return_value=packages), patch.object(workflow, "buck") as buck:
+                    with self.assertRaises(ValueError):
+                        workflow.main(["check", "example"])
+                    buck.assert_not_called()
 
     def test_fixture_action_failure_preserved_and_cohort_still_attempted(self):
         with patch.object(workflow, "roster", return_value=ROSTER), patch.object(workflow, "buck", side_effect=[7, 0]) as buck:
