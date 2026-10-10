@@ -23,8 +23,8 @@ providers, scheduling, resources, persistence, and argument parsing.
    do not run it as a routine spot check.
 4. To run it, follow `exomonad/docs/getting-started.md`: `exomonad new` creates a
    project workspace with a pinned shared-source submodule, while `exomonad init`
-   starts a run. In this repository `just exomonad-init BUNDLE DESCRIPTOR REPORT`
-   uses an explicit frozen native bundle and records the operation. Build,
+   starts a run. In this repository `just exomonad-init DESCRIPTOR REPORT`
+   uses the descriptor's frozen native bundle and records the operation. Build,
    freeze and qualify it through `build/package/README.md` before delivery.
    To see the system from the model's side, read `exomonad/prompts/base.md`
    and the skills under `exomonad/examples/workspace/.exomonad/skills/`, and
@@ -33,10 +33,10 @@ providers, scheduling, resources, persistence, and argument parsing.
 
 `just exomonad-build` builds the native runtime bundle without starting a run.
 Freeze and qualify that exact bundle through `build/package/qualification.py`;
-see `build/package/README.md`. Run with explicit bundle, descriptor and report
-paths. The bundle owns the host, libtest, compiler, stdlib, assets and build
-source/profile contract. Independently supplied compiler or libtest paths do
-not establish matched release evidence.
+see `build/package/README.md`. Run with an explicit frozen descriptor and report
+path. The descriptor selects the bundle that owns the host, libtest, compiler,
+stdlib, assets and build source/profile contract. Independently supplied
+compiler or libtest paths do not establish matched release evidence.
 
 Most changes touch one of three layers, and it helps to know which:
 

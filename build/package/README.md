@@ -302,10 +302,10 @@ and all three operation-settlement controls through the same frozen libtest.
 
 ```sh
 DESCRIPTOR="$FINAL_BUNDLE/share/exomonad/qualification.json"
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --cohort m2 --output "$M2_EVIDENCE" --jobs 3 \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --cohort m1 --output "$M1_EVIDENCE"
 ```
 
@@ -321,7 +321,7 @@ the wrapper so both the qualification owner and runner retain the cancellation
 and cleanup evidence.
 
 ```sh
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" cancel \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" cancel \
   "$M2_EVIDENCE/run-owner.json"
 ```
 
@@ -343,7 +343,7 @@ and parameterized child program. This release gate is separate from the nine
 M2 cases and is not part of routine focused spot checks.
 
 ```sh
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --cohort prepared-child --output "$PREPARED_CHILD_EVIDENCE" --jobs 1 \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
@@ -409,7 +409,7 @@ their own readers and rosters; rebuild and freeze the candidate that adds this
 cohort.
 
 ```sh
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --cohort m3-recursive --output "$M3_RECURSIVE_EVIDENCE" --jobs 1 \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
@@ -464,7 +464,7 @@ does not establish provider network performance. These supplementary cohorts do
 not block M2 acceptance.
 
 ```sh
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --cohort harness-performance --output "$HARNESS_PERFORMANCE_EVIDENCE" --jobs 1 \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
@@ -482,7 +482,7 @@ those declarations and clears ambient compiler selections. Keep this policy in
 the bundle owner; a source helper cannot replace an older frozen bundle's policy.
 
 ```sh
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" catalog-gate \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" catalog-gate \
   "$DESCRIPTOR" --output "$CATALOG_GATE_EVIDENCE"
 ```
 
@@ -499,7 +499,7 @@ a process exit alone does not establish those outcomes. Help/version requests
 are rejected by this entrypoint.
 
 ```sh
-python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" exec \
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" exec \
   --report "$LIVE_PROCESS_REPORT" "$DESCRIPTOR" -- \
   init --workspace "$LIVE_WORKSPACE" --session "$LIVE_SESSION" --no-attach
 ```

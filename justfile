@@ -87,24 +87,24 @@ exomonad-freeze *args:
     python3 build/package/qualification.py freeze "$@"
 
 [positional-arguments]
-exomonad-run bundle descriptor report *args:
-    python3 "$1/share/exomonad/qualification.py" exec --report "$3" "$2" -- "${@:4}"
+exomonad-run descriptor report *args:
+    python3 "$(dirname -- "$1")/qualification.py" exec --report "$2" "$1" -- "${@:3}"
 
 [positional-arguments]
-exomonad-init bundle descriptor report *args:
-    python3 "$1/share/exomonad/qualification.py" exec --report "$3" "$2" -- init "${@:4}"
+exomonad-init descriptor report *args:
+    python3 "$(dirname -- "$1")/qualification.py" exec --report "$2" "$1" -- init "${@:3}"
 
 [positional-arguments]
-exomonad-check-recipes bundle descriptor reports workspace parallelism="1":
+exomonad-check-recipes descriptor reports workspace parallelism="1":
     bash exomonad/scripts/exomonad-check-recipes.sh "$@"
 
 [positional-arguments]
-doctor bundle descriptor:
+doctor descriptor:
     bash scripts/toolchain-doctor.sh "$@"
 
 [positional-arguments]
-daemon-start bundle descriptor:
-    bash -c 'source scripts/lib-extract.sh; select_native_bundle "$1" "$2"; daemon_start_persistent' native-daemon "$@"
+daemon-start descriptor:
+    bash -c 'source scripts/lib-extract.sh; select_native_bundle "$1"; daemon_start_persistent' native-daemon "$@"
 
 daemon-stop:
     bash -c 'source scripts/lib-extract.sh; daemon_stop_persistent'
@@ -115,9 +115,9 @@ test-command-resources-delegated output:
     bash exomonad/scripts/test-command-resources-delegated.sh "$1"
 
 [positional-arguments]
-test-embedded-command-delegated bundle descriptor output:
+test-embedded-command-delegated descriptor output:
     bash exomonad/scripts/test-embedded-command-delegated.sh "$@"
 
 [positional-arguments]
-test-m1 bundle descriptor output:
+test-m1 descriptor output:
     bash build/testing/run-m1-acceptance.sh "$@"

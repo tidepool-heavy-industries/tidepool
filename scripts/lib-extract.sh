@@ -3,8 +3,9 @@
 # Production host execution uses the frozen qualification owner directly.
 
 select_native_bundle() {
-  local bundle="${1:?native bundle root required}" descriptor="${2:?qualification descriptor required}" selection
-  local owner="$bundle/share/exomonad/qualification.py"
+  local descriptor="${1:?qualification descriptor required}" selection
+  [[ $# -eq 1 ]] || { echo 'error: select_native_bundle accepts only a qualification descriptor' >&2; return 2; }
+  local owner="$(dirname -- "$descriptor")/qualification.py"
   [[ -f "$owner" ]] || { echo "error: frozen bundle qualification owner missing: $owner" >&2; return 1; }
   NATIVE_OPERATOR_PYTHON="$(command -v python3)" || return 1
   selection="$("$NATIVE_OPERATOR_PYTHON" "$owner" environment "$descriptor" --shell)" || return 1

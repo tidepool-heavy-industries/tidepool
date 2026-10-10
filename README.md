@@ -306,9 +306,9 @@ Each operation receives its own absolute report path:
 
 ```bash
 DESCRIPTOR="$FINAL_BUNDLE/share/exomonad/qualification.json"
-just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$NEW_REPORT" new /path/to/repository
-just exomonad-run "$FINAL_BUNDLE" "$DESCRIPTOR" "$CHECK_REPORT" check --workspace /path/to/repository
-just exomonad-init "$FINAL_BUNDLE" "$DESCRIPTOR" "$INIT_REPORT" --workspace /path/to/repository
+just exomonad-run "$DESCRIPTOR" "$NEW_REPORT" new /path/to/repository
+just exomonad-run "$DESCRIPTOR" "$CHECK_REPORT" check --workspace /path/to/repository
+just exomonad-init "$DESCRIPTOR" "$INIT_REPORT" --workspace /path/to/repository
 ```
 
 - `new` scaffolds a workspace package: configuration, the pinned

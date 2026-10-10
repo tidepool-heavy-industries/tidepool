@@ -1960,7 +1960,7 @@ def run_catalog_gate(args) -> int:
     root = Path(descriptor["bundle_root"])
     tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
     command = [str(tools / "bin/bash"), str(root / "share/exomonad/packaged-catalog-consumer.sh"),
-               str(root), str(path), str(tools / "bin/bwrap"), str(output), str(tools / "bin/python3")]
+               str(path), str(tools / "bin/bwrap"), str(output), str(tools / "bin/python3")]
     admitted_digest = sha256(path)
     started = time.monotonic_ns()
     result = subprocess.run(command, env=execution_environment(descriptor), check=False)

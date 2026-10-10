@@ -336,8 +336,9 @@ supplies all acceptance/run inputs; no arbitrary libtest/compiler paths or
 independent Nix catalog substitution are accepted. See
 `build/package/README.md` for exact freeze/run/exec commands.
 
-`just exomonad-run BUNDLE DESCRIPTOR REPORT COMMAND...` and
-`just exomonad-init BUNDLE DESCRIPTOR REPORT FLAGS...` use that frozen owner.
+`just exomonad-run DESCRIPTOR REPORT COMMAND...` and
+`just exomonad-init DESCRIPTOR REPORT FLAGS...` select the frozen owner beside
+that descriptor, which preserves intentional replay of historical bundles.
 An unqualified raw bundle build, `--help`, or a catalog self-consistency check
 does not establish the six production M2 gates or M1 browser acceptance.
 Source declarations and their actual executed qualification remain separate

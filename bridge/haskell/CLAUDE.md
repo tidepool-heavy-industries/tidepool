@@ -55,9 +55,10 @@ through the normal compiler; canonical catalog and durable module-cache
 acceptance remain separate obligations. See
 [the package guide](../../build/package/README.md) for freeze and qualification.
 
-`just exomonad-run BUNDLE DESCRIPTOR REPORT ...` and
-`just exomonad-init BUNDLE DESCRIPTOR REPORT ...` select that verified artifact
-environment. `just doctor BUNDLE DESCRIPTOR` verifies and prints the selection.
+`just exomonad-run DESCRIPTOR REPORT ...` and
+`just exomonad-init DESCRIPTOR REPORT ...` select the verified artifact
+environment from the descriptor's sibling owner. `just doctor DESCRIPTOR`
+verifies and prints the selection.
 `scripts/redeploy.sh` delegates to the same freeze owner and preserves existing
 installations and live hosts. Standalone toolchain APIs retain their resolution
 contract in `tidepool/toolchain/src/toolchain.rs`; they do not issue deployment

@@ -16,7 +16,7 @@
 //! this test at it.
 //!
 //! ```text
-//! TIDEPOOL_TIMING=1 just daemon-start BUNDLE DESCRIPTOR
+//! TIDEPOOL_TIMING=1 just daemon-start DESCRIPTOR
 //! TIDEPOOL_EXTRACT_DAEMON_SOCKET=SOCKET \
 //!   just test-lib tidepool --ignored \
 //!   --exact actor_host::cell_compile_cost_tests::cell_compile_cost_measurement \

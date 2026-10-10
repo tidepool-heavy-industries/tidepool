@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # Each recipe uses the same verified frozen host and its production compiler owner.
 set -euo pipefail
-bundle="${1:?usage: exomonad-check-recipes.sh BUNDLE DESCRIPTOR REPORTS WORKSPACE [PARALLELISM]}"
-descriptor="${2:?qualification descriptor required}"
-reports="${3:?fresh report directory required}"
-workspace="${4:?workspace required}"
-parallelism="${5:-1}"
-[[ $# -le 5 && "$parallelism" =~ ^[1-9][0-9]*$ ]] || { echo 'error: positive parallelism required' >&2; exit 2; }
+descriptor="${1:?usage: exomonad-check-recipes.sh DESCRIPTOR REPORTS WORKSPACE [PARALLELISM]}"
+reports="${2:?fresh report directory required}"
+workspace="${3:?workspace required}"
+parallelism="${4:-1}"
+[[ $# -le 4 && "$parallelism" =~ ^[1-9][0-9]*$ ]] || { echo 'error: positive parallelism required' >&2; exit 2; }
 [[ ! -e "$reports" ]] || { echo "error: report directory already exists: $reports" >&2; exit 2; }
 mkdir -m 700 -p "$reports"
-exec python3 - "$bundle/share/exomonad/qualification.py" "$descriptor" "$reports" "$workspace" "$parallelism" <<'PY'
+exec python3 - "$(dirname -- "$descriptor")/qualification.py" "$descriptor" "$reports" "$workspace" "$parallelism" <<'PY'
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import re

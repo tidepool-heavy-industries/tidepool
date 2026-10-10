@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-bundle=$1
-descriptor=$2
-bubblewrap=$3
-output=$4
-python=$5
+descriptor=$1
+bubblewrap=$2
+output=$3
+python=$4
 
 # Qualification verifies the original frozen bundle before creating a namespace
 # with no checkout, Buck outputs, user cache, or resident compiler endpoint.
-exec "$python" - "$bundle" "$descriptor" "$bubblewrap" "$output" "$python" <<'PY'
-import json
+exec "$python" - "$descriptor" "$bubblewrap" "$output" "$python" <<'PY'
 from pathlib import Path
 import runpy
 import subprocess
 import sys
 
-bundle, descriptor, bubblewrap, output, python = map(Path, sys.argv[1:])
-record = json.loads(descriptor.read_text())
-if (record["bundle_root"] != str(bundle) or record["stdlib_mode"] != "catalog-backed"
+descriptor, bubblewrap, output, python = map(Path, sys.argv[1:])
+owner = descriptor.parent / "qualification.py"
+qualification = runpy.run_path(str(owner))
+record = qualification["verify"](descriptor)
+bundle = Path(record["bundle_root"])
+if (record["stdlib_mode"] != "catalog-backed"
         or record["programs"]["libtest"] != str(bundle / "bin/tidepool-tests")):
     raise SystemExit("catalog gate requires the exact qualified native bundle")
 environment = dict(record["environment"])
@@ -44,7 +45,6 @@ command.extend(["--chdir", "/tmp", str(python), record["programs"]["runner"],
                 "--output-dir", "/evidence/tests"])
 # The verified bundle's qualification owner selects the runner resources for
 # both cohorts and this namespace. The consumer always requires its catalog.
-qualification = runpy.run_path(str(bundle / "share/exomonad/qualification.py"))
 command.extend(qualification["NativeRunnerResources"].from_environment(
     record["environment"], require_catalog=True).arguments())
 raise SystemExit(subprocess.run(command, check=False).returncode)
