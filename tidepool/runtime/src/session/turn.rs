@@ -2947,7 +2947,7 @@ fn compile_cell_program_admitted_inner(
     checked.warnings = report.diagnostics;
     drop(admission_span);
     tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.declaration_projections", inclusive = true)
-        .in_scope(|| admission.prepare_declaration_projections(program.checked_cell()))
+        .in_scope(|| admission.prepare_declaration_projections(program.checked_cell(), settlement))
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     checked.authority = Some(program.checked_cell().clone());
     checked.admission = Some(admission);

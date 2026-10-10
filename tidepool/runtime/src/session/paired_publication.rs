@@ -951,7 +951,10 @@ impl DeclarationPublicationBase {
         &self.intent
     }
 
-    pub fn certify(self) -> Result<CertifiedDeclarationPublication, SessionError> {
+    pub fn certify(
+        self,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<CertifiedDeclarationPublication, SessionError> {
         let selection = self.selected_facts()?;
         if let Some(projection) = self.reusable_projection(&selection) {
             let generation = self.reserved;
@@ -965,12 +968,13 @@ impl DeclarationPublicationBase {
                 },
             ));
         }
-        self.certify_new_join(selection)
+        self.certify_new_join(selection, settlement)
     }
 
     fn certify_new_join(
         self,
         selection: PublicationSelection,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<CertifiedDeclarationPublication, SessionError> {
         let mut lexical = self.surface.lexical.clone();
         let authored = self
@@ -1007,7 +1011,7 @@ impl DeclarationPublicationBase {
         } else {
             ExactDeclarationContext::new(&authored, &[], lexical)?
         };
-        let scratch = tempfile::tempdir()?;
+        let scratch = Arc::new(tempfile::tempdir()?);
         let materialized = context.materialize_scratch(&scratch)?;
         let anchor = |identity: &ExactModuleIdentity| -> Result<ModuleSnapshot, SessionError> {
             let module = identity.module.clone();
@@ -1081,6 +1085,8 @@ impl DeclarationPublicationBase {
             &context,
             &self.includes,
             &self.session_root,
+            Arc::clone(&scratch),
+            settlement,
         )? {
             CertifiedDeclarationJoin::Accepted(receipt) => Ok(
                 CertifiedDeclarationPublication::Accepted(AcceptedDeclarationPublication {

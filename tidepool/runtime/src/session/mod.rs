@@ -1962,8 +1962,11 @@ impl SessionLib {
     /// rolled back and the gen module file deleted so subsequent turns cannot pick
     /// up a stale poisoned module (`SessionError::ValidationFailed`). This covers
     /// ALL declaration kinds — `data`, `class`, `instance`, `type`, and values.
-    pub fn define(&mut self, decl_text: &str, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<Generation, SessionError> {
+    pub fn define(
+        &mut self,
+        decl_text: &str,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Generation, SessionError> {
         self.define_batch(&[decl_text], settlement)
     }
 
@@ -1972,8 +1975,9 @@ impl SessionLib {
     pub fn define_scoped_in(
         &mut self,
         scope: ScopeId,
-        decl_text: &str, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<Generation, SessionError> {
+        decl_text: &str,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Generation, SessionError> {
         self.define_batch_with_vals_in(scope, &[decl_text], &[], &[], settlement)
     }
 
@@ -1988,8 +1992,9 @@ impl SessionLib {
         &mut self,
         decl_text: &str,
         import_modules: &[String],
-        inject_modules: &[String], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<Generation, SessionError> {
+        inject_modules: &[String],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Generation, SessionError> {
         self.define_batch_with_vals(&[decl_text], import_modules, inject_modules, settlement)
     }
 
@@ -2010,8 +2015,11 @@ impl SessionLib {
     /// imported `f`, and a pure `let`/`<-` bind promoted into a decl
     /// (`tidepool-repl`'s `try_pure_bind_as_decl`) shadows exactly the same
     /// way, so pure and effectful binds stay interchangeable.
-    pub fn define_batch(&mut self, decl_texts: &[&str], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<Generation, SessionError> {
+    pub fn define_batch(
+        &mut self,
+        decl_texts: &[&str],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Generation, SessionError> {
         self.define_batch_with_vals(decl_texts, &[], &[], settlement)
     }
 
@@ -2022,9 +2030,16 @@ impl SessionLib {
         &mut self,
         decl_texts: &[&str],
         import_modules: &[String],
-        inject_modules: &[String], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<Generation, SessionError> {
-        self.define_batch_with_vals_in(ScopeId::ROOT, decl_texts, import_modules, inject_modules, settlement)
+        inject_modules: &[String],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Generation, SessionError> {
+        self.define_batch_with_vals_in(
+            ScopeId::ROOT,
+            decl_texts,
+            import_modules,
+            inject_modules,
+            settlement,
+        )
     }
 
     /// [`Self::define_batch_with_vals`], but the new turn chains from
@@ -2039,8 +2054,9 @@ impl SessionLib {
         scope: ScopeId,
         decl_texts: &[&str],
         import_modules: &[String],
-        inject_modules: &[String], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<Generation, SessionError> {
+        inject_modules: &[String],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Generation, SessionError> {
         let Some(receipt) = self.declaration_receipt(decl_texts, settlement)? else {
             return Ok(self.scope_tip(scope));
         };
@@ -2049,7 +2065,9 @@ impl SessionLib {
             &SourceImports::new(),
             &receipt,
             import_modules,
-            inject_modules, settlement)
+            inject_modules,
+            settlement,
+        )
     }
 
     /// Ask GHC for the declaration facts that will authorize a commit. This is
@@ -2058,8 +2076,9 @@ impl SessionLib {
     /// [`Self::define_batch_with_receipt_and_vals_in`].
     pub(crate) fn declaration_receipt(
         &self,
-        decl_texts: &[&str], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<Option<DeclarationReceipt>, SessionError> {
+        decl_texts: &[&str],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Option<DeclarationReceipt>, SessionError> {
         let sources: Vec<String> = decl_texts
             .iter()
             .filter(|s| !s.trim().is_empty())
@@ -2080,23 +2099,26 @@ impl SessionLib {
                 self.env.pragmas
             ),
         };
-        let turn_result = run_turn(TurnRequest {
-            exact_context: None,
-            session_id: Some(self.session_id()),
-            turn_text: &combined,
-            templates: std::slice::from_ref(&decl_template),
-            include: &binder_include,
-            session_root: self.root.as_path(),
-            inject_modules: &[],
-            gen: 0,
-            verdict: Some(TurnClassification {
-                kind: TurnKind::Decl,
-                binders: Vec::new(),
-                items: Vec::new(),
-            }),
-            target: None,
-            retained_imports: &[],
-        }, settlement)
+        let turn_result = run_turn(
+            TurnRequest {
+                exact_context: None,
+                session_id: Some(self.session_id()),
+                turn_text: &combined,
+                templates: std::slice::from_ref(&decl_template),
+                include: &binder_include,
+                session_root: self.root.as_path(),
+                inject_modules: &[],
+                gen: 0,
+                verdict: Some(TurnClassification {
+                    kind: TurnKind::Decl,
+                    binders: Vec::new(),
+                    items: Vec::new(),
+                }),
+                target: None,
+                retained_imports: &[],
+            },
+            settlement,
+        )
         .map_err(|failure| SessionError::Compile(failure.error))?;
         let receipt = match turn_result {
             TurnResult::Decl(receipt) => receipt,
@@ -2119,8 +2141,9 @@ impl SessionLib {
         external: &SourceImports,
         receipt: &DeclarationReceipt,
         import_modules: &[String],
-        inject_modules: &[String], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<Generation, SessionError> {
+        inject_modules: &[String],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Generation, SessionError> {
         if self.durable_graph.is_some() {
             let candidate = self.render_admitted_candidate_in(
                 scope,
@@ -2162,22 +2185,23 @@ impl SessionLib {
 
         // Validate ALL turns via GHC. On failure, roll back the log and delete
         // the gen module file so later turns don't import a poisoned module.
-        let value_types = match self.validate_candidate(&rendered, &receipt.items, inject_modules, settlement) {
-            Ok(types) => types,
-            Err(error) => {
-                assert!(self.log.pop_latest_committed(gen));
-                let gen_path = self.root.join(rendered.module.relative_hs_path());
-                if let Err(err) = std::fs::remove_file(&gen_path) {
-                    tracing::warn!(
-                        ?err,
-                        path = %gen_path.display(),
-                        "failed to delete poisoned generated module after validation failure"
-                    );
+        let value_types =
+            match self.validate_candidate(&rendered, &receipt.items, inject_modules, settlement) {
+                Ok(types) => types,
+                Err(error) => {
+                    assert!(self.log.pop_latest_committed(gen));
+                    let gen_path = self.root.join(rendered.module.relative_hs_path());
+                    if let Err(err) = std::fs::remove_file(&gen_path) {
+                        tracing::warn!(
+                            ?err,
+                            path = %gen_path.display(),
+                            "failed to delete poisoned generated module after validation failure"
+                        );
+                    }
+                    self.restore_tip(scope, tip_before);
+                    return Err(error);
                 }
-                self.restore_tip(scope, tip_before);
-                return Err(error);
-            }
-        };
+            };
         self.log
             .turn_mut(gen)
             .expect("just committed declaration")
@@ -2684,16 +2708,23 @@ impl SessionLib {
     /// the shell only subtracts exports. Durable sessions certify the shell as
     /// an authored product before committing its generation.
     /// `retract(name) == retract_in(ScopeId::ROOT, name)`.
-    pub fn retract(&mut self, name: &str, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<(), SessionError> {
+    pub fn retract(
+        &mut self,
+        name: &str,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<(), SessionError> {
         self.retract_in(ScopeId::ROOT, name, settlement)
     }
 
     /// [`Self::retract`], but against `scope`'s own persistent declaration environment — a name
     /// retracted in a child scope never touches the parent's (or a sibling's)
     /// tip or heads.
-    pub fn retract_in(&mut self, scope: ScopeId, name: &str, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<(), SessionError> {
+    pub fn retract_in(
+        &mut self,
+        scope: ScopeId,
+        name: &str,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<(), SessionError> {
         self.retract_many_in(scope, &[name.to_string()], settlement)
     }
 
@@ -2704,8 +2735,9 @@ impl SessionLib {
     pub fn retract_many_in(
         &mut self,
         scope: ScopeId,
-        names: &[String], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<(), SessionError> {
+        names: &[String],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<(), SessionError> {
         if let Some(staged) = self.prepare_retraction_in(scope, names, None, settlement)? {
             self.adopt_staged_batch_with_receipt_and_vals_in(staged, &[])?;
         }
@@ -2719,8 +2751,9 @@ impl SessionLib {
         &mut self,
         scope: ScopeId,
         names: &[String],
-        namespace: Option<tidepool_toolchain::declaration_join::ExportNamespace>, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<Option<StagedDeclaration>, SessionError> {
+        namespace: Option<tidepool_toolchain::declaration_join::ExportNamespace>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Option<StagedDeclaration>, SessionError> {
         let tip = self.scope_tip(scope);
         let heads = self.log.current_items_at(tip);
         let mut retracts: Vec<DeclarationRetraction> = names
@@ -2796,8 +2829,9 @@ impl SessionLib {
         &self,
         rendered: &RenderedModule,
         items: &[ExportItem],
-        inject_modules: &[String], settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
-) -> Result<BTreeMap<String, String>, SessionError> {
+        inject_modules: &[String],
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<BTreeMap<String, String>, SessionError> {
         let stdlib_include = stdlib_include_for_validation(&self.extra_include)?;
         let mut includes = vec![self.root.clone()];
         includes.extend(self.extra_include.iter().cloned());
@@ -2811,7 +2845,9 @@ impl SessionLib {
             &includes,
             &self.root,
             &self.env.pragmas,
-            None, settlement)
+            None,
+            settlement,
+        )
     }
 
     /// Atomically write a rendered module to its place in the include tree.
@@ -2873,7 +2909,8 @@ fn validate_rendered_module(
     pragmas: &str,
     exact_context: Option<
         &std::sync::Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
-    >, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    >,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<BTreeMap<String, String>, SessionError> {
     let mut values = Vec::new();
     for item in items {
@@ -2919,22 +2956,25 @@ fn validate_rendered_module(
     );
     let preamble = format!("{pragmas}\nmodule TidepoolDeclarationTypes where\n");
     let include_refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-    let results = match inspection::run_inspections_strict(InspectionRequest {
-        exact_context: exact_context.map(|declarations| {
-            std::sync::Arc::new(
-                tidepool_toolchain::declaration_join::ExactCompileContext::new(
-                    std::sync::Arc::clone(declarations),
-                ),
-            )
-        }),
-        preamble: &preamble,
-        imports: &imports,
-        include: &include_refs,
-        session_root,
-        inject_modules,
-        queries: &queries,
-        effects: None,
-    }, settlement) {
+    let results = match inspection::run_inspections_strict(
+        InspectionRequest {
+            exact_context: exact_context.map(|declarations| {
+                std::sync::Arc::new(
+                    tidepool_toolchain::declaration_join::ExactCompileContext::new(
+                        std::sync::Arc::clone(declarations),
+                    ),
+                )
+            }),
+            preamble: &preamble,
+            imports: &imports,
+            include: &include_refs,
+            session_root,
+            inject_modules,
+            queries: &queries,
+            effects: None,
+        },
+        settlement,
+    ) {
         Ok(results) => results,
         Err(crate::CompileError::Diagnostics(diagnostics)) => {
             let line_offset = if rendered.body_line > 0 && !rendered.hoisted_lines {
@@ -2992,7 +3032,8 @@ fn validate_rendered_module(
 /// exact bytes recorded on the returned [`StagedDeclaration`].
 pub fn validate_declaration_candidate(
     candidate: DeclarationCandidateRender,
-    primary_root: &Path, settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    primary_root: &Path,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<StagedDeclaration, SessionError> {
     write_module_at(primary_root, &candidate.rendered)?;
 
@@ -3012,7 +3053,9 @@ pub fn validate_declaration_candidate(
         &includes,
         &candidate.root,
         &candidate.pragmas,
-        candidate.exact_context.as_ref(), settlement) {
+        candidate.exact_context.as_ref(),
+        settlement,
+    ) {
         Ok(types) => types,
         Err(error) => {
             remove_module_artifacts(primary_root, candidate.rendered.module);
@@ -3030,14 +3073,18 @@ pub fn validate_declaration_candidate(
                     &candidate.rendered.source,
                     &includes,
                     &candidate.root,
-                    context.clone(), settlement)
+                    context.clone(),
+                    settlement,
+                )
             }
             None => tidepool_toolchain::declaration_join::certify_authored_declaration(
                 candidate.rendered.module,
                 &source_path,
                 &candidate.rendered.source,
                 &includes,
-                &candidate.root, settlement),
+                &candidate.root,
+                settlement,
+            ),
         };
         match certified {
             Ok(certified) => Some(lexical_projection::prepare_authored_projection(
@@ -3047,6 +3094,7 @@ pub fn validate_declaration_candidate(
                 &candidate.turn.retracts,
                 &includes,
                 &candidate.root,
+                settlement,
             )?),
             Err(error) => {
                 remove_module_artifacts(primary_root, candidate.rendered.module);
