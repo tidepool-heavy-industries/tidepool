@@ -1983,7 +1983,8 @@ fn validate_shape(graph: &impl GraphRead) -> Result<(), RecoveryError> {
                     edge.source == ArtifactBindingNode::Artifact(*binding)
                         && edge.dependency == ArtifactDependency::Interface
                         && matches!(edge.target, ArtifactBindingNode::Artifact(target)
-                        if artifacts[&target.artifact].owner() == *requirement)
+                        if artifacts[&target.artifact].owner() == *requirement
+                            && !matches!(artifacts[&target.artifact], RecoveryArtifactClosure::Home(_)))
                 }) {
                     return Err(error("value binding lacks its exact required module edge"));
                 }
@@ -3526,7 +3527,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let manifest = directory.path().join("declarations.json");
         let baseline = serde_json::to_value(&snapshot(&fixture())).unwrap();
-        for mutation in 0..5 {
+        for mutation in 0..6 {
             let mut altered = baseline.clone();
             match mutation {
                 0 => {
@@ -3545,6 +3546,12 @@ mod tests {
                 3 => {
                     altered["nodes"][0]["graph_selection"]["bindings"][0]["selection"] =
                         serde_json::to_value([0xffu8; 32]).unwrap();
+                }
+                4 => {
+                    altered["nodes"][0]["graph_selection"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("selections");
                 }
                 _ => {
                     altered["artifact_dependencies"][0]["target"]["artifact"]["selection"] =

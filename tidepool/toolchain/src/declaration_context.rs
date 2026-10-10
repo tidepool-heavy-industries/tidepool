@@ -6923,6 +6923,25 @@ mod tests {
         let mut wrong_scope = selections[0].clone();
         wrong_scope.namespace[0] = root_binding(&selections[1]);
         assert!(restore(&wrong_scope).is_err());
+        let mut missing_witness = selections[0].clone();
+        missing_witness.selections.clear();
+        assert!(restore(&missing_witness).is_err());
+        let mut altered_witness = selections[0].clone();
+        altered_witness.selections[0].dependencies.clear();
+        assert!(restore(&altered_witness).is_err());
+        let mut missing_binding = bindings.clone();
+        missing_binding.pop();
+        assert!(RecoveredArtifactInventory::capture_bound(
+            directory.path(),
+            &[],
+            &references,
+            &[],
+            &[],
+            &descriptors,
+            &missing_binding,
+            &edges
+        )
+        .is_err());
         let mut corrupted = edges.clone();
         let old_root = root_binding(&selections[0]);
         corrupted
@@ -6977,10 +6996,15 @@ mod tests {
         })]
         #[test]
         fn bound_recovery_history_retains_exact_closure_and_refusal_atomicity(
-            history in proptest::collection::vec((proptest::bool::ANY, 0u8..4), 1..33)
+            history in proptest::collection::vec((proptest::bool::ANY, 0u8..6), 1..33)
         ) {
             let pair = bound_recovery_pair_fixture();
-            let mut held = [None, None];
+            let mut held = [Some(pair.restore(&pair.selections[0]).unwrap()),
+                Some(pair.restore(&pair.selections[1]).unwrap())];
+            let mut actions = [0usize; 6];
+            let mut scopes = [0usize; 2];
+            for (new, action) in &history { actions[usize::from(*action)] += 1; scopes[usize::from(*new)] += 1; }
+            eprintln!("bound-recovery-history steps={} scopes={scopes:?} actions={actions:?}", history.len());
             for (new, action) in history {
                 let index = usize::from(new);
                 match action {
@@ -6994,6 +7018,16 @@ mod tests {
                         let mut wrong = pair.selections[index].clone();
                         wrong.namespace[0] = pair.selections[1-index].bindings[0];
                         proptest::prop_assert!(pair.restore(&wrong).is_err());
+                    }
+                    3 => {
+                        let mut missing = pair.selections[index].clone();
+                        missing.selections.clear();
+                        proptest::prop_assert!(pair.restore(&missing).is_err());
+                    }
+                    4 => {
+                        let mut changed = pair.selections[index].clone();
+                        changed.selections[0].selection.0[0] ^= 1;
+                        proptest::prop_assert!(pair.restore(&changed).is_err());
                     }
                     _ => held[index] = Some(pair.restore(&pair.selections[index]).unwrap()),
                 }
