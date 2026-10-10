@@ -99,7 +99,7 @@ import Tidepool.NativeOriginalCensus
 import Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, finalizedValueInterfaceSeals, finalizedLocalAdmissions, LocalFinalizedAdmission, localFinalizedInterface, localFinalizedHomeUnits
   , localFinalizedSourceSha256, localFinalizedRequirements, localFinalizedCore, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedCoreBody
-  , revalidateLocalFinalizedAdmission, revalidateLocalFinalizedAdmissionWith )
+  , revalidateLocalFinalizedAdmission )
 import Tidepool.Timing (readTimingEnabled, readSummaryTimingEnabled, timeDetailPhase, emitCount, withValidationTiming)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyModule(..), DependencyImport(..), DependencyResolution(..), renderDependencyEvidence
