@@ -584,14 +584,8 @@ async fn startup_refusal_preserves_typed_cleanup_before_and_after_actor_transfer
                     .descriptor
                     .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
             }
-            let held = unavailable_checkout.then(|| {
-                behavior
-                    .environment
-                    .runner
-                    .machines_for_test()
-                    .checkout_run(parent)
-                    .unwrap()
-            });
+            let machines = behavior.environment.runner.machines_for_test().clone();
+            let held = unavailable_checkout.then(|| machines.checkout_run(parent).unwrap());
             let work = behavior.workbench_executions.lock().actor_scope_root(actor);
             let result = owner
                 .kernel
