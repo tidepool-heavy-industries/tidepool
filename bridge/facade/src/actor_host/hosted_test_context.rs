@@ -166,9 +166,11 @@ impl StartupEvidence {
 
 type HostOutcome =
     futures_util::future::Shared<futures_util::future::BoxFuture<'static, Result<(), String>>>;
+type HostTerminal =
+    futures_util::future::Shared<futures_util::future::BoxFuture<'static, HostBarrierFailure>>;
 type ScenarioResult<R = ()> = Result<R, Box<dyn std::any::Any + Send>>;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum HostBarrierFailure {
     CoordinationFailed { root: ActorRef, error: String },
     HostExited { outcome: Result<(), String> },
@@ -273,27 +275,41 @@ async fn observe_operation_barrier<F: std::future::Future>(
     }
 }
 
-async fn observe_host_barrier<F: std::future::Future>(
+// One shared observation owns the single readiness receiver. Barriers may nest
+// or run concurrently without holding exclusive ownership across their progress.
+fn observe_host_terminal(
     outcome: HostOutcome,
-    readiness: &mut mpsc::UnboundedReceiver<ActorHostReadiness>,
+    mut readiness: mpsc::UnboundedReceiver<ActorHostReadiness>,
+) -> HostTerminal {
+    async move {
+        let mut outcome = outcome;
+        loop {
+            tokio::select! {
+                biased;
+                event = readiness.recv() => match event {
+                    Some(ActorHostReadiness::CoordinationFailed { root, error }) => {
+                        return HostBarrierFailure::CoordinationFailed { root, error };
+                    }
+                    Some(_) => {},
+                    None => return HostBarrierFailure::HostExited { outcome: outcome.await },
+                },
+                outcome = &mut outcome => return HostBarrierFailure::HostExited { outcome },
+            }
+        }
+    }
+    .boxed()
+    .shared()
+}
+
+async fn observe_host_barrier<F: std::future::Future>(
+    mut terminal: HostTerminal,
     future: F,
 ) -> Result<F::Output, HostBarrierFailure> {
     tokio::pin!(future);
-    let mut outcome = outcome;
-    let mut readiness_closed = false;
-    loop {
-        tokio::select! {
-            biased;
-            event = readiness.recv(), if !readiness_closed => match event {
-                Some(ActorHostReadiness::CoordinationFailed { root, error }) => {
-                    return Err(HostBarrierFailure::CoordinationFailed { root, error });
-                }
-                Some(_) => {},
-                None => readiness_closed = true,
-            },
-            outcome = &mut outcome => return Err(HostBarrierFailure::HostExited { outcome }),
-            result = &mut future => return Ok(result),
-        }
+    tokio::select! {
+        biased;
+        failure = &mut terminal => Err(failure),
+        result = &mut future => Ok(result),
     }
 }
 
@@ -704,7 +720,7 @@ pub(super) struct HostedTestRuntime {
     pub(super) address: std::net::SocketAddr,
     stop: watch::Sender<bool>,
     outcome: HostOutcome,
-    readiness: tokio::sync::Mutex<mpsc::UnboundedReceiver<ActorHostReadiness>>,
+    terminal: HostTerminal,
     thread: Option<std::thread::JoinHandle<()>>,
     diagnostics: Option<HostedTestDiagnostics>,
     preparation_elapsed: Option<Duration>,
@@ -778,12 +794,7 @@ impl HostedTestRuntime {
         &self,
         future: F,
     ) -> Result<F::Output, HostBarrierFailure> {
-        observe_host_barrier(
-            self.outcome.clone(),
-            &mut *self.readiness.lock().await,
-            future,
-        )
-        .await
+        observe_host_barrier(self.terminal.clone(), future).await
     }
 
     /// Positive progress must still occur; a successful settlement does not
@@ -1426,18 +1437,20 @@ impl HostedTestRuntime {
             }
         };
         let runtime = Arc::clone(&context.runtime);
+        let outcome = outcome
+            .map(|result| {
+                result.unwrap_or_else(|error| Err(format!("production host outcome: {error}")))
+            })
+            .boxed()
+            .shared();
+        let terminal = observe_host_terminal(outcome.clone(), readiness);
         Ok(Self {
             context,
             runtime,
             address,
             stop,
-            outcome: outcome
-                .map(|result| {
-                    result.unwrap_or_else(|error| Err(format!("production host outcome: {error}")))
-                })
-                .boxed()
-                .shared(),
-            readiness: tokio::sync::Mutex::new(readiness),
+            outcome,
+            terminal,
             thread: Some(thread),
             diagnostics,
             preparation_elapsed,
@@ -1882,27 +1895,210 @@ mod tests {
         assert_eq!(tidepool_extract_cmd::extract_spawn_count(), requests);
     }
 
+    fn pending_host_terminal() -> (
+        mpsc::UnboundedSender<ActorHostReadiness>,
+        oneshot::Sender<Result<(), String>>,
+        HostTerminal,
+    ) {
+        let (publisher, readiness) = mpsc::unbounded_channel();
+        let (complete, outcome) = oneshot::channel();
+        let outcome = outcome.map(Result::unwrap).boxed().shared();
+        (
+            publisher,
+            complete,
+            observe_host_terminal(outcome, readiness),
+        )
+    }
+
+    #[tokio::test]
+    async fn nested_host_and_operation_barriers_preserve_progress() {
+        for successful in [false, true] {
+            let (_publisher, _complete, terminal) = pending_host_terminal();
+            let store = harness::store::Store::memory().unwrap();
+            let scheduler = harness::turn::JobScheduler::new(1).unwrap();
+            let operation = operation_claim(&store, "nested", "/root");
+            if successful {
+                settle_operation(&store, &operation, harness::store::TerminalOutcome::Success);
+            }
+            let (started, polling) = oneshot::channel();
+            let (release, progress) = oneshot::channel();
+            let inner = terminal.clone();
+            let task = tokio::spawn(async move {
+                observe_host_barrier(terminal, async {
+                    observe_host_barrier(
+                        inner,
+                        observe_operation_barrier(&store, &scheduler, &operation, async {
+                            started.send(()).unwrap();
+                            progress.await
+                        }),
+                    )
+                    .await
+                })
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(1), polling)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                !task.is_finished(),
+                "nested observers still require progress"
+            );
+            release.send(37).unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), task)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                Ok(Ok(Ok(Ok(37))))
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_host_barriers_preserve_exact_operation_refusal() {
+        let (_publisher, _complete, terminal) = pending_host_terminal();
+        let store = harness::store::Store::memory().unwrap();
+        let scheduler = harness::turn::JobScheduler::new(1).unwrap();
+        let operation = operation_claim(&store, "nested-failure", "/root");
+        let failure = harness::store::TerminalOutcome::Cancelled;
+        settle_operation(&store, &operation, failure.clone());
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            observe_host_barrier(
+                terminal.clone(),
+                observe_host_barrier(
+                    terminal,
+                    observe_operation_barrier(
+                        &store,
+                        &scheduler,
+                        &operation,
+                        futures_util::future::pending::<()>(),
+                    ),
+                ),
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            Ok(Ok(Err(OperationBarrierFailure::Settlement {
+                operation,
+                terminal: failure,
+            })))
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_host_barriers_preserve_independent_progress() {
+        let (_publisher, _complete, terminal) = pending_host_terminal();
+        let (release_first, first) = oneshot::channel();
+        let (release_second, second) = oneshot::channel();
+        let first_task = tokio::spawn(observe_host_barrier(terminal.clone(), first));
+        let second_task = tokio::spawn(observe_host_barrier(terminal, second));
+        release_first.send(11).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), first_task)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(Ok(11))
+        );
+        assert!(
+            !second_task.is_finished(),
+            "one observer cannot release another's progress"
+        );
+        release_second.send(22).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), second_task)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(Ok(22))
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_host_failure_survives_cancelled_and_late_observers() {
+        for queued in [false, true] {
+            let (publisher, _complete, terminal) = pending_host_terminal();
+            let root = ActorRef::first(exomonad_actor::ActorId(1));
+            let expected = HostBarrierFailure::CoordinationFailed {
+                root,
+                error: "typed coordination refusal".into(),
+            };
+            let (started, polling) = oneshot::channel();
+            let cancelled = tokio::spawn(observe_host_barrier(terminal.clone(), async {
+                started.send(()).unwrap();
+                futures_util::future::pending::<()>().await
+            }));
+            tokio::time::timeout(Duration::from_secs(1), polling)
+                .await
+                .unwrap()
+                .unwrap();
+            cancelled.abort();
+            assert!(cancelled.await.unwrap_err().is_cancelled());
+            let publish = || {
+                publisher
+                    .send(ActorHostReadiness::CoordinationFailed {
+                        root,
+                        error: "typed coordination refusal".into(),
+                    })
+                    .unwrap()
+            };
+            if queued {
+                publish();
+            }
+            let left = tokio::spawn(observe_host_barrier(
+                terminal.clone(),
+                futures_util::future::pending::<()>(),
+            ));
+            let right = tokio::spawn(observe_host_barrier(
+                terminal.clone(),
+                futures_util::future::pending::<()>(),
+            ));
+            if !queued {
+                tokio::task::yield_now().await;
+                publish();
+            }
+            for task in [left, right] {
+                assert_eq!(
+                    tokio::time::timeout(Duration::from_secs(1), task)
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                    Err(expected.clone())
+                );
+            }
+            // The retained terminal outcome takes priority even over ready progress.
+            assert_eq!(
+                observe_host_barrier(terminal, std::future::ready(37)).await,
+                Err(expected)
+            );
+        }
+    }
+
     #[tokio::test]
     async fn host_barrier_prioritizes_successful_and_failed_host_exit_over_deadline() {
         for terminal in [Ok(()), Err("injected host failure".to_owned())] {
-            let (_publisher, mut readiness) = mpsc::unbounded_channel();
+            let (publisher, readiness) = mpsc::unbounded_channel();
+            drop(publisher);
             let (complete, outcome) = oneshot::channel();
             complete.send(terminal.clone()).unwrap();
             let outcome = outcome.map(Result::unwrap).boxed().shared();
             let barrier =
                 tokio::time::timeout(Duration::ZERO, futures_util::future::pending::<()>());
             assert_eq!(
-                observe_host_barrier(outcome, &mut readiness, barrier).await,
+                observe_host_barrier(observe_host_terminal(outcome, readiness), barrier).await,
                 Err(HostBarrierFailure::HostExited { outcome: terminal }),
             );
         }
-        let (_publisher, mut readiness) = mpsc::unbounded_channel();
+        let (_publisher, readiness) = mpsc::unbounded_channel();
         let (_complete, outcome) = oneshot::channel::<Result<(), String>>();
         let outcome = outcome.map(Result::unwrap).boxed().shared();
         assert!(matches!(
             observe_host_barrier(
-                outcome,
-                &mut readiness,
+                observe_host_terminal(outcome, readiness),
                 tokio::time::timeout(Duration::ZERO, futures_util::future::pending::<()>()),
             )
             .await,
@@ -1914,7 +2110,7 @@ mod tests {
     async fn coordination_failure_preempts_provider_wait_before_cleanup_settles() {
         let directory = tempfile::tempdir().unwrap();
         let diagnostics = diagnostics(&directory);
-        let (publisher, mut readiness) = mpsc::unbounded_channel();
+        let (publisher, readiness) = mpsc::unbounded_channel();
         let (complete, outcome) = oneshot::channel::<Result<(), String>>();
         let outcome = outcome.map(Result::unwrap).boxed().shared();
         let barrier_outcome = outcome.clone();
@@ -1928,13 +2124,15 @@ mod tests {
         let (provider, mut requests) = super::super::test_campaign::hosted_script_provider();
         let (scenario, cleanup, evidence) = settle_scenario(
             async {
-                let failure =
-                    match observe_host_barrier(barrier_outcome, &mut readiness, requests.recv())
-                        .await
-                    {
-                        Err(failure) => failure,
-                        Ok(_) => panic!("provider wait cannot settle without a provider request"),
-                    };
+                let failure = match observe_host_barrier(
+                    observe_host_terminal(barrier_outcome, readiness),
+                    requests.recv(),
+                )
+                .await
+                {
+                    Err(failure) => failure,
+                    Ok(_) => panic!("provider wait cannot settle without a provider request"),
+                };
                 assert_eq!(
                     failure,
                     HostBarrierFailure::CoordinationFailed {
