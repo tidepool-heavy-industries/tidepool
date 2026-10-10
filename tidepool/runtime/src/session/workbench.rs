@@ -494,8 +494,7 @@ pub enum WorkbenchPublicationOutcome {
     Rejected {
         detail: String,
     },
-    DurabilityUnconfirmed {
-        bindings: Vec<String>,
+    RecoveryRequired {
         detail: String,
     },
 }
@@ -512,8 +511,8 @@ impl WorkbenchPublicationOutcome {
     #[must_use]
     pub fn public_bindings(&self) -> &[String] {
         match self {
-            Self::Published { bindings } | Self::DurabilityUnconfirmed { bindings, .. } => bindings,
-            Self::NotPublished { .. } | Self::Rejected { .. } => &[],
+            Self::Published { bindings } => bindings,
+            Self::NotPublished { .. } | Self::Rejected { .. } | Self::RecoveryRequired { .. } => &[],
         }
     }
 }

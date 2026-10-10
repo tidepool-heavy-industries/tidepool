@@ -2402,19 +2402,19 @@ where
                         mark_private_publication(result, &native_bindings),
                     ),
                     Ok(PrivateExecutionPublication::Manifest {
-                        commit: PublicManifestCommit::PublishedDurabilityUnconfirmed { detail },
-                        native_bindings,
+                        commit: PublicManifestCommit::RecoveryRequired { error },
                         ..
-                    }) => Ok(WorkbenchAdvance::Park(
-                        Self::confirm_owned_publication_task(
-                            owned,
-                            environment,
-                            kernel,
+                    }) => {
+                        let publication = WorkbenchPublicationOutcome::RecoveryRequired {
+                            detail: error.to_string(),
+                        };
+                        let failure = private_publication_failure(
                             result,
-                            detail,
-                            native_bindings,
-                        ),
-                    )),
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(*error)),
+                            publication,
+                        );
+                        Self::settle_owned_execution(behavior, &kernel, owned, Err(failure))
+                    }
                     Ok(PrivateExecutionPublication::Manifest {
                         commit: PublicManifestCommit::Cancelled,
                         ..
@@ -2465,6 +2465,12 @@ where
                     failure => {
                         let error = match failure {
                             Err(error) => error,
+                            Ok(PrivateExecutionPublication::Manifest {
+                                commit: PublicManifestCommit::Refused { error },
+                                ..
+                            }) => ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                                *error,
+                            )),
                             Ok(PrivateExecutionPublication::Rejected { reason, diagnostic }) => {
                                 ResidentActorWorkbenchError::ActorProtocol(format!(
                                     "private publication rejected: {reason:?}: {diagnostic}"
@@ -2489,55 +2495,6 @@ where
                         Self::settle_owned_execution(behavior, &kernel, owned, Err(failure))
                     }
                 }
-            },
-        )
-    }
-
-    fn confirm_owned_publication_task(
-        owned: OwnedExecution<H, O>,
-        environment: ResidentEnvironment<H, O>,
-        kernel: KernelContext,
-        result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
-        detail: String,
-        native_bindings: Vec<String>,
-    ) -> OwnedWorkbenchTask<Self> {
-        Self::owned_step_task(
-            owned,
-            move |owned| {
-                let context = owned.state.effects.context.clone();
-                Box::pin(async move {
-                    // The existing atomic-write owner retains the visible write.
-                    // This task attempts confirmation once, never execution or staging.
-                    tokio::select! {
-                        confirmed = environment.runner.confirm_publication_durability(context) => confirmed,
-                        terminal = kernel.wait_requested_shutdown() => Err(
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "published write durability remains unconfirmed during actor retirement: {}",
-                                terminal.summary,
-                            ))
-                        ),
-                    }
-                })
-            },
-            move |behavior, kernel, owned, confirmed| {
-                let result = match confirmed {
-                    Ok(()) => mark_private_publication(result, &native_bindings),
-                    Err(error) => {
-                        let unconfirmed = private_publication_bindings(&result, &native_bindings);
-                        let failure_detail = format!(
-                            "published write durability remains unconfirmed: {detail}; {error}"
-                        );
-                        Err(private_publication_failure(
-                            result,
-                            ResidentActorWorkbenchError::ActorProtocol(failure_detail.clone()),
-                            WorkbenchPublicationOutcome::DurabilityUnconfirmed {
-                                bindings: unconfirmed,
-                                detail: failure_detail,
-                            },
-                        ))
-                    }
-                };
-                Self::settle_owned_execution(behavior, kernel, owned, result)
             },
         )
     }

@@ -117,9 +117,8 @@ fn cleanup_uncertainty_and_terminal_wrappers_preserve_publication_and_receipts()
         WorkbenchPublicationOutcome::Published {
             bindings: vec!["visible".into()],
         },
-        WorkbenchPublicationOutcome::DurabilityUnconfirmed {
-            bindings: vec!["visible".into()],
-            detail: "directory sync failed".into(),
+        WorkbenchPublicationOutcome::RecoveryRequired {
+            detail: "database commit outcome requires recovery".into(),
         },
         WorkbenchPublicationOutcome::NotPublished {
             reason: WorkbenchNotPublishedReason::Failed,

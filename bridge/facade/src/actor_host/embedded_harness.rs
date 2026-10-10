@@ -1,8 +1,8 @@
 use std::{
     path::Path,
     sync::{
-        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
     },
 };
 
@@ -28,7 +28,7 @@ use harness::{
     store::Store,
     turn::{JobOutput, JobScheduler},
 };
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::{mpsc, watch};
 
 use super::cell_context::{EmbeddedContextBinding, ModelResolver};
@@ -195,6 +195,7 @@ impl EmbeddedHarnessRuntime {
         installation: Arc<EmbeddedPolicyInstallation>,
         parent: Option<&AgentPath>,
     ) -> Result<EmbeddedConversation, EmbeddedError> {
+        self.store.ensure_ready()?;
         if identity.run != self.run {
             return Err(EmbeddedError::Binding(
                 "embedded host run does not match the owning run directory".into(),
@@ -248,6 +249,7 @@ impl EmbeddedHarnessRuntime {
         policy: Arc<EmbeddedPolicyInstallation>,
         captured: Arc<EmbeddedHostedCheckpoint>,
     ) -> Result<EmbeddedConversation, EmbeddedError> {
+        self.store.ensure_ready()?;
         if identity.run != self.run
             || identity.actor != captured.child_path(installation.actor.identity())
             || identity.incarnation != installation.actor.identity().incarnation.0.to_string()
@@ -657,6 +659,7 @@ impl HostActor for EmbeddedHostActor {
     }
 
     fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+        self.store.ensure_ready()?;
         self.actor
             .admit_transaction()
             .map(|lease| Box::new(StoreAdmission { _lease: lease }) as Box<dyn AdmissionGuard>)
@@ -670,6 +673,7 @@ impl HostActor for EmbeddedHostActor {
             .actor
             .admit_transaction()
             .map_err(embedded_admission_error)?;
+        self.store.ensure_ready()?;
         let snapshot = Arc::new(
             self.installation
                 .request_snapshot()
@@ -1187,8 +1191,8 @@ fn reduced_publication_metadata(
         Some(Publication::Rejected { detail }) => {
             json!({"status": "rejected", "detail": exomonad_actor::bound_workbench_display(detail, 512)})
         }
-        Some(Publication::DurabilityUnconfirmed { bindings, detail }) => {
-            json!({"status": "durabilityUnconfirmed", "bindingsOmitted": bindings.len(), "detail": exomonad_actor::bound_workbench_display(detail, 512)})
+        Some(Publication::RecoveryRequired { detail }) => {
+            json!({"status": "recoveryRequired", "detail": exomonad_actor::bound_workbench_display(detail, 512)})
         }
     }
 }
@@ -1323,8 +1327,8 @@ fn workbench_publication_context(
         WorkbenchPublicationOutcome::Published { .. } => {
             "Notebook bindings were published; later failure does not undo publication."
         }
-        WorkbenchPublicationOutcome::DurabilityUnconfirmed { .. } => {
-            "Notebook bindings reached publication, but durability is unconfirmed."
+        WorkbenchPublicationOutcome::RecoveryRequired { .. } => {
+            "No notebook bindings were activated in this run. The database commit outcome requires authenticated recovery before more work can be admitted. Completed external effects are not rolled back."
         }
     }
 }
@@ -2521,11 +2525,9 @@ mod tests {
                             ..identity.clone()
                         },
                     ] {
-                        assert!(
-                            scratch_runtime
-                                .attach(foreign, campaign.actor.clone(), installation.clone(), None)
-                                .is_err()
-                        );
+                        assert!(scratch_runtime
+                            .attach(foreign, campaign.actor.clone(), installation.clone(), None)
+                            .is_err());
                     }
                     let (wakes, _incoming) = mpsc::unbounded_channel();
                     let scratch = tempfile::tempdir().unwrap();

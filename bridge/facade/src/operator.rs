@@ -3,12 +3,12 @@ pub mod proxy;
 pub mod wire;
 
 use axum::{
-    Json, Router,
-    body::{Body, to_bytes},
+    body::{to_bytes, Body},
     extract::{Path as RoutePath, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
+    Json, Router,
 };
 use exomonad_actor::{
     ActorExitKind, ActorTerminal, KernelInvocationFailure, KernelMessage, LocalActorRef,
@@ -23,7 +23,7 @@ use std::{
 use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus};
 use tokio::{
     net::UnixListener,
-    sync::{Mutex, watch},
+    sync::{watch, Mutex},
 };
 use uuid::Uuid;
 use wire::*;
@@ -685,9 +685,9 @@ fn invocation_error(failure: KernelInvocationFailure) -> Response {
 }
 
 fn map_failure(failure: exomonad_actor::KernelWorkbenchFailure) -> SubmitResponse {
-    let durability_unconfirmed = matches!(
+    let recovery_required = matches!(
         failure.publication.as_ref(),
-        Some(tidepool_runtime::session::WorkbenchPublicationOutcome::DurabilityUnconfirmed { .. })
+        Some(tidepool_runtime::session::WorkbenchPublicationOutcome::RecoveryRequired { .. })
     );
     let mut response = map_result(WorkbenchResponse {
         status: WorkbenchRunStatus::Rejected,
@@ -704,9 +704,9 @@ fn map_failure(failure: exomonad_actor::KernelWorkbenchFailure) -> SubmitRespons
             }
             tidepool_runtime::session::WorkbenchFailurePoint::Publication {
                 completed_input_units,
-            } if durability_unconfirmed => {
+            } if recovery_required => {
                 format!(
-                    "Publication durability remains unconfirmed after {completed_input_units} completed input units"
+                    "Publication requires authenticated recovery after {completed_input_units} completed input units"
                 )
             }
             tidepool_runtime::session::WorkbenchFailurePoint::Publication {
@@ -982,11 +982,10 @@ mod artifact_tests {
             detail: "not published".into(),
         };
         assert!(rejected.public_bindings().is_empty());
-        let unconfirmed = WorkbenchPublicationOutcome::DurabilityUnconfirmed {
-            bindings: vec!["visibleWrite".into()],
+        let unconfirmed = WorkbenchPublicationOutcome::RecoveryRequired {
             detail: "journal outcome unknown".into(),
         };
-        assert_eq!(unconfirmed.public_bindings(), &["visibleWrite"]);
+        assert!(unconfirmed.public_bindings().is_empty());
         let uncertain_failure = exomonad_actor::KernelWorkbenchFailure {
             actor: ActorRef::first(ActorId(9)),
             receipts: vec![],
@@ -998,19 +997,15 @@ mod artifact_tests {
             detail: "journal outcome unknown".into(),
             diagnostic: None,
         };
-        assert!(
-            uncertain_failure
-                .to_string()
-                .contains("publication durability remains unconfirmed")
-        );
+        assert!(uncertain_failure
+            .to_string()
+            .contains("publication requires authenticated recovery"));
         let uncertain_response = map_failure(uncertain_failure);
-        assert!(
-            uncertain_response
-                .receipt
-                .unwrap()
-                .display
-                .contains("Publication durability remains unconfirmed")
-        );
+        assert!(uncertain_response
+            .receipt
+            .unwrap()
+            .display
+            .contains("Publication requires authenticated recovery"));
         assert_eq!(structured["items"][2]["output"], "private result 2");
         assert_eq!(
             structured["items"][2]["operations"][0]["effect"],

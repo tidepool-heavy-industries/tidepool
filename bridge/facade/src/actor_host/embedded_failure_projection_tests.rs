@@ -197,8 +197,7 @@ fn many_operations_and_diagnostics_keep_recovery_and_distinct_effect_outcomes() 
         error(
             receipts,
             "λ".repeat(8192),
-            Publication::DurabilityUnconfirmed {
-                bindings: vec!["large binding name".repeat(100); 100],
+            Publication::RecoveryRequired {
                 detail: "publication detail".repeat(1000),
             },
         ),
@@ -207,8 +206,9 @@ fn many_operations_and_diagnostics_keep_recovery_and_distinct_effect_outcomes() 
     .into_tool_failure();
     check_failure(&failure, &operation);
     let metadata = failure.metadata().unwrap();
-    assert_eq!(metadata["publication"]["status"], "durabilityUnconfirmed");
-    assert_eq!(metadata["publication"]["bindingsOmitted"], 100);
+    assert_eq!(metadata["publication"]["status"], "recoveryRequired");
+    assert!(metadata["publication"].get("bindingsOmitted").is_none());
+    assert!(metadata["publication"].get("bindings").is_none());
     assert_eq!(metadata["itemsOmitted"], 32);
     assert_eq!(metadata["diagnosticOmitted"], true);
     assert_eq!(metadata["class"], "version-skew");

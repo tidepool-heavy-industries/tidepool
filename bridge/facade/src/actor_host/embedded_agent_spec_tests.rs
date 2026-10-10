@@ -582,7 +582,11 @@ async fn accepted_reply_resumes_after_parked_notebook_and_provider_completion() 
             }).await.expect("all late actual notebook outputs reach the provider");
             late_outputs.assert_committed("deferred-sibling");
             late_outputs.assert_committed("deferred-late-cell");
-            assert_eq!(late_outputs.settled_output("deferred-second-reply")["status"], "rejected");
+            let second_reply = late_outputs.settled_output("deferred-second-reply");
+            assert_eq!(
+                second_reply["status"], "rejected",
+                "a later reply must not replace the accepted reply; exact second-reply output: {second_reply}"
+            );
             late_outputs.finish();
             let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             root_done.assert_value("deferred-parent-await", "True");

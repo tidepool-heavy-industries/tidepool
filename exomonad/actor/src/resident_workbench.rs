@@ -2158,7 +2158,6 @@ pub(crate) enum ActivationPublicationObservation<'a> {
     RendererSealed,
     RendererSelected(&'a tidepool_runtime::session::RuntimeActivationPreviewAdmission),
     NativeClaimed,
-    BeforeConfirmation,
     NativeSettled(&'a tidepool_runtime::session::PublicManifestCommit),
     ToolsPrepared {
         tools: std::sync::Weak<ResidentWorkbenchTools>,
@@ -2666,16 +2665,24 @@ impl ActivationPublicationResources {
 pub(crate) enum ActivationInputPublication {
     Published(crate::request::RequestActivationCompletion),
     Cancelled,
-    BeforeRename { detail: String },
-    PublishedUnconfirmed { detail: String },
+    Refused {
+        error: Box<tidepool_runtime::session::SessionError>,
+    },
+    RecoveryRequired {
+        error: Box<tidepool_runtime::session::SessionError>,
+    },
 }
 
 /// Initial owner publication carries the capability issued by its native
 /// checkout. Established owners retain their original capability instead.
 pub(crate) enum NativePublicOwnerPublication {
     Durable(Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>),
-    PublishedUnconfirmed { detail: String },
-    BeforeRename { detail: String },
+    Refused {
+        error: Box<tidepool_runtime::session::SessionError>,
+    },
+    RecoveryRequired {
+        error: Box<tidepool_runtime::session::SessionError>,
+    },
     Cancelled,
     Stale,
 }
@@ -2693,10 +2700,8 @@ impl NativePublicOwnerPublication {
             PublicManifestCommit::Durable => Self::Durable(issue().map_err(|error| {
                 ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
             })?),
-            PublicManifestCommit::PublishedDurabilityUnconfirmed { detail } => {
-                Self::PublishedUnconfirmed { detail }
-            }
-            PublicManifestCommit::BeforeRename { detail } => Self::BeforeRename { detail },
+            PublicManifestCommit::Refused { error } => Self::Refused { error },
+            PublicManifestCommit::RecoveryRequired { error } => Self::RecoveryRequired { error },
             PublicManifestCommit::Cancelled => Self::Cancelled,
             PublicManifestCommit::Stale => Self::Stale,
             PublicManifestCommit::Ephemeral => {
@@ -2716,11 +2721,10 @@ impl NativePublicOwnerPublication {
         use tidepool_runtime::session::PublicManifestCommit;
         match self {
             Self::Durable(capability) => (PublicManifestCommit::Durable, Some(capability)),
-            Self::PublishedUnconfirmed { detail } => (
-                PublicManifestCommit::PublishedDurabilityUnconfirmed { detail },
-                None,
-            ),
-            Self::BeforeRename { detail } => (PublicManifestCommit::BeforeRename { detail }, None),
+            Self::Refused { error } => (PublicManifestCommit::Refused { error }, None),
+            Self::RecoveryRequired { error } => {
+                (PublicManifestCommit::RecoveryRequired { error }, None)
+            }
             Self::Cancelled => (PublicManifestCommit::Cancelled, None),
             Self::Stale => (PublicManifestCommit::Stale, None),
         }
@@ -7730,26 +7734,15 @@ where
         let Some(bootstrap) = bootstrap else {
             return Ok(tidepool_runtime::session::PublicManifestCommit::Durable);
         };
-        let durable = owner.durable().cloned().ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "durable bootstrap lost its original public owner".into(),
-            )
-        })?;
-        self.access.with_machine(context, move |session, context, _| {
-            let commit = session.publish_durable_public_bootstrap(bootstrap)
-                .map_err(ResidentError::Session)?;
-            match commit {
-                tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { detail } => {
-                    match session.confirm_durable_public_scope(&durable, context.placement.lexical_scope) {
-                        Ok(()) => Ok(tidepool_runtime::session::PublicManifestCommit::Durable),
-                        Err(error) => Ok(tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
-                            detail: format!("{detail}; confirmation failed: {error}"),
-                        }),
-                    }
-                }
-                other => Ok(other),
-            }
-        }).await
+        self.access
+            .with_machine(context, move |session, _, _| {
+                session
+                    .publish_durable_public_bootstrap(bootstrap)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                    })
+            })
+            .await
     }
 
     /// Transfer only the journal-certified durable predecessor to this exact
@@ -7873,10 +7866,12 @@ where
             let actor = context.actor;
             #[cfg(test)]
             let native_observer = observer.clone();
-            let publication = self.access.with_machine(context.clone(), move |session, _, _| {
-                let mut activation = None;
-                let mut refusal = None;
-                let outcome = session.publish_staged_public_manifest_admitted(ticket, || {
+            let publication =
+                self.access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        let mut activation = None;
+                        let mut refusal = None;
+                        let outcome = session.publish_staged_public_manifest_admitted(ticket, || {
                     let admitted = native_requests.begin_activation_publication(
                         actor, request, native_resources.clone(), &native_retirement,
                     );
@@ -7894,104 +7889,53 @@ where
                         Err(error) => { refusal = Some(error); None }
                     }
                 }).map_err(ResidentError::Session)?;
-                // Confirm the same visible native owner while this operation still
-                // owns its checkout/fence. No JoinHandle delivery is required.
-                let outcome = if matches!(outcome,
-                    tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
-                ) {
-                    #[cfg(test)]
-                    if let Some(observer) = &native_observer {
-                        observer(ActivationPublicationObservation::BeforeConfirmation)
-                            .expect("confirmation observer must release its phase");
-                    }
-                    let owner = native_resources.execution.owner.durable()
-                        .expect("only a durable owner needs confirmation");
-                    match session.confirm_durable_public_scope(owner, native_resources.execution.public_scope) {
-                        Ok(()) => {
-                            tidepool_runtime::session::PublicManifestCommit::Durable
+                        let completion = activation.map(|lease| lease.finish());
+                        #[cfg(test)]
+                        if let Some(observer) = &native_observer {
+                            observer(ActivationPublicationObservation::NativeSettled(&outcome))
+                                .expect("native settlement observer must release its phase");
                         }
-                        Err(error) => {
-                            let tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { detail } = outcome
-                                else { unreachable!() };
-                            tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
-                                detail: format!("{detail}; confirmation failed: {error}"),
+                        match refusal {
+                            Some(crate::request::ActivationPublicationRefusal::Retired(
+                                terminal,
+                            )) => {
+                                return Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(
+                                    terminal,
+                                ))
                             }
+                            Some(crate::request::ActivationPublicationRefusal::Request(error))
+                                if error != crate::ReplyError::CancellationRequested =>
+                            {
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                                    "activation native claim refused: {error:?}"
+                                )))
+                            }
+                            _ => {}
                         }
-                    }
-                } else { outcome };
-                let completion = activation.map(|lease| lease.finish());
-                #[cfg(test)]
-                if let Some(observer) = &native_observer {
-                    observer(ActivationPublicationObservation::NativeSettled(&outcome))
-                        .expect("native settlement observer must release its phase");
-                }
-                match refusal {
-                    Some(crate::request::ActivationPublicationRefusal::Retired(terminal)) =>
-                        return Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal)),
-                    Some(crate::request::ActivationPublicationRefusal::Request(error))
-                        if error != crate::ReplyError::CancellationRequested =>
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!("activation native claim refused: {error:?}"))),
-                    _ => {},
-                }
-                Ok((outcome, completion))
-            }).await?;
+                        Ok((outcome, completion))
+                    })
+                    .await?;
             return Ok(match publication {
                 (tidepool_runtime::session::PublicManifestCommit::Stale, _) => continue,
-                (tidepool_runtime::session::PublicManifestCommit::Durable
-                    | tidepool_runtime::session::PublicManifestCommit::Ephemeral, completion) =>
-                    ActivationInputPublication::Published(completion.expect("native visible claim issued its request completion")),
-                (tidepool_runtime::session::PublicManifestCommit::Cancelled, _) => ActivationInputPublication::Cancelled,
-                (tidepool_runtime::session::PublicManifestCommit::BeforeRename { detail }, _) =>
-                    ActivationInputPublication::BeforeRename { detail },
-                (tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }, _) =>
-                    ActivationInputPublication::PublishedUnconfirmed { detail },
+                (
+                    tidepool_runtime::session::PublicManifestCommit::Durable
+                    | tidepool_runtime::session::PublicManifestCommit::Ephemeral,
+                    completion,
+                ) => ActivationInputPublication::Published(
+                    completion.expect("native visible claim issued its request completion"),
+                ),
+                (tidepool_runtime::session::PublicManifestCommit::Cancelled, _) => {
+                    ActivationInputPublication::Cancelled
+                }
+                (tidepool_runtime::session::PublicManifestCommit::Refused { error }, _) => {
+                    ActivationInputPublication::Refused { error }
+                }
+                (
+                    tidepool_runtime::session::PublicManifestCommit::RecoveryRequired { error },
+                    _,
+                ) => ActivationInputPublication::RecoveryRequired { error },
             });
         }
-    }
-
-    /// Complete only the directory durability confirmation for an already
-    /// visible initialized owner; the Pending actor keeps its placement alive.
-    pub(crate) async fn confirm_durable_public_owner(
-        &self,
-        context: crate::ActorSessionContext,
-        owner: tidepool_runtime::session::RecoveryPublicOwner,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, context, _| {
-                session
-                    .confirm_durable_public_scope(&owner, context.placement.lexical_scope)
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })
-            })
-            .await
-    }
-
-    /// Initial placement has no readiness capability yet. Confirm and issue
-    /// it before releasing the native checkout; later confirmations reuse it.
-    pub(crate) async fn confirm_initial_durable_public_owner(
-        &self,
-        context: crate::ActorSessionContext,
-        owner: tidepool_runtime::session::RecoveryPublicOwner,
-    ) -> Result<
-        Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
-        ResidentActorWorkbenchError,
-    > {
-        self.access
-            .with_machine(context, move |session, context, _| {
-                let scope = context.placement.lexical_scope;
-                session
-                    .confirm_durable_public_scope(&owner, scope)
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })?;
-                session
-                    .durable_public_readiness(&owner, scope)
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                    })
-            })
-            .await
     }
 
     /// Publish a fixed native execution. Every retry captures only the latest
@@ -8112,7 +8056,10 @@ where
                         .map_err(|error| {
                             publication_error(PrivatePublicationPhase::Publish, error)
                         })?;
-                    if outcome == tidepool_runtime::session::PublicManifestCommit::Stale {
+                    if matches!(
+                        outcome,
+                        tidepool_runtime::session::PublicManifestCommit::Stale
+                    ) {
                         continue;
                     }
                     cancel_on_drop.0 = None;
@@ -8155,19 +8102,6 @@ where
                 }
             }
         }
-    }
-
-    pub(crate) async fn confirm_publication_durability(
-        &self,
-        context: crate::ActorSessionContext,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        self.access
-            .with_machine(context, move |session, _, _| {
-                session.confirm_publication_durability().map_err(|error| {
-                    ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                })
-            })
-            .await
     }
 
     pub(crate) async fn public_visibility_snapshot(

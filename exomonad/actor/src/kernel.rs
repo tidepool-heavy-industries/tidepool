@@ -245,12 +245,12 @@ impl std::fmt::Display for KernelWorkbenchFailure {
                 completed_input_units,
             } => match self.publication.as_ref() {
                 Some(
-                    tidepool_runtime::session::WorkbenchPublicationOutcome::DurabilityUnconfirmed {
+                    tidepool_runtime::session::WorkbenchPublicationOutcome::RecoveryRequired {
                         ..
                     },
                 ) => write!(
                     formatter,
-                    "actor {} workbench publication durability remains unconfirmed after {} completed input units: {}",
+                    "actor {} workbench publication requires authenticated recovery after {} completed input units: {}",
                     self.actor, completed_input_units, self.detail
                 )?,
                 _ => write!(
@@ -357,12 +357,10 @@ impl ActorWorkbenchInvocation {
     }
 }
 
-/// Distinguish a program continuation from confirmation of an already
-/// visible child surface. A repeated confirmation never resumes effects.
+/// Distinguish ordinary continuation from release of the admitted root boot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KernelResume {
     ContinueProgram,
-    ConfirmChildDurability,
     ReleaseRootStartup,
 }
 
@@ -1816,16 +1814,17 @@ mod tests {
         assert!(!rendered.contains("input unit 3 of 3 failed"));
         assert_eq!(failure.point.next_index(), 3);
         let mut uncertain = failure;
-        uncertain.publication = Some(WorkbenchPublicationOutcome::DurabilityUnconfirmed {
-            bindings: vec!["visibleWrite".into()],
+        uncertain.publication = Some(WorkbenchPublicationOutcome::RecoveryRequired {
             detail: "journal outcome unknown".into(),
         });
         assert!(uncertain
             .to_string()
-            .contains("publication durability remains unconfirmed after 3 completed input units"));
-        assert_eq!(
-            uncertain.publication.as_ref().unwrap().public_bindings(),
-            &["visibleWrite".to_string()]
-        );
+            .contains("publication requires authenticated recovery after 3 completed input units"));
+        assert!(uncertain
+            .publication
+            .as_ref()
+            .unwrap()
+            .public_bindings()
+            .is_empty());
     }
 }
