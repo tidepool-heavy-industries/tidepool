@@ -3566,10 +3566,13 @@ mod tests {
             original_root
         );
         let published = recovery.state();
-        assert!(tidepool_testing::with_settlement(|settlement| {
+        let hidden = tidepool_testing::with_settlement(|settlement| {
             lib.define("mustStayHidden = DirectFlag", settlement)
-        })
-        .is_err());
+        });
+        assert!(
+            matches!(hidden, Err(SessionError::ValidationFailed(_))),
+            "a retracted constructor must fail the actual typecheck: {hidden:?}"
+        );
         assert_eq!(recovery.state(), published);
         assert_eq!(lib.scope_tip(ScopeId::ROOT), tip);
     }
