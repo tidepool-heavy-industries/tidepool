@@ -19,7 +19,7 @@ pub struct RuntimeDurablePublicReadiness {
     session: super::SessionId,
     durable: super::RecoveryPublicOwner,
     scope: ScopeId,
-    store:std::sync::Weak<super::RunRecoveryStore>,
+    store: std::sync::Weak<super::RunRecoveryStore>,
 }
 
 impl RuntimeDurablePublicReadiness {
@@ -34,7 +34,7 @@ impl RuntimeDurablePublicReadiness {
             && self
                 .store
                 .upgrade()
-                .is_some_and(|store|store.ensure_ready().is_ok())
+                .is_some_and(|store| store.ensure_ready().is_ok())
     }
     pub fn session(&self) -> super::SessionId {
         self.session
@@ -1026,7 +1026,7 @@ impl RuntimeCheckedPrefix {
         scope: ScopeId,
         execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
     ) -> Result<Arc<CheckedTurnCompletion>, SessionError> {
-        let store = session.lib().held_recovery_store()?;
+        let store = session.held_admission_store()?;
         let mut state = self.state.lock();
         if self.admission.host_carrier().is_some()
             || !self.admission.belongs_to(session)
@@ -1557,6 +1557,15 @@ impl RuntimeCellAdmission {
 }
 
 impl PersistentSession {
+    fn held_admission_store(
+        &self,
+    ) -> Result<Option<super::recovery_store::RunRecoveryStore>, SessionError> {
+        if !self.has_lib() {
+            return Err(SessionError::MissingDeclarationLibrary);
+        }
+        self.lib().held_recovery_store()
+    }
+
     pub(super) fn capture_value_interfaces(
         &self,
         view: &super::SessionCompileView,
@@ -1578,7 +1587,7 @@ impl PersistentSession {
         binding: &str,
         expected: super::resident::HostBindingType,
     ) -> Result<(), SessionError> {
-        let store = self.lib().held_recovery_store()?;
+        let store = self.held_admission_store()?;
         let prefix = admission.prefix();
         let mut state = prefix.state.lock();
         let scope = prefix.admission.visibility.scope;
@@ -1639,7 +1648,7 @@ impl PersistentSession {
         prefix: Arc<RuntimeCheckedPrefix>,
         item: tidepool_toolchain::checked_cell::ExactCheckedItem,
     ) -> Result<Arc<RuntimeCheckedItemAdmission>, SessionError> {
-        let store = self.lib().held_recovery_store()?;
+        let store = self.held_admission_store()?;
         let mut state = prefix.state.lock();
         let scope = prefix.admission.visibility.scope;
         if !prefix.admission.belongs_to(self)
@@ -2138,8 +2147,14 @@ impl PersistentSession {
         let snapshot = self
             .public_visibility_snapshot_in(public_scope)
             .ok_or(SessionError::DeadScope(public_scope))?;
-        if !lib.validate_recovered_public_owner(owner)? {return Err(fail(Failure::MissingSurface));}
-        let surface=state.graph.surface(owner).map_err(|error|super::recovery::graph_error(&state.path,error))?.ok_or_else(||fail(Failure::MissingSurface))?;
+        if !lib.validate_recovered_public_owner(owner)? {
+            return Err(fail(Failure::MissingSurface));
+        }
+        let surface = state
+            .graph
+            .surface(owner)
+            .map_err(|error| super::recovery::graph_error(&state.path, error))?
+            .ok_or_else(|| fail(Failure::MissingSurface))?;
         let mapped = lib.durable_public_scopes.get(owner).copied();
         if mapped != Some(public_scope) {
             return Err(fail(Failure::Scope { mapped }));
@@ -2166,7 +2181,7 @@ impl PersistentSession {
         &mut self,
         public_scope: ScopeId,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
-        let store = self.lib().held_recovery_store()?;
+        let store = self.held_admission_store()?;
         self.reap_admission_leases();
         let durable_owner = self
             .lib()
@@ -2362,7 +2377,7 @@ impl PersistentSession {
         purpose: RuntimeCellPurpose,
         compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
-        let store = self.lib().held_recovery_store()?;
+        let store = self.held_admission_store()?;
         self.reap_admission_leases();
         let view = self
             .compile_view_in(scope)
