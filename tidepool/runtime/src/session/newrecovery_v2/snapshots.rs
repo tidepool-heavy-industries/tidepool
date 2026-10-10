@@ -53,10 +53,12 @@ impl RecoveryPublicSurface {
     pub(crate) fn set_visibility(&mut self,bindings:impl IntoIterator<Item=RecoveryPublicBinding>,sources:impl IntoIterator<Item=RecoveryPublicSourceInstance>) {
         let mut next=std::collections::BTreeMap::new();
         for binding in bindings {next.insert(binding.name,binding.owner);}
-        self.bindings.retain(|name,_|next.contains_key(name));
+        let removed=self.bindings.keys().filter(|name|!next.contains_key(*name)).cloned().collect::<Vec<_>>();
+        for name in removed {self.bindings.remove(&name);}
         for (name,owner) in next {if self.bindings.get(&name)!=Some(&owner){self.bindings.insert(name,owner);}}
         let next:std::collections::BTreeSet<_>=sources.into_iter().collect();
-        self.source_instances.retain(|source,_|next.contains(source));
+        let removed=self.source_instances.keys().filter(|source|!next.contains(*source)).cloned().collect::<Vec<_>>();
+        for source in removed {self.source_instances.remove(&source);}
         for source in next {if !self.source_instances.contains_key(&source){self.source_instances.insert(source,());}}
     }
 }
@@ -76,6 +78,7 @@ pub(crate) struct RecoveryGraph {
     source_session:u64,
     lineage:u64,
     revision:StoreRevision,
+    content_revision:StoreRevision,
     root:Option<DomainSnapshotRoot>,
     ceiling:Generation,
     nodes:OrdMap<u64,Cid>,
@@ -103,7 +106,7 @@ impl Blockstore for RecoveryGraph {
 }
 impl RecoveryGraph {
     pub(crate) fn empty(store:Arc<RunRecoveryStore>,domain:RecoveryDomainId,source_session:u64)->Self {
-        Self {store,domain,source_session,lineage:source_session,revision:StoreRevision(0),root:None,ceiling:Generation(0),nodes:OrdMap::new(),artifacts:OrdMap::new(),node_receipt:None,artifact_receipt:None,owner_roots:OrdMap::new(),pending:OrdMap::new(),public_changes:Vec::new(),acquired:Arc::new(Mutex::new(Acquired::default()))}
+        Self {store,domain,source_session,lineage:source_session,revision:StoreRevision(0),content_revision:StoreRevision(0),root:None,ceiling:Generation(0),nodes:OrdMap::new(),artifacts:OrdMap::new(),node_receipt:None,artifact_receipt:None,owner_roots:OrdMap::new(),pending:OrdMap::new(),public_changes:Vec::new(),acquired:Arc::new(Mutex::new(Acquired::default()))}
     }
     pub(crate) fn hydrate_domain(store:Arc<RunRecoveryStore>,domain:RecoveryDomainId,state:&RecoveryDomainState)->Result<Self,RecoveryError> {
         store.ensure_ready()?;
@@ -112,7 +115,7 @@ impl RecoveryGraph {
         let nodes=hydrate_map::<u64,Cid,_>(store.as_ref(),&snapshot.nodes)?;
         let artifacts=hydrate_map::<ArtifactId,Cid,_>(store.as_ref(),&snapshot.artifacts)?;
         let owners=store.public_owner_states(domain)?;
-        let graph=Self {source_session:snapshot.source_session,lineage:state.lineage,revision:state.revision,root:Some(state.snapshot_root.clone()),ceiling:state.allocation_ceiling,nodes:nodes.facts().clone(),artifacts:artifacts.facts().clone(),node_receipt:Some(nodes),artifact_receipt:Some(artifacts),owner_roots:owners.into_iter().map(|owner|(owner.owner.clone(),owner)).collect(),store,domain,pending:OrdMap::new(),public_changes:Vec::new(),acquired:Arc::new(Mutex::new(Acquired::default()))};
+        let graph=Self {source_session:snapshot.source_session,lineage:state.lineage,revision:state.revision,content_revision:state.content_revision,root:Some(state.snapshot_root.clone()),ceiling:state.allocation_ceiling,nodes:nodes.facts().clone(),artifacts:artifacts.facts().clone(),node_receipt:Some(nodes),artifact_receipt:Some(artifacts),owner_roots:owners.into_iter().map(|owner|(owner.owner.clone(),owner)).collect(),store,domain,pending:OrdMap::new(),public_changes:Vec::new(),acquired:Arc::new(Mutex::new(Acquired::default()))};
         Ok(graph)
     }
     pub(crate) fn store(&self)->&Arc<RunRecoveryStore>{&self.store}
@@ -144,7 +147,7 @@ impl RecoveryGraph {
         let Some(cid)=self.artifacts.get(&id) else{return Ok(None)};
         if let Some(artifact)=self.acquired.lock().artifacts.get(&id).cloned(){return Ok(Some(artifact));}
         let artifact:RecoveryArtifactClosure=read_value(self,cid)?;
-        if artifact.artifact_id()!=id||artifact.declared_artifact_id()!=id||artifact.component_paths().iter().any(|path|!relative(path)){return Err(error("artifact block identity or custody path is invalid"));}
+        if artifact.artifact_id()!=id||artifact.declared_artifact_id()!=id||artifact.component_paths().iter().any(|(_,path)|!relative(path)){return Err(error("artifact block identity or custody path is invalid"));}
         let artifact=Arc::new(artifact); self.acquired.lock().artifacts.insert(id,artifact.clone()); Ok(Some(artifact))
     }
     pub(crate) fn context(&self,root:&ContextRoot)->Result<Arc<MaterializedContext>,RecoveryError> {
@@ -173,6 +176,18 @@ impl RecoveryGraph {
     }
     pub(crate) fn domain_root(&self)->Option<&DomainSnapshotRoot>{self.root.as_ref()}
     pub(crate) fn public_surface_root(&self,owner:&RecoveryPublicOwner)->Option<&PublicSurfaceRoot>{self.owner_roots.get(owner).map(|header|&header.surface_root)}
+    pub(crate) fn install_ceiling_revision(&mut self,revision:StoreRevision,content_revision:StoreRevision,ceiling:Generation){self.revision=revision;self.content_revision=content_revision;self.ceiling=ceiling;}
+    pub(crate) fn content_revision(&self)->StoreRevision{self.content_revision}
+    pub(crate) fn prepare_owner_transfer(&self,previous:&RecoveryPublicOwner,successor:RecoveryPublicOwner,epoch:u64)->Result<Self,RecoveryError> {
+        let mut graph=self.clone();
+        let header=self.owner_roots.get(previous).ok_or_else(||error("transfer predecessor is absent"))?;
+        let old=self.surface(previous)?.ok_or_else(||error("transfer predecessor surface is absent"))?;
+        let mut surface=(*old).clone();surface.owner=successor.clone();surface.epoch=epoch;
+        graph.owner_roots.remove(previous);
+        graph.owner_roots.insert(successor.clone(),RecoveryPublicOwnerState{owner:successor.clone(),epoch,surface_root:header.surface_root.clone()});
+        graph.acquired.lock().surfaces.insert((successor,epoch,*header.surface_root.cid()),Arc::new(surface));
+        Ok(graph)
+    }
     pub(crate) fn materialize_domain(mut self)->Result<(Self,DomainSnapshotRoot,Vec<(Cid,Arc<[u8]>)>),RecoveryError> {
         let mut materializer=Materializer::new(&self);
         let nodes=materializer.materialize_map(self.node_receipt.as_ref(),&self.nodes)?;
@@ -185,7 +200,7 @@ impl RecoveryGraph {
         Ok((self,root,blocks))
     }
     pub(crate) fn install_store_state(&mut self,state:&RecoveryDomainState) {
-        self.revision=state.revision; self.ceiling=state.allocation_ceiling; self.lineage=state.lineage; self.root=Some(state.snapshot_root.clone()); self.pending.clear(); self.public_changes.clear();
+        self.revision=state.revision; self.content_revision=state.content_revision; self.ceiling=state.allocation_ceiling; self.lineage=state.lineage; self.root=Some(state.snapshot_root.clone()); self.pending.clear(); self.public_changes.clear();
     }
 }
 
@@ -204,7 +219,7 @@ impl RecoveryGraphCandidate {
     }
     pub(crate) fn insert_artifact(&mut self,artifact:RecoveryArtifactClosure)->Result<(),RecoveryError> {
         let id=artifact.artifact_id();
-        if artifact.declared_artifact_id()!=id||artifact.component_paths().iter().any(|path|!relative(path)){return Err(error("artifact insertion has invalid identity or custody path"));}
+        if artifact.declared_artifact_id()!=id||artifact.component_paths().iter().any(|(_,path)|!relative(path)){return Err(error("artifact insertion has invalid identity or custody path"));}
         if let Some(existing)=self.graph.artifact(id)? {if *existing!=artifact{return Err(error("artifact identity cannot replace immutable custody facts"));} return Ok(())}
         let cid=self.encode(&artifact)?; self.graph.artifacts.insert(id,cid); self.graph.acquired.lock().artifacts.insert(id,Arc::new(artifact)); Ok(())
     }

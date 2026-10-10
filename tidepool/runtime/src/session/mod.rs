@@ -39,7 +39,7 @@ mod publication;
 mod recovery;
 mod recovery_hydration;
 pub mod recovery_store;
-pub use recovery_hydration::{RecoveryRunAuthority, RecoverySuccessorAuthority};
+pub use recovery_hydration::{RecoveryRunAuthority, RecoverySuccessorAuthority, RecoveredDomainPresence};
 pub use recovery_store::{
     DomainSnapshotRoot, PublicSurfaceRoot, RecoveryDomainId, RecoveryDomainState,
     RecoveryPublicOwnerState, RecoverySnapshotIdentity, RunRecoveryStore, StoreRevision,
@@ -574,6 +574,9 @@ enum PublicPublicationBaseline {
     Durable {
         owner: RecoveryPublicOwner,
         graph: recovery::RecoveryGraph,
+        store_revision:StoreRevision,
+        allocation_ceiling:Generation,
+        artifact_root:PathBuf,
     },
     Ephemeral,
 }
@@ -581,8 +584,7 @@ enum PublicPublicationBaseline {
 enum StagedPublicationTarget {
     Durable {
         owner: RecoveryPublicOwner,
-        base_checksum: String,
-        base_high_water: Generation,
+        base_revision: StoreRevision,
         staged: recovery::StagedRecoveryManifest,
     },
     Ephemeral,
@@ -629,19 +631,22 @@ impl StagedPublicManifest {
 
 /// A stale stage preserves the execution's intent; its caller can stage again
 /// from the new public graph without repeating the execution's effects.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum PublicManifestCommit {
     Stale,
     Cancelled,
-    BeforeRename {
-        detail: String,
-    },
+    Refused { error: Box<SessionError> },
+    RecoveryRequired { error: Box<SessionError> },
     Durable,
-    /// The paired lexical/native swap is visible only in this runtime owner.
     Ephemeral,
-    PublishedDurabilityUnconfirmed {
-        detail: String,
-    },
+}
+
+fn publication_disposition<T>(outcome:recovery_store::StoreDisposition<T>)->Result<T,PublicManifestCommit> {
+    match outcome {
+        recovery_store::StoreDisposition::Committed(value)=>Ok(value),
+        recovery_store::StoreDisposition::Refused(reason)=>Err(PublicManifestCommit::Refused{error:Box::new(SessionError::RecoveryStoreRefused(reason))}),
+        recovery_store::StoreDisposition::RecoveryRequired(error)=>Err(PublicManifestCommit::RecoveryRequired{error:Box::new(SessionError::RecoveryStore(Box::new(error)))}),
+    }
 }
 
 impl PublicManifestBase {
@@ -650,50 +655,15 @@ impl PublicManifestBase {
     pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
         let target = match self.target {
             PublicPublicationBaseline::Ephemeral => StagedPublicationTarget::Ephemeral,
-            PublicPublicationBaseline::Durable { owner, graph } => {
-                let root = self
-                    .path
-                    .parent()
-                    .ok_or_else(|| SessionError::RecoveryManifest {
-                        path: self.path.clone(),
-                        detail: "recovery manifest has no parent directory".into(),
-                    })?;
-                let surface = graph.public_surfaces().find(|s| s.owner == owner);
-                let epoch = surface.map_or(0, |s| s.epoch);
-                let bindings = self
-                    .final_bindings
-                    .into_iter()
-                    .map(|(name, id)| recovery::RecoveryPublicBinding {
-                        name,
-                        owner: recovery::RecoveryBindingId {
-                            session: self.session.0,
-                            variable: id.raw(),
-                        },
-                    })
-                    .collect();
-                let staged = recovery::stage_public_visibility_v2(
-                    &self.path,
-                    root,
-                    &graph,
-                    owner.clone(),
-                    epoch,
-                    bindings,
-                    self.final_source_instances,
-                    None,
-                    surface
-                        .map(|surface| surface.compiler_context.clone())
-                        .unwrap_or_default(),
-                )
-                .map_err(|error| SessionError::RecoveryManifest {
-                    path: self.path.clone(),
-                    detail: error.to_string(),
-                })?;
-                StagedPublicationTarget::Durable {
-                    owner,
-                    base_checksum: graph.checksum().to_owned(),
-                    base_high_water: graph.high_water(),
-                    staged,
-                }
+            PublicPublicationBaseline::Durable { owner, graph, store_revision, allocation_ceiling, .. } => {
+                let mut surface=graph.surface(&owner).map_err(|error|recovery::graph_error(&self.path,error))?
+                    .map(|surface|(*surface).clone()).unwrap_or_else(||recovery::RecoveryPublicSurface::empty(owner.clone()));
+                surface.epoch=surface.epoch.checked_add(1).ok_or(SessionError::WrongPublicManifestTicket)?;
+                surface.set_visibility(self.final_bindings.into_iter().map(|(name,id)|recovery::RecoveryPublicBinding{name,owner:recovery::RecoveryBindingId{session:self.session.0,variable:id.raw()}}),self.final_source_instances);
+                let mut candidate=graph.candidate();
+                candidate.replace_surface(surface).map_err(|error|recovery::graph_error(&self.path,error))?;
+                let staged=candidate.prepare(store_revision,allocation_ceiling).map_err(|error|recovery::graph_error(&self.path,error))?;
+                StagedPublicationTarget::Durable {owner,base_revision:store_revision,staged}
             }
         };
         Ok(StagedPublicManifest {
@@ -856,8 +826,6 @@ pub struct SessionLib {
     /// Actor incarnations in one session have distinct process-local lexical
     /// scopes, including inherited-context children.
     durable_public_scopes: BTreeMap<RecoveryPublicOwner, ScopeId>,
-    #[cfg(test)]
-    fail_recovery_durability_once: bool,
 }
 
 /// One scoped declaration baseline and its privately issued source custody.
@@ -868,35 +836,6 @@ pub(crate) struct ScopeDeclarationState {
         Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
     pub(crate) published_sources:
         Vec<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
-}
-
-/// The actual native manifest confirmation state, shared by read-only owner
-/// readiness capabilities. A pending receipt remains here throughout fsync.
-#[derive(Default)]
-struct RecoveryDurability(
-    std::sync::Arc<parking_lot::Mutex<Option<tidepool_atomic_write::PublishedWrite>>>,
-);
-
-impl RecoveryDurability {
-    fn is_some(&self) -> bool {
-        self.0.lock().is_some()
-    }
-    #[cfg(test)]
-    fn is_none(&self) -> bool {
-        !self.is_some()
-    }
-    fn set(&self, publication: tidepool_atomic_write::PublishedWrite) {
-        *self.0.lock() = Some(publication);
-    }
-    fn confirm(&self) -> Result<(), tidepool_atomic_write::WriteError> {
-        let publication = self.0.lock().clone();
-        if let Some(publication) = publication {
-            publication.confirm_durability()?;
-            // Native checkout serializes all writes and confirmations.
-            *self.0.lock() = None;
-        }
-        Ok(())
-    }
 }
 
 struct DurableDeclarationGraph {
@@ -1165,8 +1104,6 @@ impl SessionLib {
             tips: HashMap::from([(ScopeId::ROOT, ScopeDeclarationState::default())]),
             durable_graph: None,
             durable_public_scopes: BTreeMap::new(),
-            #[cfg(test)]
-            fail_recovery_durability_once: false,
         })
     }
 
@@ -1218,7 +1155,7 @@ impl SessionLib {
                 path: self.root.clone(),
                 detail: "v2 recovery graph is not attached".into(),
             })?;
-        if state.unconfirmed.is_some()
+        if state.store.is_recovery_required()
             || self.durable_public_scopes.get(&owner) != Some(&public_scope)
         {
             return Err(SessionError::WrongPublicManifestTicket);
@@ -1236,6 +1173,9 @@ impl SessionLib {
             target: PublicPublicationBaseline::Durable {
                 owner,
                 graph: state.graph.clone(),
+                store_revision:state.store_revision,
+                allocation_ceiling:state.allocation_ceiling,
+                artifact_root:state.artifact_root.clone(),
             },
             public_scope,
             private_scope,
@@ -1257,8 +1197,7 @@ impl SessionLib {
         }
         let StagedPublicationTarget::Durable {
             owner,
-            base_checksum,
-            base_high_water,
+            base_revision,
             ..
         } = &ticket.target
         else {
@@ -1280,8 +1219,7 @@ impl SessionLib {
             &ticket.path,
             owner,
             ticket.public_scope,
-            base_checksum,
-            *base_high_water,
+            *base_revision,
         )
     }
 
@@ -1293,14 +1231,13 @@ impl SessionLib {
             return Ok(false);
         }
         match &base.target {
-            PublicPublicationBaseline::Durable { owner, graph } => self
+            PublicPublicationBaseline::Durable { owner, store_revision, .. } => self
                 .public_manifest_baseline_is_current(
                     base.session,
                     &base.path,
                     owner,
                     base.public_scope,
-                    &graph.checksum(),
-                    graph.high_water(),
+                    *store_revision,
                 ),
             PublicPublicationBaseline::Ephemeral => Ok(base.session == self.id
                 && !self
@@ -1316,8 +1253,7 @@ impl SessionLib {
         path: &Path,
         owner: &RecoveryPublicOwner,
         public_scope: ScopeId,
-        checksum: &str,
-        high_water: Generation,
+        revision: StoreRevision,
     ) -> Result<bool, SessionError> {
         let state = self
             .durable_graph
@@ -1329,56 +1265,29 @@ impl SessionLib {
         {
             return Err(SessionError::WrongPublicManifestTicket);
         }
-        Ok(!(state.unconfirmed.is_some()
-            || state.graph.checksum() != checksum
-            || state.graph.high_water() != high_water))
+        state.owner.as_ref().ok_or(SessionError::WrongPublicManifestTicket)?.validate_owner()?;
+        state.store.ensure_ready().map_err(|error|SessionError::RecoveryStore(Box::new(error)))?;
+        let current=state.store.read_domain(state.domain_id).map_err(|error|SessionError::RecoveryStore(Box::new(error)))?;
+        Ok(state.store_revision==revision&&current.as_ref().is_some_and(|current|current.revision==revision&&Some(&current.snapshot_root)==state.graph.domain_root()))
+    }
+
+    fn install_committed_recovery_graph(&mut self,graph:recovery::RecoveryGraph,state:RecoveryDomainState) {
+        let attached=self.durable_graph.as_mut().expect("prepared recovery attachment");
+        attached.graph=graph; attached.store_revision=state.revision; attached.allocation_ceiling=state.allocation_ceiling;
     }
 
     fn publish_staged_public_manifest_unchecked(
-        &mut self,
-        mut ticket: StagedPublicManifest,
-    ) -> PublicManifestCommit {
-        let declaration = ticket.declaration.take();
-        let public_scope = ticket.public_scope;
-        let StagedPublicationTarget::Durable { staged, .. } = ticket.target else {
-            if let Some(declaration) = declaration {
-                self.commit_prepared_declaration(public_scope, declaration);
-            }
-            return PublicManifestCommit::Ephemeral;
+        &mut self,ticket:StagedPublicManifest,declaration:Option<paired_publication::PreparedResidentDeclaration>,activate:impl FnOnce(&mut Self),
+    )->PublicManifestCommit {
+
+        let install=|this:&mut Self| {
+            if let Some(declaration)=declaration {this.commit_prepared_declaration(declaration);}
+            activate(this);
         };
-        let outcome = self.publish_recovery_manifest(staged);
-        let state = self
-            .durable_graph
-            .as_mut()
-            .expect("ticket preflight found manifest");
-        let committed = match outcome {
-            recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
-                PublicManifestCommit::BeforeRename { detail }
-            }
-            recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
-                state.graph = graph;
-                PublicManifestCommit::Durable
-            }
-            recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
-                graph,
-                publication,
-                detail,
-            } => {
-                state.graph = graph;
-                state.unconfirmed.set(publication);
-                PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
-            }
-        };
-        if matches!(
-            committed,
-            PublicManifestCommit::Durable
-                | PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
-        ) {
-            if let Some(declaration) = declaration {
-                self.commit_prepared_declaration(public_scope, declaration);
-            }
+        let StagedPublicationTarget::Durable{staged,..}=ticket.target else {install(self);return PublicManifestCommit::Ephemeral};
+        match publication_disposition(staged.publish_and_install(|graph,state|{self.install_committed_recovery_graph(graph,state);install(self)})) {
+            Ok(())=>PublicManifestCommit::Durable,Err(outcome)=>outcome,
         }
-        committed
     }
 
     /// Consume a unique authored or Join identity from this library's confirmed range.
@@ -1539,23 +1448,6 @@ impl SessionLib {
         self.reserve_declaration_generation_durable()
     }
 
-    /// Retry only the parent-directory sync for an already visible manifest.
-    /// Never resubmit the declaration or reuse its reserved identity.
-    pub fn confirm_recovery_durability(&mut self) -> Result<(), SessionError> {
-        let state = self
-            .durable_graph
-            .as_mut()
-            .ok_or_else(|| SessionError::RecoveryManifest {
-                path: self.root.clone(),
-                detail: "v2 recovery graph is not attached".into(),
-            })?;
-        state
-            .unconfirmed
-            .confirm()
-            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-        Ok(())
-    }
-
     /// Report exact restored public tips and native binding winners unavailable
     /// in this session incarnation. Authored source is never replayed.
     #[must_use]
@@ -1563,11 +1455,12 @@ impl SessionLib {
         let state = self.durable_graph.as_ref()?;
         let restored = state
             .graph
-            .nodes()
-            .filter(|node| self.log.recovered_at(node.id).is_some())
+            .node_ids()
+            .filter(|id| self.log.recovered_at(*id).is_some())
+            .filter_map(|id|state.graph.node(id).ok().flatten())
             .flat_map(|node| {
-                node.lexical_roots
-                    .iter()
+                node.lexical_roots.clone()
+                    .into_iter()
                     .map(move |root| RestoredDeclaration {
                         generation: node.id.0,
                         module: root.module.clone(),
@@ -1577,13 +1470,9 @@ impl SessionLib {
         let mut unavailable_bindings = state
             .graph
             .public_surfaces()
-            .flat_map(|surface| &surface.bindings)
-            .filter(|binding| binding.owner.session != self.id.0)
-            .map(|binding| UnavailableBinding {
-                name: binding.name.clone(),
-                session: binding.owner.session,
-                variable: binding.owner.variable,
-            })
+            .flat_map(|surface|surface.bindings.iter().map(|(name,owner)|(name.clone(),*owner)).collect::<Vec<_>>())
+            .filter(|(_,owner)|owner.session!=self.id.0)
+            .map(|(name,owner)|UnavailableBinding{name,session:owner.session,variable:owner.variable})
             .collect::<Vec<_>>();
         unavailable_bindings.sort_by(|a, b| {
             (&a.name, a.session, a.variable).cmp(&(&b.name, b.session, b.variable))
@@ -1594,7 +1483,7 @@ impl SessionLib {
             successor_session: self.id.0,
             restored,
             unavailable_bindings,
-            durability_unconfirmed: state.unconfirmed.is_some(),
+            durability_unconfirmed: state.store.is_recovery_required(),
         })
     }
 
@@ -2420,89 +2309,30 @@ impl SessionLib {
         // candidate touches the shared root, moving it out of the private
         // directory it was validated against.
         self.write_module(&staged.rendered)?;
-        let uncertain = if let Some(staged_graph) = staged_graph {
-            let outcome = self.publish_recovery_manifest(staged_graph);
-            let state = self
-                .durable_graph
-                .as_mut()
-                .expect("reserved graph preflight");
-            match outcome {
-                recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
-                    return Err(SessionError::RecoveryManifest {
-                        path: state.path.clone(),
-                        detail,
-                    });
-                }
-                recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
-                    state.graph = graph;
-                    None
-                }
-                recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
-                    graph,
-                    publication,
-                    detail,
-                } => {
-                    state.graph = graph;
-                    state.unconfirmed.set(publication);
-                    Some(detail)
-                }
-            }
-        } else {
-            None
-        };
-        let generation = if staged.reserved {
-            assert!(self.log.commit_reserved_certified_authored(
-                staged.generation,
-                staged.turn.clone(),
-                staged
-                    .certified_authored
-                    .expect("authored evidence preflight"),
-            ));
-            self.set_scope_tip_in(staged.scope, staged.generation);
-            staged.generation
-        } else {
-            self.push_turn_in(staged.scope, staged.turn.clone())?
-        };
-        if let Some(detail) = uncertain {
-            return Ok(DeclarationAdmission::PublishedDurabilityUnconfirmed {
-                commit: generation,
-                path: self.durable_graph.as_ref().unwrap().path.clone(),
-                detail,
-            });
+        if let Some(staged_graph)=staged_graph {
+            let generation=staged.generation;
+            let evidence=staged.certified_authored.expect("authored evidence preflight");
+            let next_context=Some(evidence.projection.context().clone());
+            let prepared=self.log.prepare_certified_authored_commit(generation,staged.turn,evidence)?;
+            let mut tip=self.tips.get(&staged.scope).cloned().ok_or(SessionError::StaleStagedDeclaration)?;
+            tip.tip=generation; tip.exact_context=next_context;
+            let scope=staged.scope;
+            return match staged_graph.publish_and_install(|graph,state|{
+                self.install_committed_recovery_graph(graph,state);
+                self.log.activate_prepared_commit(prepared);
+                *self.tips.get_mut(&scope).expect("prepared authored tip")=tip;
+                DeclarationAdmission::Committed(generation)
+            }) {
+                recovery_store::StoreDisposition::Committed(commit)=>Ok(commit),
+                recovery_store::StoreDisposition::Refused(reason)=>Err(SessionError::RecoveryStoreRefused(reason)),
+                recovery_store::StoreDisposition::RecoveryRequired(error)=>Err(SessionError::RecoveryStore(Box::new(error))),
+            };
         }
+        let generation=if staged.reserved {
+            let prepared=self.log.prepare_certified_authored_commit(staged.generation,staged.turn,staged.certified_authored.expect("authored evidence preflight"))?;
+            self.log.activate_prepared_commit(prepared);self.set_scope_tip_in(staged.scope,staged.generation);staged.generation
+        } else {self.push_turn_in(staged.scope,staged.turn)?};
         Ok(DeclarationAdmission::Committed(generation))
-    }
-
-    fn publish_recovery_manifest(
-        &mut self,
-        staged: recovery::StagedRecoveryManifest,
-    ) -> recovery::RecoveryPublishOutcome {
-        let retained = staged.retained_graph(
-            self.durable_graph
-                .as_ref()
-                .and_then(|state| state.retained.lock().clone())
-                .as_ref(),
-        );
-        let outcome = staged.publish();
-        if !matches!(
-            &outcome,
-            recovery::RecoveryPublishOutcome::BeforeRename { .. }
-        ) {
-            if let Some(state) = &self.durable_graph {
-                *state.retained.lock() = retained;
-            }
-        }
-        #[cfg(test)]
-        if std::mem::take(&mut self.fail_recovery_durability_once) {
-            if let recovery::RecoveryPublishOutcome::Durable { graph, publication } = outcome {
-                return recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
-                    graph,
-                    publication,
-                    detail: "injected post-rename durability failure".into(),
-                };
-            }
-        }
-        outcome
     }
 
     fn stage_private_authored_graph(
@@ -2518,7 +2348,7 @@ impl SessionLib {
             path: state.path.clone(),
             detail: detail.into(),
         };
-        if state.unconfirmed.is_some() || state.graph.high_water() < staged.generation {
+        if state.store.is_recovery_required() || state.allocation_ceiling < staged.generation {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let prepared = staged
@@ -2540,10 +2370,7 @@ impl SessionLib {
                 "authored recovery product does not match validated source",
             ));
         }
-        let root = state
-            .path
-            .parent()
-            .ok_or_else(|| invalid("recovery manifest has no parent"))?;
+        let root=&state.artifact_root;
         let own = certified.product().owner();
         if certified.introduced_exports().iter().any(|export| {
             export.head.unit != own.unit
@@ -2605,10 +2432,7 @@ impl SessionLib {
             ));
         }
         let mut graph = state.graph.candidate();
-        let artifact_refs = artifacts
-            .iter()
-            .map(recovery::RecoveryArtifactClosure::artifact_id)
-            .collect();
+
         let authored_root = artifacts
             .iter()
             .find_map(|artifact| match artifact {
@@ -2633,25 +2457,20 @@ impl SessionLib {
                 &std::collections::BTreeSet::from([certified_root]),
             ),
         )?;
+        let previous=if staged.base_tip.0>0 {state.graph.node(staged.base_tip).map_err(|e|recovery::graph_error(&state.path,e))?.map(|node|node.context_root.clone())} else {None};
+        let context_root=graph.insert_context(context,previous.as_ref()).map_err(|e|recovery::graph_error(&state.path,e))?;
         graph
             .insert_node(recovery::RecoveryNode {
                 id: staged.generation,
                 parent: staged.turn.parent,
                 kind: recovery::RecoveryNodeKind::Authored,
                 implementation_refs: Vec::new(),
-                artifact_refs,
-                graph_selection: context.artifact_view().capture_graph_selection(),
-                compiler_roles: context.compiler_input_roles(),
-                native_groups: context
-                    .artifact_view()
-                    .selected_native_groups()
-                    .into_iter()
-                    .collect(),
+                artifact_refs:vec![authored_root],
+                context_root,
                 lexical_roots: vec![tidepool_toolchain::declaration_join::ExactModuleIdentity {
                     unit: prepared.projection.receipt().reserved().unit.clone(),
                     module: prepared.projection.module_name().to_owned(),
                 }],
-                lexical: context.lexical_graph().to_vec(),
                 exports,
                 retracts: paired_publication::exact_retractions(
                     self,
@@ -2681,20 +2500,7 @@ impl SessionLib {
                 .insert_artifact(artifact)
                 .map_err(|error| invalid(&error.to_string()))?;
         }
-        for binding in context.artifact_view().capture_graph_selection().bindings {
-            graph.insert_artifact_binding(binding);
-        }
-        for (source, target, dependency) in context.artifact_view().binding_dependencies() {
-            graph
-                .insert_binding_edge(recovery::RecoveryArtifactDependency {
-                    source,
-                    target,
-                    dependency,
-                })
-                .map_err(|error| invalid(&error.to_string()))?;
-        }
-        let graph = graph.seal().map_err(|error| invalid(&error.to_string()))?;
-        recovery::stage_v2(&state.path, root, graph).map_err(|error| invalid(&error.to_string()))
+        graph.prepare(state.store_revision,state.allocation_ceiling).map_err(|e|recovery::graph_error(&state.path,e))
     }
 
     pub(crate) fn discard_staged(&self, staged: &StagedDeclaration) {

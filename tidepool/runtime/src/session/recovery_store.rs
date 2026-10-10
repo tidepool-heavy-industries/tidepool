@@ -155,6 +155,7 @@ pub enum StoreDisposition<T> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CeilingCommit {
     pub revision: StoreRevision,
+    pub content_revision:StoreRevision,
     pub allocation_ceiling: Generation,
 }
 
@@ -443,7 +444,7 @@ impl RunRecoveryStore {
             let updated = transaction.execute("UPDATE recovery_domains SET revision=?1,content_revision=?2,ceiling=?3 WHERE domain=?4 AND revision=?5 AND ceiling<=?3", params![
                 revision.0.to_be_bytes().as_slice(), content.0.to_be_bytes().as_slice(), minimum.0.to_be_bytes().as_slice(), domain.bytes().as_slice(), expected.0.to_be_bytes().as_slice()]).map_err(sql_refusal)?;
             if updated != 1 { return Err(StoreRefusal::StaleRevision); }
-            Ok(CeilingCommit { revision, allocation_ceiling: minimum })
+            Ok(CeilingCommit { revision, content_revision:content,allocation_ceiling: minimum })
         }, &[])
     }
 
@@ -480,7 +481,10 @@ impl RunRecoveryStore {
         successor: RecoveryPublicOwner,
         successor_epoch: u64,
     ) -> StoreDisposition<RecoveryDomainState> {
-        self.transact(
+        self.transfer_owner_and_install(domain,expected,previous,successor,successor_epoch,|state|state)
+    }
+    pub(crate) fn transfer_owner_and_install<T>(&self,domain:RecoveryDomainId,expected:StoreRevision,previous:&RecoveryPublicOwnerState,successor:RecoveryPublicOwner,successor_epoch:u64,install:impl FnOnce(RecoveryDomainState)->T)->StoreDisposition<T> {
+        self.transact_and_install(
             |transaction| {
                 let current = read_domain(transaction, domain)
                     .map_err(sql_refusal)?
@@ -530,7 +534,7 @@ impl RunRecoveryStore {
                     ..current
                 })
             },
-            &[],
+            &[],install,
         )
     }
 

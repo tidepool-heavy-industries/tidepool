@@ -19,23 +19,22 @@ pub struct RuntimeDurablePublicReadiness {
     session: super::SessionId,
     durable: super::RecoveryPublicOwner,
     scope: ScopeId,
-    confirmation:
-        std::sync::Weak<parking_lot::Mutex<Option<tidepool_atomic_write::PublishedWrite>>>,
+    store:std::sync::Weak<super::RunRecoveryStore>,
 }
 
 impl RuntimeDurablePublicReadiness {
     /// Confirmation can temporarily block an otherwise current owner. Currency
     /// alone permits retaining its original placement, never executing work.
     pub fn is_current(&self) -> bool {
-        self.owner.epoch() == self.owner_epoch && self.confirmation.upgrade().is_some()
+        self.owner.epoch() == self.owner_epoch && self.store.upgrade().is_some()
     }
 
     pub fn is_ready(&self) -> bool {
         self.owner.epoch() == self.owner_epoch
             && self
-                .confirmation
+                .store
                 .upgrade()
-                .is_some_and(|state| state.lock().is_none())
+                .is_some_and(|store|store.ensure_ready().is_ok())
     }
     pub fn session(&self) -> super::SessionId {
         self.session
@@ -2111,7 +2110,7 @@ impl PersistentSession {
             session: self.lib().session_id(),
             durable: owner.clone(),
             scope: public_scope,
-            confirmation: Arc::downgrade(&state.unconfirmed.0),
+            store: Arc::downgrade(&state.store),
         }))
     }
 
@@ -2139,14 +2138,8 @@ impl PersistentSession {
         let snapshot = self
             .public_visibility_snapshot_in(public_scope)
             .ok_or(SessionError::DeadScope(public_scope))?;
-        let surface = state
-            .graph
-            .public_surfaces()
-            .find(|surface| &surface.owner == owner)
-            .ok_or_else(|| fail(Failure::MissingSurface))?;
-        if state.unconfirmed.is_some() {
-            return Err(fail(Failure::Unconfirmed));
-        }
+        if !lib.validate_recovered_public_owner(owner)? {return Err(fail(Failure::MissingSurface));}
+        let surface=state.graph.surface(owner).map_err(|error|super::recovery::graph_error(&state.path,error))?.ok_or_else(||fail(Failure::MissingSurface))?;
         let mapped = lib.durable_public_scopes.get(owner).copied();
         if mapped != Some(public_scope) {
             return Err(fail(Failure::Scope { mapped }));
@@ -2165,49 +2158,6 @@ impl PersistentSession {
                 current: snapshot.epoch,
             }));
         }
-        if let Some(live) = state.retained.lock().clone() {
-            if live
-                .observe(
-                    &state.graph,
-                    &state.path,
-                    state.path.parent().expect("canonical manifest parent"),
-                )
-                .map_err(|error| SessionError::RecoveryManifest {
-                    path: state.path.clone(),
-                    detail: error.to_string(),
-                })?
-            {
-                retained.validate_owner()?;
-                return Ok(snapshot);
-            }
-        }
-        let bytes = std::fs::read(&state.path).map_err(|error| SessionError::RecoveryManifest {
-            path: state.path.clone(),
-            detail: error.to_string(),
-        })?;
-        let read = super::recovery::read_v2_bytes(
-            &state.path,
-            state.path.parent().expect("canonical manifest parent"),
-            &bytes,
-            super::recovery::RecoveryReadPurpose::Metadata,
-        )
-        .map_err(|error| SessionError::RecoveryManifest {
-            path: state.path.clone(),
-            detail: error.to_string(),
-        })?
-        .ok_or_else(|| fail(Failure::UnrecognizedManifest))?;
-        if !read.artifact_losses.is_empty() {
-            return Err(fail(Failure::ArtifactLoss {
-                count: read.artifact_losses.len(),
-            }));
-        }
-        if read.graph.checksum() != state.graph.checksum() {
-            return Err(fail(Failure::ManifestChecksum {
-                published: read.graph.checksum().to_owned(),
-                current: state.graph.checksum().to_owned(),
-            }));
-        }
-        *state.retained.lock() = read.retain(&bytes);
         retained.validate_owner()?;
         Ok(snapshot)
     }

@@ -167,6 +167,12 @@ pub enum DeclarationPublicationRejection {
     },
 }
 
+pub(super) struct PreparedResidentDeclaration {
+    scope:ScopeId,
+    tip:super::ScopeDeclarationState,
+    log:super::render::PreparedDeclarationCommit,
+}
+
 pub(super) struct PreparedDeclarationPublication {
     pub(super) generation: Generation,
     pub(super) joined: JoinedDeclaration,
@@ -287,8 +293,8 @@ fn snapshot_digest(snapshot: &PublicVisibilitySnapshot) -> serde_json::Value {
 
 fn paired_version(base: &PublicManifestBase) -> String {
     let target = match &base.target {
-        super::PublicPublicationBaseline::Durable { owner, graph } => serde_json::json!({
-            "mode": "durable", "owner": owner, "graph": graph.checksum(), "high_water": graph.high_water().0 }),
+        super::PublicPublicationBaseline::Durable { owner, store_revision, allocation_ceiling, .. } => serde_json::json!({
+            "mode": "durable", "owner": owner, "revision": store_revision.0, "ceiling": allocation_ceiling.0 }),
         super::PublicPublicationBaseline::Ephemeral => serde_json::json!({ "mode": "ephemeral" }),
     };
     let bytes = serde_json::to_vec(&serde_json::json!({
@@ -1114,36 +1120,21 @@ impl AcceptedDeclarationPublication {
         let context = if let Some(projection) = receipt.projection() {
             projection.context().clone()
         } else {
-            Arc::new(ExactDeclarationContext::new(
-                &[],
-                std::slice::from_ref(receipt.receipt()),
-                std::iter::once(ExactLexicalNode {
-                    owner: ExactModuleIdentity {
-                        unit: receipt.reserved().unit.clone(),
-                        module: receipt.reserved().module.clone(),
-                    },
-                    imports: base.surface.roots.clone(),
-                })
-                .chain(base.surface.lexical.iter().cloned())
-                .collect(),
-            )?)
+            let lexical=std::iter::once(ExactLexicalNode {
+                owner:ExactModuleIdentity{unit:receipt.reserved().unit.clone(),module:receipt.reserved().module.clone()},
+                imports:base.surface.roots.clone(),
+            }).chain(base.surface.lexical.iter().cloned()).collect();
+            Arc::new(match &base.public_context {
+                Some(public)=>(**public).clone().extend(&[],std::slice::from_ref(receipt.receipt()),lexical)?,
+                None=>ExactDeclarationContext::new(&[],std::slice::from_ref(receipt.receipt()),lexical)?,
+            })
         };
         let binding_custody = receipt.native_binding_custody_requirements()?;
-        let baseline = match &base.public.target {
-            super::PublicPublicationBaseline::Durable { graph, .. } => {
-                Some((graph.checksum().to_owned(), graph.high_water()))
-            }
-            super::PublicPublicationBaseline::Ephemeral => None,
-        };
         let error_path = base.public.path.clone();
-        if let super::PublicPublicationBaseline::Durable { owner, graph } = &mut base.public.target
+        if let super::PublicPublicationBaseline::Durable { owner, graph,artifact_root,.. } = &mut base.public.target
         {
             let mut candidate = graph.candidate();
-            let root = base
-                .public
-                .path
-                .parent()
-                .ok_or_else(|| invalid_at(&error_path, "manifest has no parent"))?;
+            let root=artifact_root.as_path();
             let materialized = receipt
                 .materialize(root)
                 .map_err(|error| invalid_at(&error_path, error.to_string()))?;
@@ -1162,6 +1153,7 @@ impl AcceptedDeclarationPublication {
             if let Some(public) = &base.current_public {
                 implementation_refs.push(public.generation);
             }
+            let producer=tidepool_toolchain::artifact_inventory::ArtifactDescriptor::from_recovery_join(&materialized.join).id;
             let artifacts = materialized
                 .products
                 .into_iter()
@@ -1188,10 +1180,6 @@ impl AcceptedDeclarationPublication {
                     materialized.join,
                 )))
                 .collect::<Vec<_>>();
-            let artifact_refs = artifacts
-                .iter()
-                .map(recovery::RecoveryArtifactClosure::artifact_id)
-                .collect();
             let live_dependencies =
                 super::native_binding_dependencies(binding_custody.iter().cloned());
             let mut workbench_imports = base
@@ -1202,26 +1190,21 @@ impl AcceptedDeclarationPublication {
             for write in &base.intent.writes {
                 workbench_imports.extend(&write.turn.workbench_imports);
             }
+            let previous=graph.surface(owner).map_err(|e|recovery::graph_error(&error_path,e))?;
+            let context_root=candidate.insert_context(&context,previous.as_ref().and_then(|surface|surface.context_root.as_ref())).map_err(|e|recovery::graph_error(&error_path,e))?;
             candidate
                 .insert_node(recovery::RecoveryNode {
                     id: base.reserved,
                     parent: None,
                     kind: recovery::RecoveryNodeKind::Join,
                     implementation_refs,
-                    artifact_refs,
-                    graph_selection: context.artifact_view().capture_graph_selection(),
-                    compiler_roles: context.compiler_input_roles(),
-                    native_groups: context
-                        .artifact_view()
-                        .selected_native_groups()
-                        .into_iter()
-                        .collect(),
+                    artifact_refs:vec![producer],
+                    context_root:context_root.clone(),
                     exports,
                     lexical_roots: vec![ExactModuleIdentity {
                         unit: receipt.reserved().unit.clone(),
                         module: receipt.reserved().module.clone(),
                     }],
-                    lexical: context.lexical_graph().to_vec(),
                     retracts: Vec::new(),
                     workbench_imports: workbench_imports.specs().to_vec(),
                     instances: recovery_instances(receipt.instances(), receipt.family_closure()),
@@ -1240,39 +1223,12 @@ impl AcceptedDeclarationPublication {
                     .insert_artifact(artifact)
                     .map_err(|error| invalid_at(&error_path, error.to_string()))?;
             }
-            for binding in context.artifact_view().capture_graph_selection().bindings {
-                candidate.insert_artifact_binding(binding);
-            }
-            for (source, target, dependency) in context.artifact_view().binding_dependencies() {
-                candidate
-                    .insert_binding_edge(recovery::RecoveryArtifactDependency {
-                        source,
-                        target,
-                        dependency,
-                    })
-                    .map_err(|error| invalid_at(&error_path, error.to_string()))?;
-            }
-            let mut surface =
-                graph
-                    .surface(owner)
-                    .cloned()
-                    .unwrap_or_else(|| recovery::RecoveryPublicSurface {
-                        owner: owner.clone(),
-                        declaration_root: None,
-                        epoch: 0,
-                        bindings: Vec::new(),
-                        source_instances: Vec::new(),
-                        compiler_context: recovery::RecoveryCompilerContext::default(),
-                    });
-            surface.declaration_root = Some(base.reserved);
-            surface.compiler_context = recovery::RecoveryCompilerContext::capture(&context);
-            candidate.replace_surface(surface);
-            let (sealed, encoded_bytes) = candidate
-                .seal_with_encoded_bytes()
-                .map_err(|error| invalid_at(&error_path, error.to_string()))?;
-            work.checksum_encode_bytes += encoded_bytes;
-            *graph = sealed;
+            let mut surface=previous.map(|surface|(*surface).clone()).unwrap_or_else(||recovery::RecoveryPublicSurface::empty(owner.clone()));
+            surface.declaration_root=Some(base.reserved);surface.context_root=Some(context_root);
+            candidate.replace_surface(surface).map_err(|e|recovery::graph_error(&error_path,e))?;
+            *graph=candidate.seal().map_err(|e|recovery::graph_error(&error_path,e))?;
         }
+
         let mut turn = base
             .current_public
             .as_ref()
@@ -1404,18 +1360,6 @@ impl AcceptedDeclarationPublication {
             .final_bindings
             .retain(|(name, _)| !declaration.declared_names.contains(name));
         let mut ticket = base.public.stage()?;
-        if let (
-            Some((checksum, high_water)),
-            super::StagedPublicationTarget::Durable {
-                base_checksum,
-                base_high_water,
-                ..
-            },
-        ) = (baseline, &mut ticket.target)
-        {
-            *base_checksum = checksum;
-            *base_high_water = high_water;
-        }
         if let super::StagedPublicationTarget::Durable { staged, .. } = &mut ticket.target {
             staged.work.checksum_encode_bytes += work.checksum_encode_bytes;
             staged.work.recovery_materialization_hash_bytes +=
@@ -1449,14 +1393,15 @@ impl SessionLib {
                     .matches_generation(declaration.generation)
         })
     }
-    pub(super) fn commit_prepared_declaration(
-        &mut self,
-        scope: ScopeId,
-        declaration: PreparedDeclarationPublication,
-    ) {
-        let generation = declaration.generation;
-        assert!(self.log.commit_reserved(generation, declaration.joined));
-        self.set_scope_tip_in(scope, generation);
+    pub(super) fn prepare_resident_declaration(&self,scope:ScopeId,declaration:PreparedDeclarationPublication)->Result<PreparedResidentDeclaration,SessionError> {
+        let mut tip=self.tips.get(&scope).cloned().ok_or(SessionError::StaleStagedDeclaration)?;
+        tip.tip=declaration.generation;tip.exact_context=Some(declaration.joined.context.clone());
+        let log=self.log.prepare_joined_commit(declaration.generation,declaration.joined)?;
+        Ok(PreparedResidentDeclaration{scope,tip,log})
+    }
+    pub(super) fn commit_prepared_declaration(&mut self,declaration:PreparedResidentDeclaration) {
+        self.log.activate_prepared_commit(declaration.log);
+        *self.tips.get_mut(&declaration.scope).expect("prepared declaration tip")=declaration.tip;
     }
 }
 #[cfg(test)]

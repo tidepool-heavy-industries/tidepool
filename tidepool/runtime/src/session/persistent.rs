@@ -127,7 +127,8 @@ pub struct DurablePublicBootstrap {
     session: super::SessionId,
     owner: RecoveryPublicOwner,
     initial: super::PublicVisibilitySnapshot,
-    surface: super::recovery::RecoveryPublicSurface,
+    surface: super::RecoveryPublicOwnerState,
+    context:Option<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>>,
 }
 
 /// The exact checked interface prepared before a host value enters the heap.
@@ -2295,7 +2296,7 @@ impl PersistentSession {
             .as_ref()
             .ok_or(SessionError::WrongPublicManifestTicket)?;
         manifest_owner.validate_owner()?;
-        if state.unconfirmed.is_some() {
+        if state.store.is_recovery_required() {
             return Err(SessionError::InvalidRecoveryInitialization {
                 scope,
                 reason: Failure::UnconfirmedPublication,
@@ -2424,370 +2425,73 @@ impl PersistentSession {
         self.validate_recovery_native_dependencies(snapshot.scope, &initialization.sources)
     }
 
-    /// Durably initialize one actor's exact captured public surface before
-    /// application readiness. Existing owners and declaration products remain
-    /// unchanged; heap values are recorded as recovery loss metadata.
-    pub fn initialize_durable_public_scope(
-        &mut self,
-        owner: RecoveryPublicOwner,
-        target: ScopeId,
-    ) -> Result<PublicManifestCommit, SessionError> {
-        let snapshot = self
-            .public_visibility_snapshot_in(target)
-            .ok_or(SessionError::DeadScope(target))?;
-        if target == ScopeId::ROOT {
-            return Err(SessionError::WrongPublicManifestTicket);
+    /// Publish an exact captured public surface before admitting execution.
+    pub fn initialize_durable_public_scope(&mut self,owner:RecoveryPublicOwner,target:ScopeId)->Result<PublicManifestCommit,SessionError> {
+        let snapshot=self.public_visibility_snapshot_in(target).ok_or(SessionError::DeadScope(target))?;
+        if target==ScopeId::ROOT {return Err(SessionError::WrongPublicManifestTicket)}
+        let lib=self.lib(); let state=lib.durable_graph.as_ref().ok_or(SessionError::WrongPublicManifestTicket)?;
+        state.owner.as_ref().ok_or(SessionError::WrongPublicManifestTicket)?.validate_owner()?;
+        state.store.ensure_ready().map_err(|e|SessionError::RecoveryStore(Box::new(e)))?;
+        if lib.durable_public_scopes.get(&owner).is_some_and(|scope|*scope!=target)
+            ||lib.durable_public_scopes.iter().any(|(other,scope)|other!=&owner&&*scope==target)
+            ||snapshot.declaration_tip.0>0&&(state.graph.node(snapshot.declaration_tip).map_err(|e|super::recovery::graph_error(&state.path,e))?.is_none()||lib.log.joined_context_at(snapshot.declaration_tip).is_none()) {
+            return Err(SessionError::WrongPublicManifestTicket)
         }
-        let lib = self
-            .lib
-            .as_ref()
-            .ok_or(SessionError::MissingDeclarationLibrary)?;
-        let state = lib
-            .durable_graph
-            .as_ref()
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
-        let invalid = |detail: String| SessionError::RecoveryManifest {
-            path: state.path.clone(),
-            detail,
-        };
-        let retained = state.owner.as_ref().ok_or_else(|| {
-            invalid("initial durable public scope requires its configured run owner".into())
-        })?;
-        retained.validate_owner()?;
-        if state.unconfirmed.is_some()
-            || lib
-                .durable_public_scopes
-                .get(&owner)
-                .is_some_and(|scope| *scope != target)
-            || lib
-                .durable_public_scopes
-                .iter()
-                .any(|(other, scope)| other != &owner && *scope == target)
-            || snapshot.declaration_tip != Generation(0)
-                && (!state
-                    .graph
-                    .nodes()
-                    .any(|node| node.id == snapshot.declaration_tip)
-                    || lib
-                        .log
-                        .joined_context_at(snapshot.declaration_tip)
-                        .is_none())
-        {
-            return Err(SessionError::WrongPublicManifestTicket);
+        let previous=state.graph.surface(&owner).map_err(|e|super::recovery::graph_error(&state.path,e))?;
+        let exact_context=lib.current_exact_context_in(target);
+        let (graph,context_root)=super::recovery_hydration::materialize_public_compiler_context(&state.graph,&state.artifact_root,exact_context.as_ref(),previous.as_ref().and_then(|s|s.context_root.as_ref()))?;
+        let bindings=snapshot.bindings.iter().map(|(name,id)|super::recovery::RecoveryPublicBinding{name:name.clone(),owner:super::recovery::RecoveryBindingId{session:lib.id.0,variable:id.raw()}}).collect::<Vec<_>>();
+        let sources=self.recovery_source_instances(snapshot.source_instances.iter().cloned())?;
+        let mut surface=previous.as_ref().map(|s|(**s).clone()).unwrap_or_else(||super::recovery::RecoveryPublicSurface::empty(owner.clone()));
+        surface.set_visibility(bindings,sources);
+        surface.declaration_root=(snapshot.declaration_tip.0>0).then_some(snapshot.declaration_tip);surface.context_root=context_root;
+        if let Some(previous)=previous {
+            if lib.durable_public_scopes.get(&owner)!=Some(&target)||surface.declaration_root!=previous.declaration_root||snapshot.epoch!=previous.epoch||surface.bindings!=previous.bindings||surface.source_instances!=previous.source_instances||surface.context_root!=previous.context_root {return Err(SessionError::WrongPublicManifestTicket)}
+            return Ok(PublicManifestCommit::Durable)
         }
-        let root = state
-            .path
-            .parent()
-            .expect("attached canonical manifest parent");
-        let original = match std::fs::read(&state.path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(invalid(error.to_string())),
-        };
-        if let Some(bytes) = &original {
-            let read = super::recovery::read_v2_bytes(
-                &state.path,
-                root,
-                bytes,
-                super::recovery::RecoveryReadPurpose::Metadata,
-            )
-            .map_err(|error| invalid(error.to_string()))?
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
-            if !read.artifact_losses.is_empty() || read.graph.checksum() != state.graph.checksum() {
-                return Err(SessionError::WrongPublicManifestTicket);
-            }
-        } else if state.graph.high_water() != Generation(0)
-            || !state.graph.nodes().next().is_none()
-            || !state.graph.artifacts().next().is_none()
-            || !state.graph.public_surfaces().next().is_none()
-        {
-            return Err(SessionError::WrongPublicManifestTicket);
-        }
-        let bindings = snapshot
-            .bindings
-            .iter()
-            .map(|(name, id)| super::recovery::RecoveryPublicBinding {
-                name: name.clone(),
-                owner: super::recovery::RecoveryBindingId {
-                    session: lib.id.0,
-                    variable: id.raw(),
-                },
-            })
-            .collect::<Vec<_>>();
-        let sources = self.recovery_source_instances(snapshot.source_instances.iter().cloned())?;
-        let exact_context = lib.current_exact_context_in(target);
-        let compiler_context = exact_context
-            .as_ref()
-            .map(|context| super::recovery::RecoveryCompilerContext::capture(context))
-            .unwrap_or_default();
-        if let Some(surface) = state
-            .graph
-            .public_surfaces()
-            .find(|surface| surface.owner == owner)
-        {
-            if lib.durable_public_scopes.get(&owner) != Some(&target)
-                || surface.declaration_root
-                    != (snapshot.declaration_tip != Generation(0))
-                        .then_some(snapshot.declaration_tip)
-                || surface.epoch != snapshot.epoch
-                || surface.bindings != bindings
-                || surface.source_instances != sources
-                || surface.compiler_context != compiler_context
-            {
-                return Err(SessionError::WrongPublicManifestTicket);
-            }
-            return Ok(PublicManifestCommit::Durable);
-        }
-        // Allocate all owner/tip entries before the visible rename. Finalization
-        // swaps these prepared maps and updates an already reserved epoch entry.
-        let mut public_scopes = lib.durable_public_scopes.clone();
-        public_scopes.insert(owner.clone(), target);
-        let mut tips = lib.tips.clone();
-        tips.insert(
-            target,
-            super::ScopeDeclarationState {
-                tip: snapshot.declaration_tip,
-                exact_context: exact_context.clone(),
-                published_sources: lib.published_source_selections_in(target).to_vec(),
-            },
-        );
-        let (snapshot_graph, compiler_context) =
-            super::recovery_hydration::materialize_public_compiler_context(
-                &state.graph,
-                root,
-                exact_context.as_ref(),
-            )?;
-        let staged = super::recovery::stage_public_visibility_v2(
-            &state.path,
-            root,
-            &snapshot_graph,
-            owner.clone(),
-            0,
-            bindings,
-            sources,
-            (snapshot.declaration_tip != Generation(0)).then_some(snapshot.declaration_tip),
-            compiler_context,
-        )
-        .map_err(|error| invalid(error.to_string()))?;
-        retained.validate_owner()?;
-        let current = match std::fs::read(&state.path) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-            Err(error) => return Err(invalid(error.to_string())),
-        };
-        if current != original {
-            return Err(SessionError::WrongPublicManifestTicket);
-        }
-        self.public_visibility_epochs
-            .try_reserve(1)
-            .map_err(|error| invalid(error.to_string()))?;
-        let lib = self
-            .lib
-            .as_mut()
-            .expect("initial owner preflight checked library");
-        let outcome = lib.publish_recovery_manifest(staged);
-        let state = lib
-            .durable_graph
-            .as_mut()
-            .expect("initial owner preflight checked manifest");
-        let commit = match outcome {
-            super::recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
-                return Ok(PublicManifestCommit::BeforeRename { detail })
-            }
-            super::recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
-                state.graph = graph;
-                PublicManifestCommit::Durable
-            }
-            super::recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
-                graph,
-                publication,
-                detail,
-            } => {
-                state.graph = graph;
-                state.unconfirmed.set(publication);
-                PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
-            }
-        };
-        lib.durable_public_scopes = public_scopes;
-        lib.tips = tips;
-        self.public_visibility_epochs.insert(target, 1);
-        self.recovery_initialization = None;
-        Ok(commit)
+        surface.epoch=snapshot.epoch.checked_add(1).ok_or(SessionError::WrongPublicManifestTicket)?;
+        let next_epoch=surface.epoch;
+        let mut candidate=graph.candidate();candidate.replace_surface(surface).map_err(|e|super::recovery::graph_error(&state.path,e))?;
+        let staged=candidate.prepare(state.store_revision,state.allocation_ceiling).map_err(|e|super::recovery::graph_error(&state.path,e))?;
+        let mut public_scopes=lib.durable_public_scopes.clone();public_scopes.insert(owner,target);
+        let mut tips=lib.tips.clone();tips.insert(target,super::ScopeDeclarationState{tip:snapshot.declaration_tip,exact_context,published_sources:lib.published_source_selections_in(target).to_vec()});
+        self.public_visibility_epochs.try_reserve(1).map_err(|e|SessionError::RecoveryManifest{path:self.lib().root.clone(),detail:e.to_string()})?;
+        match super::publication_disposition(staged.publish_and_install(|graph,state|{
+            let lib=self.lib_mut();lib.install_committed_recovery_graph(graph,state);lib.durable_public_scopes=public_scopes;lib.tips=tips;
+            self.public_visibility_epochs.insert(target,next_epoch);self.recovery_initialization=None;
+        })) {Ok(())=>Ok(PublicManifestCommit::Durable),Err(outcome)=>Ok(outcome)}
     }
 
-    /// Transfer the retained root to the exact durably admitted successor.
-    /// The run owner and actor journal are checked before staging and again
-    /// before rename. No heap values or mutable source instances are reminted.
-    pub fn transfer_recovered_public_owner(
-        &mut self,
-        predecessor: &RecoveryPublicOwner,
-        successor: RecoveryPublicOwner,
-        target: ScopeId,
-        authority: Arc<dyn super::RecoverySuccessorAuthority>,
-    ) -> Result<PublicManifestCommit, SessionError> {
-        if !self.scopes.is_live(target) {
-            return Err(SessionError::DeadScope(target));
-        }
-        let snapshot = self
-            .public_visibility_snapshot_in(target)
-            .ok_or(SessionError::MissingDeclarationLibrary)?;
-        self.validate_fresh_recovery_scope(&snapshot)?;
-        self.validate_recovery_initialization(&snapshot)?;
-        let lib = self
-            .lib
-            .as_ref()
-            .ok_or(SessionError::MissingDeclarationLibrary)?;
-        let state = lib
-            .durable_graph
-            .as_ref()
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
-        let invalid = |detail: String| SessionError::RecoveryManifest {
-            path: state.path.clone(),
-            detail,
-        };
-        let owner = state.owner.as_ref().ok_or_else(|| {
-            invalid("root successor transfer requires the configured manifest owner".into())
-        })?;
-        owner.validate_owner()?;
-        use super::RecoveryInitializationFailure as Failure;
-        let reason = if state.unconfirmed.is_some() {
-            Some(Failure::UnconfirmedPublication)
-        } else if predecessor == &successor {
-            Some(Failure::RepeatedIncarnation)
-        } else if !lib.durable_public_scopes.is_empty() {
-            Some(Failure::ExistingPublicOwner)
-        } else if state
-            .graph
-            .public_surfaces()
-            .any(|surface| surface.owner == successor)
-        {
-            Some(Failure::ExistingSuccessor)
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            return Err(SessionError::InvalidRecoveryInitialization {
-                scope: target,
-                reason,
-            });
-        }
-        let surface = state
-            .graph
-            .surface(predecessor)
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
-        let generation = surface.declaration_root.unwrap_or(Generation(0));
-        let recovered_context = lib.recovered_public_compiler_context(predecessor)?;
-        let published_sources = recovered_context
-            .as_ref()
-            .map(|context| context.published_source_original_selections())
-            .transpose()?
-            .unwrap_or_default();
-        if generation != Generation(0)
-            && (recovered_context.is_none() || lib.log.recovered_at(generation).is_none())
-        {
-            return Err(invalid(
-                "successor declaration root lacks its exact public compiler selection".into(),
-            ));
-        }
-        let root = state
-            .path
-            .parent()
-            .ok_or_else(|| invalid("manifest has no canonical run parent".into()))?;
-        if !authority
-            .validate_successor(root, predecessor, &successor, lib.id, target)
-            .map_err(|error| invalid(error.to_string()))?
-        {
-            return Err(invalid(
-                "actual actor journal or placement refuses successor transfer".into(),
-            ));
-        }
-        let current_bytes =
-            std::fs::read(&state.path).map_err(|error| invalid(error.to_string()))?;
-        let current = super::recovery::read_v2_bytes(
-            &state.path,
-            root,
-            &current_bytes,
-            super::recovery::RecoveryReadPurpose::Metadata,
-        )
-        .map_err(|error| invalid(error.to_string()))?
-        .ok_or_else(|| invalid("current manifest is not the exact retained graph".into()))?;
-        if !current.artifact_losses.is_empty()
-            || current.graph.checksum() != state.graph.checksum()
-            || current.graph.high_water() != state.graph.high_water()
-        {
-            return Err(invalid("manifest changed before successor transfer".into()));
-        }
-        let epoch = surface
-            .epoch
-            .checked_add(1)
-            .ok_or_else(|| invalid("public visibility epoch exhausted".into()))?;
-        let mut graph = state.graph.candidate();
-        let mut replacement = surface.clone();
-        replacement.owner = successor.clone();
-        replacement.epoch = epoch;
-        graph.remove_surface(predecessor);
-        graph.replace_surface(replacement);
-        let graph = graph.seal().map_err(|error| invalid(error.to_string()))?;
-        let staged = super::recovery::stage_v2(&state.path, root, graph)
-            .map_err(|error| invalid(error.to_string()))?;
-        owner.validate_owner()?;
-        if std::fs::read(&state.path).map_err(|error| invalid(error.to_string()))? != current_bytes
-            || !authority
-                .validate_successor(root, predecessor, &successor, lib.id, target)
-                .map_err(|error| invalid(error.to_string()))?
-        {
-            return Err(invalid(
-                "durable owner evidence changed before successor rename".into(),
-            ));
-        }
-        self.public_visibility_epochs
-            .try_reserve(1)
-            .map_err(|error| invalid(error.to_string()))?;
-        // Admission epoch advancement is preflighted before the durable write.
-        let admission_epoch = self.prepare_execution_admission_epoch_advance()?;
-        let lib = self
-            .lib
-            .as_mut()
-            .expect("transfer preflight checked declaration library");
-        let outcome = lib.publish_recovery_manifest(staged);
-        let state = lib
-            .durable_graph
-            .as_mut()
-            .expect("transfer preflight checked manifest");
-        let committed = match outcome {
-            super::recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
-                return Ok(PublicManifestCommit::BeforeRename { detail })
-            }
-            super::recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
-                state.graph = graph;
-                PublicManifestCommit::Durable
-            }
-            super::recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
-                graph,
-                publication,
-                detail,
-            } => {
-                state.graph = graph;
-                state.unconfirmed.set(publication);
-                PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
-            }
-        };
-        // Preflight proved this fresh scope has exactly G0. It may already
-        // have an explicit G0 entry from ordinary scope minting, so transfer
-        // must set the recovered tip rather than use inheritance-only seeding.
-        lib.tips.insert(
-            target,
-            super::ScopeDeclarationState {
-                tip: generation,
-                exact_context: recovered_context,
-                published_sources,
-            },
-        );
-        lib.durable_public_scopes.insert(successor, target);
-        self.public_visibility_epochs.insert(target, epoch);
-        self.invalidate_execution_admissions_after_owner_transfer(admission_epoch);
-        self.recovery_initialization = None;
-        Ok(committed)
+    /// Transfer only owner/epoch; immutable content and allocation identity stay fixed.
+    pub fn transfer_recovered_public_owner(&mut self,predecessor:&RecoveryPublicOwner,successor:RecoveryPublicOwner,target:ScopeId,authority:Arc<dyn super::RecoverySuccessorAuthority>)->Result<PublicManifestCommit,SessionError> {
+        if !self.scopes.is_live(target){return Err(SessionError::DeadScope(target))}
+        let snapshot=self.public_visibility_snapshot_in(target).ok_or(SessionError::MissingDeclarationLibrary)?;
+        self.validate_fresh_recovery_scope(&snapshot)?;self.validate_recovery_initialization(&snapshot)?;
+        let lib=self.lib();let state=lib.durable_graph.as_ref().ok_or(SessionError::WrongPublicManifestTicket)?;
+        state.owner.as_ref().ok_or(SessionError::WrongPublicManifestTicket)?.validate_owner()?;
+        state.store.ensure_ready().map_err(|e|SessionError::RecoveryStore(Box::new(e)))?;
+        if predecessor==&successor||!lib.durable_public_scopes.is_empty()||state.graph.public_owner_state(&successor).is_some(){return Err(SessionError::WrongPublicManifestTicket)}
+        if !lib.validate_recovered_public_owner(predecessor)? {return Err(SessionError::WrongPublicManifestTicket)}
+        let surface=state.graph.surface(predecessor).map_err(|e|super::recovery::graph_error(&state.path,e))?.ok_or(SessionError::WrongPublicManifestTicket)?;
+        let previous=state.graph.public_owner_state(predecessor).cloned().ok_or(SessionError::WrongPublicManifestTicket)?;
+        let generation=surface.declaration_root.unwrap_or(Generation(0));
+        let context=lib.recovered_public_compiler_context(predecessor)?;
+        let published_sources=context.as_ref().map(|context|context.published_source_original_selections()).transpose()?.unwrap_or_default();
+        if generation.0>0&&(context.is_none()||lib.log.recovered_at(generation).is_none()){return Err(SessionError::WrongPublicManifestTicket)}
+        let run_root=state.path.parent().ok_or(SessionError::WrongPublicManifestTicket)?;
+        if !authority.validate_successor(run_root,predecessor,&successor,lib.id,target)? {return Err(SessionError::WrongPublicManifestTicket)}
+        let epoch=surface.epoch.checked_add(1).ok_or(SessionError::WrongPublicManifestTicket)?;
+        let store=state.store.clone();let domain=state.domain_id;let revision=state.store_revision;
+        let graph=state.graph.prepare_owner_transfer(predecessor,successor.clone(),epoch).map_err(|e|super::recovery::graph_error(&state.path,e))?;
+        let mut tips=lib.tips.clone();tips.insert(target,super::ScopeDeclarationState{tip:generation,exact_context:context,published_sources});
+        let mut public_scopes=lib.durable_public_scopes.clone();public_scopes.insert(successor.clone(),target);
+        self.public_visibility_epochs.try_reserve(1).map_err(|e|SessionError::RecoveryManifest{path:self.lib().root.clone(),detail:e.to_string()})?;
+        let admission_epoch=self.prepare_execution_admission_epoch_advance()?;
+        match super::publication_disposition(store.transfer_owner_and_install(domain,revision,&previous,successor,epoch,|state|{
+            let mut graph=graph;graph.install_store_state(&state);
+            let lib=self.lib_mut();lib.install_committed_recovery_graph(graph,state);lib.tips=tips;lib.durable_public_scopes=public_scopes;
+            self.public_visibility_epochs.insert(target,epoch);self.invalidate_execution_admissions_after_owner_transfer(admission_epoch);self.recovery_initialization=None;
+        })) {Ok(())=>Ok(PublicManifestCommit::Durable),Err(outcome)=>Ok(outcome)}
     }
 
     /// Admit bootstrap only against the exact already published actor surface.
@@ -2798,15 +2502,9 @@ impl PersistentSession {
     ) -> Result<DurablePublicBootstrap, SessionError> {
         let initial = self.validate_durable_public_admission(&owner, scope)?;
         let lib = self.lib();
-        let surface = lib
-            .durable_graph
-            .as_ref()
-            .expect("validated graph")
-            .graph
-            .public_surfaces()
-            .find(|surface| surface.owner == owner)
-            .expect("validated surface")
-            .clone();
+        let state=lib.durable_graph.as_ref().expect("validated graph");
+        let surface=state.graph.public_owner_state(&owner).cloned().expect("validated surface");
+        let context=lib.current_exact_context_in(scope);
         Ok(DurablePublicBootstrap {
             admission_owner: self.admission_owner().clone(),
             admission_epoch: self.admission_owner().epoch(),
@@ -2814,214 +2512,36 @@ impl PersistentSession {
             owner,
             initial,
             surface,
+            context,
         })
     }
 
     /// Publish native bootstrap's actual binding/source view under its original
     /// public owner. Declaration publication remains the declaration owner.
-    pub fn publish_durable_public_bootstrap(
-        &mut self,
-        bootstrap: DurablePublicBootstrap,
-    ) -> Result<PublicManifestCommit, SessionError> {
-        use super::DurablePublicAdmissionFailure as Failure;
-        let scope = bootstrap.initial.scope;
-        let fail = |reason| SessionError::InvalidDurablePublicAdmission {
-            owner: bootstrap.owner.clone(),
-            scope,
-            reason,
-        };
-        let current = self
-            .public_visibility_snapshot_in(scope)
-            .ok_or(SessionError::DeadScope(scope))?;
-        let lib = self.lib();
-        if !Arc::ptr_eq(&bootstrap.admission_owner, self.admission_owner())
-            || bootstrap.admission_epoch != self.admission_owner().epoch()
-            || bootstrap.session != lib.id
-            || current.machine_incarnation != bootstrap.initial.machine_incarnation
-        {
-            return Err(fail(Failure::BootstrapIdentity));
+    pub fn publish_durable_public_bootstrap(&mut self,bootstrap:DurablePublicBootstrap)->Result<PublicManifestCommit,SessionError> {
+        let scope=bootstrap.initial.scope;
+        let current=self.public_visibility_snapshot_in(scope).ok_or(SessionError::DeadScope(scope))?;
+        let lib=self.lib();
+        if !Arc::ptr_eq(&bootstrap.admission_owner,self.admission_owner())||bootstrap.admission_epoch!=self.admission_owner().epoch()||bootstrap.session!=lib.id||current.machine_incarnation!=bootstrap.initial.machine_incarnation {return Err(SessionError::WrongPublicManifestTicket)}
+        let state=lib.durable_graph.as_ref().ok_or(SessionError::WrongPublicManifestTicket)?;
+        if !lib.validate_recovered_public_owner(&bootstrap.owner)?||lib.durable_public_scopes.get(&bootstrap.owner)!=Some(&scope)||state.graph.public_owner_state(&bootstrap.owner)!=Some(&bootstrap.surface){return Err(SessionError::WrongPublicManifestTicket)}
+        let surface=state.graph.surface(&bootstrap.owner).map_err(|e|super::recovery::graph_error(&state.path,e))?.ok_or(SessionError::WrongPublicManifestTicket)?;
+        let tip=(current.declaration_tip.0>0).then_some(current.declaration_tip);
+        if surface.declaration_root!=tip {return Err(SessionError::WrongPublicManifestTicket)}
+        let context=lib.current_exact_context_in(scope);
+        let same_context=match (&context,&bootstrap.context){(None,None)=>true,(Some(a),Some(b))=>Arc::ptr_eq(a,b),_=>false};
+        if current==bootstrap.initial&&same_context{return Ok(PublicManifestCommit::Durable)}
+        let next_epoch=current.epoch.checked_add(1).ok_or(SessionError::WrongPublicManifestTicket)?;
+        let (graph,context_root)=super::recovery_hydration::materialize_public_compiler_context(&state.graph,&state.artifact_root,context.as_ref(),surface.context_root.as_ref())?;
+        let mut replacement=(*surface).clone();replacement.context_root=context_root;replacement.epoch=next_epoch;
+        let bindings=current.bindings.iter().map(|(name,id)|super::recovery::RecoveryPublicBinding{name:name.clone(),owner:super::recovery::RecoveryBindingId{session:lib.id.0,variable:id.raw()}}).collect::<Vec<_>>();
+        replacement.set_visibility(bindings,self.recovery_source_instances(current.source_instances.iter().cloned())?);
+        let mut candidate=graph.candidate();candidate.replace_surface(replacement).map_err(|e|super::recovery::graph_error(&state.path,e))?;
+        let staged=candidate.prepare(state.store_revision,state.allocation_ceiling).map_err(|e|super::recovery::graph_error(&state.path,e))?;
+        self.public_visibility_epochs.try_reserve(1).map_err(|e|SessionError::RecoveryManifest{path:self.lib().root.clone(),detail:e.to_string()})?;
+        match super::publication_disposition(staged.publish_and_install(|graph,state|{self.lib_mut().install_committed_recovery_graph(graph,state);self.public_visibility_epochs.insert(scope,next_epoch);})) {
+            Ok(())=>Ok(PublicManifestCommit::Durable),Err(outcome)=>Ok(outcome),
         }
-        let state = lib
-            .durable_graph
-            .as_ref()
-            .ok_or_else(|| fail(Failure::MissingGraph))?;
-        let retained = state
-            .owner
-            .as_ref()
-            .ok_or_else(|| fail(Failure::MissingRunOwner))?;
-        retained.validate_owner()?;
-        if state.unconfirmed.is_some() {
-            return Err(fail(Failure::Unconfirmed));
-        }
-        let mapped = lib.durable_public_scopes.get(&bootstrap.owner).copied();
-        if mapped != Some(scope) {
-            return Err(fail(Failure::Scope { mapped }));
-        }
-        let surface = state
-            .graph
-            .public_surfaces()
-            .find(|surface| surface.owner == bootstrap.owner)
-            .ok_or_else(|| fail(Failure::MissingSurface))?;
-        if surface != &bootstrap.surface {
-            return Err(fail(Failure::BootstrapSurface));
-        }
-        let tip = (current.declaration_tip != Generation(0)).then_some(current.declaration_tip);
-        if tip != surface.declaration_root {
-            return Err(fail(Failure::DeclarationTip {
-                published: surface.declaration_root,
-                current: tip,
-            }));
-        }
-        let original = std::fs::read(&state.path)?;
-        let root = state.path.parent().expect("canonical manifest parent");
-        let read = super::recovery::read_v2_bytes(
-            &state.path,
-            root,
-            &original,
-            super::recovery::RecoveryReadPurpose::Metadata,
-        )
-        .map_err(|error| SessionError::RecoveryManifest {
-            path: state.path.clone(),
-            detail: error.to_string(),
-        })?
-        .ok_or_else(|| fail(Failure::UnrecognizedManifest))?;
-        if !read.artifact_losses.is_empty() {
-            return Err(fail(Failure::ArtifactLoss {
-                count: read.artifact_losses.len(),
-            }));
-        }
-        if read.graph.checksum() != state.graph.checksum() {
-            return Err(fail(Failure::ManifestChecksum {
-                published: read.graph.checksum().to_owned(),
-                current: state.graph.checksum().to_owned(),
-            }));
-        }
-        let exact_context = lib.current_exact_context_in(scope);
-        let compiler_context = exact_context
-            .as_ref()
-            .map(|context| super::recovery::RecoveryCompilerContext::capture(context))
-            .unwrap_or_default();
-        if current == bootstrap.initial && compiler_context == surface.compiler_context {
-            return Ok(PublicManifestCommit::Durable);
-        }
-        let next_epoch =
-            current
-                .epoch
-                .checked_add(1)
-                .ok_or_else(|| SessionError::RecoveryManifest {
-                    path: state.path.clone(),
-                    detail: "public visibility epoch exhausted".into(),
-                })?;
-        let bindings = current
-            .bindings
-            .iter()
-            .map(|(name, id)| super::recovery::RecoveryPublicBinding {
-                name: name.clone(),
-                owner: super::recovery::RecoveryBindingId {
-                    session: lib.id.0,
-                    variable: id.raw(),
-                },
-            })
-            .collect();
-        let sources = self.recovery_source_instances(current.source_instances.iter().cloned())?;
-        let (snapshot_graph, compiler_context) =
-            super::recovery_hydration::materialize_public_compiler_context(
-                &state.graph,
-                root,
-                exact_context.as_ref(),
-            )?;
-        let staged = super::recovery::stage_public_visibility_at_epoch_v2(
-            &state.path,
-            root,
-            &snapshot_graph,
-            bootstrap.owner.clone(),
-            surface.epoch,
-            next_epoch,
-            bindings,
-            sources,
-            tip,
-            compiler_context,
-        )
-        .map_err(|error| SessionError::RecoveryManifest {
-            path: state.path.clone(),
-            detail: error.to_string(),
-        })?;
-        retained.validate_owner()?;
-        if std::fs::read(&state.path)? != original {
-            return Err(fail(Failure::BootstrapSurface));
-        }
-        tracing::info!(target: "tidepool::session", owner=?bootstrap.owner, scope=?scope,
-            declaration_tip=?current.declaration_tip, published_epoch=surface.epoch,
-            bootstrap_epoch=current.epoch, next_epoch,
-            binding_count=current.bindings.len(), source_count=current.source_instances.len(),
-            "publishing completed native bootstrap public surface");
-        let lib = self.lib_mut();
-        let outcome = lib.publish_recovery_manifest(staged);
-        let state = lib
-            .durable_graph
-            .as_mut()
-            .expect("bootstrap preflight graph");
-        let commit = match outcome {
-            super::recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
-                return Ok(PublicManifestCommit::BeforeRename { detail });
-            }
-            super::recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
-                state.graph = graph;
-                PublicManifestCommit::Durable
-            }
-            super::recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
-                graph,
-                publication,
-                detail,
-            } => {
-                state.graph = graph;
-                state.unconfirmed.set(publication);
-                PublicManifestCommit::PublishedDurabilityUnconfirmed { detail }
-            }
-        };
-        self.public_visibility_epochs.insert(scope, next_epoch);
-        Ok(commit)
-    }
-
-    /// Confirm the already visible initialization or transfer for this exact
-    /// owner and local scope. This never stages or publishes another surface.
-    pub fn confirm_durable_public_scope(
-        &mut self,
-        owner: &RecoveryPublicOwner,
-        target: ScopeId,
-    ) -> Result<(), SessionError> {
-        let snapshot = self
-            .public_visibility_snapshot_in(target)
-            .ok_or(SessionError::DeadScope(target))?;
-        let lib = self.lib();
-        let state = lib
-            .durable_graph
-            .as_ref()
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
-        state
-            .owner
-            .as_ref()
-            .ok_or(SessionError::WrongPublicManifestTicket)?
-            .validate_owner()?;
-        let surface = state
-            .graph
-            .public_surfaces()
-            .find(|surface| &surface.owner == owner)
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
-        if lib.durable_public_scopes.get(owner) != Some(&target)
-            || surface.declaration_root
-                != (snapshot.declaration_tip != Generation(0)).then_some(snapshot.declaration_tip)
-            || surface.epoch != snapshot.epoch
-            || surface.compiler_context
-                != lib
-                    .current_exact_context_in(target)
-                    .as_ref()
-                    .map(|context| super::recovery::RecoveryCompilerContext::capture(context))
-                    .unwrap_or_default()
-        {
-            return Err(SessionError::WrongPublicManifestTicket);
-        }
-        self.lib_mut().confirm_recovery_durability()
     }
 
     /// Capture a binding-only publication against one exact private and public
@@ -3170,7 +2690,7 @@ impl PersistentSession {
     /// The claim callback must not await or perform native publication itself.
     pub fn publish_staged_public_manifest_admitted(
         &mut self,
-        ticket: StagedPublicManifest,
+        mut ticket: StagedPublicManifest,
         claim: impl FnOnce() -> Option<super::PublicationClaim>,
     ) -> Result<PublicManifestCommit, SessionError> {
         if ticket
@@ -3223,33 +2743,19 @@ impl PersistentSession {
             .as_ref()
             .map(|declaration| declaration.declared_names.clone())
             .unwrap_or_default();
-        let Some(claim) = claim() else {
-            return Ok(PublicManifestCommit::Cancelled);
-        };
-        let public_scope = ticket.public_scope;
-        let outcome = self
-            .lib
-            .as_mut()
-            .expect("manifest preflight found library")
-            .publish_staged_public_manifest_unchecked(ticket);
+        let public_scope=ticket.public_scope;
+        let declaration=ticket.declaration.take().map(|declaration|self.lib_mut().prepare_resident_declaration(public_scope,declaration)).transpose()?;
+        let Some(claim)=claim() else{return Ok(PublicManifestCommit::Cancelled)};
+        let Self {lib,bindings,public_visibility_epochs,..}=self;
+        let outcome=lib.as_mut().expect("preflight library").publish_staged_public_manifest_unchecked(ticket,declaration,|_|{
+            bindings.commit_exact_binding_promotion(prepared);
+            for name in declared_names {bindings.remove_current_in(public_scope,&name);}
+            public_visibility_epochs.insert(public_scope,next_epoch);
+        });
         match &outcome {
-            PublicManifestCommit::BeforeRename { .. } => {
-                claim.before_rename_failure();
-            }
-            PublicManifestCommit::Durable
-            | PublicManifestCommit::Ephemeral
-            | PublicManifestCommit::PublishedDurabilityUnconfirmed { .. } => {
-                self.bindings.commit_exact_binding_promotion(prepared);
-                for name in declared_names {
-                    self.bindings.remove_current_in(public_scope, &name);
-                }
-                self.public_visibility_epochs
-                    .insert(public_scope, next_epoch);
-                claim.published();
-            }
-            PublicManifestCommit::Stale | PublicManifestCommit::Cancelled => {
-                unreachable!("preflight and claim resolved these outcomes")
-            }
+            PublicManifestCommit::Durable|PublicManifestCommit::Ephemeral=>{claim.published();}
+            PublicManifestCommit::Refused{..}|PublicManifestCommit::RecoveryRequired{..}=>{claim.before_rename_failure();}
+            PublicManifestCommit::Stale|PublicManifestCommit::Cancelled=>unreachable!("prepared publication"),
         }
         Ok(outcome)
     }
