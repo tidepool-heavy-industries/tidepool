@@ -288,6 +288,10 @@ async fn commit_error_fences_provider_and_sibling_owners_until_authenticated_reo
     let provider = forest
         .authorize_provider_attachment(actor.identity())
         .unwrap();
+    let provider_entries = std::sync::atomic::AtomicUsize::new(0);
+    provider
+        .with_admission(|| provider_entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+        .unwrap();
     let context = forest.directory.session_context(actor.identity()).unwrap();
     let owner = provider.owner.durable().unwrap().clone();
     let machines = forest.environment.runner.machines_for_test().clone();
@@ -340,6 +344,11 @@ async fn commit_error_fences_provider_and_sibling_owners_until_authenticated_reo
         PublicManifestCommit::RecoveryRequired { .. }
     ));
     assert!(!provider.owner.is_ready());
+    let blocked = provider
+        .with_admission(|| provider_entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+        .unwrap_err();
+    assert!(blocked.requires_recovery());
+    assert_eq!(provider_entries.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert!(!sibling.is_ready());
     assert!(initial_capability.is_current());
     let delayed_initial_owner =
@@ -389,6 +398,10 @@ async fn commit_error_fences_provider_and_sibling_owners_until_authenticated_reo
         matches!(confirmed, PublicManifestCommit::Durable),
         "later sibling fencing preserves the confirmed disposition"
     );
+    assert!(provider
+        .with_admission(|| provider_entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+        .is_err());
+    assert_eq!(provider_entries.load(std::sync::atomic::Ordering::Relaxed), 1);
     forest.shutdown().await;
     drop(actor);
     drop(forest);
