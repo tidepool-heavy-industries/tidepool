@@ -96,6 +96,13 @@ loading defining Core or granting native execution or lexical imports. Its
 recovery owner decodes those bytes only on demand, without replaying source or
 Template Haskell.
 
+Encoded artifacts use opaque `ArtifactBytes`, joining strict bytes, their SHA
+and length. A receiving request separately owns paths, allowances and byte
+budgets. Canonical and local finalization admissions retain their selected
+bodies. Materialization writes held bodies into fresh output views; a path alone
+does not own bytes. Decoded interfaces and Core retain their existing NameCache
+and compiler-epoch owners.
+
 A physical request owns immutable captured home originals, checked interfaces,
 certificates, Core and graphs. Scope generations extend that opaque owner; they
 cannot replace an admitted owner or expose a partially assembled closure. The
