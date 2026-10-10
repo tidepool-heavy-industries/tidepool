@@ -150,6 +150,14 @@ can be test results, but a campaign dominated by rejected operations supplies
 little evidence about successful transitions. Fix the distribution or model
 before buying more cases.
 
+For shared graph or snapshot persistence, vary both repeated references to one
+snapshot and successive distinct snapshots with overlapping contents. Whole
+snapshot deduplication can pass the first case while duplicating every inherited
+node and edge in the second. Check semantic round trips alongside encoded bytes,
+unique facts, reference counts and restored sharing through the production
+writer and reader. Use structural growth bounds instead of timing thresholds;
+small successful round trips alone do not exercise publication size limits.
+
 For repeated stateful exploration, extend a reusable replay driver at the owning
 boundary. Add generation, observation and shrinking capabilities as new
 counterexamples demand them. Shrinking should minimize the causal history,
