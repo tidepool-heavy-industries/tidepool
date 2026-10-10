@@ -617,7 +617,7 @@ async fn native_mailbox_casts_retain_recipient_compiler_close_after_caller_retir
         compiled: receiver, ..
     } = compile(
         r#"(do
-  send (Core.ActorInstallShutdownWith 0 (\reason -> send (Core.Print (Text.pack (show (reason :: Int))))))
+  send (Core.ActorInstallShutdownWith 0 (\reason -> (send (Core.Print (Text.pack (show (reason :: Int)))) :: Eff '[Core.Console] ())))
   Actor.serve @() @Maybe () (\() request -> case request of Just value -> pure (value, ()); Nothing -> error "unused mailbox request")
   ) :: Eff '[Core.ActorKernel, Core.ActorLocal Maybe, Core.Console] ()"#,
         2,
