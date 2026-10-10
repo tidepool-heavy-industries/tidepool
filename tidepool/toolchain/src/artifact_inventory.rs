@@ -1757,6 +1757,48 @@ impl ArtifactInventory {
         let mut state = self.0.lock().expect("inventory lock");
         let parent_projection = parent.read_projection(&state);
         let parent_nodes = &parent_projection.nodes;
+        // Existing immutable graph custody must still match its issued witness.
+        // A changed namespace can rebind valid payloads; it cannot repair or
+        // conceal corruption of an already retained exact graph.
+        let mut witnessed_edges =
+            BTreeMap::<InventoryNodeKey, BTreeSet<(InventoryNodeKey, ArtifactDependency)>>::new();
+        for scope in parent_nodes
+            .iter()
+            .map(|key| key.binding().selection)
+            .collect::<BTreeSet<_>>()
+        {
+            let witness = state
+                .selection_plans
+                .get(&scope)
+                .ok_or_else(|| failure("retained graph witness missing"))?;
+            for key in &witness.nodes {
+                if parent_nodes.contains(key) {
+                    witnessed_edges.entry(*key).or_default();
+                }
+            }
+            for (source, target, edge) in &witness.dependencies {
+                if parent_nodes.contains(source) {
+                    witnessed_edges
+                        .entry(*source)
+                        .or_default()
+                        .insert((*target, edge.clone()));
+                }
+            }
+        }
+        for key in parent_nodes {
+            let actual = state
+                .graph
+                .edges(state.indices[key])
+                .map(|edge| (state.graph[edge.target()], edge.weight().clone()))
+                .collect::<BTreeSet<_>>();
+            if witnessed_edges.get(key) != Some(&actual) {
+                return Err(admission_failure(
+                    ArtifactInventoryFailure::MetadataConflict {
+                        artifact: key.artifact(),
+                    },
+                ));
+            }
+        }
         let parent_ids = artifact_ids(parent_nodes);
         let parent_entries = parent_projection
             .entries
@@ -1950,12 +1992,28 @@ impl ArtifactInventory {
             .map(|id| (*id, resolve(LogicalNodeKey::Artifact(*id)).binding()))
             .collect::<BTreeMap<_, _>>();
         let roots = retained_roots.unwrap_or_else(|| {
-            selected
+            supplied
                 .keys()
+                .filter(|id| selected.contains_key(id))
                 .copied()
                 .map(LogicalNodeKey::Artifact)
-                .chain(selected_groups.iter().copied().map(LogicalNodeKey::Group))
+                .chain(
+                    groups
+                        .iter()
+                        .filter(|group| selected.contains_key(&group.artifact))
+                        .copied()
+                        .map(LogicalNodeKey::Group),
+                )
+                .chain(
+                    parent
+                        .roots()
+                        .iter()
+                        .map(|key| key.logical())
+                        .filter(|key| planned.contains_key(key)),
+                )
                 .map(resolve)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
                 .collect()
         });
         // The prior selected closure stays immutable and independently owned.

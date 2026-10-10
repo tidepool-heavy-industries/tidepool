@@ -231,13 +231,9 @@ impl Model {
             return Err(Refusal::Typed(failures));
         }
         let roots: BTreeSet<_> = supplied.keys().copied().collect();
-        let reused: BTreeSet<_> = roots
-            .iter()
-            .filter(|id| stored.contains_key(id))
-            .copied()
-            .collect();
-        let mut selected = self.contents(parent);
-        selected.extend(reachable(stored, &reused));
+        // Payload reuse grants no other view's dependency selection. Only
+        // explicit supplied rows and this parent are admitted namespace facts.
+        let selected = self.contents(parent);
         let mut entries: BTreeMap<_, _> = selected
             .into_iter()
             .map(|id| {
@@ -393,8 +389,16 @@ fn observe(
     views: &[Option<ArtifactView>; SLOTS],
 ) -> Result<(), TestCaseError> {
     for (inventory, actual) in inventories.iter().enumerate() {
-        prop_assert_eq!(actual.node_count(), model.records[inventory].len());
-        prop_assert_eq!(actual.metrics().nodes, model.records[inventory].len());
+        // Multiple issued bindings may share one immutable payload. The model
+        // independently checks payload custody; scoped graph reclamation has
+        // its own binding-history oracle and zero-node terminal controls.
+        prop_assert_eq!(
+            actual.0.lock().unwrap().payloads.len(),
+            model.records[inventory].len()
+        );
+        if model.records[inventory].is_empty() {
+            prop_assert_eq!(actual.node_count(), 0);
+        }
     }
     for (slot, expected) in model.views.iter().enumerate() {
         let Some(expected) = expected else {
