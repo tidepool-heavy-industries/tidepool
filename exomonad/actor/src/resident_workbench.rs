@@ -12236,6 +12236,36 @@ pub(crate) mod request_tests {
     use super::*;
     use std::path::Path;
 
+    #[tokio::test]
+    async fn empty_checkpoint_retirement_preserves_nonempty_machine_admission() {
+        let (machines, context, source, _root) = actor_registry_fixture();
+        let runner = ResidentActorRunner::new(machines.clone(), source);
+        let id = context.placement.session;
+        let mut checkout = machines.checkout_run(id).unwrap();
+        let scope = checkout.machine().mint_isolated_scope();
+        let mut empty = Box::pin(runner.retire_checkpoint_scopes(id, Vec::new()));
+        assert!(
+            matches!(
+                futures_util::poll!(&mut empty),
+                std::task::Poll::Ready(Ok(()))
+            ),
+            "an empty issued selection has no machine work"
+        );
+        drop(empty);
+        let mut nonempty = Box::pin(runner.retire_checkpoint_scopes(id, vec![scope]));
+        assert!(
+            futures_util::poll!(&mut nonempty).is_pending(),
+            "a real scope still waits for its owning machine"
+        );
+        assert!(checkout.machine().compile_view_in(scope).is_some());
+        checkout.restore_suspended(Vec::new());
+        nonempty.await.unwrap();
+        let mut checkout = machines.checkout_run(id).unwrap();
+        assert!(checkout.machine().compile_view_in(scope).is_none());
+        assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
+        checkout.restore_suspended(Vec::new());
+    }
+
     #[test]
     fn selected_spec_import_belongs_to_installer_only() {
         let source = ActorWorkbenchSource::new(String::new(), Vec::new())
