@@ -76,7 +76,7 @@ test-toolchain-scripts:
     bash scripts/buck2-run.sh test --local-only -c remote.enabled=false -c {{quote("tidepool.profile=" + native_profile)}} //scripts:toolchain_script_tests
 
 test-workflow-scripts:
-    bash scripts/buck2-run.sh test --local-only -c remote.enabled=false -c {{quote("tidepool.profile=" + native_profile)}} //scripts:native_workflow_tests
+    bash scripts/buck2-run.sh test --local-only -c remote.enabled=false -c {{quote("tidepool.profile=" + native_profile)}} //scripts:native_workflow_tests //build/rust:proptest_persistence_tests
 
 # A raw build is frozen/qualified explicitly before it can own a run.
 exomonad-build:

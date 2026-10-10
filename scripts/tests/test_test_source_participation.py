@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -109,6 +110,9 @@ class CompilerActionTests(unittest.TestCase):
     def proof(self):
         return json.loads((self.extras / "test-source-participation.json").read_text())
 
+    def remap(self):
+        return "--remap-path-prefix=" + str(self.projection) + "/="
+
     def test_same_compiler_action_preserves_response_arguments_and_emit_outputs(self):
         response = self.root / "compiler response"
         response.write_text("\n".join([*self.arguments(), "--cfg", 'feature="selected"',
@@ -129,6 +133,24 @@ class CompilerActionTests(unittest.TestCase):
         self.assertTrue(fixtures["owned/component/src/worker.rs"]["compiler_dependency"])
         self.assertFalse(fixtures["owned/component/src/fixture.hs"]["compiler_dependency"])
 
+    def test_repository_source_identity_overrides_only_the_projection_remap(self):
+        projected = os.path.relpath(self.projection) + "/"
+        original = "--remap-path-prefix=" + projected + "=owned/component/"
+        unrelated = "--remap-path-prefix=/retained/compiler=sources"
+        response = self.root / "remapped response"
+        response.write_text("\n".join([*self.arguments(), original, unrelated]))
+        with patch.object(wrapper.subprocess, "call", side_effect=self.compiler):
+            self.assertEqual(wrapper.compile_test(
+                "/pinned/rustc", ["@" + str(response)], self.environment), 0)
+        command = self.calls[0]
+        self.assertEqual(command[1], "@" + str(response))
+        mappings = wrapper.option_values(wrapper.expanded_arguments(command[1:]),
+                                         "--remap-path-prefix")
+        self.assertIn("/retained/compiler=sources", mappings)
+        self.assertGreater(mappings.index(projected + "="),
+                           mappings.index(projected + "=owned/component/"))
+        self.assertIn(str(self.projection) + "/=", mappings)
+
     def test_missing_required_module_refuses_action_even_when_fixture_is_consumed(self):
         self.dependencies.remove("owned/component/src/required.rs")
         with patch.object(wrapper.subprocess, "call", side_effect=self.compiler):
@@ -143,7 +165,7 @@ class CompilerActionTests(unittest.TestCase):
         arguments = self.arguments() + ["--emit=dep-info=" + str(original)]
         with patch.object(wrapper.subprocess, "call", side_effect=self.compiler):
             self.assertEqual(wrapper.compile_test("/pinned/rustc", arguments, self.environment), 0)
-        self.assertEqual(self.calls, [["/pinned/rustc", *arguments]])
+        self.assertEqual(self.calls, [["/pinned/rustc", *arguments, self.remap()]])
         self.assertEqual((self.extras / "test-source-participation.d").read_bytes(),
                          original.read_bytes())
 
@@ -156,7 +178,7 @@ class CompilerActionTests(unittest.TestCase):
         original.write_text("artifact: " + dependencies + "\n")
         with patch.object(wrapper.subprocess, "call", return_value=0) as compiler:
             self.assertEqual(wrapper.compile_test("/pinned/rustc", arguments, self.environment), 0)
-        compiler.assert_called_once_with(["/pinned/rustc", *arguments])
+        compiler.assert_called_once_with(["/pinned/rustc", *arguments, self.remap()])
         self.assertEqual((self.extras / "test-source-participation.d").read_bytes(),
                          original.read_bytes())
 

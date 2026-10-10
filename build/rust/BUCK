@@ -1,8 +1,46 @@
 load(":checks.bzl", "native_rust_checks")
 load(":native_check_targets.bzl", "NATIVE_CHECK_SOURCES", "NATIVE_CHECK_TARGETS")
 load(":source_snapshot.bzl", "native_source_snapshot")
+load(":defs.bzl", "tidepool_rust_binary")
+load("@prelude//rust:sources.bzl", "rust_filegroup")
 load(":native_qualification_sources.bzl", "NATIVE_QUALIFICATION_TREES")
-load("@prelude//:rules.bzl", "export_file", "filegroup", "python_bootstrap_binary")
+load("@prelude//:rules.bzl", "export_file", "filegroup", "python_bootstrap_binary", "sh_test")
+
+rust_filegroup(
+    name = "proptest_persistence_sources",
+    mapped_srcs = {
+        "tests/proptest-persistence/src/lib.rs": "build/rust/tests/proptest-persistence/src/lib.rs",
+    },
+)
+
+tidepool_rust_binary(
+    name = "proptest_persistence_probe",
+    package_name = "native-proptest-control",
+    package_dir = "build/rust/tests/proptest-persistence",
+    version = "0.0.0",
+    crate_root = "build/rust/tests/proptest-persistence/src/lib.rs",
+    edition = "2021",
+    srcs_filegroup = ":proptest_persistence_sources",
+    deps = ["//third-party/rust:proptest"],
+    rustc_flags = ["--test"],
+    required_test_modules = ["build/rust/tests/proptest-persistence/src/lib.rs"],
+)
+
+python_bootstrap_binary(
+    name = "proptest_persistence_control",
+    main = "proptest-persistence.py",
+)
+
+sh_test(
+    name = "proptest_persistence_tests",
+    test = ":proptest_persistence_control",
+    args = [
+        "--binary", "$(location :proptest_persistence_probe)",
+        "--runner", "$(location :isolated_libtest_source)",
+    ],
+    resources = [":proptest_persistence_probe", ":isolated_libtest_source"],
+    visibility = ["PUBLIC"],
+)
 
 python_bootstrap_binary(
     name = "isolated_libtest",
@@ -34,7 +72,7 @@ native_source_snapshot(
 
 filegroup(
     name = "qualification_inputs",
-    srcs = {"build/rust/" + source: source for source in glob(["BUCK", "*.bzl", "*.py"])},
+    srcs = {"build/rust/" + source: source for source in glob(["BUCK", "*.bzl", "*.py", "tests/**/*.rs"])},
     visibility = ["PUBLIC"],
 )
 

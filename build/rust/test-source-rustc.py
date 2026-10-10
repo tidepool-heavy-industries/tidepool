@@ -141,6 +141,22 @@ def projection_root(requirements, environment):
     return root
 
 
+def source_identity_remaps(arguments, root):
+    """Keep the repository-relative names already present in mapped_srcs.
+
+    Prelude remaps its source projection to the rule's package path. First-party
+    projections already include that path, so appending it duplicates the prefix
+    in file!(), diagnostics and proptest's source identity. Later matching rustc
+    remaps take precedence; retain unrelated mappings and response files.
+    """
+    prefixes = {str(root) + os.sep}
+    for mapping in option_values(arguments, "--remap-path-prefix"):
+        prefix, separator, _destination = mapping.partition("=")
+        if separator and Path(os.path.abspath(prefix)) == root:
+            prefixes.add(prefix)
+    return ["--remap-path-prefix=" + prefix + "=" for prefix in sorted(prefixes)]
+
+
 def compile_test(rustc, arguments, environment):
     requirement_path = environment.get("TIDEPOOL_TEST_SOURCE_REQUIREMENTS")
     if not requirement_path:
@@ -157,7 +173,7 @@ def compile_test(rustc, arguments, environment):
     modes = emit_modes(expanded)
     retained_depfile = output / "test-source-participation.d"
     depfile = modes.get("dep-info")
-    compiler_arguments = list(arguments)
+    compiler_arguments = list(arguments) + source_identity_remaps(expanded, root)
     if "dep-info" not in modes:
         modes["dep-info"] = str(retained_depfile)
         compiler_arguments.append("--emit=" + ",".join(

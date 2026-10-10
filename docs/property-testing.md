@@ -178,13 +178,16 @@ swarm-build env PROPTEST_CASES=4096 just test-lib exomonad-actor \
 ```
 
 Construct configuration from `proptest::test_runner::Config::default()` and
-honor explicit campaign controls when applying suite defaults. Buck's native
-test macros supply the compile-time `TIDEPOOL_PROPTEST_REGRESSIONS` path under
-the owning package. Select `FileFailurePersistence::Direct` with that value
-when present; keep normal Cargo persistence otherwise. Do not derive native
-seed paths from `CARGO_MANIFEST_DIR` or `file!()`: those can identify disposable
-Buck source projections. Run from the checkout root so the declared relative
-path resolves into the source tree.
+honor explicit campaign controls when applying suite defaults. The native test
+compiler wrapper preserves the repository-relative paths already carried by
+its source projection for `file!()` and diagnostics, so ordinary
+`FileFailurePersistence::SourceParallel` resolves into the checkout. Buck's
+native test macros also supply a compile-time `TIDEPOOL_PROPTEST_REGRESSIONS`
+path under the owning package for suites using target-owned
+`FileFailurePersistence::Direct` files. Do not construct custom seed paths
+from `CARGO_MANIFEST_DIR`, which identifies a disposable Buck source projection.
+Run from the checkout root so source identity and regression paths resolve
+into the source tree.
 
 The `proptest!` macro applies `contextualize_config` to its configured value.
 For a manually constructed `TestRunner`, call
@@ -198,6 +201,16 @@ the final choice. Set `source_file` and `test_name` on the resulting config befo
 constructing the runner so persisted failures retain the native test identity.
 Test environment settings in isolated subprocesses: proptest caches its default
 configuration, and process-wide environment changes can race other tests.
+
+`just test-native //build/rust:proptest_persistence_tests` qualifies the native
+runner with five semantic controls. Four deliberately fail macro/manual
+properties using source-parallel/direct persistence, check a saved shrunk
+history, and reproduce it with zero fresh cases and a different RNG seed.
+The fifth proves that a manual runner lacking source identity cannot persist
+or replay with the default source-parallel policy. The failing probe cases are
+ignored outside this explicit selftest. Pass `--output-dir PATH` to retain each
+counted execution, saved seed and shrink trace; `just test-workflow-scripts`
+also runs the controls.
 
 For custom runners, keep generated production replay inside the configured
 runner so failures receive shrinking and persistence. Separate deterministic

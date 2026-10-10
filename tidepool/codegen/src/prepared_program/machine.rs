@@ -10466,11 +10466,16 @@ mod tests {
         let options = PreparedMachineOptions { nursery_bytes: 128 };
         let callable = Arc::new(scalar_returning_function_program());
         let issuer_images = [declaring_site_image(551), declaring_site_image(552)];
-        let mut config = proptest::test_runner::Config::default();
+        let mut config = proptest::test_runner::Config::with_source_file(file!());
         if std::env::var_os("PROPTEST_CASES").is_none() {
             config.cases = 32;
         }
         config.max_shrink_iters = 256;
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::declaring_site_transfer_histories_preserve_only_issued_dependencies"
+        ));
         let mut runner = proptest::test_runner::TestRunner::new(config);
         runner
             .run(&proptest::collection::vec(0_u8..5, 1..12), |operations| {

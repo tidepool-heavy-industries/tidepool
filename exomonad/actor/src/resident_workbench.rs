@@ -16908,7 +16908,12 @@ pub(crate) mod request_tests {
                 .semantic_sha256(),
             "native bootstrap durably carries an issued original at generation zero"
         );
-        let mut runner = proptest::test_runner::TestRunner::default();
+        let mut config = proptest::test_runner::Config::with_source_file(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay"
+        ));
+        let mut runner = proptest::test_runner::TestRunner::new(config);
         runner.run(&proptest::collection::vec(0_u8..5, 1..40), |operations| {
             let root = tempfile::tempdir().unwrap();
             let lib = SessionLib::open(tidepool_repr::SessionId(7), root.path(), ModuleEnv::standalone_default()).unwrap();
