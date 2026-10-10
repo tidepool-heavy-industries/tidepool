@@ -1941,8 +1941,64 @@ fn select_configured_inner(
     context: Option<&ExactCandidateContext>,
 ) -> Result<Option<CandidateSet>, deployment::ModulePackageError> {
     crate::host_work::checkpoint().map_err(deployment::ModulePackageError::Interrupted)?;
-    let started = std::time::Instant::now();
     let package = crate::toolchain::configured_module_package()?;
+    select_acquired_inner(
+        endpoint_identity,
+        include,
+        scratch,
+        context,
+        package.as_ref(),
+        true,
+    )
+}
+
+pub(crate) fn select_acquired_catalog(
+    package: &Arc<deployment::DeploymentModulePackage>,
+    endpoint_identity: &[u8],
+    include: &[PathBuf],
+    scratch: &Path,
+) -> Result<Option<CandidateSet>, deployment::ModulePackageError> {
+    select_acquired_inner(
+        endpoint_identity,
+        include,
+        scratch,
+        None,
+        Some(package),
+        false,
+    )
+}
+
+pub(crate) fn select_with_catalog(
+    catalog: &crate::toolchain::CatalogSelection,
+    endpoint_identity: &[u8],
+    include: &[PathBuf],
+    scratch: &Path,
+    context: Option<&ExactCandidateContext>,
+) -> Result<Option<CandidateSet>, deployment::ModulePackageError> {
+    let package = catalog.acquire()?;
+    select_acquired_inner(
+        endpoint_identity,
+        include,
+        scratch,
+        context,
+        package.as_ref(),
+        true,
+    )
+}
+
+fn select_acquired_inner(
+    endpoint_identity: &[u8],
+    include: &[PathBuf],
+    scratch: &Path,
+    context: Option<&ExactCandidateContext>,
+    package: Option<&Arc<deployment::DeploymentModulePackage>>,
+    allow_ordinary: bool,
+) -> Result<Option<CandidateSet>, deployment::ModulePackageError> {
+    crate::host_work::checkpoint().map_err(deployment::ModulePackageError::Interrupted)?;
+    let started = std::time::Instant::now();
+    if let Some(package) = package {
+        package.validate_current_sources()?;
+    }
     let has_package = package.is_some();
     let mut records = match package {
         Some(package) => package.candidates(endpoint_identity)?,
@@ -1952,13 +2008,15 @@ fn select_configured_inner(
         .iter()
         .map(|(r, _)| (r.record().unit.clone(), r.record().module.clone()))
         .collect();
-    records.extend(
-        ordinary_records(endpoint_identity, include, context.is_some())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|r| !deployed.contains(&(r.unit.clone(), r.module.clone())))
-            .map(|r| (CandidateRecord::Encoded(r), CandidateOrigin::Ordinary)),
-    );
+    if allow_ordinary {
+        records.extend(
+            ordinary_records(endpoint_identity, include, context.is_some())
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|r| !deployed.contains(&(r.unit.clone(), r.module.clone())))
+                .map(|r| (CandidateRecord::Encoded(r), CandidateOrigin::Ordinary)),
+        );
+    }
     crate::host_work::checkpoint().map_err(deployment::ModulePackageError::Interrupted)?;
     let selected = select_records_inner(endpoint_identity, include, scratch, records, context);
     // Internal optional-record readers can refuse a record. A stopped scoped

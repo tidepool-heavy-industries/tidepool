@@ -116,7 +116,7 @@ fn io(path: &Path, source: std::io::Error) -> ModulePackageError {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum RootPolicy {
     NixStore,
     #[cfg(test)]
@@ -410,6 +410,7 @@ pub struct DeploymentModulePackage {
     artifact_root: PathBuf,
     catalog_identity: String,
     source_identity: String,
+    source_policy: RootPolicy,
     records: Vec<Arc<DecodedDeploymentRecord>>,
 }
 
@@ -527,6 +528,28 @@ struct PackageRevalidationWork {
 }
 
 impl DeploymentModulePackage {
+    pub fn catalog_path(&self) -> PathBuf {
+        self.artifact_root.join("catalog.json")
+    }
+
+    pub fn validate_deployment(
+        &self,
+        deployment: &crate::toolchain::AdmittedCompilerDeployment,
+    ) -> Result<(), ModulePackageError> {
+        if self.catalog.producer_identity != deployment.producer_identity
+            || self.catalog.consumed_worker_identity != deployment.consumed_worker_identity
+        {
+            return Err(ModulePackageError::CompilerMismatch);
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_current_sources(&self) -> Result<(), ModulePackageError> {
+        self.catalog
+            .source_selection
+            .validate_under(self.source_policy)
+    }
+
     /// Retained decoded objects do not make a mutable package path immutable.
     /// Reauthenticate physical bytes before reusing semantic admission, including
     /// canonical companions that are not listed as native module files.
@@ -773,6 +796,7 @@ impl DeploymentModulePackage {
             artifact_root,
             catalog_identity: sha(&bytes),
             source_identity,
+            source_policy: policy,
             records: Vec::new(),
         })
     }
