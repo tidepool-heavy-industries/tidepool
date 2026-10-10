@@ -218,6 +218,12 @@ fn construction_history(
     // The merged output has not served any production consumer. It can stay
     // cold while its parents retire and an unrelated graph slot is reclaimed.
     let cold = merged.reads.read_projection.get().is_none();
+    if read_schedule == &[false; 5] {
+        prop_assert!(
+            cold,
+            "delayed output must remain cold until its first checked read"
+        );
+    }
     let retired = inventory.0.lock().unwrap().indices
         [&InventoryNodeKey::Artifact(catalog.entries[OWNERS - 1].descriptor.id)];
     drop(all);
