@@ -1042,6 +1042,20 @@ impl RecoveredArtifactInventory {
         roles: &[CompilerInputRole],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<ExactDeclarationContext, CompileError> {
+        let namespace = selection
+            .namespace
+            .iter()
+            .map(|binding| binding.artifact)
+            .collect::<BTreeSet<_>>();
+        let issued_roles = roles
+            .iter()
+            .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+            .collect::<BTreeSet<_>>();
+        if namespace.len() != selection.namespace.len() || namespace != issued_roles {
+            return Err(failure(
+                "bound recovery namespace differs from recorded compiler roles",
+            ));
+        }
         let selected = selection.bindings.iter().copied().collect::<BTreeSet<_>>();
         if selected.len() != selection.bindings.len() || !selected.is_subset(&self.bindings) {
             return Err(failure("missing or duplicate recovered selection binding"));
@@ -1097,8 +1111,7 @@ impl RecoveredArtifactInventory {
             inventory: restored,
             lexical,
         };
-        context.normalize()?;
-        Ok(context)
+        context.finish()
     }
 
     fn capture_inputs(
