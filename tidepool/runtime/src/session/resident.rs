@@ -6248,7 +6248,7 @@ where
             prepared,
             code.certification.as_ref().as_ref(),
             retained_images,
-            retained_images.map(|_| &code.table),
+            retained_images.map(|_| code.table.as_ref()),
         )?;
         timing::record_stage(
             timing::NO_NODE,
