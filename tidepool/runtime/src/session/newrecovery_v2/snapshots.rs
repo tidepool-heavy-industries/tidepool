@@ -3,9 +3,9 @@ use super::*;
 use rpds::RedBlackTreeMapSync;
 use serde::ser::{SerializeSeq, SerializeStruct};
 
-type EdgeKey = (ArtifactId, ArtifactId, ArtifactDependency);
+type EdgeKey = (ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency);
 
-/// A successfully checked v8 record. Cloning copies persistent tree roots;
+/// A successfully checked selection-bound record. Cloning copies persistent tree roots;
 /// historical node, artifact, edge and surface payloads are not cloned.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RecoveryGraph {
@@ -17,6 +17,7 @@ pub(crate) struct RecoveryGraph {
     pub(super) public_surfaces: RedBlackTreeMapSync<RecoveryPublicOwner, RecoveryPublicSurface>,
     pub(super) nodes: RedBlackTreeMapSync<Generation, RecoveryNode>,
     pub(super) artifacts: RedBlackTreeMapSync<ArtifactId, RecoveryArtifactClosure>,
+    pub(super) artifact_bindings: RedBlackTreeMapSync<ArtifactBinding, ArtifactBinding>,
     pub(super) artifact_dependencies: RedBlackTreeMapSync<EdgeKey, RecoveryArtifactDependency>,
     /// The authenticated raw-wire checksum remains the baseline revision even
     /// when a valid input's array order differs from canonical tree order.
@@ -37,6 +38,7 @@ pub(super) trait GraphRead {
     fn nodes(&self) -> impl Iterator<Item = &RecoveryNode>;
     fn artifacts(&self) -> impl Iterator<Item = &RecoveryArtifactClosure>;
     fn public_surfaces(&self) -> impl Iterator<Item = &RecoveryPublicSurface>;
+    fn artifact_bindings(&self) -> impl Iterator<Item = &ArtifactBinding>;
     fn artifact_dependencies(&self) -> impl Iterator<Item = &RecoveryArtifactDependency>;
 }
 
@@ -70,6 +72,9 @@ impl GraphRead for RecoveryGraphWire {
     fn public_surfaces(&self) -> impl Iterator<Item = &RecoveryPublicSurface> {
         self.public_surfaces.iter()
     }
+    fn artifact_bindings(&self) -> impl Iterator<Item = &ArtifactBinding> {
+        self.artifact_bindings.iter()
+    }
     fn artifact_dependencies(&self) -> impl Iterator<Item = &RecoveryArtifactDependency> {
         self.artifact_dependencies.iter()
     }
@@ -99,6 +104,9 @@ impl GraphRead for RecoveryGraph {
     fn public_surfaces(&self) -> impl Iterator<Item = &RecoveryPublicSurface> {
         self.public_surfaces.values()
     }
+    fn artifact_bindings(&self) -> impl Iterator<Item = &ArtifactBinding> {
+        self.artifact_bindings.values()
+    }
     fn artifact_dependencies(&self) -> impl Iterator<Item = &RecoveryArtifactDependency> {
         self.artifact_dependencies.values()
     }
@@ -124,6 +132,7 @@ row_serializer!(Nodes, nodes);
 row_serializer!(Artifacts, artifacts);
 row_serializer!(Surfaces, public_surfaces);
 row_serializer!(Edges, artifact_dependencies);
+row_serializer!(Bindings, artifact_bindings);
 
 pub(super) struct GraphEncoding<'a, T: GraphRead> {
     pub graph: &'a T,
@@ -132,7 +141,7 @@ pub(super) struct GraphEncoding<'a, T: GraphRead> {
 impl<T: GraphRead> Serialize for GraphEncoding<'_, T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let graph = self.graph;
-        let mut fields = serializer.serialize_struct("RecoveryGraph", 10)?;
+        let mut fields = serializer.serialize_struct("RecoveryGraph", 11)?;
         fields.serialize_field("version", &graph.version())?;
         fields.serialize_field("public_schema", graph.public_schema())?;
         fields.serialize_field("source_session", &graph.source_session())?;
@@ -141,6 +150,7 @@ impl<T: GraphRead> Serialize for GraphEncoding<'_, T> {
         fields.serialize_field("public_surfaces", &Surfaces(graph))?;
         fields.serialize_field("nodes", &Nodes(graph))?;
         fields.serialize_field("artifacts", &Artifacts(graph))?;
+        fields.serialize_field("artifact_bindings", &Bindings(graph))?;
         fields.serialize_field("artifact_dependencies", &Edges(graph))?;
         fields.serialize_field("checksum", self.checksum)?;
         fields.end()
@@ -183,6 +193,7 @@ impl RecoveryGraph {
             nodes: RedBlackTreeMapSync::new_sync(),
             artifacts: RedBlackTreeMapSync::new_sync(),
             public_surfaces: RedBlackTreeMapSync::new_sync(),
+            artifact_bindings: RedBlackTreeMapSync::new_sync(),
             artifact_dependencies: RedBlackTreeMapSync::new_sync(),
         };
         let mut previous = None;
@@ -224,6 +235,14 @@ impl RecoveryGraph {
             }
             previous = Some(key.clone());
             graph.public_surfaces.insert_mut(key, row);
+        }
+        let mut previous = None;
+        for row in wire.artifact_bindings {
+            if previous.as_ref().is_some_and(|old| old >= &row) {
+                graph.wire_order_matches_maps = false;
+            }
+            previous = Some(row);
+            graph.artifact_bindings.insert_mut(row, row);
         }
         let mut previous = None;
         for row in wire.artifact_dependencies {
@@ -292,6 +311,7 @@ impl RecoveryGraph {
             nodes: self.nodes().cloned().collect(),
             artifacts: self.artifacts().cloned().collect(),
             public_surfaces: self.public_surfaces().cloned().collect(),
+            artifact_bindings: self.artifact_bindings.values().copied().collect(),
             artifact_dependencies: self.artifact_dependencies().cloned().collect(),
         }
     }
@@ -332,15 +352,14 @@ impl RecoveryGraphCandidate {
         }
         Ok(())
     }
-    pub(crate) fn insert_interface_edge(
+    pub(crate) fn insert_artifact_binding(&mut self, binding: ArtifactBinding) {
+        self.0.artifact_bindings.insert_mut(binding, binding);
+    }
+
+    pub(crate) fn insert_binding_edge(
         &mut self,
         row: RecoveryArtifactDependency,
     ) -> Result<(), RecoveryError> {
-        if !matches!(row.dependency, ArtifactDependency::Interface) {
-            return Err(error(
-                "native recovery edges must derive from original certification",
-            ));
-        }
         let key = edge_key(&row);
         if !self.0.artifact_dependencies.contains_key(&key) {
             self.0.artifact_dependencies.insert_mut(key, row);

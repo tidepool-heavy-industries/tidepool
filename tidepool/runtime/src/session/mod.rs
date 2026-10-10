@@ -2578,6 +2578,7 @@ impl SessionLib {
                 kind: recovery::RecoveryNodeKind::Authored,
                 implementation_refs: Vec::new(),
                 artifact_refs,
+                graph_selection: context.artifact_view().capture_graph_selection(),
                 compiler_roles: context.compiler_input_roles(),
                 native_groups: context
                     .artifact_view()
@@ -2618,9 +2619,12 @@ impl SessionLib {
                 .insert_artifact(artifact)
                 .map_err(|error| invalid(&error.to_string()))?;
         }
-        for (source, target, dependency) in context.artifact_view().interface_dependencies() {
+        for binding in context.artifact_view().capture_graph_selection().bindings {
+            graph.insert_artifact_binding(binding);
+        }
+        for (source, target, dependency) in context.artifact_view().binding_dependencies() {
             graph
-                .insert_interface_edge(recovery::RecoveryArtifactDependency {
+                .insert_binding_edge(recovery::RecoveryArtifactDependency {
                     source,
                     target,
                     dependency,

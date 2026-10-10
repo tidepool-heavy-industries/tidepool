@@ -126,6 +126,7 @@ fn restored(
             .map(|entry| (entry.descriptor.id, entry))
             .collect(),
         recorded_inventory: true,
+            bindings: BTreeSet::new(), binding_edges: Vec::new(),
         interfaces: view.interface_dependencies(),
     }
     .context_with_published_roles(

@@ -358,9 +358,8 @@ impl SessionLib {
         }
         let mut contexts = BTreeMap::new();
         for node in graph.nodes() {
-            let context = Arc::new(inventory.context_with_published_roles(
-                &node.artifact_refs,
-                &node.native_groups,
+            let context = Arc::new(inventory.context_with_graph_selection(
+                &node.graph_selection,
                 &node.compiler_roles,
                 node.lexical.clone(),
             )?);
@@ -689,9 +688,12 @@ pub(super) fn materialize_public_compiler_context(
             .insert_artifact(artifact)
             .map_err(|error| invalid(error.to_string()))?;
     }
-    for (source, target, dependency) in context.artifact_view().interface_dependencies() {
+    for binding in context.artifact_view().capture_graph_selection().bindings {
+        candidate.insert_artifact_binding(binding);
+    }
+    for (source, target, dependency) in context.artifact_view().binding_dependencies() {
         candidate
-            .insert_interface_edge(recovery::RecoveryArtifactDependency {
+            .insert_binding_edge(recovery::RecoveryArtifactDependency {
                 source,
                 target,
                 dependency,

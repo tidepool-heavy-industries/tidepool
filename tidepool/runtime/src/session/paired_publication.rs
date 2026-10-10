@@ -1209,6 +1209,7 @@ impl AcceptedDeclarationPublication {
                     kind: recovery::RecoveryNodeKind::Join,
                     implementation_refs,
                     artifact_refs,
+                    graph_selection: context.artifact_view().capture_graph_selection(),
                     compiler_roles: context.compiler_input_roles(),
                     native_groups: context
                         .artifact_view()
@@ -1239,9 +1240,12 @@ impl AcceptedDeclarationPublication {
                     .insert_artifact(artifact)
                     .map_err(|error| invalid_at(&error_path, error.to_string()))?;
             }
-            for (source, target, dependency) in materialized.artifact_dependencies {
+            for binding in context.artifact_view().capture_graph_selection().bindings {
+                candidate.insert_artifact_binding(binding);
+            }
+            for (source, target, dependency) in context.artifact_view().binding_dependencies() {
                 candidate
-                    .insert_interface_edge(recovery::RecoveryArtifactDependency {
+                    .insert_binding_edge(recovery::RecoveryArtifactDependency {
                         source,
                         target,
                         dependency,
