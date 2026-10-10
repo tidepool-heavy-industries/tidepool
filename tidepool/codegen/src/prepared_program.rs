@@ -1505,6 +1505,8 @@ impl CompiledProgram {
                 functions_defined: pipeline.functions_defined(),
                 blocks_emitted: pipeline.blocks_emitted(),
                 code_bytes: pipeline.code_bytes(),
+                literal_storage_entries: plan.bytes.storage_entries(),
+                literal_storage_bytes: plan.bytes.storage_bytes(),
             },
         );
         Ok(Self {

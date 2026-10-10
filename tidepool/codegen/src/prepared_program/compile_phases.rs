@@ -52,6 +52,9 @@ pub(crate) struct CompileScale {
     pub blocks_emitted: u64,
     /// Machine-code bytes the JIT module finalized.
     pub code_bytes: u64,
+    /// Exact immutable literal allocations whose addresses this image embeds.
+    pub literal_storage_entries: usize,
+    pub literal_storage_bytes: usize,
 }
 
 /// A running stage clock. `lap` closes the current stage and opens the next.
@@ -121,6 +124,8 @@ pub(crate) fn record(image_instance: u64, phases: &CompilePhases, scale: &Compil
         functions_defined = scale.functions_defined,
         blocks_emitted = scale.blocks_emitted,
         code_bytes = scale.code_bytes,
+        literal_storage_entries = scale.literal_storage_entries,
+        literal_storage_bytes = scale.literal_storage_bytes,
         "prepared compile"
     );
 }
