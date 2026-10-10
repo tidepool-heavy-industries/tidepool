@@ -1389,12 +1389,18 @@ impl SessionLib {
         {
             recovery_store::StoreDisposition::Committed(recovery_store::CeilingCommit {
                 revision,
+                content_revision,
                 allocation_ceiling,
                 ..
             }) => {
                 assert!(allocation_ceiling >= target);
                 state.store_revision = revision;
                 state.allocation_ceiling = allocation_ceiling;
+                state.graph.install_ceiling_revision(
+                    revision,
+                    content_revision,
+                    allocation_ceiling,
+                );
                 Ok(allocation_ceiling)
             }
             recovery_store::StoreDisposition::Refused(error) => {
