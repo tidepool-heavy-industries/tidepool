@@ -4926,12 +4926,59 @@ impl ExactDeclarationContext {
         ),
         CompileError,
     > {
-        let products = recovery_artifacts::materialize_certified_products(
-            root,
-            self.toolchain_identity_sha256(),
-            &self.recovery_products(),
-        )
-        .map_err(failure)?;
+        self.materialize_recovery_entries(root, &self.inventory.entries())
+    }
+
+    /// Materialize only newly referenced immutable payloads from this exact view.
+    /// Retained references are owned by the run and need no repeated file reads.
+    pub fn materialize_recovery_products_and_interfaces_for_artifacts(
+        &self,
+        root: &Path,
+        artifacts: &BTreeSet<ArtifactId>,
+    ) -> Result<
+        (
+            Vec<RecoveryArtifactRef>,
+            Vec<recovery_artifacts::RecoveryModuleInterfaceRef>,
+        ),
+        CompileError,
+    > {
+        if artifacts.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        self.materialize_recovery_entries(root, &self.inventory.entries_for_artifacts(artifacts)?)
+    }
+
+    fn materialize_recovery_entries(
+        &self,
+        root: &Path,
+        entries: &[Arc<ArtifactEntry>],
+    ) -> Result<
+        (
+            Vec<RecoveryArtifactRef>,
+            Vec<recovery_artifacts::RecoveryModuleInterfaceRef>,
+        ),
+        CompileError,
+    > {
+        let originals = entries
+            .iter()
+            .filter_map(|entry| match &entry.payload {
+                ArtifactPayload::Original(product) => Some(product.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut validation = PackageInterfaceValidation::default();
+        let products = if originals.is_empty() {
+            Vec::new()
+        } else {
+            recovery_artifacts::materialize_certified_products_with_validation(
+                root,
+                self.toolchain_identity_sha256(),
+                &originals,
+                &mut validation,
+                MaterializationMode::Durable,
+            )
+            .map_err(materialization_failure)?
+        };
         let emitted = products
             .iter()
             .filter_map(|product| product.module_interface.as_ref())
@@ -4945,10 +4992,7 @@ impl ExactDeclarationContext {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        let mut validation = PackageInterfaceValidation::default();
-        let interfaces = self
-            .inventory
-            .entries()
+        let interfaces = entries
             .iter()
             .filter_map(|entry| {
                 let ArtifactPayload::Canonical(interface) = &entry.payload else {
@@ -4962,7 +5006,7 @@ impl ExactDeclarationContext {
                         &mut validation,
                         MaterializationMode::Durable,
                     )
-                    .map_err(failure),
+                    .map_err(materialization_failure),
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -8393,6 +8437,102 @@ mod tests {
             compact.len(),
             proof_transport.len()
         );
+    }
+
+    #[test]
+    fn selected_raw_materialization_skips_retained_bytes_and_refuses_missing_custody() {
+        let source = published_original_history_fixture();
+        let entries = source.artifact_view().entries();
+        let original = |module: &str| {
+            entries
+                .iter()
+                .find(|entry| {
+                    entry.descriptor.owner.module == module
+                        && matches!(entry.payload, ArtifactPayload::Original(_))
+                })
+                .unwrap()
+                .descriptor
+                .id
+        };
+        let canonical = |module: &str| {
+            entries
+                .iter()
+                .find(|entry| {
+                    entry.descriptor.owner.module == module
+                        && matches!(entry.payload, ArtifactPayload::Canonical(_))
+                })
+                .unwrap()
+                .descriptor
+                .id
+        };
+        let scratch = tempfile::tempdir().unwrap();
+        let absent = scratch.path().join("absent");
+        assert_eq!(
+            source
+                .materialize_recovery_products_and_interfaces_for_artifacts(
+                    &absent,
+                    &BTreeSet::new()
+                )
+                .unwrap(),
+            (vec![], vec![])
+        );
+        assert!(
+            !absent.exists(),
+            "empty materialization does not create directories"
+        );
+        let (retained, _) = source
+            .materialize_recovery_products_and_interfaces_for_artifacts(
+                scratch.path(),
+                &BTreeSet::from([original("Beta")]),
+            )
+            .unwrap();
+        assert_eq!(retained.len(), 1);
+        let retained_path = scratch.path().join(&retained[0].product_path);
+        std::fs::write(&retained_path, b"damaged retained product").unwrap();
+        let (new_products, new_interfaces) = source
+            .materialize_recovery_products_and_interfaces_for_artifacts(
+                scratch.path(),
+                &BTreeSet::from([original("Alpha"), canonical("Alpha")]),
+            )
+            .unwrap();
+        assert_eq!(new_products.len(), 1);
+        assert_eq!(new_products[0].module, "Alpha");
+        assert_eq!(
+            new_interfaces,
+            vec![new_products[0].module_interface.clone().unwrap()]
+        );
+        assert_eq!(
+            std::fs::read(&retained_path).unwrap(),
+            b"damaged retained product"
+        );
+        assert!(
+            source
+                .materialize_recovery_products_and_interfaces_for_artifacts(
+                    scratch.path(),
+                    &BTreeSet::from([original("Beta")])
+                )
+                .is_err(),
+            "fresh materialization verifies its requested existing destination"
+        );
+        let selected = source
+            .issue_published_source_original("revision", "input", &identity("fixture", "Alpha"))
+            .unwrap();
+        assert!(
+            selected
+                .context()
+                .materialize_recovery_products_and_interfaces_for_artifacts(
+                    scratch.path(),
+                    &BTreeSet::from([original("Beta")])
+                )
+                .is_err(),
+            "ambient inventory payload cannot supply a selected durable reference"
+        );
+        assert!(source
+            .materialize_recovery_products_and_interfaces_for_artifacts(
+                scratch.path(),
+                &BTreeSet::from([ArtifactId([0xee; 32])])
+            )
+            .is_err());
     }
 
     #[test]
