@@ -2810,7 +2810,7 @@ fn compile_cell_program_admitted_inner(
     let endpoint = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.bind")
         .in_scope(|| bind_extract_cmd(&command))?;
     let offer_span = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.offer", inclusive = true).entered();
-    let offer = ModuleCandidateOffer::select_cell_program(
+    let offer = ModuleCandidateOffer::select_cell_program_with_catalog(
         &endpoint,
         admission.include_paths(),
         scratch.path(),
@@ -2828,6 +2828,7 @@ fn compile_cell_program_admitted_inner(
             .map(|interface| interface.checked_artifact().clone())
             .collect::<Vec<_>>(),
         &admission.retained_declaration_projections(),
+        admission.catalog_selection(),
     )?;
     if let Some(root) = offer.checked_value_root() {
         command.session_root(root);

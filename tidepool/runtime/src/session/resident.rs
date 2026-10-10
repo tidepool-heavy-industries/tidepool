@@ -2828,6 +2828,13 @@ where
     /// turn bootstraps it, since there is no machine yet to share an image
     /// with. The composition root that owns a run's sibling sessions is the
     /// intended caller.
+    pub fn set_catalog_selection(
+        &mut self,
+        catalog: tidepool_toolchain::toolchain::CatalogSelection,
+    ) {
+        self.state.set_catalog_selection(catalog);
+    }
+
     pub fn set_image_registry(&mut self, registry: Arc<ImageRegistry>) {
         self.state.set_image_registry(registry);
     }
@@ -3701,6 +3708,7 @@ where
         Ok(super::AdmittedInspectionInputs::capture(
             view.clone(),
             values,
+            self.state.catalog_selection().clone(),
         ))
     }
 

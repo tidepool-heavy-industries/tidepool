@@ -414,70 +414,6 @@ pub struct DeploymentModulePackage {
     records: Vec<Arc<DecodedDeploymentRecord>>,
 }
 
-/// One current configured selection; replacement never accumulates packages.
-/// Failed loads and freshness checks cannot publish a new owner.
-#[derive(Default)]
-pub(crate) struct ConfiguredModulePackageOwner {
-    current: Option<(
-        PathBuf,
-        CompilerDeploymentAuthority,
-        Arc<DeploymentModulePackage>,
-    )>,
-}
-
-impl ConfiguredModulePackageOwner {
-    pub(crate) const fn new() -> Self {
-        Self { current: None }
-    }
-    pub(crate) fn clear(&mut self) {
-        self.current = None;
-    }
-
-    pub(crate) fn load(
-        &mut self,
-        path: &Path,
-        authority: &CompilerDeploymentAuthority,
-    ) -> Result<Arc<DeploymentModulePackage>, ModulePackageError> {
-        self.load_under(path, authority, RootPolicy::NixStore)
-    }
-
-    fn load_under(
-        &mut self,
-        path: &Path,
-        authority: &CompilerDeploymentAuthority,
-        policy: RootPolicy,
-    ) -> Result<Arc<DeploymentModulePackage>, ModulePackageError> {
-        crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
-        let started = std::time::Instant::now();
-        if let Some((selected, configured, package)) = &self.current {
-            if selected == path && configured == authority {
-                let work = package.revalidate(path, policy)?;
-                tracing::info!(target: "tidepool_toolchain::module_candidates",
-                    phase = "configured_package", reused = true,
-                    elapsed_ms = started.elapsed().as_millis() as u64,
-                    hydrated_modules = 0, retained_modules = package.records.len(),
-                    reauthenticated_artifact_files = work.artifact_files,
-                    reauthenticated_artifact_bytes = work.artifact_bytes,
-                    source_read_attempts = work.evidence.source_read_attempts,
-                    source_read_bytes = work.evidence.source_read_bytes,
-                    negative_metadata_calls = work.evidence.negative_metadata_calls,
-                    revalidated_source_proofs = package.records.len(),
-                    revalidated_package_imports = package.records.len());
-                return Ok(Arc::clone(package));
-            }
-        }
-        let package = Arc::new(DeploymentModulePackage::load_under(
-            path, authority, policy,
-        )?);
-        tracing::info!(target: "tidepool_toolchain::module_candidates",
-            phase = "configured_package", reused = false,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            hydrated_modules = package.records.len(), retained_modules = package.records.len());
-        self.current = Some((path.to_owned(), authority.clone(), Arc::clone(&package)));
-        Ok(package)
-    }
-}
-
 /// The loader owns both the original bytes and their single decoded product.
 /// No mutable record is exposed after this relationship is established.
 #[derive(Debug)]
@@ -486,6 +422,7 @@ pub(super) struct DecodedDeploymentRecord {
     record: Record,
     product: Arc<tidepool_repr::execution_schema::RawModuleProduct>,
     artifacts: std::sync::OnceLock<Arc<DeploymentArtifactPaths>>,
+    original: std::sync::OnceLock<crate::recovery_artifacts::CertifiedRecoveryProduct>,
 }
 
 /// Compiler paths issued once from acquired original bytes. Cloned canonical
@@ -517,6 +454,7 @@ impl DecodedDeploymentRecord {
             record,
             product: Arc::new(product),
             artifacts: std::sync::OnceLock::new(),
+            original: std::sync::OnceLock::new(),
         })
     }
 
@@ -526,6 +464,12 @@ impl DecodedDeploymentRecord {
 
     pub(super) fn product(&self) -> &Arc<tidepool_repr::execution_schema::RawModuleProduct> {
         &self.product
+    }
+
+    pub(super) fn certified_original(
+        &self,
+    ) -> Option<&crate::recovery_artifacts::CertifiedRecoveryProduct> {
+        self.original.get()
     }
 
     pub(super) fn artifacts(&self) -> Option<&Arc<DeploymentArtifactPaths>> {
@@ -541,6 +485,7 @@ impl std::ops::Deref for DecodedDeploymentRecord {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 struct PackageRevalidationWork {
     artifact_files: u64,
     artifact_bytes: u64,
@@ -570,9 +515,8 @@ impl DeploymentModulePackage {
             .validate_under(self.source_policy)
     }
 
-    /// Retained decoded objects do not make a mutable package path immutable.
-    /// Reauthenticate physical bytes before reusing semantic admission, including
-    /// canonical companions that are not listed as native module files.
+    /// Test the physical-authentication accounting independently of borrowing.
+    #[cfg(test)]
     fn revalidate(
         &self,
         path: &Path,
@@ -1022,6 +966,27 @@ impl DeploymentModulePackage {
                     origins,
                 }))
                 .map_err(|_| ModulePackageError::Format("original inputs already materialized"))?;
+            let canonical = canonical_owner
+                .clone()
+                .with_catalog_input_custody(Arc::clone(
+                    record.artifacts().expect("acquired originals"),
+                ));
+            let mut candidate = CandidateRecord::Deployment(Arc::clone(record));
+            let original = crate::certified_products::certify_candidate_original_with_validation(
+                crate::certified_products::OriginalNativeCandidate {
+                    owner: record.original_owner.owner(),
+                    product: candidate.product(Arc::clone(record.product())),
+                    certification_bytes: record.original_certification.clone(),
+                    module_interface: canonical,
+                    execution_source: record.execution_source.clone(),
+                },
+                &mut validation,
+            )
+            .map_err(|_| ModulePackageError::Format("acquired original certification"))?;
+            record
+                .original
+                .set(original)
+                .map_err(|_| ModulePackageError::Format("original already acquired"))?;
         }
         Ok(())
     }
@@ -2058,8 +2023,33 @@ mod tests {
         else {
             panic!("deployment candidate");
         };
-        assert!(interface.starts_with(&other));
-        assert!(packages.starts_with(&other));
+        assert_eq!(fs::read(interface).unwrap(), after[0].interface);
+        assert_eq!(fs::read(packages).unwrap(), after[0].package_imports);
+        assert!(
+            !interface.starts_with(&other),
+            "compiler receives acquired private bytes"
+        );
+        let origins = &relocated.records[0].artifacts().unwrap().origins;
+        assert!(
+            origins
+                .origins()
+                .iter()
+                .any(|origin| origin.path.starts_with(&other)),
+            "protected origin paths follow the authenticated relocated catalog"
+        );
+        let before_paths = original.candidates(&[3; 32]).unwrap();
+        let super::super::CandidateOrigin::Deployment {
+            interface: before_interface,
+            ..
+        } = &before_paths[0].1
+        else {
+            unreachable!()
+        };
+        assert_ne!(before_interface, interface);
+        assert_eq!(
+            fs::read(before_interface).unwrap(),
+            fs::read(interface).unwrap()
+        );
 
         let alias = fixture._root.path().join("product-alias");
         std::os::unix::fs::symlink(&other, &alias).unwrap();

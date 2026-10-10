@@ -157,16 +157,17 @@ are rejected and must be regenerated through the matched producer.
 
 `configured_module_source_selection` shares catalog schema, compiler authority,
 source manifest and alias validation without hydrating native products. The
-configured package owner retains only its current exact catalog path and complete
-compiler authority selection. Initial loading validates every proof and the
-complete cohort; reuse reauthenticates catalog, native artifacts, canonical
-companions and source observations, sharing the admitted decoded products.
-Deployment records share a dependency proof only after each physical evidence
-file authenticates the exact SHA-256 and length. Each fresh catalog or candidate
-validation stage walks that shared proof and generated input once, including
-negative import witnesses; a later stage observes the filesystem again.
-Candidate acquisition still validates its current source/import witnesses and
-exact context. Read-only bundle permissions do not replace content checks.
+acquired package is retained explicitly by its workspace/session and cell admission.
+New acquisition validates the catalog, every artifact, canonical companion and
+source observation. Borrowing uses the captured original bytes and single decoded
+products until release or reload; it checks current source/import witnesses,
+package interfaces and exact declaration compatibility without reauthenticating
+the static acquired image. Private compiler paths are materialized once by that
+owner, and certified originals retain their custody after a run is released.
+Deployment records share a dependency proof only after every distinct physical
+evidence file authenticates its exact SHA-256 and length. Each fresh source
+validation stage walks shared proofs once, including negative import witnesses.
+Read-only bundle permissions do not replace new-acquisition checks.
 Actual Nix registration, NAR, retention and final bundle qualification remain the
 qualification owner’s independent checks.
 

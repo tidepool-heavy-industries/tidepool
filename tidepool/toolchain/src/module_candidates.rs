@@ -1929,33 +1929,12 @@ pub(crate) fn select_configured(
     include: &[PathBuf],
     scratch: &Path,
 ) -> Result<Option<CandidateSet>, deployment::ModulePackageError> {
-    select_configured_inner(endpoint_identity, include, scratch, None)
-}
-
-pub(crate) fn select_configured_in_context(
-    endpoint_identity: &[u8],
-    include: &[PathBuf],
-    scratch: &Path,
-    context: &ExactCandidateContext,
-) -> Result<Option<CandidateSet>, deployment::ModulePackageError> {
-    select_configured_inner(endpoint_identity, include, scratch, Some(context))
-}
-
-fn select_configured_inner(
-    endpoint_identity: &[u8],
-    include: &[PathBuf],
-    scratch: &Path,
-    context: Option<&ExactCandidateContext>,
-) -> Result<Option<CandidateSet>, deployment::ModulePackageError> {
-    crate::host_work::checkpoint().map_err(deployment::ModulePackageError::Interrupted)?;
-    let package = crate::toolchain::configured_module_package()?;
-    select_acquired_inner(
+    select_with_catalog(
+        &crate::toolchain::CatalogSelection::FreshConfigured,
         endpoint_identity,
         include,
         scratch,
-        context,
-        package.as_ref(),
-        true,
+        None,
     )
 }
 
@@ -2129,11 +2108,15 @@ fn select_records_inner<R: Into<CandidateRecord>>(
                 .is_ok();
         validation_elapsed += validation_started.elapsed();
         if !valid {
-            selection_omissions.omit(
+            if omit_or_refuse_candidate(
+                &origin,
+                &mut selection_omissions,
                 &record.unit,
                 &record.module,
                 CacheOfferOmission::InvalidRecord,
-            );
+            ) {
+                return None;
+            }
             continue;
         }
         let decode_started = std::time::Instant::now();
@@ -2166,12 +2149,15 @@ fn select_records_inner<R: Into<CandidateRecord>>(
                 } else {
                     CacheOfferOmission::InvalidRecord
                 };
-                if reason == CacheOfferOmission::OperationBudget
-                    && matches!(origin, CandidateOrigin::Deployment { .. })
-                {
+                if omit_or_refuse_candidate(
+                    &origin,
+                    &mut selection_omissions,
+                    &record.unit,
+                    &record.module,
+                    reason,
+                ) {
                     return None;
                 }
-                selection_omissions.omit(&record.unit, &record.module, reason);
                 continue;
             }
         };
@@ -2180,11 +2166,15 @@ fn select_records_inner<R: Into<CandidateRecord>>(
             || product.interface != record.interface
             || record.interface.is_empty()
         {
-            selection_omissions.omit(
+            if omit_or_refuse_candidate(
+                &origin,
+                &mut selection_omissions,
                 &record.unit,
                 &record.module,
                 CacheOfferOmission::InvalidRecord,
-            );
+            ) {
+                return None;
+            }
             continue;
         }
         let evidence_count = record
@@ -2205,15 +2195,21 @@ fn select_records_inner<R: Into<CandidateRecord>>(
                     && s.sha256 == record.source_sha256
             })
         {
-            selection_omissions.omit(
+            if omit_or_refuse_candidate(
+                &origin,
+                &mut selection_omissions,
                 &record.unit,
                 &record.module,
                 CacheOfferOmission::InvalidRecord,
-            );
+            ) {
+                return None;
+            }
             continue;
         }
-        let iface_sha = Sha256::digest(&record.interface);
-        let iface_sha_array: [u8; 32] = iface_sha.into();
+        let iface_sha_array = match record.acquired_artifacts() {
+            Some(_) => record.original_owner.skinny_iface_sha256,
+            None => Sha256::digest(&record.interface).into(),
+        };
         let package_roots =
             crate::recovery_artifacts::validate_package_import_evidence_with_validation(
                 &record.package_imports,
@@ -2231,21 +2227,28 @@ fn select_records_inner<R: Into<CandidateRecord>>(
                 } else {
                     CacheOfferOmission::InvalidRecord
                 };
-                if reason == CacheOfferOmission::OperationBudget
-                    && matches!(origin, CandidateOrigin::Deployment { .. })
-                {
+                if omit_or_refuse_candidate(
+                    &origin,
+                    &mut selection_omissions,
+                    &record.unit,
+                    &record.module,
+                    reason,
+                ) {
                     return None;
                 }
-                selection_omissions.omit(&record.unit, &record.module, reason);
                 continue;
             }
         };
         if record.original_owner.owner() != computed_owner(&record) {
-            selection_omissions.omit(
+            if omit_or_refuse_candidate(
+                &origin,
+                &mut selection_omissions,
                 &record.unit,
                 &record.module,
                 CacheOfferOmission::InvalidRecord,
-            );
+            ) {
+                return None;
+            }
             continue;
         }
         if let Some(digest) = record.execution_source_sha256 {
@@ -2622,8 +2625,13 @@ fn select_records_inner<R: Into<CandidateRecord>>(
     for (key, (mut record, origin, product, _)) in validated {
         crate::host_work::checkpoint().ok()?;
         if availability.contains(&key) {
-            native_availability.push(
-                crate::certified_products::certify_candidate_original_with_validation(
+            let captured = match &record.record {
+                CandidateRecord::Deployment(record) => record.certified_original().cloned(),
+                CandidateRecord::Encoded(_) => None,
+            };
+            native_availability.push(match captured {
+                Some(original) => original,
+                None => crate::certified_products::certify_candidate_original_with_validation(
                     crate::certified_products::OriginalNativeCandidate {
                         owner: record.original_owner.owner(),
                         product: record.record.product(product),
@@ -2634,7 +2642,7 @@ fn select_records_inner<R: Into<CandidateRecord>>(
                     &mut package_validation,
                 )
                 .ok()?,
-            );
+            });
             continue;
         }
         let product_sha = record.original_owner.product_sha256;

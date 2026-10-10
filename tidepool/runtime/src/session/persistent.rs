@@ -217,6 +217,7 @@ fn stage_interface_file(
 /// wrapping, decl/pure-bind routing, output draining, continuation-id minting)
 /// and delegate the machine and persistent-store operations here.
 pub struct PersistentSession {
+    catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
     admission_owner: Arc<super::admission::RuntimeAdmissionOwner>,
     /// The resident machine — `None` before the first turn bootstraps it,
     /// `Some` when idle/suspended, and moved out onto the eval thread for a
@@ -359,6 +360,7 @@ impl PersistentSession {
             .unwrap_or(Generation(0));
         PersistentSession {
             admission_owner: Arc::new(super::admission::RuntimeAdmissionOwner::new()),
+            catalog_selection: Default::default(),
             machine: None,
             invocation_cancel: None,
             machine_incarnation: None,
@@ -381,6 +383,17 @@ impl PersistentSession {
             stub_generations: std::collections::BTreeSet::new(),
             retired_stub_sources: Vec::new(),
         }
+    }
+
+    pub fn set_catalog_selection(
+        &mut self,
+        catalog: tidepool_toolchain::toolchain::CatalogSelection,
+    ) {
+        self.catalog_selection = catalog;
+    }
+
+    pub fn catalog_selection(&self) -> &tidepool_toolchain::toolchain::CatalogSelection {
+        &self.catalog_selection
     }
 
     pub(super) fn admission_owner(&self) -> &Arc<super::admission::RuntimeAdmissionOwner> {

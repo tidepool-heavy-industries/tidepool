@@ -715,6 +715,24 @@ fn immutable_candidates_in_context(
     scratch: &Path,
     reserved: BTreeSet<String>,
 ) -> Result<Option<Arc<module_candidates::CandidateSet>>, CompileError> {
+    immutable_candidates_in_context_with_catalog(
+        context,
+        producer,
+        include,
+        scratch,
+        reserved,
+        &crate::toolchain::CatalogSelection::FreshConfigured,
+    )
+}
+
+fn immutable_candidates_in_context_with_catalog(
+    context: &crate::declaration_join::ExactDeclarationContext,
+    producer: &[u8],
+    include: &[PathBuf],
+    scratch: &Path,
+    reserved: BTreeSet<String>,
+    catalog: &crate::toolchain::CatalogSelection,
+) -> Result<Option<Arc<module_candidates::CandidateSet>>, CompileError> {
     let mut protected = BTreeSet::new();
     for entry in context.interface_owners() {
         protected.insert((entry.owner.unit, entry.owner.module));
@@ -777,10 +795,14 @@ fn immutable_candidates_in_context(
                 })
                 .collect(),
         );
-    Ok(
-        module_candidates::select_configured_in_context(producer, include, scratch, &exclusions)?
-            .map(Arc::new),
-    )
+    Ok(module_candidates::select_with_catalog(
+        catalog,
+        producer,
+        include,
+        scratch,
+        Some(&exclusions),
+    )?
+    .map(Arc::new))
 }
 
 fn private_native_availability(
@@ -832,7 +854,27 @@ impl ModuleCandidateOffer {
         include: &[PathBuf],
         scratch: &Path,
     ) -> Result<Self, CompileError> {
-        Self::select(endpoint.identity().producer_bytes(), include, scratch)
+        Self::select_admitted_with_catalog(
+            endpoint,
+            include,
+            scratch,
+            &crate::toolchain::CatalogSelection::FreshConfigured,
+        )
+    }
+
+    pub fn select_admitted_with_catalog(
+        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+        include: &[PathBuf],
+        scratch: &Path,
+        catalog: &crate::toolchain::CatalogSelection,
+    ) -> Result<Self, CompileError> {
+        let catalog = catalog.for_deployment(endpoint.deployment())?;
+        Self::select_originals_with_catalog(
+            endpoint.identity().producer_bytes(),
+            include,
+            scratch,
+            &catalog,
+        )
     }
 
     /// Execute an ordinary turn into fresh, privately owned outputs and seal
@@ -958,9 +1000,25 @@ impl ModuleCandidateOffer {
         include: &[PathBuf],
         scratch: &Path,
     ) -> Result<Self, CompileError> {
+        Self::select_originals_with_catalog(
+            producer,
+            include,
+            scratch,
+            &crate::toolchain::CatalogSelection::FreshConfigured,
+        )
+    }
+
+    fn select_originals_with_catalog(
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+        catalog: &crate::toolchain::CatalogSelection,
+    ) -> Result<Self, CompileError> {
         Ok(Self {
-            selected: module_candidates::select_configured(producer, include, scratch)?
-                .map(Arc::new),
+            selected: module_candidates::select_with_catalog(
+                catalog, producer, include, scratch, None,
+            )?
+            .map(Arc::new),
             producer: producer.to_vec(),
             include: include.to_vec(),
             exact: None,
@@ -979,12 +1037,46 @@ impl ModuleCandidateOffer {
         scratch: &Path,
         context: Arc<crate::declaration_context::ExactCompileContext>,
     ) -> Result<Self, CompileError> {
-        let selected = immutable_candidates_in_context(
+        Self::select_originals_in_context_with_catalog(
+            producer,
+            include,
+            scratch,
+            context,
+            &crate::toolchain::CatalogSelection::FreshConfigured,
+        )
+    }
+
+    pub fn select_in_context_with_catalog(
+        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Arc<crate::declaration_context::ExactCompileContext>,
+        catalog: &crate::toolchain::CatalogSelection,
+    ) -> Result<Self, CompileError> {
+        let catalog = catalog.for_deployment(endpoint.deployment())?;
+        Self::select_originals_in_context_with_catalog(
+            endpoint.identity().producer_bytes(),
+            include,
+            scratch,
+            context,
+            &catalog,
+        )
+    }
+
+    fn select_originals_in_context_with_catalog(
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Arc<crate::declaration_context::ExactCompileContext>,
+        catalog: &crate::toolchain::CatalogSelection,
+    ) -> Result<Self, CompileError> {
+        let selected = immutable_candidates_in_context_with_catalog(
             context.declarations(),
             producer,
             include,
             scratch,
             BTreeSet::new(),
+            catalog,
         )?;
         let private =
             private_native_availability(context.declarations(), producer, selected.as_deref())?;
@@ -1031,6 +1123,28 @@ impl ModuleCandidateOffer {
         )
     }
 
+    pub fn select_inspection_with_catalog(
+        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+        retained: &[Arc<crate::checked_cell::CheckedValueArtifact>],
+        catalog: &crate::toolchain::CatalogSelection,
+    ) -> Result<Self, CompileError> {
+        let catalog = catalog.for_deployment(endpoint.deployment())?;
+        Self::select_inspection_for_with_catalog(
+            CheckedPurpose::Inspection,
+            endpoint.identity().producer_bytes(),
+            include,
+            scratch,
+            context,
+            values,
+            retained,
+            &catalog,
+        )
+    }
+
     /// Reload compares candidate source for every original in the retained
     /// namespace, independently of whether the inspection query uses it.
     pub fn select_reload_inspection(
@@ -1061,6 +1175,28 @@ impl ModuleCandidateOffer {
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         retained: &[Arc<crate::checked_cell::CheckedValueArtifact>],
     ) -> Result<Self, CompileError> {
+        Self::select_inspection_for_with_catalog(
+            purpose,
+            producer,
+            include,
+            scratch,
+            context,
+            values,
+            retained,
+            &crate::toolchain::CatalogSelection::FreshConfigured,
+        )
+    }
+
+    fn select_inspection_for_with_catalog(
+        purpose: CheckedPurpose,
+        producer: &[u8],
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+        retained: &[Arc<crate::checked_cell::CheckedValueArtifact>],
+        catalog: &crate::toolchain::CatalogSelection,
+    ) -> Result<Self, CompileError> {
         let owners = values
             .iter()
             .map(|(owner, _)| owner.module_name())
@@ -1076,8 +1212,9 @@ impl ModuleCandidateOffer {
             encode_inspection_authorization_for(purpose, &owners, inputs.baseline_authorization()),
             include,
         )?;
-        let selected =
-            immutable_candidates_in_context(&context, producer, include, scratch, owners)?;
+        let selected = immutable_candidates_in_context_with_catalog(
+            &context, producer, include, scratch, owners, catalog,
+        )?;
         let private = private_native_availability(&context, producer, selected.as_deref())?;
         Ok(Self {
             selected,
@@ -1196,6 +1333,33 @@ impl ModuleCandidateOffer {
         retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
         retained_projections: &[Arc<crate::declaration_join::AcceptedJoin>],
     ) -> Result<Self, CompileError> {
+        Self::select_cell_program_with_catalog(
+            endpoint,
+            include,
+            scratch,
+            context,
+            specification,
+            values,
+            planned,
+            retained_interfaces,
+            retained_projections,
+            &crate::toolchain::CatalogSelection::FreshConfigured,
+        )
+    }
+
+    pub fn select_cell_program_with_catalog(
+        endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
+        include: &[PathBuf],
+        scratch: &Path,
+        context: Option<Arc<crate::declaration_context::ExactCompileContext>>,
+        specification: crate::checked_cell::CheckedCellSpecification,
+        values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
+        planned: crate::checked_cell::CheckedPlannedCellSpecification,
+        retained_interfaces: &[Arc<crate::checked_cell::CheckedValueArtifact>],
+        retained_projections: &[Arc<crate::declaration_join::AcceptedJoin>],
+        catalog: &crate::toolchain::CatalogSelection,
+    ) -> Result<Self, CompileError> {
+        let catalog = catalog.for_deployment(endpoint.deployment())?;
         let producer = endpoint.identity().producer_bytes();
         let expected = specification
             .injected_modules
@@ -1241,12 +1405,13 @@ impl ModuleCandidateOffer {
                 .map(|path| Value::Text(path.to_string_lossy().into_owned()))
                 .collect(),
         ));
-        let selected = immutable_candidates_in_context(
+        let selected = immutable_candidates_in_context_with_catalog(
             &context,
             producer,
             include,
             scratch,
             checked_candidate_reservations(&specification, Some(&planned)),
+            &catalog,
         )?;
         let private = private_native_availability(&context, producer, selected.as_deref())?;
         Ok(Self {

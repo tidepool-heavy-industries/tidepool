@@ -338,6 +338,8 @@ pub struct FrozenWorkspace {
     /// Process-local immutable readiness; serialized selections never issue it.
     #[serde(skip)]
     pub(crate) prepared_toolset: Option<exomonad_actor::PreparedSourceToolset>,
+    #[serde(skip)]
+    pub(crate) catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
 }
 
 impl FrozenWorkspace {
@@ -360,10 +362,14 @@ impl FrozenWorkspace {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        let deployment = tidepool_toolchain::toolchain::configured_module_package()?
+        let package = tidepool_toolchain::toolchain::configured_module_package()?;
+        let deployment = package
             .as_ref()
             .map(|package| DeploymentSources::from_package(package));
-        Self::load_with_deployment(workspace, run_root, deployment)
+        let mut frozen = Self::load_with_deployment(workspace, run_root, deployment)?;
+        frozen.catalog_selection =
+            tidepool_toolchain::toolchain::CatalogSelection::Acquired(package);
+        Ok(frozen)
     }
 
     fn load_with_deployment(
@@ -665,6 +671,7 @@ impl FrozenWorkspace {
             preparation: None,
             prepared_deployment: None,
             prepared_toolset: None,
+            catalog_selection: Default::default(),
         };
         tidepool_atomic_write::write_durable(&manifest, &serde_json::to_vec_pretty(&frozen)?)?;
         Ok(frozen)
@@ -676,10 +683,11 @@ impl FrozenWorkspace {
         check_current: bool,
     ) -> Result<Self> {
         let selection = pointer.read_selection()?;
-        let deployment = tidepool_toolchain::toolchain::configured_module_package()?
+        let package = tidepool_toolchain::toolchain::configured_module_package()?;
+        let deployment = package
             .as_ref()
             .map(|package| DeploymentSources::from_package(package));
-        let frozen = Self::load_with_deployment_selection(
+        let mut frozen = Self::load_with_deployment_selection(
             workspace,
             &pointer.directory,
             deployment,
@@ -696,6 +704,8 @@ impl FrozenWorkspace {
         if check_current {
             frozen.verify_current_inputs(workspace)?;
         }
+        frozen.catalog_selection =
+            tidepool_toolchain::toolchain::CatalogSelection::Acquired(package);
         Ok(frozen)
     }
 

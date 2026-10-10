@@ -3417,7 +3417,7 @@ fn compile_root(
         let child_event_handler =
             RepoEventHandler::with_source(Box::new(InertObservationSource), EventConfig::default());
         let child_worktree_handler = child_worktree_handler.clone();
-        let machine = ResidentSession::unbootstrapped(
+        let mut machine = ResidentSession::unbootstrapped(
             host_handlers(
                 child_source_service.as_ref(),
                 child_journal.clone(),
@@ -3428,6 +3428,12 @@ fn compile_root(
             DEFAULT_NURSERY_SIZE,
             Some(library),
         );
+        machine.set_catalog_selection(
+            child_workspace_inputs
+                .as_ref()
+                .map(|inputs| inputs.catalog_selection.clone())
+                .unwrap_or_default(),
+        );
         Ok(Box::new(machine))
     });
     let mut machine = ResidentSession::unbootstrapped(
@@ -3435,6 +3441,13 @@ fn compile_root(
         CapturedOutput::new(),
         DEFAULT_NURSERY_SIZE,
         Some(library),
+    );
+    machine.set_catalog_selection(
+        config
+            .workspace_inputs
+            .as_ref()
+            .map(|inputs| inputs.catalog_selection.clone())
+            .unwrap_or_default(),
     );
     machine.set_effect_execution(
         EffectRunPolicy::HandleOrSuspend,

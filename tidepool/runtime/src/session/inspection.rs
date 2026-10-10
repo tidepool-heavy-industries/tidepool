@@ -345,6 +345,7 @@ fn render_query_error(error: &QueryError) -> String {
 /// The input inventory cannot be assembled or changed by a caller.
 #[derive(Clone, Debug)]
 pub struct AdmittedInspectionInputs {
+    catalog: tidepool_toolchain::toolchain::CatalogSelection,
     view: super::SessionCompileView,
     values: Vec<super::admission::AdmittedValueInterface>,
 }
@@ -353,8 +354,13 @@ impl AdmittedInspectionInputs {
     pub(super) fn capture(
         view: super::SessionCompileView,
         values: Vec<super::admission::AdmittedValueInterface>,
+        catalog: tidepool_toolchain::toolchain::CatalogSelection,
     ) -> Self {
-        Self { view, values }
+        Self {
+            view,
+            values,
+            catalog,
+        }
     }
 
     pub fn view(&self) -> &super::SessionCompileView {
@@ -568,12 +574,20 @@ fn run_inspections_with_policy(
         command.inspect_type_batch(&batch_path);
     }
 
-    let endpoint = command.bind().map_err(map_spawn)?;
+    let endpoint = tidepool_toolchain::toolchain::AdmittedCompilerEndpoint::from_bound(
+        command.bind().map_err(map_spawn)?,
+    )
+    .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     let include = request
         .include
         .iter()
         .map(|path| path.to_path_buf())
         .collect::<Vec<_>>();
+    let catalog = inputs
+        .map(|inputs| &inputs.catalog)
+        .cloned()
+        .unwrap_or_default()
+        .for_deployment(endpoint.deployment())?;
     let offer = match values {
         Some(values) => {
             let certificates = values
@@ -585,8 +599,8 @@ fn run_inspections_with_policy(
                 .map(|value| value.module().module_name())
                 .collect::<Vec<_>>();
             command.inject_vals(&modules);
-            tidepool_toolchain::artifacts::ModuleCandidateOffer::select_inspection(
-                endpoint.identity().producer_bytes(),
+            tidepool_toolchain::artifacts::ModuleCandidateOffer::select_inspection_with_catalog(
+                &endpoint,
                 &include,
                 temp.path(),
                 inputs
@@ -599,20 +613,34 @@ fn run_inspections_with_policy(
                     .map(|value| (value.module(), value.bytes_owned().clone()))
                     .collect(),
                 &certificates,
+                &catalog,
             )?
         }
-        None => super::turn::select_module_candidate_offer(
-            endpoint.identity().producer_bytes(),
-            &include,
-            temp.path(),
-            request.exact_context.clone(),
-        )?,
+        None => match request.exact_context.clone() {
+            Some(context) => {
+                tidepool_toolchain::artifacts::ModuleCandidateOffer::select_in_context_with_catalog(
+                    &endpoint,
+                    &include,
+                    temp.path(),
+                    context,
+                    &catalog,
+                )?
+            }
+            None => {
+                tidepool_toolchain::artifacts::ModuleCandidateOffer::select_admitted_with_catalog(
+                    &endpoint,
+                    &include,
+                    temp.path(),
+                    &catalog,
+                )?
+            }
+        },
     };
     if let Some(root) = offer.checked_value_root() {
         command.session_root(root);
     }
     offer.apply_to(&mut command)?;
-    crate::paths::apply_build_products_dir(&mut command, &endpoint);
+    crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
     #[cfg(test)]
     if std::env::var("TIDEPOOL_KEEP_TEST_LOGS").as_deref() == Ok("1") {
         if let Some(root) = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
@@ -1271,7 +1299,8 @@ mod tests {
             first.injected_module_names(),
             second.injected_module_names()
         );
-        let inputs = AdmittedInspectionInputs::capture(first.clone(), Vec::new());
+        let inputs =
+            AdmittedInspectionInputs::capture(first.clone(), Vec::new(), Default::default());
         let injected = first.injected_module_names();
         let request = || InspectionRequest {
             exact_context: first.exact_compile_context(),
@@ -1309,7 +1338,7 @@ mod tests {
         assert!(view.reachable_values().is_empty());
         let values = session.capture_value_interfaces(&view).unwrap();
         assert!(values.is_empty());
-        let inputs = AdmittedInspectionInputs::capture(view.clone(), values);
+        let inputs = AdmittedInspectionInputs::capture(view.clone(), values, Default::default());
         let queries = [InspectionQuery::TypeSearch("Int -> Int".into())];
         let results = run_admitted_inspections(
             InspectionRequest {

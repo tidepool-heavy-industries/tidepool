@@ -471,6 +471,7 @@ impl PrivateExecutionAdmission {
 /// leases; compiler evidence binds its digest without interpreting authority.
 /// Original declaration identities are burned before checking any source.
 pub struct RuntimeCellAdmission {
+    catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
     owner: Arc<RuntimeAdmissionOwner>,
     owner_epoch: u64,
     purpose: RuntimeCellPurpose,
@@ -1410,6 +1411,10 @@ impl std::fmt::Debug for RuntimeCellAdmission {
 }
 
 impl RuntimeCellAdmission {
+    pub fn catalog_selection(&self) -> &tidepool_toolchain::toolchain::CatalogSelection {
+        &self.catalog_selection
+    }
+
     /// Issue cumulative lexical projections while the machine and prefix
     /// mutex are stowed. Only this admission's immutable checked items enter
     /// the prepared sequence consumed by declaration adoption.
@@ -2678,6 +2683,7 @@ impl PersistentSession {
             planned
         });
         Ok(Arc::new(RuntimeCellAdmission {
+            catalog_selection: self.catalog_selection().clone(),
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
             purpose,

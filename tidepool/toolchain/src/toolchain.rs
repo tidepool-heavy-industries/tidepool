@@ -91,6 +91,17 @@ pub enum CatalogSelection {
 }
 
 impl CatalogSelection {
+    pub fn for_deployment(
+        &self,
+        deployment: &AdmittedCompilerDeployment,
+    ) -> Result<Self, ModulePackageError> {
+        let package = self.acquire()?;
+        if let Some(package) = &package {
+            package.validate_deployment(deployment)?;
+        }
+        Ok(Self::Acquired(package))
+    }
+
     pub fn acquire(
         &self,
     ) -> Result<Option<std::sync::Arc<DeploymentModulePackage>>, ModulePackageError> {
@@ -119,35 +130,9 @@ pub fn configured_module_package(
         .map(Some)
 }
 
-/// Serialize selection, environment observation, freshness and replacement
-/// within one owner operation. Returning immutable objects does not retain the
-/// lock; their consumers retain their own shared custody.
-#[cfg(test)]
-pub(crate) fn with_configured_module_package_owner<T>(
-    owner: &std::sync::Mutex<crate::module_candidates::deployment::ConfiguredModulePackageOwner>,
-    operation: impl FnOnce(
-        &mut crate::module_candidates::deployment::ConfiguredModulePackageOwner,
-    ) -> Result<T, ModulePackageError>,
-) -> Result<T, ModulePackageError> {
-    let waiting = std::time::Instant::now();
-    let mut owner = loop {
-        crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
-        match owner.try_lock() {
-            Ok(owner) => break owner,
-            Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => {
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-        }
-    };
-    crate::host_work::checkpoint().map_err(ModulePackageError::Interrupted)?;
-    tracing::debug!(target: "tidepool_toolchain::module_candidates",
-        phase = "configured_package_owner_wait", elapsed_ms = waiting.elapsed().as_millis() as u64);
-    operation(&mut owner)
-}
 /// Validate configured source provenance without hydrating native products.
 /// Candidate selection authenticates the complete package, retaining its
-/// decoded objects under the configured package owner.
+/// decoded objects under the explicitly acquired package owner.
 pub fn configured_module_source_selection(
 ) -> Result<Option<NativeCatalogSourceSelection>, ModulePackageError> {
     let Some(path) = std::env::var_os(ENV_COMPILER_MODULES) else {
