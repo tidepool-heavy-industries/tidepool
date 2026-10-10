@@ -38,7 +38,19 @@ impl Fixture {
         } else {
             Vec::new()
         };
-        let surface = TestEffectSurface::minimal(&declarations).unwrap();
+        let surface = if ready {
+            TestEffectSurface::with_options(
+                &declarations,
+                tidepool_testing::effect_surface::TestEffectSurfaceOptions {
+                    row_args: tidepool_mcp::RowArgs::default()
+                        .importing(["Tidepool.Effects.Core (ActorKernel(..), ActorLocal(..))"]),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        } else {
+            TestEffectSurface::minimal(&declarations).unwrap()
+        };
         let root = tempfile::tempdir().unwrap();
         let templates = resident_workbench_templates(surface.preamble(), surface.row(), "");
         let include = surface
