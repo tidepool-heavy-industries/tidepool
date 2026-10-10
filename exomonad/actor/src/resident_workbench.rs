@@ -6995,15 +6995,30 @@ mod declaration_receipt_tests {
     #[test]
     fn import_and_pragma_only_cells_have_truthful_receipts() {
         assert_eq!(
-            declaration_receipt(&[], true, 7),
+            tidepool_testing::with_settlement(|settlement| declaration_receipt(
+                &[],
+                true,
+                7,
+                settlement
+            )),
             "accepted cell prologue at generation 7"
         );
         assert_eq!(
-            declaration_receipt(&[], false, 7),
+            tidepool_testing::with_settlement(|settlement| declaration_receipt(
+                &[],
+                false,
+                7,
+                settlement
+            )),
             "committed declaration at generation 7"
         );
         assert_eq!(
-            declaration_receipt(&["watchdogProbe".to_owned()], false, 7),
+            tidepool_testing::with_settlement(|settlement| declaration_receipt(
+                &["watchdogProbe".to_owned()],
+                false,
+                7,
+                settlement
+            )),
             "defined watchdogProbe at generation 7"
         );
     }
@@ -11039,16 +11054,18 @@ where
         let session_root = carrier_mount_session_root(session, scope)?;
         let generation = session.val_gen().next();
         session.reserve_value_generations_through(generation);
-        session
-            .mount_carrier_in(
+        tidepool_testing::with_settlement(|settlement| {
+            session.mount_carrier_in(
                 &session_root,
                 scope,
                 &binding,
                 generation,
                 carrier,
                 HostPayload::Json(input),
+                settlement,
             )
-            .map_err(ResidentActorWorkbenchError::Resident)?
+        })
+        .map_err(ResidentActorWorkbenchError::Resident)?
     } else {
         let (binder, compiled, generation) = compile_host_binding(
             session,
@@ -11060,9 +11077,17 @@ where
             json_input_carrier_imports(),
             false,
         )?;
-        session
-            .mount_json_binding_in(scope, &binder, generation, compiled.into_code(), input)
-            .map_err(ResidentActorWorkbenchError::Resident)?;
+        tidepool_testing::with_settlement(|settlement| {
+            session.mount_json_binding_in(
+                scope,
+                &binder,
+                generation,
+                compiled.into_code(),
+                input,
+                settlement,
+            )
+        })
+        .map_err(ResidentActorWorkbenchError::Resident)?;
         binder
     };
     if let Err(error) = session.hide_host_binding_in(scope, &binder) {
@@ -11098,16 +11123,18 @@ where
         let session_root = carrier_mount_session_root(session, scope)?;
         let generation = session.val_gen().next();
         session.reserve_value_generations_through(generation);
-        session
-            .mount_carrier_in(
+        tidepool_testing::with_settlement(|settlement| {
+            session.mount_carrier_in(
                 &session_root,
                 scope,
                 binding,
                 generation,
                 carrier,
                 HostPayload::Text(text),
+                settlement,
             )
-            .map_err(ResidentActorWorkbenchError::Resident)?;
+        })
+        .map_err(ResidentActorWorkbenchError::Resident)?;
         return Ok(());
     }
     let (binder, compiled, generation) = compile_host_binding(
@@ -11120,9 +11147,17 @@ where
         text_binding_carrier_imports(),
         true,
     )?;
-    session
-        .mount_text_binding_in(scope, &binder, generation, compiled.into_code(), text)
-        .map_err(ResidentActorWorkbenchError::Resident)
+    tidepool_testing::with_settlement(|settlement| {
+        session.mount_text_binding_in(
+            scope,
+            &binder,
+            generation,
+            compiled.into_code(),
+            text,
+            settlement,
+        )
+    })
+    .map_err(ResidentActorWorkbenchError::Resident)
 }
 
 fn fresh_host_binding_name<H, O>(
@@ -12202,15 +12237,17 @@ pub(crate) mod request_tests {
             "no mutation happened between snapshot and install: views must still match"
         );
 
-        session
-            .mount_text_binding_in(
+        tidepool_testing::with_settlement(|settlement| {
+            session.mount_text_binding_in(
                 scope,
                 &binder,
                 generation,
                 compiled.into_code(),
                 "text payload",
+                settlement,
             )
-            .expect("Text carrier installs after revalidation");
+        })
+        .expect("Text carrier installs after revalidation");
 
         assert!(session
             .binding_names_in(scope)
@@ -12290,15 +12327,17 @@ pub(crate) mod request_tests {
             &retry_retained,
         )
         .expect("recompile against the fresh snapshot succeeds");
-        session
-            .mount_text_binding_in(
+        tidepool_testing::with_settlement(|settlement| {
+            session.mount_text_binding_in(
                 scope,
                 &retry_binder,
                 retry_generation,
                 retry_compiled.into_code(),
                 "retry text payload",
+                settlement,
             )
-            .expect("recompiled carrier installs");
+        })
+        .expect("recompiled carrier installs");
         assert!(session
             .binding_names_in(scope)
             .contains(&"text_binding2".into()));
@@ -13864,7 +13903,8 @@ pub(crate) mod request_tests {
                             HostPayload::Json(&wrong_json)
                         };
                         assert!(matches!(
-                            session.mount_checked_host_input(&carrier, wrong),
+                            tidepool_testing::with_settlement(|settlement| session
+                                .mount_checked_host_input(&carrier, wrong, settlement)),
                             Err(ResidentError::UnsupportedCheckedTurn)
                         ));
                         assert!(session
@@ -13924,7 +13964,8 @@ pub(crate) mod request_tests {
                         }
                     };
                     assert!(matches!(
-                        session.mount_checked_host_input(&carrier, wrong),
+                        tidepool_testing::with_settlement(|settlement| session
+                            .mount_checked_host_input(&carrier, wrong, settlement)),
                         Err(ResidentError::UnsupportedCheckedTurn)
                     ));
                     assert!(session
@@ -14913,15 +14954,17 @@ pub(crate) mod request_tests {
                             text_binding_carrier_imports(),
                             true,
                         )?;
-                        session
-                            .mount_text_binding_in(
+                        tidepool_testing::with_settlement(|settlement| {
+                            session.mount_text_binding_in(
                                 sibling,
                                 &binder,
                                 generation,
                                 compiled.into_code(),
                                 "unrelated sibling value",
+                                settlement,
                             )
-                            .map_err(ResidentActorWorkbenchError::Resident)?;
+                        })
+                        .map_err(ResidentActorWorkbenchError::Resident)?;
                         Ok(())
                     })
                     .await
@@ -15625,7 +15668,10 @@ pub(crate) mod request_tests {
             .prepare_startup_entry(prepared.prepared.entry.compiled().code())
             .unwrap();
         let ResidentOutcome::Suspended { hole, request, .. } =
-            session.run_startup_entry(entry).unwrap()
+            tidepool_testing::with_settlement(|settlement| {
+                session.run_startup_entry(entry, settlement)
+            })
+            .unwrap()
         else {
             panic!("source-owned installer must publish its native dispatcher");
         };
@@ -15723,7 +15769,10 @@ pub(crate) mod request_tests {
             .prepare_startup_entry(prepared.compiled().code())
             .unwrap();
         let ResidentOutcome::Suspended { hole, request, .. } =
-            session.run_startup_entry(entry).unwrap()
+            tidepool_testing::with_settlement(|settlement| {
+                session.run_startup_entry(entry, settlement)
+            })
+            .unwrap()
         else {
             panic!("selected original must execute its actual installer");
         };
@@ -18800,9 +18849,14 @@ pub(crate) mod request_tests {
         let token = publisher
             .capture_progress_publication(&hole, RealmId::ROOT)
             .unwrap();
-        publisher
-            .abort(hole.cont_id(), "publication fixture captured".into())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            publisher.abort(
+                hole.cont_id(),
+                "publication fixture captured".into(),
+                settlement,
+            )
+        })
+        .unwrap();
         assert_eq!(
             registry
                 .publish_progress(target, request, token, publisher_id)
@@ -18834,9 +18888,14 @@ pub(crate) mod request_tests {
         let token = publisher
             .capture_progress_publication(&hole, RealmId::ROOT)
             .unwrap();
-        publisher
-            .abort(hole.cont_id(), "publication fixture captured".into())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            publisher.abort(
+                hole.cont_id(),
+                "publication fixture captured".into(),
+                settlement,
+            )
+        })
+        .unwrap();
         let (revision, notifications) = registry
             .publish_progress(target, request, token, publisher_id)
             .unwrap();
@@ -18866,9 +18925,14 @@ pub(crate) mod request_tests {
         let token = publisher
             .capture_progress_publication(&hole, RealmId::ROOT)
             .unwrap();
-        publisher
-            .abort(hole.cont_id(), "publication fixture captured".into())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            publisher.abort(
+                hole.cont_id(),
+                "publication fixture captured".into(),
+                settlement,
+            )
+        })
+        .unwrap();
         assert_eq!(
             registry
                 .publish_progress(target, request, token, publisher_id)
@@ -18907,9 +18971,14 @@ pub(crate) mod request_tests {
         let token = publisher
             .capture_progress_publication(&hole, RealmId::ROOT)
             .unwrap();
-        publisher
-            .abort(hole.cont_id(), "publication fixture captured".into())
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            publisher.abort(
+                hole.cont_id(),
+                "publication fixture captured".into(),
+                settlement,
+            )
+        })
+        .unwrap();
         assert_eq!(
             no_progress
                 .publish_progress(target, request_without_progress, token, publisher_id)
@@ -18926,12 +18995,14 @@ pub(crate) mod request_tests {
                 .run_with_sites("observer-publication-image", note.code())
                 .unwrap(),
         );
-        observer
-            .abort(
+        tidepool_testing::with_settlement(|settlement| {
+            observer.abort(
                 warm.cont_id(),
                 "observer installed original publication image".into(),
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         let observer_handles = observer.value_handle_count();
         let observer_hole = suspend(
             observer
@@ -19001,9 +19072,14 @@ pub(crate) mod request_tests {
             runner
                 .access
                 .with_machine(context.clone(), move |session, _, _| {
-                    session
-                        .abort(continuation.cont_id(), "source fixture captured".into())
-                        .map_err(Into::into)
+                    tidepool_testing::with_settlement(|settlement| {
+                        session.abort(
+                            continuation.cont_id(),
+                            "source fixture captured".into(),
+                            settlement,
+                        )
+                    })
+                    .map_err(Into::into)
                 })
                 .await
                 .unwrap();
@@ -19031,15 +19107,17 @@ pub(crate) mod request_tests {
             runner
                 .access
                 .with_machine(context.clone(), move |session, _, _| {
-                    session
-                        .run_rooted_application(
+                    tidepool_testing::with_settlement(|settlement| {
+                        session.run_rooted_application(
                             "verify-progress-source",
                             &verifier,
                             &message.into_custody(),
                             RealmId::ROOT,
                             None,
+                            settlement,
                         )
-                        .map_err(Into::into)
+                    })
+                    .map_err(Into::into)
                 })
         };
         let wrong_result = verify_message(wrong_message).await.unwrap();
@@ -19135,7 +19213,13 @@ pub(crate) mod request_tests {
                         panic!("later publication must suspend")
                     };
                     let token = session.capture_progress_publication(&hole, RealmId::ROOT)?;
-                    session.abort(hole.cont_id(), "later publication captured".into())?;
+                    tidepool_testing::with_settlement(|settlement| {
+                        session.abort(
+                            hole.cont_id(),
+                            "later publication captured".into(),
+                            settlement,
+                        )
+                    })?;
                     Ok(token)
                 },
             )
@@ -20598,7 +20682,7 @@ pub(crate) mod request_tests {
             .map(|(hole, input)| {
                 let activation_id = hole.cont_id().to_owned();
                 assert!(matches!(
-                    session.abort(&activation_id, "fixture retained original input".into()),
+                    tidepool_testing::with_settlement(|settlement| session.abort(&activation_id, "fixture retained original input".into(), settlement)),
                     Err(ResidentError::Run(tidepool_runtime::RuntimeError::Jit(
                         tidepool_effect::EffectError::Handler(reason)
                     ))) if reason == "ask aborted by caller: fixture retained original input"
@@ -20925,15 +21009,17 @@ pub(crate) mod request_tests {
                 .unwrap()
                 .unwrap();
             let activation = suspend(
-                session
-                    .run_rooted_application(
+                tidepool_testing::with_settlement(|settlement| {
+                    session.run_rooted_application(
                         "originalActivationInput",
                         &receiver,
                         &payload,
                         context.placement.resource_scope,
                         None,
+                        settlement,
                     )
-                    .unwrap(),
+                })
+                .unwrap(),
             );
             let input = producer
                 .asks
@@ -21138,17 +21224,19 @@ pub(crate) mod request_tests {
         private_context.placement.lexical_scope = execution.private_scope;
         let workbench = ResidentActorWorkbench::new(machines.clone(), source, None)
             .with_private_execution(execution);
-        let prepared = workbench
-            .mount_activation_input(
+        let prepared = tidepool_testing::with_settlement(|settlement| {
+            workbench.mount_activation_input(
                 private_context,
                 inputs.remove(0),
                 None,
                 "()".into(),
                 None,
                 Vec::new(),
+                settlement,
             )
-            .await
-            .unwrap();
+        })
+        .await
+        .unwrap();
         drop(inputs);
         drop(workbench);
         drop(runner);
@@ -21326,17 +21414,19 @@ pub(crate) mod request_tests {
                 ),
             )
             .with_private_execution(execution);
-            let prepared = private_workbench
-                .mount_activation_input(
+            let prepared = tidepool_testing::with_settlement(|settlement| {
+                private_workbench.mount_activation_input(
                     private_context.clone(),
                     input,
                     None,
                     "()".into(),
                     None,
                     vec![],
+                    settlement,
                 )
-                .await
-                .unwrap();
+            })
+            .await
+            .unwrap();
             let binding = prepared.binding;
             let requests = Arc::new(crate::request::RequestRegistry::default());
             let requester = crate::ActorRef::first(crate::ActorId(context.actor.id.0 + 100));
@@ -21454,17 +21544,19 @@ pub(crate) mod request_tests {
         let mut private_context = context.clone();
         private_context.placement.lexical_scope = execution.private_scope;
         let workbench = workbench.with_private_execution(execution);
-        let error = workbench
-            .mount_activation_input(
+        let error = tidepool_testing::with_settlement(|settlement| {
+            workbench.mount_activation_input(
                 private_context,
                 inputs.remove(0),
                 None,
                 "()".into(),
                 None,
                 vec![],
+                settlement,
             )
-            .await
-            .unwrap_err();
+        })
+        .await
+        .unwrap_err();
         assert!(
             matches!(error, ResidentActorWorkbenchError::InputMount(ref detail) if detail.contains("reserved"))
         );
@@ -21529,10 +21621,13 @@ pub(crate) mod request_tests {
         let inputs = parked
             .into_iter()
             .map(|(hole, input)| {
-                let _ = session.abort(
-                    hole.cont_id(),
-                    "original parent failed after capture".into(),
-                );
+                let _ = tidepool_testing::with_settlement(|settlement| {
+                    session.abort(
+                        hole.cont_id(),
+                        "original parent failed after capture".into(),
+                        settlement,
+                    )
+                });
                 input
             })
             .collect();
@@ -21563,17 +21658,19 @@ pub(crate) mod request_tests {
                     }
                     Ok(())
                 }));
-                let prepared = activation
-                    .mount_activation_input(
+                let prepared = tidepool_testing::with_settlement(|settlement| {
+                    activation.mount_activation_input(
                         private_context.clone(),
                         input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
+                        settlement,
                     )
-                    .await
-                    .unwrap();
+                })
+                .await
+                .unwrap();
                 assert_eq!(prepared.input_preview.trim(), (index + 1).to_string());
                 assert!(bindings.insert(prepared.binding.raw()));
                 assert!(generations.insert(prepared.admission.generation()));
@@ -21654,32 +21751,36 @@ pub(crate) mod request_tests {
             let abandoned_input = inputs.remove(0);
             drop(inputs);
             let first_task = tokio::spawn(with_test_compiler_owner(async move {
-                first
-                    .mount_activation_input(
+                tidepool_testing::with_settlement(|settlement| {
+                    first.mount_activation_input(
                         first_context,
                         first_input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
+                        settlement,
                     )
-                    .await
+                })
+                .await
             }));
             tokio::time::timeout(Duration::from_secs(30), producer_seen)
                 .await
                 .unwrap()
                 .unwrap();
             let second_task = tokio::spawn(with_test_compiler_owner(async move {
-                second
-                    .mount_activation_input(
+                tidepool_testing::with_settlement(|settlement| {
+                    second.mount_activation_input(
                         second_context,
                         second_input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
+                        settlement,
                     )
-                    .await
+                })
+                .await
             }));
             tokio::time::timeout(Duration::from_secs(30), waiter_seen)
                 .await
@@ -21698,16 +21799,18 @@ pub(crate) mod request_tests {
                 .collect();
             machines.settle_suspended(receipt, session, holes);
             let abandoned_task = tokio::spawn(with_test_compiler_owner(async move {
-                abandoned
-                    .mount_activation_input(
+                tidepool_testing::with_settlement(|settlement| {
+                    abandoned.mount_activation_input(
                         abandoned_context,
                         abandoned_input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
+                        settlement,
                     )
-                    .await
+                })
+                .await
             }));
             tokio::time::timeout(Duration::from_secs(30), abandoned_seen)
                 .await
@@ -21757,16 +21860,18 @@ pub(crate) mod request_tests {
             drop(inputs);
             let submissions = tidepool_extract_cmd::extract_spawn_count();
             let first_task = tokio::spawn(with_test_compiler_owner(async move {
-                first
-                    .mount_activation_input(
+                tidepool_testing::with_settlement(|settlement| {
+                    first.mount_activation_input(
                         first_context,
                         first_input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
+                        settlement,
                     )
-                    .await
+                })
+                .await
             }));
             tokio::time::timeout(Duration::from_secs(60), sealed_seen)
                 .await
@@ -21775,17 +21880,19 @@ pub(crate) mod request_tests {
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions + 2);
             first_task.abort();
             assert!(matches!(first_task.await, Err(error) if error.is_cancelled()));
-            let fresh = second
-                .mount_activation_input(
+            let fresh = tidepool_testing::with_settlement(|settlement| {
+                second.mount_activation_input(
                     second_context,
                     second_input,
                     None,
                     "()".into(),
                     None,
                     Vec::new(),
+                    settlement,
                 )
-                .await
-                .unwrap();
+            })
+            .await
+            .unwrap();
             assert_eq!(fresh.input_preview.trim(), "2");
             assert_eq!(
                 tidepool_extract_cmd::extract_spawn_count(),
@@ -21843,16 +21950,18 @@ pub(crate) mod request_tests {
             let second_input = inputs.remove(0);
             drop(inputs);
             let first_task = tokio::spawn(with_test_compiler_owner(async move {
-                first
-                    .mount_activation_input(
+                tidepool_testing::with_settlement(|settlement| {
+                    first.mount_activation_input(
                         first_context,
                         first_input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
+                        settlement,
                     )
-                    .await
+                })
+                .await
             }));
             tokio::time::timeout(Duration::from_secs(60), started_seen)
                 .await
@@ -21861,16 +21970,18 @@ pub(crate) mod request_tests {
             first_task.abort();
             assert!(matches!(first_task.await, Err(error) if error.is_cancelled()));
             let second_task = tokio::spawn(with_test_compiler_owner(async move {
-                second
-                    .mount_activation_input(
+                tidepool_testing::with_settlement(|settlement| {
+                    second.mount_activation_input(
                         second_context,
                         second_input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
+                        settlement,
                     )
-                    .await
+                })
+                .await
             }));
             tokio::time::timeout(Duration::from_secs(60), waiting_seen)
                 .await
@@ -21908,7 +22019,7 @@ pub(crate) mod request_tests {
             let third_input = inputs.remove(0);
             drop(inputs);
             let submissions = tidepool_extract_cmd::extract_spawn_count();
-            let warm = first.mount_activation_input(first_context, first_input, None, "()".into(), None, Vec::new()).await.unwrap();
+            let warm = tidepool_testing::with_settlement(|settlement| first.mount_activation_input(first_context, first_input, None, "()".into(), None, Vec::new(), settlement)).await.unwrap();
             assert_eq!(warm.input_preview.trim(), "1");
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions + 2);
             let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -21924,12 +22035,12 @@ pub(crate) mod request_tests {
                 }
                 Ok(())
             }));
-            let refused = stale.mount_activation_input(stale_context, stale_input, None, "()".into(), None, Vec::new()).await;
+            let refused = tidepool_testing::with_settlement(|settlement| stale.mount_activation_input(stale_context, stale_input, None, "()".into(), None, Vec::new(), settlement)).await;
             assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
             assert!(matches!(refused, Err(ResidentActorWorkbenchError::ActivationBindingCommitted { source, .. })
                 if matches!(*source, ResidentActorWorkbenchError::Resident(_))));
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions + 3);
-            let fresh = third.mount_activation_input(third_context, third_input, None, "()".into(), None, Vec::new()).await.unwrap();
+            let fresh = tidepool_testing::with_settlement(|settlement| third.mount_activation_input(third_context, third_input, None, "()".into(), None, Vec::new(), settlement)).await.unwrap();
             assert_eq!(fresh.input_preview.trim(), "3");
             assert_ne!(fresh.binding, warm.binding);
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions + 4,

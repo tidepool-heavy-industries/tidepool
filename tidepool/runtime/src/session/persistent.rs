@@ -4217,7 +4217,7 @@ mod checkpoint_scope_tests {
         conflict.id = id;
         let roots = session.persistent_roots_count();
         assert!(matches!(
-            session.bind_replacing_decls(vec![first, conflict]),
+            tidepool_testing::with_settlement(|settlement| session.bind_replacing_decls(vec![first, conflict], settlement)),
             Err(SessionError::InvalidBindingIdentity(error)) if error.id == id
         ));
         assert_eq!(
@@ -4253,7 +4253,7 @@ mod checkpoint_scope_tests {
         let roots = session.persistent_roots_count();
         let revision = session.bindings.mutation_revision();
         assert!(matches!(
-            session.bind_replacing_decls(vec![first, second]),
+            tidepool_testing::with_settlement(|settlement| session.bind_replacing_decls(vec![first, second], settlement)),
             Err(SessionError::InvalidBindingIdentity(error)) if error.id == id
         ));
         assert_eq!(session.bindings.mutation_revision(), revision);

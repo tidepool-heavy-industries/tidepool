@@ -3288,7 +3288,14 @@ mod tests {
         .unwrap();
         let candidate =
             lib.render_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[]);
-        assert!(validate_declaration_candidate(candidate.clone(), lib.include_dir()).is_err());
+        assert!(
+            tidepool_testing::with_settlement(|settlement| validate_declaration_candidate(
+                candidate.clone(),
+                lib.include_dir(),
+                settlement
+            ))
+            .is_err()
+        );
         let staged = tidepool_testing::with_settlement(|settlement| {
             validate_declaration_candidate(
                 candidate.with_source_layer(&[helper.path().to_path_buf()]),
@@ -3428,7 +3435,10 @@ mod tests {
         let mut lib = staged_test_lib(&root);
         lib.attach_recovery_graph_v2(&manifest).unwrap();
         assert_eq!(
-            lib.define_batch(&["data DirectFlag = DirectFlag"]).unwrap(),
+            tidepool_testing::with_settlement(
+                |settlement| lib.define_batch(&["data DirectFlag = DirectFlag"], settlement)
+            )
+            .unwrap(),
             Generation(1)
         );
         let retained = recovery::read_v2(&manifest, root.path()).unwrap().unwrap();
@@ -3441,7 +3451,10 @@ mod tests {
         assert_eq!(retained.graph.nodes().next().unwrap().id, Generation(1));
         assert!(retained.graph.public_surfaces().next().is_none());
         assert!(!retained.graph.artifacts().next().is_none());
-        assert!(lib.retract("DirectFlag").is_err());
+        assert!(tidepool_testing::with_settlement(
+            |settlement| lib.retract("DirectFlag", settlement)
+        )
+        .is_err());
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(1));
         assert_eq!(lib.generation(), Generation(1));
         let projection = lib
@@ -3686,7 +3699,14 @@ mod tests {
         let candidate = lib
             .render_admitted_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[])
             .unwrap();
-        assert!(validate_declaration_candidate(candidate, lib.include_dir()).is_err());
+        assert!(
+            tidepool_testing::with_settlement(|settlement| validate_declaration_candidate(
+                candidate,
+                lib.include_dir(),
+                settlement
+            ))
+            .is_err()
+        );
         assert!(lib.log.is_reserved(Generation(1)));
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
         drop(lib);

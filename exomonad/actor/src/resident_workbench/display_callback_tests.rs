@@ -153,15 +153,17 @@ async fn expansion_fences_immediate_handler_before_callback_input() {
     let ordinary = runner
         .access
         .with_machine(context, move |session, context, _| {
-            session
-                .run_rooted_entry_borrowed(
+            tidepool_testing::with_settlement(|settlement| {
+                session.run_rooted_entry_borrowed(
                     "ordinaryDisplayCallback",
                     &callback,
                     0,
                     context.placement.resource_scope,
                     None,
+                    settlement,
                 )
-                .map_err(ResidentActorWorkbenchError::Resident)
+            })
+            .map_err(ResidentActorWorkbenchError::Resident)
         })
         .await
         .unwrap();

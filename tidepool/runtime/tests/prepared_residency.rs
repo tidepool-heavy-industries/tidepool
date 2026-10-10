@@ -354,25 +354,26 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
         .retain_binding_custody("held")
         .expect("retain independent binding custody")
         .unwrap();
-    let error = notebook
-        .session
-        .resume_framed_custody_classified(
+    let error = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.resume_framed_custody_classified(
             hole.clone(),
             &held,
             tidepool_repr::DataConId(u64::MAX),
             Vec::new(),
+            settlement,
         )
-        .unwrap_err();
+    })
+    .unwrap_err();
     assert!(
         matches!(error, ResidentResumeError::Rejected(_)),
         "{error:?}"
     );
     assert_eq!(notebook.session.parked_holes(), vec![hole.cont_id()]);
     assert!(matches!(
-        notebook
+        tidepool_testing::with_settlement(|settlement| notebook
             .session
-            .resume_handle_classified(hole, held)
-            .unwrap(),
+            .resume_handle_classified(hole, held, settlement))
+        .unwrap(),
         ResidentOutcome::Completed { .. }
     ));
 
@@ -390,10 +391,12 @@ fn custody_resume_classifies_rejected_frame_and_consumed_failure() {
         .retain_binding_custody("held")
         .expect("retain independent binding custody")
         .unwrap();
-    let error = notebook
-        .session
-        .resume_handle_classified(hole, held)
-        .unwrap_err();
+    let error = tidepool_testing::with_settlement(|settlement| {
+        notebook
+            .session
+            .resume_handle_classified(hole, held, settlement)
+    })
+    .unwrap_err();
     assert!(
         matches!(error, ResidentResumeError::Consumed(_)),
         "{error:?}"
@@ -834,11 +837,13 @@ fn certified_resident_turn_compiles_off_checkout_then_installs() {
     let compiled = pending
         .compile_off_checkout()
         .expect("off-checkout compile");
-    let outcome = notebook
-        .session
-        .revalidate_and_run_prepared(compiled)
-        .expect("certified split install")
-        .expect("unchanged public view");
+    let outcome = tidepool_testing::with_settlement(|settlement| {
+        notebook
+            .session
+            .revalidate_and_run_prepared(compiled, settlement)
+    })
+    .expect("certified split install")
+    .expect("unchanged public view");
     assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
 }
 
@@ -998,62 +1003,66 @@ fn host_carrier_mounts_json_text_and_job_payloads_from_one_compile_each() {
     // and one job payload, all with NO further GHC compile -------------
 
     let gen_a = tidepool_repr::Generation(notebook.generation);
-    let binder_a = notebook
-        .session
-        .mount_carrier_in(
+    let binder_a = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.mount_carrier_in(
             notebook.root.path(),
             ScopeId::ROOT,
             "carriedA",
             gen_a,
             &json_carrier,
             HostPayload::Json(&serde_json::json!({"tag": "A"})),
+            settlement,
         )
-        .expect("mount first carrier payload");
+    })
+    .expect("mount first carrier payload");
     notebook.injected.push(binder_a.module.clone());
 
     notebook.generation += 1;
     let gen_b = tidepool_repr::Generation(notebook.generation);
-    let binder_b = notebook
-        .session
-        .mount_carrier_in(
+    let binder_b = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.mount_carrier_in(
             notebook.root.path(),
             ScopeId::ROOT,
             "carriedB",
             gen_b,
             &json_carrier,
             HostPayload::Json(&serde_json::json!({"tag": "B"})),
+            settlement,
         )
-        .expect("mount second carrier payload");
+    })
+    .expect("mount second carrier payload");
     notebook.injected.push(binder_b.module.clone());
 
     notebook.generation += 1;
     let gen_text = tidepool_repr::Generation(notebook.generation);
-    let binder_text = notebook
-        .session
-        .mount_carrier_in(
+    let binder_text = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.mount_carrier_in(
             notebook.root.path(),
             ScopeId::ROOT,
             "carriedText",
             gen_text,
             &text_carrier,
             HostPayload::Text("hello-carrier-text"),
+            settlement,
         )
-        .expect("mount text carrier payload");
+    })
+    .expect("mount text carrier payload");
     notebook.injected.push(binder_text.module.clone());
 
     notebook.generation += 1;
     let gen_job = tidepool_repr::Generation(notebook.generation);
-    let binder_job = notebook
-        .session
-        .mount_carrier_in(
+    let binder_job = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.mount_carrier_in(
             notebook.root.path(),
             ScopeId::ROOT,
             "carriedJob",
             gen_job,
             &job_carrier,
             HostPayload::Job("job-command"),
+            settlement,
         )
-        .expect("mount job carrier payload");
+    })
+    .expect("mount job carrier payload");
     notebook.injected.push(binder_job.module.clone());
 
     // Every stub generation must never be offered as --inject-val (no .hi
@@ -1129,17 +1138,18 @@ fn retired_carrier_binding_captured_by_declaration_fails_to_compile_not_hang() {
 
     notebook.generation += 1;
     let gen = Generation(notebook.generation);
-    let binder = notebook
-        .session
-        .mount_carrier_in(
+    let binder = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.mount_carrier_in(
             notebook.root.path(),
             ScopeId::ROOT,
             "capturedCarrier",
             gen,
             &carrier,
             HostPayload::Json(&serde_json::json!({"tag": "captured"})),
+            settlement,
         )
-        .expect("mount carrier binding");
+    })
+    .expect("mount carrier binding");
     notebook.injected.push(binder.module.clone());
 
     let stub_path = notebook
@@ -1231,17 +1241,18 @@ fn failed_carrier_mount_leaves_no_stub_source() {
         .session
         .public_visibility_snapshot_in(ScopeId::ROOT)
         .unwrap();
-    let error = notebook
-        .session
-        .mount_carrier_in(
+    let error = tidepool_testing::with_settlement(|settlement| {
+        notebook.session.mount_carrier_in(
             notebook.root.path(),
             ScopeId::ROOT,
             "unmountable",
             gen,
             &carrier,
             HostPayload::Job("wrong nominal payload"),
+            settlement,
         )
-        .expect_err("a wrong payload kind must refuse before mutation");
+    })
+    .expect_err("a wrong payload kind must refuse before mutation");
     assert!(matches!(error, ResidentError::UnsupportedCheckedTurn));
 
     assert_eq!(notebook.session.residency(), residency);
@@ -1402,17 +1413,18 @@ impl Incarnation {
         use tidepool_runtime::session::HostPayload;
         self.generation += 1;
         let gen = tidepool_repr::Generation(self.generation);
-        let binder = self
-            .session
-            .mount_carrier_in(
+        let binder = tidepool_testing::with_settlement(|settlement| {
+            self.session.mount_carrier_in(
                 &self.root,
                 ScopeId::ROOT,
                 name,
                 gen,
                 carrier,
                 HostPayload::Json(value),
+                settlement,
             )
-            .expect("mount json carrier payload");
+        })
+        .expect("mount json carrier payload");
         self.injected.push(binder.module.clone());
         binder
     }

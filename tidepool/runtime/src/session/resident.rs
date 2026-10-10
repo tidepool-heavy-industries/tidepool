@@ -8123,14 +8123,16 @@ mod custody_release_tests {
         );
         let before = session.value_handle_count();
         assert!(matches!(
-            session.resume_framed_binding_sources_classified(
-                &hole,
-                ScopeId::ROOT,
-                "x",
-                id,
-                DataConId(0),
-                Vec::<i64>::new()
-            ),
+            tidepool_testing::with_settlement(|settlement| session
+                .resume_framed_binding_sources_classified(
+                    &hole,
+                    ScopeId::ROOT,
+                    "x",
+                    id,
+                    DataConId(0),
+                    Vec::<i64>::new(),
+                    settlement
+                )),
             Err(ResidentResumeError::Rejected(
                 ResidentError::WrongContinuation { .. }
             ))
@@ -8147,42 +8149,47 @@ mod custody_release_tests {
                 ..SessionRunContext::ROOT
             })
             .unwrap();
-        assert!(session
+        assert!(tidepool_testing::with_settlement(|settlement| session
             .resume_framed_binding_sources_classified(
                 &hole,
                 ScopeId::ROOT,
                 "x",
                 id,
                 DataConId(0),
-                Vec::<i64>::new()
-            )
-            .unwrap()
-            .is_none());
+                Vec::<i64>::new(),
+                settlement
+            ))
+        .unwrap()
+        .is_none());
         let foreign_scope = session.mint_isolated_scope();
         let foreign_id = bind_fixture(&mut session, foreign_scope, 45);
         assert!(matches!(
-            session.resume_framed_binding_sources_classified(
-                &hole,
-                foreign_scope,
-                "x",
-                foreign_id,
-                DataConId(0),
-                Vec::<i64>::new()
-            ),
+            tidepool_testing::with_settlement(|settlement| session
+                .resume_framed_binding_sources_classified(
+                    &hole,
+                    foreign_scope,
+                    "x",
+                    foreign_id,
+                    DataConId(0),
+                    Vec::<i64>::new(),
+                    settlement
+                )),
             Err(ResidentResumeError::Rejected(ResidentError::Prepared(
                 PreparedRuntimeError::SourceScopeAdmission
             )))
         ));
         session.retire_scope(foreign_scope);
         assert!(matches!(
-            session.resume_framed_binding_sources_classified(
-                &hole,
-                foreign_scope,
-                "x",
-                foreign_id,
-                DataConId(0),
-                Vec::<i64>::new()
-            ),
+            tidepool_testing::with_settlement(|settlement| session
+                .resume_framed_binding_sources_classified(
+                    &hole,
+                    foreign_scope,
+                    "x",
+                    foreign_id,
+                    DataConId(0),
+                    Vec::<i64>::new(),
+                    settlement
+                )),
             Err(ResidentResumeError::Rejected(ResidentError::Session(
                 SessionError::DeadScope(_)
             )))
@@ -8601,7 +8608,10 @@ mod authored_publication_tests {
                 StartupCompileIdentity::Fixture,
             )
             .unwrap();
-        session.run_startup_entry(entry).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            session.run_startup_entry(entry, settlement)
+        })
+        .unwrap();
         (root, session)
     }
 
@@ -8640,7 +8650,10 @@ mod authored_publication_tests {
         let b = b.compile_off_checkout().unwrap();
         let a = a.compile_off_checkout().unwrap();
         let Some(ResidentOutcome::Completed { result, .. }) =
-            session.revalidate_and_run_prepared(a).unwrap()
+            tidepool_testing::with_settlement(|settlement| {
+                session.revalidate_and_run_prepared(a, settlement)
+            })
+            .unwrap()
         else {
             panic!("original binding capsule must complete");
         };
@@ -8658,7 +8671,10 @@ mod authored_publication_tests {
         assert_eq!(original.defining_generation(), Some(41));
         assert_eq!(original.type_display.as_deref(), Some("Int"));
         let Some(ResidentOutcome::Completed { result, .. }) =
-            session.revalidate_and_run_prepared(b).unwrap()
+            tidepool_testing::with_settlement(|settlement| {
+                session.revalidate_and_run_prepared(b, settlement)
+            })
+            .unwrap()
         else {
             panic!("value capsule must complete");
         };
@@ -8713,7 +8729,10 @@ mod authored_publication_tests {
             "preparation does not run an authored entry"
         );
         assert!(
-            session.run_startup_entry(entry).is_err(),
+            tidepool_testing::with_settlement(
+                |settlement| session.run_startup_entry(entry, settlement)
+            )
+            .is_err(),
             "the original native entry fails when consumed"
         );
     }
@@ -8735,7 +8754,9 @@ mod authored_publication_tests {
             .quiesce_and_collect_now()
             .unwrap();
         assert!(matches!(
-            session.run_startup_entry(entry),
+            tidepool_testing::with_settlement(
+                |settlement| session.run_startup_entry(entry, settlement)
+            ),
             Ok(ResidentOutcome::Completed { .. })
         ));
         let entry = session
@@ -8748,7 +8769,9 @@ mod authored_publication_tests {
         );
         session.state.bind(binding).unwrap();
         assert!(matches!(
-            session.run_startup_entry(entry),
+            tidepool_testing::with_settlement(
+                |settlement| session.run_startup_entry(entry, settlement)
+            ),
             Err(ResidentError::StaleStartupEntry)
         ));
     }
@@ -8947,7 +8970,9 @@ mod authored_publication_tests {
                 .quiesce_and_collect_now()
                 .unwrap();
             assert!(matches!(
-                session.run_startup_entry(entry),
+                tidepool_testing::with_settlement(
+                    |settlement| session.run_startup_entry(entry, settlement)
+                ),
                 Ok(ResidentOutcome::Completed { .. })
             ));
             assert_eq!(session.outstanding_custody(), 0);
@@ -8971,7 +8996,9 @@ mod authored_publication_tests {
             .state
             .retire_failed_turn_source_instances(ScopeId::ROOT, &keys));
         assert!(matches!(
-            session.run_startup_entry(entry),
+            tidepool_testing::with_settlement(
+                |settlement| session.run_startup_entry(entry, settlement)
+            ),
             Err(ResidentError::StaleStartupEntry)
         ));
         session.state.require_prepared().unwrap().unpin(producer);
@@ -8985,7 +9012,9 @@ mod authored_publication_tests {
             .prepare_startup_entry_installed(startup_code(false), StartupCompileIdentity::Fixture)
             .unwrap();
         assert!(matches!(
-            foreign.run_startup_entry(entry),
+            tidepool_testing::with_settlement(
+                |settlement| foreign.run_startup_entry(entry, settlement)
+            ),
             Err(ResidentError::ForeignCustody)
         ));
         session.settle_dropped_custody();
@@ -8999,7 +9028,9 @@ mod authored_publication_tests {
             })
             .unwrap();
         assert!(matches!(
-            session.run_startup_entry(entry),
+            tidepool_testing::with_settlement(
+                |settlement| session.run_startup_entry(entry, settlement)
+            ),
             Err(ResidentError::StaleStartupEntry)
         ));
         session.set_run_context(SessionRunContext::ROOT).unwrap();
@@ -9015,7 +9046,9 @@ mod authored_publication_tests {
             })
             .unwrap();
         assert!(matches!(
-            session.run_startup_entry(entry),
+            tidepool_testing::with_settlement(
+                |settlement| session.run_startup_entry(entry, settlement)
+            ),
             Err(ResidentError::StaleStartupEntry)
         ));
     }
@@ -9089,7 +9122,9 @@ mod authored_publication_tests {
             compile_identity: StartupCompileIdentity::Fixture,
         };
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            session.run_startup_entry(entry)
+            tidepool_testing::with_settlement(|settlement| {
+                session.run_startup_entry(entry, settlement)
+            })
         }))
         .expect_err("output Clone panics before native execution");
         assert_eq!(
@@ -9882,33 +9917,47 @@ mod authored_publication_tests {
         ));
 
         assert!(matches!(
-            session.mount_json_binding_in(
+            tidepool_testing::with_settlement(|settlement| session.mount_json_binding_in(
                 scope,
                 page,
                 generation,
                 code.clone(),
-                &serde_json::Value::Null
-            ),
+                &serde_json::Value::Null,
+                settlement
+            )),
             Err(ResidentError::UnsupportedCheckedTurn)
         ));
         assert!(matches!(
-            session.mount_text_binding_in(scope, page, generation, code.clone(), "host value"),
+            tidepool_testing::with_settlement(|settlement| session.mount_text_binding_in(
+                scope,
+                page,
+                generation,
+                code.clone(),
+                "host value",
+                settlement
+            )),
             Err(ResidentError::UnsupportedCheckedTurn)
         ));
         assert!(matches!(
-            session.mount_typed_binding_in(
+            tidepool_testing::with_settlement(|settlement| session.mount_typed_binding_in(
                 scope,
                 page,
                 generation,
                 code.clone(),
                 HostBindingType::TEXT,
-                &()
-            ),
+                &(),
+                settlement
+            )),
             Err(ResidentError::UnsupportedCheckedTurn)
         ));
         assert!(matches!(
-            session.mount_host_value_in(scope, page, generation, code.clone(), |_, _, _| panic!(
-                "unsupported checked recipe must not build a host value"
+            tidepool_testing::with_settlement(|settlement| session.mount_host_value_in(
+                scope,
+                page,
+                generation,
+                code.clone(),
+                |_, _, _| panic!("unsupported checked recipe must not build a host value"),
+                settlement
             )),
             Err(ResidentError::UnsupportedCheckedTurn)
         ));
@@ -10056,10 +10105,11 @@ mod authored_publication_tests {
             current
         );
         let residency = session.residency();
-        assert!(session
-            .revalidate_and_run_prepared(compiled)
-            .unwrap()
-            .is_none());
+        assert!(tidepool_testing::with_settlement(
+            |settlement| session.revalidate_and_run_prepared(compiled, settlement)
+        )
+        .unwrap()
+        .is_none());
         assert_eq!(session.residency(), residency);
         assert_eq!(
             session
