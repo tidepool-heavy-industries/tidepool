@@ -342,13 +342,24 @@ impl OriginalCompilerInputs {
             )?));
         }
         let projection = CompilerInputProjection::from_issued_entries(&entries)?;
-        // Available code retains custody without selecting executable groups.
-        let artifacts = context.inventory.inventory().admit_shared_with_demand(
+        let preferred = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
+            &context.compiler_projection,
             &context.inventory,
-            entries,
-            crate::artifact_inventory::NativeArtifactDemand::ScopeInterfaces,
+            &[],
         )?;
+        let native_original_requirements =
+            capture_native_original_requirements(&projection, &context.inventory, &preferred)?;
         let effective = context.compiler_projection.merge(&projection)?;
+        // Available code retains custody without selecting executable groups.
+        let artifacts = context
+            .inventory
+            .inventory()
+            .admit_projected_with_native_requirements(
+                &context.inventory,
+                entries,
+                &effective,
+                &native_original_requirements,
+            )?;
         let metadata = effective.project_metadata(artifacts.metadata_snapshot())?;
         let originals = metadata
             .artifacts
@@ -381,17 +392,6 @@ impl OriginalCompilerInputs {
             &mut validation,
         )
         .map_err(compiler_evidence_failure)?;
-        let preferred = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
-            &context.compiler_projection,
-            &context.inventory,
-            &[],
-        )?;
-        let native_original_requirements =
-            crate::artifact_inventory::NativeOriginalRequirement::for_projection(
-                &projection,
-                &artifacts,
-                &preferred,
-            )?;
         Ok(Self {
             projection,
             artifacts,
@@ -14030,6 +14030,16 @@ mod tests {
             private.native_original_requirements,
             inputs.native_original_requirements
         );
+        let available_private = OriginalCompilerInputs::from_native_availability(
+            &context,
+            CanonicalProducerIdentity::from_compiler(&endpoint.identity()),
+            std::slice::from_ref(certificate.product()),
+        )
+        .unwrap();
+        assert_eq!(
+            available_private.native_original_requirements, private.native_original_requirements,
+            "a partial private offer preserves the selected original before admission"
+        );
         // The recipe keeps its certificate while the declaration baseline is
         // narrowed to types. Its original arrives through the private issuer,
         // after baseline native choices have been captured independently.
@@ -14054,7 +14064,7 @@ mod tests {
                 &directory.path().join("private-planned"),
                 producer,
                 None,
-                Some(private.clone()),
+                Some(available_private),
             )
             .unwrap();
         assert_eq!(
