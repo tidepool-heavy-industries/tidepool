@@ -5524,7 +5524,7 @@ hydratedSiteSiblings = withScratch $ \work -> do
   case classifySiteOccurrence siblings spec surface arguments of
     Right _ -> pure ()
     Left _ -> fail "genuine cold HPT request/sibling pair was refused"
-  sibling <- maybe (fail "cold HPT lacks its genuine request sibling Id") pure (Map.lookup "request" siblings)
+  sibling <- maybe (fail "cold HPT lacks its genuine request sibling Id") pure (Map.lookup "Tidepool.Actors.Internal.Agent.request" siblings)
   uniqueSupply <- mkSplitUniqSupply 's'
   let (foreignUnique,remaining) = takeUniqFromSupply uniqueSupply
       (surfaceUnique,remaining') = takeUniqFromSupply remaining

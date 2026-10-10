@@ -69,7 +69,7 @@ import Data.Text qualified as Text
 import Data.Text.Encoding qualified as TextEncoding
 import Data.Word (Word32, Word64, Word8)
 import GHC.Builtin.PrimOps (PrimOp(..), PrimCall(..), primOpOcc)
-import GHC.Builtin.Types (doubleDataCon, intDataCon, intTy)
+import GHC.Builtin.Types (doubleDataCon, intDataCon, intTy, promotedConsDataCon, promotedNilDataCon)
 import GHC.Core (AltCon(..))
 import GHC.Core.DataCon
   ( DataCon, dataConName, dataConTheta, dataConOrigArgTys, dataConRepArgTys, dataConRepArity, dataConWorkId
@@ -96,7 +96,7 @@ import GHC.Types.ForeignCall qualified as Foreign
 import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (fieldOcc_maybe, isDataOcc, occNameString)
 import GHC.Types.RepType
-  (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
+  (PrimRep(..), typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
 import GHC.Types.Unique.Set (UniqSet, addListToUniqSet, addOneToUniqSet, elementOfUniqSet, emptyUniqSet, mkUniqSet, nonDetEltsUniqSet)
 import GHC.Types.Unique (Unique, getKey)
 import GHC.Types.Unique.FM
@@ -1627,7 +1627,9 @@ lowerPreparedEvidence context modules evidence = do
         pure site { siteWire = wire, siteInputs = inputs }) sites
       replies <- traverse (\(constructor, reply) -> (constructor,) <$> case reply of
         StaticReply root -> StaticReply <$> lift (rebase root)
-        ReplyAtSite -> pure ReplyAtSite) verbSites
+        ReplyAtSite -> pure ReplyAtSite
+        StaticReplyWithSite root field payload capture ->
+          (\root' -> StaticReplyWithSite root' field payload capture) <$> lift (rebase root)) verbSites
       pure (graph, sites', replies)
  where
   lowerOne (priorNodes, priorSites) selectedEvidence = do
@@ -1725,11 +1727,42 @@ lowerConstructorReplies carriers base = do
       TypePolicy.internConstructorType constructor reply) static) TypePolicy.emptyTypeGraphBuilder)
   graph <- lift $ either (Left . TypeEvidenceIssuanceFailure) Right (TypePolicy.finishTypeGraph builder)
   (lowered, rebase) <- lowerTypeGraph base graph roots
-  entries <- traverse (\((_, identity, _), root) ->
-      (identity,) . StaticReply <$> rebase root) (zip static roots)
+  entries <- traverse (\((constructor, identity, _), root) -> do
+      node <- rebase root
+      pure (identity, case inputSite constructor of
+        Just (field, payload, capture) -> StaticReplyWithSite node field payload capture
+        Nothing -> StaticReply node)) (zip static roots)
   let replies = Map.fromList (entries <> [(identity, ReplyAtSite) | (_, identity, _, True) <- candidates])
   pure (lowered, [(identity, replies Map.! identity) | (_, identity, _, _) <- candidates])
  where
+  -- Only the original nominal carrier authorizes an erased field. Closed
+  -- replies remain independent of this site's input and eventual result.
+  inputSite constructor
+    | not (null (dataConTheta constructor)) = Nothing
+    | length originals /= length runtime = Nothing
+    | otherwise = case
+        [ (fromIntegral ordinal, fromIntegral payload,
+            fmap (fromIntegral . fst) (lastInput inputs >>= \(index, ty) ->
+              if eqType ty (originals !! payload) then Just (index, ty) else Nothing))
+        | (ordinal, (original, representation)) <- zip [0 :: Int ..] (zip originals runtime)
+        , ordinal > 0
+        , Just (carrier, [inputs, _]) <- [splitTyConApp_maybe original]
+        , carrier `elem` carriers, eqType (unwrapType representation) intTy
+        , let payload = if ordinal + 1 < length originals then ordinal + 1 else ordinal - 1
+        , typePrimRep_maybe (runtime !! payload) == Just [LiftedRep] ] of
+          [evidence] -> Just evidence
+          _ -> Nothing
+    where
+      originals = [ty | Scaled _ ty <- dataConOrigArgTys constructor]
+      runtime = [ty | Scaled _ ty <- dataConRepArgTys constructor]
+  lastInput inputs = go 0 inputs
+    where
+      go index ty = case splitTyConApp_maybe ty of
+        Just (cons, [_, input, rest]) | cons == promotedConsDataCon ->
+          case splitTyConApp_maybe rest of
+            Just (nil, [_]) | nil == promotedNilDataCon -> Just (index, input)
+            _ -> go (index + 1) rest
+        _ -> Nothing
   atSite constructor reply = case (dataConOrigArgTys constructor, dataConRepArgTys constructor) of
     (Scaled _ first : _, Scaled _ runtimeFirst : _) ->
       case splitTyConApp_maybe first of

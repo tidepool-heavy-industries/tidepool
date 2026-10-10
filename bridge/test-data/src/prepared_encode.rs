@@ -182,6 +182,9 @@ fn definitions(
                 match reply {
                     ConstructorReply::Static(node) => a([n(0_u64), n(node.0)]),
                     ConstructorReply::AtSite => a([n(1_u64)]),
+                    ConstructorReply::StaticWithSite { reply, field, payload_field, capture_input } =>
+                        a([n(2_u64), n(reply.0), n(*field), n(*payload_field),
+                            capture_input.map_or(Value::Null, n)]),
                 },
             ])
         }),

@@ -967,6 +967,36 @@ impl RuntimeProgressPublication {
     }
 }
 
+/// One result value and its canonical type, issued jointly from an
+/// authenticated parked publication and owned by the machine's root realm.
+#[derive(Debug)]
+pub struct RuntimeResultPublication {
+    custody: RootCustody,
+    type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+}
+
+static_assertions::assert_not_impl_any!(RuntimeResultPublication: Clone, Copy);
+
+impl RuntimeResultPublication {
+    pub fn custody(&self) -> &RootCustody { &self.custody }
+    pub fn type_witness(&self) -> &Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness> {
+        &self.type_witness
+    }
+    /// The destination lease and incorporated root must share their issuer.
+    pub fn belongs_to_bindings(&self, lease: &BindingLease) -> bool {
+        Arc::ptr_eq(&self.custody.cleanup.0, &lease.cleanup.0)
+    }
+}
+
+/// Typed transport preserves joint value/type issuance across machines.
+#[must_use = "a result parcel must be imported or deliberately dropped"]
+pub struct RuntimeResultParcel {
+    parcel: ResidentParcel,
+    type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
+}
+
+static_assertions::assert_not_impl_any!(RuntimeResultParcel: Clone, Copy);
+
 /// One affine original input paired with a fresh type-interface reservation.
 pub struct RuntimeActivationInputAdmission {
     input: RuntimeActivationInput,
@@ -4200,7 +4230,7 @@ where
         let input_type = metadata
             .inputs
             .first()
-            .filter(|_| metadata.inputs.len() <= 2)
+            .filter(|_| (2..=3).contains(&metadata.inputs.len()))
             .ok_or_else(invalid)?
             .ty
             .clone();
@@ -4214,16 +4244,16 @@ where
             .and_then(Option::as_ref)
             .ok_or_else(missing_witness)?
             .clone();
-        let progress_type_witness = match metadata.input_type_witnesses.get(1) {
+        let signatures = metadata.request_type_signatures.clone().ok_or_else(invalid)?;
+        if metadata.inputs.len() != if signatures.progress().is_some() { 3 } else { 2 } {
+            return Err(invalid());
+        }
+        let progress_type_witness = match signatures.progress().and_then(|_| metadata.input_type_witnesses.get(1)) {
             Some(witness) => Some(Arc::new(
                 witness.as_ref().ok_or_else(missing_witness)?.clone(),
             )),
             None => None,
         };
-        let signatures = metadata
-            .request_type_signatures
-            .clone()
-            .ok_or_else(invalid)?;
         let interfaces = provenance
             .authenticated_inputs
             .get(&site)
@@ -4302,6 +4332,89 @@ where
             custody,
             type_witness,
         })
+    }
+
+    fn parked_canonical_input_witness(
+        &mut self,
+        continuation: &str,
+        site: u64,
+        input: usize,
+    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError> {
+        let invalid = || ResidentError::InvalidActivationInput { site };
+        let entry = self.parked.iter().find(|entry| entry.name == continuation).ok_or_else(invalid)?;
+        if self.state.prepared_mut().and_then(|engine| engine.parked_site(entry.id)) != Some(site) {
+            return Err(invalid());
+        }
+        if !entry.provenance.authenticated_inputs.contains_key(&site) {
+            return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
+        }
+        let metadata = entry.provenance.sites.get(&site).ok_or_else(invalid)?;
+        if metadata.input_type_witnesses.len() != metadata.inputs.len() { return Err(invalid()); }
+        let witness = metadata.input_type_witnesses.get(input).and_then(Option::as_ref)
+            .ok_or(ResidentError::MissingActivationInputWitness { site })?;
+        Ok(Arc::new(witness.clone()))
+    }
+
+    /// Admission uses the submitted original site's final canonical response
+    /// input, while its static unit reply remains independent.
+    pub fn request_result_type_witness(
+        &mut self,
+        site: u64,
+        hole: &ResidentHole,
+    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError> {
+        let invalid = || ResidentError::InvalidActivationInput { site };
+        let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
+        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
+        let signatures = metadata.request_type_signatures.as_ref().ok_or_else(invalid)?;
+        let count = if signatures.progress().is_some() { 3 } else { 2 };
+        if metadata.inputs.len() != count { return Err(invalid()); }
+        self.parked_canonical_input_witness(hole.cont_id(), site, count - 1)
+    }
+
+    /// An observer's own parked typed helper issues its expected result type.
+    pub fn result_type_witness(
+        &mut self,
+        continuation: &str,
+    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError> {
+        self.progress_type_witness(continuation)
+    }
+
+    pub fn capture_result_publication(
+        &mut self,
+        hole: &ResidentHole,
+        site: u64,
+        realm: RealmId,
+    ) -> Result<RuntimeResultPublication, ResidentError> {
+        let invalid = || ResidentError::InvalidActivationInput { site };
+        if realm != RealmId::ROOT { return Err(invalid()); }
+        let entry = self.parked.iter().find(|entry| entry.name == hole.cont_id()).ok_or_else(invalid)?;
+        let (actual, input) = self.state.prepared_mut()
+            .and_then(|engine| engine.parked_capture_site(entry.id)).ok_or_else(invalid)?;
+        if actual != site { return Err(invalid()); }
+        let type_witness = self.parked_canonical_input_witness(hole.cont_id(), site, input)?;
+        let custody = self.live_payload_handle_owned_by(hole.cont_id(), RealmId::ROOT)?.ok_or_else(invalid)?;
+        Ok(RuntimeResultPublication { custody, type_witness })
+    }
+
+    pub fn export_result(
+        &mut self,
+        publication: RuntimeResultPublication,
+    ) -> Result<RuntimeResultParcel, ResidentError> {
+        Ok(RuntimeResultParcel { parcel: self.export_custody(publication.custody)?, type_witness: publication.type_witness })
+    }
+
+    pub fn export_result_shared(
+        &mut self,
+        publication: &RuntimeResultPublication,
+    ) -> Result<RuntimeResultParcel, ResidentError> {
+        Ok(RuntimeResultParcel { parcel: self.export_shared(&publication.custody)?, type_witness: publication.type_witness.clone() })
+    }
+
+    pub fn import_result(
+        &mut self,
+        parcel: RuntimeResultParcel,
+    ) -> Result<RuntimeResultPublication, ResidentError> {
+        Ok(RuntimeResultPublication { custody: self.import_parcel(parcel.parcel, RealmId::ROOT)?, type_witness: parcel.type_witness })
     }
 
     /// Transfer a rooted value to another runtime resource scope.
@@ -5864,12 +5977,9 @@ where
                     && site.input_type_witnesses.len() == site.inputs.len()
                     && site.input_type_witnesses.iter().any(Option::is_some)
             }) {
-                let Some(signatures) = &site.request_type_signatures else {
-                    continue;
-                };
                 let mut roots = std::collections::BTreeSet::new();
-                for name in std::iter::once(signatures.reply())
-                    .chain(signatures.progress())
+                for name in site.request_type_signatures.iter().flat_map(|signatures|
+                    std::iter::once(signatures.reply()).chain(signatures.progress()))
                     .flat_map(|signature| signature.names())
                 {
                     if home_units.contains(name.unit()) {
@@ -5883,7 +5993,7 @@ where
                         roots.insert(*id);
                     }
                 }
-                if let Some(witness) = site.input_type_witnesses.first().and_then(Option::as_ref) {
+                for witness in site.input_type_witnesses.iter().flatten() {
                     for (unit, module, seal) in witness.interface_seals() {
                         let owner = tidepool_toolchain::declaration_join::ExactModuleIdentity {
                             unit: unit.to_owned(),

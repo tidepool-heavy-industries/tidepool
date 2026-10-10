@@ -1769,6 +1769,20 @@ impl<'a> Validator<'a> {
                 ConstructorReply::Static(node) => {
                     self.type_node(node)?;
                 }
+                ConstructorReply::StaticWithSite { reply, field, payload_field, capture_input: _ } => {
+                    self.type_node(reply)?;
+                    if field == 0 || !matches!(
+                        declaration.field_reps.get(field as usize),
+                        Some(RuntimeRep::LiftedRef) | Some(RuntimeRep::Int(64))
+                    ) || field == payload_field || !matches!(
+                        declaration.field_reps.get(payload_field as usize),
+                        Some(RuntimeRep::LiftedRef) | Some(RuntimeRep::UnliftedRef)
+                    ) {
+                        return Err(ParseError::InvalidLayout(
+                            "StaticWithSite request requires distinct non-leading Int site and managed payload fields".into(),
+                        ));
+                    }
+                }
                 ConstructorReply::AtSite => {
                     if !matches!(
                         declaration.field_reps.first(),

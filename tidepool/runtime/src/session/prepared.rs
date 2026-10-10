@@ -81,6 +81,7 @@ pub enum ConstructorReplyObservation {
     Static {
         node: TypeNodeId,
         shape: ReplyTypeObservation,
+        input_site: Option<(u32, u32, Option<u32>)>,
     },
 }
 
@@ -2497,6 +2498,12 @@ fn constructor_replies_equivalent(
 ) -> Result<bool, TypeGraphError> {
     match (x, y) {
         (ConstructorReply::AtSite, ConstructorReply::AtSite) => Ok(true),
+        (ConstructorReply::StaticWithSite { reply: x, field: xf, payload_field: xp, capture_input: xc },
+         ConstructorReply::StaticWithSite { reply: y, field: yf, payload_field: yp, capture_input: yc })
+            if (xf, xp, xc) == (yf, yp, yc) => {
+            let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
+            a.types.rooted_compatible(x, &b.types, y, &mut budget)
+        }
         (ConstructorReply::Static(x), ConstructorReply::Static(y)) => {
             let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
             a.types.rooted_compatible(x, &b.types, y, &mut budget)
@@ -2535,7 +2542,12 @@ fn reply_conflict_evidence(
     fn observe(facts: &ProgramFacts, reply: ConstructorReply) -> ConstructorReplyObservation {
         match reply {
             ConstructorReply::AtSite => ConstructorReplyObservation::AtSite,
-            ConstructorReply::Static(node) => {
+            ConstructorReply::Static(node) | ConstructorReply::StaticWithSite { reply: node, .. } => {
+                let input_site = match reply {
+                    ConstructorReply::StaticWithSite { field, payload_field, capture_input, .. } =>
+                        Some((field, payload_field, capture_input)),
+                    _ => None,
+                };
                 let mut budget = TypeWorkBudget::new(256);
                 let shape = match facts.types.open_root(node, &mut budget) {
                     Err(source) => ReplyTypeObservation::Refused(source),
@@ -2558,7 +2570,7 @@ fn reply_conflict_evidence(
                         }
                     },
                 };
-                ConstructorReplyObservation::Static { node, shape }
+                ConstructorReplyObservation::Static { node, shape, input_site }
             }
         }
     }
@@ -5210,6 +5222,25 @@ impl PreparedEngine {
                 constructor: *constructor,
                 node,
             }),
+            ConstructorReply::StaticWithSite { reply: node, field, payload_field, capture_input } => {
+                let site = fields.get(field as usize)
+                    .and_then(|field| site_field(field, table))
+                    .ok_or(PreparedRuntimeError::MalformedRequestSite { constructor: *constructor })?;
+                let selected = self.sites.get(&site).ok_or(PreparedRuntimeError::UnknownSite { site })?;
+                let row = &self.programs[&selected.owner].sites[selected.row];
+                if capture_input.is_some_and(|input| row.inputs.len() != input as usize + 1) {
+                    return Err(PreparedRuntimeError::MalformedRequestSite { constructor: *constructor });
+                }
+                Ok(PreparedReplyEvidence::StaticWithSite {
+                    owner: witness.owner,
+                    constructor: *constructor,
+                    node,
+                    site_owner: selected.owner,
+                    site_row: selected.row,
+                    payload_field,
+                    capture_input,
+                })
+            }
             ConstructorReply::AtSite => {
                 let site = fields
                     .first()
@@ -5238,9 +5269,8 @@ impl PreparedEngine {
             ExecutionError::UnknownProgram(owner),
         ))?;
         match reply {
-            PreparedReplyEvidence::Static {
-                constructor, node, ..
-            } => Ok((owner, node, ReplyTarget::Static(constructor))),
+            PreparedReplyEvidence::Static { constructor, node, .. }
+            | PreparedReplyEvidence::StaticWithSite { constructor, node, .. } => Ok((owner, node, ReplyTarget::Static(constructor))),
             PreparedReplyEvidence::AtSite { row, .. } => {
                 let row = facts
                     .sites
@@ -5260,10 +5290,23 @@ impl PreparedEngine {
     /// Dynamic request site, if this frame carries compiler-attested AtSite evidence.
     pub fn parked_site(&self, id: ContinuationId) -> Option<u64> {
         let (_, evidence) = self.machine.parked(id)?;
-        let PreparedReplyEvidence::AtSite { owner, row } = evidence.reply else {
-            return None;
+        let (owner, row) = match evidence.reply {
+            PreparedReplyEvidence::AtSite { owner, row } => (owner, row),
+            PreparedReplyEvidence::StaticWithSite { site_owner, site_row, .. } => (site_owner, site_row),
+            PreparedReplyEvidence::Static { .. } => return None,
         };
         Some(self.programs.get(&owner)?.sites.get(row)?.site)
+    }
+
+    /// Result capture requires the actual parked constructor's compiler proof
+    /// that its retained payload has the final input's type.
+    pub fn parked_capture_site(&self, id: ContinuationId) -> Option<(u64, usize)> {
+        let (_, evidence) = self.machine.parked(id)?;
+        let PreparedReplyEvidence::StaticWithSite { site_owner, site_row, capture_input: Some(input), .. } = evidence.reply else {
+            return None;
+        };
+        let row = self.programs.get(&site_owner)?.sites.get(site_row)?;
+        (row.inputs.len() == input as usize + 1).then_some((row.site, input as usize))
     }
 
     /// Observe and classify a suspension by its exact request constructor.
@@ -5364,8 +5407,15 @@ impl PreparedEngine {
         // newly tenured handle without a frame to own it; then mirror the field
         // before releasing `payload`. `PreparedMachine::park` consumes the
         // handle on both success and refusal.
+        let live_payload = match (park.live_payload, reply) {
+            (LivePayloadPolicy::ValueField(_), PreparedReplyEvidence::StaticWithSite { payload_field, .. }) =>
+                LivePayloadPolicy::ValueField(payload_field as usize),
+            (LivePayloadPolicy::ClosureField(_), PreparedReplyEvidence::StaticWithSite { payload_field, .. }) =>
+                LivePayloadPolicy::ClosureField(payload_field as usize),
+            (policy, _) => policy,
+        };
         let live_payload_root =
-            match self.tenure_live_payload(payload, realm, park.live_payload, &request) {
+            match self.tenure_live_payload(payload, realm, live_payload, &request) {
                 Ok(root) => root,
                 Err(error) => {
                     self.machine.release(payload);
@@ -5374,6 +5424,12 @@ impl PreparedEngine {
                 }
             };
         self.machine.release(payload);
+        let reply = match reply {
+            PreparedReplyEvidence::StaticWithSite { owner, constructor, node, site_owner, site_row, payload_field, capture_input: _ }
+                if live_payload != LivePayloadPolicy::ValueField(payload_field as usize) =>
+                PreparedReplyEvidence::StaticWithSite { owner, constructor, node, site_owner, site_row, payload_field, capture_input: None },
+            reply => reply,
+        };
         let evidence = PreparedFrameEvidence {
             reply,
             runner: program,

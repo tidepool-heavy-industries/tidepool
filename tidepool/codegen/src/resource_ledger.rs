@@ -38,6 +38,15 @@ pub enum PreparedReplyEvidence {
         constructor: tidepool_repr::DataConId,
         node: TypeNodeId,
     },
+    StaticWithSite {
+        owner: ProgramId,
+        constructor: tidepool_repr::DataConId,
+        node: TypeNodeId,
+        site_owner: ProgramId,
+        site_row: usize,
+        payload_field: u32,
+        capture_input: Option<u32>,
+    },
     AtSite {
         owner: ProgramId,
         row: usize,
@@ -45,9 +54,17 @@ pub enum PreparedReplyEvidence {
 }
 
 impl PreparedReplyEvidence {
+    pub fn site_owner(self) -> Option<ProgramId> {
+        match self {
+            Self::StaticWithSite { site_owner, .. } => Some(site_owner),
+            _ => None,
+        }
+    }
+
     pub fn owner(self) -> ProgramId {
         match self {
-            Self::Static { owner, .. } | Self::AtSite { owner, .. } => owner,
+            Self::Static { owner, .. } | Self::StaticWithSite { owner, .. }
+                | Self::AtSite { owner, .. } => owner,
         }
     }
 }

@@ -603,6 +603,19 @@ impl<'a> Decoder<'a> {
                     ConstructorReply::Static(TypeNodeId(u32_value(node, "reply type node ID")?))
                 }
                 [tag] if unsigned(tag, "constructor reply tag")? == 1 => ConstructorReply::AtSite,
+                [tag, node, field, payload_field, capture_input]
+                    if unsigned(tag, "constructor reply tag")? == 2 =>
+                {
+                    ConstructorReply::StaticWithSite {
+                        reply: TypeNodeId(u32_value(node, "reply type node ID")?),
+                        field: u32_value(field, "original site field")?,
+                        payload_field: u32_value(payload_field, "original payload field")?,
+                        capture_input: match capture_input {
+                            Value::Null => None,
+                            value => Some(u32_value(value, "captured site input")?),
+                        },
+                    }
+                }
                 _ => {
                     return Err(ParseError::Malformed(
                         "invalid constructor reply evidence".into(),

@@ -123,6 +123,7 @@ pub use resident::{
     ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome, ResidentParcel,
     ResidentResumeError, ResidentSession, RootCustody, RuntimeActivationInput,
     RuntimeActivationInputAdmission, RuntimeActivationPreviewAdmission, RuntimeProgressPublication,
+    RuntimeResultPublication, RuntimeResultParcel,
     SessionRunContext,
 };
 

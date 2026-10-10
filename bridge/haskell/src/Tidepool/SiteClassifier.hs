@@ -54,7 +54,7 @@ classifySiteOccurrence siblings spec surface args = do
   -- Siblings first: a walk without generated siblings (constructor metadata
   -- over bindings that are never executed) poisons the occurrence and must
   -- never turn a site-shape failure into a rejection.
-  sibling <- maybe (Left MissingSibling) Right (Map.lookup (vsName spec) siblings)
+  sibling <- maybe (Left MissingSibling) Right (Map.lookup (verbKey spec) siblings)
   -- Recognition and sibling resolution check their declared modules. A verb
   -- and sibling may live in different modules, but must share a defining unit.
   case (nameModule_maybe (idName surface), nameModule_maybe (idName sibling)) of
@@ -72,9 +72,15 @@ classifySiteOccurrence siblings spec surface args = do
   mapM_ checkEvidence (zip [0..] evidence)
   let missingEvidence = take (nEvidence - length evidence)
         (drop (length evidence) (fst (splitFunTys (piResultTys (idType surface) types))))
+  let instantiatedArgs = fst (splitFunTys (piResultTys (idType sibling) types))
   answer <- case vsAnswerSource spec of
     FirstTypeArgument -> typeAt types 0 >>= closed SiteResult
     TypeArgument i -> typeAt types i >>= closed SiteResult
+    CarrierReply -> case drop nEvidence instantiatedArgs of
+      Scaled _ carrierType : _ -> case splitTyConApp_maybe carrierType of
+        Just (_, [_, reply]) -> closed SiteResult reply
+        _ -> Left IncompatibleSibling
+      _ -> Left IncompatibleSibling
     EffectResult -> do
       let (_, effectType) = splitFunTys (piResultTys (idType surface) types)
       case splitTyConApp_maybe effectType of
@@ -84,7 +90,6 @@ classifySiteOccurrence siblings spec surface args = do
   let (siblingBinders, siblingBody) = splitInvisPiTys (idType sibling)
       (siblingArgs, siblingResult) = splitFunTys siblingBody
       rebuild = foldr (\(Scaled mult arg) body -> mkVisFunTy mult arg body) siblingResult
-      instantiatedArgs = fst (splitFunTys (piResultTys (idType sibling) types))
   case (siblingArgs, drop nEvidence instantiatedArgs) of
     (_ : remaining, Scaled _ carrierType : _)
       | eqType (mkPiTys siblingBinders (rebuild remaining)) (mkPiTys binders result) ->
