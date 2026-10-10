@@ -183,3 +183,152 @@ fn cancelled_promotion_then_name_removal_does_not_grow_revision_index() {
     }
     assert!(visible(&table, &tree, target).is_empty());
 }
+
+#[test]
+fn prepared_detached_capture_cancellation_and_install_preserve_exact_future_tip() {
+    let mut tree = ScopeTree::new();
+    let parent = tree.mint_isolated();
+    let foreign = tree.mint_isolated();
+    let older = tree.mint_isolated();
+    let child = tree.mint_isolated();
+    let mut table = BindingTable::new();
+    let hidden = table.bind_in(parent, entry("answer", 1)).unwrap();
+    let dependency = table.bind_in(foreign, entry("foreign", 2)).unwrap();
+    let observation = table.bind_in(parent, entry("observation", 3)).unwrap();
+    table.save_observation(dependency, &[], 10);
+    table.save_observation(observation, &[dependency.var()], 10);
+    table.seed_detached_scope(&tree, parent, older);
+    assert!(table.tips[&older].retained.contains(&dependency));
+    let owner = CachedHomeOwner {
+        unit: "unit".into(),
+        module: "Future".into(),
+        module_version: ModuleVersion([4; 32]),
+        skinny_iface_sha256: [5; 32],
+        product_sha256: [6; 32],
+    };
+    let before = table.scope_snapshot(&tree, parent).unwrap();
+    let counts = [hidden, dependency, observation].map(|id| table.lease_count(id));
+    let next_tip = table.next_tip;
+    let origin = table
+        .prepare_source_owner_origin_in(&tree, parent, owner.clone())
+        .unwrap();
+    let changes = table
+        .prepare_declaration_binding_changes_in(parent, &[observation.var()], &["answer".into()])
+        .unwrap();
+    let capture = table
+        .prepare_seed_detached_scope_for_declaration(&tree, parent, child, &origin, &changes)
+        .unwrap();
+    assert_eq!(before, table.scope_snapshot(&tree, parent).unwrap());
+    assert_eq!(
+        counts,
+        [hidden, dependency, observation].map(|id| table.lease_count(id))
+    );
+    assert_eq!(next_tip, table.next_tip);
+    assert!(table.tip_id(child).is_none());
+    drop(capture);
+    assert_eq!(
+        counts,
+        [hidden, dependency, observation].map(|id| table.lease_count(id))
+    );
+    let capture = table
+        .prepare_seed_detached_scope_for_declaration(&tree, parent, child, &origin, &changes)
+        .unwrap();
+    without_allocations(|| {
+        table.commit_source_owner_origin(origin);
+        table.commit_declaration_binding_changes(changes);
+        table.commit_prepared_detached_scope(capture);
+    });
+    assert!(table.resolve_in(&tree, child, "answer").is_none());
+    assert_eq!(
+        table.resolve_in(&tree, child, "observation").unwrap().id,
+        observation
+    );
+    assert!(table.tips[&child].retained.contains(&hidden));
+    assert!(!table.tips[&child].retained.contains(&dependency));
+    let selection = table.source_domain_selection_in(&tree, child).unwrap();
+    assert_eq!(
+        selection
+            .domain_for_owner(table.source_selection[&child].current, &owner)
+            .unwrap(),
+        table.source_selection[&child].current
+    );
+    assert_ne!(
+        table.source_selection[&child].current,
+        table.source_selection[&parent].current
+    );
+    let origin = table
+        .prepare_source_owner_origin_in(&tree, parent, owner)
+        .unwrap();
+    let changes = table
+        .prepare_declaration_binding_changes_in(parent, &[], &[])
+        .unwrap();
+    assert!(matches!(
+        table.prepare_seed_detached_scope_for_declaration(&tree, parent, child, &origin, &changes),
+        Err(BindingPromotionError::UnverifiableSourceSelection)
+    ));
+    table.drain_scope(older);
+    assert_eq!(table.lease_count(dependency), 0);
+    assert!(table.drain_scope(parent).is_empty());
+    assert_eq!(table.drain_scope(child).len(), 2);
+    assert!(table.get(dependency).is_some());
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+    #[test]
+    fn prospective_detached_histories_keep_cancellation_and_repeated_custody_exact(
+        history in prop::collection::vec((0u8..4, any::<bool>(), any::<bool>()), 1..32)
+    ) {
+        let mut tree = ScopeTree::new();
+        let parent = tree.mint_isolated();
+        let mut table = BindingTable::new();
+        let mut captured = Vec::new();
+        let mut ids = Vec::new();
+        for (step, (slot, commit, remove)) in history.into_iter().enumerate() {
+            let name = format!("name{slot}");
+            let id = table.bind_in(parent, entry(&name, step as u64 + 1)).unwrap();
+            ids.push(id);
+            let owner = CachedHomeOwner {
+                unit: "unit".into(), module: format!("Home{step}"), module_version: ModuleVersion([step as u8; 32]),
+                skinny_iface_sha256: [1; 32], product_sha256: [2; 32],
+            };
+            let child = tree.mint_isolated();
+            let origin = table.prepare_source_owner_origin_in(&tree, parent, owner.clone()).unwrap();
+            let removals = if remove { vec![name] } else { Vec::new() };
+            let changes = table.prepare_declaration_binding_changes_in(parent, &[], &removals).unwrap();
+            let before = table.scope_snapshot(&tree, parent).unwrap();
+            let counts: Vec<_> = ids.iter().map(|id| table.lease_count(*id)).collect();
+            let next_tip = table.next_tip;
+            let token = table.prepare_seed_detached_scope_for_declaration(&tree, parent, child, &origin, &changes).unwrap();
+            prop_assert_eq!(table.scope_snapshot(&tree, parent).unwrap(), before);
+            prop_assert_eq!(ids.iter().map(|id| table.lease_count(*id)).collect::<Vec<_>>(), counts);
+            prop_assert_eq!(table.next_tip, next_tip);
+            if commit {
+                let prospective: Vec<_> = table.prepared_iter_current_in(&tree, parent, &changes).unwrap().into_iter()
+                    .map(|(name, entry)| (name.0, entry.id)).collect();
+                without_allocations(|| {
+                    table.commit_source_owner_origin(origin);
+                    table.commit_declaration_binding_changes(changes);
+                    table.commit_prepared_detached_scope(token);
+                });
+                prop_assert_eq!(visible(&table, &tree, child), prospective);
+                captured.push(child);
+                for id in &ids { prop_assert_eq!(table.lease_count(*id), 1); }
+                let duplicate = tree.mint_isolated();
+                let origin = table.prepare_source_owner_origin_in(&tree, parent, owner).unwrap();
+                let changes = table.prepare_declaration_binding_changes_in(parent, &[], &[]).unwrap();
+                let token = table.prepare_seed_detached_scope_for_declaration(&tree, parent, duplicate, &origin, &changes).unwrap();
+                without_allocations(|| table.commit_prepared_detached_scope(token));
+                prop_assert!(Arc::ptr_eq(&table.tips[&child].leases, &table.tips[&duplicate].leases));
+                for id in &ids { prop_assert_eq!(table.lease_count(*id), 1); }
+                captured.push(duplicate);
+            } else {
+                drop((origin, changes, token));
+                prop_assert_eq!(table.lease_count(id), 0);
+            }
+        }
+        table.drain_scope(parent);
+        for child in captured { table.drain_scope(child); }
+        prop_assert!(table.is_empty());
+    }
+}

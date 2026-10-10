@@ -763,3 +763,87 @@ fn prepared_source_promotion_installs_native_custody_without_allocation() {
     let drained = scenario.table.drain_scope_with_sources(target);
     scenario.release_sources(drained.source_instances);
 }
+
+#[test]
+fn prospective_native_source_capture_cancel_and_retire_keep_exact_shared_handles() {
+    let (image, binder) = source_image();
+    let mut scenario = Scenario::new(3, 0, &image, &binder);
+    let parent = scenario.parent;
+    let owner = CachedHomeOwner {
+        unit: "fixture".into(),
+        module: "Future".into(),
+        module_version: ModuleVersion([4; 32]),
+        skinny_iface_sha256: [5; 32],
+        product_sha256: [6; 32],
+    };
+    let keys = scenario
+        .table
+        .source_instance_keys_in(&scenario.tree, parent);
+    let before_shares: Vec<_> = keys
+        .iter()
+        .map(|key| (key.clone(), scenario.table.source_instances[key].shares))
+        .collect();
+    let origin = scenario
+        .table
+        .prepare_source_owner_origin_in(&scenario.tree, parent, owner)
+        .unwrap();
+    let changes = scenario
+        .table
+        .prepare_declaration_binding_changes_in(parent, &[], &["value_000".into()])
+        .unwrap();
+    let cancelled = scenario.tree.mint_isolated();
+    let prepared = scenario
+        .table
+        .prepare_seed_detached_scope_for_declaration(
+            &scenario.tree,
+            parent,
+            cancelled,
+            &origin,
+            &changes,
+        )
+        .unwrap();
+    drop(prepared);
+    for (key, count) in &before_shares {
+        assert_eq!(scenario.table.source_instances[key].shares, *count);
+    }
+    assert_eq!(scenario.machine.handle_count(), 3);
+    let child = scenario.tree.mint_isolated();
+    let prepared = scenario
+        .table
+        .prepare_seed_detached_scope_for_declaration(
+            &scenario.tree,
+            parent,
+            child,
+            &origin,
+            &changes,
+        )
+        .unwrap();
+    measure(|| {
+        scenario.table.commit_source_owner_origin(origin);
+        scenario.table.commit_declaration_binding_changes(changes);
+        scenario.table.commit_prepared_detached_scope(prepared);
+    })
+    .1
+    .assert_nonallocating();
+    assert_eq!(
+        scenario
+            .table
+            .source_instance_keys_in(&scenario.tree, child),
+        keys
+    );
+    assert!(scenario
+        .table
+        .resolve_in(&scenario.tree, child, "value_000")
+        .is_none());
+    for scope in [scenario.parent, scenario.child] {
+        let drained = scenario.table.drain_scope_with_sources(scope);
+        assert!(drained.source_instances.is_empty());
+        scenario.release_sources(drained.source_instances);
+    }
+    assert_eq!(scenario.machine.handle_count(), 3);
+    let drained = scenario.table.drain_scope_with_sources(child);
+    assert_eq!(drained.source_instances.len(), 3);
+    scenario.release_sources(drained.source_instances);
+    assert_eq!(scenario.machine.handle_count(), 0);
+    assert!(scenario.table.is_empty());
+}

@@ -3409,6 +3409,10 @@ impl BindingTable {
         }
         self.capture_history
             .insert(prepared.parent, prepared.history);
+        if let Some(projected) = self.capturable_membership.get_mut(&prepared.parent) {
+            projected.added_bindings.clear();
+            projected.added_sources.clear();
+        }
         prepared.chunk
     }
 
