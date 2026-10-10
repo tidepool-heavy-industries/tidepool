@@ -2172,13 +2172,9 @@ async fn run_owned(
         };
         match manifest {
             tidepool_runtime::session::PublicManifestCommit::Durable => {}
-            tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed {
-                ..
-            } => {
-                forest
-                    .confirm_durable_root_public_owner(root_actor.identity())
-                    .await
-                    .map_err(|error| runtime_error(error.to_string()))?;
+            tidepool_runtime::session::PublicManifestCommit::Refused { error }
+            | tidepool_runtime::session::PublicManifestCommit::RecoveryRequired { error } => {
+                return Err(runtime_error(error.to_string()));
             }
             outcome => {
                 return Err(runtime_error(format!(
@@ -2445,6 +2441,7 @@ async fn run_owned(
     }
     #[cfg(test)]
     let shutdown_observer = test_observer.clone();
+    let run_store = embedded_service.runtime.store();
     let mut applications_task = tokio::spawn(run_interactive_applications(
         deployments,
         application_owners.clone(),
@@ -2480,6 +2477,9 @@ async fn run_owned(
         loop {
             tokio::select! {
                 biased;
+                failure = run_store.wait_recovery_required() => {
+                    break Err(runtime_error(format!("embedded run store requires authenticated recovery: {failure}")));
+                }
                 failure = &mut coordination_failure => {
                     break Err(runtime_error(failure.unwrap_or_else(|_| "interactive application coordination owner stopped".into())));
                 }
