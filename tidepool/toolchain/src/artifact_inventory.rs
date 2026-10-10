@@ -432,7 +432,7 @@ impl NativeOriginalRequirement {
 enum ArtifactRootIntent<'a> {
     SuppliedArtifacts,
     Certified(&'a crate::certified_products::CertifiedSourceSelection),
-    Projected(&'a CompilerInputProjection),
+    Projected(&'a CompilerInputProjection, &'a [NativeOriginalRequirement]),
 }
 
 impl ArtifactRootIntent<'_> {
@@ -442,11 +442,25 @@ impl ArtifactRootIntent<'_> {
             Self::Certified(selection) => {
                 selection.native_original_requirements().cloned().collect()
             }
-            Self::Projected(projection) => projection
-                .roles()
-                .into_iter()
-                .filter_map(NativeOriginalRequirement::from_role)
-                .collect(),
+            Self::Projected(projection, preferred) => {
+                let mut requirements = projection
+                    .roles()
+                    .into_iter()
+                    .filter_map(NativeOriginalRequirement::from_role)
+                    .collect::<Vec<_>>();
+                let published = requirements
+                    .iter()
+                    .map(|fact| fact.original)
+                    .collect::<BTreeSet<_>>();
+                for requirement in *preferred {
+                    if !published.contains(&requirement.original)
+                        && !requirements.contains(requirement)
+                    {
+                        requirements.push(requirement.clone());
+                    }
+                }
+                requirements
+            }
         }
     }
 }
@@ -1875,11 +1889,36 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         projection: &CompilerInputProjection,
     ) -> Result<ArtifactView, CompileError> {
+        self.admit_projected_with_native_requirements(parent, entries, projection, &[])
+    }
+
+    pub(crate) fn admit_projected_with_native_requirements(
+        &self,
+        parent: &ArtifactView,
+        entries: Vec<Arc<ArtifactEntry>>,
+        projection: &CompilerInputProjection,
+        requirements: &[NativeOriginalRequirement],
+    ) -> Result<ArtifactView, CompileError> {
+        let offered = projection
+            .roles()
+            .iter()
+            .filter_map(CompilerInputRole::original)
+            .collect::<BTreeSet<_>>();
+        if let Some(requirement) = requirements
+            .iter()
+            .find(|fact| !offered.contains(&fact.original))
+        {
+            return Err(admission_failure(
+                ArtifactInventoryFailure::NativeRootOutsideView {
+                    artifact: requirement.original,
+                },
+            ));
+        }
         self.admit_shared_with_intent(
             parent,
             entries,
             NativeArtifactDemand::ScopeInterfaces,
-            ArtifactRootIntent::Projected(projection),
+            ArtifactRootIntent::Projected(projection, requirements),
         )
     }
     fn admit_shared_with_intent(
@@ -2075,7 +2114,7 @@ impl ArtifactInventory {
                     .artifact_ids_from_entries(&selected)
                     .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?,
             ),
-            ArtifactRootIntent::Projected(projection) => {
+            ArtifactRootIntent::Projected(projection, _) => {
                 projection.entries_from_artifacts(&selected)?;
                 let ids = projection
                     .roles()
@@ -5001,7 +5040,7 @@ mod tests {
                 &old,
                 vec![Arc::new(native.clone()), Arc::new(next.clone())],
                 NativeArtifactDemand::AllGroups,
-                ArtifactRootIntent::Projected(&active_projection),
+                ArtifactRootIntent::Projected(&active_projection, &[]),
             )
             .unwrap();
         let changed_group = changed
@@ -5034,7 +5073,7 @@ mod tests {
                 &narrowed,
                 vec![Arc::new(native.clone()), Arc::new(next)],
                 NativeArtifactDemand::AllGroups,
-                ArtifactRootIntent::Projected(&active_projection),
+                ArtifactRootIntent::Projected(&active_projection, &[]),
             )
             .unwrap();
         assert_eq!(
@@ -5113,7 +5152,7 @@ mod tests {
                 &restored,
                 vec![Arc::new(native)],
                 NativeArtifactDemand::AllGroups,
-                ArtifactRootIntent::Projected(&active_projection),
+                ArtifactRootIntent::Projected(&active_projection, &[]),
             )
             .unwrap();
         assert_eq!(
@@ -5239,7 +5278,7 @@ mod tests {
                 &new,
                 vec![Arc::new(native.clone())],
                 NativeArtifactDemand::AllGroups,
-                ArtifactRootIntent::Projected(&projection),
+                ArtifactRootIntent::Projected(&projection, &[]),
             )
             .unwrap();
         assert_eq!(
@@ -5701,19 +5740,31 @@ mod tests {
             receipt
                 .with_native_original_requirements(&issuer.metadata_snapshot(), &facts)
                 .unwrap();
-            for joined in [
+            for (joined, projected) in [
                 issuer.merge(&sibling).unwrap(),
                 sibling.merge(&issuer).unwrap(),
-            ] {
+            ]
+            .into_iter()
+            .flat_map(|joined| [(joined.clone(), false), (joined, true)])
+            {
                 let scopes_before = inventory.0.lock().unwrap().selection_plans.len();
-                let closed = inventory
-                    .admit_certified_with_demand(
+                let admitted = if projected {
+                    inventory.admit_projected_with_native_requirements(
+                        &joined,
+                        vec![Arc::new(root.clone())],
+                        &projection,
+                        &facts,
+                    )
+                } else {
+                    inventory.admit_certified_with_demand(
                         &joined,
                         vec![Arc::new(root.clone())],
                         NativeArtifactDemand::ScopeInterfaces,
                         &receipt,
                     )
-                    .unwrap()
+                }
+                .unwrap();
+                let closed = admitted
                     .select_admission_roots(vec![root.descriptor.id])
                     .unwrap();
                 assert_eq!(closed.capture_graph_selection().native_groups, expected);
@@ -5735,14 +5786,23 @@ mod tests {
                         &joined.binding_dependencies(),
                     )
                     .unwrap();
-                let repeated = cold
-                    .admit_certified_with_demand(
+                let readmitted = if projected {
+                    cold.admit_projected_with_native_requirements(
+                        &reopened,
+                        vec![Arc::new(root.clone())],
+                        &projection,
+                        &facts,
+                    )
+                } else {
+                    cold.admit_certified_with_demand(
                         &reopened,
                         vec![Arc::new(root.clone())],
                         NativeArtifactDemand::ScopeInterfaces,
                         &receipt,
                     )
-                    .unwrap()
+                }
+                .unwrap();
+                let repeated = readmitted
                     .select_admission_roots(vec![root.descriptor.id])
                     .unwrap();
                 assert_eq!(repeated.capture_graph_selection().native_groups, expected);
@@ -6016,7 +6076,7 @@ mod tests {
                 &old,
                 vec![Arc::new(native.clone()), Arc::new(next)],
                 NativeArtifactDemand::AllGroups,
-                ArtifactRootIntent::Projected(&projection),
+                ArtifactRootIntent::Projected(&projection, &[]),
             ).unwrap();
 
             // Independent reference facts: a plain set of the issued rows and
@@ -6040,7 +6100,7 @@ mod tests {
                         &view,
                         vec![Arc::new(native.clone())],
                         NativeArtifactDemand::AllGroups,
-                        ArtifactRootIntent::Projected(&projection),
+                        ArtifactRootIntent::Projected(&projection, &[]),
                     ).unwrap(),
                     2 => view.merge_selected(&old, &projection).unwrap(),
                     3 => {
@@ -6077,7 +6137,7 @@ mod tests {
                 proptest::prop_assert_eq!(original.capture_graph_selection(), old.capture_graph_selection());
                 let issued = view.inventory().admit_shared_with_intent(
                     &view, vec![Arc::new(native.clone())], NativeArtifactDemand::AllGroups,
-                    ArtifactRootIntent::Projected(&projection),
+                    ArtifactRootIntent::Projected(&projection, &[]),
                 ).unwrap();
                 let selected = issued.select_admission_roots(vec![native.descriptor.id]).unwrap();
                 let requirements = selected.native_requirements_from_roots(&[
