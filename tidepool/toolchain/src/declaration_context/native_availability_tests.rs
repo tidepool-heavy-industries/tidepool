@@ -160,7 +160,7 @@ fn wire_groups(request: &ExactCompilationRequest) -> BTreeMap<String, Vec<u32>> 
                 .unwrap()
                 .iter()
                 .map(|group| {
-                    let ordinal = group.as_array().unwrap()[0].as_integer().unwrap();
+                    let ordinal = group.as_integer().unwrap();
                     u32::try_from(ordinal).unwrap()
                 })
                 .collect();
@@ -404,7 +404,7 @@ fn initial_private_native_offer_reaches_wire_without_lexical_or_instance_authori
             .as_array()
             .unwrap()
             .iter()
-            .map(|group| { group.as_array().unwrap()[0].clone() })
+            .cloned()
             .collect::<Vec<_>>(),
         vec![Value::Integer(7.into()), Value::Integer(9001.into())]
     );
