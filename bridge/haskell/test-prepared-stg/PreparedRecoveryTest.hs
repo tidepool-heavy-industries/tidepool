@@ -25,6 +25,13 @@ import GHC.Unit.Home.ModInfo (lookupHpt)
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import GHC.Driver.Main (hscTidy)
 import GHC.Driver.Session (updOptLevel)
+import GHC.Core.DataCon (dataConName)
+import GHC.Core.TyCon (tyConDataCons)
+import GHC.Types.TypeEnv (typeEnvTyCons)
+import GHC.Unit.Module.ModDetails (md_types)
+import GHC.Unit.Home.ModInfo (HomeModInfo(..))
+import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.Metadata (DCMeta(..), MetadataConflict(..), metadataForConstructors)
 import GHC.Builtin.Types (intTy, boolTy)
 import GHC.Core (Bind(..), Expr(..))
 import GHC.Types.Id (mkVanillaGlobal, setIdType, isDataConWorkId_maybe)
@@ -42,17 +49,18 @@ import GHC.Unit.Finder (addModuleToFinder, initFinderCache)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
 import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet)
 import GHC.Stg.Syntax qualified as Stg
-import System.Directory (getCurrentDirectory, removeFile)
+import System.Directory (createDirectoryIfMissing, getCurrentDirectory, removeFile, removePathForcibly)
 import System.Environment (setEnv)
 import System.IO (openTempFile, stderr, hClose, hFlush, hPutStr, hSeek, hGetContents, SeekMode(..))
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>))
 import System.Process (proc, readCreateProcessWithExitCode)
+import Tidepool.ExecutionProjection qualified as Projection
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), ProjectionError(..), preparedTopIdentities, preparedTopIdentityBindings
   , prepareProjection, prepareProjectionWithReachability, prepareComponentProjectionWithReachability, projectSelected
-  , projectPreparedTarget, preparedModuleReachFacts, preparedSeedUniques
+  , projectPreparedTarget, projectPreparedModuleProducts, preparedModuleProductConstructors, preparedModuleReachFacts, preparedSeedUniques
   , admitReachFacts, emptyPreparedReachability, reachedUniques, admittedTops
   , PreparedReachUpdate(..), updatePreparedReachability
   , preparedTargetReferences, preparedRootIdentity, resolveTextPackageUnit )
@@ -93,8 +101,116 @@ tests = testGroup "test-prepared-stg"
   , testCase "component histories agree with complete reachability recomputation" reachHistoryProperty
   , testCase "overlapping structural groups retain every sibling" assertOverlapMerge
   , testCase "subset lookup preserves authoritative full group" assertSubsetPreservesFullGroup
+  , testCase "homonymous real compiler units preserve closure and refuse host alias" homonymousUnitProperty
   , testCase "compiled original recovery and reachability closure" scenario
   ]
+
+-- Compile each owner independently. Names and constructors come from GHC;
+-- the oracle retains the issuing unit instead of reconstructing it from text.
+homonymousUnitProperty :: IO ()
+homonymousUnitProperty = bracket scratch removePathForcibly $ \directory -> do
+  libdir <- getLibdir
+  issued <- forM ["unit-one", "unit-two"] $ \unit -> do
+    let work = directory </> unit
+        source = work </> "Homonymous.hs"
+    createDirectoryIfMissing True work
+    writeFile source (unlines
+      [ "module Homonymous where"
+      , "data Ticket = Ticket"
+      , "{-# OPAQUE result #-}"
+      , "result :: Ticket"
+      , "result = Ticket"
+      ])
+    runGhc (Just libdir) $ do
+      flags <- getSessionDynFlags
+      initial <- getSession
+      (selected, _, _) <- parseDynamicFlags (hsc_logger initial) flags
+        (map noLoc ["-this-unit-id", unit])
+      _ <- setSessionDynFlags (updOptLevel 0 selected)
+        { importPaths = [work], backend = noBackend, ghcLink = NoLink }
+      target <- guessTarget source Nothing Nothing
+      setTargets [target]
+      loaded <- load LoadAllTargets
+      case loaded of
+        Failed -> fail "homonymous unit compiler failed"
+        Succeeded -> pure ()
+      env <- getSession
+      summary <- getModSummary (mkModuleName "Homonymous")
+      parsed <- parseModule summary
+      typed <- typecheckModule parsed
+      desugared <- desugarModule typed
+      (guts, _) <- liftIO $ hscTidy env (coreModule desugared)
+      home <- maybe (fail "homonymous original lacks compiler interface") pure
+        (lookupHpt (hsc_HPT env) (mkModuleName "Homonymous"))
+      prepared <- liftIO $ prepareModule env (ms_location summary) mempty (FinalizedModule home guts)
+      let constructors = concatMap tyConDataCons (typeEnvTyCons (md_types (hm_details home)))
+          tickets = [con | con <- constructors, occNameString (nameOccName (dataConName con)) == "Ticket"]
+      rows <- either (fail . show) pure (metadataForConstructors [] tickets)
+      liftIO $ assert (length tickets == 1 && moduleUnit (pmModule prepared) == stringToUnit unit)
+        "homonymous issuer did not retain the declared unit"
+      pure (env, prepared, tickets, rows)
+  let modules = [prepared | (_,prepared,_,_) <- issued]
+      roots = [SymbolIdentity (Text.pack (unitString (moduleUnit (pmModule prepared))))
+          "Homonymous" "value" "result" Nothing | prepared <- modules]
+      context selected = ProjectionContext
+        { projectionProfile = "exact-unit-history", projectionToolchain = "ghc-9.12.2"
+        , projectionTarget = TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []
+        , projectionRetainedGenerations = mempty, projectionCurrentOriginals = mempty
+        , projectionEntry = head selected, projectionAuxiliaryRoots = tail selected
+        , projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing
+        , projectionJsonAuthority = Nothing, projectionTextUnit = Nothing }
+      ticketRows = [[row | row <- rows, dcmName row == "Ticket"] | (_,_,_,rows) <- issued]
+  assert (roots !! 0 /= roots !! 1) "independent units collapsed their exact root identity"
+  -- This is a projection-only limitation of legacy metadata. The combined
+  -- compiler batch has a nominal guard even when independent host projections agree.
+  let hostSpellings = [[(dcmId row,dcmQualName row) | row <- rows] | rows <- ticketRows]
+  assert (hostSpellings !! 0 == hostSpellings !! 1 && length (head hostSpellings) == 1)
+    "homonymous control no longer exercises the shared legacy host projection"
+  forM_ [issued, reverse issued] $ \ordered -> do
+    let constructors = concat [cons | (_,_,cons,_) <- ordered]
+    case metadataForConstructors [] constructors of
+      Left MetadataNominalConflict{} -> pure ()
+      _ -> fail "genuine homonymous constructor batch escaped the nominal guard"
+    case preparedModuleProductConstructors
+        (projectPreparedModuleProducts (context roots) [prepared | (_,prepared,_,_) <- ordered]) of
+      Left InvalidPreparedIdentity{} -> pure ()
+      _ -> fail "genuine homonymous products escaped the exact host-ID guard"
+  let (env,_,_,_) = head issued
+      history choices = do
+        cache <- newFatIfaceCache
+        owners <- newOwnerInterfaceCache
+        bodies <- newPreparedBodyCache
+        forM_ choices $ \choice -> do
+          let selected = [root | (index,root) <- zip [0 :: Int ..] roots, index `elem` choice]
+              ctx = context selected
+          closure <- recoverPreparedClosure env cache owners bodies ctx modules
+          assert (null (closureFailures closure)) "homonymous recovery failed before exact reachability"
+          let identities = preparedTopIdentityBindings modules
+              tops = [(identity,binder) | prepared <- modules, (binding,_) <- pmBindings prepared
+                , binder <- Projection.topBinders binding
+                , Just identity <- [Map.lookup (varName binder) identities], identity `elem` roots]
+              observed = Set.fromList [identity | (identity,binder) <- tops
+                , varUnique binder `elementOfUniqSet` reachedUniques (closureReachability closure)]
+          assert (observed == Set.fromList selected)
+            "recovery demand aliased a same-spelling root from another unit"
+  result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess=120, QC.maxSize=16 }
+    (QC.checkCoverage $ QC.forAllShrink
+      (QC.listOf1 (QC.elements [[0],[1],[0,1],[1,0]]))
+      (QC.shrinkList (const [])) $ \choices ->
+        QC.cover 15 (any (== [0]) choices) "first unit only" $
+        QC.cover 15 (any (== [1]) choices) "second unit only" $
+        QC.cover 15 (any ((== 2) . length) choices) "both units" $
+        QC.cover 10 (or (zipWith (/=) choices (drop 1 choices))) "selection switch" $
+        QC.cover 5 (or (zipWith (==) choices (drop 1 choices))) "retry" $
+        QC.counterexample (show choices) (QC.ioProperty (history choices >> pure True)))
+  unless (QC.isSuccess result) (fail "homonymous unit histories diverged")
+  where
+    scratch = do
+      (path, handle) <- openTempFile "/tmp" "homonymous-unit-history"
+      hClose handle
+      removeFile path
+      createDirectoryIfMissing True path
+      pure path
 
 -- Generated replacement histories exercise the production reach update owner.
 -- The independent oracle always scans the current adjacency from all roots.
