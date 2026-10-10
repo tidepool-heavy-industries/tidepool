@@ -123,6 +123,53 @@ fn assert_pending(host: &HostedTestRuntime, operation: &OperationId) {
     );
 }
 
+fn exact_claim(
+    store: &harness::store::Store,
+    operation: &OperationId,
+) -> Option<harness::store::Claim> {
+    let mut claims = store
+        .claims(&operation.call)
+        .unwrap()
+        .into_iter()
+        .filter(|claim| claim.operation == *operation && claim.request == operation.request);
+    let claim = claims.next();
+    assert!(claims.next().is_none(), "one exact original yield claim");
+    claim
+}
+
+async fn assert_engine_yield_owner(
+    host: &HostedTestRuntime,
+    policy: &dyn exomonad_actor::ResidentToolEndpoint,
+    operation: &OperationId,
+    state: harness::store::ClaimState,
+) {
+    assert_eq!(
+        exact_claim(&host.runtime.store(), operation).unwrap().state,
+        state
+    );
+    assert!(
+        matches!(
+            host.runtime.scheduler().output(operation).await,
+            Err(harness::turn::JobError::UnknownCall)
+        ),
+        "Engine yield never admits a provider scheduler job"
+    );
+    let invocation = exomonad_tool::ToolInvocationContext {
+        origin: exomonad_tool::ToolInvocationOrigin::Model(
+            embedded_harness::original_operation(&root_identity(host), operation).unwrap(),
+        ),
+        call_id: operation.call.0.clone(),
+        namespace: None,
+    };
+    assert!(
+        matches!(
+            policy.retained_operation(invocation),
+            Err(exomonad_actor::ResidentToolError::Unavailable(_))
+        ),
+        "Engine yield never issues a native settlement owner"
+    );
+}
+
 fn assert_capture(
     round: &HostedScriptRound,
     prefix: &[harness::item::Item],
@@ -211,6 +258,167 @@ async fn wait_parent_parked(host: &HostedTestRuntime, operation: &OperationId) {
         .await
         .unwrap_or_else(|error| panic!("{error}"))
         .expect("parent parks while both provider responses remain held");
+}
+
+#[tokio::test]
+async fn engine_yield_claim_waits_and_settles_without_native_dispatch() {
+    use harness::embedding::{
+        AdmissionGuard, EmbeddedError, HostActor, HostControl, HostControlError, HostIdentity,
+        ToolSurface,
+    };
+    use harness::provider::{Provider, ProviderError};
+    use harness::transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError};
+
+    struct Offline;
+    impl Auth for Offline {
+        fn access(&self) -> Result<(String, String), TransportError> {
+            panic!("scripted yield requires no credentials")
+        }
+    }
+    struct Guard;
+    impl AdmissionGuard for Guard {}
+    struct NativeSentinel;
+    #[async_trait::async_trait]
+    impl Provider for NativeSentinel {
+        fn tools(&self) -> Vec<Value> {
+            vec![]
+        }
+        async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+            panic!("Engine yield must not reach native dispatch")
+        }
+    }
+    struct Host {
+        identity: HostIdentity,
+        wakes: tokio::sync::mpsc::UnboundedSender<harness::mailbox::DurableMailboxWake>,
+    }
+    #[async_trait::async_trait]
+    impl HostActor for Host {
+        fn identity(&self) -> &HostIdentity {
+            &self.identity
+        }
+        fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+            Ok(Box::new(Guard))
+        }
+        fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+            Ok(Arc::new(ToolSurface::new(
+                "yield-control".into(),
+                vec![],
+                Arc::new(NativeSentinel),
+            )?))
+        }
+        async fn wake(&self, envelope_id: i64) -> Result<(), String> {
+            self.wakes
+                .send(harness::mailbox::DurableMailboxWake { envelope_id })
+                .map_err(|error| error.to_string())
+        }
+        async fn control(&self, _: HostControl) -> Result<Value, HostControlError> {
+            panic!("yield control never requests actor lifecycle changes")
+        }
+    }
+    struct Transport(Arc<dyn harness::engine::ResponsesTransport>);
+    #[async_trait::async_trait]
+    impl harness::engine::ResponsesTransport for Transport {
+        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+            self.0.create(request).await
+        }
+    }
+
+    for (arguments, reason) in [(json!({}), "user_input"), (json!({"until": 0}), "timeout")] {
+        let store = Arc::new(harness::store::Store::memory().unwrap());
+        let scheduler = Arc::new(harness::turn::JobScheduler::new(1).unwrap());
+        let identity = HostIdentity {
+            run: "yield-control".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "one".into(),
+        };
+        let (wakes, incoming) = tokio::sync::mpsc::unbounded_channel();
+        let conversation = harness::embedding::Conversation::attach(
+            store.clone(),
+            Arc::new(Host {
+                identity: identity.clone(),
+                wakes,
+            }),
+            None,
+        )
+        .unwrap();
+        let (transport, mut requests) = hosted_script_provider();
+        let engine = conversation
+            .engine::<Offline, _>(
+                Transport(transport),
+                scheduler.clone(),
+                harness::engine::EngineConfig {
+                    instructions: "yield claim ownership control".into(),
+                    tools: vec![],
+                    model: "offline".into(),
+                    effort: harness::model::Effort::Low,
+                    session_id: "yield-control".into(),
+                    agent: identity.actor.clone(),
+                },
+                std::num::NonZeroU64::new(1000).unwrap(),
+            )
+            .unwrap();
+        let (_cancel, cancellation) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async move {
+            engine
+                .run_embedded(None, vec![], cancellation, incoming)
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let round = requests.recv().await.unwrap();
+            let operation = OperationId {
+                origin: harness::model::ConversationIdentity::Embedded {
+                    run: identity.run.clone(),
+                    actor: identity.actor.clone(),
+                    incarnation: identity.incarnation.clone(),
+                },
+                request: store
+                    .embedded_round_frontier(&identity)
+                    .unwrap()
+                    .pending_head
+                    .unwrap(),
+                call: CallId(YIELD_CALL.into()),
+            };
+            round.function(YIELD_CALL, "yield", arguments);
+            if reason == "user_input" {
+                loop {
+                    if let Some(claim) = exact_claim(&store, &operation) {
+                        assert_eq!(claim.state, harness::store::ClaimState::Pending);
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                assert!(
+                    requests.try_recv().is_err(),
+                    "indefinite yield prevents the successor request"
+                );
+                assert!(matches!(
+                    scheduler.output(&operation).await,
+                    Err(harness::turn::JobError::UnknownCall)
+                ));
+                conversation
+                    .input("resume-yield", "/operator", "resume")
+                    .await
+                    .unwrap();
+            }
+            let round = requests.recv().await.unwrap();
+            assert_eq!(
+                round.settled_output(YIELD_CALL),
+                json!({"reason": reason, "ready_results": []})
+            );
+            assert_eq!(
+                exact_claim(&store, &operation).unwrap().state,
+                harness::store::ClaimState::Settled
+            );
+            assert!(matches!(
+                scheduler.output(&operation).await,
+                Err(harness::turn::JobError::UnknownCall)
+            ));
+            round.finish();
+            task.await.unwrap().unwrap();
+        })
+        .await
+        .expect("exact yield claim and owned wake settle without native dispatch");
+    }
 }
 
 #[tokio::test]
@@ -337,6 +545,14 @@ async fn production_harness_three_actor_capture_phases() {
         assert_ne!(graph.iter().find(|node| node.actor == children[0].1).unwrap().bound_worktree,
             graph.iter().find(|node| node.actor == children[1].1).unwrap().bound_worktree, "distinct actual fork worktrees");
         wait_parent_parked(host, &parent).await;
+        let parent_invocation = exomonad_tool::ToolInvocationContext {
+            origin: exomonad_tool::ToolInvocationOrigin::Model(
+                embedded_harness::original_operation(&root_identity(host), &parent).unwrap(),
+            ),
+            call_id: parent.call.0.clone(), namespace: None,
+        };
+        assert!(installation.policy.retained_operation(parent_invocation).is_ok(),
+            "the real parent supplies the positive native settlement control");
         phase.record(&scenario_phases, 2, "root", &root_name, Some(PARENT_CALL), "native-tool", CAPTURE,
             Some(scripted_response_hold_ns),
             json!({"milestone": "both captured workers admitted while parent parked", "operation": parent,
@@ -344,6 +560,9 @@ async fn production_harness_three_actor_capture_phases() {
 
         let phase = PhaseClock::begin();
         let yield_head = root_head(host);
+        let yield_operation = OperationId {
+            origin: successor.origin(), request: yield_head.clone(), call: CallId(YIELD_CALL.into()),
+        };
         let scripted_response_hold_ns = successor.scripted_response_hold_ns();
         successor.function(YIELD_CALL, "yield", json!({}));
         host.context.while_root_live("three-actor persisted Engine yield",
@@ -352,15 +571,20 @@ async fn production_harness_three_actor_capture_phases() {
                     assert_pending(host, &parent);
                     if host.runtime.store().replay_turns(&yield_head).unwrap().iter().any(|turn|
                         turn.request == yield_head && turn.model_response.items.iter().any(|item|
-                            item.0["type"] == "function_call" && item.0["name"] == "yield" && item.0["call_id"] == YIELD_CALL)) { break; }
+                            item.0["type"] == "function_call" && item.0["name"] == "yield" && item.0["call_id"] == YIELD_CALL))
+                        && exact_claim(&host.runtime.store(), &yield_operation).is_some() { break; }
                     tokio::task::yield_now().await;
                 }
             })).await.unwrap_or_else(|error| panic!("{error}"))
             .expect("yield recorded while both scripted worker responses remain held");
-        assert!(host.runtime.store().claims(&CallId(YIELD_CALL.into())).unwrap().is_empty(), "Engine builtin is not a native claim");
+        // Engine claims its intrinsic for recovery, without dispatching it to
+        // the provider or issuing a native workbench settlement owner.
+        assert_engine_yield_owner(host, installation.policy.as_ref(), &yield_operation,
+            harness::store::ClaimState::Pending).await;
         phase.record(&scenario_phases, 3, "root", &root_name, Some(YIELD_CALL), "engine-builtin", "yield {}",
             Some(scripted_response_hold_ns),
-            json!({"milestone": "yield persisted with exact parent Pending and both child responses held", "parent_operation": parent}));
+            json!({"milestone": "yield persisted with exact parent Pending and both child responses held", "parent_operation": parent,
+                "yield_operation": yield_operation, "yield_claim_pending": true, "native_yield_owner": false}));
 
         let child_actors = children.iter().map(|(_, actor, _)| *actor).collect::<Vec<_>>();
         for (index, (label, actor, child_round)) in children.into_iter().enumerate() {
@@ -389,6 +613,8 @@ async fn production_harness_three_actor_capture_phases() {
         let yielded = round.settled_output(YIELD_CALL);
         assert_eq!(yielded["reason"], "tool_result", "{yielded}");
         assert!(yielded["ready_results"].as_array().unwrap().iter().any(|result| result["call"] == PARENT_CALL), "{yielded}");
+        assert_engine_yield_owner(host, installation.policy.as_ref(), &yield_operation,
+            harness::store::ClaimState::Settled).await;
         round.call("three-actor-read", READ);
         round = next_root(host, &mut requests, &mut pending).await;
         round.assert_value("three-actor-read", "True");
@@ -441,14 +667,15 @@ mod roster_tests {
 
     #[test]
     fn performance_fixture_roster_matches_report_contract() {
-        let manifest: Vec<String> = serde_json::from_str(include_str!(
-            "fixtures/three_actor_workload_roster.json"
-        ))
-        .expect("shared performance roster is valid JSON");
+        let manifest: Vec<String> =
+            serde_json::from_str(include_str!("fixtures/three_actor_workload_roster.json"))
+                .expect("shared performance roster is valid JSON");
         assert_eq!(WORKLOAD_COHORT, "three-actor-capture");
         assert_eq!(manifest, WORKLOAD_ROSTER);
         assert_eq!(manifest.first().map(String::as_str), Some("activation"));
         assert_eq!(manifest.last().map(String::as_str), Some("host-cleanup"));
-        assert!(manifest.iter().any(|phase| phase == "explicit-child-cleanup"));
+        assert!(manifest
+            .iter()
+            .any(|phase| phase == "explicit-child-cleanup"));
     }
 }
