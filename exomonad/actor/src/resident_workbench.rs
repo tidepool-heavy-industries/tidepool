@@ -20885,10 +20885,13 @@ pub(crate) mod request_tests {
             injected_modules: prepared.injected.clone(),
             reserved_declaration_modules: Vec::new(),
         });
-        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            specification.clone(),
-            &prepared.include,
-        )
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                specification.clone(),
+                &prepared.include,
+                settlement,
+            )
+        })
         .unwrap();
         let authority =
             crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone());
@@ -21297,10 +21300,13 @@ pub(crate) mod request_tests {
             injected_modules: prepared.injected,
             reserved_declaration_modules: Vec::new(),
         });
-        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            specification.clone(),
-            &prepared.include,
-        )
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                specification.clone(),
+                &prepared.include,
+                settlement,
+            )
+        })
         .unwrap();
         for helper in [RequestHelperRecipe::None, RequestHelperRecipe::ActorReply] {
             let annotations = RequestCompileAnnotations::new(evidence.clone(), helper).unwrap();
@@ -24185,10 +24191,13 @@ pub(crate) mod request_tests {
                     injected_modules: prepared.injected.clone(),
                     reserved_declaration_modules: Vec::new(),
                 });
-            let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-                specification.clone(),
-                &prepared.include,
-            );
+            let plan = tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    specification.clone(),
+                    &prepared.include,
+                    settlement,
+                )
+            });
             if let Ok(plan) = plan {
                 assert!(
                     session
@@ -24240,9 +24249,14 @@ pub(crate) mod request_tests {
         let mut leaked = specification.as_ref().clone();
         leaked.injected_modules = raw_injection;
         let leaked = Arc::new(leaked);
-        let leaked_plan =
-            tidepool_toolchain::artifacts::parse_cell_plan(leaked.clone(), &prepared.include)
-                .unwrap();
+        let leaked_plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                leaked.clone(),
+                &prepared.include,
+                settlement,
+            )
+        })
+        .unwrap();
         let before_refusal = session
             .compile_view_in(context.placement.lexical_scope)
             .unwrap()
@@ -24283,10 +24297,13 @@ pub(crate) mod request_tests {
                 .next_value_generation(),
             before_refusal
         );
-        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            specification.clone(),
-            &prepared.include,
-        )
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                specification.clone(),
+                &prepared.include,
+                settlement,
+            )
+        })
         .unwrap();
         let admitted = session
             .admit_native_setup_cell_in(

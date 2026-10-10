@@ -1423,10 +1423,13 @@ where
         &format!("{label}.parse"),
         None,
         |_| {
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                Arc::new(specification.clone()),
-                &admitted_include,
-            )
+            tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    Arc::new(specification.clone()),
+                    &admitted_include,
+                    settlement,
+                )
+            })
         },
     )
     .map_err(crate::session::SessionError::Compile)?;

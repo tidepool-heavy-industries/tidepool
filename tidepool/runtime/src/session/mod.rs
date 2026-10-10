@@ -3527,7 +3527,8 @@ mod tests {
             .current_declaration_projection_in(ScopeId::ROOT)
             .unwrap();
         let recovered = Arc::new(
-            tidepool_toolchain::declaration_join::certify_recovered_declaration_tip_in_context(
+            tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::declaration_join::certify_recovered_declaration_tip_in_context(
                 projection.context().clone(),
                 tidepool_toolchain::declaration_join::RecoveryDeclarationSelection {
                     origin:
@@ -3550,7 +3551,8 @@ mod tests {
                     family_closure: projection.receipt().family_closure().to_vec(),
                 },
                 &lib.extra_include,
-            )
+             settlement)
+            })
             .unwrap(),
         );
         let restored = render::RecoveredDeclaration {

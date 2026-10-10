@@ -69,8 +69,14 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
         let mut roots = effects.include_paths().to_vec();
         roots.insert(0, root.path().to_path_buf());
         let include = view.include_paths(&roots);
-        let plan = tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include)
-            .unwrap();
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                specification.clone(),
+                &include,
+                settlement,
+            )
+        })
+        .unwrap();
         assert_eq!(plan.items().len(), 3);
         let admission = session
             .admit_planned_cell_for_execution(

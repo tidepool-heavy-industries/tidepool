@@ -705,7 +705,9 @@ fn try_check_fixture_cell(
         reserved_declaration_modules: Vec::new(),
     });
     let includes = view.include_paths(&recipe.include);
-    let plan = tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &includes)?;
+    let plan = tidepool_testing::with_settlement(|settlement| {
+        tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &includes, settlement)
+    })?;
     let admission = resident
         .admit_planned_cell_for_execution(
             execution,
@@ -953,10 +955,13 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
     let admission = resident
         .admit_planned_cell_for_execution(
             execution.clone(),
-            tidepool_toolchain::artifacts::parse_cell_plan(
-                specification.clone(),
-                &(view.include_paths(&fixture.recipe.include)),
-            )
+            tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    specification.clone(),
+                    &(view.include_paths(&fixture.recipe.include)),
+                    settlement,
+                )
+            })
             .unwrap(),
             specification.clone(),
             specification.specification_digest(),

@@ -8407,10 +8407,13 @@ mod authored_publication_tests {
         let admission = state
             .admit_planned_cell_for_execution(
                 execution.clone(),
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(specification.clone()),
-                    &(view.include_paths(effects.include_paths())),
-                )
+                tidepool_testing::with_settlement(|settlement| {
+                    tidepool_toolchain::artifacts::parse_cell_plan(
+                        Arc::new(specification.clone()),
+                        &(view.include_paths(effects.include_paths())),
+                        settlement,
+                    )
+                })
                 .unwrap(),
                 Arc::new(specification.clone()),
                 specification.specification_digest(),
@@ -9989,10 +9992,13 @@ mod authored_publication_tests {
         let admission = session
             .admit_planned_cell_for_execution(
                 private,
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(specification.clone()),
-                    &(includes.clone()),
-                )
+                tidepool_testing::with_settlement(|settlement| {
+                    tidepool_toolchain::artifacts::parse_cell_plan(
+                        Arc::new(specification.clone()),
+                        &(includes.clone()),
+                        settlement,
+                    )
+                })
                 .unwrap(),
                 Arc::new(specification.clone()),
                 specification.specification_digest(),

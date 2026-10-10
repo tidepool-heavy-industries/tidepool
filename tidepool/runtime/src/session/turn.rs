@@ -5932,10 +5932,13 @@ mod tests {
                 roots.insert(0, first.to_owned());
             }
             let include_paths = view.include_paths(&roots);
-            let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-                Arc::new(specification.clone()),
-                &include_paths,
-            )?;
+            let plan = tidepool_testing::with_settlement(|settlement| {
+                tidepool_toolchain::artifacts::parse_cell_plan(
+                    Arc::new(specification.clone()),
+                    &include_paths,
+                    settlement,
+                )
+            })?;
             let admission = resident
                 .admit_planned_cell_for_execution(
                     execution.clone(),
@@ -6574,10 +6577,13 @@ mod tests {
         let mut roots = effects.include_paths().to_vec();
         roots.insert(0, root.path().to_owned());
         let include = view.include_paths(&roots);
-        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            Arc::new(specification.clone()),
-            &include,
-        )
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                Arc::new(specification.clone()),
+                &include,
+                settlement,
+            )
+        })
         .unwrap();
         let admission = state
             .admit_planned_cell_for_execution(
@@ -6699,15 +6705,21 @@ mod tests {
             ]
             .concat(),
         );
-        let original_plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            Arc::new(specification.clone()),
-            &original_include,
-        )
+        let original_plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                Arc::new(specification.clone()),
+                &original_include,
+                settlement,
+            )
+        })
         .unwrap();
-        let alternate_plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            Arc::new(specification.clone()),
-            &alternate_include,
-        )
+        let alternate_plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                Arc::new(specification.clone()),
+                &alternate_include,
+                settlement,
+            )
+        })
         .unwrap();
         let before = state.public_visibility_snapshot_in(execution.private_scope());
         assert!(state
@@ -6868,10 +6880,13 @@ mod tests {
         let mut roots = effects.include_paths().to_vec();
         roots.insert(0, root.path().to_owned());
         let include = view.include_paths(&roots);
-        let plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            Arc::new(specification.clone()),
-            &include,
-        )
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                Arc::new(specification.clone()),
+                &include,
+                settlement,
+            )
+        })
         .unwrap();
         let admission = session
             .admit_planned_cell_for_execution(
@@ -6958,10 +6973,13 @@ mod tests {
             let admission = session
                 .admit_planned_cell_for_execution(
                     execution,
-                    tidepool_toolchain::artifacts::parse_cell_plan(
-                        Arc::new(specification.clone()),
-                        &(admitted_include),
-                    )
+                    tidepool_testing::with_settlement(|settlement| {
+                        tidepool_toolchain::artifacts::parse_cell_plan(
+                            Arc::new(specification.clone()),
+                            &(admitted_include),
+                            settlement,
+                        )
+                    })
                     .unwrap(),
                     Arc::new(specification.clone()),
                     specification.specification_digest(),
@@ -7098,10 +7116,13 @@ mod tests {
             let admission = match &execution {
                 Some(execution) => session.admit_planned_cell_for_execution(
                     execution.clone(),
-                    tidepool_toolchain::artifacts::parse_cell_plan(
-                        Arc::new(specification.clone()),
-                        &(include_paths),
-                    )
+                    tidepool_testing::with_settlement(|settlement| {
+                        tidepool_toolchain::artifacts::parse_cell_plan(
+                            Arc::new(specification.clone()),
+                            &(include_paths),
+                            settlement,
+                        )
+                    })
                     .unwrap(),
                     Arc::new(specification.clone()),
                     specification.specification_digest(),
@@ -7256,10 +7277,13 @@ mod tests {
         let admission = session
             .admit_planned_cell_for_execution(
                 execution.clone(),
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(specification.clone()),
-                    &(admitted_include),
-                )
+                tidepool_testing::with_settlement(|settlement| {
+                    tidepool_toolchain::artifacts::parse_cell_plan(
+                        Arc::new(specification.clone()),
+                        &(admitted_include),
+                        settlement,
+                    )
+                })
                 .unwrap(),
                 Arc::new(specification.clone()),
                 specification.specification_digest(),
@@ -7920,13 +7944,16 @@ mod tests {
         let admission = session
             .admit_planned_cell_for_execution(
                 binding_execution.clone(),
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(admission_specification.clone()),
-                    &include
-                        .iter()
-                        .map(|path| path.to_path_buf())
-                        .collect::<Vec<_>>(),
-                )
+                tidepool_testing::with_settlement(|settlement| {
+                    tidepool_toolchain::artifacts::parse_cell_plan(
+                        Arc::new(admission_specification.clone()),
+                        &include
+                            .iter()
+                            .map(|path| path.to_path_buf())
+                            .collect::<Vec<_>>(),
+                        settlement,
+                    )
+                })
                 .unwrap(),
                 Arc::new(admission_specification.clone()),
                 admission_specification.specification_digest(),
@@ -8028,13 +8055,16 @@ mod tests {
         let expression_admission = session
             .admit_planned_cell_for_execution(
                 expression_execution.clone(),
-                tidepool_toolchain::artifacts::parse_cell_plan(
-                    Arc::new(expression_specification.clone()),
-                    &include
-                        .iter()
-                        .map(|path| path.to_path_buf())
-                        .collect::<Vec<_>>(),
-                )
+                tidepool_testing::with_settlement(|settlement| {
+                    tidepool_toolchain::artifacts::parse_cell_plan(
+                        Arc::new(expression_specification.clone()),
+                        &include
+                            .iter()
+                            .map(|path| path.to_path_buf())
+                            .collect::<Vec<_>>(),
+                        settlement,
+                    )
+                })
                 .unwrap(),
                 Arc::new(expression_specification.clone()),
                 expression_specification.specification_digest(),
@@ -8091,13 +8121,16 @@ mod tests {
         );
         let hidden_execution = Arc::new(session.begin_private_execution(public).unwrap());
         let hidden_scope = hidden_execution.private_scope();
-        let hidden_plan = tidepool_toolchain::artifacts::parse_cell_plan(
-            Arc::new(hidden_specification.clone()),
-            &include
-                .iter()
-                .map(|path| path.to_path_buf())
-                .collect::<Vec<_>>(),
-        )
+        let hidden_plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                Arc::new(hidden_specification.clone()),
+                &include
+                    .iter()
+                    .map(|path| path.to_path_buf())
+                    .collect::<Vec<_>>(),
+                settlement,
+            )
+        })
         .unwrap();
         let hidden_admission = session
             .admit_planned_cell_for_execution(
@@ -9769,9 +9802,14 @@ mod compiler_packet_replay {
             injected_modules: Vec::new(),
             reserved_declaration_modules: Vec::new(),
         });
-        let plan =
-            tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &inputs.include)
-                .unwrap();
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                specification.clone(),
+                &inputs.include,
+                settlement,
+            )
+        })
+        .unwrap();
         assert_eq!(plan.items().len(), 1);
         assert_eq!(plan.items()[0].binders(), ["job1"]);
         let root = tempfile::tempdir().unwrap();

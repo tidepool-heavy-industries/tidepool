@@ -113,8 +113,10 @@ fn adopt_recovery_declaration(
         reserved_declaration_modules: Vec::new(),
     });
     let include = view.include_paths(effects.include_paths());
-    let plan =
-        tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include).unwrap();
+    let plan = tidepool_testing::with_settlement(|settlement| {
+        tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include, settlement)
+    })
+    .unwrap();
     let admission = session
         .admit_planned_cell_for_execution(
             execution,
@@ -1150,8 +1152,14 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
             reserved_declaration_modules: Vec::new(),
         });
         let include = view.include_paths(effects.include_paths());
-        let plan = tidepool_toolchain::artifacts::parse_cell_plan(specification.clone(), &include)
-            .unwrap();
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                specification.clone(),
+                &include,
+                settlement,
+            )
+        })
+        .unwrap();
         let admission = resident
             .admit_planned_cell_for_execution(
                 execution,
