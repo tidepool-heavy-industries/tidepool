@@ -544,6 +544,10 @@ where
         Outcome::Running,
         &mut persist,
     );
+    if let Err(error) = constructors.validate_program(&prepared) {
+        record_stage(&mut record, Stage::Admission, Outcome::Failed { reason: error.to_string() }, &mut persist);
+        return record;
+    }
     if let Err(error) = admit_prepared(&prepared) {
         record_stage(
             &mut record,
@@ -1027,7 +1031,8 @@ mod tests {
             (9, "False", 0),
             (10, "C#", 1),
         ] {
-            table.insert(DataCon {
+            table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
                 id: DataConId(id),
                 name: name.into(),
                 tag: 1,
@@ -1035,7 +1040,7 @@ mod tests {
                 field_bangs: vec![SrcBang::NoSrcBang; arity as usize],
                 qualified_name: None,
                 type_name: name.into(),
-            });
+            }).expect("valid fixture metadata");
         }
         table
     }

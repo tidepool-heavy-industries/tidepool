@@ -61,23 +61,7 @@ pub(super) fn encode_type_graph_value(graph: &TypeGraph) -> Value {
         }
     }
     fn symbol(value: &SymbolIdentity) -> Value {
-        let SymbolIdentity {
-            unit,
-            module,
-            namespace,
-            occurrence,
-            record_parent,
-        } = value;
-        a([
-            text(unit),
-            text(module),
-            text(namespace),
-            text(occurrence),
-            match record_parent {
-                None => a([n(0_u64)]),
-                Some(parent) => a([n(1_u64), text(parent)]),
-            },
-        ])
+        super::symbol::encode(value)
     }
     fn form(value: &DeclarationForm) -> Value {
         match value {
@@ -641,22 +625,7 @@ impl<'a> Decoder<'a> {
     }
 
     fn symbol(&mut self, value: &Value) -> Result<SymbolIdentity, ParseError> {
-        let fields = array(value, 5, "symbol")?;
-        let parent = tagged(&fields[4], "record parent")?;
-        let parent_tag = unsigned(&parent[0], "record parent tag")?;
-        let record_parent = match (parent_tag, parent.len()) {
-            (0, 1) => None,
-            (1, 2) => Some(self.text(&parent[1], "record parent")?),
-            (0 | 1, _) => return Err(ParseError::Malformed("invalid record parent".into())),
-            (tag, _) => return Err(ParseError::InvalidTag(tag)),
-        };
-        Ok(SymbolIdentity {
-            unit: self.text(&fields[0], "symbol unit")?,
-            module: self.text(&fields[1], "symbol module")?,
-            namespace: self.text(&fields[2], "symbol namespace")?,
-            occurrence: self.text(&fields[3], "symbol occurrence")?,
-            record_parent,
-        })
+        super::symbol::decode(value, |value, what| self.text(value, what))
     }
 
     fn text(&mut self, value: &Value, what: &str) -> Result<String, ParseError> {

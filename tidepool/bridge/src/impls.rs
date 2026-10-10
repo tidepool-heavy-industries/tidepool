@@ -930,7 +930,8 @@ mod tests {
         let mut t = DataConTable::new();
         // Nothing=0, Just=1, False=2, True=3, ()=4, Nil=5, Cons=6, (,,)=7, Right=8, Left=9
         // I#=10, W#=11, D#=12, C#=13
-        t.insert(DataCon {
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Maybe".into(), namespace: "constructor".into(), occurrence: "Nothing".into(), record_parent: None },
             id: DataConId(0),
             name: "Nothing".into(),
             tag: 1,
@@ -938,8 +939,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("GHC.Maybe.Nothing".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Maybe".into(), namespace: "constructor".into(), occurrence: "Just".into(), record_parent: None },
             id: DataConId(1),
             name: "Just".into(),
             tag: 2,
@@ -947,8 +949,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("GHC.Maybe.Just".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Types".into(), namespace: "constructor".into(), occurrence: "False".into(), record_parent: None },
             id: DataConId(2),
             name: "False".into(),
             tag: 1,
@@ -956,8 +959,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("GHC.Types.False".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Types".into(), namespace: "constructor".into(), occurrence: "True".into(), record_parent: None },
             id: DataConId(3),
             name: "True".into(),
             tag: 2,
@@ -965,8 +969,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("GHC.Types.True".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Tuple".into(), namespace: "constructor".into(), occurrence: "(,)".into(), record_parent: None },
             id: DataConId(4),
             name: "(,)".into(),
             tag: 1,
@@ -974,8 +979,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("GHC.Tuple.(,)".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Types".into(), namespace: "constructor".into(), occurrence: "[]".into(), record_parent: None },
             id: DataConId(5),
             name: "[]".into(),
             tag: 1,
@@ -983,8 +989,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("GHC.Types.[]".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Types".into(), namespace: "constructor".into(), occurrence: ":".into(), record_parent: None },
             id: DataConId(6),
             name: ":".into(),
             tag: 2,
@@ -992,8 +999,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("GHC.Types.:".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Tuple".into(), namespace: "constructor".into(), occurrence: "(,,)".into(), record_parent: None },
             id: DataConId(7),
             name: "(,,)".into(),
             tag: 1,
@@ -1001,8 +1009,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("GHC.Tuple.(,,)".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Data.Either".into(), namespace: "constructor".into(), occurrence: "Right".into(), record_parent: None },
             id: DataConId(8),
             name: "Right".into(),
             tag: 2,
@@ -1010,8 +1019,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("Data.Either.Right".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Data.Either".into(), namespace: "constructor".into(), occurrence: "Left".into(), record_parent: None },
             id: DataConId(9),
             name: "Left".into(),
             tag: 1,
@@ -1019,8 +1029,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("Data.Either.Left".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Types".into(), namespace: "constructor".into(), occurrence: "I#".into(), record_parent: None },
             id: DataConId(10),
             name: "I#".into(),
             tag: 1,
@@ -1028,8 +1039,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("GHC.Types.I#".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Types".into(), namespace: "constructor".into(), occurrence: "W#".into(), record_parent: None },
             id: DataConId(11),
             name: "W#".into(),
             tag: 1,
@@ -1037,8 +1049,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("GHC.Types.W#".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Types".into(), namespace: "constructor".into(), occurrence: "D#".into(), record_parent: None },
             id: DataConId(12),
             name: "D#".into(),
             tag: 1,
@@ -1046,8 +1059,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("GHC.Types.D#".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Types".into(), namespace: "constructor".into(), occurrence: "C#".into(), record_parent: None },
             id: DataConId(13),
             name: "C#".into(),
             tag: 1,
@@ -1055,8 +1069,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("GHC.Types.C#".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Tuple".into(), namespace: "constructor".into(), occurrence: "()".into(), record_parent: None },
             id: DataConId(14),
             name: "()".into(),
             tag: 1,
@@ -1064,8 +1079,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("GHC.Tuple.()".into()),
             type_name: String::new(),
-        });
-        t.insert(DataCon {
+        }).expect("valid fixture metadata");
+        t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Data.Text".into(), namespace: "constructor".into(), occurrence: "Text".into(), record_parent: None },
             id: DataConId(15),
             name: "Text".into(),
             tag: 1,
@@ -1073,7 +1089,7 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("Data.Text.Text".into()),
             type_name: String::new(),
-        });
+        }).expect("valid fixture metadata");
         t
     }
 
@@ -1087,7 +1103,8 @@ mod tests {
     #[test]
     fn quadruple_roundtrip_preserves_nested_display_packet_fields() {
         let mut table = test_table();
-        table.insert(DataCon {
+        table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "(,,,)".into(), record_parent: None },
             id: DataConId(100),
             name: "(,,,)".into(),
             tag: 1,
@@ -1095,7 +1112,7 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some(QUADRUPLE.into()),
             type_name: String::new(),
-        });
+        }).expect("valid fixture metadata");
         roundtrip(
             (
                 (1i64, 2i64, 3i64),
@@ -1118,7 +1135,8 @@ mod tests {
             Packet::from_value(&value, &table),
             Err(BridgeError::UnknownDataConName(_))
         ));
-        table.insert(DataCon {
+        table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "(,,,)".into(), record_parent: None },
             id,
             name: "(,,,)".into(),
             tag: 1,
@@ -1126,7 +1144,7 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some(QUADRUPLE.into()),
             type_name: String::new(),
-        });
+        }).expect("valid fixture metadata");
         assert!(matches!(
             Packet::from_value(&HaskellValue::Con(DataConId(101), fields()), &table),
             Err(BridgeError::TypeMismatch { .. })

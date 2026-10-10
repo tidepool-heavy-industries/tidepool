@@ -6,7 +6,8 @@ use tidepool_bridge::{BridgeError, FromHaskell, HaskellValue, ToHaskell};
 use tidepool_repr::{DataCon, DataConId, DataConTable, Literal};
 
 fn insert(table: &mut DataConTable, id: u64, name: &str, arity: u32, qualified: &str) {
-    table.insert(DataCon {
+    table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
         id: DataConId(id),
         name: name.into(),
         tag: 1,
@@ -14,7 +15,7 @@ fn insert(table: &mut DataConTable, id: u64, name: &str, arity: u32, qualified: 
         field_bangs: vec![],
         qualified_name: Some(qualified.into()),
         type_name: String::new(),
-    });
+    }).expect("valid fixture metadata");
 }
 
 #[test]

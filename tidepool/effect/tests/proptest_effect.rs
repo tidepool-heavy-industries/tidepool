@@ -23,7 +23,8 @@ fn table() -> DataConTable {
         (SECOND, "SecondRequest"),
         (UNKNOWN, "UnknownRequest"),
     ] {
-        table.insert(DataCon {
+        table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
             id,
             name: name.into(),
             tag: id.0 as u32,
@@ -31,7 +32,7 @@ fn table() -> DataConTable {
             field_bangs: vec![],
             qualified_name: Some(format!("Test.{name}")),
             type_name: "TestRequest".into(),
-        });
+        }).expect("valid fixture metadata");
     }
     table
 }

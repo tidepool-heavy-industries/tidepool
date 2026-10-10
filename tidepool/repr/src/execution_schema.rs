@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+pub(crate) mod symbol;
 mod shared_content;
 use shared_content::SharedContent;
 

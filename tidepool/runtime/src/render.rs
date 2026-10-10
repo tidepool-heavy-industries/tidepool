@@ -502,7 +502,8 @@ mod tests {
             (16, "IN", 1),
         ];
         for (id, name, arity) in cons {
-            t.insert(DataCon {
+            t.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
                 id: DataConId(id),
                 name: name.into(),
                 tag: id as u32,
@@ -510,7 +511,7 @@ mod tests {
                 field_bangs: vec![],
                 qualified_name: None,
                 type_name: String::new(),
-            });
+            }).expect("valid fixture metadata");
         }
         t
     }
@@ -782,7 +783,8 @@ mod tests {
         // `Hit { path, line, text }` → {"_con","path","line","text"}.
         let mut table = test_table();
         let hit_id = DataConId(100);
-        table.insert(DataCon {
+        table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Tidepool.Records".into(), namespace: "constructor".into(), occurrence: "Hit".into(), record_parent: None },
             id: hit_id,
             name: "Hit".into(),
             tag: 1,
@@ -790,7 +792,7 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("Tidepool.Records.Hit".into()),
             type_name: String::new(),
-        });
+        }).expect("valid fixture metadata");
         table.set_field_labels(hit_id, vec!["path".into(), "line".into(), "text".into()]);
 
         let text_id = table.get_by_name("Text").unwrap();
@@ -825,7 +827,8 @@ mod tests {
         let mut table = test_table();
         let inner_id = DataConId(101);
         let outer_id = DataConId(102);
-        table.insert(DataCon {
+        table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "Loc".into(), record_parent: None },
             id: inner_id,
             name: "Loc".into(),
             tag: 1,
@@ -833,8 +836,9 @@ mod tests {
             field_bangs: vec![],
             qualified_name: None,
             type_name: String::new(),
-        });
-        table.insert(DataCon {
+        }).expect("valid fixture metadata");
+        table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "Node".into(), record_parent: None },
             id: outer_id,
             name: "Node".into(),
             tag: 1,
@@ -842,7 +846,7 @@ mod tests {
             field_bangs: vec![],
             qualified_name: None,
             type_name: String::new(),
-        });
+        }).expect("valid fixture metadata");
         table.set_field_labels(inner_id, vec!["line".into()]);
         table.set_field_labels(outer_id, vec!["name".into(), "loc".into()]);
 
@@ -862,7 +866,8 @@ mod tests {
         // A constructor WITHOUT field labels keeps the legacy positional shape.
         let mut table = test_table();
         let con_id = DataConId(103);
-        table.insert(DataCon {
+        table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "FileApplied".into(), record_parent: None },
             id: con_id,
             name: "FileApplied".into(),
             tag: 1,
@@ -870,7 +875,7 @@ mod tests {
             field_bangs: vec![],
             qualified_name: None,
             type_name: String::new(),
-        });
+        }).expect("valid fixture metadata");
         let val = HaskellValue::Con(
             con_id,
             vec![
@@ -890,7 +895,8 @@ mod tests {
         // wrapper unpacking added/removed fields), fall back to positional.
         let mut table = test_table();
         let con_id = DataConId(104);
-        table.insert(DataCon {
+        table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "Weird".into(), record_parent: None },
             id: con_id,
             name: "Weird".into(),
             tag: 1,
@@ -898,7 +904,7 @@ mod tests {
             field_bangs: vec![],
             qualified_name: None,
             type_name: String::new(),
-        });
+        }).expect("valid fixture metadata");
         // Only one label, but two runtime fields.
         table.set_field_labels(con_id, vec!["only".into()]);
         let val = HaskellValue::Con(

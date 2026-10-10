@@ -88,7 +88,8 @@ mod tests {
     use tidepool_repr::{DataCon, DataConId};
 
     fn insert(table: &mut DataConTable, id: u64, qualified_name: &str) {
-        table.insert(DataCon {
+        table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "ActorCompletedStatus".into(), record_parent: None },
             id: DataConId(id),
             name: "ActorCompletedStatus".into(),
             tag: 1,
@@ -96,7 +97,7 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some(qualified_name.into()),
             type_name: "ActorTerminalStatus".into(),
-        });
+        }).expect("valid fixture metadata");
     }
 
     fn completed() -> ActorTerminal {
@@ -136,7 +137,8 @@ mod tests {
             (101, "ActorFailedStatus", 1),
             (102, "ActorCancelledStatus", 1),
         ] {
-            table.insert(DataCon {
+            table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
                 id: DataConId(id),
                 name: name.into(),
                 tag: (id - 99) as u32,
@@ -144,7 +146,7 @@ mod tests {
                 field_bangs: vec![tidepool_repr::datacon::SrcBang::NoSrcBang; arity as usize],
                 qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
                 type_name: "ActorTerminalStatus".into(),
-            });
+            }).expect("valid fixture metadata");
         }
         table
     }
@@ -192,7 +194,8 @@ mod tests {
     #[test]
     fn terminal_source_rejects_wrong_representation_arity() {
         let mut table = DataConTable::new();
-        table.insert(DataCon {
+        table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Tidepool.Effects.Core".into(), namespace: "constructor".into(), occurrence: "ActorFailedStatus".into(), record_parent: None },
             id: DataConId(103),
             name: "ActorFailedStatus".into(),
             tag: 2,
@@ -200,7 +203,7 @@ mod tests {
             field_bangs: vec![],
             qualified_name: Some("Tidepool.Effects.Core.ActorFailedStatus".into()),
             type_name: "ActorTerminalStatus".into(),
-        });
+        }).expect("valid fixture metadata");
         let terminal = ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "failure".into(),

@@ -93,42 +93,27 @@ fn emit_datacon_lookup(
     } else {
         quote! {}
     };
-    if let Some(module) = module {
+    let lookup = if let Some(module) = module {
         let qualified = format!("{}.{}", module, haskell_name);
-        quote! {
-            table.get_by_qualified_name(#qualified)
-                .ok_or_else(|| tidepool_bridge::BridgeError::UnknownDataConQualified {
-                    qualified_name: #qualified.to_string(),
-                })#suffix
-        }
+        quote! { table.get_by_qualified_name_checked(#qualified, #haskell_arity_u32) }
     } else {
-        // Silence unused-var warnings in the `Some` branch where arity isn't
-        // consumed by the emitted code.
-        let _ = haskell_arity_usize;
-        // `get_by_name_arity_checked`, not the lenient `get_by_name_arity`:
-        // two distinct constructors sharing this name+arity must be a loud,
-        // candidate-naming error — insertion order must never silently
-        // decide which one the derive resolves to.
-        quote! {
-            match table.get_by_name_arity_checked(#haskell_name, #haskell_arity_u32) {
-                ::std::result::Result::Ok(::std::option::Option::Some(id)) => {
-                    ::std::result::Result::Ok(id)
-                }
-                ::std::result::Result::Ok(::std::option::Option::None) => {
-                    ::std::result::Result::Err(tidepool_bridge::BridgeError::UnknownDataConNameArity {
-                        name: #haskell_name.to_string(),
-                        arity: #haskell_arity_u32 as usize,
-                    })
-                }
-                ::std::result::Result::Err(ambiguous) => {
-                    ::std::result::Result::Err(tidepool_bridge::BridgeError::AmbiguousDataConNameArity {
-                        name: ambiguous.name,
-                        arity: ambiguous.arity as usize,
-                        candidates: ambiguous.candidates,
-                    })
-                }
-            }#suffix
-        }
+        quote! { table.get_by_name_arity_checked(#haskell_name, #haskell_arity_u32) }
+    };
+    let _ = haskell_arity_usize;
+    quote! {
+        match #lookup {
+            ::std::result::Result::Ok(::std::option::Option::Some(id)) => ::std::result::Result::Ok(id),
+            ::std::result::Result::Ok(::std::option::Option::None) => {
+                ::std::result::Result::Err(tidepool_bridge::BridgeError::UnknownDataConNameArity {
+                    name: #haskell_name.to_string(), arity: #haskell_arity_u32 as usize,
+                })
+            }
+            ::std::result::Result::Err(ambiguous) => {
+                ::std::result::Result::Err(tidepool_bridge::BridgeError::AmbiguousDataConNameArity {
+                    name: ambiguous.name, arity: ambiguous.arity as usize, candidates: ambiguous.candidates,
+                })
+            }
+        }#suffix
     }
 }
 

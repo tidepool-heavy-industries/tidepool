@@ -10342,6 +10342,7 @@ pub(super) mod tests {
 
     fn mount_table_row(id: u64, name: &str, arity: u32, qualified_name: Option<&str>) -> DataCon {
         DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (name.into()).clone(), record_parent: None },
             id: DataConId(id),
             name: name.into(),
             tag: 1,
@@ -12158,8 +12159,8 @@ pub(super) mod tests {
         let (mut engine, owner) =
             PreparedEngine::bootstrap(testing::prepare(wire).unwrap()).unwrap();
         let mut table = DataConTable::new();
-        table.insert(mount_table_row(78, "Nothing", 0, Some("GHC.Maybe.Nothing")));
-        table.insert(mount_table_row(79, "Just", 1, Some("GHC.Maybe.Just")));
+        table.insert_checked(mount_table_row(78, "Nothing", 0, Some("GHC.Maybe.Nothing"))).unwrap();
+        table.insert_checked(mount_table_row(79, "Just", 1, Some("GHC.Maybe.Just"))).unwrap();
         let reply = PreparedReplyEvidence::Static {
             owner,
             constructor: DataConId(77),

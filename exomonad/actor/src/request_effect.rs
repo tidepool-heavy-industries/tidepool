@@ -640,7 +640,8 @@ mod tests {
             ),
             (6, "Tidepool.Agent.Reply.Internal.ReplyStale", 0),
         ] {
-            table.insert(DataCon {
+            table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (qualified_name.rsplit('.').next().unwrap().into()).clone(), record_parent: None },
                 id: DataConId(id),
                 name: qualified_name.rsplit('.').next().unwrap().into(),
                 tag: 1,
@@ -648,7 +649,7 @@ mod tests {
                 field_bangs: Vec::new(),
                 qualified_name: Some(qualified_name.into()),
                 type_name: String::new(),
-            });
+            }).expect("valid fixture metadata");
         }
         table
     }

@@ -3190,9 +3190,9 @@ fn decode_cell_program_turn(
     let missing =
         || CompileError::ExtractFailed("complete cell lacks its sealed output observations".into());
     let turn = decode_turn_out(turn_bytes.ok_or_else(missing)?)?;
-    let (table, warnings) = read_metadata(metadata_bytes.ok_or_else(missing)?)?;
     let products = products.ok_or_else(missing)?;
     let prepared = prepared.ok_or_else(missing)?;
+    let (table, warnings) = tidepool_repr::serial::read_metadata_for_program(metadata_bytes.ok_or_else(missing)?, &prepared)?;
     let certification = TurnCertification {
         artifact_view: products.artifact_view.clone(),
         original_compile_input: None,
@@ -4439,7 +4439,8 @@ fn read_compiled_turn(
     );
 
     let deserialize_start = std::time::Instant::now();
-    let (table, warnings) = read_metadata(&meta_bytes)?;
+    let prepared = read_prepared_program(output_dir)?;
+    let (table, warnings) = tidepool_repr::serial::read_metadata_for_program(&meta_bytes, &prepared)?;
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -4449,7 +4450,6 @@ fn read_compiled_turn(
     );
     // Runtime unresolved-error naming — see lib.rs twin sites.
 
-    let prepared = read_prepared_program(output_dir)?;
     let module = extract_module_name(wrapped_source).unwrap_or_else(|| "Input".into());
     let source_path = output_dir.join(format!("{module}.hs"));
     let sealed = seal_turn_outputs(

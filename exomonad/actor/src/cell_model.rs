@@ -71,7 +71,8 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            table.insert(DataCon {
+            table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (qualified.rsplit('.').next().unwrap().into()).clone(), record_parent: None },
                 id: DataConId(index as u64),
                 name: qualified.rsplit('.').next().unwrap().into(),
                 tag: 1,
@@ -79,7 +80,7 @@ mod tests {
                 field_bangs: Vec::new(),
                 qualified_name: Some(qualified.into()),
                 type_name: "test response".into(),
-            });
+            }).expect("valid fixture metadata");
         }
         let value = || HaskellValue::Con(DataConId(50), Vec::new());
         for request in [

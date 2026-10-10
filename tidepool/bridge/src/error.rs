@@ -27,11 +27,10 @@ pub enum BridgeError {
     /// (the class of bug that let a wrong-type `HaskellValue::Con` reach the
     /// runtime with metadata/field arity disagreeing). Emitted by derived
     /// `FromHaskell`/`ToHaskell` impls instead of picking a candidate arbitrarily;
-    /// disambiguate with a `#[haskell(module = "...")]` attribute.
+    /// use the exact compiler-issued identity when spelling remains ambiguous.
     #[error(
         "ambiguous DataCon name+arity: {name} (arity {arity}) matches {candidates:?} — \
-         use a module-qualified #[haskell(module = \"...\")] attribute or \
-         get_by_qualified_name to disambiguate"
+         use the exact compiler-issued constructor identity"
     )]
     AmbiguousDataConNameArity {
         /// The unqualified constructor name.
@@ -40,7 +39,7 @@ pub enum BridgeError {
         arity: usize,
         /// Module-qualified identity (falling back to unqualified name) of
         /// every constructor that matched both the name and the arity.
-        candidates: Vec<String>,
+        candidates: Vec<tidepool_repr::execution_schema::SymbolIdentity>,
     },
     /// Lookup by module-qualified name failed. Emitted by derived
     /// `FromHaskell`/`ToHaskell` impls when a variant carries a

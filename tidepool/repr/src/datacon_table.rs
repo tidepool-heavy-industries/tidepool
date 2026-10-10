@@ -1,95 +1,42 @@
 //! A lookup table for data constructor metadata.
 
 use crate::datacon::DataCon;
-use crate::execution_schema::JsonLayout;
+use crate::execution_schema::{ConstructorDecl, JsonLayout, PreparedProgram, SymbolIdentity};
 use crate::types::DataConId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-/// The module-qualified identity of a constructor, used to distinguish a true
-/// varId collision from a harmless re-encounter of the same constructor. Falls
-/// back to the unqualified name when no qualified name is recorded.
-fn dc_identity(dc: &DataCon) -> &str {
-    dc.qualified_name.as_deref().unwrap_or(&dc.name)
-}
-
-/// A collision `insert_checked`/`extend_checked` refuses to silently absorb.
-///
-/// Two independent axes, both loud rather than last-writer-wins:
-///
-/// - [`Self::Id`]: two DISTINCT constructors (different module-qualified
-///   identity) sharing one [`DataConId`] — i.e. a 56-bit `stableVarId` hash
-///   collision. This is the silent-eviction class that took out freer-simple's
-///   `Union`: a dcid-keyed map would overwrite one constructor's entry with
-///   the other, and the lost constructor then resolves to `None` (or to the
-///   wrong metadata) at effect-machine setup / case dispatch.
-/// - [`Self::QualifiedName`]: two DISTINCT [`DataConId`]s claiming one
-///   module-qualified name. `by_qualified_name` (and `freer_names::resolve`,
-///   which consults it first) can only remember one id per name, so the
-///   other would silently drop out of qualified-name resolution — the mirror
-///   image of the `Id` case. A real accumulated session table carries zero
-///   such duplicates (library constructor ids are stable across extract
-///   invocations), so this indicates the extractor's id minting changed, not
-///   a shape to tie-break.
+/// A checked metadata ingestion cannot change a constructor's nominal owner.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DataConCollision {
-    #[error(
-        "DataConId {:#018x} collision: two distinct constructors hash to the same \
-         varId — '{first}' and '{second}'. One would silently shadow the other in \
-         the DataConTable (the freer-simple Union eviction class). This is a \
-         Haskell-side stableVarId hash collision; rename one constructor or widen \
-         the hash. (Set TIDEPOOL_VARID_AUDIT=1 on the extract for the forensic dump.)",
-        .id.0
-    )]
-    Id {
-        /// The colliding identifier.
-        id: DataConId,
-        /// Module-qualified identity of the constructor already in the table.
-        first: String,
-        /// Module-qualified identity of the constructor that collided with it.
-        second: String,
-    },
-    #[error(
-        "qualified name {qualified_name:?} collision: two distinct DataConIds claim \
-         it — {:#018x} ('{first}') and {:#018x} ('{second}'). `by_qualified_name` \
-         (and `freer_names::resolve`, which consults it first) can only remember \
-         one id per name, so the other would silently drop out of qualified-name \
-         resolution. A real accumulated session table carries zero such \
-         duplicates, so this indicates the extractor's id minting changed; it is \
-         not something to tie-break.",
-        .first_id.0, .second_id.0
-    )]
-    QualifiedName {
-        /// The qualified name both ids claim.
-        qualified_name: String,
-        /// The id already holding the qualified-name mapping.
-        first_id: DataConId,
-        /// Identity of the constructor already holding the mapping.
-        first: String,
-        /// The id that tried to claim the same qualified name.
-        second_id: DataConId,
-        /// Identity of the constructor that collided with it.
-        second: String,
-    },
+    #[error("invalid constructor symbol {identity:?}: {detail}")]
+    InvalidIdentity { identity: SymbolIdentity, detail: &'static str },
+    #[error("DataConId {id:?} belongs to {first:?}, not {second:?}")]
+    Id { id: DataConId, first: SymbolIdentity, second: SymbolIdentity },
+    #[error("constructor {identity:?} has conflicting tags or arities: {first_tag}/{first_arity}, {second_tag}/{second_arity}")]
+    Shape { identity: SymbolIdentity, first_tag: u32, first_arity: u32, second_tag: u32, second_arity: u32 },
+    #[error("constructor {identity:?} claims two DataConIds: {first_id:?}, {second_id:?}")]
+    Identity { identity: SymbolIdentity, first_id: DataConId, second_id: DataConId },
 }
 
-/// Two or more constructors share an unqualified name and representation arity.
-/// Use [`DataConTable::get_by_qualified_name`] to resolve their identities.
+/// A diagnostic spelling has several possible nominal owners.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error(
-    "ambiguous DataCon lookup: {} constructors named {name:?} with arity {arity} — {candidates:?}. \
-     Insertion order cannot decide which one is correct; disambiguate via \
-     get_by_qualified_name (module-qualified identity).",
-    candidates.len()
-)]
+#[error("ambiguous constructor spelling {name:?}, arity {arity}: {candidates:?}")]
 pub struct AmbiguousDataCon {
-    /// The unqualified name that was looked up.
     pub name: String,
-    /// The requested representation arity.
     pub arity: u32,
-    /// Module-qualified identity (falling back to unqualified name) of every
-    /// constructor that matched both the name and the arity.
-    pub candidates: Vec<String>,
+    pub candidates: Vec<SymbolIdentity>,
+}
+
+/// The complete output table must agree with every emitted constructor.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ConstructorMetadataMismatch {
+    #[error("constructor {identity:?} has no metadata at {host_id:?}")]
+    Missing { host_id: DataConId, identity: SymbolIdentity },
+    #[error("constructor {prepared:?} at {host_id:?} resolves to {metadata:?}")]
+    Identity { host_id: DataConId, prepared: SymbolIdentity, metadata: SymbolIdentity },
+    #[error("constructor {identity:?} at {host_id:?} has conflicting tag/arity metadata")]
+    Shape { host_id: DataConId, identity: SymbolIdentity },
 }
 
 /// Lookup table for data constructor metadata.
@@ -111,7 +58,9 @@ struct DataConMetadata {
     /// Mapping from unqualified name to all DataConIds sharing that name.
     by_name: HashMap<String, Vec<DataConId>>,
     /// Mapping from module-qualified name to its DataConId.
-    by_qualified_name: HashMap<String, DataConId>,
+    by_qualified_name: HashMap<String, Vec<DataConId>>,
+    /// The exact defining symbol, independently of diagnostic aliases.
+    by_identity: HashMap<SymbolIdentity, DataConId>,
     /// Mapping from parent-type name (e.g. "Verdict") to all DataConIds of
     /// that type, kept sorted by constructor TAG (declaration order) by
     /// [`DataConTable::sort_type_name_bucket`] — see that function for why insertion
@@ -151,83 +100,62 @@ impl DataConTable {
         self.json_layout.as_ref()
     }
 
-    /// Insert a data constructor, refusing to silently overwrite a DISTINCT
-    /// constructor already bound to the same id (a `stableVarId` collision).
-    ///
-    /// A re-encounter of the SAME constructor (identical module-qualified
-    /// identity, AND agreeing tag/rep_arity) is idempotent — the table load
-    /// legitimately sees a constructor from several metadata sources. An
-    /// agreeing identity that disagrees on tag or rep_arity is still an error:
-    /// two encodings of "the same" constructor that disagree on its actual
-    /// shape indicate a corrupt or mismatched metadata source, not a harmless
-    /// re-encounter, and silently keeping the last-inserted shape (as plain
-    /// `insert` would) risks a runtime tag/arity mismatch downstream.
-    ///
-    /// This is the always-on table-integrity guard; it covers every producer,
-    /// including future non-extract ones. (The Haskell extractor additionally
-    /// stops coalescing colliding entries so they actually reach this check.)
-    ///
-    /// Also guards the `by_qualified_name` axis: two DISTINCT ids claiming one
-    /// qualified name is a hard error too — see [`Self::check_collision`].
+    /// Admit a row without replacing another owner or changing its physical shape.
     pub fn insert_checked(&mut self, dc: DataCon) -> Result<(), DataConCollision> {
         self.check_collision(&dc)?;
-        self.insert(dc);
+        let type_name = self.upsert_no_sort(dc);
+        self.sort_type_name_bucket(&type_name);
         Ok(())
     }
 
-    /// Check `dc` against both collision axes without mutating the table —
-    /// the by-id axis (a `stableVarId` hash collision between two distinct
-    /// constructors) and the `by_qualified_name` axis (two distinct
-    /// [`DataConId`]s claiming one qualified name). A re-encounter of the SAME
-    /// id or the SAME id already owning a qualified name is not a collision.
-    ///
-    /// Shared by [`Self::insert_checked`] and [`Self::extend_checked`] so both
-    /// ingestion routes see byte-identical guard logic rather than two
-    /// hand-maintained copies that could drift.
     fn check_collision(&self, dc: &DataCon) -> Result<(), DataConCollision> {
+        let identity = &dc.identity;
+        if identity.unit.is_empty() || identity.module.is_empty() || identity.occurrence.is_empty()
+            || identity.namespace != "constructor" || identity.occurrence != dc.name
+            || identity.record_parent.as_ref().is_some_and(|parent| parent.is_empty()) {
+            return Err(DataConCollision::InvalidIdentity {
+                identity: identity.clone(), detail: "expected a complete constructor symbol agreeing with its name",
+            });
+        }
         if let Some(existing) = self.metadata.by_id.get(&dc.id) {
-            if dc_identity(existing) != dc_identity(dc) {
+            if existing.identity != dc.identity {
                 return Err(DataConCollision::Id {
-                    id: dc.id,
-                    first: dc_identity(existing).to_string(),
-                    second: dc_identity(dc).to_string(),
+                    id: dc.id, first: existing.identity.clone(), second: dc.identity.clone(),
                 });
             }
             if existing.tag != dc.tag || existing.rep_arity != dc.rep_arity {
-                return Err(DataConCollision::Id {
-                    id: dc.id,
-                    first: format!(
-                        "{} (tag={}, rep_arity={})",
-                        dc_identity(existing),
-                        existing.tag,
-                        existing.rep_arity
-                    ),
-                    second: format!(
-                        "{} (tag={}, rep_arity={})",
-                        dc_identity(dc),
-                        dc.tag,
-                        dc.rep_arity
-                    ),
+                return Err(DataConCollision::Shape {
+                    identity: identity.clone(), first_tag: existing.tag, first_arity: existing.rep_arity,
+                    second_tag: dc.tag, second_arity: dc.rep_arity,
                 });
             }
         }
-        if let Some(qn) = &dc.qualified_name {
-            if let Some(&existing_id) = self.metadata.by_qualified_name.get(qn) {
-                if existing_id != dc.id {
-                    let existing_identity = self
-                        .metadata
-                        .by_id
-                        .get(&existing_id)
-                        .map(|d| dc_identity(d).to_string())
-                        .unwrap_or_else(|| qn.clone());
-                    return Err(DataConCollision::QualifiedName {
-                        qualified_name: qn.clone(),
-                        first_id: existing_id,
-                        first: existing_identity,
-                        second_id: dc.id,
-                        second: dc_identity(dc).to_string(),
-                    });
-                }
+        if let Some(&first_id) = self.metadata.by_identity.get(identity) {
+            if first_id != dc.id {
+                return Err(DataConCollision::Identity { identity: identity.clone(), first_id, second_id: dc.id });
+            }
+        }
+        Ok(())
+    }
+
+    /// Joint admission is complete only after its producer has emitted all
+    /// declarations and their metadata from the same lowering transaction.
+    pub fn validate_program(&self, program: &PreparedProgram) -> Result<(), ConstructorMetadataMismatch> {
+        self.validate_constructors(program.constructors())
+    }
+
+    pub fn validate_constructors(&self, constructors: &[ConstructorDecl]) -> Result<(), ConstructorMetadataMismatch> {
+        for declared in constructors {
+            let Some(metadata) = self.get(declared.host_id) else {
+                return Err(ConstructorMetadataMismatch::Missing { host_id: declared.host_id, identity: declared.identity.clone() });
+            };
+            if metadata.identity != declared.identity {
+                return Err(ConstructorMetadataMismatch::Identity {
+                    host_id: declared.host_id, prepared: declared.identity.clone(), metadata: metadata.identity.clone(),
+                });
+            }
+            if metadata.tag != declared.tag || metadata.rep_arity as usize != declared.field_reps.len() {
+                return Err(ConstructorMetadataMismatch::Shape { host_id: declared.host_id, identity: declared.identity.clone() });
             }
         }
         Ok(())
@@ -244,61 +172,36 @@ impl DataConTable {
     fn upsert_no_sort(&mut self, dc: DataCon) -> String {
         let metadata = Arc::make_mut(&mut self.metadata);
         let id = dc.id;
-        let name = dc.name.clone();
-        let qualified_name = dc.qualified_name.clone();
         let type_name = dc.type_name.clone();
-
-        // If we're overwriting an existing entry for this id, remove its old
-        // name mapping — but ONLY if it actually changed. Re-pushing an
-        // unchanged name would move `id` to the end of its `by_name` Vec, and
-        // `get_by_name_arity` treats that Vec's order as a load-bearing
-        // insertion-order tie-break between two ids sharing a name+arity. A
-        // genuine re-encounter of the same constructor (identical name) must
-        // keep its position, so skip the retain/re-push when the name is equal.
-        let mut name_unchanged = false;
-        let mut type_name_changed = false;
-        if let Some(old_dc) = metadata.by_id.insert(id, dc) {
-            if old_dc.name == name {
-                name_unchanged = true;
-            } else if let Some(vec) = metadata.by_name.get_mut(&old_dc.name) {
-                vec.retain(|&existing| existing != id);
-                if vec.is_empty() {
-                    metadata.by_name.remove(&old_dc.name);
+        if let Some(old) = metadata.by_id.get(&id) {
+            if old.type_name != dc.type_name {
+                if let Some(bucket) = metadata.by_type_name.get_mut(&old.type_name) {
+                    bucket.retain(|value| *value != id);
                 }
+                metadata.by_type_name.entry(type_name.clone()).or_default().push(id);
             }
-            if old_dc.type_name != type_name {
-                type_name_changed = true;
-                if let Some(vec) = metadata.by_type_name.get_mut(&old_dc.type_name) {
-                    vec.retain(|&existing| existing != id);
-                    if vec.is_empty() {
-                        metadata.by_type_name.remove(&old_dc.type_name);
+            if old.qualified_name != dc.qualified_name {
+                if let Some(alias) = &old.qualified_name {
+                    if let Some(bucket) = metadata.by_qualified_name.get_mut(alias) {
+                        bucket.retain(|value| *value != id);
                     }
                 }
-            }
-            if old_dc.qualified_name != qualified_name {
-                if let Some(ref old_qn) = old_dc.qualified_name {
-                    metadata.by_qualified_name.remove(old_qn);
+                if let Some(alias) = &dc.qualified_name {
+                    metadata.by_qualified_name.entry(alias.clone()).or_default().push(id);
+                    metadata.by_qualified_name.get_mut(alias).unwrap().sort_unstable();
                 }
             }
         } else {
-            type_name_changed = true; // first time this id is seen
+            metadata.by_name.entry(dc.name.clone()).or_default().push(id);
+            metadata.by_name.get_mut(&dc.name).unwrap().sort_unstable();
+            metadata.by_type_name.entry(type_name.clone()).or_default().push(id);
+            if let Some(alias) = &dc.qualified_name {
+                metadata.by_qualified_name.entry(alias.clone()).or_default().push(id);
+                    metadata.by_qualified_name.get_mut(alias).unwrap().sort_unstable();
+            }
+            metadata.by_identity.insert(dc.identity.clone(), id);
         }
-
-        // Insert the mapping for the new name (skipping an unchanged name so
-        // its existing Vec position — and thus tie-break order — is preserved).
-        if !name_unchanged {
-            metadata.by_name.entry(name).or_default().push(id);
-        }
-        if type_name_changed {
-            metadata
-                .by_type_name
-                .entry(type_name.clone())
-                .or_default()
-                .push(id);
-        }
-        if let Some(qn) = qualified_name {
-            metadata.by_qualified_name.insert(qn, id);
-        }
+        metadata.by_id.insert(id, dc);
         type_name
     }
 
@@ -320,12 +223,6 @@ impl DataConTable {
         }
     }
 
-    /// Insert a data constructor. Overwrites if id already exists.
-    pub fn insert(&mut self, dc: DataCon) {
-        let type_name = self.upsert_no_sort(dc);
-        self.sort_type_name_bucket(&type_name);
-    }
-
     /// Batch sibling of [`Self::insert_checked`]: performs the same
     /// collision-checked insert for every constructor in `dcs`, but sorts
     /// each AFFECTED `by_type_name` bucket exactly once at the end instead of
@@ -340,7 +237,7 @@ impl DataConTable {
     /// left at the same point, not a batch-deferred half state.
     ///
     /// Routes through [`Self::check_collision`] — the same guard
-    /// `insert_checked` uses, including the `by_qualified_name` axis — so a
+    /// `insert_checked` uses, including the exact-identity axis — so a
     /// collision on either axis stops the batch exactly where the sequential
     /// fold would.
     pub fn extend_checked<I>(&mut self, dcs: I) -> Result<(), DataConCollision>
@@ -370,7 +267,18 @@ impl DataConTable {
 
     /// Look up by module-qualified name (e.g., "Data.Map.Bin"), returning the DataConId.
     pub fn get_by_qualified_name(&self, qname: &str) -> Option<DataConId> {
-        self.metadata.by_qualified_name.get(qname).copied()
+        let ids = self.metadata.by_qualified_name.get(qname)?;
+        (ids.len() == 1).then(|| ids[0])
+    }
+
+    /// Resolve the exact compiler-issued symbol.
+    pub fn get_by_identity(&self, identity: &SymbolIdentity) -> Option<DataConId> {
+        self.metadata.by_identity.get(identity).copied()
+    }
+
+    /// A spelling narrows candidates; it never chooses between nominal owners.
+    pub fn get_by_qualified_name_checked(&self, name: &str, arity: u32) -> Result<Option<DataConId>, AmbiguousDataCon> {
+        self.unique_candidate(self.metadata.by_qualified_name.get(name), name, arity)
     }
 
     /// Record field labels for a constructor, in field order. Returns `None` for
@@ -427,7 +335,7 @@ impl DataConTable {
     ///
     /// Returns `None` when multiple constructors share the same unqualified name,
     /// since the result would be ambiguous. Use `get_by_qualified_name`,
-    /// or `get_by_name_arity` instead.
+    /// or a checked arity lookup instead.
     pub fn get_by_name(&self, name: &str) -> Option<DataConId> {
         self.metadata
             .by_name
@@ -435,71 +343,23 @@ impl DataConTable {
             .and_then(|vec| (vec.len() == 1).then(|| vec[0]))
     }
 
-    /// Look up by name AND expected arity, scanning all entries with this name.
-    ///
-    /// This avoids the ambiguity of `get_by_name` when multiple constructors
-    /// share the same unqualified name (e.g. `Array` from aeson vs GHC internals).
-    /// Returns the last matching entry (preserving insertion-order preference).
-    pub fn get_by_name_arity(&self, name: &str, arity: u32) -> Option<DataConId> {
-        self.metadata.by_name.get(name).and_then(|vec| {
-            vec.iter()
-                .rev()
-                .find(|&&id| {
-                    self.metadata
-                        .by_id
-                        .get(&id)
-                        .is_some_and(|dc| dc.rep_arity == arity)
-                })
-                .copied()
-        })
+    /// Refuse ambiguity instead of depending on insertion order.
+    pub fn get_by_name_arity_checked(&self, name: &str, arity: u32) -> Result<Option<DataConId>, AmbiguousDataCon> {
+        self.unique_candidate(self.metadata.by_name.get(name), name, arity)
     }
 
-    /// Look up by name AND expected arity, erroring loudly instead of
-    /// tie-breaking when more than one constructor shares both — the strict
-    /// counterpart of [`Self::get_by_name_arity`]. Callers that must not let
-    /// metadata insertion order decide encoding (including the derive's
-    /// default unqualified resolution path) use this instead.
-    ///
-    /// - Zero matches (name absent entirely, or present only at other
-    ///   arities): `Ok(None)` — a plain "not found," not an ambiguity.
-    /// - Exactly one match: `Ok(Some(id))`.
-    /// - Two or more matches: `Err(AmbiguousDataCon)` naming every candidate's
-    ///   module-qualified identity (falling back to unqualified name).
-    pub fn get_by_name_arity_checked(
-        &self,
-        name: &str,
-        arity: u32,
-    ) -> Result<Option<DataConId>, AmbiguousDataCon> {
-        let Some(ids) = self.metadata.by_name.get(name) else {
-            return Ok(None);
-        };
-        let mut candidates: Vec<DataConId> = ids
-            .iter()
-            .copied()
-            .filter(|id| {
-                self.metadata
-                    .by_id
-                    .get(id)
-                    .is_some_and(|dc| dc.rep_arity == arity)
-            })
-            .collect();
-        match candidates.len() {
-            0 => Ok(None),
-            1 => Ok(candidates.pop()),
-            _ => Err(AmbiguousDataCon {
-                name: name.to_string(),
-                arity,
-                candidates: candidates
-                    .iter()
-                    .map(|id| {
-                        self.metadata
-                            .by_id
-                            .get(id)
-                            .map(|dc| dc_identity(dc).to_string())
-                            .unwrap_or_else(|| format!("{id:?}"))
-                    })
-                    .collect(),
-            }),
+    fn unique_candidate(&self, ids: Option<&Vec<DataConId>>, name: &str, arity: u32) -> Result<Option<DataConId>, AmbiguousDataCon> {
+        let Some(ids) = ids else { return Ok(None); };
+        let candidates: Vec<&DataCon> = ids.iter().filter_map(|id| self.get(*id))
+            .filter(|dc| dc.rep_arity == arity).collect();
+        match candidates.as_slice() {
+            [] => Ok(None),
+            [dc] => Ok(Some(dc.id)),
+            _ => {
+                let mut identities: Vec<_> = candidates.iter().map(|dc| dc.identity.clone()).collect();
+                identities.sort();
+                Err(AmbiguousDataCon { name: name.to_owned(), arity, candidates: identities })
+            }
         }
     }
 
@@ -551,7 +411,7 @@ mod tests {
     #[test]
     fn response_contexts_share_metadata_but_replace_json_authority() {
         let mut table = DataConTable::new();
-        table.insert(make_datacon(1, "Example", 1, 0));
+        table.insert_checked(make_datacon(1, "Example", 1, 0)).expect("valid fixture metadata");
         let layout = JsonLayout {
             object: 1,
             array: 2,
@@ -590,7 +450,7 @@ mod tests {
     #[test]
     fn shared_table_mutation_keeps_snapshots_and_indexes_independent() {
         let mut table = DataConTable::new();
-        table.insert(make_datacon_typed(1, "First", 1, 1, "Example"));
+        table.insert_checked(make_datacon_typed(1, "First", 1, 1, "Example")).expect("valid fixture metadata");
         table.set_field_labels(DataConId(1), vec!["original".into()]);
         table.set_field_types(DataConId(1), vec!["Int".into()]);
         let snapshot = table.clone();
@@ -626,592 +486,105 @@ mod tests {
     }
 
     fn make_datacon(id: u64, name: &str, tag: u32, rep_arity: u32) -> DataCon {
+        let mut row = nominal_row(id, "fixture", "Fixture", name, rep_arity);
+        row.tag = tag;
+        row
+    }
+
+    fn make_datacon_typed(id: u64, name: &str, tag: u32, arity: u32, type_name: &str) -> DataCon {
+        let mut row = make_datacon(id, name, tag, arity);
+        row.type_name = type_name.into();
+        row
+    }
+
+    fn nominal_row(id: u64, unit: &str, module: &str, occurrence: &str, arity: u32) -> DataCon {
         DataCon {
-            id: DataConId(id),
-            name: name.to_string(),
-            tag,
-            rep_arity,
-            field_bangs: vec![],
-            qualified_name: None,
-            type_name: String::new(),
-        }
-    }
-
-    fn make_datacon_qualified(
-        id: u64,
-        name: &str,
-        tag: u32,
-        rep_arity: u32,
-        qname: &str,
-    ) -> DataCon {
-        DataCon {
-            id: DataConId(id),
-            name: name.to_string(),
-            tag,
-            rep_arity,
-            field_bangs: vec![],
-            qualified_name: Some(qname.to_string()),
-            type_name: String::new(),
-        }
-    }
-
-    fn make_datacon_typed(
-        id: u64,
-        name: &str,
-        tag: u32,
-        rep_arity: u32,
-        type_name: &str,
-    ) -> DataCon {
-        DataCon {
-            id: DataConId(id),
-            name: name.to_string(),
-            tag,
-            rep_arity,
-            field_bangs: vec![],
-            qualified_name: None,
-            type_name: type_name.to_string(),
+            identity: SymbolIdentity {
+                unit: unit.into(), module: module.into(), namespace: "constructor".into(),
+                occurrence: occurrence.into(), record_parent: None,
+            },
+            id: DataConId(id), name: occurrence.into(), tag: 1, rep_arity: arity,
+            field_bangs: vec![], qualified_name: Some("Shared.Ticket".into()), type_name: "Ticket".into(),
         }
     }
 
     #[test]
-    fn test_insert_and_get_by_id() {
+    fn homonymous_units_at_one_host_id_refuse_without_replacement() {
+        let first = nominal_row(18329113560068104472, "unit-one", "Homonymous", "Ticket", 0);
+        let second = nominal_row(first.id.0, "unit-two", "Homonymous", "Ticket", 0);
         let mut table = DataConTable::new();
-        let dc = make_datacon(1, "Just", 1, 1);
-        table.insert(dc.clone());
-        assert_eq!(table.get(DataConId(1)), Some(&dc));
+        table.insert_checked(first.clone()).unwrap();
+        let snapshot = table.clone();
+        assert!(matches!(table.insert_checked(second), Err(DataConCollision::Id { .. })));
+        assert_eq!(table, snapshot);
+        assert_eq!(table.get_by_identity(&first.identity), Some(first.id));
     }
 
     #[test]
-    fn test_insert_and_get_by_name() {
+    fn distinct_exact_owners_share_spelling_without_granting_unique_lookup() {
+        let first = nominal_row(1, "unit-one", "Homonymous", "Ticket", 0);
+        let second = nominal_row(2, "unit-two", "Homonymous", "Ticket", 0);
         let mut table = DataConTable::new();
-        let dc = make_datacon(1, "Just", 1, 1);
-        table.insert(dc);
-        assert_eq!(table.get_by_name("Just"), Some(DataConId(1)));
+        table.extend_checked([first.clone(), second.clone()]).unwrap();
+        assert_eq!(table.get_by_identity(&first.identity), Some(first.id));
+        assert_eq!(table.get_by_identity(&second.identity), Some(second.id));
+        assert_eq!(table.get_by_qualified_name("Shared.Ticket"), None);
+        assert!(table.get_by_qualified_name_checked("Shared.Ticket", 0).is_err());
+        assert!(table.get_by_name_arity_checked("Ticket", 0).is_err());
     }
 
     #[test]
-    fn test_maybe_rep_arity() {
+    fn one_exact_identity_cannot_claim_two_host_ids() {
+        let first = nominal_row(1, "unit-one", "Homonymous", "Ticket", 0);
+        let second = DataCon { id: DataConId(2), ..first.clone() };
         let mut table = DataConTable::new();
-        let nothing = make_datacon(1, "Nothing", 1, 0);
-        let just = make_datacon(2, "Just", 2, 1);
-        table.insert(nothing.clone());
-        table.insert(just.clone());
-
-        assert_eq!(table.get(DataConId(1)).unwrap().rep_arity, 0);
-        assert_eq!(table.get(DataConId(2)).unwrap().rep_arity, 1);
+        table.insert_checked(first).unwrap();
+        assert!(matches!(table.insert_checked(second), Err(DataConCollision::Identity { .. })));
     }
 
     #[test]
-    fn test_multiple_datacons() {
+    fn reencounter_is_idempotent_and_shape_changes_refuse() {
+        let first = nominal_row(1, "unit-one", "Homonymous", "Ticket", 0);
         let mut table = DataConTable::new();
-        table.insert(make_datacon(1, "A", 1, 0));
-        table.insert(make_datacon(2, "B", 2, 0));
-        table.insert(make_datacon(3, "C", 3, 0));
-
-        assert_eq!(table.len(), 3);
-        let ids: Vec<u64> = table
-            .iter()
-            .map(|dc| match dc.id {
-                DataConId(id) => id,
-            })
-            .collect();
-        assert!(ids.contains(&1));
-        assert!(ids.contains(&2));
-        assert!(ids.contains(&3));
+        table.insert_checked(first.clone()).unwrap();
+        let snapshot = table.clone();
+        table.insert_checked(first.clone()).unwrap();
+        assert_eq!(table, snapshot);
+        assert!(matches!(table.insert_checked(DataCon { tag: 2, ..first.clone() }), Err(DataConCollision::Shape { .. })));
+        assert!(matches!(table.insert_checked(DataCon { rep_arity: 1, ..first }), Err(DataConCollision::Shape { .. })));
+        assert_eq!(table, snapshot);
     }
 
     #[test]
-    fn test_overwrite() {
+    fn malformed_nominal_identity_is_not_ingested() {
+        let mut row = nominal_row(1, "unit-one", "Homonymous", "Ticket", 0);
+        row.identity.unit.clear();
         let mut table = DataConTable::new();
-        let dc1 = make_datacon(1, "Just", 1, 1);
-        let mut dc2 = make_datacon(1, "Just", 1, 1);
-        dc2.field_bangs = vec![SrcBang::SrcBang];
-
-        table.insert(dc1);
-        table.insert(dc2.clone());
-
-        assert_eq!(table.len(), 1);
-        assert_eq!(table.get(DataConId(1)), Some(&dc2));
+        assert!(matches!(table.insert_checked(row), Err(DataConCollision::InvalidIdentity { .. })));
+        assert!(table.is_empty());
     }
 
     #[test]
-    fn test_overwrite_name_and_by_name_consistency() {
+    fn checked_batch_retains_only_its_accepted_prefix() {
+        let first = nominal_row(1, "unit-one", "Homonymous", "Ticket", 0);
+        let second = nominal_row(2, "unit-two", "Homonymous", "Ticket", 0);
+        let conflict = nominal_row(1, "unit-three", "Homonymous", "Ticket", 0);
+        let untouched = nominal_row(3, "unit-four", "Homonymous", "Ticket", 0);
         let mut table = DataConTable::new();
-
-        let dc1 = make_datacon(1, "Just", 1, 1);
-        let dc2 = make_datacon(1, "Other", 1, 1);
-
-        table.insert(dc1);
-        table.insert(dc2.clone());
-
-        assert_eq!(table.len(), 1);
-        assert_eq!(table.get(DataConId(1)), Some(&dc2));
-
-        assert_eq!(table.get_by_name("Other"), Some(DataConId(1)));
-        assert_eq!(table.get_by_name("Just"), None);
-
-        let dc3 = make_datacon(2, "Same", 2, 0);
-        let dc4 = make_datacon(3, "Same", 3, 0);
-
-        table.insert(dc3.clone());
-        // Only one "Same" — not ambiguous yet
-        assert_eq!(table.get_by_name("Same"), Some(DataConId(2)));
-
-        table.insert(dc4.clone());
-        // Two "Same" entries — get_by_name returns None (ambiguous), use
-        // get_all_by_name instead
-        let all = table.get_all_by_name("Same");
-        assert_eq!(all.len(), 2);
-        assert_eq!(all[0], DataConId(2));
-        assert_eq!(all[1], DataConId(3));
+        assert!(table.extend_checked([first.clone(), second.clone(), conflict, untouched]).is_err());
+        assert_eq!(table.len(), 2);
+        assert_eq!(table.constructors_of_type("Ticket"), [first.id, second.id]);
+        assert_eq!(table.get(DataConId(3)), None);
     }
 
     #[test]
-    fn test_get_by_name_missing() {
-        let table = DataConTable::new();
-        assert_eq!(table.get_by_name("Missing"), None);
-    }
-
-    #[test]
-    fn test_get_all_by_name() {
+    fn freer_union_collision_preserves_both_existing_indexes() {
+        let union = nominal_row(0xFFFF, "freer-simple", "Data.OpenUnion.Internal", "Union", 1);
+        let other = nominal_row(0xFFFF, "ghc", "GHC.Driver.Session", "DynFlags", 0);
         let mut table = DataConTable::new();
-        table.insert(make_datacon(100, "Tip", 1, 0));
-        table.insert(make_datacon(200, "Tip", 1, 0));
-
-        let all = table.get_all_by_name("Tip");
-        assert_eq!(all.len(), 2);
-        assert_eq!(all[0], DataConId(100));
-        assert_eq!(all[1], DataConId(200));
-    }
-
-    #[test]
-    fn test_get_by_name_arity_disambiguates() {
-        let mut table = DataConTable::new();
-        table.insert(make_datacon(100, "Bin", 1, 5));
-        table.insert(make_datacon(200, "Bin", 1, 3));
-
-        assert_eq!(table.get_by_name_arity("Bin", 5), Some(DataConId(100)));
-        assert_eq!(table.get_by_name_arity("Bin", 3), Some(DataConId(200)));
-    }
-
-    #[test]
-    fn test_get_by_qualified_name() {
-        let mut table = DataConTable::new();
-        table.insert(make_datacon_qualified(100, "Bin", 1, 5, "Data.Map.Bin"));
-        table.insert(make_datacon_qualified(200, "Bin", 1, 3, "Data.Set.Bin"));
-
-        assert_eq!(
-            table.get_by_qualified_name("Data.Map.Bin"),
-            Some(DataConId(100))
-        );
-        assert_eq!(
-            table.get_by_qualified_name("Data.Set.Bin"),
-            Some(DataConId(200))
-        );
-        assert_eq!(table.get_by_qualified_name("Data.Map.Tip"), None);
-    }
-
-    #[test]
-    fn test_get_by_name_returns_none_on_ambiguity() {
-        let mut table = DataConTable::new();
-        table.insert(make_datacon_qualified(100, "Tip", 1, 0, "Data.Map.Tip"));
-        table.insert(make_datacon_qualified(200, "Tip", 1, 0, "Data.Set.Tip"));
-
-        // Ambiguous name returns None — use get_by_qualified_name instead
-        assert_eq!(table.get_by_name("Tip"), None);
-    }
-
-    #[test]
-    fn test_get_by_name_unique_still_works() {
-        let mut table = DataConTable::new();
-        table.insert(make_datacon_qualified(100, "Just", 2, 1, "Data.Maybe.Just"));
-        // Only one "Just" — no ambiguity
-        assert_eq!(table.get_by_name("Just"), Some(DataConId(100)));
-    }
-
-    #[test]
-    fn test_overwrite_cleans_old_qualified_name() {
-        let mut table = DataConTable::new();
-        table.insert(make_datacon_qualified(1, "Foo", 1, 0, "Mod.A.Foo"));
-        assert_eq!(table.get_by_qualified_name("Mod.A.Foo"), Some(DataConId(1)));
-
-        // Overwrite same id with different qualified name
-        table.insert(make_datacon_qualified(1, "Foo", 1, 0, "Mod.B.Foo"));
-        assert_eq!(table.get_by_qualified_name("Mod.A.Foo"), None);
-        assert_eq!(table.get_by_qualified_name("Mod.B.Foo"), Some(DataConId(1)));
-    }
-
-    #[test]
-    fn test_overwrite_qualified_to_none() {
-        let mut table = DataConTable::new();
-        table.insert(make_datacon_qualified(1, "Foo", 1, 0, "Mod.Foo"));
-        assert_eq!(table.get_by_qualified_name("Mod.Foo"), Some(DataConId(1)));
-
-        // Overwrite with None qualified name — old mapping should be removed
-        table.insert(make_datacon(1, "Foo", 1, 0));
-        assert_eq!(table.get_by_qualified_name("Mod.Foo"), None);
-    }
-
-    #[test]
-    fn test_get_by_name_ambiguous_without_qualified_names() {
-        let mut table = DataConTable::new();
-        // Two constructors with None qualified_name
-        table.insert(make_datacon(100, "Dup", 1, 0));
-        table.insert(make_datacon(200, "Dup", 1, 0));
-        // Ambiguous name returns None
-        assert_eq!(table.get_by_name("Dup"), None);
-    }
-
-    #[test]
-    fn test_get_by_qualified_name_missing() {
-        let table = DataConTable::new();
-        assert_eq!(table.get_by_qualified_name("No.Such.Thing"), None);
-    }
-
-    // ---- insert_checked: loud varId-collision detection ----
-
-    /// Two DISTINCT constructors hashing to one id must be rejected loudly,
-    /// naming both module-qualified — instead of the silent overwrite `insert`
-    /// performs (which evicted freer-simple's Union).
-    #[test]
-    fn insert_checked_rejects_true_collision() {
-        let mut table = DataConTable::new();
-        table
-            .insert_checked(make_datacon_qualified(
-                42,
-                "Union",
-                1,
-                1,
-                "Data.OpenUnion.Internal.Union",
-            ))
-            .expect("first insert is clean");
-        let err = table
-            .insert_checked(make_datacon_qualified(
-                42,
-                "DynFlags",
-                1,
-                1,
-                "GHC.Driver.Session.DynFlags",
-            ))
-            .expect_err("distinct constructor at same id must collide");
-        match &err {
-            DataConCollision::Id { id, first, second } => {
-                assert_eq!(*id, DataConId(42));
-                assert_eq!(first, "Data.OpenUnion.Internal.Union");
-                assert_eq!(second, "GHC.Driver.Session.DynFlags");
-            }
-            other => panic!("expected DataConCollision::Id, got {other:?}"),
-        }
-        // The survivor is unchanged — the collision did not overwrite it.
-        assert_eq!(
-            table.get_by_qualified_name("Data.OpenUnion.Internal.Union"),
-            Some(DataConId(42))
-        );
-        assert_eq!(
-            table.get_by_qualified_name("GHC.Driver.Session.DynFlags"),
-            None
-        );
-        // Error message names both constructors and the id.
-        let msg = err.to_string();
-        assert!(msg.contains("Union"), "msg: {msg}");
-        assert!(msg.contains("DynFlags"), "msg: {msg}");
-        assert!(msg.contains("0x000000000000002a"), "msg: {msg}");
-    }
-
-    /// The SAME constructor seen twice (same module-qualified identity, e.g.
-    /// from both the wired-in list and a tycon scan) is a legitimate
-    /// re-encounter and must stay silent (idempotent).
-    #[test]
-    fn insert_checked_allows_same_constructor_reencounter() {
-        let mut table = DataConTable::new();
-        let dc = make_datacon_qualified(7, "Just", 2, 1, "GHC.Maybe.Just");
-        table.insert_checked(dc.clone()).expect("first insert");
-        table
-            .insert_checked(dc)
-            .expect("identical re-encounter is not a collision");
-        assert_eq!(table.len(), 1);
-        assert_eq!(
-            table.get_by_qualified_name("GHC.Maybe.Just"),
-            Some(DataConId(7))
-        );
-    }
-
-    /// An agreeing qualified name but DISAGREEING tag/rep_arity must still be
-    /// rejected — the old last-wins behavior (plain `insert`) would silently
-    /// keep whichever shape arrived last, and a downstream consumer that
-    /// resolved the id earlier would then disagree with the table about the
-    /// constructor's actual tag/arity.
-    #[test]
-    fn insert_checked_rejects_same_identity_disagreeing_tag_arity() {
-        let mut table = DataConTable::new();
-        table
-            .insert_checked(make_datacon_qualified(5, "Foo", 1, 2, "Mod.Foo"))
-            .expect("first insert is clean");
-        let err = table
-            .insert_checked(make_datacon_qualified(5, "Foo", 2, 3, "Mod.Foo"))
-            .expect_err("agreeing identity but disagreeing tag/arity must collide");
-        match &err {
-            DataConCollision::Id { id, first, second } => {
-                assert_eq!(*id, DataConId(5));
-                assert!(first.contains("tag=1"), "first: {first}");
-                assert!(first.contains("rep_arity=2"), "first: {first}");
-                assert!(second.contains("tag=2"), "second: {second}");
-                assert!(second.contains("rep_arity=3"), "second: {second}");
-            }
-            other => panic!("expected DataConCollision::Id, got {other:?}"),
-        }
-        // The survivor (first insert) is unchanged.
-        assert_eq!(table.get(DataConId(5)).unwrap().tag, 1);
-        assert_eq!(table.get(DataConId(5)).unwrap().rep_arity, 2);
-    }
-
-    /// Without qualified names, identity falls back to the unqualified name:
-    /// same name = silent, different name = collision.
-    #[test]
-    fn insert_checked_falls_back_to_unqualified_name() {
-        let mut table = DataConTable::new();
-        table.insert_checked(make_datacon(9, "Same", 1, 0)).unwrap();
-        table
-            .insert_checked(make_datacon(9, "Same", 1, 0))
-            .expect("same unqualified name is a re-encounter");
-        let err = table
-            .insert_checked(make_datacon(9, "Different", 1, 0))
-            .expect_err("different unqualified name at same id collides");
-        match &err {
-            DataConCollision::Id { first, second, .. } => {
-                assert_eq!(first, "Same");
-                assert_eq!(second, "Different");
-            }
-            other => panic!("expected DataConCollision::Id, got {other:?}"),
-        }
-    }
-
-    // ---- insert_checked / extend_checked: by_qualified_name collision guard ----
-
-    /// Two DISTINCT ids claiming one qualified name must be rejected loudly,
-    /// naming both ids — the mirror-image of the by-id guard above.
-    #[test]
-    fn insert_checked_rejects_distinct_ids_sharing_a_qualified_name() {
-        let mut table = DataConTable::new();
-        table
-            .insert_checked(make_datacon_qualified(
-                10,
-                "Val",
-                1,
-                1,
-                "Control.Monad.Freer.Val",
-            ))
-            .expect("first insert is clean");
-        let err = table
-            .insert_checked(make_datacon_qualified(
-                910,
-                "Val",
-                1,
-                1,
-                "Control.Monad.Freer.Val",
-            ))
-            .expect_err("a second, distinct id claiming the same qualified name must collide");
-        match &err {
-            DataConCollision::QualifiedName {
-                qualified_name,
-                first_id,
-                second_id,
-                ..
-            } => {
-                assert_eq!(qualified_name, "Control.Monad.Freer.Val");
-                assert_eq!(*first_id, DataConId(10));
-                assert_eq!(*second_id, DataConId(910));
-            }
-            other => panic!("expected DataConCollision::QualifiedName, got {other:?}"),
-        }
-        // The survivor is unchanged — the collision did not overwrite it.
-        assert_eq!(
-            table.get_by_qualified_name("Control.Monad.Freer.Val"),
-            Some(DataConId(10))
-        );
-        assert_eq!(table.get(DataConId(910)), None);
-        // The error message names both colliding ids.
-        let msg = err.to_string();
-        assert!(msg.contains("0x000000000000000a"), "msg: {msg}");
-        assert!(msg.contains("0x000000000000038e"), "msg: {msg}");
-        assert!(msg.contains("Control.Monad.Freer.Val"), "msg: {msg}");
-    }
-
-    /// The SAME id re-presenting the qualified name it already owns is not a
-    /// collision — the guard only fires when a DIFFERENT id claims it.
-    #[test]
-    fn insert_checked_allows_same_id_reclaiming_its_own_qualified_name() {
-        let mut table = DataConTable::new();
-        let dc = make_datacon_qualified(7, "Just", 2, 1, "GHC.Maybe.Just");
-        table.insert_checked(dc.clone()).expect("first insert");
-        table
-            .insert_checked(dc)
-            .expect("the same id re-claiming its own qualified name is not a collision");
-        assert_eq!(table.len(), 1);
-    }
-
-    /// `extend_checked` must route through the SAME qualified-name guard as
-    /// `insert_checked` — not a separately hand-maintained copy that could
-    /// drift. Two distinct ids sharing a qualified name, fed through the
-    /// batch API, must collide identically.
-    #[test]
-    fn extend_checked_rejects_distinct_ids_sharing_a_qualified_name() {
-        let mut table = DataConTable::new();
-        let first = make_datacon_qualified(1, "A", 1, 0, "Shared.Qualified.Name");
-        let second = make_datacon_qualified(2, "B", 1, 0, "Shared.Qualified.Name");
-        let err = table
-            .extend_checked([first, second])
-            .expect_err("extend_checked must reject the same qualified-name collision");
-        match &err {
-            DataConCollision::QualifiedName {
-                first_id,
-                second_id,
-                ..
-            } => {
-                assert_eq!(*first_id, DataConId(1));
-                assert_eq!(*second_id, DataConId(2));
-            }
-            other => panic!("expected DataConCollision::QualifiedName, got {other:?}"),
-        }
-        // Only the first (clean) entry landed.
-        assert_eq!(table.len(), 1);
-        assert_eq!(
-            table.get_by_qualified_name("Shared.Qualified.Name"),
-            Some(DataConId(1))
-        );
-    }
-
-    #[test]
-    fn test_qualified_name_does_not_affect_by_name() {
-        let mut table = DataConTable::new();
-        table.insert(make_datacon_qualified(1, "Bin", 1, 5, "Data.Map.Bin"));
-        // get_by_name still works via unqualified name
-        assert_eq!(table.get_by_name("Bin"), Some(DataConId(1)));
-        // get_by_qualified_name also works
-        assert_eq!(
-            table.get_by_qualified_name("Data.Map.Bin"),
-            Some(DataConId(1))
-        );
-    }
-
-    #[test]
-    fn test_constructors_of_type_declaration_order() {
-        let mut table = DataConTable::new();
-        table.insert(make_datacon_typed(1, "GO", 1, 0, "Verdict"));
-        table.insert(make_datacon_typed(2, "PARTIAL", 2, 0, "Verdict"));
-        table.insert(make_datacon_typed(3, "NOGO", 3, 0, "Verdict"));
-        // Unrelated type must not pollute the lookup.
-        table.insert(make_datacon_typed(4, "Just", 1, 1, "Maybe"));
-
-        assert_eq!(
-            table.constructors_of_type("Verdict"),
-            vec![DataConId(1), DataConId(2), DataConId(3)]
-        );
-        assert_eq!(table.constructors_of_type("Maybe"), vec![DataConId(4)]);
-        assert_eq!(table.constructors_of_type("NoSuchType"), Vec::new());
-    }
-
-    #[test]
-    fn test_qualified_name_disambiguates_same_name_same_arity() {
-        let mut table = DataConTable::new();
-        // Both "Tip" with arity 0 — get_by_name_arity can't disambiguate
-        table.insert(make_datacon_qualified(100, "Tip", 1, 0, "Data.Map.Tip"));
-        table.insert(make_datacon_qualified(200, "Tip", 1, 0, "Data.Set.Tip"));
-
-        assert_eq!(
-            table.get_by_qualified_name("Data.Map.Tip"),
-            Some(DataConId(100))
-        );
-        assert_eq!(
-            table.get_by_qualified_name("Data.Set.Tip"),
-            Some(DataConId(200))
-        );
-        // get_by_name_arity returns one of them (last inserted)
-        assert_eq!(table.get_by_name_arity("Tip", 0), Some(DataConId(200)));
-    }
-
-    // ---- get_by_name_arity_checked: loud ambiguity, no insertion-order tie-break ----
-
-    /// Two distinct constructors sharing name AND arity (e.g. `Bin` from
-    /// `Data.Map` vs `Data.Set`, both binary) must be a loud error naming
-    /// both candidates — not a silent last-inserted pick.
-    #[test]
-    fn get_by_name_arity_checked_rejects_true_ambiguity() {
-        let mut table = DataConTable::new();
-        table.insert(make_datacon_qualified(
-            100,
-            "Bin",
-            1,
-            2,
-            "Data.Map.Internal.Bin",
-        ));
-        table.insert(make_datacon_qualified(
-            200,
-            "Bin",
-            1,
-            2,
-            "Data.Set.Internal.Bin",
-        ));
-
-        let err = table
-            .get_by_name_arity_checked("Bin", 2)
-            .expect_err("two distinct Bin/2 constructors must be ambiguous");
-        assert_eq!(err.name, "Bin");
-        assert_eq!(err.arity, 2);
-        assert_eq!(err.candidates.len(), 2);
-        assert!(err
-            .candidates
-            .contains(&"Data.Map.Internal.Bin".to_string()));
-        assert!(err
-            .candidates
-            .contains(&"Data.Set.Internal.Bin".to_string()));
-        let msg = err.to_string();
-        assert!(msg.contains("Bin"), "msg: {msg}");
-        assert!(msg.contains("Data.Map.Internal.Bin"), "msg: {msg}");
-        assert!(msg.contains("Data.Set.Internal.Bin"), "msg: {msg}");
-    }
-
-    /// A requested arity that no same-named constructor carries is a plain
-    /// "not found" — `Ok(None)`, never a silent fallback to a wrong-arity
-    /// entry.
-    #[test]
-    fn get_by_name_arity_checked_absent_arity_is_ok_none() {
-        let mut table = DataConTable::new();
-        table.insert(make_datacon(1, "Just", 2, 1));
-
-        assert_eq!(table.get_by_name_arity_checked("Just", 5), Ok(None));
-        assert_eq!(table.get_by_name_arity_checked("Missing", 0), Ok(None));
-    }
-
-    /// A single unambiguous name+arity match still resolves cleanly — the
-    /// strict path must not regress the common, non-colliding case.
-    #[test]
-    fn get_by_name_arity_checked_resolves_unique_match() {
-        let mut table = DataConTable::new();
-        table.insert(make_datacon(1, "Just", 2, 1));
-        table.insert(make_datacon(2, "Nothing", 1, 0));
-
-        assert_eq!(
-            table.get_by_name_arity_checked("Just", 1),
-            Ok(Some(DataConId(1)))
-        );
-    }
-
-    /// Same name, DIFFERENT arities is not ambiguous — arity alone
-    /// disambiguates, each resolves to its own unique id.
-    #[test]
-    fn get_by_name_arity_checked_different_arities_not_ambiguous() {
-        let mut table = DataConTable::new();
-        table.insert(make_datacon(1, "Read", 1, 1));
-        table.insert(make_datacon(2, "Read", 1, 2));
-
-        assert_eq!(
-            table.get_by_name_arity_checked("Read", 1),
-            Ok(Some(DataConId(1)))
-        );
-        assert_eq!(
-            table.get_by_name_arity_checked("Read", 2),
-            Ok(Some(DataConId(2)))
-        );
+        table.insert_checked(union.clone()).unwrap();
+        assert!(matches!(table.insert_checked(other), Err(DataConCollision::Id { .. })));
+        assert_eq!(table.get_by_identity(&union.identity), Some(union.id));
+        assert_eq!(table.get_by_name("Union"), Some(union.id));
     }
 }

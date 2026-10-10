@@ -1093,7 +1093,8 @@ mod tests {
             )
             .is_err());
         let mut edited_table = DataConTable::new();
-        edited_table.insert(tidepool_repr::DataCon {
+        edited_table.insert_checked(tidepool_repr::DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "Edited".into(), record_parent: None },
             id: tidepool_repr::DataConId(99),
             name: "Edited".into(),
             tag: 1,
@@ -1101,7 +1102,7 @@ mod tests {
             field_bangs: vec![],
             qualified_name: None,
             type_name: "Edited".into(),
-        });
+        }).expect("valid fixture metadata");
         assert!(first_proof
             .original_contexts(
                 &first_proof.target,

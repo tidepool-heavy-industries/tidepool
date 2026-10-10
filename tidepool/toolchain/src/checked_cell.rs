@@ -3804,7 +3804,7 @@ impl CheckedItemOffer {
             original_execution,
             item: self.item.clone(),
             target: target.clone(),
-            table: read_table(root)?,
+            table: read_table(root, target)?,
             yield_sites_digest: authenticated_sites,
             value_interface,
             generation: self.generation,
@@ -3845,9 +3845,9 @@ fn bound_binder_identities(bound: &[Value]) -> impl Iterator<Item = (&str, u64)>
     })
 }
 
-pub(crate) fn read_table(root: &Path) -> Result<tidepool_repr::DataConTable, CompileError> {
+pub(crate) fn read_table(root: &Path, target: &tidepool_repr::execution_schema::PreparedProgram) -> Result<tidepool_repr::DataConTable, CompileError> {
     let (table, _) =
-        tidepool_repr::serial::read_metadata(&read(root.join("meta.cbor"), 32 * 1024 * 1024)?)?;
+        tidepool_repr::serial::read_metadata_for_program(&read(root.join("meta.cbor"), 32 * 1024 * 1024)?, target)?;
     Ok(table)
 }
 

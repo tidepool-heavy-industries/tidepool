@@ -940,10 +940,7 @@ fn exact_host_constructor(
         || row.field_reps != fields
         || row.tag != 1
         || row.family_size != 1
-        || code
-            .table
-            .get(row.host_id)
-            .is_none_or(|table| table.rep_arity as usize != fields.len() || table.tag != row.tag)
+        || code.table.validate_constructors(std::slice::from_ref(row)).is_err()
     {
         return Err(host_mount_failure(
             "host constructor differs from its authenticated table",
@@ -1013,9 +1010,7 @@ fn host_representation(
                 let row = constructors
                     .get(id.0 as usize)
                     .ok_or_else(|| host_mount_failure("host JSON layout constructor missing"))?;
-                if code.table.get(row.host_id).is_none_or(|table| {
-                    table.rep_arity as usize != row.field_reps.len() || table.tag != row.tag
-                }) {
+                if code.table.validate_constructors(std::slice::from_ref(row)).is_err() {
                     return Err(host_mount_failure(
                         "host JSON layout differs from its compiler table",
                     ));
@@ -8703,7 +8698,8 @@ mod authored_publication_tests {
         *body = if fail { 0 } else { 1 };
         let mut table = DataConTable::new();
         for constructor in &wire.constructors {
-            table.insert(tidepool_repr::DataCon {
+            table.insert_checked(tidepool_repr::DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (constructor.identity.occurrence.clone()).clone(), record_parent: None },
                 id: constructor.host_id,
                 name: constructor.identity.occurrence.clone(),
                 tag: constructor.tag,
@@ -8714,7 +8710,7 @@ mod authored_publication_tests {
                     constructor.identity.module, constructor.identity.occurrence
                 )),
                 type_name: constructor.family.occurrence.clone(),
-            });
+            }).expect("valid fixture metadata");
         }
         TurnCode {
             provenance: Arc::default(),

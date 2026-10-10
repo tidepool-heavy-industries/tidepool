@@ -38,7 +38,8 @@ fn build_collision_table() -> (DataConTable, DataConId, DataConId) {
     let alpha_id = DataConId(1);
     let beta_id = DataConId(2);
 
-    table.insert(DataCon {
+    table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "TestMod.Alpha".into(), namespace: "constructor".into(), occurrence: "Read".into(), record_parent: None },
         id: alpha_id,
         name: "Read".to_string(),
         tag: 1,
@@ -46,8 +47,9 @@ fn build_collision_table() -> (DataConTable, DataConId, DataConId) {
         field_bangs: vec![],
         qualified_name: Some("TestMod.Alpha.Read".to_string()),
         type_name: String::new(),
-    });
-    table.insert(DataCon {
+    }).expect("valid fixture metadata");
+    table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "TestMod.Beta".into(), namespace: "constructor".into(), occurrence: "Read".into(), record_parent: None },
         id: beta_id,
         name: "Read".to_string(),
         tag: 1,
@@ -55,7 +57,7 @@ fn build_collision_table() -> (DataConTable, DataConId, DataConId) {
         field_bangs: vec![],
         qualified_name: Some("TestMod.Beta.Read".to_string()),
         type_name: String::new(),
-    });
+    }).expect("valid fixture metadata");
     (table, alpha_id, beta_id)
 }
 

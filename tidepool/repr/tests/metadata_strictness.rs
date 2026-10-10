@@ -16,7 +16,7 @@ fn header() -> Vec<u8> {
     bytes
 }
 
-/// A writer-conforming 9-element metadata entry: id, name, tag 1, arity 0,
+/// A writer-conforming 10-element metadata entry: id, name, tag 1, arity 0,
 /// no bangs, and the given (possibly corrupted) qualified-name/field-labels
 /// elements — the two fields these tests target. Field types (9th element)
 /// is always the empty array here — not one of this file's targets.
@@ -31,7 +31,14 @@ fn entry(dcid: u64, name: &str, qualified_name: Cbor, field_labels: Cbor) -> Cbo
         field_labels,
         Cbor::Text(name.to_string()),
         Cbor::Array(vec![]),
+        symbol(name),
     ])
+}
+
+fn symbol(name: &str) -> Cbor {
+    Cbor::Array(vec![Cbor::Text("fixture".into()), Cbor::Text("Fixture".into()),
+        Cbor::Text("constructor".into()), Cbor::Text(name.into()),
+        Cbor::Array(vec![Cbor::Integer(0.into())])])
 }
 
 fn plain_entry(dcid: u64, name: &str) -> Cbor {
@@ -103,7 +110,7 @@ fn non_text_field_label_element_is_malformed() {
 
 // ---- entry-level: field types (9th element) ----
 
-/// A 9-element entry whose 9th (field-types) element is corrupted; the first
+/// A 10-element entry whose 9th (field-types) element is corrupted; the first
 /// 8 elements are the plain-entry shape.
 fn entry_with_field_types(dcid: u64, name: &str, field_types: Cbor) -> Cbor {
     Cbor::Array(vec![
@@ -116,6 +123,7 @@ fn entry_with_field_types(dcid: u64, name: &str, field_types: Cbor) -> Cbor {
         Cbor::Array(vec![]),
         Cbor::Text(name.to_string()),
         field_types,
+        symbol(name),
     ])
 }
 
@@ -273,7 +281,8 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
     // No qualified name (writer emits "" -> reader None) and no field labels
     // (writer emits [] -> reader empty Vec) — the exact placeholder shapes
     // strictness must still accept.
-    table.insert(DataCon {
+    table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: "Nothing".into(), record_parent: None },
         id: DataConId(1),
         name: "Nothing".to_string(),
         tag: 1,
@@ -281,9 +290,10 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
         field_bangs: vec![],
         qualified_name: None,
         type_name: "Maybe".to_string(),
-    });
+    }).expect("valid fixture metadata");
     // With a qualified name, field labels, and field types.
-    table.insert(DataCon {
+    table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Tidepool.Records".into(), namespace: "constructor".into(), occurrence: "Hit".into(), record_parent: None },
         id: DataConId(2),
         name: "Hit".to_string(),
         tag: 1,
@@ -291,7 +301,7 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
         field_bangs: vec![],
         qualified_name: Some("Tidepool.Records.Hit".to_string()),
         type_name: "Hit".to_string(),
-    });
+    }).expect("valid fixture metadata");
     table.set_field_labels(DataConId(2), vec!["path".to_string(), "line".to_string()]);
     table.set_field_types(DataConId(2), vec!["Text".to_string(), "Int".to_string()]);
 
@@ -309,4 +319,30 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
     assert_eq!(recovered_warnings.has_io, warnings.has_io);
     assert_eq!(recovered_warnings.captured_type, warnings.captured_type);
     assert_eq!(recovered_warnings.warnings, warnings.warnings);
+}
+
+#[test]
+fn old_ambiguous_metadata_version_is_rejected() {
+    let mut bytes = meta_bytes(vec![plain_entry(1, "Ticket")], vec![has_io_false()]);
+    bytes[4..6].copy_from_slice(&4u16.to_be_bytes());
+    assert!(matches!(read_metadata(&bytes), Err(ReadError::UnsupportedVersion(4, 0))));
+}
+
+#[test]
+fn mandatory_constructor_symbol_rejects_missing_owner_and_spelling_mismatch() {
+    for (field, malformed) in [(0, ""), (1, ""), (2, "value"), (3, "Other")] {
+        let mut entry = plain_entry(1, "Ticket");
+        let Cbor::Array(row) = &mut entry else { unreachable!() };
+        let Cbor::Array(identity) = &mut row[9] else { unreachable!() };
+        identity[field] = Cbor::Text(malformed.into());
+        assert_malformed(read_metadata(&meta_bytes(vec![entry], vec![has_io_false()])), "identity");
+    }
+}
+
+#[test]
+fn current_header_cannot_hide_a_nine_field_ambiguous_row() {
+    let mut entry = plain_entry(1, "Ticket");
+    let Cbor::Array(row) = &mut entry else { unreachable!() };
+    row.pop();
+    assert!(matches!(read_metadata(&meta_bytes(vec![entry], vec![has_io_false()])), Err(ReadError::InvalidStructure(_))));
 }

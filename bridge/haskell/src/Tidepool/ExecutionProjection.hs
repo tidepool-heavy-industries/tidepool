@@ -94,7 +94,7 @@ import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
 import GHC.Types.Id (idDmdSig, isDeadEndId, isDataConWorkId_maybe)
 import GHC.Types.ForeignCall qualified as Foreign
 import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
-import GHC.Types.Name.Occurrence (fieldOcc_maybe, isDataOcc, occNameString)
+import GHC.Types.Name.Occurrence (isDataOcc, occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
 import GHC.Types.Unique.Set (UniqSet, addListToUniqSet, addOneToUniqSet, elementOfUniqSet, emptyUniqSet, mkUniqSet, nonDetEltsUniqSet)
@@ -119,7 +119,7 @@ import Tidepool.ExecutionEncode
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
-import Tidepool.Identity (varId)
+import Tidepool.Identity (nameSymbolIdentity, varId)
 import Tidepool.FatIface (fatOriginalOwner)
 import Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..), pmModule, pmCoverage, pmBindings
@@ -3400,13 +3400,8 @@ nameSymbolFor :: Module -> Text -> Name -> SymbolIdentity
 nameSymbolFor fallback namespace = nameSymbolWithFallback (Just fallback) namespace
 
 nameSymbolWithFallback :: Maybe Module -> Text -> Name -> SymbolIdentity
-nameSymbolWithFallback fallback namespace name = case nameModule_maybe name of
-  Just modul -> SymbolIdentity (Text.pack (unitString (moduleUnit modul)))
-    (Text.pack (moduleNameString (moduleName modul))) namespace
-    (Text.pack (occNameString (nameOccName name)))
-    (if isExternalName name
-       then Text.pack . unpackFS <$> fieldOcc_maybe (nameOccName name)
-       else Nothing)
+nameSymbolWithFallback fallback namespace name = case nameSymbolIdentity namespace name of
+  Just identity -> identity
   Nothing -> case fallback of
     Just modul -> SymbolIdentity (Text.pack (unitString (moduleUnit modul)))
       (Text.pack (moduleNameString (moduleName modul))) namespace

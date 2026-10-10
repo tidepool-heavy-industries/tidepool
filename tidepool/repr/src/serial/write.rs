@@ -56,7 +56,7 @@ pub fn write_metadata(
                 .collect(),
         );
 
-        // Always the full 9-element shape (matching
+        // Always the full 10-element shape (matching
         // `Tidepool.CborEncode.encodeMetaEntry`): an absent qualified name is
         // the empty string, absent field labels/types the empty array. The
         // parent type name (8th element) is always present; the field types
@@ -71,6 +71,7 @@ pub fn write_metadata(
             field_labels_value(table.field_labels_of(dc.id).unwrap_or(&[])),
             Value::Text(dc.type_name.clone()),
             field_types_value(table.field_types_of(dc.id).unwrap_or(&[])),
+            crate::execution_schema::symbol::encode(&dc.identity),
         ];
         entries.push(Value::Array(entry));
     }

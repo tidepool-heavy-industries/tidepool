@@ -4,7 +4,7 @@
 -- The reader owns validation; this module preserves the already-normalized
 -- table order and uses only definite-length arrays and primitive leaves.
 module Tidepool.ExecutionEncode
-  ( encodeWireProgram, encodeProjectedGroup, encodeModuleProducts
+  ( encodeSymbol, encodeWireProgram, encodeProjectedGroup, encodeModuleProducts
   , ModuleProductEncoding, prepareModuleProductEncoding
   , moduleProductInput, moduleProductBytes, encodeModuleProductInventory
   , ProjectedGroupEncoding, prepareProjectedGroupEncoding, prepareModuleProductEncodingFromGroups

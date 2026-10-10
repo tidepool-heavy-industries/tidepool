@@ -3,7 +3,7 @@
 pub mod read;
 pub mod write;
 
-pub use read::{read_metadata, MetaWarnings};
+pub use read::{read_metadata, read_metadata_for_program, read_metadata_for_programs, MetaWarnings};
 pub use write::write_metadata;
 
 /// Errors that can occur during CBOR deserialization of constructor metadata.
@@ -11,6 +11,10 @@ pub use write::write_metadata;
 /// Wraps underlying `ciborium` errors and adds structural context.
 #[derive(Debug, thiserror::Error)]
 pub enum ReadError {
+    /// Complete prepared output and constructor metadata disagree.
+    #[error("constructor metadata: {0}")]
+    ConstructorMetadata(#[from] crate::ConstructorMetadataMismatch),
+
     /// An error occurred in the underlying CBOR parser.
     #[error("CBOR decode error: {0}")]
     Cbor(#[from] ciborium::de::Error<std::io::Error>),
@@ -58,9 +62,9 @@ pub const HEADER_MAGIC: [u8; 4] = [0x54, 0x50, 0x4C, 0x52];
 /// only on a breaking shape change, in the same commit as the Haskell
 /// serializer and the regenerated fixture corpora.
 ///
-/// `4.0` removes obsolete variable-name and poison tables. Older payloads are
-/// rejected so stale artifacts cannot silently preserve that runtime contract.
-pub const VERSION_MAJOR: u16 = 4;
+/// `5.0` requires complete compiler-issued constructor symbols. Older payloads
+/// lack nominal owners and must be regenerated rather than reconstructed.
+pub const VERSION_MAJOR: u16 = 5;
 /// Wire format minor version. An older minor within the same major is
 /// accepted (forward-compatible read); a newer minor than this build
 /// supports is rejected.

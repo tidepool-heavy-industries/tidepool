@@ -984,7 +984,7 @@ impl ModuleCandidateOffer {
         let sites = decode_turn_yield_sites(site_observations)?;
         let mut output = read_native_turn_artifacts(directory, turn.clone(), source.to_owned())?;
         let deserialize_start = Instant::now();
-        let (table, warnings) = read_metadata(&output.metadata)?;
+        let (table, warnings) = tidepool_repr::serial::read_metadata_for_program(&output.metadata, &output.target)?;
         timing::record_stage(
             timing::NO_NODE,
             timing::NO_ROUND,
@@ -5576,128 +5576,22 @@ pub(crate) fn extract_and_read(
     Ok((meta_bytes, raw, product_bytes, inventory_operation))
 }
 
-/// A prepared program's constructor declaration RESOLVES in the accompanying
-/// `DataConTable` (by `host_id`) but disagrees with the entry it resolves
-/// to — a different occurrence name, or a different field count. Both sides
-/// mint `host_id` identically from `dataConWorkId`, so
-/// a correctly paired artifact and table can never produce this — it is
-/// exactly the signal that the two were NOT compiled together (e.g. metadata
-/// from one compile assembled with a prepared program from another), caught
-/// at the moment it is dangerous: `host_id` coincidentally resolving to some
-/// OTHER real constructor a handler would then silently misinterpret fields
-/// under, rather than failing to resolve at all. See
-/// `check_constructor_identity_agreement`'s doc for why a host_id that
-/// resolves to NOTHING is deliberately not a variant here.
+/// A prepared output and its complete constructor table disagree.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ConstructorIdentityMismatch {
-    /// The `host_id` resolves, but to a differently-named constructor —
-    /// nominal disagreement, not merely a missing entry.
-    #[error(
-        "target {target:?} constructor {prepared_name:?} (host_id {:#018x}) resolves in the \
-         DataConTable to {table_name:?} instead",
-        host_id.0
-    )]
-    NameMismatch {
-        target: String,
-        host_id: tidepool_repr::DataConId,
-        prepared_name: String,
-        table_name: String,
-    },
-    /// The `host_id` resolves to the right name, but the two sides disagree
-    /// on field count — a corrupt or mismatched metadata source, not a
-    /// harmless re-encounter (mirrors `DataConTable::insert_checked`'s
-    /// tag/rep_arity agreement guard on the metadata side alone).
-    #[error(
-        "target {target:?} constructor {name:?} (host_id {:#018x}) declares {prepared_fields} \
-         field(s) in the prepared program but {table_rep_arity} in the DataConTable",
-        host_id.0
-    )]
-    ArityMismatch {
-        target: String,
-        host_id: tidepool_repr::DataConId,
-        name: String,
-        prepared_fields: usize,
-        table_rep_arity: u32,
-    },
+#[error("target {target:?}: {mismatch}")]
+pub struct ConstructorIdentityMismatch {
+    pub target: String,
+    pub mismatch: tidepool_repr::ConstructorMetadataMismatch,
 }
 
-/// Verify every constructor `target`'s prepared program declares that
-/// RESOLVES in `table` agrees with the entry it resolves to. `PreparedProgram`
-/// validation (`tidepool_repr::execution_schema::validate_program`) already
-/// enforces `host_id` uniqueness WITHIN one prepared program; it has no way
-/// to check those ids against a metadata table compiled elsewhere, since the
-/// two are parsed independently in `assemble`.
-///
-/// SCOPE: a `host_id` with NO table entry at all is deliberately not
-/// rejected here — only a `host_id` that resolves to a DIFFERENT constructor
-/// is. Two things independently justify drawing the line there rather than
-/// at "every declared constructor must resolve":
-///
-/// - It would reject currently-valid, exercised pipelines. The STG
-///   projection's closure (`Tidepool.ExecutionProjection.projectPreparedTarget`)
-///   pulls in whatever the entry's REAL reachable STG needs, and GHC's own
-///   exception-raising sites transitively need real `SomeException`/
-///   `Typeable` evidence (`TrNameS`/`TrNameD` and friends) for native
-///   exception settlement — reachable from virtually any nontrivial entry
-///   (any partial pattern match, `error`, div-by-zero, ...), independent of
-///   whether the user's source ever mentions `Typeable`. The legacy
-///   metadata's constructor collection sources
-///   (`wiredInDataCons`/`collectDataCons`/`collectUsedDataCons`/
-///   `collectTransitiveDCons`) were never built against that
-///   requirement and do not reliably cover it — confirmed empirically: a
-///   real compile (`tidepool-runtime`'s
-///   `build_products_dir_differential` fixture) declares a prepared
-///   `TrNameS` with no metadata entry despite artifact and table coming
-///   from the exact same extractor invocation.
-/// - It is not the dangerous case. `tidepool_runtime::render::con_name`
-///   already renders an unresolved id as `"<unknown>"` rather than
-///   panicking or guessing — a `host_id` genuinely absent from the table
-///   degrades exactly as gracefully whether that absence comes from this
-///   legitimate coverage gap or a cross-paired table. The case that
-///   silently misinterprets data — `host_id` coincidentally present in the
-///   WRONG table under a different constructor's shape — has no such
-///   fallback, which is exactly what this check catches instead.
-///
-/// Field count is the one arity fact both sides carry in genuinely
-/// comparable form: `DataConTable::rep_arity` is `length
-/// (dataConRepArgTys dc)`, and `ConstructorDecl::field_reps` is built by
-/// mapping each of those same `dataConRepArgTys` entries through
-/// `repsForType` and concatenating — an ordinary heap-constructor field (the
-/// only kind `internConstructor` accepts; see its `result_rep` check) always
-/// has exactly one representation component, so the flatten never actually
-/// changes the count. Tag is deliberately NOT compared here: it is already
-/// pinned by each side independently (both read `dataConTag` directly), and
-/// disagreeing tags at agreeing name+id would indicate the SAME bug this
-/// check exists to catch, just observed through a different field.
+/// All emitted constructors, including settlement and external declarations,
+/// receive metadata from their owning projection transaction.
 pub fn check_constructor_identity_agreement(
-    target: &str,
-    artifact: &PreparedArtifact,
-    table: &DataConTable,
+    target: &str, artifact: &PreparedArtifact, table: &DataConTable,
 ) -> Result<(), ConstructorIdentityMismatch> {
-    for constructor in artifact.prepared().constructors() {
-        let Some(dc) = table.get(constructor.host_id) else {
-            continue;
-        };
-        let occurrence = &constructor.identity.occurrence;
-        if &dc.name != occurrence {
-            return Err(ConstructorIdentityMismatch::NameMismatch {
-                target: target.to_string(),
-                host_id: constructor.host_id,
-                prepared_name: occurrence.clone(),
-                table_name: dc.name.clone(),
-            });
-        }
-        if usize::try_from(dc.rep_arity).unwrap_or(usize::MAX) != constructor.field_reps.len() {
-            return Err(ConstructorIdentityMismatch::ArityMismatch {
-                target: target.to_string(),
-                host_id: constructor.host_id,
-                name: dc.name.clone(),
-                prepared_fields: constructor.field_reps.len(),
-                table_rep_arity: dc.rep_arity,
-            });
-        }
-    }
-    Ok(())
+    table.validate_program(artifact.prepared()).map_err(|mismatch| ConstructorIdentityMismatch {
+        target: target.to_owned(), mismatch,
+    })
 }
 
 /// Deserialize a `(meta_bytes, raw)` pair — from a fresh spawn or a memo hit
@@ -5710,7 +5604,6 @@ pub(crate) fn assemble(
     mut on_stage: impl FnMut(&str, Duration, u64),
 ) -> Result<CompiledArtifacts, CompileError> {
     let deserialize_start = Instant::now();
-    let (table, warnings) = read_metadata(meta_bytes)?;
     let requirements = crate::prepared_artifact::production_requirements()?;
     let prepared: Vec<PreparedArtifact> = raw
         .iter()
@@ -5722,9 +5615,8 @@ pub(crate) fn assemble(
             )
         })
         .collect::<Result<_, _>>()?;
-    for (r, artifact) in raw.iter().zip(&prepared) {
-        check_constructor_identity_agreement(&r.target, artifact, &table)?;
-    }
+    let programs: Vec<_> = prepared.iter().map(PreparedArtifact::prepared).collect();
+    let (table, warnings) = tidepool_repr::serial::read_metadata_for_programs(meta_bytes, &programs)?;
     on_stage(
         timing::STAGE_CBOR_DESERIALIZE,
         deserialize_start.elapsed(),
@@ -8374,6 +8266,7 @@ mod constructor_identity_tests {
     /// compile as `decl`'s prepared program necessarily contains.
     fn matching_dc(decl: &ConstructorDecl) -> DataCon {
         DataCon {
+            identity: decl.identity.clone(),
             id: decl.host_id,
             name: decl.identity.occurrence.clone(),
             tag: decl.tag,
@@ -8400,7 +8293,7 @@ mod constructor_identity_tests {
             if candidate.host_id == decl.host_id {
                 mutate(&mut dc);
             }
-            table.insert(dc);
+            table.insert_checked(dc).expect("valid fixture metadata");
         }
         table
     }
@@ -8426,7 +8319,7 @@ mod constructor_identity_tests {
 
         let mut table = DataConTable::new();
         for decl in artifact.prepared().constructors() {
-            table.insert(matching_dc(decl));
+            table.insert_checked(matching_dc(decl)).expect("valid fixture metadata");
         }
         let meta_bytes = write_metadata(&table, &MetaWarnings::default()).unwrap();
         let raw = vec![raw_target("entry", prepared_bytes)];
@@ -8434,38 +8327,20 @@ mod constructor_identity_tests {
         assemble(&meta_bytes, &raw, |_, _, _| {}).expect("correctly paired artifact must assemble");
     }
 
-    /// TEST 3 (scope boundary, primary case): a table missing the fixture's
-    /// constructor ENTIRELY — an otherwise-empty table — must still assemble.
-    /// This is the empirically-forced scope line documented on
-    /// `check_constructor_identity_agreement`: a real compile
-    /// (`tidepool-runtime`'s `build_products_dir_differential` fixture, a
-    /// plain Tidepool eval with no explicit `Typeable`/exception use) was
-    /// caught by an earlier, blanket "every declared constructor must
-    /// resolve" version of this check over a prepared `TrNameS` — real GHC
-    /// exception-settlement evidence with no metadata entry, from an
-    /// artifact and table that came from the exact same compile. Requiring
-    /// resolution would reject that currently-valid pipeline, so it is
-    /// deliberately not enforced.
     #[test]
-    fn table_missing_a_declared_constructor_entirely_is_outside_this_checks_scope() {
+    fn removing_a_required_constructor_rejects_joint_admission() {
         let prepared_bytes = prepared_fixture_bytes();
-        let artifact =
-            PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
-        assert!(
-            !artifact.prepared().constructors().is_empty(),
-            "fixture must declare at least one constructor for this test to mean anything"
-        );
-
-        // Totally empty: no host_id in the fixture's prepared program
-        // resolves in this table at all.
-        let table = DataConTable::new();
-        let meta_bytes = write_metadata(&table, &MetaWarnings::default()).unwrap();
+        let artifact = PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
+        let missing = artifact.prepared().constructors().first().expect("fixture has constructors");
+        let mut table = DataConTable::new();
+        for declared in artifact.prepared().constructors() {
+            if declared.host_id != missing.host_id { table.insert_checked(matching_dc(declared)).unwrap(); }
+        }
+        let metadata = write_metadata(&table, &MetaWarnings::default()).unwrap();
         let raw = vec![raw_target("entry", prepared_bytes)];
-
-        assemble(&meta_bytes, &raw, |_, _, _| {}).expect(
-            "a host_id absent from the table entirely must not reject assembly — only a \
-             host_id that resolves to a DIFFERENT constructor does",
-        );
+        assert!(matches!(assemble(&metadata, &raw, |_,_,_| {}),
+            Err(CompileError::ReadError(tidepool_repr::serial::ReadError::ConstructorMetadata(
+                tidepool_repr::ConstructorMetadataMismatch::Missing { host_id, .. }))) if host_id == missing.host_id));
     }
 
     /// TEST 2 (cross-pairing rejects): the id resolves to the WRONG
@@ -8488,6 +8363,7 @@ mod constructor_identity_tests {
 
         let table = table_with_one_entry_mutated(&artifact, &decl, |dc| {
             dc.name = format!("{}NotThis", dc.name);
+            dc.identity.occurrence = dc.name.clone();
         });
         let meta_bytes = write_metadata(&table, &MetaWarnings::default()).unwrap();
         let raw = vec![raw_target("entry", prepared_bytes)];
@@ -8498,37 +8374,34 @@ mod constructor_identity_tests {
         };
         assert!(matches!(
             err,
-            CompileError::ConstructorIdentity(ConstructorIdentityMismatch::NameMismatch { .. })
+            CompileError::ReadError(tidepool_repr::serial::ReadError::ConstructorMetadata(tidepool_repr::ConstructorMetadataMismatch::Identity { .. }))
         ));
     }
 
-    /// A second, narrower scope line: tag is deliberately NOT one of the
-    /// compared facts (see `check_constructor_identity_agreement`'s doc) — id,
-    /// name, and field count all still agree, so a table entry disagreeing
-    /// ONLY on tag must still assemble. Pins that the check does not
-    /// duplicate `DataConTable::insert_checked`'s own tag/rep_arity guard,
-    /// and is not accidentally stricter than the facts both wire formats
-    /// actually carry in agreeing form.
     #[test]
-    fn tag_disagreement_alone_is_outside_this_checks_scope() {
+    fn tag_disagreement_rejects_joint_admission() {
         let prepared_bytes = prepared_fixture_bytes();
-        let artifact =
-            PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
-        let decl = artifact
-            .prepared()
-            .constructors()
-            .first()
-            .expect("fixture declares at least one constructor")
-            .clone();
-
-        let table = table_with_one_entry_mutated(&artifact, &decl, |dc| {
-            dc.tag = dc.tag.wrapping_add(1).max(1);
-        });
-        let meta_bytes = write_metadata(&table, &MetaWarnings::default()).unwrap();
+        let artifact = PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
+        let declared = artifact.prepared().constructors().first().unwrap();
+        let table = table_with_one_entry_mutated(&artifact, declared, |dc| dc.tag += 1);
+        let metadata = write_metadata(&table, &MetaWarnings::default()).unwrap();
         let raw = vec![raw_target("entry", prepared_bytes)];
+        assert!(matches!(assemble(&metadata, &raw, |_,_,_| {}),
+            Err(CompileError::ReadError(tidepool_repr::serial::ReadError::ConstructorMetadata(
+                tidepool_repr::ConstructorMetadataMismatch::Shape { .. })))));
+    }
 
-        assemble(&meta_bytes, &raw, |_, _, _| {})
-            .expect("a tag-only disagreement is out of this check's scope and must not reject");
+    #[test]
+    fn cross_paired_table_unit_only_difference_rejects() {
+        let prepared_bytes = prepared_fixture_bytes();
+        let artifact = PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
+        let declared = artifact.prepared().constructors().first().unwrap();
+        let table = table_with_one_entry_mutated(&artifact, declared, |dc| dc.identity.unit.push_str("-other"));
+        let metadata = write_metadata(&table, &MetaWarnings::default()).unwrap();
+        let raw = vec![raw_target("entry", prepared_bytes)];
+        assert!(matches!(assemble(&metadata, &raw, |_,_,_| {}),
+            Err(CompileError::ReadError(tidepool_repr::serial::ReadError::ConstructorMetadata(
+                tidepool_repr::ConstructorMetadataMismatch::Identity { .. })))));
     }
 
     /// Arity IS checked: a table entry agreeing on id and name but declaring
@@ -8557,7 +8430,7 @@ mod constructor_identity_tests {
         };
         assert!(matches!(
             err,
-            CompileError::ConstructorIdentity(ConstructorIdentityMismatch::ArityMismatch { .. })
+            CompileError::ReadError(tidepool_repr::serial::ReadError::ConstructorMetadata(tidepool_repr::ConstructorMetadataMismatch::Shape { .. }))
         ));
     }
 }

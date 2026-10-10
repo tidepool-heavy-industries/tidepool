@@ -1,6 +1,7 @@
 //! Data constructor metadata for Tidepool IR.
 
 use crate::types::DataConId;
+use crate::execution_schema::SymbolIdentity;
 
 /// Strictness annotation for a data constructor field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +18,8 @@ pub enum SrcBang {
 /// Extracted from GHC's DataCon during serialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DataCon {
+    /// Complete defining symbol issued by the compiler.
+    pub identity: SymbolIdentity,
     /// Unique identifier for this constructor
     pub id: DataConId,
     /// Human-readable name (e.g., "Just", "Nothing", ":", "[]")
@@ -28,7 +31,7 @@ pub struct DataCon {
     pub rep_arity: u32,
     /// Strictness per field (from `dataConSrcBangs`). For debugging/pretty-printing only.
     pub field_bangs: Vec<SrcBang>,
-    /// Module-qualified name (e.g., "Data.Map.Bin"). None for legacy CBOR without this field.
+    /// Optional diagnostic alias (e.g., "Data.Map.Bin"), never nominal authority.
     pub qualified_name: Option<String>,
     /// Rendered name of the constructor's parent TyCon (e.g. "Verdict" for a
     /// constructor of `data Verdict = GO | PARTIAL | NOGO`), unqualified.

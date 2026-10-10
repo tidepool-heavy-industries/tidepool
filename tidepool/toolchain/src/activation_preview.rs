@@ -170,7 +170,7 @@ impl ActivationPreviewOffer {
             prototype: self.prototype.clone(),
             specification: self.specification.clone(),
             target: target.clone(),
-            table: read_table(root)?,
+            table: read_table(root, target)?,
             yield_sites_digest: crate::artifacts::yield_sites_metadata_digest(&sites)?,
             disposition,
             original_interfaces: Arc::new(ExactDeclarationContext::from_authenticated_interfaces(

@@ -13,7 +13,8 @@ fn get_table() -> &'static DataConTable {
         // I#/W#/D#/C#/Text; append the constructors it lacks that these
         // proptests still need (3-tuple, Either) with fresh ids.
         let mut table = tidepool_test_data::standard_datacon_table();
-        table.insert(DataCon {
+        table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "GHC.Tuple".into(), namespace: "constructor".into(), occurrence: "(,,)".into(), record_parent: None },
             id: DataConId(100),
             name: "(,,)".to_string(),
             tag: 1,
@@ -21,8 +22,9 @@ fn get_table() -> &'static DataConTable {
             field_bangs: vec![SrcBang::NoSrcBang, SrcBang::NoSrcBang, SrcBang::NoSrcBang],
             qualified_name: Some("GHC.Tuple.(,,)".into()),
             type_name: String::new(),
-        });
-        table.insert(DataCon {
+        }).expect("valid fixture metadata");
+        table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Data.Either".into(), namespace: "constructor".into(), occurrence: "Right".into(), record_parent: None },
             id: DataConId(101),
             name: "Right".to_string(),
             tag: 2,
@@ -30,8 +32,9 @@ fn get_table() -> &'static DataConTable {
             field_bangs: vec![SrcBang::NoSrcBang],
             qualified_name: Some("Data.Either.Right".into()),
             type_name: String::new(),
-        });
-        table.insert(DataCon {
+        }).expect("valid fixture metadata");
+        table.insert_checked(DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Data.Either".into(), namespace: "constructor".into(), occurrence: "Left".into(), record_parent: None },
             id: DataConId(102),
             name: "Left".to_string(),
             tag: 1,
@@ -39,7 +42,7 @@ fn get_table() -> &'static DataConTable {
             field_bangs: vec![SrcBang::NoSrcBang],
             qualified_name: Some("Data.Either.Left".into()),
             type_name: String::new(),
-        });
+        }).expect("valid fixture metadata");
         table
     })
 }

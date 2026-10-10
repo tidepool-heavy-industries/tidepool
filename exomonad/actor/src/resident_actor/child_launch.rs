@@ -1338,7 +1338,8 @@ mod tests {
         *body = 1;
         let mut table = DataConTable::new();
         for constructor in &wire.constructors {
-            table.insert(tidepool_repr::DataCon {
+            table.insert_checked(tidepool_repr::DataCon {
+            identity: tidepool_repr::execution_schema::SymbolIdentity { unit: "fixture".into(), module: "Fixture".into(), namespace: "constructor".into(), occurrence: (constructor.identity.occurrence.clone()).clone(), record_parent: None },
                 id: constructor.host_id,
                 name: constructor.identity.occurrence.clone(),
                 tag: constructor.tag,
@@ -1349,7 +1350,7 @@ mod tests {
                     constructor.identity.module, constructor.identity.occurrence
                 )),
                 type_name: constructor.family.occurrence.clone(),
-            });
+            }).expect("valid fixture metadata");
         }
         Arc::new(tidepool_runtime::session::CompiledTurn::new(
             table,

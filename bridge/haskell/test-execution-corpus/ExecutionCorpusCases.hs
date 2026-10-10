@@ -3,6 +3,7 @@
 
 module ExecutionCorpusCases where
 
+import GHC.Core.DataCon (DataCon)
 import Control.Monad (forM, unless, when)
 import Control.Exception
   ( AsyncException, SomeException, evaluate, fromException, throwIO, try )
@@ -35,7 +36,7 @@ import ExecutionCorpusInventory
 import Tidepool.ExecutionEncode (encodeWireProgram)
 import Tidepool.ExecutionProjection
   ( ProjectionContext(..), TextUnitAuthority, resolveTextPackageUnit
-  , preparedTopIdentities, projectPreparedTarget, projectPreparedTargetWithConstructors )
+  , preparedTopIdentities, projectPreparedTargetWithConstructors )
 import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
 import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
@@ -149,19 +150,21 @@ runProbe compile rawArguments = do
                   Right (_, constructors) -> pure constructors
               _ | not (null metadataTargets) -> fail ("metadata target missing or ambiguous: " ++ name)
               _ -> pure []
-          let result = pprPipelineResult prepared
-          metadata <- either (fail . show) pure (metadataForConstructors (prTyCons result) constructors)
-          let hasIO = any (targetBindingHasIO (prBinds result)) metadataNames
-          BS.writeFile (outputDir </> "meta.cbor")
-            (encodeMetadata metadata hasIO (Text.pack <$> prCapturedType result)
-              (map Text.pack (prWarnings result)))
           rowsWithInventory <- if allTops
             then forM (zip [0 :: Int ..] selected) $ \(index, identity) ->
               projectOneIdentity recover formattingAuthority timeAuthority textAuthority outputDir index identity
             else forM (zip [0 :: Int ..] (zip targets sourceTargets)) $ \(index, (occurrence, sourceTarget)) ->
               projectOneTarget recover formattingAuthority timeAuthority textAuthority moduleNameArg outputDir index occurrence
                 (sourceTargetIdentity sourceTarget)
-          let (rows, targetInventories) = unzip rowsWithInventory
+          let rows = [record | (record,_,_) <- rowsWithInventory]
+              targetInventories = [inventory | (_,inventory,_) <- rowsWithInventory]
+              emittedConstructors = concat [cons | (_,_,cons) <- rowsWithInventory]
+          let result = pprPipelineResult prepared
+          metadata <- either (fail . show) pure (metadataForConstructors (prTyCons result) (constructors ++ emittedConstructors))
+          let hasIO = any (targetBindingHasIO (prBinds result)) metadataNames
+          BS.writeFile (outputDir </> "meta.cbor")
+            (encodeMetadata metadata hasIO (Text.pack <$> prCapturedType result)
+              (map Text.pack (prWarnings result)))
           pure (rows, sourceTargets, targetInventories)
   BS.writeFile (outputDir </> "manifest.json")
     (toBytes (renderManifest records sourceTargets))
@@ -235,12 +238,13 @@ projectOneTarget
   -> Int
   -> String
   -> Maybe SymbolIdentity
-  -> IO (Record, TargetInventory)
+  -> IO (Record, TargetInventory, [DataCon])
 projectOneTarget recover formattingAuthority timeAuthority textAuthority moduleNameArg outputDir index occurrence mapped = do
   let name = missingName moduleNameArg occurrence
       reject reason = pure
         ( Record name Nothing [] (Rejected reason)
         , unavailableTargetInventory name [] reason
+        , []
         )
   case mapped of
     Nothing -> reject ("target " <> show occurrence <> " is missing from module " <> moduleNameArg)
@@ -254,7 +258,7 @@ projectOneIdentity
   -> FilePath
   -> Int
   -> SymbolIdentity
-  -> IO (Record, TargetInventory)
+  -> IO (Record, TargetInventory, [DataCon])
 projectOneIdentity recover formattingAuthority timeAuthority textAuthority outputDir index selected = do
   let context = projectionContext formattingAuthority timeAuthority textAuthority selected
       artifactName = numericArtifactName index
@@ -262,7 +266,7 @@ projectOneIdentity recover formattingAuthority timeAuthority textAuthority outpu
       expectationKey = externalExpectationKey selected
       unavailable residuals reason = unavailableTargetInventory name residuals reason
       reject residuals inventory reason = pure
-        (Record name Nothing residuals (Rejected reason), inventory)
+        (Record name Nothing residuals (Rejected reason), inventory, [])
   recovered <- trySync (recover selected)
   case recovered of
     Left failure -> let reason = "target " <> show (symbolOccurrence selected) <> " recovery failed: " <> show failure
@@ -271,13 +275,13 @@ projectOneIdentity recover formattingAuthority timeAuthority textAuthority outpu
       let residuals = closureFailures closure
           inventory = inventoryRecoveredTarget context selected closure
       projected <- trySync (evaluate
-        (projectPreparedTarget context (closureModules closure)))
+        (projectPreparedTargetWithConstructors context (closureModules closure)))
       case projected of
         Left failure -> reject residuals inventory ("target " <> show (symbolOccurrence selected)
           <> " projection rejected: " <> show failure)
         Right (Left failure) -> reject residuals inventory ("target " <> show (symbolOccurrence selected)
           <> " rejected: " <> show failure)
-        Right (Right program) -> do
+        Right (Right (program, emittedConstructors)) -> do
           encoded <- trySync (evaluate (BS.copy (encodeWireProgram program)))
           case encoded of
             Left failure -> reject residuals inventory ("target " <> show (symbolOccurrence selected)
@@ -287,6 +291,7 @@ projectOneIdentity recover formattingAuthority timeAuthority textAuthority outpu
               pure
                 ( Record name expectationKey residuals (Projected artifactName selected)
                 , inventory
+                , emittedConstructors
                 )
 
 identityName :: SymbolIdentity -> String
