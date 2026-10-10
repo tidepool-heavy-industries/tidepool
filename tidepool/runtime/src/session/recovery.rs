@@ -9,26 +9,10 @@ pub(crate) use newrecovery_v2::*;
 pub use newrecovery_v2::{RecoveryPublicOwner, RecoveryRefusal as RecoveryFormatRefusal};
 
 pub(crate) fn graph_error(path: &Path, error: RecoveryError) -> SessionError {
-    match &error.kind {
-        RecoveryErrorKind::SourceEvidence { input, failure } => SessionError::Compile(
-            crate::CompileError::CompilerEvidence(Box::new(
-                tidepool_toolchain::certified_products::CertificationError::CompletedSourceEvidence {
-                    input: input.clone(), failure: Box::new(failure.clone()),
-                },
-            )),
-        ),
-        RecoveryErrorKind::Format(refusal) => SessionError::RecoveryFormatRefused {
-            path: path.to_path_buf(),
-            refusal: *refusal,
-        },
-        RecoveryErrorKind::InventoryAccounting(cause) => SessionError::RecoveryInventoryRefused {
-            path: path.to_path_buf(),
-            cause: cause.clone(),
-        },
-        RecoveryErrorKind::Manifest => SessionError::RecoveryManifest {
-            path: path.to_path_buf(),
-            detail: error.to_string(),
-        },
+    match error.kind {
+        RecoveryErrorKind::Snapshot(error)=>SessionError::RecoverySnapshot(Box::new(error)),
+        RecoveryErrorKind::Store(error)=>SessionError::RecoveryStore(Box::new(error)),
+        RecoveryErrorKind::Manifest=>SessionError::RecoveryManifest {path:path.to_path_buf(),detail:error.detail},
     }
 }
 

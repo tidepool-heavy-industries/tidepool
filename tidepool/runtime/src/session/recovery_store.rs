@@ -162,6 +162,7 @@ pub(crate) struct PreparedRecoveryWrite {
     pub blocks: Vec<(Cid, Arc<[u8]>)>,
     pub public_changes: Vec<PreparedPublicOwnerChange>,
 }
+#[derive(Clone)]
 pub(crate) enum PreparedPublicOwnerChange {
     Insert(RecoveryPublicOwnerState),
     Replace {
@@ -344,6 +345,18 @@ impl RunRecoveryStore {
         read_public_owner(&connection.connection, domain, owner)
             .map_err(|error| store_error(self.path(), StoreErrorKind::Storage, error))
     }
+    pub(crate) fn public_owner_states(&self, domain:RecoveryDomainId)->Result<Vec<RecoveryPublicOwnerState>,StoreError> {
+        let connection=self.connection.lock();
+        if let Some(error)=&connection.fence {return Err(error.clone())}
+        let mut statement=connection.connection.prepare("SELECT owner,epoch,surface_root FROM public_owners WHERE domain=?1 ORDER BY owner")
+            .map_err(|error|store_error(self.path(),StoreErrorKind::Storage,error))?;
+        let rows=statement.query_map([domain.bytes().as_slice()],|row| {
+            let bytes:Vec<u8>=row.get(0)?;
+            let owner=fvm_ipld_encoding::from_slice(&bytes).map_err(|e|rusqlite::Error::FromSqlConversionFailure(0,rusqlite::types::Type::Blob,Box::new(e)))?;
+            Ok(RecoveryPublicOwnerState{owner,epoch:read_u64(row,1)?,surface_root:PublicSurfaceRoot(read_cid(row,2)?)})
+        }).map_err(|error|store_error(self.path(),StoreErrorKind::Storage,error))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|error|store_error(self.path(),StoreErrorKind::Storage,error))
+    }
     pub fn has_public_owners(&self, domain: RecoveryDomainId) -> Result<bool, StoreError> {
         let connection = self.connection.lock();
         if let Some(error) = &connection.fence {
@@ -432,7 +445,10 @@ impl RunRecoveryStore {
         &self,
         prepared: PreparedRecoveryWrite,
     ) -> StoreDisposition<RecoveryDomainState> {
-        self.transact(|transaction| {
+        self.publish_and_install(prepared,|state|state)
+    }
+    pub(crate) fn publish_and_install<T>(&self,prepared:PreparedRecoveryWrite,install:impl FnOnce(RecoveryDomainState)->T)->StoreDisposition<T> {
+        self.transact_and_install(|transaction| {
             let current = read_domain(transaction, prepared.domain_id).map_err(sql_refusal)?.ok_or(StoreRefusal::DomainMissing)?;
             if current.revision != prepared.expected_revision { return Err(StoreRefusal::StaleRevision); }
             let revision = increment(current.revision)?;
@@ -444,7 +460,7 @@ impl RunRecoveryStore {
                 revision.0.to_be_bytes().as_slice(), content_revision.0.to_be_bytes().as_slice(), prepared.allocation_ceiling.0.to_be_bytes().as_slice(), prepared.snapshot_root.cid().to_bytes(), prepared.domain_id.bytes().as_slice(), prepared.expected_revision.0.to_be_bytes().as_slice()]).map_err(sql_refusal)?;
             if updated != 1 { return Err(StoreRefusal::StaleRevision); }
             Ok(RecoveryDomainState { revision, content_revision, allocation_ceiling: prepared.allocation_ceiling, snapshot_root: prepared.snapshot_root.clone(), ..current })
-        }, &prepared.blocks)
+        }, &prepared.blocks,install)
     }
 
     /// This structurally distinct operation retains both immutable roots and
@@ -517,6 +533,9 @@ impl RunRecoveryStore {
         action: impl FnOnce(&Transaction<'_>) -> Result<T, StoreRefusal>,
         blocks: &[(Cid, Arc<[u8]>)],
     ) -> StoreDisposition<T> {
+        self.transact_and_install(action,blocks,|value|value)
+    }
+    fn transact_and_install<T,R>(&self,action:impl FnOnce(&Transaction<'_>)->Result<T,StoreRefusal>,blocks:&[(Cid,Arc<[u8]>)],install:impl FnOnce(T)->R)->StoreDisposition<R> {
         for (cid, bytes) in blocks {
             if let Err(error) = tidepool_toolchain::exact_context::verify_block(cid, bytes) {
                 return StoreDisposition::Refused(StoreRefusal::Storage(store_error(
@@ -547,7 +566,7 @@ impl RunRecoveryStore {
                     blocks.iter().map(|(_, bytes)| bytes.len() as u64).sum(),
                     Ordering::Relaxed,
                 );
-                StoreDisposition::Committed(value)
+                StoreDisposition::Committed(install(value))
             }
             TransactionResult::Refused(refusal) => StoreDisposition::Refused(refusal),
             TransactionResult::RecoveryRequired(detail) => {

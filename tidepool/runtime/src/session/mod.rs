@@ -418,6 +418,12 @@ pub enum SessionError {
         "staged declaration no longer matches this session's live declaration or value environment"
     )]
     StaleStagedDeclaration,
+    #[error(transparent)]
+    RecoveryStore(Box<recovery_store::StoreError>),
+    #[error(transparent)]
+    RecoverySnapshot(Box<tidepool_toolchain::exact_context::SnapshotError>),
+    #[error(transparent)]
+    RecoveryArtifacts(Box<tidepool_toolchain::declaration_join::RecoveryInventoryError>),
     /// A durable source-recovery manifest was unreadable, from a future or
     /// retired schema, corrupt, or could not be published. This artifact is
     /// never silently reset: it is the authoritative record of which source
@@ -892,13 +898,15 @@ impl RecoveryDurability {
 }
 
 struct DurableDeclarationGraph {
-    owner: Option<std::sync::Arc<recovery_hydration::OwnedRecoveryManifest>>,
+    owner: Option<Arc<recovery_hydration::OwnedRecoveryManifest>>,
+    store: Arc<RunRecoveryStore>,
+    domain_id: RecoveryDomainId,
+    store_revision: StoreRevision,
+    allocation_ceiling: Generation,
+    artifact_root: PathBuf,
+    attached_existing_domain: bool,
     path: PathBuf,
     graph: recovery::RecoveryGraph,
-    /// A visible rename whose directory sync still needs confirmation. The
-    /// high-water identity is already burned, even while success is withheld.
-    unconfirmed: RecoveryDurability,
-    retained: parking_lot::Mutex<Option<recovery::RetainedRecoveryGraph>>,
 }
 
 /// Exact declaration module prepared for cell compilation without advancing
