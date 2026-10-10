@@ -66,5 +66,6 @@ Execution intent retains the exact original declaration and value identities.
 A declaration publication attempt captures its current public predecessors
 before issuing its own join identity. Restaging allocates a fresh attempt;
 stale, refused and cancelled attempts burn their reservations without rerunning
-private execution. Recovery declarations remain an append-only causal DAG:
+private execution. Binding-only capture does not issue a declaration reservation.
+Recovery declarations remain an append-only causal DAG:
 parents and implementation references identify previously issued declarations.

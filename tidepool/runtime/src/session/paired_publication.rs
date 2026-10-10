@@ -76,6 +76,15 @@ struct DeclarationHeadReplacement {
     occurrence: String,
 }
 
+/// Captured causal facts before selecting whether this attempt needs a join.
+struct CapturedDeclarationPublication {
+    public: PublicManifestBase,
+    intent: Arc<FinalExecutionIntent>,
+    current_public: Option<DeclarationTip>,
+    public_context: Option<Arc<ExactDeclarationContext>>,
+    surface: AdmittedDeclarationSurface,
+}
+
 /// One current public graph paired with the unchanged final execution intent.
 pub struct DeclarationPublicationBase {
     public: PublicManifestBase,
@@ -722,7 +731,7 @@ impl PersistentSession {
         owner: Option<RecoveryPublicOwner>,
         intent: Arc<FinalExecutionIntent>,
     ) -> Result<ExecutionPublication, SessionError> {
-        let base = self.restage_declaration_target(owner, intent)?;
+        let base = self.capture_declaration_target(owner, intent)?;
         let declaration_conflict = base.current_public.as_ref().is_some_and(|tip| {
             tip.exports.iter().any(|export| {
                 base.intent.head_replacements.iter().any(|replacement| {
@@ -734,7 +743,9 @@ impl PersistentSession {
         if base.intent.writes.is_empty() && !declaration_conflict {
             Ok(ExecutionPublication::Bindings(base.public))
         } else {
-            Ok(ExecutionPublication::Declarations(base))
+            Ok(ExecutionPublication::Declarations(
+                self.reserve_declaration_target(base)?,
+            ))
         }
     }
 
@@ -752,6 +763,15 @@ impl PersistentSession {
         owner: Option<RecoveryPublicOwner>,
         intent: Arc<FinalExecutionIntent>,
     ) -> Result<DeclarationPublicationBase, SessionError> {
+        let captured = self.capture_declaration_target(owner, intent)?;
+        self.reserve_declaration_target(captured)
+    }
+
+    fn capture_declaration_target(
+        &mut self,
+        owner: Option<RecoveryPublicOwner>,
+        intent: Arc<FinalExecutionIntent>,
+    ) -> Result<CapturedDeclarationPublication, SessionError> {
         if !Arc::ptr_eq(&intent.owner, self.admission_owner())
             || intent.owner_epoch != self.admission_owner().epoch()
         {
@@ -760,7 +780,7 @@ impl PersistentSession {
         if intent.durable_owner != owner {
             return Err(SessionError::WrongPublicManifestTicket);
         }
-        let mut public = self.snapshot_publication_target(
+        let public = self.snapshot_publication_target(
             owner,
             intent.admitted.scope,
             intent.private.scope,
@@ -781,6 +801,26 @@ impl PersistentSession {
         for write in &intent.writes {
             surface = extend_admitted_surface(&write.evidence, surface)?;
         }
+        Ok(CapturedDeclarationPublication {
+            public,
+            intent,
+            current_public,
+            public_context,
+            surface,
+        })
+    }
+
+    fn reserve_declaration_target(
+        &mut self,
+        captured: CapturedDeclarationPublication,
+    ) -> Result<DeclarationPublicationBase, SessionError> {
+        let CapturedDeclarationPublication {
+            mut public,
+            intent,
+            current_public,
+            public_context,
+            surface,
+        } = captured;
         let reserved = self.lib_mut().reserve_join_for_publication(&mut public)?;
         let expected_public_version = paired_version(&public);
         Ok(DeclarationPublicationBase {
@@ -2088,13 +2128,25 @@ mod tests {
             crate::session::prepared::tests::rooted_publication_fixture(&mut session, "local", 703);
         let id = value.id;
         session.bind_in(admission.private_scope(), value).unwrap();
+        let before_freeze = session.lib().generation();
+        let before_freeze_revision = session.lib().log.publication_revision();
         let intent = session
             .freeze_execution_intent(&admission, vec![id], vec![])
             .unwrap();
+        assert_eq!(session.lib().generation(), before_freeze);
+        assert_eq!(
+            session.lib().log.publication_revision(),
+            before_freeze_revision
+        );
         let before = recovery.state();
         let cancelled = PublicationDecision::new();
         cancelled.request_cancellation();
         let stage = ephemeral_binding_stage(&mut session, intent.clone());
+        assert_eq!(session.lib().generation(), before_freeze);
+        assert_eq!(
+            session.lib().log.publication_revision(),
+            before_freeze_revision
+        );
         assert!(matches!(
             session
                 .publish_staged_public_manifest(stage, &cancelled)
@@ -2144,6 +2196,7 @@ mod tests {
             PublicManifestCommit::Ephemeral
         ));
         assert_eq!(recovery.state(), before);
+        assert_eq!(session.lib().generation(), generation);
         let owner = RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root/ephemeral-mode").unwrap(),
             1,
