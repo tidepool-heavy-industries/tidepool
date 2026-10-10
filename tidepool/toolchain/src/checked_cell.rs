@@ -3814,6 +3814,7 @@ impl CheckedItemOffer {
                 crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
                     self.item.cell.producer,
                     original_execution.artifact_view(),
+                    original_execution.compiler_input_projection().clone(),
                 )?,
             ),
             original_execution,

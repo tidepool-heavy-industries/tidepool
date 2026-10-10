@@ -387,6 +387,7 @@ impl Catalog {
         ExactDeclarationContext::from_authenticated_execution(
             Sha256::digest(PRODUCER).into(),
             view,
+            self.projection(view, roles),
             (0..MODULES)
                 .map(|module| ExactLexicalNode {
                     owner: owner(module),
@@ -399,8 +400,6 @@ impl Catalog {
             owner(0),
             &(0..MODULES).map(owner).collect::<Vec<_>>(),
         )
-        .unwrap()
-        .with_compiler_input_projection(self.projection(view, roles))
         .unwrap()
     }
 }

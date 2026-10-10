@@ -7885,6 +7885,7 @@ mod module_product_tests {
                 let incomplete = ExactDeclarationContext::from_authenticated_execution(
                     original.toolchain_identity_sha256(),
                     original.artifact_view(),
+                    original.compiler_input_projection().clone(),
                     incomplete_graph,
                     original.original_instance_target().unwrap().clone(),
                     std::slice::from_ref(&missing),

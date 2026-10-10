@@ -426,6 +426,15 @@ mod program_source_support_history {
                     source,
                 )
                 .is_err());
+            assert!(
+                full_selection
+                    .compiler_support_projection(
+                        &missing_selected,
+                        std::slice::from_ref(&admission)
+                    )
+                    .is_err(),
+                "a source admission may omit only its generated target"
+            );
             assert_private_choices(&continued, &expected, &published);
         }
     }

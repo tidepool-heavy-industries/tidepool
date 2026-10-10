@@ -2580,10 +2580,46 @@ impl CertifiedSourceSelection {
         &self,
         view: &crate::artifact_inventory::ArtifactView,
     ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
-        use crate::artifact_inventory::{ArtifactPayload, CompilerInputProjection};
+        self.compiler_projection_from_metadata(&view.metadata_snapshot(), &BTreeSet::new())
+    }
+
+    /// Support may omit the generated scaffold authenticated by the source
+    /// admission. Every other issued interface and original remains required.
+    pub(crate) fn compiler_support_projection(
+        &self,
+        view: &crate::artifact_inventory::ArtifactView,
+        admissions: &[crate::declaration_context::ExactSourceAdmission],
+    ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
         let metadata = view.metadata_snapshot();
+        let present = metadata
+            .artifacts
+            .values()
+            .map(|entry| &entry.descriptor.owner)
+            .collect::<BTreeSet<_>>();
+        let omitted_generated = admissions
+            .iter()
+            // An admission need not contain a generated scaffold. Only a
+            // successfully authenticated owner can authorize its omission.
+            .filter_map(|admission| admission.generated_source_owner().ok())
+            .filter(|owner| !present.contains(owner))
+            .collect();
+        self.compiler_projection_from_metadata(&metadata, &omitted_generated)
+    }
+
+    fn compiler_projection_from_metadata(
+        &self,
+        metadata: &crate::artifact_inventory::ArtifactMetadataSnapshot,
+        omitted_generated: &BTreeSet<crate::declaration_join::ExactModuleIdentity>,
+    ) -> CertResult<crate::artifact_inventory::CompilerInputProjection> {
+        use crate::artifact_inventory::{ArtifactPayload, CompilerInputProjection};
         let mut entries = Vec::new();
-        for (_, selected) in self.visible_modules() {
+        for ((unit, module), selected) in self.visible_modules() {
+            if omitted_generated
+                .iter()
+                .any(|owner| owner.unit == *unit && owner.module == *module)
+            {
+                continue;
+            }
             let interface = metadata
                 .artifacts
                 .get(&selected.interface())

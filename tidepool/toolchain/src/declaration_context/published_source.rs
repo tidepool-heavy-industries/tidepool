@@ -545,6 +545,7 @@ mod tests {
             let issued = ExactDeclarationContext::from_authenticated_execution(
                 producer,
                 &view,
+                projection,
                 vec![
                     ExactLexicalNode {
                         owner: target.descriptor.owner.clone(),
@@ -571,8 +572,6 @@ mod tests {
                     leaf.descriptor.owner.clone(),
                 ],
             )
-            .unwrap()
-            .with_compiler_input_projection(projection)
             .unwrap();
             let publication = issued
                 .issue_published_source_original("revision", "input", &root.descriptor.owner)
@@ -646,12 +645,11 @@ mod tests {
             let continued = ExactDeclarationContext::from_authenticated_execution(
                 producer,
                 &admitted,
+                published.compiler_projection.clone(),
                 published.lexical.clone(),
                 root.descriptor.owner.clone(),
                 &[root.descriptor.owner.clone()],
             )
-            .unwrap()
-            .with_compiler_input_projection(published.compiler_projection.clone())
             .expect("later native demand preserves the issued published selection");
             let reopened_after_demand = continued.published_source_original_selections().unwrap();
             assert_eq!(

@@ -176,6 +176,7 @@ impl ActivationPreviewOffer {
             original_interfaces: Arc::new(ExactDeclarationContext::from_authenticated_interfaces(
                 producer,
                 artifact_context.artifact_view(),
+                artifact_context.compiler_input_projection().clone(),
             )?),
             original_execution: self.original_execution.clone(),
         }))

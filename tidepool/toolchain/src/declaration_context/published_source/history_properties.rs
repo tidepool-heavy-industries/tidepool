@@ -68,6 +68,7 @@ fn fixture(initial: usize) -> (Arc<ArtifactEntry>, Arc<PublishedSourceOriginalSe
     let issued = ExactDeclarationContext::from_authenticated_execution(
         producer,
         &view,
+        CompilerInputProjection::from_issued_entries(&[root.clone(), target.clone()]).unwrap(),
         vec![
             ExactLexicalNode {
                 owner: target.descriptor.owner.clone(),
@@ -83,10 +84,6 @@ fn fixture(initial: usize) -> (Arc<ArtifactEntry>, Arc<PublishedSourceOriginalSe
             target.descriptor.owner.clone(),
             root.descriptor.owner.clone(),
         ],
-    )
-    .unwrap()
-    .with_compiler_input_projection(
-        CompilerInputProjection::from_issued_entries(&[root.clone(), target]).unwrap(),
     )
     .unwrap();
     let publication = issued
@@ -105,15 +102,15 @@ fn continued_context(
     root: &ArtifactEntry,
 ) -> Result<ExactDeclarationContext, CompileError> {
     // This is the original_execution_context production construction boundary:
-    // original instance evidence first, then its retained compiler projection.
+    // original instance evidence and its issued compiler projection travel together.
     ExactDeclarationContext::from_authenticated_execution(
         context.producer,
         view,
+        context.compiler_projection.clone(),
         context.lexical.clone(),
         root.descriptor.owner.clone(),
         &[root.descriptor.owner.clone()],
-    )?
-    .with_compiler_input_projection(context.compiler_projection.clone())
+    )
 }
 
 fn restored(

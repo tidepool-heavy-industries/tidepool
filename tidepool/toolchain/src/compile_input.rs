@@ -799,6 +799,7 @@ pub(crate) fn seal(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
                     .sha256(),
                 artifacts,
+                compiler_projection.clone(),
             )?,
         ),
         original_execution: Arc::new(
@@ -806,11 +807,11 @@ pub(crate) fn seal(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
                     .sha256(),
                 artifacts,
+                compiler_projection.clone(),
                 lexical,
                 original_target.clone(),
                 &required_instance_owners,
-            )?
-            .with_compiler_input_projection(compiler_projection.clone())?,
+            )?,
         ),
         target: prepared.clone(),
         groups: groups.clone(),

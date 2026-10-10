@@ -2458,6 +2458,12 @@ impl ExactProductAdmission<'_> {
         inputs: &OriginalCompilerInputs,
     ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
         let artifacts = &inputs.artifacts;
+        let projection = self
+            .request
+            .compiler_inputs()
+            .projection
+            .within_view(artifacts)
+            .merge(&inputs.projection)?;
         let imports = self.source.home_imports()?;
         let inherited = self.request.context().as_ref();
         let exact_roots = self
@@ -2532,7 +2538,7 @@ impl ExactProductAdmission<'_> {
             }
         }
         self.request.checked_value_imports.validate()?;
-        let retained_interfaces = CompilerInputProjection::from_interface_view(artifacts)?
+        let retained_interfaces = projection
             .project_metadata(artifacts.metadata_snapshot())?
             .entries;
         for (unit, module) in self.request.checked_value_imports.owners() {
@@ -2595,17 +2601,11 @@ impl ExactProductAdmission<'_> {
         let context = ExactDeclarationContext::from_authenticated_execution(
             self.request.producer_sha256,
             artifacts,
+            projection,
             lexical,
             self.source.generated_source_owner()?,
             &required.into_iter().collect::<Vec<_>>(),
         )?;
-        let projection = self
-            .request
-            .compiler_inputs()
-            .projection
-            .within_view(artifacts)
-            .merge(&inputs.projection)?;
-        let context = context.with_compiler_input_projection(projection)?;
         Ok(Arc::new(context))
     }
 }
@@ -3118,38 +3118,9 @@ impl ExactCompilationRequest {
                 }
             }
         }
-        let entries = support.entries();
-        let mut originals = Vec::new();
-        for owner in selection.selected_original_owners() {
-            let matching = entries
-                .iter()
-                .filter(|entry| {
-                    matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == owner)
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            // Only the authenticated generated target may leave the support
-            // view; every other selected original keeps its exact carrier.
-            if matching.is_empty()
-                && !admissions.iter().any(|admission| {
-                    admission.generated_source_owner().is_ok_and(|generated| {
-                        generated.unit == owner.unit && generated.module == owner.module
-                    })
-                })
-            {
-                return Err(failure(
-                    "compiler support offer omitted a selected original",
-                ));
-            }
-            if matching.len() > 1 {
-                return Err(failure(
-                    "compiler support offer has conflicting exact original artifacts",
-                ));
-            }
-            originals.extend(matching);
-        }
-        let issued = CompilerInputProjection::from_interface_view(support)?
-            .merge(&CompilerInputProjection::from_issued_entries(&originals)?)?;
+        let issued = selection
+            .compiler_support_projection(support, admissions)
+            .map_err(compiler_evidence_failure)?;
         let supplied = issued
             .project_metadata(support.metadata_snapshot())?
             .entries;
@@ -4500,10 +4471,26 @@ impl ExactDeclarationContext {
     pub(crate) fn from_authenticated_interfaces(
         producer: [u8; 32],
         artifacts: &ArtifactView,
+        projection: CompilerInputProjection,
     ) -> Result<Self, CompileError> {
         let mut context = Self::new(&[], &[], Vec::new())?;
         context.admit_producer(producer)?;
-        context.extend_interface_artifacts(artifacts)
+        let projection = projection.interface_only();
+        projection.validate(artifacts)?;
+        let interfaces = artifacts.select_roots(
+            projection
+                .roles()
+                .iter()
+                .map(CompilerInputRole::interface)
+                .collect(),
+        )?;
+        for descriptor in interfaces.descriptors() {
+            context.admit_producer(descriptor.producer_sha256)?;
+        }
+        context.inventory = interfaces;
+        context.compiler_projection = projection;
+        context.normalize()?;
+        Ok(context)
     }
 
     /// Retain already authenticated original code owners and their original
@@ -4511,6 +4498,7 @@ impl ExactDeclarationContext {
     pub(crate) fn from_authenticated_execution(
         producer: [u8; 32],
         artifacts: &ArtifactView,
+        projection: CompilerInputProjection,
         lexical: Vec<ExactLexicalNode>,
         target: ExactModuleIdentity,
         required_instance_owners: &[ExactModuleIdentity],
@@ -4520,26 +4508,26 @@ impl ExactDeclarationContext {
         for descriptor in artifacts.descriptors() {
             context.admit_producer(descriptor.producer_sha256)?;
         }
-        context.inventory = context.inventory.merge(artifacts)?;
-        context.compiler_projection = CompilerInputProjection::from_interface_view(artifacts)?;
+        context.inventory = artifacts.clone();
+        context.compiler_projection = projection;
         context.compiler_projection.validate(&context.inventory)?;
         context.lexical = lexical;
-        let interfaces = context
-            .interface_owners()
-            .into_iter()
-            .map(|row| row.owner)
+        let selected_metadata = context.compiler_metadata_snapshot()?;
+        let interfaces = selected_metadata
+            .entries
+            .keys()
+            .cloned()
             .collect::<BTreeSet<_>>();
         let selected = context
             .lexical
             .iter()
             .map(|row| &row.owner)
             .collect::<BTreeSet<_>>();
-        let canonical_target = context.inventory.entries().iter().any(|entry| {
-            entry.descriptor.owner == target
-                && matches!(
-                    entry.payload,
-                    ArtifactPayload::Canonical(_) | ArtifactPayload::Original(_)
-                )
+        let canonical_target = selected_metadata.entries.get(&target).is_some_and(|entry| {
+            matches!(
+                entry.payload,
+                ArtifactPayload::Canonical(_) | ArtifactPayload::Original(_)
+            )
         });
         let missing = required_instance_owners
             .iter()
@@ -4601,7 +4589,8 @@ impl ExactDeclarationContext {
         roots: Vec<crate::artifact_inventory::ArtifactId>,
     ) -> Result<Self, CompileError> {
         let selected = self.inventory.select_roots(roots)?;
-        Self::from_authenticated_interfaces(self.producer, &selected)
+        let projection = CompilerInputProjection::from_interface_view(&selected)?;
+        Self::from_authenticated_interfaces(self.producer, &selected, projection)
     }
 
     /// Merge original type-interface evidence without granting lexical imports.
@@ -4700,7 +4689,7 @@ impl ExactDeclarationContext {
         &self,
         mut pending: Vec<ExactModuleIdentity>,
     ) -> Result<BTreeMap<ExactModuleIdentity, TemplateInterfaceNode>, CompileError> {
-        let entries = self.artifact_view().entries();
+        let metadata = self.compiler_metadata_snapshot()?;
         let lexical = self
             .lexical_graph()
             .iter()
@@ -4714,24 +4703,14 @@ impl ExactDeclarationContext {
             let node = lexical
                 .get(&owner)
                 .ok_or_else(|| failure("checked template lexical closure is incomplete"))?;
-            let seals = entries
-                .iter()
-                .filter(|entry| entry.descriptor.owner == owner)
-                .map(|entry| entry.descriptor.interface_sha256)
-                .collect::<BTreeSet<_>>();
-            if seals.len() != 1 {
-                return Err(failure(
-                    "checked template selection lacks one exact interface seal",
-                ));
-            }
+            let interface = metadata.entries.get(&owner).ok_or_else(|| {
+                failure("checked template selection lacks one exact interface seal")
+            })?;
             pending.extend(node.imports.iter().cloned());
             selected.insert(
                 owner,
                 TemplateInterfaceNode {
-                    interface_sha256: *seals
-                        .iter()
-                        .next()
-                        .ok_or_else(|| failure("missing template interface seal"))?,
+                    interface_sha256: interface.descriptor.interface_sha256,
                     imports: node.imports.clone(),
                 },
             );
@@ -7143,8 +7122,7 @@ mod tests {
                 &selection(&missing),
             )
             .unwrap_err();
-        assert!(matches!(refusal, CompileError::ExtractFailed(detail)
-            if detail == "exact declaration context: compiler support offer omitted a selected original"));
+        assert!(matches!(refusal, CompileError::CompilerEvidence(_)));
         assert!(request.program_support.is_none());
         assert!(request.program_source_lexical().is_empty());
         assert_eq!(empty.semantic_sha256(), before);
@@ -7447,6 +7425,77 @@ mod tests {
         (Arc::new(context), producer)
     }
 
+    #[test]
+    fn authenticated_execution_uses_issued_roles_not_available_interfaces() {
+        let producer = [7; 32];
+        let entries = ["Target", "A", "B", "C"].map(|module| {
+            Arc::new(ArtifactEntry::canonical(
+                crate::certified_products::fixture_module_interface(
+                    producer,
+                    "fixture",
+                    module,
+                    BTreeMap::new(),
+                ),
+            ))
+        });
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit_shared(&inventory.empty_view(), entries.to_vec())
+            .unwrap();
+        let target = entries[0].descriptor.owner.clone();
+        let dependencies = entries[1..]
+            .iter()
+            .map(|entry| entry.descriptor.owner.clone())
+            .collect::<Vec<_>>();
+        for mask in 0u8..8 {
+            let issued_entries = std::iter::once(entries[0].clone())
+                .chain(
+                    entries[1..]
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, entry)| {
+                            (mask & (1 << index) != 0).then(|| entry.clone())
+                        }),
+                )
+                .collect::<Vec<_>>();
+            let projection = CompilerInputProjection::from_issued_entries(&issued_entries).unwrap();
+            let lexical = std::iter::once(ExactLexicalNode {
+                owner: target.clone(),
+                imports: dependencies.clone(),
+            })
+            .chain(dependencies.iter().cloned().map(|owner| ExactLexicalNode {
+                owner,
+                imports: Vec::new(),
+            }))
+            .collect();
+            let context = ExactDeclarationContext::from_authenticated_execution(
+                producer,
+                &view,
+                projection.clone(),
+                lexical,
+                target.clone(),
+                &dependencies,
+            )
+            .unwrap();
+            assert_eq!(context.compiler_input_roles(), projection.roles());
+            assert_eq!(context.artifact_view().artifact_ids(), view.artifact_ids());
+            let missing = dependencies
+                .iter()
+                .enumerate()
+                .filter_map(|(index, owner)| (mask & (1 << index) == 0).then(|| owner.clone()))
+                .collect::<Vec<_>>();
+            let expected = if missing.is_empty() {
+                OriginalInstanceEnvironment::Complete {
+                    target: target.clone(),
+                }
+            } else {
+                OriginalInstanceEnvironment::MissingOriginalOwners(missing)
+            };
+            assert_eq!(context.original_instance_environment(), &expected);
+            assert_eq!(context.lexical_graph().len(), issued_entries.len());
+        }
+    }
+
     fn published_original_fixture() -> ExactDeclarationContext {
         let (base, _) = metadata_fixture();
         let target = identity("fixture", "PrivateSourceTarget");
@@ -7466,6 +7515,7 @@ mod tests {
         ExactDeclarationContext::from_authenticated_execution(
             base.producer,
             &view,
+            projection,
             vec![
                 ExactLexicalNode {
                     owner: target.clone(),
@@ -7479,8 +7529,6 @@ mod tests {
             target.clone(),
             &[target, identity("fixture", "Alpha")],
         )
-        .unwrap()
-        .with_compiler_input_projection(projection)
         .unwrap()
     }
 
@@ -11391,7 +11439,12 @@ mod tests {
             )
             .unwrap();
         let baseline = Arc::new(
-            ExactDeclarationContext::from_authenticated_interfaces([2; 32], &interfaces).unwrap(),
+            ExactDeclarationContext::from_authenticated_interfaces(
+                [2; 32],
+                &interfaces,
+                CompilerInputProjection::from_interface_view(&interfaces).unwrap(),
+            )
+            .unwrap(),
         );
         let context = Arc::new(
             baseline
@@ -12573,6 +12626,7 @@ mod tests {
         let joined_target = ExactDeclarationContext::from_authenticated_execution(
             initial.producer,
             initial.artifact_view(),
+            initial.compiler_projection.clone(),
             initial.lexical_graph().to_vec(),
             identity("main", "CapturedInterface"),
             &[identity("main", "CapturedInterface")],
@@ -12602,6 +12656,7 @@ mod tests {
         let original = ExactDeclarationContext::from_authenticated_execution(
             initial.producer,
             &retained,
+            CompilerInputProjection::from_interface_view(&retained).unwrap(),
             lexical,
             identity("main", "OriginalTarget"),
             &[identity("main", "CapturedInterface")],

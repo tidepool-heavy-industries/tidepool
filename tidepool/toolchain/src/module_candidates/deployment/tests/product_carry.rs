@@ -747,6 +747,8 @@ fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
             crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
                 retained.descriptors()[0].producer_sha256,
                 &retained,
+                crate::artifact_inventory::CompilerInputProjection::from_interface_view(&retained)
+                    .unwrap(),
             )
             .unwrap(),
         );

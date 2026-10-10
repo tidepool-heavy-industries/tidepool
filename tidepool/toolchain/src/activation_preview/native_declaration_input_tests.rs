@@ -152,6 +152,7 @@ fn original_context_with_fixtures(
     let context = ExactDeclarationContext::from_authenticated_execution(
         producer,
         &view,
+        CompilerInputProjection::restore(&view, &roles).unwrap(),
         vec![ExactLexicalNode {
             owner: target,
             imports: Vec::new(),
@@ -162,8 +163,6 @@ fn original_context_with_fixtures(
         },
         &[],
     )
-    .unwrap()
-    .with_compiler_input_projection(CompilerInputProjection::restore(&view, &roles).unwrap())
     .unwrap();
     Arc::new(context)
 }
