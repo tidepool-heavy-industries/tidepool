@@ -1080,6 +1080,7 @@ impl<'code> PreparedMachine<'code> {
             self.static_catalog = Some(catalog);
         }
         let compiled = program.get();
+        tracing::info!(target: "tidepool_codegen::image_install", image_instance = compiled.image_instance_id(), outcome = "admitted", "native image install");
         // Shared descriptors (interned constructors, external wrappers) have
         // no owner; retiring this program leaves them.
         let shared: HashSet<usize> = compiled

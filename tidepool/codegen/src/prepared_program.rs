@@ -433,7 +433,10 @@ unsafe extern "C" fn prepared_recorded_failure(vmctx: *mut crate::context::VMCon
 
 /// Pins generated entries, descriptors and immutable images together. Each run
 /// owns its mutable heap; materialization may force values before releasing it.
+static NEXT_IMAGE_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 pub struct CompiledProgram {
+    image_instance: u64,
     definition_facts: Arc<DefinitionFacts>,
     pub(crate) pipeline: CodegenPipeline,
     pub(crate) entries: BTreeMap<ValueId, CompiledEntry>,
@@ -553,6 +556,11 @@ unsafe impl Sync for CompiledProgram {}
 static_assertions::assert_impl_all!(CompiledProgram: Send, Sync);
 
 impl CompiledProgram {
+    /// Process-local observation identity; never an image key or authority.
+    pub fn image_instance_id(&self) -> u64 {
+        self.image_instance
+    }
+
     /// Shared immutable evidence for every installation of this image.
     pub fn definition_facts(&self) -> &Arc<DefinitionFacts> {
         &self.definition_facts
@@ -1440,6 +1448,7 @@ impl CompiledProgram {
             },
         );
         Ok(Self {
+            image_instance: NEXT_IMAGE_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             definition_facts: Arc::new(DefinitionFacts::new(plan.program)),
             pipeline,
             entries,
@@ -1583,3 +1592,9 @@ mod entry_tests;
 mod freer_boundary_tests;
 #[cfg(test)]
 mod tests;
+
+impl Drop for CompiledProgram {
+    fn drop(&mut self) {
+        tracing::info!(target: "tidepool_codegen::image_lifetime", image_instance = self.image_instance, outcome = "released", "native image lifetime");
+    }
+}

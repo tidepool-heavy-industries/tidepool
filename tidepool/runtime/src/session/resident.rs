@@ -6073,6 +6073,7 @@ where
     }
 
     /// Run only a sealed pure preview of this exact original committed root.
+    #[tracing::instrument(name = "activation_renderer_install", skip_all, fields(renderer_owner = Arc::as_ptr(&compiled.renderer) as usize, binding = compiled.admission.mounted.binding.raw()))]
     pub fn run_activation_preview(
         &mut self,
         compiled: CompiledActivationPreview,
