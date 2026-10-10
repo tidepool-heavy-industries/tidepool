@@ -927,7 +927,7 @@ impl NativeImageBundle {
     }
 
     pub(super) fn image_instances(&self) -> impl Iterator<Item = u64> + '_ {
-        self.images.iter().map(|image| image.image_instance_id())
+        self.images.values().map(|image| image.image_instance_id())
     }
 }
 
