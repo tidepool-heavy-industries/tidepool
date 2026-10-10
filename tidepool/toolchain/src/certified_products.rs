@@ -2549,7 +2549,12 @@ impl CertifiedSourceSelection {
             .collect::<Vec<_>>();
         let native_closure = view
             .inventory()
-            .admit_shared(view, entries)
+            .admit_certified_with_demand(
+                view,
+                entries,
+                crate::artifact_inventory::NativeArtifactDemand::AllGroups,
+                self,
+            )
             .and_then(|view| view.select_admission_roots(selected_ids.clone()))
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         if excluded.is_some_and(|(unit, module)| {

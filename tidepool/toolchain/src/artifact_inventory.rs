@@ -5689,6 +5689,14 @@ mod tests {
                     &validation.inventory,
                 )
                 .unwrap();
+            if !child_reusable {
+                let broader = issuer.merge(&sibling).unwrap();
+                assert!(matches!(inventory.admit_certified_with_demand(
+                    &broader, vec![Arc::new(root.clone())], NativeArtifactDemand::ScopeInterfaces, &receipt,
+                ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                    ArtifactInventoryFailure::MissingDependency { ref required, dependency: ArtifactDependency::NativeGroup { dependent_ordinal: 12, required_ordinal: 7 }, .. }
+                    if required == &child.descriptor.owner)));
+            }
             receipt
                 .with_native_original_requirements(&issuer.metadata_snapshot(), &facts)
                 .unwrap();
@@ -5866,6 +5874,26 @@ mod tests {
             for parent in [joined, narrowed, restored] {
                 let owning = parent.inventory().clone();
                 let before = owning.0.lock().unwrap().selection_plans.len();
+                let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+                let receipt =
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        published.compiler_input_projection(),
+                        &parent.metadata_snapshot(),
+                        &validation.inventory,
+                    )
+                    .unwrap();
+                receipt
+                    .selected_authored_original_closure(
+                        &parent,
+                        &native.descriptor.owner.unit,
+                        &native.descriptor.owner.module,
+                    )
+                    .unwrap();
+                let after = owning.0.lock().unwrap().selection_plans.len();
+                assert_eq!(
+                    after, before,
+                    "whole-original certification must retain the issuer's exact group"
+                );
                 let mut admitted = parent;
                 for _ in 0..2 {
                     admitted = owning
