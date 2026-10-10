@@ -3706,12 +3706,15 @@ mod tests {
             RecoveryPublicOwner,
         };
         let root = tempfile::tempdir().unwrap();
-        let mut lib =
-            SessionLib::open(SessionId(987), root.path(), ModuleEnv::standalone_default()).unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
-        })
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut lib = SessionLib::open(
+            SessionId(987),
+            root.path().join("compiler"),
+            ModuleEnv::standalone_default(),
+        )
         .unwrap();
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -3719,9 +3722,12 @@ mod tests {
             1,
         )
         .unwrap();
-        session
-            .bind_durable_public_scope(owner.clone(), public)
-            .unwrap();
+        assert_eq!(
+            session
+                .initialize_durable_public_scope(owner.clone(), public)
+                .unwrap(),
+            PublicManifestCommit::Durable
+        );
         let private = Arc::new(session.begin_private_execution(public).unwrap());
         let cell = session
             .admit_cell_for_execution(

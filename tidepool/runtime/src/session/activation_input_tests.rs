@@ -3637,43 +3637,23 @@ fn parked_input_owner(
 #[test]
 fn durable_activation_binding_retains_private_authored_source_after_retirement_and_collection() {
     use crate::session::{PublicManifestCommit, PublicationDecision, RecoveryPublicOwner};
-    struct RunOwner {
-        root: PathBuf,
-        _lock: std::fs::File,
-    }
-    impl crate::session::RecoveryRunAuthority for RunOwner {
-        fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
-            Ok(root.canonicalize()? == self.root)
-        }
-    }
     let (root, recipe) = InputFixture::source_recipe(false);
     let session = SessionId(1741);
-    let mut library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
-        .unwrap()
-        .with_validation_include(recipe.include.clone());
     let durable_root = tempfile::tempdir().unwrap();
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(durable_root.path().join("run-owner.lock"))
-        .unwrap();
-    lock.try_lock().unwrap();
-    // Receiver setup reserves a Join identity even for a binding-only
-    // publication. Attach recovery before that allocator can advance.
+    let recovery = super::recovery_test_fixture::RecoveryFixture::create(durable_root.path());
+    let mut library = SessionLib::open(
+        session,
+        durable_root.path().join("compiler"),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(recipe.include.clone());
+    // Attach before receiver setup can reserve a Join identity.
     assert_eq!(library.generation(), Generation(0));
-    tidepool_testing::with_settlement(|settlement| {
-        library.attach_owned_recovery_graph_v3(
-            durable_root.path().join("declarations.json"),
-            Arc::new(RunOwner {
-                root: durable_root.path().canonicalize().unwrap(),
-                _lock: lock,
-            }),
-            settlement,
-        )
-    })
-    .unwrap_or_else(|error| panic!("fresh declaration library must attach recovery: {error:?}"));
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut library, settlement))
+        .unwrap_or_else(|error| {
+            panic!("fresh declaration library must attach recovery: {error:?}")
+        });
     let mut resident = InputFixture::fresh_with_library(library, &recipe);
     assert_eq!(resident.state.lib().scope_tip(ScopeId::ROOT), Generation(0));
     assert_eq!(
