@@ -141,6 +141,19 @@ impl<'de> Deserialize<'de> for ExactArtifactSelection {
 }
 
 impl ExactArtifactSelection {
+    /// Borrow the issued graph facts without duplicating its complete witnesses.
+    /// Consumers still validate these facts against authenticated live custody.
+    pub fn graph_selection(&self) -> &ArtifactGraphSelection {
+        &self.0.graph
+    }
+
+    /// Reconstruct untrusted transport facts, equivalent to deserialization.
+    /// This grants no selection authority; the inventory must authenticate the
+    /// payloads, digest witnesses and exact closure before using the selection.
+    pub fn from_recovered_graph_selection(graph: ArtifactGraphSelection) -> Self {
+        Self(Arc::new(ExactArtifactSelectionFacts { graph }))
+    }
+
     pub(crate) fn capture(view: &ArtifactView) -> Self {
         Self(Arc::new(ExactArtifactSelectionFacts {
             graph: view.capture_graph_selection(),
