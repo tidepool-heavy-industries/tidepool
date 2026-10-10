@@ -3574,6 +3574,7 @@ dependencies = [
  "cranelift-native",
  "env_logger",
  "libc",
+ "proptest",
  "recursion",
  "rpds",
  "serde",
