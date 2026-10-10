@@ -374,6 +374,15 @@ pub(crate) struct PreparedDeclarationReservations {
     generations: Vec<Generation>,
 }
 
+/// A validated replacement for an existing reserved slot. Publication can move
+/// this payload into the log after COMMIT without allocating or cloning facts.
+pub(crate) struct PreparedDeclarationCommit {
+    generation: Generation,
+    slot: DeclarationSlot,
+}
+
+static_assertions::assert_not_impl_any!(PreparedDeclarationCommit: Clone, Copy);
+
 impl DeclLog {
     pub(crate) fn prepare_reservations(
         &self,
@@ -526,22 +535,76 @@ impl DeclLog {
         generation: Generation,
         turn: DeclTurn,
     ) -> bool {
+        let Ok(prepared) =
+            self.prepare_reserved_commit(generation, DeclarationSlot::Committed(turn))
+        else {
+            return false;
+        };
+        self.activate_prepared_commit(prepared);
+        true
+    }
+
+    fn prepare_reserved_commit(
+        &self,
+        generation: Generation,
+        slot: DeclarationSlot,
+    ) -> Result<PreparedDeclarationCommit, super::SessionError> {
+        let turn = match &slot {
+            DeclarationSlot::Committed(turn) | DeclarationSlot::CertifiedAuthored { turn, .. } => {
+                turn
+            }
+            DeclarationSlot::Joined(joined) => &joined.turn,
+            _ => return Err(super::SessionError::StaleStagedDeclaration),
+        };
         if generation.0 == 0
+            || !self.is_reserved(generation)
             || turn
                 .parent
                 .is_some_and(|parent| parent.0 >= generation.0 || self.turn(parent).is_none())
         {
-            return false;
+            return Err(super::SessionError::StaleStagedDeclaration);
         }
-        let Some(slot) = self.turns.get_mut(&generation) else {
-            return false;
-        };
-        if !matches!(slot, DeclarationSlot::Reserved) {
-            return false;
+        Ok(PreparedDeclarationCommit { generation, slot })
+    }
+
+    pub(crate) fn prepare_certified_authored_commit(
+        &self,
+        generation: Generation,
+        turn: DeclTurn,
+        prepared: Arc<super::lexical_projection::PreparedAuthoredDeclaration>,
+    ) -> Result<PreparedDeclarationCommit, super::SessionError> {
+        if prepared.generation != generation
+            || prepared.parent != turn.parent.unwrap_or(Generation(0))
+            || prepared.evidence.product().owner().module
+                != SessionModule::lib(generation).module_name()
+        {
+            return Err(super::SessionError::StaleStagedDeclaration);
         }
-        *slot = DeclarationSlot::Committed(turn);
+        self.prepare_reserved_commit(
+            generation,
+            DeclarationSlot::CertifiedAuthored { turn, prepared },
+        )
+    }
+
+    pub(crate) fn prepare_joined_commit(
+        &self,
+        generation: Generation,
+        joined: JoinedDeclaration,
+    ) -> Result<PreparedDeclarationCommit, super::SessionError> {
+        if !joined.evidence.matches_generation(generation) {
+            return Err(super::SessionError::StaleStagedDeclaration);
+        }
+        self.prepare_reserved_commit(generation, DeclarationSlot::Joined(joined))
+    }
+
+    pub(crate) fn activate_prepared_commit(&mut self, prepared: PreparedDeclarationCommit) {
+        let slot = self
+            .turns
+            .get_mut(&prepared.generation)
+            .expect("preprepared declaration slot exists");
+        assert!(matches!(slot, DeclarationSlot::Reserved));
+        *slot = prepared.slot;
         self.advance_revision();
-        true
     }
 
     pub(super) fn commit_reserved_certified_authored(
@@ -550,18 +613,11 @@ impl DeclLog {
         turn: DeclTurn,
         prepared: Arc<super::lexical_projection::PreparedAuthoredDeclaration>,
     ) -> bool {
-        if prepared.generation != generation
-            || prepared.parent != turn.parent.unwrap_or(Generation(0))
-            || prepared.evidence.product().owner().module
-                != SessionModule::lib(generation).module_name()
-            || !self.commit_reserved_authored(generation, turn.clone())
-        {
+        let Ok(prepared) = self.prepare_certified_authored_commit(generation, turn, prepared)
+        else {
             return false;
-        }
-        self.turns.insert(
-            generation,
-            DeclarationSlot::CertifiedAuthored { turn, prepared },
-        );
+        };
+        self.activate_prepared_commit(prepared);
         true
     }
 
@@ -687,27 +743,10 @@ impl DeclLog {
         generation: Generation,
         joined: JoinedDeclaration,
     ) -> bool {
-        if generation.0 == 0 {
-            return false;
-        }
-        if !joined.evidence.matches_generation(generation) {
-            return false;
-        }
-        let turn = &joined.turn;
-        if turn
-            .parent
-            .is_some_and(|parent| parent.0 >= generation.0 || self.turn(parent).is_none())
-        {
-            return false;
-        }
-        let Some(slot) = self.turns.get_mut(&generation) else {
+        let Ok(prepared) = self.prepare_joined_commit(generation, joined) else {
             return false;
         };
-        if !matches!(slot, DeclarationSlot::Reserved) {
-            return false;
-        }
-        *slot = DeclarationSlot::Joined(joined);
-        self.advance_revision();
+        self.activate_prepared_commit(prepared);
         true
     }
 
@@ -1376,6 +1415,56 @@ mod tests {
             assert!(log.is_reserved(Generation(u64::MAX)));
             assert!(log.prepare_reservations(1).is_none());
         }
+    }
+
+    #[test]
+    fn prepared_slot_activation_keeps_cancellation_and_refusal_nonmutating() {
+        let mut log = DeclLog::new();
+        let generation = log.reserve();
+        let revision = log.publication_revision();
+        let cancelled = log
+            .prepare_reserved_commit(
+                generation,
+                DeclarationSlot::Committed(turn("answer = 42", vec![val("answer")])),
+            )
+            .unwrap();
+        drop(cancelled);
+        assert!(log.is_reserved(generation));
+        assert_eq!(log.publication_revision(), revision);
+        let mut invalid = turn("answer = 42", vec![val("answer")]);
+        invalid.parent = Some(generation);
+        assert!(log
+            .prepare_reserved_commit(generation, DeclarationSlot::Committed(invalid))
+            .is_err());
+        assert!(log.is_reserved(generation));
+        assert_eq!(log.publication_revision(), revision);
+        let prepared = log
+            .prepare_reserved_commit(
+                generation,
+                DeclarationSlot::Committed(turn("answer = 42", vec![val("answer")])),
+            )
+            .unwrap();
+        assert!(log.is_reserved(generation));
+        assert_eq!(log.generation(), generation);
+        log.activate_prepared_commit(prepared);
+        assert!(!log.is_reserved(generation));
+        assert_eq!(
+            log.turn(generation)
+                .unwrap()
+                .items
+                .iter()
+                .flat_map(ExportItem::value_names)
+                .collect::<Vec<_>>(),
+            ["answer"]
+        );
+        assert_eq!(log.generation(), generation);
+        assert_ne!(log.publication_revision(), revision);
+        assert!(log
+            .prepare_reserved_commit(
+                generation,
+                DeclarationSlot::Committed(turn("answer = 43", vec![val("answer")])),
+            )
+            .is_err());
     }
 
     fn val(name: &str) -> ExportItem {
