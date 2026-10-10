@@ -6300,6 +6300,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recipient_lifecycle_owns_compilation_after_sender_retirement() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let (sender, sender_task) = spawn_local_actor(None, observed_probe(&observations))
+            .await
+            .unwrap();
+        let (recipient, recipient_task) = spawn_local_actor(None, observed_probe(&observations))
+            .await
+            .unwrap();
+        let sender_context = observations.lock()[0].0.clone();
+        let recipient_context = observations.lock()[1].0.clone();
+        let original = crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
+            sender_context.retained_exit(),
+        );
+        original
+            .scope(recipient_context.compiler_lifecycle_scope(async {
+                crate::ActorCompilerCloseOwner::current()
+                    .unwrap()
+                    .run(|settlement| {
+                        tidepool_runtime::compile_haskell(
+                            "module RecipientFirst where\nvalue = (42 :: Int)\n",
+                            "value",
+                            &[],
+                            settlement,
+                        )
+                    })
+                    .unwrap()
+                    .action
+                    .unwrap();
+            }))
+            .await;
+        assert!(sender.terminal().compiler_close_observations().is_empty());
+        assert!(crate::ActorCompilerCloseOwner::current().is_err());
+        sender
+            .shutdown(ActorTerminal::new(
+                ActorExitKind::Completed,
+                "sender finished",
+            ))
+            .await
+            .unwrap();
+        sender_task.await.unwrap();
+        recipient_context
+            .compiler_lifecycle_scope(async {
+                crate::ActorCompilerCloseOwner::current()
+                    .unwrap()
+                    .run(|settlement| {
+                        tidepool_runtime::compile_haskell(
+                            "module RecipientNext where\nvalue = (43 :: Int)\n",
+                            "value",
+                            &[],
+                            settlement,
+                        )
+                    })
+                    .unwrap()
+                    .action
+                    .unwrap();
+            })
+            .await;
+        let closes = recipient.terminal().compiler_close_observations();
+        assert_eq!(closes.len(), 2);
+        assert!(closes.iter().all(|close| matches!(
+            close,
+            crate::termination::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::Clean
+            )
+        )));
+        recipient
+            .shutdown(ActorTerminal::new(
+                ActorExitKind::Completed,
+                "recipient finished",
+            ))
+            .await
+            .unwrap();
+        recipient_task.await.unwrap();
+        let mut entered = false;
+        let refused = recipient_context
+            .compiler_lifecycle_scope(async {
+                crate::ActorCompilerCloseOwner::current()
+                    .unwrap()
+                    .run(|_| entered = true)
+            })
+            .await;
+        assert!(matches!(
+            refused,
+            Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
+        ));
+        assert!(
+            !entered,
+            "retirement must refuse before compiler work starts"
+        );
+    }
+
+    #[tokio::test]
+    async fn recipient_retirement_cancels_native_work_after_waiter_drop() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let (recipient, recipient_task) = spawn_local_actor(None, observed_probe(&observations))
+            .await
+            .unwrap();
+        let context = observations.lock()[0].0.clone();
+        let owner = context
+            .compiler_lifecycle_scope(async { crate::ActorCompilerCloseOwner::current().unwrap() })
+            .await;
+        let (entered, observed) = oneshot::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let (finished, settled) = oneshot::channel();
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("must-not-be-read");
+        let waiter = tokio::spawn(async move {
+            tokio::task::spawn_blocking(move || {
+                let result = owner.run(|_settlement| {
+                    entered.send(()).unwrap();
+                    proceed.recv_timeout(Duration::from_secs(5)).unwrap();
+                    tidepool_toolchain::cache::source_root_manifest(&missing)
+                });
+                finished.send(result).ok();
+            })
+            .await
+            .unwrap();
+        });
+        tokio::time::timeout(Duration::from_secs(5), observed)
+            .await
+            .unwrap()
+            .unwrap();
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert!(matches!(
+            recipient
+                .terminal()
+                .compiler_close_observations()
+                .as_slice(),
+            [crate::termination::CompilerWorkClose::Pending]
+        ));
+        let terminal = ActorTerminal::new(ActorExitKind::Cancelled, "retire recipient");
+        recipient.terminal().request_shutdown(terminal.clone());
+        let mut entered_late = false;
+        let refused = context
+            .compiler_lifecycle_scope(async {
+                crate::ActorCompilerCloseOwner::current()
+                    .unwrap()
+                    .run(|_| entered_late = true)
+            })
+            .await;
+        assert!(matches!(
+            refused,
+            Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
+        ));
+        assert!(!entered_late);
+        release.send(()).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), settled)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            outcome.action.unwrap_err().source.kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert!(matches!(
+            outcome.close,
+            tidepool_runtime::CompilerTransactionClose::NotStarted
+        ));
+        assert!(matches!(
+            recipient
+                .terminal()
+                .compiler_close_observations()
+                .as_slice(),
+            [crate::termination::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::NotStarted
+            )]
+        ));
+        recipient.shutdown(terminal).await.unwrap();
+        recipient_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn startup_ownership_precedes_live_link_and_survives_reparenting() {
         let observations = Arc::new(Mutex::new(Vec::new()));
         let directory = LocalActorDirectory::default();
