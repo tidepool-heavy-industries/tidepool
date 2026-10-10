@@ -8,12 +8,14 @@ publish = false
 [lib]
 path = "empty.rs"
 [dependencies]
+"anyhow" = { package = "anyhow", version = "=1.0.104", default-features = true, features = [] }
 "async-trait" = { package = "async-trait", version = "=0.1.92", default-features = true, features = [] }
 "axum" = { package = "axum", version = "=0.8.9", default-features = true, features = [] }
 "blake3" = { package = "blake3", version = "=1.8.6", default-features = true, features = [] }
 "camino" = { package = "camino", version = "=1.2.5", default-features = true, features = [] }
 "chrono" = { package = "chrono", version = "=0.4.45", default-features = false, features = ["alloc"] }
 "ciborium" = { package = "ciborium", version = "=0.2.2", default-features = true, features = [] }
+"cid" = { package = "cid", version = "=0.11.3", default-features = false, features = ["serde", "std"] }
 "clap" = { package = "clap", version = "=4.6.6", default-features = true, features = ["derive", "env"] }
 "cranelift-codegen" = { package = "cranelift-codegen", version = "=0.129.1", default-features = true, features = [] }
 "cranelift-frontend" = { package = "cranelift-frontend", version = "=0.129.1", default-features = true, features = [] }
@@ -23,14 +25,19 @@ path = "empty.rs"
 "env_logger" = { package = "env_logger", version = "=0.11.11", default-features = true, features = [] }
 "frunk" = { package = "frunk", version = "=0.5.0", default-features = true, features = [] }
 "futures-util" = { package = "futures-util", version = "=0.3.34", default-features = true, features = [] }
+"fvm_ipld_blockstore" = { package = "fvm_ipld_blockstore", version = "=0.3.2", default-features = true, features = [] }
+"fvm_ipld_encoding" = { package = "fvm_ipld_encoding", version = "=0.5.4", default-features = true, features = [] }
+"fvm_ipld_hamt" = { package = "fvm_ipld_hamt", version = "=0.10.6", default-features = true, features = [] }
 "genai" = { package = "genai", version = "=0.6.5", default-features = true, features = [] }
 "glob" = { package = "glob", version = "=0.3.4", default-features = true, features = [] }
-"harness" = { package = "harness", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "7e96a3c844666aa4d707f6876ca37c2f56a5377e" }
+"harness" = { package = "harness", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "a1eb22cd5a2c93f8efdcdc3192f9fa7a86a84a35" }
 "ignore" = { package = "ignore", version = "=0.4.33", default-features = true, features = [] }
+"imbl" = { package = "imbl", version = "=7.0.2", default-features = true, features = [] }
 "insta" = { package = "insta", version = "=1.48.0", default-features = true, features = [] }
 "inventory" = { package = "inventory", version = "=0.3.24", default-features = true, features = [] }
 "libc" = { package = "libc", version = "=0.2.189", default-features = true, features = [] }
 "log" = { package = "log", version = "=0.4.33", default-features = true, features = [] }
+"multihash-codetable" = { package = "multihash-codetable", version = "=0.2.2", default-features = false, features = ["blake2b"] }
 "num-bigint" = { package = "num-bigint", version = "=0.4.8", default-features = true, features = [] }
 "parking_lot" = { package = "parking_lot", version = "=0.12.5", default-features = true, features = [] }
 "petgraph" = { package = "petgraph", version = "=0.8.3", default-features = true, features = [] }
@@ -42,7 +49,7 @@ path = "empty.rs"
 "regex" = { package = "regex", version = "=1.13.1", default-features = true, features = [] }
 "reqwest" = { package = "reqwest", version = "=0.13.4", default-features = true, features = ["json", "stream"] }
 "rpds" = { package = "rpds", version = "=1.2.1", default-features = true, features = [] }
-"rusqlite" = { package = "rusqlite", version = "=0.32.1", default-features = true, features = ["bundled"] }
+"rusqlite" = { package = "rusqlite", version = "=0.40.2", default-features = false, features = ["bundled", "cache", "fallible_uint"] }
 "rustix" = { package = "rustix", version = "=1.1.4", default-features = true, features = ["event", "fs", "mount", "pipe", "process", "runtime", "stdio", "termios", "thread"] }
 "schemars" = { package = "schemars", version = "=1.2.2", default-features = true, features = [] }
 "serde" = { package = "serde", version = "=1.0.229", default-features = true, features = ["derive"] }

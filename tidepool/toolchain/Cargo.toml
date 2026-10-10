@@ -10,6 +10,13 @@ description = "Locate, validate, fingerprint, and cache the Tidepool toolchain a
 readme = "../../README.md"
 
 [dependencies]
+anyhow.workspace = true
+imbl.workspace = true
+cid.workspace = true
+fvm_ipld_hamt.workspace = true
+fvm_ipld_blockstore.workspace = true
+fvm_ipld_encoding.workspace = true
+multihash-codetable.workspace = true
 tidepool-atomic-write.workspace = true
 thiserror.workspace = true
 tidepool-repr.workspace = true

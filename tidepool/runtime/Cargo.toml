@@ -11,6 +11,12 @@ description = "Runtime support for Tidepool applications"
 readme = "../../README.md"
 
 [dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+imbl.workspace = true
+cid.workspace = true
+fvm_ipld_blockstore.workspace = true
+fvm_ipld_encoding.workspace = true
 exomonad-tool.workspace = true
 tidepool-atomic-write.workspace = true
 blake3.workspace = true
