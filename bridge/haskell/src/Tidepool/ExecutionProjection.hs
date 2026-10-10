@@ -1738,8 +1738,8 @@ lowerConstructorReplies carriers base = do
   -- Only the original nominal carrier authorizes an erased field. Closed
   -- replies remain independent of this site's input and eventual result.
   inputSite constructor
-    | not (null (dataConTheta constructor)) = Nothing
-    | length originals /= length runtime = Nothing
+    | not (erasedConstraints constructor) = Nothing
+    | Nothing <- constructorSourceFieldProjection constructor = Nothing
     | otherwise = case
         [ (fromIntegral ordinal, fromIntegral payload,
             fmap (fromIntegral . fst) (lastInput inputs >>= \(index, ty) ->
@@ -1754,7 +1754,9 @@ lowerConstructorReplies carriers base = do
           _ -> Nothing
     where
       originals = [ty | Scaled _ ty <- dataConOrigArgTys constructor]
-      runtime = [ty | Scaled _ ty <- dataConRepArgTys constructor]
+      runtime = maybe [] (map snd) (constructorSourceFieldProjection constructor)
+  erasedConstraints constructor =
+    all ((== Just []) . typePrimRep_maybe) (dataConTheta constructor)
   lastInput inputs = go 0 inputs
     where
       go index ty = case splitTyConApp_maybe ty of
@@ -1763,11 +1765,11 @@ lowerConstructorReplies carriers base = do
             Just (nil, [_]) | nil == promotedNilDataCon -> Just (index, input)
             _ -> go (index + 1) rest
         _ -> Nothing
-  atSite constructor reply = case (dataConOrigArgTys constructor, dataConRepArgTys constructor) of
-    (Scaled _ first : _, Scaled _ runtimeFirst : _) ->
+  atSite constructor reply = case constructorSourceFieldProjection constructor of
+    Just ((first, runtimeFirst) : _) ->
       case splitTyConApp_maybe first of
         Just (carrier, [_, carrierReply]) ->
-          null (dataConTheta constructor)
+          erasedConstraints constructor
             && carrier `elem` carriers && eqType carrierReply reply
             && eqType (unwrapType runtimeFirst) intTy
         _ -> False
@@ -2969,9 +2971,28 @@ internSignature signature = do
         , signatureIndex = Map.insert key identity (signatureIndex current) })
       pure identity
 
+-- One GHC representation query owns both physical declaration fields and
+-- source-indexed carrier metadata. Equality proofs have no PrimRep; retained
+-- dictionaries and unpacked/split fields cannot silently shift a site index.
+constructorFieldRepresentations :: DataCon -> Maybe [(Type, [GHC.PrimRep])]
+constructorFieldRepresentations constructor = traverse field (dataConRepArgTys constructor)
+  where field (Scaled _ ty) = (ty,) <$> typePrimRep_maybe ty
+
+constructorSourceFieldProjection :: DataCon -> Maybe [(Type, Type)]
+constructorSourceFieldProjection constructor = do
+  represented <- constructorFieldRepresentations constructor
+  let fields = filter (not . null . snd) represented
+      originals = [ty | Scaled _ ty <- dataConOrigArgTys constructor]
+  if length originals == length fields && all ((== 1) . length . snd) fields
+      && and (zipWith eqType originals (map fst fields))
+    then Just (zip originals (map fst fields))
+    else Nothing
+
 constructorDeclaration :: DataCon -> P ConstructorDecl
 constructorDeclaration con = do
-  reps <- concat <$> mapM (repsForType . scaledThing) (dataConRepArgTys con)
+  represented <- maybe (failRepresentation "runtime-polymorphic constructor field representation")
+    pure (constructorFieldRepresentations con)
+  reps <- concat <$> traverse (traverse projectRep . snd) represented
   -- GHC expands strictness along with representation arguments: a strict
   -- unboxed tuple does not make its lifted components strict. Resolve all
   -- representations first, before calling the fixed-representation helper.
@@ -2994,7 +3015,6 @@ constructorDeclaration con = do
         resultRep reps fieldStrictness layout tag familySize
         (varId (dataConWorkId con)))
  where
-  scaledThing (Scaled _ ty) = ty
   isUnboxed LiftedRefRep = False
   isUnboxed UnliftedRefRep = False
   isUnboxed _ = True
