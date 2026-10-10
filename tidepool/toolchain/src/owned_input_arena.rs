@@ -283,7 +283,8 @@ mod tests {
                 prop_assert_eq!(slice.offset(), offset as u64);
                 prop_assert_eq!(slice.arena_len(), model.len() as u64);
                 prop_assert_eq!(read_slice(&slice), bytes.clone());
-                prop_assert_eq!(slice.sha256().as_slice(), Sha256::digest(&model[offset..offset + bytes.len()]).as_slice());
+                let expected_sha: [u8; 32] = Sha256::digest(&model[offset..offset + bytes.len()]).into();
+                prop_assert_eq!(slice.sha256(), &expected_sha);
                 if keep[index % keep.len()] {
                     slices.push((slice.clone(), bytes));
                 }
@@ -383,10 +384,9 @@ mod tests {
         );
         assert_eq!(read_slice(&slice), b"abc");
         assert_eq!(arena._file.metadata().unwrap().len(), 3);
-        assert_ne!(
-            rustix::fs::fcntl_getfd(&arena._file).unwrap().bits() & libc::FD_CLOEXEC as u32,
-            0
-        );
+        assert!(rustix::io::fcntl_getfd(&arena._file)
+            .unwrap()
+            .contains(rustix::io::FdFlags::CLOEXEC));
 
         let damaged = OwnedInputArenaBuilder::new(10).unwrap();
         damaged.file.set_len(1).unwrap();
@@ -403,13 +403,22 @@ mod tests {
     #[test]
     fn selected_slices_keep_backing_until_last_release() {
         let mut builder = OwnedInputArenaBuilder::new(100).unwrap();
-        let first = builder.append(b"first-original").unwrap();
+        let origin = tempfile::tempdir().unwrap();
+        let original_path = origin.path().join("acquired-original");
+        std::fs::write(&original_path, b"first-original").unwrap();
+        let first = builder
+            .append(&std::fs::read(&original_path).unwrap())
+            .unwrap();
         let second = builder.append(b"second-original").unwrap();
         let arena = builder.finish().unwrap();
         let weak = Arc::downgrade(&arena);
         let first = arena.issue_slice(first).unwrap();
         let second = arena.issue_slice(second).unwrap();
         assert_eq!(first.endpoint(), second.endpoint());
+        std::fs::write(&original_path, b"changed-original").unwrap();
+        assert_eq!(read_slice(&first), b"first-original");
+        std::fs::remove_file(&original_path).unwrap();
+        assert_eq!(read_slice(&first), b"first-original");
         let endpoint = first.endpoint().to_owned();
         let detached = second.clone();
         drop(first);
