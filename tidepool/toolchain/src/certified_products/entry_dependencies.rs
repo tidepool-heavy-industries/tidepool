@@ -1,7 +1,9 @@
 //! Durable observations of the exact dependency selection issued for an entry.
 
 use super::*;
-use crate::artifact_inventory::{CompilerInputRole, ExactArtifactSelection};
+use crate::artifact_inventory::{
+    CompilerInputRole, ExactArtifactSelection, ExactArtifactSelectionDigest,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -33,7 +35,7 @@ impl LinkedOriginal {
 pub(crate) struct EntryDependencySelection {
     linked: Vec<LinkedOriginal>,
     compiler_roles: Vec<CompilerInputRole>,
-    native_closure: ExactArtifactSelection,
+    native_closure: ExactArtifactSelectionDigest,
 }
 
 impl CertifiedSourceSelection {
@@ -58,7 +60,9 @@ impl CertifiedSourceSelection {
         Ok(EntryDependencySelection {
             linked,
             compiler_roles: projection.roles(),
-            native_closure: ExactArtifactSelection::capture(&closure.native_closure),
+            native_closure: ExactArtifactSelection::capture(&closure.native_closure)
+                .observation_digest()
+                .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?,
         })
     }
 }

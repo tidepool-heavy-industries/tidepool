@@ -217,7 +217,8 @@ enum EntryPurpose {
 }
 
 const MANIFEST: &str = "entry.json";
-const ENTRY_SCHEMA: u32 = 3;
+const ENTRY_SCHEMA: u32 = 4;
+const MANIFEST_BYTES_LIMIT: u64 = 16 << 20;
 const MAX_FILES: usize = 32_768;
 const MAX_FILE_BYTES: u64 = 256 << 20;
 const MAX_CONTAINER_BYTES: u64 = 2 << 30;
@@ -652,7 +653,7 @@ pub fn load_selected_production_entry_with_catalog(
     #[cfg(test)]
     ENTRY_LOADS.with(|loads| loads.set(loads.get() + 1));
     crate::host_work::checkpoint()?;
-    let bytes = crate::checked_cell::read(directory.join(MANIFEST), 16 << 20)?;
+    let bytes = crate::checked_cell::read(directory.join(MANIFEST), MANIFEST_BYTES_LIMIT)?;
     let manifest: EntryManifest = serde_json::from_slice(&bytes).map_err(invalid)?;
     if manifest.schema != ENTRY_SCHEMA
         || manifest.purpose != EntryPurpose::OriginalSource
@@ -929,7 +930,8 @@ mod source_selection_tests {
                 && module.module == "Tidepool.Prelude"));
         let original = std::fs::read(output.join(MANIFEST)).unwrap();
         let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
-        assert_eq!(manifest["schema"], 3);
+        assert_eq!(manifest["schema"], ENTRY_SCHEMA);
+        assert!(original.len() as u64 <= MANIFEST_BYTES_LIMIT);
         assert_eq!(
             manifest["dependencies"]["catalog_path"],
             package.catalog_path().to_str().unwrap()
@@ -1001,10 +1003,10 @@ mod source_selection_tests {
         )
         .is_err());
         manifest["dependencies"]["selection"]["linked"][0]["module_version"] = saved;
-        for field in ["artifacts", "native_groups"] {
-            let saved = manifest["dependencies"]["selection"]["native_closure"][field].clone();
-            assert!(!saved.as_array().unwrap().is_empty());
-            manifest["dependencies"]["selection"]["native_closure"][field] = serde_json::json!([]);
+        let saved = manifest["dependencies"]["selection"]["native_closure"].clone();
+        assert_eq!(saved.as_array().unwrap().len(), 32);
+        for changed in [serde_json::json!(vec![0; 32]), serde_json::Value::Null] {
+            manifest["dependencies"]["selection"]["native_closure"] = changed;
             std::fs::write(
                 output.join(MANIFEST),
                 serde_json::to_vec(&manifest).unwrap(),
@@ -1014,8 +1016,19 @@ mod source_selection_tests {
                 &output, &authority, &selected, &catalog
             )
             .is_err());
-            manifest["dependencies"]["selection"]["native_closure"][field] = saved;
         }
+        manifest["dependencies"]["selection"]["native_closure"] = saved;
+        manifest["schema"] = serde_json::json!(3);
+        std::fs::write(
+            output.join(MANIFEST),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(load_selected_production_entry_with_catalog(
+            &output, &authority, &selected, &catalog
+        )
+        .is_err());
+        manifest["schema"] = serde_json::json!(ENTRY_SCHEMA);
         let linked_count = manifest["dependencies"]["selection"]["linked"]
             .as_array()
             .unwrap()

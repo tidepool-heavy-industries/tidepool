@@ -113,7 +113,7 @@ PREPARED_CHILD_TESTS = [
 ]
 DESCRIPTOR = "share/exomonad/qualification.json"
 QUALIFICATION_SCHEMA = 3
-PRODUCTION_ENTRY_SCHEMA = 3
+PRODUCTION_ENTRY_SCHEMA = 4
 BROWSER_DRIVER_ROOT = "share/exomonad/browser-driver"
 BROWSER_DRIVER_TARGET = "//build/testing/browser:driver_bundle"
 BROWSER_DRIVER_SOURCES = {

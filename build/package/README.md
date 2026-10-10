@@ -59,7 +59,7 @@ Named source snapshot metadata is version 2, qualification descriptors are
 version 3, and prepared workspace selections are version 8. Rebuild, refreeze
 and reprepare with this reader; it does not infer missing named-entry provenance.
 Pointer version 2 and native catalog version 4 retain their existing contracts.
-Production entries use version 3. Preserve older frozen bundles with their own readers.
+Production entries use version 4. Preserve older frozen bundles with their own readers.
 Immediate preparation/start carries only issuer-owned immutable entry/images;
 each actor still installs fresh policy state. Durable reopening authenticates
 the complete selected original through the existing loader.
@@ -135,16 +135,18 @@ and source selection through the existing original-output owner. Portable
 prepared fixtures carry no production authority. Loading the root entry does
 not execute source or require a live compiler.
 
-Production entries use schema 3, with an explicit native-catalog or frozen
+Production entries use schema 4, with an explicit native-catalog or frozen
 workspace source selection. Native root and built-in entries own their complete
 original output and declare no catalog dependencies. Workspace entries may link
 to an exact authenticated catalog selection: fresh outputs belong to the entry,
 while unchanged originals remain owned by that catalog. Reopening validates the
-recorded catalog identity and selected original closure; it does not select from
+recorded catalog identity and reissues the selected original closure before
+comparing its complete content digest; the manifest does not duplicate that graph.
+It does not select from
 the catalog's broader inventory or recompile source. Retain the linked catalog
 and its source roots for the lifetime of the workspace entry.
 
-Schema 1 and 2 entries must be rebuilt with the matching producer. Publication syncs
+Earlier entry schemas must be rebuilt with the matching producer. Publication syncs
 the complete staged tree before rename and the established output parent after
 rename. `EntryPublicationUnconfirmed` names an already visible output: validate
 and load that original, then retry parent durability confirmation without

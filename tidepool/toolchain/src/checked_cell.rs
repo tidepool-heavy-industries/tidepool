@@ -4378,29 +4378,27 @@ fn unique_key(values: &[Value], key: &str, count: usize) -> Result<Value, Compil
 }
 pub(crate) fn read(path: impl AsRef<Path>, limit: u64) -> Result<Vec<u8>, CompileError> {
     crate::host_work::checkpoint()?;
-    if std::fs::metadata(path.as_ref())
-        .map_err(|error| {
-            failure(format!(
-                "checked evidence {}: {error}",
-                path.as_ref().display()
-            ))
-        })?
-        .len()
-        > limit
-    {
-        return Err(failure("checked evidence exceeds bound"));
+    let path = path.as_ref();
+    let oversized = |actual| {
+        failure(format!(
+            "checked evidence {} has {actual} bytes, exceeding the {limit}-byte bound",
+            path.display()
+        ))
+    };
+    let actual = std::fs::metadata(path)
+        .map_err(|error| failure(format!("checked evidence {}: {error}", path.display())))?
+        .len();
+    if actual > limit {
+        return Err(oversized(actual));
     }
-    let bytes = crate::host_work::read(path.as_ref()).map_err(|error| {
+    let bytes = crate::host_work::read(path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::Interrupted {
             return CompileError::Io(error);
         }
-        failure(format!(
-            "checked evidence {}: {error}",
-            path.as_ref().display()
-        ))
+        failure(format!("checked evidence {}: {error}", path.display()))
     })?;
     if bytes.len() as u64 > limit {
-        return Err(failure("checked evidence exceeds bound"));
+        return Err(oversized(bytes.len() as u64));
     }
     Ok(bytes)
 }

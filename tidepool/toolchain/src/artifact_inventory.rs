@@ -117,6 +117,11 @@ pub struct NativeGroupKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExactArtifactSelection(Arc<ExactArtifactSelectionFacts>);
 
+/// Observation compared only after the complete selection has been independently
+/// reissued from authenticated artifacts. This digest cannot restore authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ExactArtifactSelectionDigest([u8; 32]);
+
 #[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExactArtifactSelectionFacts {
@@ -140,6 +145,33 @@ impl ExactArtifactSelection {
         Self(Arc::new(ExactArtifactSelectionFacts {
             graph: view.capture_graph_selection(),
         }))
+    }
+
+    pub(crate) fn observation_digest(&self) -> Result<ExactArtifactSelectionDigest, CompileError> {
+        use std::io::Write;
+
+        struct DigestWriter(Sha256);
+        impl Write for DigestWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.update(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        crate::host_work::checkpoint()?;
+        let mut sink = DigestWriter(Sha256::new());
+        sink.0
+            .update(b"Tidepool reissued exact selection observation v1\0");
+        {
+            let mut buffered = std::io::BufWriter::new(&mut sink);
+            serde_json::to_writer(&mut buffered, self)
+                .map_err(|error| failure(&format!("exact selection observation: {error}")))?;
+            buffered.flush()?;
+        }
+        Ok(ExactArtifactSelectionDigest(sink.0.finalize().into()))
     }
 }
 
@@ -3863,6 +3895,70 @@ mod view_read_properties;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reissued_selection_observation_does_not_embed_a_large_native_graph() {
+        let inventory = ArtifactInventory::default();
+        let original = issued_native_groups(
+            "WideObservation",
+            (0..20_000).map(|ordinal| (ordinal, Vec::new())).collect(),
+            &[],
+            &BTreeMap::new(),
+        );
+        let view = inventory
+            .admit(&inventory.empty_view(), vec![original])
+            .unwrap();
+        let selection = ExactArtifactSelection::capture(&view);
+        let complete = serde_json::to_vec(&selection).unwrap();
+        assert!(
+            complete.len() > 16 << 20,
+            "exercise the former manifest size failure"
+        );
+        let observation = selection.observation_digest().unwrap();
+        let mut expected = Sha256::new();
+        expected.update(b"Tidepool reissued exact selection observation v1\0");
+        expected.update(&complete);
+        assert_eq!(observation.0, <[u8; 32]>::from(expected.finalize()));
+        let encoded = serde_json::to_vec(&observation).unwrap();
+        assert!(encoded.len() <= 129);
+        assert_eq!(
+            serde_json::from_slice::<ExactArtifactSelectionDigest>(&encoded).unwrap(),
+            observation
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn reissued_selection_digest_covers_all_graph_observations(ordinal in 1u32..1_024) {
+            let inventory = ArtifactInventory::default();
+            let original = issued_native_groups("Observed", vec![(ordinal, Vec::new())], &[], &BTreeMap::new());
+            let view = inventory.admit(&inventory.empty_view(), vec![original]).unwrap();
+            let selection = ExactArtifactSelection::capture(&view);
+            let expected = selection.observation_digest().unwrap();
+            let value = serde_json::to_value(&selection).unwrap();
+            let reopened: ExactArtifactSelection = serde_json::from_value(value.clone()).unwrap();
+            proptest::prop_assert_eq!(reopened.observation_digest().unwrap(), expected);
+            for field in ["selections", "bindings", "namespace", "roots", "native_groups", "native_custody"] {
+                let mut changed = value.clone();
+                let rows = changed["graph"][field].as_array_mut().unwrap();
+                if rows.is_empty() {
+                    rows.push(value["graph"]["bindings"][0].clone());
+                } else {
+                    rows.pop();
+                }
+                let changed: ExactArtifactSelection = serde_json::from_value(changed).unwrap();
+                proptest::prop_assert_ne!(changed.observation_digest().unwrap(), expected, "omitted field {}", field);
+            }
+            for field in ["nodes", "dependencies"] {
+                let mut changed = value.clone();
+                let rows = changed["graph"]["selections"][0][field].as_array_mut().unwrap();
+                proptest::prop_assert!(!rows.is_empty());
+                rows.pop();
+                let changed: ExactArtifactSelection = serde_json::from_value(changed).unwrap();
+                proptest::prop_assert_ne!(changed.observation_digest().unwrap(), expected, "omitted witness {}", field);
+            }
+        }
+    }
 
     #[test]
     fn interrupted_materialization_waiter_exits_without_touching_producer() {
