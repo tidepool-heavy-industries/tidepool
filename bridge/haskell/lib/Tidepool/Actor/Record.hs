@@ -27,12 +27,12 @@ module Tidepool.Actor.Record
     -- against a reference it was sent — but it cannot be forged from parts.
   , ActorState, Handler, ActorSpec, ActorHandle (actorRef)
   , Send, Request, EventHandler, EventSource, EventSink, AttachmentError (..)
-  , on, progress, settlement, lifecycle, command, attach
+  , on, progress, progressSited, settlement, settlementSited, lifecycle, command, attach
   , get, gets, put, modify'
-  , start, client, send, trySend, call, finish, replace
+  , start, startSited, client, send, trySend, call, finish, finishSited, replace, replaceSited
   , definition, withWorkspace
   , self, sender, ActorInputOrigin (..)
-  , LocalEffects, Forwarding, forwardResult, forwardingExit
+  , LocalEffects, Forwarding, forwardResult, forwardResultSited, forwardingExit
   -- Named by exported signatures ('definition', 'self', 'sender',
   -- 'LocalEffects'), so a cell binding's pinned type can name it. Abstract:
   -- the constructor stays private.
@@ -54,11 +54,12 @@ import qualified Tidepool.Actor.Source as Source
 import Tidepool.Command.Types (Job)
 import Tidepool.Effects.Core (CommandResult)
 import Tidepool.Agent.Reply.Internal
-  ( Progress, ProgressState, ResponseFailure, ResponseResult )
+  ( Progress, ProgressState, ResponseFailure, ResponseResult, ResponseState )
 import qualified Tidepool.Agent.Reply.Internal as AgentReply
 import Tidepool.Effects.Core (Actor, ActorLocal, ActorInputOrigin (..))
 import qualified Tidepool.Effects.Core as Core
 import qualified Tidepool.Internal.ActorRef as Internal
+import Tidepool.Internal.RequestSite (RequestSite)
 
 data State (s :: Type)
 data Call (input :: Type) (reply :: Type)
@@ -155,11 +156,23 @@ on = EventHandler
 command :: Job -> EventSource CommandResult
 command job = EventSource (\receive -> [Source.commandSource job receive])
 
-progress :: Progress p -> EventSource (ProgressState p)
-progress handle = EventSource (\receive -> [Actor.progressSource handle receive])
+{-# OPAQUE progress #-}
+progress :: forall progress. Progress progress -> EventSource (ProgressState progress)
+progress = progressSited (error "progress: extractor must assign a typed site")
 
-settlement :: AgentReply.Request r -> EventSource (Either ResponseFailure (ResponseResult r))
-settlement handle = EventSource (\receive -> [Actor.settlementSource handle receive])
+{-# OPAQUE progressSited #-}
+progressSited :: forall progress. RequestSite '[progress] (ProgressState progress)
+  -> Progress progress -> EventSource (ProgressState progress)
+progressSited site handle = EventSource (\receive -> [Source.progressSourceSited site handle receive])
+
+{-# OPAQUE settlement #-}
+settlement :: forall result. AgentReply.Request result -> EventSource (Either ResponseFailure (ResponseResult result))
+settlement = settlementSited (error "settlement: extractor must assign a typed site")
+
+{-# OPAQUE settlementSited #-}
+settlementSited :: forall result. RequestSite '[ResponseResult result] (ResponseState result)
+  -> AgentReply.Request result -> EventSource (Either ResponseFailure (ResponseResult result))
+settlementSited site handle = EventSource (\receive -> [Source.settlementSourceSited site handle receive])
 
 lifecycle :: ActorHandle api -> EventSource Actor.ActorLifecycle
 lifecycle ActorHandle { actorRef = ref } =
@@ -364,16 +377,24 @@ lower ActorSpec { specLabel = label, specProfile = profile, specRecord = record,
     [initial] -> (actor, initial)
     _ -> error "record derivation violated the single State field invariant"
 
+{-# OPAQUE start #-}
 start
-  :: (Derive api effects, Member Actor parent)
+  :: forall exit api effects parent. (ActorState api ~ exit, Derive api effects, Member Actor parent)
   => ActorSpec api effects -> Eff parent (ActorHandle api)
-start spec = let (actor, initial) = lower spec in ActorHandle <$> Actor.startActor actor initial
+start = startSited (error "start: extractor must assign a typed site")
+
+{-# OPAQUE startSited #-}
+startSited
+  :: forall exit api effects parent. (ActorState api ~ exit, Derive api effects, Member Actor parent)
+  => RequestSite '[exit] (ActorHandle api)
+  -> ActorSpec api effects -> Eff parent (ActorHandle api)
+startSited site spec = let (actor, initial) = lower spec in ActorHandle <$> Actor.startActorWithSite site actor initial
 
 client
   :: forall api. (Generic (api Client), Rep (api Client) ~ Fields (Schema api) Client,
                  GActor api (Schema api))
   => ActorHandle api -> api Client
-client ActorHandle { actorRef = Internal.ActorRef actor incarnation _ } =
+client ActorHandle { actorRef = Internal.ActorRef actor incarnation } =
   to (unView (endpoints @api @(Schema api) (Address (actor, incarnation)) id))
 
 self
@@ -391,14 +412,29 @@ sender
   => Eff effects ActorInputOrigin
 sender = snd <$> Eff.send @(ActorLocal (Message api)) Core.ActorLocalContextWith
 
-finish :: Member Actor effects => ActorHandle api -> Eff effects (ActorExit (ActorState api))
-finish ActorHandle { actorRef = ref } = Actor.drainActor ref >> Actor.awaitExit ref
+{-# OPAQUE finish #-}
+finish :: forall exit api effects. (ActorState api ~ exit, Member Actor effects) => ActorHandle api -> Eff effects (ActorExit exit)
+finish = finishSited (error "finish: extractor must assign a typed site")
 
+{-# OPAQUE finishSited #-}
+finishSited :: forall exit api effects. (ActorState api ~ exit, Member Actor effects)
+  => RequestSite '[exit] (ActorExit exit)
+  -> ActorHandle api -> Eff effects (ActorExit exit)
+finishSited site ActorHandle { actorRef = ref } = Actor.drainActor ref >> Actor.awaitExitSited site ref
+
+{-# OPAQUE replace #-}
 replace
-  :: (Derive api effects, Member Actor parent)
+  :: forall exit api effects parent. (ActorState api ~ exit, Derive api effects, Member Actor parent)
   => ActorHandle api -> ActorSpec api effects -> Eff parent (ActorHandle api)
-replace ActorHandle { actorRef = ref } spec =
-  let (actor, _) = lower spec in ActorHandle <$> Actor.replaceActor ref actor
+replace = replaceSited (error "replace: extractor must assign a typed site")
+
+{-# OPAQUE replaceSited #-}
+replaceSited
+  :: forall exit api effects parent. (ActorState api ~ exit, Derive api effects, Member Actor parent)
+  => RequestSite '[exit] (ActorHandle api)
+  -> ActorHandle api -> ActorSpec api effects -> Eff parent (ActorHandle api)
+replaceSited site ActorHandle { actorRef = ref } spec =
+  let (actor, _) = lower spec in ActorHandle <$> Actor.replaceActorWithSite site ref actor
 
 -- A settlement source publishes exactly once. This actor has no public input
 -- endpoint, so after forwarding that value there is no accepted tail to lose.
@@ -410,15 +446,25 @@ instance Show (Forwarding value) where
     showString "Forwarding " . shows (Internal.actorAddress ref)
 
 forwardingExit :: Member Actor effects => Forwarding value -> Eff effects (Maybe (ActorExit ()))
-forwardingExit (Forwarding ref) = Actor.pollExit ref
+forwardingExit (Forwarding ref) = Actor.pollExit @() ref
 
+{-# OPAQUE forwardResult #-}
 forwardResult
-  :: Member Actor effects
+  :: forall value effects. Member Actor effects
   => AgentReply.Request value
   -> Send (Either ResponseFailure (ResponseResult value))
   -> Eff effects (Forwarding value)
-forwardResult response endpoint = Forwarding <$> Actor.startActor
-  (Actor.withSources [Actor.settlementSource response (\value -> Forward value ())]
+forwardResult = forwardResultSited (error "forwardResult: extractor must assign a typed site")
+
+{-# OPAQUE forwardResultSited #-}
+forwardResultSited
+  :: forall value effects. Member Actor effects
+  => RequestSite '[ResponseResult value] (ResponseState value)
+  -> AgentReply.Request value
+  -> Send (Either ResponseFailure (ResponseResult value))
+  -> Eff effects (Forwarding value)
+forwardResultSited site response endpoint = Forwarding <$> Actor.startUnitActor @()
+  (Actor.withSources [Source.settlementSourceSited site response (\value -> Forward value ())]
     Actor.ActorDefinition
       { Actor.label = "forward-result"
       , Actor.effectProfile = Actor.ReadOnly

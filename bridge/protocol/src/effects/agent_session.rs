@@ -89,6 +89,8 @@ pub fn agent_session() -> Effect {
                 errors: None,
                 handling: HandlingClass::AgentSession,
             },
+            response_publication("AgentSessionPublishResponseWith", "agent_session_publish_response_with", false),
+            response_publication("AgentSessionPublishProgressResponseWith", "agent_session_publish_progress_response_with", true),
             Verb {
                 ctor: "AgentAttachWith",
                 method: "agent_attach_with",
@@ -107,5 +109,44 @@ pub fn agent_session() -> Effect {
         generated_handler: false,
         handler_execution: crate::schema::HandlerExecution::Immediate,
         caller_principal: false,
+    }
+}
+
+fn response_publication(ctor: &'static str, method: &'static str, progress: bool) -> Verb {
+    let inputs = if progress {
+        vec![
+            HsType::Var("input"),
+            HsType::Var("progress"),
+            HsType::Var("response"),
+        ]
+    } else {
+        vec![HsType::Var("input"), HsType::Var("response")]
+    };
+    Verb {
+        ctor,
+        method,
+        args: vec![
+            Arg {
+                name: "requestId",
+                ty: HsType::Int,
+                rust: RustBinding::Derived,
+            },
+            Arg {
+                name: "site",
+                ty: HsType::app(
+                    HsType::app(HsType::Named("RequestSite"), HsType::TypeList(inputs)),
+                    HsType::Var("siteReply"),
+                ),
+                rust: RustBinding::External,
+            },
+            Arg {
+                name: "response",
+                ty: HsType::Var("response"),
+                rust: RustBinding::HaskellValue,
+            },
+        ],
+        ret: HsType::Unit,
+        errors: None,
+        handling: HandlingClass::AgentSession,
     }
 }

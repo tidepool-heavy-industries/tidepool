@@ -171,7 +171,7 @@ tryCallUnit
   => ActorRef protocol exit
   -> protocol ()
   -> Eff effs (Either Text ())
-tryCallUnit (ActorRef actorId incarnation _) request = do
+tryCallUnit (ActorRef actorId incarnation) request = do
   status <- send (ActorTryCallWith (actorId, incarnation) request)
   pure $ case status of
     ActorCallSucceeded -> Right ()

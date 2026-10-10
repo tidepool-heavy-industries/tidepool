@@ -42,14 +42,14 @@ import qualified Tidepool.Actor as Actor
 import Tidepool.Agent.Reply.Internal
   ( Request, RequestOptions (..), defaultRequestOptions, RequestError (..)
   , SettlementReporting (..), Progress (..), responseRequestId
-  , Replies, RequestId (..), fillResponse, newRequestHandles, reserveRequest
+  , Replies, RequestId (..), newRequestHandles, reserveRequest
   , replyRequestId, submitRequest, abandonResponse
   , ResponseResult (..), ExecutionReceipt (..), WorktreeEvidence (..)
   )
 import Tidepool.Agent.Ref.Internal
   ( AgentRef (..), AgentProtocol (..), agentIdentity, agentBoundWorktree, internalAgentRef )
 import Tidepool.Agent.Watch.Internal (WatchId (..))
-import Tidepool.Agent.Session (requestSessionSited)
+import Tidepool.Agent.Session (requestSessionSited, publishResponse, publishProgressResponse)
 import Tidepool.View.Types (View(..))
 import Tidepool.Inspection
   ( Display (..), DisplayTree (..), PageDisplay (..)
@@ -211,10 +211,10 @@ request = requestSited (error "request: extractor must assign a typed site")
 {-# OPAQUE requestSited #-}
 requestSited
   :: forall result input effs. Member Replies effs
-  => RequestSite '[input] result -> AgentRef -> input -> RequestOptions
+  => RequestSite '[input, ResponseResult result] result -> AgentRef -> input -> RequestOptions
   -> Eff effs (Either RequestError (Request result))
 requestSited site agent input options =
-  requestConfiguredSited site agent input options (const (pure ()))
+  requestConfiguredSited site (\requestId -> publishResponse requestId site) agent input options (const (pure ()))
 
 {-# OPAQUE requestWithProgress #-}
 requestWithProgress
@@ -227,7 +227,7 @@ requestWithProgress = requestWithProgressSited
 {-# OPAQUE requestWithProgressSited #-}
 requestWithProgressSited
   :: forall progress result input effs. Member Replies effs
-  => RequestSite '[input, progress] result -> AgentRef -> input -> RequestOptions
+  => RequestSite '[input, progress, ResponseResult result] result -> AgentRef -> input -> RequestOptions
   -> Eff effs (Either RequestError (Request result, Progress progress))
 requestWithProgressSited site agent input options =
   requestWithProgressIntoSited site agent input options (const (pure ()))
@@ -246,29 +246,31 @@ requestWithProgressInto = requestWithProgressIntoSited
 {-# OPAQUE requestWithProgressIntoSited #-}
 requestWithProgressIntoSited
   :: forall progress result input effs. Member Replies effs
-  => RequestSite '[input, progress] result -> AgentRef -> input -> RequestOptions
+  => RequestSite '[input, progress, ResponseResult result] result -> AgentRef -> input -> RequestOptions
   -> ((Request result, Progress progress) -> Eff effs ())
   -> Eff effs (Either RequestError (Request result, Progress progress))
 requestWithProgressIntoSited site agent input options retain = do
   let handles response = (response, Progress (responseRequestId response))
-  submitted <- requestConfiguredSited site agent input options (retain . handles)
+  submitted <- requestConfiguredSited site (\requestId -> publishProgressResponse requestId site) agent input options (retain . handles)
   pure (handles <$> submitted)
 
 requestConfiguredSited
   :: forall result input extra effs. Member Replies effs
-  => RequestSite (input ': extra) result -> AgentRef -> input -> RequestOptions
+  => RequestSite (input ': extra) result
+  -> (Int -> ResponseResult result -> Eff (Actor.ReadOnlyEffects AgentProtocol) ())
+  -> AgentRef -> input -> RequestOptions
   -> (Request result -> Eff effs ())
   -> Eff effs (Either RequestError (Request result))
-requestConfiguredSited site agent@(AgentRef target targetWorktree) input options retain = do
+requestConfiguredSited site publish agent@(AgentRef target targetWorktree) input options retain = do
   reserved <- reserveRequest (requestLabel options) (actorAddress target)
     (requestReporting options) (requestLifetime options)
   case reserved of
     Left failure -> pure (Left failure)
     Right requestId -> do
-      let (response, replyHandle) = newRequestHandles input requestId agent
+      let (response, replyHandle) = newRequestHandles requestId agent
       retain response
-      admitted <- submitRequest requestId (actorAddress target)
-        (RunRequest (runRequest targetWorktree response replyHandle)) (requestDeadline options)
+      admitted <- submitRequest requestId site (actorAddress target)
+        (RunRequest (runRequest targetWorktree replyHandle)) (requestDeadline options)
       case admitted of
         Left failure -> do
           -- Submission refusal occurs before queue admission. Abandon eagerly;
@@ -278,7 +280,7 @@ requestConfiguredSited site agent@(AgentRef target targetWorktree) input options
           pure (Left failure)
         Right () -> pure (Right response)
   where
-    runRequest tree response replyHandle = do
+    runRequest tree replyHandle = do
       let requestId = case replyRequestId replyHandle of RequestId value -> value
           (actorId, incarnation) = actorAddress target
       start <- traverse worktreeHead tree
@@ -292,8 +294,7 @@ requestConfiguredSited site agent@(AgentRef target targetWorktree) input options
             Right submission -> WorktreeObserved (handleReceipt worktree) startHead submission
         (Just _, Nothing) -> error "bound worktree was not sampled"
       let execution = ExecutionReceipt (RequestId requestId) actorId incarnation
-      case fillResponse response (ResponseResult result execution evidence) of
-        () -> pure ()
+      publish requestId (ResponseResult result execution evidence)
 
 -- | Observable result of asking one exact actor incarnation to retire.
 --

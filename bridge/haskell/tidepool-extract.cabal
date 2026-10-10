@@ -820,6 +820,7 @@ test-suite model-turn-test
     Tidepool.Inspection.Tree
     Tidepool.View.Types
     Tidepool.Internal.ActorRef
+    Tidepool.Internal.ActorExit
     Tidepool.Internal.ExitCell
     Tidepool.Internal.ModelControl
     Tidepool.Internal.RequestSite
@@ -966,6 +967,7 @@ test-suite automation-helper-contract
     Tidepool.View.Types
     Tidepool.Internal.ActorProfiles
     Tidepool.Internal.ActorRef
+    Tidepool.Internal.ActorExit
     Tidepool.Internal.ExitCell
     Tidepool.Internal.RequestSite
     Tidepool.Journal
@@ -1029,6 +1031,7 @@ test-suite browser-scenario-contract
     Tidepool.Inspection.Tree
     Tidepool.View.Types
     Tidepool.Internal.ActorRef
+    Tidepool.Internal.ActorExit
     Tidepool.Internal.ExitCell
     Tidepool.Internal.RequestSite
     Tidepool.Patch
@@ -1090,6 +1093,7 @@ test-suite command-tools-contract
     Tidepool.Inspection.Tree
     Tidepool.View.Types
     Tidepool.Internal.ActorRef
+    Tidepool.Internal.ActorExit
     Tidepool.Internal.ExitCell
     Tidepool.Internal.RequestSite
     Tidepool.Patch
@@ -1149,6 +1153,7 @@ test-suite tool-profiles-contract
     Tidepool.View.Types
     Tidepool.Internal.ActorProfiles
     Tidepool.Internal.ActorRef
+    Tidepool.Internal.ActorExit
     Tidepool.Internal.ExitCell
     Tidepool.Internal.RequestSite
     Tidepool.Patch
