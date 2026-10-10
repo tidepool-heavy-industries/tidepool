@@ -216,12 +216,12 @@ fn recovered_public_owner_rejects_foreign_admission_and_incarnation_without_effe
     else {
         panic!("empty execution has a binding-only publication");
     };
-    assert_eq!(
+    assert!(matches!(
         first
             .publish_staged_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     let before = recovery.state();
     drop(first);
     // Even identical serialized session/scope counters cannot restore this
@@ -531,12 +531,12 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
     else {
         panic!("materialized declaration retraction must publish");
     };
-    assert_eq!(
+    assert!(matches!(
         session
             .publish_staged_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new(),)
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
 }
 
 #[test]
@@ -555,12 +555,12 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         1024 * 1024,
     );
     let public = producer.mint_isolated_scope();
-    assert_eq!(
+    assert!(matches!(
         producer
             .initialize_durable_public_scope(owner(1), public)
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     let admission = Arc::new(producer.begin_private_execution(public).unwrap());
     let original = adopt_recovery_declaration(
         &mut producer,
@@ -596,12 +596,12 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
     else {
         panic!("real retained declarations must publish");
     };
-    assert_eq!(
+    assert!(matches!(
         producer
             .publish_staged_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new())
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     let expected = producer.public_visibility_snapshot_in(public).unwrap();
     let child_owner = RecoveryPublicOwner::new(
         &tidepool_repr::ActorPath::parse("root/exact-recovery/child").unwrap(),
@@ -614,12 +614,12 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         .read_public_owner(RecoveryDomainId::Root, &owner(1))
         .unwrap()
         .unwrap();
-    assert_eq!(
+    assert!(matches!(
         producer
             .initialize_durable_public_scope(child_owner.clone(), child)
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     let child_snapshot = producer.public_visibility_snapshot_in(child).unwrap();
     assert_eq!(child_snapshot.declaration_tip, expected.declaration_tip);
     assert_eq!(
@@ -643,12 +643,12 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
     )
     .unwrap();
     let additional_child = producer.mint_detached_scope(public).unwrap();
-    assert_eq!(
+    assert!(matches!(
         producer
             .initialize_durable_public_scope(additional_owner.clone(), additional_child)
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     assert_eq!(
         producer
             .begin_durable_private_execution(&additional_owner, additional_child)
@@ -758,7 +758,7 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
     let durable = spec.store_path.parent().unwrap();
     let recovery = RecoveryFixture::reopen(run_owner(durable));
     assert_eq!(recovery.store.path(), spec.store_path);
-    let before = recovery.state();
+    let before = published_recovery_state(&recovery);
     let original = Generation(spec.original);
     let dependent = Generation(spec.dependent);
     let recovery_owner = recovery.owner.clone();
@@ -798,7 +798,7 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
         assert_eq!(consumer.lib().scope_tip(public), Generation(0));
         assert_same_content(&recovery, &before);
     }
-    assert_eq!(
+    assert!(matches!(
         consumer
             .transfer_recovered_public_owner(
                 &owner(1),
@@ -812,9 +812,9 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
             )
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     assert!(consumer.recover_public_scope(&owner(1)).is_err());
-    let before = recovery.state();
+    let before = published_recovery_state(&recovery);
     let snapshot = consumer.public_visibility_snapshot_in(public).unwrap();
     assert_eq!(snapshot.declaration_tip, Generation(spec.declaration_tip));
     assert_eq!(snapshot.epoch, spec.epoch + 1);
@@ -1125,25 +1125,34 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
     .unwrap();
 }
 
-fn assert_same_content(
+fn published_recovery_state(
     recovery: &RecoveryFixture,
-    before: &super::recovery_store::RecoveryDomainState,
+) -> (
+    super::recovery_store::RecoveryDomainState,
+    Vec<super::recovery_store::RecoveryPublicOwnerState>,
 ) {
-    let current = recovery.state();
-    assert_eq!(current.content_revision, before.content_revision);
-    assert_eq!(current.snapshot_root, before.snapshot_root);
-    assert!(current.allocation_ceiling >= before.allocation_ceiling);
+    (
+        recovery.state(),
+        recovery
+            .store
+            .public_owner_states(RecoveryDomainId::Root)
+            .unwrap(),
+    )
 }
 
-fn persist_empty_public(recovery: &RecoveryFixture, id: u64) {
-    let mut session = PersistentSession::new(Some(library(id, recovery, &[])), 1024);
-    let public = session.mint_isolated_scope();
-    assert_eq!(
-        session
-            .initialize_durable_public_scope(owner(1), public)
-            .unwrap(),
-        PublicManifestCommit::Durable
-    );
+fn assert_same_content(
+    recovery: &RecoveryFixture,
+    before: &(
+        super::recovery_store::RecoveryDomainState,
+        Vec<super::recovery_store::RecoveryPublicOwnerState>,
+    ),
+) {
+    let (current, owners) = published_recovery_state(recovery);
+    assert_eq!(current.snapshot_root, before.0.snapshot_root);
+    assert_eq!(owners, before.1);
+    assert!(current.allocation_ceiling >= before.0.allocation_ceiling);
+    assert!(current.revision >= before.0.revision);
+    assert!(current.content_revision >= before.0.content_revision);
 }
 
 #[test]
@@ -1247,7 +1256,7 @@ fn successor_transfer_fences_old_admissions_after_commit_or_commit_error() {
             );
             assert!(session.begin_private_execution(target).is_err());
         } else {
-            assert_eq!(outcome, PublicManifestCommit::Durable);
+            assert!(matches!(outcome, PublicManifestCommit::Durable));
             assert!(matches!(
                 session.freeze_execution_intent(&old, vec![], vec![]),
                 Err(SessionError::StaleStagedDeclaration)
@@ -1320,7 +1329,7 @@ fn successor_transfer_retains_only_the_sealed_live_bootstrap_dependencies() {
         ));
         assert_eq!(domain_state(session.lib()), before);
         let outcome = transfer(&mut session, target).unwrap();
-        assert_eq!(outcome, PublicManifestCommit::Durable);
+        assert!(matches!(outcome, PublicManifestCommit::Durable));
         let transferred = session.public_visibility_snapshot_in(target).unwrap();
         assert_eq!(transferred.source_instances, snapshot.source_instances);
         assert_eq!(
@@ -1413,7 +1422,7 @@ fn initial_public_owner_survives_restart_before_first_cell() {
     let mut session = PersistentSession::new(Some(library(4431, &reopened, &[])), 1024);
     assert!(graph(session.lib()).node_ids().next().is_none());
     let target = session.mint_isolated_scope();
-    assert_eq!(
+    assert!(matches!(
         session
             .transfer_recovered_public_owner(
                 &owner(1),
@@ -1427,7 +1436,7 @@ fn initial_public_owner_survives_restart_before_first_cell() {
             )
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     assert!(graph(session.lib()).node_ids().next().is_none());
     assert_eq!(reopened.state().allocation_ceiling, Generation(0));
     let successor = reopened
@@ -1457,12 +1466,12 @@ fn durable_child_initializer_preserves_parent_and_refuses_a_local_only_owner() {
     let recovery = RecoveryFixture::create(durable.path());
     let mut session = PersistentSession::new(Some(library(4407, &recovery, &[])), 1024);
     let parent = session.mint_isolated_scope();
-    assert_eq!(
+    assert!(matches!(
         session
             .initialize_durable_public_scope(owner(1), parent)
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     let before_parent = session.public_visibility_snapshot_in(parent).unwrap();
     let parent_surface = recovery
         .store
@@ -1486,12 +1495,12 @@ fn durable_child_initializer_preserves_parent_and_refuses_a_local_only_owner() {
         .initialize_durable_public_scope(child_owner.clone(), parent)
         .is_err());
     assert_eq!(recovery.state(), before);
-    assert_eq!(
+    assert!(matches!(
         session
             .initialize_durable_public_scope(child_owner.clone(), child)
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     assert_eq!(
         session.public_visibility_snapshot_in(parent),
         Some(before_parent)
@@ -1513,12 +1522,12 @@ fn durable_child_initializer_preserves_parent_and_refuses_a_local_only_owner() {
         1
     );
     let initialized = recovery.state();
-    assert_eq!(
+    assert!(matches!(
         session
             .initialize_durable_public_scope(child_owner.clone(), child)
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     assert_eq!(recovery.state(), initialized);
 }
 

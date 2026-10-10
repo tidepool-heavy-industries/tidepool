@@ -3857,12 +3857,12 @@ mod checkpoint_scope_tests {
             super::super::prepared::tests::rooted_publication_fixture(&mut session, "original", id);
         session.bind_in(public, initial).unwrap();
         let owner = public_owner("root/bootstrap");
-        assert_eq!(
+        assert!(matches!(
             session
                 .initialize_durable_public_scope(owner.clone(), public)
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         (session, public, owner)
     }
 
@@ -3888,10 +3888,10 @@ mod checkpoint_scope_tests {
             })
         ));
         let before = session.public_visibility_snapshot_in(public).unwrap();
-        assert_eq!(
+        assert!(matches!(
             session.publish_durable_public_bootstrap(seal).unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         let after = session.public_visibility_snapshot_in(public).unwrap();
         assert_eq!(after.bindings, before.bindings);
         assert_eq!(after.source_instances, before.source_instances);
@@ -4081,12 +4081,12 @@ mod checkpoint_scope_tests {
                 .unwrap()
                 .stage()
                 .unwrap();
-            assert_eq!(
+            assert!(matches!(
                 session
                     .publish_staged_public_manifest(staged, &PublicationDecision::new())
                     .unwrap(),
                 PublicManifestCommit::Durable
-            );
+            ));
         }
         assert_eq!(
             session
@@ -4931,12 +4931,12 @@ mod checkpoint_scope_tests {
             .unwrap()
             .stage()
             .unwrap();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(staged_b, &PublicationDecision::new())
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         assert_eq!(
             session
                 .public_visibility_snapshot_in(public_b)
@@ -4952,24 +4952,24 @@ mod checkpoint_scope_tests {
             0
         );
         let a_decision = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(staged_a, &a_decision)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(a_decision.phase(), super::super::PublicationPhase::Running);
         let restaged_a = session
             .snapshot_binding_publication(actor_a.clone(), public_a, private_a, vec![])
             .unwrap()
             .stage()
             .unwrap();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(restaged_a, &a_decision)
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         assert_eq!(
             session
                 .public_visibility_snapshot_in(public_a)
@@ -5020,12 +5020,12 @@ mod checkpoint_scope_tests {
             public_base
         );
         let decision = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(stage, &decision)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
         assert!(!crate::session::recovery_test_fixture::has_public_owners(
             session.lib()
@@ -5036,12 +5036,12 @@ mod checkpoint_scope_tests {
             .stage()
             .unwrap();
         decision.request_cancellation();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(retry, &decision)
                 .unwrap(),
             PublicManifestCommit::Cancelled
-        );
+        ));
         assert_eq!(
             session.public_visibility_snapshot_in(public).unwrap(),
             public_base
@@ -5069,24 +5069,24 @@ mod checkpoint_scope_tests {
             .unwrap();
         session.advance_public_visibility(public);
         let decision = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(stage, &decision)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
         let retry = session
             .snapshot_binding_publication(owner, public, private, vec![])
             .unwrap()
             .stage()
             .unwrap();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(retry, &decision)
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         assert_eq!(decision.phase(), super::super::PublicationPhase::Published);
         assert_eq!(
             session.public_visibility_snapshot_in(public).unwrap().epoch,
@@ -5153,12 +5153,12 @@ mod checkpoint_scope_tests {
             .unwrap();
         first.retire_scope(public);
         let decision = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             first
                 .publish_staged_public_manifest(retired, &decision)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
         assert!(!crate::session::recovery_test_fixture::has_public_owners(
             first.lib()
@@ -5203,12 +5203,12 @@ mod checkpoint_scope_tests {
             .unwrap();
         session.lib_mut().reserve_join_generation_durable().unwrap();
         let decision = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(stage, &decision)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
     }
 
@@ -5230,12 +5230,12 @@ mod checkpoint_scope_tests {
             .unwrap();
         let decision = PublicationDecision::new();
         decision.request_cancellation();
-        assert_eq!(
+        assert!(matches!(
             cancelled
                 .publish_staged_public_manifest(stage, &decision)
                 .unwrap(),
             PublicManifestCommit::Cancelled
-        );
+        ));
         assert!(!crate::session::recovery_test_fixture::has_public_owners(
             cancelled.lib()
         ));

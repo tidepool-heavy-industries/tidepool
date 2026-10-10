@@ -2225,12 +2225,12 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
             "durable_initialization",
             None,
             |resident| {
-                assert_eq!(
+                assert!(matches!(
                     resident
                         .initialize_durable_public_scope(owner.clone(), public)
                         .unwrap(),
                     PublicManifestCommit::Durable
-                );
+                ));
             },
         );
     }
@@ -2537,12 +2537,12 @@ fn resident_capture_cells(count: usize, durable: bool) {
             "durable_initialization",
             None,
             |resident| {
-                assert_eq!(
+                assert!(matches!(
                     resident
                         .initialize_durable_public_scope(owner.clone(), public)
                         .unwrap(),
                     PublicManifestCommit::Durable
-                );
+                ));
             },
         );
         execute_cell(
@@ -3479,23 +3479,32 @@ fn complete_cell_preserves_exact_local_fixity() {
 }
 
 fn persisted_root_state(
-    resident: &ScaleSession,
+    publication: &ScalePublication,
     owner: &RecoveryPublicOwner,
 ) -> crate::session::recovery::RecoveryNodeState {
-    let attached = resident.state.lib().durable_graph.as_ref().unwrap();
-    assert!(attached
+    let ScalePublication::Durable { recovery, .. } = publication else {
+        panic!("persisted state requires a durable publication");
+    };
+    let domain = crate::session::RecoveryDomainId::Root;
+    assert!(recovery
         .store
-        .read_public_owner(attached.domain_id, owner)
+        .read_public_owner(domain, owner)
         .unwrap()
         .is_some());
-    let root = attached
-        .graph
-        .public_surfaces()
-        .find(|surface| &surface.owner == owner)
+    let state = recovery.store.read_domain(domain).unwrap().unwrap();
+    let graph = crate::session::recovery::RecoveryGraph::hydrate_domain(
+        recovery.store.clone(),
+        domain,
+        &state,
+    )
+    .unwrap();
+    let root = graph
+        .surface(owner)
+        .unwrap()
         .unwrap()
         .declaration_root
         .unwrap();
-    attached.graph.node(root).unwrap().unwrap().state.clone()
+    graph.node(root).unwrap().unwrap().state.clone()
 }
 
 #[test]
@@ -3601,12 +3610,12 @@ fn durable_mixed_originals_recover_independent_native_entry() {
         );
         return;
     }
-    assert_eq!(
+    assert!(matches!(
         resident
             .initialize_durable_public_scope(owner.clone(), public)
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     execute_cell(
         &mut resident,
         public,
@@ -3630,7 +3639,7 @@ fn durable_mixed_originals_recover_independent_native_entry() {
         &publication,
     );
     assert!(matches!(
-        persisted_root_state(&resident, &owner),
+        persisted_root_state(&publication, &owner),
         crate::session::recovery::RecoveryNodeState::ExactArtifactClosure
     ));
     execute_cell(
@@ -3645,7 +3654,7 @@ fn durable_mixed_originals_recover_independent_native_entry() {
         &publication,
     );
     assert!(matches!(
-        persisted_root_state(&resident, &owner),
+        persisted_root_state(&publication, &owner),
         crate::session::recovery::RecoveryNodeState::LiveValueDependency { .. }
     ));
     drop(resident);

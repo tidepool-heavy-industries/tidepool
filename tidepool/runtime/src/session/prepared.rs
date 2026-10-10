@@ -8002,18 +8002,20 @@ pub(super) mod tests {
             .unwrap();
         let cancelled = PublicationDecision::new();
         cancelled.request_cancellation();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(cancel_stage, &cancelled)
                 .unwrap(),
             PublicManifestCommit::Cancelled
-        );
+        ));
         assert!(session
             .public_visibility_snapshot_in(public)
             .unwrap()
             .source_instances
             .is_empty());
-        assert!(!path.exists());
+        assert!(!crate::session::recovery_test_fixture::has_public_owners(
+            session.lib()
+        ));
 
         let stage = session
             .snapshot_publication(owner.clone(), public, private, vec![], keys.to_vec())
@@ -8046,7 +8048,7 @@ pub(super) mod tests {
         for key in &keys {
             let source = surface
                 .source_instances
-                .iter()
+                .keys()
                 .find(|source| source.instance == key.instance.raw())
                 .unwrap();
             assert_eq!(source.machine_incarnation, incarnation.0);
@@ -8058,12 +8060,12 @@ pub(super) mod tests {
             assert_eq!(source.binder.record_parent, key.binder.binder.record_parent);
         }
         let stale = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(old_stage, &stale)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(stale.phase(), PublicationPhase::Running);
         assert_eq!(
             recovery.state().revision,
@@ -13019,16 +13021,16 @@ pub(super) mod tests {
             .unwrap()
             .stage()
             .unwrap();
-        assert_eq!(state.publish_staged_public_manifest(
+        assert!(matches!(state.publish_staged_public_manifest(
             staged_b, &super::super::PublicationDecision::new(),
-        ).unwrap(), super::super::PublicManifestCommit::Durable);
+        ).unwrap(), super::super::PublicManifestCommit::Durable));
         let decision_a = super::super::PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             state
                 .publish_staged_public_manifest(staged_a, &decision_a)
                 .unwrap(),
             super::super::PublicManifestCommit::Stale
-        );
+        ));
         let restaged_a = state
             .snapshot_binding_publication(
                 actor_a.clone(),
@@ -13039,12 +13041,12 @@ pub(super) mod tests {
             .unwrap()
             .stage()
             .unwrap();
-        assert_eq!(
+        assert!(matches!(
             state
                 .publish_staged_public_manifest(restaged_a, &decision_a)
                 .unwrap(),
             super::super::PublicManifestCommit::Durable
-        );
+        ));
         state.retire_scope(private_a);
         state.retire_scope(private_b);
         assert_eq!(state.resolve_in(public_a, "a").unwrap().id.raw(), 11);

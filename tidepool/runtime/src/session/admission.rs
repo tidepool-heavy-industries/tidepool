@@ -3722,12 +3722,12 @@ mod tests {
             1,
         )
         .unwrap();
-        assert_eq!(
+        assert!(matches!(
             session
                 .initialize_durable_public_scope(owner.clone(), public)
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         let private = Arc::new(session.begin_private_execution(public).unwrap());
         let cell = session
             .admit_cell_for_execution(
@@ -3772,12 +3772,12 @@ mod tests {
             Err(SessionError::StaleStagedDeclaration)
         ));
         let decision = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(ticket, &decision)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         assert!(session.scope_tree().is_live(private.private_scope()));
         let fresh = Arc::new(session.begin_private_execution(public).unwrap());

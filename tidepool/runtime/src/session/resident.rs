@@ -9411,7 +9411,7 @@ mod authored_publication_tests {
         else {
             panic!("original declarations must publish");
         };
-        assert_eq!(
+        assert!(matches!(
             producer
                 .publish_staged_public_manifest(
                     accepted.stage().unwrap(),
@@ -9419,7 +9419,7 @@ mod authored_publication_tests {
                 )
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         let published = producer.public_visibility_snapshot_in(public).unwrap();
         assert_ne!(published.declaration_tip, Generation(0));
         drop(producer);
@@ -9469,7 +9469,7 @@ mod authored_publication_tests {
                     }),
                 )
                 .unwrap();
-            assert_eq!(commit, PublicManifestCommit::Durable);
+            assert!(matches!(commit, PublicManifestCommit::Durable));
             let transferred = session.public_visibility_snapshot_in(scope).unwrap();
             assert_eq!(transferred.declaration_tip, published.declaration_tip);
             assert_eq!(transferred.epoch, published.epoch + 1);
@@ -10069,7 +10069,7 @@ mod authored_publication_tests {
         else {
             panic!("certified D join rejected");
         };
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(
                     joined.stage().unwrap(),
@@ -10077,7 +10077,7 @@ mod authored_publication_tests {
                 )
                 .unwrap(),
             super::super::PublicManifestCommit::Durable
-        );
+        ));
         let public_before = session
             .state
             .bindings()
@@ -10141,7 +10141,7 @@ mod authored_publication_tests {
         else {
             panic!("certified E join rejected");
         };
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(
                     joined.stage().unwrap(),
@@ -10149,7 +10149,7 @@ mod authored_publication_tests {
                 )
                 .unwrap(),
             super::super::PublicManifestCommit::Durable
-        );
+        ));
         session.retire_scope(d.private_scope());
         session.retire_scope(e.private_scope());
         let selection = session

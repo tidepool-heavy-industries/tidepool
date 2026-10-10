@@ -3271,8 +3271,9 @@ mod tests {
                 .projection_at(Generation(1))
                 .unwrap()
                 .context()
-                .authored_native_root(1),
-            Some(original_root)
+                .authored_native_root(1)
+                .unwrap(),
+            original_root
         );
         assert_eq!(
             lib.reserve_join_generation_durable().unwrap(),

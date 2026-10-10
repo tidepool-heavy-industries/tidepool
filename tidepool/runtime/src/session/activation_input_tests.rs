@@ -368,12 +368,12 @@ fn publish_checked_fixture(
             accepted.stage().unwrap()
         }
     };
-    assert_eq!(
+    assert!(matches!(
         resident
             .publish_staged_public_manifest(ticket, &crate::session::PublicationDecision::new())
             .expect("commit the checked fixture to ROOT"),
-        crate::session::PublicManifestCommit::Ephemeral,
-    );
+        crate::session::PublicManifestCommit::Ephemeral
+    ));
 }
 
 fn assert_startup_origin(label: &str, compiled: &CompiledTurn, requires_input: bool) {
@@ -3640,7 +3640,8 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
     let (root, recipe) = InputFixture::source_recipe(false);
     let session = SessionId(1741);
     let durable_root = tempfile::tempdir().unwrap();
-    let recovery = super::recovery_test_fixture::RecoveryFixture::create(durable_root.path());
+    let recovery =
+        crate::session::recovery_test_fixture::RecoveryFixture::create(durable_root.path());
     let mut library = SessionLib::open(
         session,
         durable_root.path().join("compiler"),
@@ -3658,7 +3659,7 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
     assert_eq!(resident.state.lib().scope_tip(ScopeId::ROOT), Generation(0));
     let durable_ceiling = recovery.state().allocation_ceiling;
     assert_eq!(
-        super::recovery_test_fixture::graph(resident.state.lib()).high_water(),
+        crate::session::recovery_test_fixture::graph(resident.state.lib()).high_water(),
         durable_ceiling,
     );
     assert!(durable_ceiling >= resident.state.lib().generation());
@@ -3668,12 +3669,12 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         1,
     )
     .unwrap();
-    assert_eq!(
+    assert!(matches!(
         resident
             .initialize_durable_public_scope(durable.clone(), public)
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     let public_context = SessionRunContext {
         lexical_scope: public,
         ..SessionRunContext::ROOT
@@ -3786,12 +3787,12 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
         base.source_keys.is_empty(),
         "binding reachability retains the private source without promoting its selection"
     );
-    assert_eq!(
+    assert!(matches!(
         resident
             .publish_staged_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     let published = resident.public_visibility_snapshot_in(public).unwrap();
     assert_eq!(published.source_instances, before.source_instances);
     let mut expected_binding_ids = before_binding_ids;

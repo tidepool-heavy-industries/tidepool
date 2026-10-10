@@ -1516,12 +1516,12 @@ mod tests {
             );
             let cancelled = PublicationDecision::new();
             cancelled.request_cancellation();
-            assert_eq!(
+            assert!(matches!(
                 session
                     .publish_staged_public_manifest(publication.stage().unwrap(), &cancelled)
                     .unwrap(),
                 PublicManifestCommit::Cancelled
-            );
+            ));
             assert_eq!(session.lib().scope_tip(public), Generation(0));
             if durable {
                 let before = recovery.state();
@@ -1548,12 +1548,12 @@ mod tests {
             let stage = accepted(base).stage().unwrap();
             session.lib_mut().log.reserve();
             let decision = PublicationDecision::new();
-            assert_eq!(
+            assert!(matches!(
                 session
                     .publish_staged_public_manifest(stage, &decision)
                     .unwrap(),
                 PublicManifestCommit::Stale
-            );
+            ));
             assert_eq!(decision.phase(), PublicationPhase::Running);
             let ExecutionPublication::Declarations(base) = restage(&mut session) else {
                 panic!("authored publication")
@@ -1664,7 +1664,7 @@ mod tests {
             PublicationEvidence::ReusedProjection { .. }
         ));
         let module = publication.receipt.reserved().module.clone();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(
                     publication.stage().unwrap(),
@@ -1672,7 +1672,7 @@ mod tests {
                 )
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         session
             .validate_durable_public_admission(&owner, public)
             .unwrap();
@@ -1726,7 +1726,7 @@ mod tests {
             &publication.receipt,
             PublicationEvidence::ReusedProjection { .. }
         ));
-        assert_eq!(
+        assert!(matches!(
             reopened
                 .publish_staged_public_manifest(
                     publication.stage().unwrap(),
@@ -1734,7 +1734,7 @@ mod tests {
                 )
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         assert_eq!(
             reopened.lib().scope_tip(public),
             continuation.reserved_generation()
@@ -1831,7 +1831,7 @@ mod tests {
             .children
             .iter()
             .any(|child| child.occurrence == "PublicFamily"));
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(
                     publication.stage().unwrap(),
@@ -1839,7 +1839,7 @@ mod tests {
                 )
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         session.retire_scope(execution.private_scope());
         assert_eq!(
             session.lib().import_line_in(public).unwrap(),
@@ -1902,7 +1902,7 @@ mod tests {
                 let export = reused.receipt.exports().iter().find(|export| export.head.occurrence == name).unwrap();
                 proptest::prop_assert_eq!(&export.head.module, &SessionModule::lib(generation).module_name());
             }
-            proptest::prop_assert_eq!(session.publish_staged_public_manifest(reused.stage().unwrap(), &PublicationDecision::new()).unwrap(), PublicManifestCommit::Ephemeral);
+            proptest::prop_assert!(matches!(session.publish_staged_public_manifest(reused.stage().unwrap(), &PublicationDecision::new()).unwrap(), PublicManifestCommit::Ephemeral));
         }
     }
 
@@ -1948,12 +1948,12 @@ mod tests {
             .unwrap();
         let stale_a = ephemeral_binding_stage(&mut session, a_intent.clone());
         let b_stage = ephemeral_binding_stage(&mut session, b_intent);
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(b_stage, &PublicationDecision::new())
                 .unwrap(),
             super::super::PublicManifestCommit::Ephemeral
-        );
+        ));
         assert_eq!(
             session
                 .bindings()
@@ -1962,20 +1962,20 @@ mod tests {
             Some(b_id)
         );
         let decision = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(stale_a, &decision)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         let current_a = ephemeral_binding_stage(&mut session, a_intent.clone());
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(current_a, &decision)
                 .unwrap(),
             PublicManifestCommit::Ephemeral
-        );
+        ));
         assert_eq!(decision.phase(), PublicationPhase::Published);
         assert_eq!(
             session
@@ -2020,12 +2020,12 @@ mod tests {
         let cancelled = PublicationDecision::new();
         cancelled.request_cancellation();
         let stage = ephemeral_binding_stage(&mut session, intent.clone());
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(stage, &cancelled)
                 .unwrap(),
             PublicManifestCommit::Cancelled
-        );
+        ));
         assert!(session
             .bindings()
             .resolve_in(session.scope_tree(), public, "local")
@@ -2054,20 +2054,20 @@ mod tests {
         assert_eq!(session.lib().generation(), generation);
         assert_ne!(session.lib().log.publication_revision(), revision);
         let decision = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(stale, &decision)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         let current = ephemeral_binding_stage(&mut session, intent.clone());
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(current, &decision)
                 .unwrap(),
             PublicManifestCommit::Ephemeral
-        );
+        ));
         assert_eq!(recovery.state(), before);
         let owner = RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root/ephemeral-mode").unwrap(),
@@ -2124,12 +2124,12 @@ mod tests {
             second.lib().log.publication_revision()
         );
         let decision = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             second
                 .publish_staged_public_manifest(ticket, &decision)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         assert!(second
             .restage_ephemeral_execution_publication(intent)
@@ -2187,24 +2187,24 @@ mod tests {
             second.public_visibility_snapshot_in(second_private.private_scope())
         );
         let decision = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             second
                 .publish_staged_public_manifest(ticket, &decision)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         let ExecutionPublication::Bindings(base) =
             first.restage_execution_publication(owner, intent).unwrap()
         else {
             unreachable!()
         };
-        assert_eq!(
+        assert!(matches!(
             first
                 .publish_staged_public_manifest(base.stage().unwrap(), &decision)
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
     }
 
     #[test]
@@ -2292,7 +2292,7 @@ mod tests {
             .iter()
             .any(|export| export.head.occurrence == "%%"
                 && export.head.namespace == ExportNamespace::Type));
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(
                     publication.stage().unwrap(),
@@ -2300,7 +2300,7 @@ mod tests {
                 )
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         assert!(session
             .public_visibility_snapshot_in(public)
             .unwrap()
@@ -2358,12 +2358,12 @@ mod tests {
         )
         .stage()
         .unwrap();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(b_stage, &PublicationDecision::new())
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         let ExecutionPublication::Declarations(base) = session
             .restage_execution_publication(owner.clone(), intent.clone())
             .unwrap()
@@ -2391,7 +2391,7 @@ mod tests {
             .iter()
             .any(|export| export.head.occurrence == "laterUnrelated"
                 && export.head.module == SessionModule::lib(original).module_name()));
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(
                     publication.stage().unwrap(),
@@ -2399,7 +2399,7 @@ mod tests {
                 )
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         assert_eq!(
             session.lib().scope_tip(public),
             intent.reserved_generation()
@@ -2494,7 +2494,7 @@ mod tests {
                 .restage_declaration_publication(owner.clone(), b_intent)
                 .unwrap(),
         );
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(
                     b_publication.stage().unwrap(),
@@ -2502,7 +2502,7 @@ mod tests {
                 )
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         assert!(matches!(
             tidepool_testing::with_settlement(|settlement| session
                 .restage_declaration_publication(owner, intent)
@@ -2599,17 +2599,17 @@ mod tests {
                 .unwrap(),
         );
         let first_generation = first.base.reserved;
-        assert_eq!(session.publish_staged_public_manifest(
+        assert!(matches!(session.publish_staged_public_manifest(
             first.stage().unwrap(), &PublicationDecision::new(),
-        ).unwrap(), PublicManifestCommit::Durable);
+        ).unwrap(), PublicManifestCommit::Durable));
         let first_public = session.public_visibility_snapshot_in(public).unwrap();
         let decision = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(old_b, &decision)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         assert_eq!(
             session.public_visibility_snapshot_in(public).unwrap(),
@@ -2639,12 +2639,12 @@ mod tests {
         );
         let cancellation = PublicationDecision::new();
         cancellation.request_cancellation();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(cancelled.stage().unwrap(), &cancellation,)
                 .unwrap(),
             PublicManifestCommit::Cancelled
-        );
+        ));
         assert_eq!(
             session.public_visibility_snapshot_in(public).unwrap(),
             first_public
@@ -2696,12 +2696,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["NewShape"]
         );
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(retry.stage().unwrap(), &decision,)
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         assert_eq!(decision.phase(), PublicationPhase::Published);
         let published = session.public_visibility_snapshot_in(public).unwrap();
         assert_eq!(published.declaration_tip, generation);
@@ -2917,12 +2917,12 @@ mod tests {
             .unwrap()
             .stage()
             .unwrap();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(binding_stage, &PublicationDecision::new())
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         assert_eq!(
             session.revalidate_declaration_rejection(&rejected).unwrap(),
             DeclarationPublicationRejection::Stale
@@ -2943,12 +2943,12 @@ mod tests {
         .unwrap();
         let cancelled = PublicationDecision::new();
         cancelled.request_cancellation();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(cancelled_stage, &cancelled)
                 .unwrap(),
             PublicManifestCommit::Cancelled
-        );
+        ));
         assert_eq!(session.lib().scope_tip(public), Generation(0));
         assert!(session.bindings().get(old_answer_id).is_some());
 
@@ -2967,12 +2967,12 @@ mod tests {
         .unwrap();
         session.lib_mut().reserve_join_generation_durable().unwrap();
         let decision = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(stale_stage, &decision)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         assert_eq!(session.lib().scope_tip(public), Generation(0));
 
@@ -3050,8 +3050,8 @@ mod tests {
             .next()
             .unwrap()
             .bindings
-            .iter()
-            .any(|binding| binding.name == "answer"));
+            .keys()
+            .any(|name| name == "answer"));
         assert!(
             matches!(session.lib().log.turn(generation), Some(turn) if turn.sources.is_empty())
         );
@@ -3134,12 +3134,12 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(base.receipt.instances().classes.len(), 1);
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
 
         let a = session.begin_private_execution(public).unwrap();
         let b = session.begin_private_execution(public).unwrap();
@@ -3207,7 +3207,7 @@ mod tests {
                 .unwrap(),
         );
         assert!(b_publication.base.reserved > reserved);
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(
                     b_publication.stage().unwrap(),
@@ -3215,14 +3215,14 @@ mod tests {
                 )
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         let decision = PublicationDecision::new();
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(old_a, &decision)
                 .unwrap(),
             PublicManifestCommit::Stale
-        );
+        ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         let publication = accepted(
             session
@@ -3269,12 +3269,12 @@ mod tests {
             .iter()
             .any(|child| child.occurrence == "publicField"
                 && child.record_parent.as_deref() == Some("PublicRecord")));
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(publication.stage().unwrap(), &decision)
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         assert_eq!(session.lib().scope_tip(public), reserved);
         assert!(session
             .public_visibility_snapshot_in(public)

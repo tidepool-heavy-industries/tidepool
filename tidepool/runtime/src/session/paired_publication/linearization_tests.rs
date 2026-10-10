@@ -55,12 +55,12 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
     .unwrap();
     let admission = match persistence {
         Persistence::Durable => {
-            assert_eq!(
+            assert!(matches!(
                 session
                     .initialize_durable_public_scope(owner.clone(), public)
                     .unwrap(),
                 PublicManifestCommit::Durable
-            );
+            ));
             session
                 .begin_durable_private_execution(&owner, public)
                 .unwrap()
@@ -109,12 +109,12 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
                 Some(PublicationCancellation::RequestedBeforeCommit)
             );
             assert!(!eligible.load(Ordering::Acquire));
-            assert_eq!(
+            assert!(matches!(
                 session
                     .publish_staged_public_manifest(staged, &decision)
                     .unwrap(),
                 PublicManifestCommit::Cancelled
-            );
+            ));
             assert_eq!(
                 session.public_visibility_snapshot_in(public).unwrap(),
                 before
@@ -127,15 +127,16 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
             assert!(decision.terminate());
         }
         First::Publication => {
-            assert_eq!(
-                session
-                    .publish_staged_public_manifest(staged, &decision)
-                    .unwrap(),
-                match persistence {
-                    Persistence::Durable => PublicManifestCommit::Durable,
-                    Persistence::Ephemeral => PublicManifestCommit::Ephemeral,
-                }
-            );
+            assert!(matches!(
+                (
+                    persistence,
+                    session
+                        .publish_staged_public_manifest(staged, &decision)
+                        .unwrap()
+                ),
+                (Persistence::Durable, PublicManifestCommit::Durable)
+                    | (Persistence::Ephemeral, PublicManifestCommit::Ephemeral)
+            ));
             assert_eq!(decision.phase(), PublicationPhase::Published);
             let published = session.public_visibility_snapshot_in(public).unwrap();
             assert_eq!(published.epoch, before.epoch + 1);
@@ -177,12 +178,12 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
     let settled = session.public_visibility_snapshot_in(public).unwrap();
     let settled_domain = stored();
     let restaged = stage(&mut session);
-    assert_eq!(
+    assert!(matches!(
         session
             .publish_staged_public_manifest(restaged, &decision)
             .unwrap(),
         PublicManifestCommit::Cancelled
-    );
+    ));
     assert_eq!(
         session.public_visibility_snapshot_in(public).unwrap(),
         settled
@@ -311,12 +312,12 @@ fn fixed_sibling_intents_restage_after_observation_and_domain_changes_without_re
     else {
         panic!("binding-only publication");
     };
-    assert_eq!(
+    assert!(matches!(
         session
             .publish_staged_public_manifest(base_b.stage().unwrap(), &PublicationDecision::new())
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     assert_eq!(
         session
             .public_visibility_snapshot_in(a.private_scope())
@@ -324,12 +325,12 @@ fn fixed_sibling_intents_restage_after_observation_and_domain_changes_without_re
         before_a
     );
     let decision_a = PublicationDecision::new();
-    assert_eq!(
+    assert!(matches!(
         session
             .publish_staged_public_manifest(staged_a, &decision_a)
             .unwrap(),
         PublicManifestCommit::Stale
-    );
+    ));
     assert_eq!(decision_a.phase(), PublicationPhase::Running);
     let ExecutionPublication::Bindings(retry_a) = session
         .restage_execution_publication(owner_a, intent_a.clone())
@@ -337,12 +338,12 @@ fn fixed_sibling_intents_restage_after_observation_and_domain_changes_without_re
     else {
         panic!("same binding-only intent");
     };
-    assert_eq!(
+    assert!(matches!(
         session
             .publish_staged_public_manifest(retry_a.stage().unwrap(), &decision_a)
             .unwrap(),
         PublicManifestCommit::Durable
-    );
+    ));
     assert_eq!(
         session.resolve_in(public_a, "observationA").unwrap().id,
         id_a

@@ -6274,7 +6274,7 @@ mod tests {
                     accepted.stage().unwrap()
                 }
             };
-            assert_eq!(
+            assert!(matches!(
                 self.resident
                     .publish_staged_public_manifest(
                         ticket,
@@ -6282,7 +6282,7 @@ mod tests {
                     )
                     .unwrap(),
                 crate::session::PublicManifestCommit::Ephemeral
-            );
+            ));
             let public = self.execution.admitted_public().scope;
             let published = self.resident.public_visibility_snapshot_in(public).unwrap();
             assert_eq!(
@@ -7767,7 +7767,7 @@ mod tests {
         else {
             panic!("the original declaration and certified private Value overlay must join")
         };
-        assert_eq!(
+        assert!(matches!(
             resident
                 .publish_staged_public_manifest(
                     accepted.stage().unwrap(),
@@ -7775,7 +7775,7 @@ mod tests {
                 )
                 .unwrap(),
             crate::session::PublicManifestCommit::Ephemeral
-        );
+        ));
         let public_bindings = resident.public_visibility_snapshot_in(public).unwrap();
         assert_eq!(
             public_bindings
@@ -7883,7 +7883,7 @@ mod tests {
         else {
             panic!("first authored declaration must be accepted");
         };
-        assert_eq!(
+        assert!(matches!(
             session
                 .publish_staged_public_manifest(
                     accepted.stage().unwrap(),
@@ -7891,7 +7891,7 @@ mod tests {
                 )
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         session.retire_scope(private);
 
         let original_path = root
