@@ -33,6 +33,7 @@ struct Observations {
     installer_phases: HashMap<String, (BTreeMap<String, String>, Vec<BTreeMap<String, String>>)>,
     renderer_installs: HashMap<String, RendererInstall>,
     renderer_bundles: HashMap<String, Vec<BTreeMap<String, String>>>,
+    native_images: HashMap<u64, BTreeMap<String, String>>,
 }
 
 struct RendererInstall {
@@ -159,6 +160,20 @@ where
         let mut fields = Fields::default();
         event.record(&mut fields);
         let mut state = self.observations.lock();
+        if event.metadata().target() == "tidepool_codegen::prepared_compile"
+            && fields.0.contains_key("image_instance")
+        {
+            assert!(
+                state
+                    .native_images
+                    .insert(
+                        fields.0["image_instance"].parse().unwrap(),
+                        fields.0.clone()
+                    )
+                    .is_none(),
+                "each native image has one actual successful construction"
+            );
+        }
         if event.metadata().target() == "tidepool_runtime::activation_renderer"
             && fields.0.get("outcome").map(String::as_str) == Some("native_image")
         {
@@ -698,12 +713,13 @@ async fn prepared_children_execute_original_native_probe(
                 let bundle = &state.renderer_bundles[&images[0].to_string()];
                 assert_eq!(bundle.iter().map(|image| image["image_instance"].parse::<u64>().unwrap()).collect::<Vec<_>>(), images, "prepared custody includes the exact complete image set used for installation");
                 assert!(bundle.iter().any(|image| image["role"] == "source"), "the fixture exercises original home-source code custody");
-                assert!(bundle.iter().any(|image| image["literal_producer"] == "true"), "the fixture exercises an actual original Bytes producer");
+                assert!(bundle.iter().filter(|image| image["role"] == "source").any(|image| state.native_images[&image["image_instance"].parse::<u64>().unwrap()]["literal_storage_entries"].parse::<usize>().unwrap() > 0), "the original home-source image owns actual literal storage");
+                assert!(images.iter().any(|image| state.native_images[image]["constructors"].parse::<usize>().unwrap() > 0), "the complete retained bundle owns actual constructor declarations");
                 match &shared_renderer_images {
                     Some(shared) => assert_eq!(&images, shared, "independent child machines reuse every retained native image"),
                     None => shared_renderer_images = Some(images),
                 }
-                renderer.fields.clone()
+                (renderer.fields.clone(), images.iter().map(|image| state.native_images[image].clone()).collect::<Vec<_>>())
             };
             progress.distinct_installation_scopes = scopes.len();
             progress.compiler_requests_during_setup += compiler_requests.len();
@@ -767,7 +783,7 @@ async fn prepared_children_execute_original_native_probe(
                     "native_reply":replied_executions.lines().count()},
                 "native_reply_accepted":true,"producer":endpoint.producer_hex()});
             let mut row = row;
-            row["activation_preview"] = serde_json::json!({"expected":expected_preview,"actual":actual_preview,"provider_visible_match":true,"renderer":renderer,"native_compilations_during_install":0});
+            row["activation_preview"] = serde_json::json!({"expected":expected_preview,"actual":actual_preview,"provider_visible_match":true,"renderer":renderer.0,"native_image_custody":renderer.1,"native_compilations_during_install":0});
             eprintln!("prepared-runtime-child {row}");
             rows.push(row);
         }
