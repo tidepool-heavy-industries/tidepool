@@ -20,7 +20,8 @@ module Tidepool.ExactScope
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner
   , readExactScope, ExactScopeValidationReason(..), revalidateExactScope, revalidateExactScopesAt, validateExactScopeEnvironment, scopeValueInterfaces
   , scopeInterfaceBytes, scopeInterfaceToken, scopeOriginalBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes
-  , writeExactCompilation, writeCheckedExactCompilation, writeRetainedExactCompilation, extendSourceSelectedOriginals
+  , writeExactCompilation, writeCheckedExactCompilation, writeCheckedExactCompilationWithPublication
+  , writeRetainedExactCompilation, writeRetainedExactCompilationWithPublication, extendSourceSelectedOriginals
   , extendExactExecutionSources, extendExactExecutionSourcesWithinBudget
   , scopeExecutionNativeOwners
   , scopeAvailableOriginalProducts
@@ -1759,7 +1760,12 @@ writeExactCompilation compilation evidence =
 writeCheckedExactCompilation
   :: HscEnv -> ExactCompilation -> DependencyEvidence -> IO ()
 writeCheckedExactCompilation env = writeCheckedExactCompilationWithScopes
-  CheckedReceiptPublication env []
+  CheckedReceiptPublication env [] (pure ())
+
+writeCheckedExactCompilationWithPublication
+  :: HscEnv -> ExactCompilation -> DependencyEvidence -> IO () -> IO ()
+writeCheckedExactCompilationWithPublication env compilation evidence publish =
+  writeCheckedExactCompilationWithScopes CheckedReceiptPublication env [] publish compilation evidence
 
 -- Retention and the checked receipt share this final publication boundary.
 -- Capture source evidence first, then check both original and retained paths in
@@ -1767,15 +1773,21 @@ writeCheckedExactCompilation env = writeCheckedExactCompilationWithScopes
 writeRetainedExactCompilation
   :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence -> IO ()
 writeRetainedExactCompilation env retained = writeCheckedExactCompilationWithScopes
-  RetainedReceiptPublication env [retained]
+  RetainedReceiptPublication env [retained] (pure ())
+
+writeRetainedExactCompilationWithPublication
+  :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence -> IO () -> IO ()
+writeRetainedExactCompilationWithPublication env retained compilation evidence publish =
+  writeCheckedExactCompilationWithScopes RetainedReceiptPublication env [retained] publish compilation evidence
 
 writeCheckedExactCompilationWithScopes
-  :: ExactScopeValidationReason -> HscEnv -> [ExactScope] -> ExactCompilation -> DependencyEvidence -> IO ()
-writeCheckedExactCompilationWithScopes reason env retained compilation evidence = do
+  :: ExactScopeValidationReason -> HscEnv -> [ExactScope] -> IO () -> ExactCompilation -> DependencyEvidence -> IO ()
+writeCheckedExactCompilationWithScopes reason env retained publishCertificate compilation evidence = do
   selected <- either fail pure (extendSourceSelectedOriginals
     (compilationSourceSelection compilation) (compilationScope compilation))
   receipt <- captureExactCompilationReceipt compilation evidence
   revalidateExactScopesAt reason env (retained ++ [selected]) >>= either fail pure
+  publishCertificate
   publishExactCompilationReceipt receipt
 
 -- Kept private so a receipt cannot be constructed from unobserved inputs.

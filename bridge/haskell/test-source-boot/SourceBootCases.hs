@@ -126,7 +126,7 @@ import Tidepool.CompilerProducts
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts
-  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts )
+  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, publishStagedOriginalProducts )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts
   ( captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface
@@ -3433,11 +3433,12 @@ originalProjectionProducts = withScratch $ \work -> do
   sharedBytes <- BS.readFile (segmentDirectory </> "module-products.cbor")
   unless (sharedBytes == emittedInventory) $
     fail "segment original issuance changed the certified native inventory"
-  sharedFacts <- readCertificateCodecFacts work (segmentDirectory </> "certified-products.cbor")
+  let receiptDirectory = work </> ".exact-compilations"
+  receiptsBefore <- doesDirectoryExist receiptDirectory >>= \exists ->
+    if exists then listDirectory receiptDirectory else pure []
+  prematureCertificate <- doesFileExist (segmentDirectory </> "certified-products.cbor")
+  when prematureCertificate (fail "staged segment published its original certificate before completion")
   ordinaryFacts <- readCertificateCodecFacts work (captureDirectory </> "certified-products.cbor")
-  unless (codecCertificateModules sharedFacts == codecCertificateModules ordinaryFacts
-      && null (codecCertificateTargets sharedFacts)) $
-    fail "segment originals changed module ordinals or advertised executable targets"
   let ordinaryTarget = case codecCertificateTargets ordinaryFacts of
         [("usesGood",references)] -> references
         _ -> error "ordinary producer lost its selected target"
@@ -3457,6 +3458,22 @@ originalProjectionProducts = withScratch $ \work -> do
       when duplicated (fail ("item copied segment original facts: " ++ name))
     unchanged <- BS.readFile (segmentDirectory </> "module-products.cbor")
     unless (unchanged == sharedBytes) (fail "item emission changed immutable original facts")
+  receiptsAfterItems <- doesDirectoryExist receiptDirectory >>= \exists ->
+    if exists then listDirectory receiptDirectory else pure []
+  unless (receiptsAfterItems == receiptsBefore) $
+    fail "staged segment published a compilation receipt before completion"
+  _ <- publishStagedOriginalProducts paired sharedCertificate
+  sharedFacts <- readCertificateCodecFacts work (segmentDirectory </> "certified-products.cbor")
+  receiptsAfterCompletion <- doesDirectoryExist receiptDirectory >>= \exists ->
+    if exists then listDirectory receiptDirectory else pure []
+  let expectedReceiptCount = length receiptsBefore + case preparedExactCompilation paired of
+        Nothing -> 0
+        Just _ -> 1
+  unless (length receiptsAfterCompletion == expectedReceiptCount) $
+    fail "completed staged segment did not publish exactly one compilation receipt"
+  unless (codecCertificateModules sharedFacts == codecCertificateModules ordinaryFacts
+      && null (codecCertificateTargets sharedFacts)) $
+    fail "completed staged segment changed original certification facts"
   let packetDirectory = captureDirectory </> "projected-packet"
   packetCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
     packetDirectory paired (Just issuedContext) [("usesGood",currentProgram)]

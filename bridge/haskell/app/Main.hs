@@ -80,7 +80,8 @@ import Tidepool.CompilerProducts
   , requireOriginalExecutableGlobals, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept, currentReconciledOriginalProducts
   , newPreparedOriginalInterfaceArtifacts, writeCertifiedProductsKeepingWithOriginals
-  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, prepareCompilerProjectionContext
+  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, stagedCertifiedOriginalProducts
+  , retainStagedProgramProducts, prepareCompilerProjectionContext
   , exactProgramProductVersionFromDigest, retainProgramProducts, programLexicalRequirements, programSourceRequirements )
 import Tidepool.ExecutionProjection (ProjectionContext(..), ProjectionError(..), prepareComponentProjectionWithReachability, projectSelectedCandidateWithHostBindings, candidateGlobals, finalizePreparedCandidate, preparedModuleProductOutcomes, preparedModuleProductConstructors, preparedModuleProductYieldSites, preparedRootIdentity)
 import Tidepool.HostBindingAuthority
@@ -1513,16 +1514,17 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
               Nothing (map T.pack (prWarnings result)) [outputArtifact]
             writePreparedArtifacts itemDirectory [outputArtifact]
             writeCertifiedSegmentItemProducts prepared sharedProducts itemDirectory (paProgram outputArtifact)
-            ordinal <- typedEntryOriginalOrdinal sharedProducts (preparedRootIdentity (typedItemRoot item))
+            ordinal <- typedEntryOriginalOrdinal (stagedCertifiedOriginalProducts sharedProducts)
+              (preparedRootIdentity (typedItemRoot item))
             BS.writeFile (itemDirectory </> "turn.cbor") (encodeTurnOut turn)
             writeTypedItemReceipt itemDirectory scope itemAdmission rendered typedPlan
               (preparedRootIdentity (typedSegmentOriginalRoot typed)) (preparedRootIdentity (typedItemRoot item)) ordinal
             pure (generation,captures)
           validateDependencyEvidence (preparedFreshDependencies prepared)
           when (null emitted) (fail "typed segment emitted no items")
-          extended <- retainProgramProducts directory prepared sharedProducts sourceOwner scope
+          extended <- retainStagedProgramProducts directory prepared sharedProducts sourceOwner scope
           retainedImports <- retainProgramSourceImports (programSourceImports state) prepared
-            (certifiedFinalizedArtifacts sharedProducts) extended
+            (certifiedFinalizedArtifacts (stagedCertifiedOriginalProducts sharedProducts)) extended
           let completedState = recordTypedSegment finalized typedPlan expressionObservations captureSignatures rendered
                 state {programExact=extended,programSourceImports=retainedImports}
           next <- foldM (\current (generation,captures) ->
