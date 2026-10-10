@@ -386,9 +386,8 @@ fn prepared_default_sol_workspace(config: &mut ActorHostConfig) {
         },
     )
     .expect("the admitted test service delegates production command resources");
-    config.command_resources = Some(std::sync::Arc::new(
-        exomonad_node::command_resources::CommandResourceClient::local(resources),
-    ));
+    config.command_resources =
+        Some(exomonad_node::command_resources::CommandResourceClient::local(resources));
     config.model = "gpt-6.1-sol".into();
     config.jev = Some(std::sync::Arc::new(super::test_campaign::FixtureJev));
     crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
