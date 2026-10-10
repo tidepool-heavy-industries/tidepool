@@ -292,6 +292,78 @@ fn uncertain_refill_fences_previously_confirmed_tail() {
 }
 
 #[test]
+fn fenced_run_refuses_value_only_cell_and_private_scope_activation() {
+    let run = TestRun::new();
+    let mut sibling = run.child();
+    let mut session = crate::session::PersistentSession::new(Some(run.root()), 1024 * 1024);
+    let public = session.mint_scope(ScopeId::ROOT).unwrap();
+    let private = Arc::new(session.begin_private_execution(public).unwrap());
+    let accepted = session
+        .admit_cell_for_execution(
+            private.clone(),
+            0,
+            Arc::new(()),
+            [7; 32],
+            [8; 32],
+            Vec::new(),
+        )
+        .unwrap();
+    assert!(accepted.visibility().machine_incarnation.is_some());
+    assert_eq!(session.lib().generation(), Generation(0));
+    let value_generation = session.val_gen();
+    let scopes = session.scope_tree().len();
+    run.store.inject_fault(StoreFault::CommitError);
+    assert!(sibling.reserve_declaration_generation_durable().is_err());
+    assert!(session
+        .admit_cell_for_execution(private, 0, Arc::new(()), [7; 32], [8; 32], Vec::new())
+        .is_err());
+    assert_eq!(session.val_gen(), value_generation);
+    assert_eq!(session.scope_tree().len(), scopes);
+    assert!(session.begin_private_execution(public).is_err());
+    assert_eq!(session.scope_tree().len(), scopes);
+    assert_eq!(session.lib().generation(), Generation(0));
+}
+
+#[test]
+fn failed_compiler_validation_burns_requested_identity_and_restart_burns_tail() {
+    tidepool_testing::eval_harness::require_extract();
+    let mut run = TestRun::new();
+    let mut lib = run
+        .root()
+        .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
+    let receipt = tidepool_testing::with_settlement(|settlement| {
+        lib.declaration_receipt(&["answer :: Int\nanswer = missingHelper"], settlement)
+    })
+    .unwrap()
+    .unwrap();
+    let candidate = lib
+        .render_admitted_candidate_in(
+            ScopeId::ROOT,
+            &crate::session::SourceImports::new(),
+            &receipt,
+            &[],
+            &[],
+        )
+        .unwrap();
+    assert!(tidepool_testing::with_settlement(|settlement| {
+        crate::session::validate_declaration_candidate(candidate, lib.include_dir(), settlement)
+    })
+    .is_err());
+    assert!(lib.log.is_reserved(Generation(1)));
+    assert!(!lib.log.is_reserved(Generation(2)));
+    assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
+    assert_eq!(store_state(&lib).allocation_ceiling, Generation(64));
+    drop(lib);
+    run.reopen();
+    let mut restored = run.root();
+    assert_eq!(restored.generation(), Generation(64));
+    assert_eq!(
+        restored.reserve_join_generation_durable().unwrap(),
+        Generation(65)
+    );
+}
+
+#[test]
 fn resident_child_capture_reads_ceiling_and_refuses_uncertain_floor() {
     #[derive(Clone)]
     struct QuietOutput;

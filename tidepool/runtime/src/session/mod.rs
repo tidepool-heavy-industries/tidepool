@@ -1064,9 +1064,29 @@ impl SessionLib {
         )?))
     }
 
+    /// Retain the run store after validating the native host lease and paths.
+    /// Preparation precedes the caller's short final activation guard.
+    pub(super) fn held_recovery_store(
+        &self,
+    ) -> Result<Option<recovery_store::RunRecoveryStore>, SessionError> {
+        self.durable_graph
+            .as_ref()
+            .map(|state| {
+                state
+                    .owner
+                    .as_ref()
+                    .ok_or(SessionError::WrongPublicManifestTicket)?
+                    .validate_owner()?;
+                let store: &recovery_store::RunRecoveryStore = &state.store;
+                Ok(store.clone())
+            })
+            .transpose()
+    }
+
     /// Conservative inherited identity floor, checked against the run fence.
     /// The lease itself stays with this library, never a child's context.
     pub fn durable_allocation_ceiling(&self) -> Result<Generation, SessionError> {
+        self.held_recovery_store()?;
         match &self.durable_graph {
             Some(state) => {
                 state
@@ -1368,6 +1388,7 @@ impl SessionLib {
         if count == 0 {
             return Ok(Vec::new());
         }
+        self.held_recovery_store()?;
         let requested = u64::try_from(count).map_err(|_| GenerationExhausted {
             consumed: self.log.generation(),
             requested: u64::MAX,
@@ -1490,6 +1511,7 @@ impl SessionLib {
         &mut self,
         high_water: Generation,
     ) -> Result<(), SessionError> {
+        self.held_recovery_store()?;
         let state = self
             .durable_graph
             .as_ref()
@@ -2721,16 +2743,27 @@ impl SessionLib {
         }
         let tip = self.scope_tip(scope);
         turn.parent = (tip.0 > 0).then_some(tip);
-        let gen = if self.durable_graph.is_some() {
+        if self.durable_graph.is_some() {
             let generation = self.reserve_declaration_generation_durable()?;
+            let store = self
+                .held_recovery_store()?
+                .expect("attached store preflighted");
+            let _admission =
+                store
+                    .lease_admission()
+                    .map_err(|error| SessionError::RecoveryManifest {
+                        path: error.path.clone(),
+                        detail: error.to_string(),
+                    })?;
             assert!(self.log.commit_reserved_authored(generation, turn));
-            generation
+            self.set_scope_tip_in(scope, generation);
+            Ok(generation)
         } else {
             self.next_module()?;
-            self.log.push(turn)
-        };
-        self.set_scope_tip_in(scope, gen);
-        Ok(gen)
+            let generation = self.log.push(turn);
+            self.set_scope_tip_in(scope, generation);
+            Ok(generation)
+        }
     }
 
     /// Undo [`Self::push_turn_in`]'s tip bump for `scope` — restores it to
@@ -3589,62 +3622,6 @@ mod tests {
             lib.import_line().unwrap(),
             format!("import {}", projection.module_name())
         );
-    }
-
-    #[test]
-    fn attached_v2_failed_validation_and_reservation_keep_burned_boundaries() {
-        let root = tempfile::tempdir().unwrap();
-        let manifest = root.path().join("declarations.json");
-        let mut lib = staged_test_lib(&root);
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
-        let receipt = tidepool_testing::with_settlement(|settlement| {
-            lib.declaration_receipt(&["answer :: Int\nanswer = missingHelper"], settlement)
-        })
-        .unwrap()
-        .unwrap();
-        let candidate = lib
-            .render_admitted_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[])
-            .unwrap();
-        assert!(
-            tidepool_testing::with_settlement(|settlement| validate_declaration_candidate(
-                candidate,
-                lib.include_dir(),
-                settlement
-            ))
-            .is_err()
-        );
-        assert!(lib.log.is_reserved(Generation(1)));
-        assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
-        drop(lib);
-        let mut restarted = staged_test_lib(&root);
-        tidepool_testing::with_settlement(|settlement| {
-            restarted.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
-        assert_eq!(restarted.generation(), Generation(1));
-        assert_eq!(
-            restarted.reserve_join_generation_durable().unwrap(),
-            Generation(2)
-        );
-
-        let separate = tempfile::tempdir().unwrap();
-        let path = separate.path().join("declarations.json");
-        let mut failed = SessionLib::open(
-            SessionId(992),
-            separate.path().join("session"),
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            failed.attach_recovery_graph_v2(&path, settlement)
-        })
-        .unwrap();
-        std::fs::create_dir(&path).unwrap();
-        assert!(failed.reserve_declaration_generation_durable().is_err());
-        assert_eq!(failed.generation(), Generation(0));
     }
 
     #[test]

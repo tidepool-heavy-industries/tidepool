@@ -1627,6 +1627,7 @@ impl PersistentSession {
         prefix: Arc<RuntimeCheckedPrefix>,
         item: tidepool_toolchain::checked_cell::ExactCheckedItem,
     ) -> Result<Arc<RuntimeCheckedItemAdmission>, SessionError> {
+        let store = self.lib().held_recovery_store()?;
         let mut state = prefix.state.lock();
         let scope = prefix.admission.visibility.scope;
         if !prefix.admission.belongs_to(self)
@@ -1686,20 +1687,30 @@ impl PersistentSession {
             }
         }
         let digest = *digest.finalize().as_bytes();
-        state.reservation = Some(CheckedItemReservation {
+        let reservation = CheckedItemReservation {
             item: item.clone(),
             generation,
             digest,
-        });
-        drop(state);
-        Ok(Arc::new(RuntimeCheckedItemAdmission {
-            prefix,
+        };
+        let prepared = Arc::new(RuntimeCheckedItemAdmission {
+            prefix: prefix.clone(),
             snapshot,
             item,
             generation,
             observation_name,
             digest,
-        }))
+        });
+        let _admission = store
+            .as_ref()
+            .map(|store| store.lease_admission())
+            .transpose()
+            .map_err(|error| SessionError::RecoveryManifest {
+                path: error.path.clone(),
+                detail: error.to_string(),
+            })?;
+        state.reservation = Some(reservation);
+        drop(state);
+        Ok(prepared)
     }
     /// Adopt the compiler-owned original declaration from this same checked
     /// offer. Its reserved identity and bytes are never rendered or recompiled.
@@ -2195,6 +2206,7 @@ impl PersistentSession {
         &mut self,
         public_scope: ScopeId,
     ) -> Result<PrivateExecutionAdmission, SessionError> {
+        let store = self.lib().held_recovery_store()?;
         self.reap_admission_leases();
         let durable_owner = self
             .lib()
@@ -2204,11 +2216,25 @@ impl PersistentSession {
         let admitted = self
             .public_visibility_snapshot_in(public_scope)
             .ok_or(SessionError::DeadScope(public_scope))?;
-        self.lib_mut()
-            .seed_scope(public_scope, admitted.declaration_tip);
-        let private_scope = self
-            .mint_detached_scope(public_scope)
-            .ok_or(SessionError::DeadScope(public_scope))?;
+        let private_scope = {
+            let _admission = store
+                .as_ref()
+                .map(|store| store.lease_admission())
+                .transpose()
+                .map_err(|error| SessionError::RecoveryManifest {
+                    path: error.path.clone(),
+                    detail: error.to_string(),
+                })?;
+            self.lib_mut()
+                .seed_scope(public_scope, admitted.declaration_tip);
+            self.mint_detached_scope(public_scope)
+                .ok_or(SessionError::DeadScope(public_scope))?
+        };
+        let scope_lease = Arc::new(RuntimeLexicalScopeLease {
+            owner: self.admission_owner().clone(),
+            owner_epoch: self.admission_owner().epoch(),
+            scope: private_scope,
+        });
         let view = self
             .compile_view_in(private_scope)
             .expect("fresh detached scope has a library")
@@ -2216,22 +2242,27 @@ impl PersistentSession {
         let binding_tip = self
             .binding_tip_id(private_scope)
             .expect("detached scope captures a binding tip");
-        Ok(PrivateExecutionAdmission {
+        let prepared = PrivateExecutionAdmission {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
             durable_owner,
-            scope_lease: Arc::new(RuntimeLexicalScopeLease {
-                owner: self.admission_owner().clone(),
-                owner_epoch: self.admission_owner().epoch(),
-                scope: private_scope,
-            }),
+            scope_lease,
             admitted,
             private_scope,
             view,
             binding_tip,
             completed_values: parking_lot::Mutex::new(std::collections::HashMap::new()),
             final_intent: OnceLock::new(),
-        })
+        };
+        let _admission = store
+            .as_ref()
+            .map(|store| store.lease_admission())
+            .transpose()
+            .map_err(|error| SessionError::RecoveryManifest {
+                path: error.path.clone(),
+                detail: error.to_string(),
+            })?;
+        Ok(prepared)
     }
 
     /// An explicitly local public surface cannot reuse an initialized durable
@@ -2377,6 +2408,7 @@ impl PersistentSession {
         purpose: RuntimeCellPurpose,
         compile_inputs: Option<super::prepared::RuntimeCompileInputs>,
     ) -> Result<Arc<RuntimeCellAdmission>, SessionError> {
+        let store = self.lib().held_recovery_store()?;
         self.reap_admission_leases();
         let view = self
             .compile_view_in(scope)
@@ -2459,7 +2491,17 @@ impl PersistentSession {
         // The lazy machine has one reserved lifetime identity before any
         // compiler offer captures it. Bootstrap adopts this identity rather
         // than invalidating another independently admitted private cell.
-        self.ensure_machine_incarnation();
+        {
+            let _admission = store
+                .as_ref()
+                .map(|store| store.lease_admission())
+                .transpose()
+                .map_err(|error| SessionError::RecoveryManifest {
+                    path: error.path.clone(),
+                    detail: error.to_string(),
+                })?;
+            self.ensure_machine_incarnation();
+        }
         let visibility = self
             .public_visibility_snapshot_in(scope)
             .ok_or(SessionError::DeadScope(scope))?;
@@ -2516,7 +2558,17 @@ impl PersistentSession {
                 .try_reserve_exact(plan.items().len())
                 .map_err(|_| SessionError::StaleStagedDeclaration)?;
         }
-        let retained_scope = self.retain_lexical_scope(scope)?;
+        let retained_scope = {
+            let _admission = store
+                .as_ref()
+                .map(|store| store.lease_admission())
+                .transpose()
+                .map_err(|error| SessionError::RecoveryManifest {
+                    path: error.path.clone(),
+                    detail: error.to_string(),
+                })?;
+            self.retain_lexical_scope(scope)?
+        };
         if self.lib().durable_graph.is_some() {
             reserved_generations = self
                 .lib_mut()
@@ -2527,7 +2579,6 @@ impl PersistentSession {
             }
         }
         let initial_value_generation = view.next_value_generation();
-        self.set_val_gen(last_value_generation);
         let planned = plan.map(|plan| {
             use super::planned_cell::{
                 RuntimeCellPlanReservation, RuntimePlannedCellItem, RuntimePlannedCellSlot as Slot,
@@ -2684,7 +2735,7 @@ impl PersistentSession {
                 .digest = digest;
             planned
         });
-        Ok(Arc::new(RuntimeCellAdmission {
+        let prepared = Arc::new(RuntimeCellAdmission {
             catalog_selection: self.catalog_selection().clone(),
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
@@ -2708,7 +2759,17 @@ impl PersistentSession {
             authority_digest,
             include_paths,
             digest,
-        }))
+        });
+        let _admission = store
+            .as_ref()
+            .map(|store| store.lease_admission())
+            .transpose()
+            .map_err(|error| SessionError::RecoveryManifest {
+                path: error.path.clone(),
+                detail: error.to_string(),
+            })?;
+        self.set_val_gen(last_value_generation);
+        Ok(prepared)
     }
 
     fn capture_admitted_native_imports(
