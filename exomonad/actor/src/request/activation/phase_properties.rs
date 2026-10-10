@@ -1,5 +1,5 @@
 //! Request-settlement component histories with authentic retained resources.
-//! Native claim/outcome/confirmation facts are supplied at the native-owner
+//! Native claim/outcome/fence facts are supplied at the native-owner
 //! boundary; actual manifest transactions and async task routing are qualified
 //! by the separate native activation cluster. Observations never reconcile.
 
@@ -75,7 +75,8 @@ enum Action {
     FinishToken,
     LoseWaiter,
     DropNativeLease,
-    ConfirmOwner,
+    ObserveOwner,
+    FenceOwner,
     CancelNative,
     ShutdownTarget,
     Deliver,
@@ -102,7 +103,8 @@ impl Action {
             Self::FinishToken => "finish_token",
             Self::LoseWaiter => "lose_waiter",
             Self::DropNativeLease => "drop_native_lease",
-            Self::ConfirmOwner => "owner_confirm",
+            Self::ObserveOwner => "owner_observe",
+            Self::FenceOwner => "owner_fence",
             Self::CancelNative => "native_cancel",
             Self::ShutdownTarget => "shutdown_target",
             Self::Deliver => "deliver",
@@ -149,7 +151,7 @@ fn operations() -> impl Strategy<Value = Operation> {
         4 => outcome.clone().prop_map(Action::Finish),
         3 => outcome.prop_map(Action::Decide), 2 => Just(Action::FinishToken),
         3 => Just(Action::LoseWaiter), 2 => Just(Action::DropNativeLease),
-        3 => Just(Action::ConfirmOwner), 3 => Just(Action::CancelNative), 1 => Just(Action::ShutdownTarget), 3 => Just(Action::Deliver),
+        3 => Just(Action::ObserveOwner), 3 => Just(Action::FenceOwner), 3 => Just(Action::CancelNative), 1 => Just(Action::ShutdownTarget), 3 => Just(Action::Deliver),
         4 => Just(Action::Publish), 3 => Just(Action::Reconcile),
         2 => Just(Action::Read), 3 => Just(Action::BeginReply),
         2 => Just(Action::FinishReply), 3 => Just(Action::Cancel),
@@ -197,7 +199,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             op(0, BeginReply),
             op(0, Cancel),
             op(0, BeginAck),
-            op(0, ConfirmOwner),
+            op(0, ObserveOwner),
             op(0, Read),
         ],
         3 => vec![
@@ -206,7 +208,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             op(0, Finish(NativeOutcome::Visible)),
             op(0, Reconcile),
             op(0, BeginReply),
-            op(0, ConfirmOwner),
+            op(0, ObserveOwner),
             op(0, Deliver),
             op(0, BeginReply),
             op(0, FinishReply),
@@ -238,7 +240,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             op(0, RetireTarget),
             op(0, Forget),
             op(0, Finish(NativeOutcome::Visible)),
-            op(0, ConfirmOwner),
+            op(0, ObserveOwner),
             op(0, Deliver),
             op(0, Publish),
             op(0, Reconcile),
@@ -298,7 +300,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
                 op(0, Finish(NativeOutcome::Visible)),
                 op(0, Cancel),
                 op(0, BeginAck),
-                op(0, ConfirmOwner),
+                op(0, ObserveOwner),
                 op(0, BeginAck),
                 op(0, FinishAck),
                 op(0, Deliver),
@@ -322,7 +324,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             op(0, Decide(NativeOutcome::Visible)),
             op(0, Cancel),
             op(0, BeginAck),
-            op(0, ConfirmOwner),
+            op(0, ObserveOwner),
             op(0, BeginAck),
             op(0, FinishAck),
             op(0, DropNativeLease),
@@ -348,13 +350,36 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
             op(1, Claim(true)),
             op(0, DropNativeLease),
             op(1, Decide(NativeOutcome::Visible)),
-            op(0, ConfirmOwner),
+            op(0, ObserveOwner),
             op(0, Reconcile),
             op(1, Reconcile),
             op(0, BeginReply),
             op(1, BeginReply),
             op(1, FinishToken),
             op(1, Deliver),
+        ],
+        17 => vec![
+            claim,
+            op(0, Finish(NativeOutcome::Visible)),
+            op(0, FenceOwner),
+            op(0, ObserveOwner),
+            op(0, Reconcile),
+            op(0, Deliver),
+            op(0, Publish),
+            op(1, Claim(true)),
+        ],
+        18 => vec![
+            claim,
+            op(0, LoseWaiter),
+            op(0, FenceOwner),
+            op(0, ObserveOwner),
+            op(0, Finish(NativeOutcome::Visible)),
+            op(0, Deliver),
+            op(0, Reconcile),
+            op(0, BeginReply),
+            op(0, Cancel),
+            op(0, BeginAck),
+            op(1, Claim(true)),
         ],
         _ => unreachable!("bounded guided mode"),
     };
@@ -371,7 +396,7 @@ fn guided(mode: u8, cancel_native: bool) -> Vec<Operation> {
 
 fn histories() -> impl Strategy<Value = Vec<Operation>> {
     let arbitrary = proptest::collection::vec(operations(), 1..65);
-    let guided = (0u8..17, any::<bool>()).prop_flat_map(|(mode, cancel_native)| {
+    let guided = (0u8..19, any::<bool>()).prop_flat_map(|(mode, cancel_native)| {
         let core = guided(mode, cancel_native);
         (
             proptest::collection::vec(operations(), 0..8),
@@ -386,7 +411,10 @@ fn histories() -> impl Strategy<Value = Vec<Operation>> {
                         operation.capability = CapabilityRef::ForRequest;
                         if matches!(
                             operation.action,
-                            Action::RetireOwner | Action::ConfirmOwner | Action::ShutdownTarget
+                            Action::RetireOwner
+                                | Action::ObserveOwner
+                                | Action::FenceOwner
+                                | Action::ShutdownTarget
                         ) {
                             operation.action = Action::Read;
                         }
@@ -469,7 +497,7 @@ impl NativeFacts {
         }
         match self.decision() {
             Some((_, outcome)) if outcome.visible() => {
-                if owner_ready {
+                if owner_ready || self.cache() == ExpectedCache::Published {
                     ExpectedNative::VisibleConfirmed
                 } else {
                     ExpectedNative::VisibleUnconfirmed
@@ -674,7 +702,10 @@ struct Coverage {
     fenced_replies: usize,
     fenced_acknowledgements: usize,
     native_finishes: BTreeMap<&'static str, usize>,
-    native_confirmations: usize,
+    owner_observations: usize,
+    owner_fences: usize,
+    claims_refused_after_fence: usize,
+    confirmed_outcomes_preserved_after_fence: usize,
     native_cancellations: usize,
     releases_without_token_finish: usize,
     retirement_claim_refusals: usize,
@@ -712,8 +743,8 @@ fn run_history(
     coverage: &mut Coverage,
 ) -> Result<(), TestCaseError> {
     crate::request::test_support::fresh_history();
-    // Reset actual native confirmation state for each replay/shrink. Compilation
-    // and authentic input admission happened once at family setup, not here.
+    // Each replay owns a fresh authenticated run. Fencing is absorbing for every
+    // capability issued by that owner, including capabilities retained by waiters.
     fixture.make_ready();
     if initially_pending {
         fixture.make_pending();
@@ -769,7 +800,7 @@ fn run_history(
                         if shutdown[key] {
                             Err(ExpectedClaimRefusal::Retired)
                         } else {
-                            Ok(permit)
+                            Ok(permit && owner_ready)
                         }
                     });
                 let (resources, decision) = fixture.fresh_resources();
@@ -836,6 +867,7 @@ fn run_history(
                     coverage.claims += 1;
                 } else if actual_result == Ok(false) {
                     coverage.claim_control_refusals += 1;
+                    coverage.claims_refused_after_fence += usize::from(!owner_ready);
                 }
             }
             Action::Finish(outcome) | Action::Decide(outcome) => {
@@ -935,12 +967,23 @@ fn run_history(
                     *coverage.logical_refusals.entry(action.name()).or_default() += 1;
                 }
             }
-            Action::ConfirmOwner => {
-                fixture.make_ready();
-                owner_ready = true;
-                coverage.native_confirmations += 1;
+            Action::ObserveOwner => {
+                if owner_ready {
+                    fixture.make_ready();
+                } else {
+                    prop_assert!(!fixture.fresh_resources().0.confirmed());
+                }
+                coverage.owner_observations += 1;
                 coverage.confirmations_after_lost_waiter +=
                     usize::from(capabilities.iter().any(|cap| cap.waiter_lost));
+            }
+            Action::FenceOwner => {
+                if owner_ready {
+                    fixture.make_pending();
+                    owner_ready = false;
+                    coverage.owner_fences += 1;
+                }
+                prop_assert!(!fixture.fresh_resources().0.confirmed());
             }
             Action::ShutdownTarget => {
                 if caller == Caller::Exact {
@@ -1287,6 +1330,8 @@ fn run_history(
                 }
                 coverage.unknown_with_ready_owner +=
                     usize::from(owner_ready && expected == ExpectedNative::Unknown);
+                coverage.confirmed_outcomes_preserved_after_fence +=
+                    usize::from(!owner_ready && expected == ExpectedNative::VisibleConfirmed);
                 coverage.known_unconfirmed_with_pending_owner +=
                     usize::from(!owner_ready && expected == ExpectedNative::VisibleUnconfirmed);
             }
@@ -1336,10 +1381,8 @@ fn config(name: &'static str) -> Config {
     config
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generated_request_activation_matches_native_evidence() {
-    let fixture =
-        crate::resident_workbench::request_tests::activation_publication_phase_fixture().await;
     for initially_pending in [false, true] {
         let coverage = RefCell::new(Coverage::default());
         let result = TestRunner::new(config(concat!(
@@ -1347,6 +1390,12 @@ async fn generated_request_activation_matches_native_evidence() {
             "::generated_request_activation_matches_native_evidence"
         )))
         .run(&histories(), |history| {
+            let fixture = tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(
+                    crate::resident_workbench::request_tests::activation_publication_phase_fixture(
+                    ),
+                )
+            });
             run_history(
                 &history,
                 &fixture,
@@ -1364,12 +1413,14 @@ async fn generated_request_activation_matches_native_evidence() {
 
 #[tokio::test]
 async fn request_activation_phase_support_covers_contract_partitions() {
-    let fixture =
-        crate::resident_workbench::request_tests::activation_publication_phase_fixture().await;
     let mut coverage = Coverage::default();
     for initially_pending in [false, true] {
-        for mode in 0..17 {
+        for mode in 0..19 {
             for cancel_native in [false, true] {
+                let fixture =
+                    crate::resident_workbench::request_tests::activation_publication_phase_fixture(
+                    )
+                    .await;
                 run_history(
                     &guided(mode, cancel_native),
                     &fixture,
@@ -1387,8 +1438,10 @@ async fn request_activation_phase_support_covers_contract_partitions() {
         coverage.unknown_with_ready_owner > 0 && coverage.known_unconfirmed_with_pending_owner > 0
     );
     assert!(coverage.fenced_replies > 0 && coverage.fenced_acknowledgements > 0);
-    assert!(coverage.native_confirmations > 0 && coverage.provider_publications > 0);
+    assert!(coverage.owner_observations > 0 && coverage.provider_publications > 0);
     assert!(coverage.native_cancellations > 0);
+    assert!(coverage.owner_fences > 0 && coverage.claims_refused_after_fence > 0);
+    assert!(coverage.confirmed_outcomes_preserved_after_fence > 0);
     assert!(
         coverage.suppressed_provider_publications > 0 && coverage.shared_target_retirements > 0
     );
