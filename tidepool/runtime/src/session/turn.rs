@@ -7214,9 +7214,10 @@ mod tests {
             .trim()
             .split("\n\n")
             .collect::<Vec<_>>();
-        let inherited_generation = session
-            .define_scoped_in(public, &prior_declarations)
-            .unwrap();
+        let inherited_generation = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_in(public, &prior_declarations, settlement)
+        })
+        .unwrap();
         let inherited_surface = session.exact_exports_in(public, &["PriorNominal"]).unwrap();
         let inherited_exports = inherited_surface.declarations().unwrap().to_vec();
         let execution = Arc::new(session.begin_private_execution(public).unwrap());
@@ -7677,11 +7678,14 @@ mod tests {
             .bind_durable_public_scope(owner.clone(), public)
             .unwrap();
         let admitted = session.public_visibility_snapshot_in(public).unwrap();
-        let receipt = session
-            .lib()
-            .declaration_receipt(&[include_str!("fixtures/exact-join-original.hs")])
-            .unwrap()
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            session.lib().declaration_receipt(
+                &[include_str!("fixtures/exact-join-original.hs")],
+                settlement,
+            )
+        })
+        .unwrap()
+        .unwrap();
         let (candidate, values) = session
             .render_declaration_candidate_in(private, &receipt, &SourceImports::new())
             .unwrap();
@@ -7701,7 +7705,10 @@ mod tests {
             .log
             .certified_authored_arc_at(original_generation)
             .unwrap();
-        session.retract_in(private, "HiddenResult").unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            session.retract_in(private, "HiddenResult", settlement)
+        })
+        .unwrap();
         let CertifiedDeclarationPublication::Accepted(accepted) = session
             .snapshot_declaration_publication(owner, &admitted, private, vec![], vec![])
             .unwrap()

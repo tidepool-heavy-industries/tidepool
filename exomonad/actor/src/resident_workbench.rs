@@ -14930,14 +14930,16 @@ pub(crate) mod request_tests {
                 workbench
                     .access
                     .with_machine(context.clone(), move |session, context, _| {
-                        session
-                            .define_scoped_in(
+                        tidepool_testing::with_settlement(|settlement| {
+                            session.define_scoped_in(
                                 context.placement.lexical_scope,
                                 &["data LookupViewChanged = LookupViewChanged"],
+                                settlement,
                             )
-                            .map_err(|error| {
-                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
-                            })?;
+                        })
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })?;
                         Ok(())
                     })
                     .await

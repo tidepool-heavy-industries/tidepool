@@ -8825,12 +8825,14 @@ mod authored_publication_tests {
             .initialize_durable_public_scope(owner(1), public)
             .unwrap();
         let admission = producer.begin_private_execution(public).unwrap();
-        producer
-            .define_scoped_in(
+        tidepool_testing::with_settlement(|settlement| {
+            producer.define_scoped_in(
                 admission.private_scope(),
                 &[include_str!("fixtures/recovery-original.hs")],
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         let intent = producer
             .freeze_execution_intent(&admission, vec![], vec![])
             .unwrap();
@@ -10121,12 +10123,14 @@ mod authored_publication_tests {
         let root = tempfile::tempdir().unwrap();
         let lib = authored_lib(root.path());
         let mut session = resident_with_replaced_binding(lib);
-        let receipt = session
-            .state
-            .lib()
-            .declaration_receipt(&["answer :: Int\nanswer = 42"])
-            .unwrap()
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            session
+                .state
+                .lib()
+                .declaration_receipt(&["answer :: Int\nanswer = 42"], settlement)
+        })
+        .unwrap()
+        .unwrap();
         let staged = session
             .stage_declarations_in(ScopeId::ROOT, &receipt, &SourceImports::new(), &[])
             .unwrap_or_else(|error| {
@@ -10419,12 +10423,14 @@ mod authored_publication_tests {
         assert!(readiness.is_ready());
         assert!(sibling.is_ready());
 
-        let receipt = session
-            .state
-            .lib()
-            .declaration_receipt(&["answer :: Int\nanswer = 42"])
-            .unwrap()
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            session
+                .state
+                .lib()
+                .declaration_receipt(&["answer :: Int\nanswer = 42"], settlement)
+        })
+        .unwrap()
+        .unwrap();
         let staged = session
             .stage_declarations_in(private, &receipt, &SourceImports::new(), &[])
             .unwrap();

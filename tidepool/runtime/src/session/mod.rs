@@ -3256,10 +3256,11 @@ mod tests {
     }
 
     fn validated_staged_declaration(lib: &SessionLib, source: &str) -> StagedDeclaration {
-        let receipt = lib
-            .declaration_receipt(&[source])
-            .expect("extract declaration receipt")
-            .expect("non-empty declaration receipt");
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            lib.declaration_receipt(&[source], settlement)
+        })
+        .expect("extract declaration receipt")
+        .expect("non-empty declaration receipt");
         let candidate =
             lib.render_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[]);
         tidepool_testing::with_settlement(|settlement| {
@@ -3278,10 +3279,14 @@ mod tests {
         )
         .unwrap();
         let lib = staged_test_lib(&root);
-        let receipt = lib
-            .declaration_receipt(&["import SessionHelpers\nanswer :: Int\nanswer = helper"])
-            .unwrap()
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            lib.declaration_receipt(
+                &["import SessionHelpers\nanswer :: Int\nanswer = helper"],
+                settlement,
+            )
+        })
+        .unwrap()
+        .unwrap();
         let candidate =
             lib.render_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[]);
         assert!(validate_declaration_candidate(candidate.clone(), lib.include_dir()).is_err());
@@ -3318,10 +3323,11 @@ mod tests {
         lib.attach_recovery_graph_v2(&manifest).unwrap();
         let private = ScopeId(2);
         lib.seed_scope(private, Generation(0));
-        let receipt = lib
-            .declaration_receipt(&["data PrivateFlag = PrivateFlag"])
-            .unwrap()
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            lib.declaration_receipt(&["data PrivateFlag = PrivateFlag"], settlement)
+        })
+        .unwrap()
+        .unwrap();
         let candidate = lib
             .render_admitted_candidate_in(private, &SourceImports::new(), &receipt, &[], &[])
             .unwrap();
@@ -3673,10 +3679,11 @@ mod tests {
         let manifest = root.path().join("declarations.json");
         let mut lib = staged_test_lib(&root);
         lib.attach_recovery_graph_v2(&manifest).unwrap();
-        let receipt = lib
-            .declaration_receipt(&["answer :: Int\nanswer = missingHelper"])
-            .unwrap()
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            lib.declaration_receipt(&["answer :: Int\nanswer = missingHelper"], settlement)
+        })
+        .unwrap()
+        .unwrap();
         let candidate = lib
             .render_admitted_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[])
             .unwrap();
@@ -3744,10 +3751,11 @@ mod tests {
     fn failed_staging_keeps_structured_diagnostics_and_publishes_no_types() {
         let root = tempfile::tempdir().unwrap();
         let lib = staged_test_lib(&root);
-        let receipt = lib
-            .declaration_receipt(&["bad :: Int\nbad = True"])
-            .expect("extract declaration receipt")
-            .expect("non-empty declaration receipt");
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            lib.declaration_receipt(&["bad :: Int\nbad = True"], settlement)
+        })
+        .expect("extract declaration receipt")
+        .expect("non-empty declaration receipt");
         let candidate =
             lib.render_candidate_in(ScopeId::ROOT, &SourceImports::new(), &receipt, &[], &[]);
         let error = tidepool_testing::with_settlement(|settlement| {
@@ -3824,10 +3832,14 @@ mod tests {
             panic!("the original value must compile as a bind")
         };
         let injected = vec![bound[0].module.clone()];
-        let receipt = lib
-            .declaration_receipt(&["data Version = NewVersion Bool deriving Show"])
-            .expect("extract replacement declaration")
-            .expect("non-empty replacement declaration");
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            lib.declaration_receipt(
+                &["data Version = NewVersion Bool deriving Show"],
+                settlement,
+            )
+        })
+        .expect("extract replacement declaration")
+        .expect("non-empty replacement declaration");
         let candidate = lib.render_candidate_in(
             ScopeId::ROOT,
             &SourceImports::new(),

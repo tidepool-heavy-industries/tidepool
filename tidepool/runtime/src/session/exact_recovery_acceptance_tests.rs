@@ -302,9 +302,14 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
     let execution = session.begin_private_execution(public).unwrap();
     let private = execution.private_scope();
     let public_before = session.public_visibility_snapshot_in(public).unwrap();
-    let original = session
-        .define_scoped_in(private, &[include_str!("fixtures/recovery-original.hs")])
-        .expect("public declaration API certifies its first original");
+    let original = tidepool_testing::with_settlement(|settlement| {
+        session.define_scoped_in(
+            private,
+            &[include_str!("fixtures/recovery-original.hs")],
+            settlement,
+        )
+    })
+    .expect("public declaration API certifies its first original");
     let original_owner = session
         .lib()
         .log
@@ -320,9 +325,14 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
         .lexical_graph()
         .iter()
         .all(|node| node.owner.module != original_owner.module));
-    let dependent = session
-        .define_scoped_in(private, &[include_str!("fixtures/recovery-dependent.hs")])
-        .expect("public declaration API reuses the selected original behind its lexical join");
+    let dependent = tidepool_testing::with_settlement(|settlement| {
+        session.define_scoped_in(
+            private,
+            &[include_str!("fixtures/recovery-dependent.hs")],
+            settlement,
+        )
+    })
+    .expect("public declaration API reuses the selected original behind its lexical join");
     let certificate = session.lib().log.certified_authored_at(dependent).unwrap();
     assert!(certificate
         .recovery_products()
@@ -347,9 +357,10 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
 
     let private_before = session.public_visibility_snapshot_in(private).unwrap();
     let high_water = session.lib().generation();
-    let rejected = session
-        .define_scoped_in(private, &["bad :: Int\nbad = True"])
-        .expect_err("ill-typed public declaration is refused during validation");
+    let rejected = tidepool_testing::with_settlement(|settlement| {
+        session.define_scoped_in(private, &["bad :: Int\nbad = True"], settlement)
+    })
+    .expect_err("ill-typed public declaration is refused during validation");
     assert!(matches!(rejected, SessionError::ValidationFailed(_)));
     assert_eq!(session.lib().scope_tip(private), dependent);
     assert!(session.lib().generation() > high_water);
@@ -367,9 +378,14 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
         Some(public_before)
     );
 
-    session
-        .retract_many_in(private, &["answer".into(), "HiddenResult".into()])
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        session.retract_many_in(
+            private,
+            &["answer".into(), "HiddenResult".into()],
+            settlement,
+        )
+    })
+    .unwrap();
     let view = session.compile_view_in(private).unwrap();
     let context = view.exact_declaration_context().unwrap().clone();
     assert!(context
@@ -475,9 +491,14 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
         .unwrap();
     let admission = session.begin_private_execution(public).unwrap();
     let private = admission.private_scope();
-    session
-        .define_scoped_in(private, &[include_str!("fixtures/recovery-original.hs")])
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        session.define_scoped_in(
+            private,
+            &[include_str!("fixtures/recovery-original.hs")],
+            settlement,
+        )
+    })
+    .unwrap();
     // A previously materialized value remains visible while this next binding
     // moves from the declaration environment into the binding store.
     let mut existing = prepared::tests::rooted_publication_fixture(&mut session, "existing", 4413);
@@ -518,7 +539,10 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
         )
         .unwrap();
     let before = session.public_visibility_snapshot_in(private).unwrap();
-    session.retract_in(private, "absent").unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        session.retract_in(private, "absent", settlement)
+    })
+    .unwrap();
     assert_eq!(
         session.public_visibility_snapshot_in(private).unwrap(),
         before
@@ -583,12 +607,14 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         &effects,
         include_str!("fixtures/recovery-dependent.hs"),
     );
-    producer
-        .retract_in(admission.private_scope(), "HiddenResult")
-        .unwrap();
-    producer
-        .retract_in(admission.private_scope(), "answer")
-        .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        producer.retract_in(admission.private_scope(), "HiddenResult", settlement)
+    })
+    .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        producer.retract_in(admission.private_scope(), "answer", settlement)
+    })
+    .unwrap();
     let intent = producer
         .freeze_execution_intent(&admission, vec![], vec![])
         .unwrap();

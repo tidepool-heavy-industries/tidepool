@@ -1474,11 +1474,11 @@ mod tests {
         scope: ScopeId,
         source: &str,
     ) -> Generation {
-        let receipt = session
-            .lib()
-            .declaration_receipt(&[source])
-            .unwrap()
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            session.lib().declaration_receipt(&[source], settlement)
+        })
+        .unwrap()
+        .unwrap();
         let (candidate, values) = session
             .render_declaration_candidate_in(scope, &receipt, &SourceImports::new())
             .unwrap();
@@ -2326,9 +2326,10 @@ mod tests {
             .iter()
             .any(|export| export.head.occurrence == "%%"
                 && export.head.namespace == ExportNamespace::Value));
-        session
-            .retract_many_in(withdrawal.private_scope(), &["%%".into()])
-            .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            session.retract_many_in(withdrawal.private_scope(), &["%%".into()], settlement)
+        })
+        .unwrap();
         let withdrawn = session
             .freeze_execution_intent(&withdrawal, vec![], vec![])
             .unwrap();
@@ -2606,11 +2607,11 @@ mod tests {
             (private_a, include_str!("fixtures/paired-rebase-A.hs")),
             (private_b, include_str!("fixtures/paired-rebase-B.hs")),
         ] {
-            let receipt = session
-                .lib()
-                .declaration_receipt(&[source])
-                .unwrap()
-                .unwrap();
+            let receipt = tidepool_testing::with_settlement(|settlement| {
+                session.lib().declaration_receipt(&[source], settlement)
+            })
+            .unwrap()
+            .unwrap();
             let (candidate, values) = session
                 .render_declaration_candidate_in(scope, &receipt, &SourceImports::new())
                 .unwrap();
@@ -2870,11 +2871,14 @@ mod tests {
             .bind_durable_public_scope(owner.clone(), public)
             .unwrap();
         let admitted = session.public_visibility_snapshot_in(public).unwrap();
-        let receipt = session
-            .lib()
-            .declaration_receipt(&["data PrivateFlag = PrivateFlag\nanswer :: Int\nanswer = 42"])
-            .unwrap()
-            .unwrap();
+        let receipt = tidepool_testing::with_settlement(|settlement| {
+            session.lib().declaration_receipt(
+                &["data PrivateFlag = PrivateFlag\nanswer :: Int\nanswer = 42"],
+                settlement,
+            )
+        })
+        .unwrap()
+        .unwrap();
         let (candidate, values) = session
             .render_declaration_candidate_in(private, &receipt, &SourceImports::new())
             .unwrap();
@@ -3158,7 +3162,10 @@ mod tests {
         ));
     }
     fn commit_source(session: &mut PersistentSession, scope: ScopeId, source: &str) -> Generation {
-        session.define_scoped_in(scope, &[source]).unwrap()
+        tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_in(scope, &[source], settlement)
+        })
+        .unwrap()
     }
 
     #[test]
@@ -3216,12 +3223,14 @@ mod tests {
             a.private_scope(),
             include_str!("fixtures/paired-rich-A2.hs"),
         );
-        session
-            .retract_many_in(
+        tidepool_testing::with_settlement(|settlement| {
+            session.retract_many_in(
                 a.private_scope(),
                 &["retractValue".into(), "baseValue".into()],
+                settlement,
             )
-            .unwrap();
+        })
+        .unwrap();
         let value = crate::session::prepared::tests::rooted_publication_fixture(
             &mut session,
             "retractValue",
