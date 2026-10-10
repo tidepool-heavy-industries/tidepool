@@ -13922,12 +13922,18 @@ mod tests {
         let issued =
             ExactDeclarationContext::new(std::slice::from_ref(&certificate), &[], Vec::new())
                 .unwrap();
-        let original_id = issued.compiler_metadata_snapshot().unwrap().entries
-            [&identity("main", &owner.module_name())]
-            .descriptor
-            .id;
+        let original_id =
+            ArtifactEntry::original_artifact_id(issued.producer, certificate.product());
         let projection = issued.compiler_input_projection().interface_only();
         let context = Arc::new(issued.with_compiler_input_projection(projection).unwrap());
+        assert_ne!(
+            context.compiler_metadata_snapshot().unwrap().entries
+                [&identity("main", &owner.module_name())]
+                .descriptor
+                .id,
+            original_id,
+            "the baseline winner is an interface; the protected recipe offers its original"
+        );
         let persistent_semantic = context.semantic_sha256();
         let endpoint = tidepool_extract_cmd::ExtractCmd::new()
             .unwrap()
