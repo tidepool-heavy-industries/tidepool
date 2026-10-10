@@ -53,7 +53,6 @@ enum ResidentResumeInput {
         constructor: tidepool_repr::DataConId,
         prefix: Vec<Box<dyn tidepool_bridge::ToHaskell + Send>>,
     },
-    Abort(String),
 }
 
 /// Immutable compiler provenance that travels with live Haskell programs.
@@ -7415,19 +7414,22 @@ where
         &mut self,
         cont_id: &str,
         reason: String,
-        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<ResidentOutcome, ResidentError> {
-        self.reenter(
-            cont_id,
-            ResidentResumeInput::Abort(reason),
-            HoleSeed {
-                obligation: HoleObligation::Plain,
-                checked: None,
-            },
-            None,
-            settlement,
-        )
-        .map_err(ResidentResumeError::into_inner)
+        let Some(entry) = self.parked.iter().find(|entry| entry.name == cont_id) else {
+            return Err(ResidentError::WrongContinuation {
+                attempted: cont_id.to_string(),
+                pending: self.parked.iter().map(|entry| entry.name.clone()).collect(),
+            });
+        };
+        let frame_id = entry.id;
+        let aborted = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
+            Ok(engine.abort_parked(frame_id))
+        });
+        self.reconcile_failed_reentry(cont_id, frame_id);
+        aborted??;
+        Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
+            format!("ask aborted by caller: {reason}"),
+        ))))
     }
 
     fn reenter(
@@ -7755,19 +7757,6 @@ where
             obligation,
             checked,
         } = seed;
-        let input = match input {
-            ResidentResumeInput::Abort(reason) => {
-                let aborted = self.on_eval_thread(move |engine, _table, _handlers, _captured| {
-                    Ok(engine.abort_parked(frame_id))
-                });
-                self.reconcile_failed_reentry(cont_id, frame_id);
-                aborted??;
-                return Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(
-                    format!("ask aborted by caller: {reason}"),
-                ))));
-            }
-            other => other,
-        };
         // The hole's own obligation says how the resumed run completes; the
         // frame carries the runner whose entry re-enters the continuation.
         let (lexical_scope, mode) = match &obligation {
@@ -7825,9 +7814,6 @@ where
                     &prefix,
                     table,
                 ),
-                ResidentResumeInput::Abort(_) => {
-                    unreachable!("Abort is handled before the frame is touched")
-                }
             };
             Ok(outcome.and_then(|resumed| {
                 let runner = resumed.runner;
@@ -10790,9 +10776,8 @@ where
         hole: Self::Hole,
         reason: String,
         (): Self::Context,
-        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Self::Outcome, Self::Error> {
-        Self::abort(self, hole.cont_id(), reason, settlement)
+        Self::abort(self, hole.cont_id(), reason)
     }
 }
 
