@@ -69,7 +69,7 @@ tidepool-mcp = { version = "0.1.0", path = "bridge/mcp" }
 exomonad-model = { version = "0.1.0", path = "exomonad/model" }
 exomonad-node = { version = "0.1.0", path = "exomonad/node" }
 exomonad-tool = { version = "0.1.0", path = "exomonad/tool" }
-harness = { git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "702d194926aa05683d9146364445838d72e8aceb", package = "harness" }
+harness = { git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "d1332cebff50264ad9859a33fb04dafe97d7920c", package = "harness" }
 tidepool-protocol = { version = "0.1.0", path = "bridge/protocol" }
 tidepool-repr = { version = "0.1.0", path = "tidepool/repr" }
 tidepool-runtime = { version = "0.1.0", path = "tidepool/runtime" }
@@ -88,7 +88,7 @@ cid = { version = "=0.11.3", default-features = false, features = ["std", "serde
 fvm_ipld_hamt = "=0.10.6"
 fvm_ipld_blockstore = "=0.3.2"
 fvm_ipld_encoding = "=0.5.4"
-imbl = "=7.0.2"
+imbl = { version = "=7.0.2", default-features = false }
 multihash-codetable = { version = "=0.2.2", default-features = false, features = ["blake2b"] }
 clap = { version = "4", features = ["derive", "env"] }
 frunk = "0.5"

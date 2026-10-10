@@ -9,12 +9,12 @@ checked_harness_source(
     name = "exomonad-harness-5fdd156badd86236",
     cp = read_root_config("nix", "coreutils") + "/cp",
     python = read_root_config("nix", "python"),
-    revision = "702d194926aa05683d9146364445838d72e8aceb",
-    nar_hash = "sha256-sBgzVWvzEIDFn2nFSq6ODwzuMt1VIDb+QGFTZ8p+1Sc=",
+    revision = "d1332cebff50264ad9859a33fb04dafe97d7920c",
+    nar_hash = "sha256-gpUWEz/qf5kJx7C9WQ7dz+nD0br5rAe8xDAerWQm1iE=",
     cargo_lock = "root//:workspace_cargo_lock",
     flake_lock = "root//:workspace_flake_lock",
     provenance_script = "root//:embedded_web_provenance_script",
-    store_path = "/nix/store/hfxr7992didl6ja53pa8wv1594snrf6a-source",
+    store_path = "/nix/store/j5cg17bhqw1156dmqq2f84yymhc15m79-source",
     visibility = [],
 )
 
