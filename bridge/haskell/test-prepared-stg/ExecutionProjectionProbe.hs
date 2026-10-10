@@ -5,7 +5,8 @@ import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup)
 import CallerResultProjectionTest (verifyCallerResultProjection)
 import DeferredFunctionProjectionTest (verifyDeferredFunctionProjection)
 import ExecutionProjectionTest
-  (projectProjectionContract, verifyRetainedImportProjection, verifyUnboxedSumJoinProjection)
+  ( projectProjectionContract, verifyRetainedImportProjection, verifyUnboxedSumJoinProjection
+  , verifyTimeEitherShadow, verifyPreparedTime )
 import ModuleEvidenceProjectionTest (verifyModuleEvidenceProjection)
 import Tidepool.GhcPipeline
   ( PipelineSelection(PreparedStg), pprModules, runPipelineSelected )
@@ -17,7 +18,9 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "execution-schema-projection"
-  [ testCase "unarised sum joins preserve literal signedness" verifyUnboxedSumJoinProjection
+  [ testCase "Time exact installed dependency owners" verifyPreparedTime
+  , testCase "Time rejects home Either behind authenticated source" verifyTimeEitherShadow
+  , testCase "unarised sum joins preserve literal signedness" verifyUnboxedSumJoinProjection
   , testCase "caller chosen result" verifyCallerResultProjection
   , testCase "module evidence" verifyModuleEvidenceProjection
   , testCase "deferred function" verifyDeferredFunctionProjection
