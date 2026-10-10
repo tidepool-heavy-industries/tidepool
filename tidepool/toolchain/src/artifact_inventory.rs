@@ -217,7 +217,7 @@ pub enum ArtifactDependency {
 pub enum ArtifactInventoryFailure {
     #[error("artifact {artifact:?} has differing metadata")]
     MetadataConflict { artifact: ArtifactId },
-    #[error("original owner {owner:?} has differing artifacts")]
+    #[error("compiler interface owner {owner:?} has differing artifacts")]
     OwnerConflict { owner: ExactModuleIdentity },
     #[error("owner {owner:?} selects multiple native implementations")]
     NativeOwnerAmbiguity { owner: ExactModuleIdentity },
@@ -258,10 +258,96 @@ pub struct ArtifactInventoryError {
     pub(crate) owner_conflict: Option<ArtifactOwnerConflictEvidence>,
 }
 
-pub(crate) struct ArtifactOwnerConflictEvidence {
-    existing: Arc<ArtifactEntry>,
-    incoming: Arc<ArtifactEntry>,
-    existing_in_parent: bool,
+pub(crate) enum ArtifactOwnerConflictEvidence {
+    ArtifactSelection {
+        existing: Arc<ArtifactEntry>,
+        incoming: Arc<ArtifactEntry>,
+        existing_in_parent: bool,
+    },
+    NativeCanonicalCarrier {
+        selected: Arc<ArtifactEntry>,
+        incoming: Arc<ArtifactEntry>,
+    },
+    CompilerRole {
+        existing: CompilerInputRole,
+        incoming: CompilerInputRole,
+    },
+}
+
+impl ArtifactOwnerConflictEvidence {
+    fn summary(&self) -> String {
+        fn artifact(entry: &ArtifactEntry) -> String {
+            format!("{:?}:{}", entry.descriptor.kind, hex(entry.descriptor.id))
+        }
+        fn hex(id: ArtifactId) -> String {
+            id.0.iter().map(|byte| format!("{byte:02x}")).collect()
+        }
+        fn role(role: &CompilerInputRole) -> String {
+            let kind = match role {
+                CompilerInputRole::InterfaceOnly { .. } => "interface_only",
+                CompilerInputRole::ReusableOriginal { .. } => "reusable_original",
+                CompilerInputRole::PublishedSourceOriginal { .. } => "published_source_original",
+            };
+            let mut summary = format!("{kind}:interface={}", hex(role.interface()));
+            if let Some(original) = role.original() {
+                summary.push_str(&format!(",original={}", hex(original)));
+            }
+            summary
+        }
+        match self {
+            Self::ArtifactSelection {
+                existing, incoming, ..
+            } => format!(
+                "artifact_selection existing={} incoming={}",
+                artifact(existing),
+                artifact(incoming)
+            ),
+            Self::NativeCanonicalCarrier { selected, incoming } => format!(
+                "native_canonical_carrier existing={} incoming={}",
+                artifact(selected),
+                artifact(incoming)
+            ),
+            Self::CompilerRole { existing, incoming } => format!(
+                "compiler_role existing={} incoming={}",
+                role(existing),
+                role(incoming)
+            ),
+        }
+    }
+    fn metadata(&self) -> serde_json::Value {
+        match self {
+            Self::ArtifactSelection {
+                existing,
+                incoming,
+                existing_in_parent,
+            } => serde_json::json!({
+                "boundary": "artifact_selection",
+                "existing": existing.descriptor,
+                "incoming": incoming.descriptor,
+                "existing_in_parent": existing_in_parent,
+            }),
+            Self::NativeCanonicalCarrier { selected, incoming } => serde_json::json!({
+                "boundary": "native_canonical_carrier",
+                "existing": selected.descriptor,
+                "incoming": incoming.descriptor,
+            }),
+            Self::CompilerRole { existing, incoming } => serde_json::json!({
+                "boundary": "compiler_role",
+                "existing_role": existing,
+                "incoming_role": incoming,
+            }),
+        }
+    }
+
+    fn entries(&self) -> Option<(&Arc<ArtifactEntry>, &Arc<ArtifactEntry>)> {
+        match self {
+            Self::ArtifactSelection {
+                existing, incoming, ..
+            } => Some((existing, incoming)),
+            Self::NativeCanonicalCarrier { selected, incoming } => Some((selected, incoming)),
+            Self::CompilerRole { .. } => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for ArtifactInventoryError {
@@ -270,6 +356,13 @@ impl std::fmt::Debug for ArtifactInventoryError {
             .debug_struct("ArtifactInventoryError")
             .field("failure", &self.failure)
             .field("diagnostic_artifacts", &self.diagnostic_artifacts)
+            .field(
+                "owner_conflict",
+                &self
+                    .owner_conflict
+                    .as_ref()
+                    .map(ArtifactOwnerConflictEvidence::summary),
+            )
             .finish()
     }
 }
@@ -283,19 +376,15 @@ impl ArtifactInventoryError {
         };
         let root = root.join("owner-conflict");
         std::fs::create_dir(&root)?;
-        let metadata = serde_json::json!({
-            "existing": evidence.existing.descriptor,
-            "incoming": evidence.incoming.descriptor,
-            "existing_in_parent": evidence.existing_in_parent,
-        });
+        let metadata = evidence.metadata();
         std::fs::write(
             root.join("index.json"),
             serde_json::to_vec_pretty(&metadata).map_err(std::io::Error::other)?,
         )?;
-        for (label, entry) in [
-            ("existing", &evidence.existing),
-            ("incoming", &evidence.incoming),
-        ] {
+        let Some((existing, incoming)) = evidence.entries() else {
+            return Ok(());
+        };
+        for (label, entry) in [("existing", existing), ("incoming", incoming)] {
             if let ArtifactPayload::Canonical(interface) = &entry.payload {
                 for (extension, bytes) in [
                     ("finalized.cbor", interface.certificate_bytes()),
@@ -316,6 +405,9 @@ impl ArtifactInventoryError {
 impl std::fmt::Display for ArtifactInventoryError {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.failure.fmt(output)?;
+        if let Some(evidence) = &self.owner_conflict {
+            write!(output, "; conflict evidence {}", evidence.summary())?;
+        }
         if let Some(path) = &self.diagnostic_artifacts {
             write!(
                 output,
@@ -1013,7 +1105,7 @@ impl SelectedOwners {
                         owner: entry.descriptor.owner.clone(),
                     },
                     diagnostic_artifacts: None,
-                    owner_conflict: Some(ArtifactOwnerConflictEvidence {
+                    owner_conflict: Some(ArtifactOwnerConflictEvidence::ArtifactSelection {
                         existing: Arc::clone(existing),
                         incoming: Arc::clone(incoming),
                         existing_in_parent: parent_ids.contains(&existing.descriptor.id),
@@ -1228,9 +1320,17 @@ impl SelectedOwners {
             );
             let id = resolve(&entry.descriptor.owner, &ArtifactDependency::Interface)?;
             if id != carrier.descriptor.id {
-                return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
-                    owner: entry.descriptor.owner.clone(),
-                }));
+                return Err(ArtifactInventoryError {
+                    failure: ArtifactInventoryFailure::OwnerConflict {
+                        owner: entry.descriptor.owner.clone(),
+                    },
+                    diagnostic_artifacts: None,
+                    owner_conflict: Some(ArtifactOwnerConflictEvidence::NativeCanonicalCarrier {
+                        selected: Arc::clone(&entries[&id]),
+                        incoming: Arc::new(carrier),
+                    }),
+                }
+                .into());
             }
             edges.insert((id, ArtifactDependency::Interface));
         }
@@ -3998,6 +4098,7 @@ mod tests {
         let root = destination.path().join("owner-conflict");
         let index: serde_json::Value =
             serde_json::from_slice(&std::fs::read(root.join("index.json")).unwrap()).unwrap();
+        assert_eq!(index["boundary"], "artifact_selection");
         assert_eq!(index["existing_in_parent"], true);
         for (label, entry) in [("existing", existing), ("incoming", incoming)] {
             let ArtifactPayload::Canonical(interface) = entry.payload else {
@@ -4012,6 +4113,92 @@ mod tests {
                 serde_json::to_value(entry.descriptor).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn compiler_role_conflict_reports_bounded_exact_ids_and_retains_full_selection() {
+        let owner = ExactModuleIdentity {
+            unit: "unit".into(),
+            module: "Shared".into(),
+        };
+        let existing = CompilerInputRole::InterfaceOnly {
+            interface: ArtifactId([1; 32]),
+        };
+        let incoming = CompilerInputRole::PublishedSourceOriginal {
+            interface: ArtifactId([2; 32]),
+            original: ArtifactId([3; 32]),
+            source_revision: "source".into(),
+            original_input_identity: "input".into(),
+            selection: ExactArtifactSelection(Arc::new(ExactArtifactSelectionFacts {
+                artifacts: vec![ArtifactId([4; 32]); 10_000],
+                native_groups: vec![],
+            })),
+            selection_sha256: [5; 32],
+        };
+        let mut projection = CompilerInputProjection::default();
+        projection
+            .admit_role(owner.clone(), existing.clone())
+            .unwrap();
+        let CompileError::ArtifactInventory(error) =
+            projection.admit_role(owner, incoming.clone()).unwrap_err()
+        else {
+            panic!("expected compiler role refusal")
+        };
+        assert_eq!(projection.roles(), vec![existing]);
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(rendered.len() < 1024);
+            assert!(rendered.contains("compiler_role"));
+            assert!(rendered.contains(&"02".repeat(32)));
+            assert!(!rendered.contains("selection_sha256"));
+        }
+        let destination = tempfile::tempdir().unwrap();
+        error.retain_owner_conflict(destination.path()).unwrap();
+        let index: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(destination.path().join("owner-conflict/index.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(index["boundary"], "compiler_role");
+        assert_eq!(
+            index["incoming_role"],
+            serde_json::to_value(incoming).unwrap()
+        );
+    }
+
+    #[test]
+    fn native_canonical_conflict_reports_selected_and_required_carriers() {
+        let native = native_entry("Shared", &[]);
+        let selected = Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                [3; 32],
+                "unit",
+                "Shared",
+                BTreeMap::new(),
+            ),
+        ));
+        let entries = BTreeMap::from([(selected.descriptor.id, Arc::clone(&selected))]);
+        let owners = SelectedOwners {
+            interfaces: BTreeMap::from([(
+                selected.descriptor.owner.clone(),
+                selected.descriptor.id,
+            )]),
+            native: BTreeMap::new(),
+        };
+        let inventory = ArtifactInventory::default();
+        let state = inventory.0.lock().unwrap();
+        let CompileError::ArtifactInventory(error) =
+            owners.dependencies(&state, &native, &entries).unwrap_err()
+        else {
+            panic!("expected native canonical refusal")
+        };
+        let evidence = error.owner_conflict.as_ref().unwrap().metadata();
+        assert_eq!(evidence["boundary"], "native_canonical_carrier");
+        assert_eq!(
+            evidence["existing"],
+            serde_json::to_value(&selected.descriptor).unwrap()
+        );
+        assert_ne!(evidence["incoming"]["id"], evidence["existing"]["id"]);
+        assert!(error.to_string().contains("native_canonical_carrier"));
+        assert_eq!(state.graph.node_count(), 0);
     }
 
     #[test]

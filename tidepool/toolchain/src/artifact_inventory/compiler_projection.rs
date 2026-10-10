@@ -176,9 +176,15 @@ impl CompilerInputProjection {
                 }
             }
             if previous.interface() != incoming.interface() {
-                return Err(admission_failure(ArtifactInventoryFailure::OwnerConflict {
-                    owner,
-                }));
+                return Err(ArtifactInventoryError {
+                    failure: ArtifactInventoryFailure::OwnerConflict { owner },
+                    diagnostic_artifacts: None,
+                    owner_conflict: Some(ArtifactOwnerConflictEvidence::CompilerRole {
+                        existing: previous.clone(),
+                        incoming,
+                    }),
+                }
+                .into());
             }
             if previous.is_published_source_original()
                 && incoming.is_published_source_original()
