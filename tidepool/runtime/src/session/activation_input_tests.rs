@@ -2778,7 +2778,6 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     };
     let weak_images = bundle
         .image_owners()
-        .iter()
         .map(Arc::downgrade)
         .collect::<Vec<_>>();
     assert!(!weak_images.is_empty());
@@ -2794,13 +2793,17 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(),
         "same immutable code/literal keys reuse every native image"
     );
-    for (first, next) in bundle.image_owners().iter().zip(repeated.image_owners()) {
+    eprintln!(
+        "original ordinary-home display Ready bundle images: {}",
+        bundle.image_owners().len()
+    );
+    for (first, next) in bundle.image_owners().zip(repeated.image_owners()) {
         assert!(Arc::ptr_eq(first, next));
     }
     drop(repeated);
     let before_fault = resident.residency();
     {
-        let incomplete = bundle.omitting_image(0);
+        let incomplete = bundle.omitting_target_image();
         let refused = resident.install_turn_program_in_with_images(
             compiled.admission.scope_lease.scope(),
             compiled.renderer.compiled.prepared.as_ref().clone(),

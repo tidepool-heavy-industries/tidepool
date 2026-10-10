@@ -694,20 +694,32 @@ pub(crate) struct CertifiedTargetImage {
 /// Strong custody of native code and its literal storage, with no installed state.
 pub(crate) struct NativeImageBundle {
     registry: Arc<ImageRegistry>,
-    images: Vec<Arc<CompiledProgram>>,
+    images: BTreeMap<usize, Arc<CompiledProgram>>,
+    target: usize,
 }
 
 impl std::fmt::Debug for NativeImageBundle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeImageBundle")
             .field("images", &self.images.len())
+            .field(
+                "target",
+                &self
+                    .images
+                    .get(&self.target)
+                    .map(|image| image.image_instance_id()),
+            )
             .finish()
     }
 }
 
 impl NativeImageBundle {
     fn holds(&self, image: &Arc<CompiledProgram>) -> bool {
-        self.images.iter().any(|held| Arc::ptr_eq(held, image))
+        // The strong owner prevents address reuse while this index is live.
+        // Registry equality remains the native selection authority.
+        self.images
+            .get(&(Arc::as_ptr(image) as usize))
+            .is_some_and(|held| Arc::ptr_eq(held, image))
     }
 
     pub(crate) fn prepare_activation_renderer(
@@ -859,6 +871,7 @@ impl NativeImageBundle {
         } else {
             BTreeMap::new()
         };
+        let target_key = Arc::as_ptr(&target) as usize;
         images.push(target);
         for (index, (group, imports)) in groups.iter().enumerate() {
             let image = match byte_images.remove(&index) {
@@ -880,27 +893,36 @@ impl NativeImageBundle {
         }
         Ok(Self {
             registry: registry.clone(),
-            images,
+            images: images
+                .into_iter()
+                .map(|image| (Arc::as_ptr(&image) as usize, image))
+                .collect(),
+            target: target_key,
         })
     }
 
     #[cfg(test)]
-    pub(super) fn omitting_image(&self, index: usize) -> Self {
+    pub(super) fn omitting_image(&self, key: usize) -> Self {
         Self {
             registry: self.registry.clone(),
             images: self
                 .images
                 .iter()
-                .enumerate()
-                .filter(|(position, _)| *position != index)
-                .map(|(_, image)| image.clone())
+                .filter(|(address, _)| **address != key)
+                .map(|(address, image)| (*address, image.clone()))
                 .collect(),
+            target: self.target,
         }
     }
 
     #[cfg(test)]
-    pub(super) fn image_owners(&self) -> &[Arc<CompiledProgram>] {
-        &self.images
+    pub(super) fn omitting_target_image(&self) -> Self {
+        self.omitting_image(self.target)
+    }
+
+    #[cfg(test)]
+    pub(super) fn image_owners(&self) -> impl ExactSizeIterator<Item = &Arc<CompiledProgram>> {
+        self.images.values()
     }
 
     pub(super) fn image_instances(&self) -> impl Iterator<Item = u64> + '_ {
@@ -6665,7 +6687,8 @@ pub(super) mod tests {
         };
         let absent = NativeImageBundle {
             registry: registry.clone(),
-            images: vec![],
+            images: BTreeMap::new(),
+            target: 0,
         };
         let before = CompiledProgram::successful_image_compilations();
         assert!(matches!(
@@ -6679,11 +6702,13 @@ pub(super) mod tests {
             registry: registry.clone(),
             images: std::iter::once(target.image.clone())
                 .chain(demanded.iter().map(|image| image.image().clone()))
+                .map(|image| (Arc::as_ptr(&image) as usize, image))
                 .collect(),
+            target: Arc::as_ptr(&target.image) as usize,
         };
         let before = CompiledProgram::successful_image_compilations();
-        for index in 0..complete.images.len() {
-            let incomplete = complete.omitting_image(index);
+        for key in complete.images.keys() {
+            let incomplete = complete.omitting_image(*key);
             assert!(matches!(
                 CertifiedTargetImage::lookup_scoped(prepared.clone(), &resolved, &incomplete),
                 Err(PreparedRuntimeError::MissingPreparedNativeImage)
