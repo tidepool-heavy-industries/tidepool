@@ -315,7 +315,8 @@ pub struct DeclLog {
     /// Changes at every graph mutation, including reserved-slot settlement.
     /// Zero permanently fences publication if the revision space is exhausted.
     revision: u64,
-    /// Highest allocated identity, independent of public visibility.
+    /// Highest consumed identity, including failed candidates and burned floors.
+    /// Durable reservation tails belong to SessionLib, never this sparse log.
     high_water: Generation,
     /// Sparse generation-addressed nodes; abandoned reservations remain
     /// allocated without retaining empty vector slots up to high_water.
@@ -363,7 +364,7 @@ pub(crate) struct AdmittedDeclarationSurface {
 }
 
 /// Prepared reserved slots contain only the newly admitted range. The existing
-/// declaration graph stays in its sole owner until the manifest becomes visible.
+/// declaration graph stays in its sole owner until the range is confirmed.
 pub(crate) struct PreparedDeclarationReservations {
     previous_high_water: Generation,
     previous_revision: u64,
@@ -450,6 +451,16 @@ impl DeclLog {
         self.high_water = high_water;
         self.advance_revision();
         true
+    }
+
+    /// Burn a known durable allocation floor without creating reserved slots.
+    /// Already exposed identities remain burned; only the unissued tail moves.
+    pub(crate) fn burn_to(&mut self, floor: Generation) {
+        assert!(floor >= self.high_water);
+        if floor != self.high_water {
+            self.high_water = floor;
+            self.advance_revision();
+        }
     }
 
     pub(crate) fn restore_recovered(

@@ -222,6 +222,8 @@ pub(crate) struct ChildSessionSeed {
 #[derive(Debug, thiserror::Error)]
 pub enum ActorStartCaptureError {
     #[error(transparent)]
+    Session(#[from] tidepool_runtime::session::SessionError),
+    #[error(transparent)]
     Resident(#[from] tidepool_runtime::session::ResidentError),
     #[error(transparent)]
     Decode(#[from] BridgeError),
@@ -324,6 +326,7 @@ impl ResidentActorStart {
         }) {
             return Err(ActorStartCaptureError::InvalidModel);
         }
+        let declaration_high_water = session.declaration_generation_high_water()?;
         let child_realm = RealmId::fresh();
         let entry = session
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)?
@@ -331,7 +334,7 @@ impl ResidentActorStart {
         // Only the explicit installer closure's exact dependencies cross a
         // fresh context boundary; ambient parent lexical bindings do not.
         let facade = materialize_entry_facade(session, entry.provenance(), settlement)?;
-        if facade.is_some() && session.declaration_generation_high_water().is_none() {
+        if facade.is_some() && declaration_high_water.is_none() {
             return Err(ActorStartCaptureError::NoCompileView);
         }
         let keys: Vec<_> = effects.into_iter().map(Into::into).collect();
@@ -340,7 +343,7 @@ impl ResidentActorStart {
         let seed = independent_machine.then(|| ChildSessionSeed {
             facade: facade.clone(),
             val_generation: session.val_gen(),
-            declaration_high_water: session.declaration_generation_high_water(),
+            declaration_high_water,
         });
         let (child_session, lexical_scope) = if independent_machine {
             (
@@ -411,12 +414,13 @@ impl ResidentActorStart {
                 .with_effect_keys(keys.into_iter().map(Into::into).collect()),
             None => crate::ActorCapabilities::default(),
         };
+        let declaration_high_water = session.declaration_generation_high_water()?;
         let child_realm = RealmId::fresh();
         let entry = session
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)?
             .ok_or(ActorStartCaptureError::MissingEntry)?;
         let facade = materialize_entry_facade(session, entry.provenance(), settlement)?;
-        if facade.is_some() && session.declaration_generation_high_water().is_none() {
+        if facade.is_some() && declaration_high_water.is_none() {
             return Err(ActorStartCaptureError::NoCompileView);
         }
         let independent_machine = !capabilities
@@ -425,7 +429,7 @@ impl ResidentActorStart {
         let seed = independent_machine.then(|| ChildSessionSeed {
             facade: facade.clone(),
             val_generation: session.val_gen(),
-            declaration_high_water: session.declaration_generation_high_water(),
+            declaration_high_water,
         });
         let (launch_session, lexical_scope) = if independent_machine {
             (

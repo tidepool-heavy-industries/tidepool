@@ -19,6 +19,8 @@
 mod admission;
 mod binding_table;
 mod dialect;
+mod generation_lease;
+pub use generation_lease::GenerationExhausted;
 #[cfg(test)]
 #[path = "exact_recovery_acceptance_tests.rs"]
 mod exact_recovery_acceptance_tests;
@@ -353,6 +355,8 @@ pub enum DurablePublicAdmissionFailure {
 
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
+    #[error(transparent)]
+    GenerationExhausted(#[from] GenerationExhausted),
     #[error(transparent)]
     InvalidBindingIdentity(#[from] tidepool_codegen::binding_table::BindingIdentityError),
     /// Filesystem I/O failure (creating the session root, writing/reading a
@@ -810,6 +814,8 @@ pub struct SessionLib {
     /// highest precedence so they shadow any same-named module.
     root: PathBuf,
     log: DeclLog,
+    generation_lease: Option<generation_lease::GenerationRangeLease>,
+    local_generation_issued: bool,
     env: ModuleEnv,
     /// Extra `--include` dirs for decl binder-extraction + candidate validation,
     /// beyond `root` and the auto-derived stdlib `lib/`. When `env` imports
@@ -1050,8 +1056,26 @@ impl DeclarationCandidateRender {
 
 impl SessionLib {
     #[must_use]
-    pub fn next_module(&self) -> SessionModule {
-        SessionModule::lib(self.log.generation().next())
+    pub fn next_module(&self) -> Result<SessionModule, GenerationExhausted> {
+        generation_lease::requested_end(self.log.generation(), 1).map(SessionModule::lib)
+    }
+
+    /// Conservative inherited identity floor, checked against the run fence.
+    /// The lease itself stays with this library, never a child's context.
+    pub fn durable_allocation_ceiling(&self) -> Result<Generation, SessionError> {
+        match &self.durable_graph {
+            Some(state) => {
+                state
+                    .store
+                    .ensure_ready()
+                    .map_err(|error| SessionError::RecoveryManifest {
+                        path: state.path.clone(),
+                        detail: error.to_string(),
+                    })?;
+                Ok(state.allocation_ceiling)
+            }
+            None => Ok(self.log.generation()),
+        }
     }
 
     /// Open a session rooted at `root` (created if absent). `env` controls the
@@ -1100,6 +1124,8 @@ impl SessionLib {
             compile_view_identity: uuid::Uuid::new_v4(),
             root,
             log: DeclLog::new(),
+            generation_lease: None,
+            local_generation_issued: false,
             env,
             extra_include: Vec::new(),
             // ROOT starts at the empty environment. Seeding it explicitly is
@@ -1324,16 +1350,13 @@ impl SessionLib {
         committed
     }
 
-    /// Burn a unique authored or Join module identity before exposing it to the compiler.
-    /// A failure before rename leaves the allocator untouched. After rename,
-    /// the identity stays burned even if directory durability is uncertain.
+    /// Consume a unique authored or Join identity from this library's confirmed range.
     pub fn reserve_declaration_generation_durable(&mut self) -> Result<Generation, SessionError> {
         Ok(self.reserve_declaration_generations_durable(1)?[0])
     }
 
-    /// Burn every original declaration identity in one manifest publication.
-    /// Only the new reserved slots are prepared; existing graph payloads stay
-    /// shared. A visible but unconfirmed rename burns the entire range.
+    /// Prepare only requested slots. Consumption within a confirmed range has
+    /// no durable writes; a refill reserves a bounded ceiling transaction first.
     pub fn reserve_declaration_generations_durable(
         &mut self,
         count: usize,
@@ -1341,23 +1364,23 @@ impl SessionLib {
         if count == 0 {
             return Ok(Vec::new());
         }
+        let requested = u64::try_from(count).map_err(|_| GenerationExhausted {
+            consumed: self.log.generation(),
+            requested: u64::MAX,
+        })?;
+        let end = generation_lease::requested_end(self.log.generation(), requested)?;
         let state = self
             .durable_graph
             .as_ref()
             .ok_or_else(|| SessionError::RecoveryManifest {
                 path: self.root.clone(),
-                detail: "exact recovery graph is not attached".into(),
+                detail: "run recovery domain is not attached".into(),
             })?;
-        if state.unconfirmed.is_some() {
+        if let Err(error) = state.store.ensure_ready() {
+            self.generation_lease = None;
             return Err(SessionError::RecoveryManifest {
                 path: state.path.clone(),
-                detail: "previous recovery publication still needs durability confirmation".into(),
-            });
-        }
-        if self.log.generation() != state.graph.high_water() {
-            return Err(SessionError::RecoveryManifest {
-                path: state.path.clone(),
-                detail: "declaration allocator and durable high-water diverged".into(),
+                detail: error.to_string(),
             });
         }
         let prepared =
@@ -1365,49 +1388,76 @@ impl SessionLib {
                 .prepare_reservations(count)
                 .ok_or_else(|| SessionError::RecoveryManifest {
                     path: state.path.clone(),
-                    detail: "could not prepare declaration reservation range".into(),
+                    detail: "could not prepare declaration reservation slots".into(),
                 })?;
-        let count_u64 = u64::try_from(count).expect("prepared range count fits u64");
-        let staged = recovery::stage_high_water_range_v2(&state.path, &state.graph, count_u64)
-            .map_err(|error| SessionError::RecoveryManifest {
+        if self
+            .generation_lease
+            .as_ref()
+            .is_some_and(|lease| lease.covers(end))
+        {
+            self.local_generation_issued = true;
+            return Ok(self.log.commit_reservations(prepared));
+        }
+        let ceiling = state.allocation_ceiling;
+        if self.log.generation() > ceiling {
+            return Err(SessionError::RecoveryManifest {
                 path: state.path.clone(),
-                detail: error.to_string(),
-            })?;
-        let outcome = self.publish_recovery_manifest(staged);
+                detail: "consumed generation exceeds durable allocation ceiling".into(),
+            });
+        }
+        // Recovered tails are burned before admission; they never grant a lease.
+        if end <= ceiling {
+            return Err(SessionError::RecoveryManifest {
+                path: state.path.clone(),
+                detail: "unowned allocation tail must be burned before issuance".into(),
+            });
+        }
+        let target = generation_lease::refill_ceiling(ceiling, end);
+        let ceiling = self.extend_generation_ceiling(target)?;
+        self.generation_lease = Some(generation_lease::GenerationRangeLease::confirmed(ceiling));
+        self.local_generation_issued = true;
+        Ok(self.log.commit_reservations(prepared))
+    }
+
+    fn extend_generation_ceiling(
+        &mut self,
+        target: Generation,
+    ) -> Result<Generation, SessionError> {
         let state = self
             .durable_graph
             .as_mut()
-            .expect("attached graph preflighted");
-        match outcome {
-            recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
+            .expect("attached store preflighted");
+        match state
+            .store
+            .reserve_ceiling(state.domain_id, state.store_revision, target)
+        {
+            recovery_store::StoreDisposition::Committed(recovery_store::CeilingCommit {
+                revision,
+                allocation_ceiling,
+            }) => {
+                assert!(allocation_ceiling >= target);
+                state.store_revision = revision;
+                state.allocation_ceiling = allocation_ceiling;
+                Ok(allocation_ceiling)
+            }
+            recovery_store::StoreDisposition::Refused(error) => {
                 Err(SessionError::RecoveryManifest {
                     path: state.path.clone(),
-                    detail,
+                    detail: error.to_string(),
                 })
             }
-            recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
-                state.graph = graph;
-                Ok(self.log.commit_reservations(prepared))
-            }
-            recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
-                graph,
-                publication,
-                detail,
-            } => {
-                state.graph = graph;
-                self.log.commit_reservations(prepared);
-                state.unconfirmed.set(publication);
+            recovery_store::StoreDisposition::RecoveryRequired(error) => {
+                self.generation_lease = None;
                 Err(SessionError::RecoveryManifest {
                     path: state.path.clone(),
-                    detail,
+                    detail: error.to_string(),
                 })
             }
         }
     }
 
-    /// Fence imported declaration identities before a fresh child admits any
-    /// local declaration. The inherited identities remain unavailable allocator
-    /// holes; they are not declaration nodes or lexical roots.
+    /// Install inherited identity floors before this incarnation exposes a
+    /// local identity. A child receives a durable floor, never a parent's lease.
     pub fn initialize_captured_declaration_high_water(
         &mut self,
         high_water: Generation,
@@ -1417,64 +1467,31 @@ impl SessionLib {
             .as_ref()
             .ok_or_else(|| SessionError::RecoveryManifest {
                 path: self.root.clone(),
-                detail: "exact recovery graph is not attached".into(),
+                detail: "run recovery domain is not attached".into(),
             })?;
-        if state.unconfirmed.is_some()
-            || self.log.generation() != Generation(0)
-            || state.graph.high_water() != Generation(0)
-        {
+        state
+            .store
+            .ensure_ready()
+            .map_err(|error| SessionError::RecoveryManifest {
+                path: state.path.clone(),
+                detail: error.to_string(),
+            })?;
+        if self.local_generation_issued {
             return Err(SessionError::RecoveryManifest {
                 path: state.path.clone(),
-                detail: "captured declaration identities require a fresh confirmed allocator"
+                detail: "captured identities require an allocator with no exposed local identities"
                     .into(),
             });
         }
-        if high_water == Generation(0) {
+        if high_water <= state.allocation_ceiling {
+            self.generation_lease = None;
+            self.log.burn_to(state.allocation_ceiling);
             return Ok(());
         }
-        let mut initialized_log = self.log.clone();
-        if !initialized_log.restore_high_water(high_water) {
-            return Err(SessionError::RecoveryManifest {
-                path: state.path.clone(),
-                detail: "captured declaration allocator is not fresh".into(),
-            });
-        }
-        let staged = recovery::stage_high_water_range_v2(&state.path, &state.graph, high_water.0)
-            .map_err(|error| SessionError::RecoveryManifest {
-            path: state.path.clone(),
-            detail: error.to_string(),
-        })?;
-        let outcome = self.publish_recovery_manifest(staged);
-        let state = self
-            .durable_graph
-            .as_mut()
-            .expect("attached graph preflighted");
-        match outcome {
-            recovery::RecoveryPublishOutcome::BeforeRename { detail, .. } => {
-                Err(SessionError::RecoveryManifest {
-                    path: state.path.clone(),
-                    detail,
-                })
-            }
-            recovery::RecoveryPublishOutcome::Durable { graph, .. } => {
-                state.graph = graph;
-                self.log = initialized_log;
-                Ok(())
-            }
-            recovery::RecoveryPublishOutcome::PublishedDurabilityUnconfirmed {
-                graph,
-                publication,
-                detail,
-            } => {
-                state.graph = graph;
-                self.log = initialized_log;
-                state.unconfirmed.set(publication);
-                Err(SessionError::RecoveryManifest {
-                    path: state.path.clone(),
-                    detail,
-                })
-            }
-        }
+        let ceiling = self.extend_generation_ceiling(high_water)?;
+        self.generation_lease = None;
+        self.log.burn_to(ceiling);
+        Ok(())
     }
 
     /// Reserve a Join through the same durable allocator used by authored
@@ -2272,6 +2289,7 @@ impl SessionLib {
         import_modules: &[String],
         inject_modules: &[String],
     ) -> Result<DeclarationCandidateRender, SessionError> {
+        self.next_module()?;
         let mut candidate =
             self.render_candidate_in(scope, external, receipt, import_modules, inject_modules);
         if self.durable_graph.is_some() {
@@ -2317,8 +2335,9 @@ impl SessionLib {
                 && staged.module == SessionModule::lib(staged.generation)
         } else {
             self.durable_graph.is_none()
-                && staged.generation == self.log.generation().next()
-                && staged.module == self.next_module()
+                && generation_lease::requested_end(self.log.generation(), 1)
+                    == Ok(staged.generation)
+                && self.next_module() == Ok(staged.module)
         };
         if staged.session_id != self.id
             || staged.root != self.root
@@ -2647,7 +2666,8 @@ impl SessionLib {
                 self.log.is_reserved(staged.generation)
             } else {
                 staged.base_generation == self.log.generation()
-                    && staged.generation == self.log.generation().next()
+                    && generation_lease::requested_end(self.log.generation(), 1)
+                        == Ok(staged.generation)
             }
         {
             // A no-op when the candidate was validated off-checkout, against
@@ -2676,6 +2696,7 @@ impl SessionLib {
             assert!(self.log.commit_reserved_authored(generation, turn));
             generation
         } else {
+            self.next_module()?;
             self.log.push(turn)
         };
         self.set_scope_tip_in(scope, gen);

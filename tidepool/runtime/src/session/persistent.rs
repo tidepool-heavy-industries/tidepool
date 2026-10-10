@@ -1514,7 +1514,7 @@ impl PersistentSession {
 
     #[must_use]
     pub fn next_lib_module(&self) -> Option<SessionModule> {
-        self.lib.as_ref().map(SessionLib::next_module)
+        self.lib.as_ref().and_then(|lib| lib.next_module().ok())
     }
 
     /// Snapshot the exact source-side environment visible from `scope` so a

@@ -3937,8 +3937,11 @@ where
 
     /// The existing declaration allocator's high-water mark, captured while
     /// the parent owner is checked out. It grants no lexical scope.
-    pub fn declaration_generation_high_water(&self) -> Option<Generation> {
-        self.state.has_lib().then(|| self.state.lib().generation())
+    pub fn declaration_generation_high_water(&self) -> Result<Option<Generation>, SessionError> {
+        self.state
+            .has_lib()
+            .then(|| self.state.lib().durable_allocation_ceiling())
+            .transpose()
     }
 
     /// Initialize a fresh declaration allocator before retained compilation.

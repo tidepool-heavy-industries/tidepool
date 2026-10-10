@@ -9,7 +9,7 @@ fn owner(incarnation: u64) -> RecoveryPublicOwner {
     RecoveryPublicOwner::new(&ActorPath::parse("root/recovered").unwrap(), incarnation).unwrap()
 }
 
-struct TestRunOwner {
+pub(super) struct TestRunOwner {
     root: PathBuf,
     _lock: std::fs::File,
 }
@@ -30,7 +30,7 @@ impl RecoveryRunAuthority for TestRunOwner {
     }
 }
 
-fn run_owner(root: &Path) -> Arc<TestRunOwner> {
+pub(super) fn run_owner(root: &Path) -> Arc<TestRunOwner> {
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .write(true)

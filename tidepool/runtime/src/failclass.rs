@@ -72,7 +72,8 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         // A stale/forged scope, absent declaration library, or stale staged
         // candidate at this admission point is a caller/session-state error,
         // not a user declaration or an environment failure.
-        SessionError::DeadScope(_)
+        SessionError::GenerationExhausted(_)
+        | SessionError::DeadScope(_)
         | SessionError::MissingDeclarationLibrary
         | SessionError::MissingRetainedValueInterface(_)
         | SessionError::WrongPublicManifestTicket
