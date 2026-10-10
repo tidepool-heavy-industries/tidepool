@@ -11,7 +11,7 @@ module Tidepool.ExecutionSource
   , ExecutionSourceRecipe(..), issueExecutionSourceRecipe
   , executionSourceProspectiveReferences
   , executionNodeOriginalResolutions
-  , ExecutionSourceFiles(..), decodeExecutionSourceDescriptors, readExecutionSourceGraphs, readExecutionSourceGraphsWith, executionSourceGraphsFit
+  , ExecutionSourceFiles(..), decodeExecutionSourceDescriptors, readExecutionSourceGraphs, readExecutionSourceGraphsWith, readExecutionSourceGraphsWithFacts, executionSourceGraphsFit
   , executionSourceGraphBytesLimit
   , WorkerExecutionSource(..), SourceRecipeUnavailable(..), encodeWorkerExecutionSource
   ) where
@@ -34,7 +34,7 @@ import Numeric (showHex)
 import GHC.Iface.Recomp (CompileReason)
 import GHC.Utils.Outputable (defaultSDocContext, ppr, renderWithContext)
 import System.Directory (getFileSize)
-import System.FilePath (isAbsolute, takeDirectory)
+import System.FilePath (isAbsolute)
 import System.IO (IOMode(ReadMode), withBinaryFile)
 import Tidepool.DependencyEvidence
 import Tidepool.Session (isReservedSessionModuleName)
@@ -553,16 +553,13 @@ readExecutionSourceGraphs files known descriptors = do
   let manifest = case files of
         RetainedScopeGraphFiles path -> path
         CandidateGraphFiles path -> path
-      selectedPath path = isAbsolute path && case files of
-        RetainedScopeGraphFiles _ -> True
-        CandidateGraphFiles _ -> takeDirectory path == takeDirectory manifest
   unless (isAbsolute manifest && length descriptors <= executionSourceGraphsLimit
       && Set.size (Set.fromList (map fst descriptors)) == length descriptors)
     (fail "invalid original execution graph descriptor inventory")
   let captured = Map.fromList [(executionGraphSha256 graph,graph) | graph <- known]
   sizes <- forM descriptors $ \(sha, path) -> do
-    unless (selectedPath path)
-      (fail "original execution graph is outside its request directory")
+    unless (isAbsolute path)
+      (fail "original execution graph path must be absolute")
     size <- getFileSize path
     when (size > toInteger executionSourceGraphBytesLimit)
       (fail "original execution graphs exceed 64 MiB")
@@ -595,15 +592,23 @@ readExecutionSourceGraphs files known descriptors = do
 readExecutionSourceGraphsWith :: (FilePath -> Int -> IO BS.ByteString)
   -> FilePath -> [(String, FilePath)] -> IO [ExecutionSourceGraph]
 readExecutionSourceGraphsWith readInput manifest descriptors = do
+  readExecutionSourceGraphsWithFacts (\sha path -> do
+    payload <- readInput path executionSourceGraphBytesLimit
+    either fail pure (decodeExecutionSourceGraph sha payload)) manifest descriptors
+
+readExecutionSourceGraphsWithFacts :: (String -> FilePath -> IO ExecutionSourceGraph)
+  -> FilePath -> [(String,FilePath)] -> IO [ExecutionSourceGraph]
+readExecutionSourceGraphsWithFacts readFacts manifest descriptors = do
   unless (isAbsolute manifest && length descriptors <= executionSourceGraphsLimit
       && Set.size (Set.fromList (map fst descriptors)) == length descriptors
       && all (isAbsolute . snd) descriptors)
     (fail "invalid original execution graph descriptor inventory")
-  bytes <- mapM (\(_,path) -> readInput path executionSourceGraphBytesLimit) descriptors
-  when (sum (map (toInteger . BS.length) bytes) > toInteger executionSourceGraphBytesLimit)
+  graphs <- mapM (uncurry readFacts) descriptors
+  unless (and [executionGraphSha256 graph == sha | ((sha,_),graph) <- zip descriptors graphs])
+    (fail "original execution graph facts differ from receiving selection")
+  when (sum (map (toInteger . BS.length . executionGraphBytes) graphs) > toInteger executionSourceGraphBytesLimit)
     (fail "original execution graphs exceed their retained byte bound")
-  sequence [either fail pure (decodeExecutionSourceGraph sha payload)
-    | ((sha,_),payload) <- zip descriptors bytes]
+  pure graphs
 
 -- Both candidate parcels and exact-scope graph files consume the same bytes.
 decodeExecutionSourceGraph :: String -> BS.ByteString -> Either String ExecutionSourceGraph

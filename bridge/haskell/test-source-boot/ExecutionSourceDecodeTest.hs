@@ -143,8 +143,9 @@ executionSourceFileCustodyChecks graph = bracket newRoot removePathForcibly $ \r
   forM_ [[], [graph]] $ \known -> do
     actual <- readScope known
     unless (actual == [graph]) (fail "retained parent graph transport changed the original payload")
-  reject "candidate graph outside its request directory"
-    (readExecutionSourceGraphs (CandidateGraphFiles manifest) [] descriptors)
+  forM_ [[],[graph]] $ \known -> do
+    actual <- readExecutionSourceGraphs (CandidateGraphFiles manifest) known descriptors
+    unless (actual == [graph]) (fail "candidate transport lost acquired parent graph custody")
   reject "another advertised digest"
     (readExecutionSourceGraphs (RetainedScopeGraphFiles manifest) [] [(replicate 64 '0', graphPath)])
   reject "duplicate graph descriptors"
@@ -154,8 +155,12 @@ executionSourceFileCustodyChecks graph = bracket newRoot removePathForcibly $ \r
   BS.writeFile graphPath (BS.reverse (executionGraphBytes graph))
   reject "corrupted new graph" (readScope [])
   reject "corrupted previously captured graph" (readScope [graph])
+  reject "corrupted acquired candidate graph"
+    (readExecutionSourceGraphs (CandidateGraphFiles manifest) [graph] descriptors)
   removePathForcibly owner
   reject "expired parent graph custody" (readScope [])
+  reject "expired acquired candidate graph custody"
+    (readExecutionSourceGraphs (CandidateGraphFiles manifest) [] descriptors)
   where
     newRoot = do
       temporary <- getTemporaryDirectory
