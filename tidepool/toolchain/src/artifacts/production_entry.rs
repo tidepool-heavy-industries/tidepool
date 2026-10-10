@@ -851,9 +851,14 @@ mod source_selection_tests {
             assert_eq!(std::fs::read(counter).unwrap(), before);
             return;
         }
+        let first_use_started = std::time::Instant::now();
         let package = crate::toolchain::configured_module_package()
             .unwrap()
             .expect("requires the matched native catalog");
+        eprintln!(
+            "linked entry cold catalog acquisition: {:?}",
+            first_use_started.elapsed()
+        );
         let catalog = CatalogSelection::Acquired(Some(Arc::clone(&package)));
         let mut root = match std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
             Some(path) => tempfile::Builder::new()
@@ -895,6 +900,10 @@ mod source_selection_tests {
             prepare_frozen_production_entry_with_catalog(&sources, root.path(), &output, &catalog)
                 .unwrap();
         eprintln!("linked entry cold preparation: {:?}", started.elapsed());
+        eprintln!(
+            "linked entry cold first use: {:?}",
+            first_use_started.elapsed()
+        );
         let executions = std::fs::read(&counter).unwrap();
         assert_eq!(
             executions, b"37\n",
