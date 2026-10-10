@@ -101,6 +101,7 @@ impl ExactExportSurface {
     pub fn materialize(
         &self,
         view: &SessionCompileView,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<MaterializedFacade, ExactFacadeError> {
         if view.session() != self.session {
             return Err(ExactFacadeError::WrongSession {
@@ -123,6 +124,7 @@ impl ExactExportSurface {
                 &baseline.families,
                 includes,
                 view.session_root(),
+                settlement,
             )?;
             let identity = FacadeIdentity {
                 digest: projection.receipt().expected_public_version().to_owned(),

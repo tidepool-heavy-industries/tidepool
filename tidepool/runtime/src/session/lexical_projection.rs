@@ -102,6 +102,7 @@ pub(super) fn prepare_authored_projection(
     retractions: &[DeclarationRetraction],
     includes: &[PathBuf],
     root: &Path,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<Arc<PreparedAuthoredDeclaration>, SessionError> {
     let original = evidence.product().owner();
     if original.unit != "main"
@@ -153,7 +154,7 @@ pub(super) fn prepare_authored_projection(
         None => ExactDeclarationContext::new(std::slice::from_ref(&evidence), &[], lexical)?,
     };
     let projection = issue_projection(
-        &context, &owner, &surface, &exports, &instances, &families, includes, root,
+        &context, &owner, &surface, &exports, &instances, &families, includes, root, settlement,
     )?;
     Ok(Arc::new(PreparedAuthoredDeclaration {
         generation,
@@ -178,6 +179,7 @@ pub(super) fn issue_projection(
     families: &[ExportIdentity],
     includes: &[PathBuf],
     root: &Path,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<Arc<CertifiedDeclarationProjection>, SessionError> {
     let mut exports = exports.to_vec();
     for export in &mut exports {
@@ -198,7 +200,7 @@ pub(super) fn issue_projection(
     hash.update(&encoded);
     let digest = hash.finalize().to_hex().to_string();
     let module = format!("Tidepool.Actor.Surface.H{digest}");
-    let scratch = tempfile::tempdir()?;
+    let scratch = Arc::new(tempfile::tempdir()?);
     let materialized = context.materialize_scratch(&scratch)?;
     let original = materialized
         .artifacts
@@ -228,7 +230,14 @@ pub(super) fn issue_projection(
         expected_exports: exports,
         expected_instances: instances.clone(),
     };
-    let receipt = match certify_declaration_join(input, context, includes, root)? {
+    let receipt = match certify_declaration_join(
+        input,
+        context,
+        includes,
+        root,
+        Arc::clone(&scratch),
+        settlement,
+    )? {
         CertifiedDeclarationJoin::Accepted(receipt) => Arc::new(receipt),
         CertifiedDeclarationJoin::Rejected(rejected) => {
             return Err(SessionError::Compile(crate::CompileError::ExtractFailed(

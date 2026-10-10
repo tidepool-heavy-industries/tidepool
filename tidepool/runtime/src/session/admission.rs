@@ -1421,6 +1421,7 @@ impl RuntimeCellAdmission {
     pub(super) fn prepare_declaration_projections(
         &self,
         cell: &Arc<tidepool_toolchain::checked_cell::ExactCheckedCell>,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<(), SessionError> {
         let mut baseline = self.declaration_baseline.clone();
         let mut prepared = Vec::new();
@@ -1448,6 +1449,7 @@ impl RuntimeCellAdmission {
                 &[],
                 &self.include_paths,
                 self.view.session_root(),
+                settlement,
             )?;
             baseline = Some(projection.next_baseline());
             prepared.push((item, projection));
