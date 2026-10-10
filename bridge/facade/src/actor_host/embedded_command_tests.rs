@@ -649,6 +649,7 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
     )
     .expect("the admitted test service delegates cgroups");
     let resources = exomonad_node::command_resources::CommandResourceClient::local(owner);
+    let output_store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let mut bindings = Vec::new();
     for text in ["embedded-host-command", "second-embedded-command"] {
         let policy = campaign.root_installation.policy.clone();
@@ -706,11 +707,12 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
         let issued_binding = result["items"][0]["installedBindings"][0]
             .as_str()
             .expect("retained command binding");
-        let terminal_evidence = super::tests::dispatch_haskell_script_result(
-            campaign.root_installation.policy.as_ref(),
-            &format!("Cmd.await {issued_binding}"),
-        )
-        .await;
+        let policy = campaign.root_installation.policy.clone();
+        let diagnostic = format!("Cmd.await {issued_binding} >>= display");
+        let terminal_evidence = campaign.drive_actor_output(
+            &output_store,
+            super::tests::dispatch_haskell_script_result(policy.as_ref(), &diagnostic),
+        ).await;
         let facts = &result["items"][0]["value"];
         assert_eq!(facts["state"], "Finished", "{result}; retained terminal: {terminal_evidence:?}");
         assert_eq!(facts["successful"], true, "{result}; retained terminal: {terminal_evidence:?}");
@@ -718,12 +720,12 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
         assert_eq!(facts["cleanup"], "CleanupClean", "{result}");
         assert_eq!(facts["retained_binding"], issued_binding, "{result}");
         assert_eq!(terminal_evidence.expect("retained await succeeds")["status"], "committed");
-        let terminal = super::command_jobs_tests::committed(
-            campaign,
-            &format!("terminal <- Cmd.await {issued_binding}\nCmd.commandOutcome (Cmd.commandResult terminal) == Cmd.CommandExited 0 && Cmd.commandCleanup (Cmd.commandResult terminal) == Cmd.CommandClean"),
-        )
-        .await;
-        assert_eq!(terminal["items"].as_array().unwrap().last().unwrap()["output"], "True", "{terminal}");
+        let terminal_source = format!("terminal <- Cmd.await {issued_binding}\ndisplay (Cmd.commandOutcome (Cmd.commandResult terminal) == Cmd.CommandExited 0 && Cmd.commandCleanup (Cmd.commandResult terminal) == Cmd.CommandClean)");
+        let terminal = campaign.drive_actor_output(
+            &output_store,
+            super::tests::dispatch_haskell_script(policy.as_ref(), &terminal_source),
+        ).await;
+        assert_eq!(super::test_campaign::committed_display_text(&terminal), "True", "{terminal}");
         assert!(output.contains(text), "{output}");
         bindings.push(
             result["items"][0]["installedBindings"][0]
@@ -733,16 +735,17 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
         );
     }
     assert_ne!(bindings[0], bindings[1]);
-    let recovered = super::command_jobs_tests::committed(
-        campaign,
-        &format!(
-            "retainedFirst <- Cmd.readStdout {}\nretainedSecond <- Cmd.readStdout {}\nretainedFirst == Right \"embedded-host-command\" && retainedSecond == Right \"second-embedded-command\" && {} /= {}",
-            bindings[0], bindings[1], bindings[0], bindings[1],
-        ),
-    )
-    .await;
+    let policy = campaign.root_installation.policy.clone();
+    let recovery_source = format!(
+        "retainedFirst <- Cmd.readStdout {}\nretainedSecond <- Cmd.readStdout {}\ndisplay (retainedFirst == Right \"embedded-host-command\" && retainedSecond == Right \"second-embedded-command\" && {} /= {})",
+        bindings[0], bindings[1], bindings[0], bindings[1],
+    );
+    let recovered = campaign.drive_actor_output(
+        &output_store,
+        super::tests::dispatch_haskell_script(policy.as_ref(), &recovery_source),
+    ).await;
     assert_eq!(
-        recovered["items"].as_array().unwrap().last().unwrap()["output"],
+        super::test_campaign::committed_display_text(&recovered),
         "True",
         "a later binding preserves both independently retained command outputs"
     );
