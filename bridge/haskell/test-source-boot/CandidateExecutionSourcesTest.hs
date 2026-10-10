@@ -1,8 +1,8 @@
 module CandidateExecutionSourcesTest (candidateExecutionSourcesTest, executionScopeDescriptorChecks) where
 
 import CodecFixtureSupport
-  ( ScopeCodecFixture, ScopeCodecField(..), readScopeCodecFixture
-  , scopeCodecField, replaceScopeCodecField, scopeCodecTerm )
+  ( ScopeCodecFixture, ScopeCodecField(..), ScopeCodecAcquisition(..), readScopeCodecFixture
+  , scopeCodecField, replaceScopeCodecField, replaceScopeCodecAcquisition, scopeCodecTerm )
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
@@ -53,8 +53,9 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   originalFixture <- capturePreparedFixture work original
   sourceScopePath <- writeExecutionScope work originalFixture ["ExecutionReexportFacade"]
   originalScope <- readExactScope sourceScopePath >>= either fail pure
-  emptyExecution <- scopeVariant originalScope (replaceScopeCodecField ScopeCodecExecution TNull)
-    >>= either fail pure
+  emptyExecution <- scopeVariant originalScope
+    (replaceScopeCodecAcquisition FreshCodecInputs
+      . replaceScopeCodecField ScopeCodecExecution TNull) >>= either fail pure
   -- Budget policies consume genuinely admitted original owners. Alter only
   -- the graph envelope; no synthetic interface/Core authority is constructed.
   case scopeExecutionGraphs originalScope of

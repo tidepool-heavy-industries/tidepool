@@ -6,8 +6,8 @@ module ExactScopeV9Test (exactScopeChecks, nativeOriginChecks, candidateCanonica
 
 import CodecFixtureSupport
   ( PurposeCodecCase(..), readPurposeCodecFixture, readExpressionItemCodecFixture
-  , ScopeCodecFixture, ScopeCodecField(..), readScopeCodecFixture
-  , scopeCodecField, replaceScopeCodecField, scopeCodecTerm )
+  , ScopeCodecFixture, ScopeCodecField(..), ScopeCodecAcquisition(..), readScopeCodecFixture
+  , scopeCodecField, scopeCodecAcquisition, replaceScopeCodecField, scopeCodecTerm )
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
@@ -45,6 +45,10 @@ exactScopeChecksFor kind manifest = do
   fields <- values (scopeCodecTerm fixture)
   unless (encode (scopeCodecTerm fixture) == originalBytes)
     (fail "current mutation adapter changed the genuine exact-scope envelope")
+  case scopeCodecAcquisition fixture of
+    Just FreshCodecInputs -> pure ()
+    Just (ContinueCodecOriginals _) -> pure ()
+    Nothing -> fail "production exact-scope issuer emitted an unknown acquisition variant"
   unless (Map.keysSet (scopeInterfaceEvidence scope) == Set.fromList
       [(exactUnit iface,exactModule iface) | (iface,_,_) <- scopeInterfaces scope])
     (fail "genuine exact-scope context lost its typed interface evidence")
@@ -94,7 +98,7 @@ exactScopeChecksFor kind manifest = do
               (replace 1 (TString (T.pack path)) role))
         BS.writeFile path bytes
         refuse manifest expected (evidence replacement)
-  forM_ ["2","4","6","7","8","9","10"] $ \version ->
+  forM_ ["2","4","6","7","8","9","10","11"] $ \version ->
     refuse manifest "unsupported exact scope" (scopeCodecTerm (replaceScopeCodecField ScopeCodecVersion (TString version) fixture))
   forM_ [8,9] $ \count ->
     refuse manifest "unsupported exact scope" (TList (take count fields))

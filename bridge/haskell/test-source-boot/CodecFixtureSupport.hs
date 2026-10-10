@@ -6,8 +6,9 @@ module CodecFixtureSupport
   , ReceiptCodecFacts(..), readReceiptCodecFacts
   , CodecImportOwner(..), CertificateCodecFacts(..), readCertificateCodecFacts, readSegmentItemCodecFacts
   , CompilerInputCodecFacts(..), readCompilerInputCodecFacts
-  , ScopeCodecFixture, ScopeCodecField(..), readScopeCodecFixture
-  , scopeCodecField, replaceScopeCodecField, scopeCodecTerm
+  , ScopeCodecFixture, ScopeCodecField(..), ScopeCodecAcquisition(..), readScopeCodecFixture
+  , scopeCodecField, replaceScopeCodecField, scopeCodecAcquisition
+  , replaceScopeCodecAcquisition, scopeCodecTerm
   , readCodecTerm
   ) where
 
@@ -42,6 +43,7 @@ data ScopeCodecFixture = ScopeCodecFixture
   , codecScopeExecution :: Term
   , codecScopePurpose :: Term
   , codecScopePublished :: Term
+  , codecScopeAcquisition :: Term
   }
 
 data ScopeCodecField
@@ -50,14 +52,20 @@ data ScopeCodecField
   | ScopeCodecNativeProducts
   | ScopeCodecExecution
   | ScopeCodecPurpose
+  | ScopeCodecAcquisition
+
+data ScopeCodecAcquisition
+  = FreshCodecInputs
+  | ContinueCodecOriginals Term
+  deriving (Eq,Show)
 
 readScopeCodecFixture :: FilePath -> IO (ExactScope, ScopeCodecFixture)
 readScopeCodecFixture path = do
   scope <- readExactScope path >>= either fail pure
   term <- readCodecTerm path
   fixture <- case term of
-    TList [magic,version,semantic,producer,interfaces,lexical,products,execution,purpose,published] ->
-      pure (ScopeCodecFixture magic version semantic producer interfaces lexical products execution purpose published)
+    TList [magic,version,semantic,producer,interfaces,lexical,products,execution,purpose,published,acquisition] ->
+      pure (ScopeCodecFixture magic version semantic producer interfaces lexical products execution purpose published acquisition)
     _ -> fail "production-admitted exact scope needs a current mutation adapter"
   pure (scope,fixture)
 
@@ -68,6 +76,7 @@ scopeCodecField field fixture = case field of
   ScopeCodecNativeProducts -> codecScopeProducts fixture
   ScopeCodecExecution -> codecScopeExecution fixture
   ScopeCodecPurpose -> codecScopePurpose fixture
+  ScopeCodecAcquisition -> codecScopeAcquisition fixture
 
 replaceScopeCodecField :: ScopeCodecField -> Term -> ScopeCodecFixture -> ScopeCodecFixture
 replaceScopeCodecField field value fixture = case field of
@@ -76,13 +85,28 @@ replaceScopeCodecField field value fixture = case field of
   ScopeCodecNativeProducts -> fixture {codecScopeProducts=value}
   ScopeCodecExecution -> fixture {codecScopeExecution=value}
   ScopeCodecPurpose -> fixture {codecScopePurpose=value}
+  ScopeCodecAcquisition -> fixture {codecScopeAcquisition=value}
+
+scopeCodecAcquisition :: ScopeCodecFixture -> Maybe ScopeCodecAcquisition
+scopeCodecAcquisition fixture = case codecScopeAcquisition fixture of
+  TList [TString tag] | tag == T.pack "fresh-files" -> Just FreshCodecInputs
+  TList [TString tag,images] | tag == T.pack "continue-originals" ->
+    Just (ContinueCodecOriginals images)
+  _ -> Nothing
+
+replaceScopeCodecAcquisition :: ScopeCodecAcquisition -> ScopeCodecFixture -> ScopeCodecFixture
+replaceScopeCodecAcquisition acquisition fixture = fixture
+  { codecScopeAcquisition=case acquisition of
+      FreshCodecInputs -> TList [text "fresh-files"]
+      ContinueCodecOriginals images -> TList [text "continue-originals",images]
+  }
 
 scopeCodecTerm :: ScopeCodecFixture -> Term
-scopeCodecTerm fixture = TList
+scopeCodecTerm fixture = TList $
   [ codecScopeMagic fixture, codecScopeVersion fixture, codecScopeSemantic fixture
   , codecScopeProducer fixture, codecScopeInterfaces fixture, codecScopeLexical fixture
   , codecScopeProducts fixture, codecScopeExecution fixture, codecScopePurpose fixture
-  , codecScopePublished fixture ]
+  , codecScopePublished fixture, codecScopeAcquisition fixture ]
 
 data PurposeCodecCase
   = CodecCellPurpose
