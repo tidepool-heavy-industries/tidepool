@@ -215,7 +215,7 @@ import Tidepool.Session (sessionHiPath, Generation(..), SessionModule(..), Sessi
 import Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256
   , scopeLexical, scopeProducts, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes
-  , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
+  , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeOriginalBytes, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
   , CheckedCellAdmission(checkedValueInterfaces), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, validateExactScopeEnvironment
   , scopeModuleInterfaceProofs, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
@@ -1122,28 +1122,39 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
           if missing then removeFile path else BS.writeFile path (BS.singleton 0)
     originals <- bracket (disturbCandidates True) (const restoreCandidates) $ \_ ->
       newPreparedOriginalInterfaceArtifacts completed directory
-    when reuseCandidate $ forM_ [True,False] $ \missing -> do
-      let rejectedDirectory = directory </> if missing then "certify-missing" else "certify-replaced"
-      createDirectory rejectedDirectory
-      refused <- bracket (disturbCandidates missing) (const restoreCandidates) $ \_ ->
-        try (writeCertifiedProductsKeeping includes originals rejectedDirectory completed Nothing [])
-          :: IO (Either IOException CertifiedOriginalProducts)
-      unless (case refused of Left exception -> "request original input" `isInfixOf` show exception; Right _ -> False)
-        (fail "certification failed before consuming captured candidate originals or published producer drift")
-    certified <- writeCertifiedProductsKeeping includes originals directory completed Nothing []
+    when reuseCandidate $ do
+      candidate <- case pprCandidateAdmissions completed of
+        [admission] -> pure (preparedCandidateOriginal admission)
+        _ -> fail "candidate source drift fixture lacks one selected owner"
+      let sourcePath = candidateSource candidate
+      sourceBytes <- BS.readFile sourcePath
+      forM_ [Nothing,Just (BS.singleton 0)] $ \replacement -> do
+        let restoreSource = BS.writeFile sourcePath sourceBytes
+            disturbSource = case replacement of
+              Nothing -> removeFile sourcePath
+              Just bytes -> BS.writeFile sourcePath bytes
+        refused <- bracket disturbSource (const restoreSource) $ \_ ->
+          try (writeCertifiedProductsKeeping includes originals (directory </> "source-drift") completed Nothing [])
+            :: IO (Either IOException CertifiedOriginalProducts)
+        unless (case refused of Left _ -> True; Right _ -> False) $
+          fail "certification accepted a changed current candidate source"
+    certified <- if reuseCandidate
+      then bracket (disturbCandidates True) (const restoreCandidates) $ \_ ->
+        writeCertifiedProductsKeeping includes originals directory completed Nothing []
+      else writeCertifiedProductsKeeping includes originals directory completed Nothing []
     case certifiedExecutionSource certified of
       ExactExecutionSourceUnavailable _ -> pure ()
       _ -> fail "arbitrary runIO compilation unexpectedly issued an execution source recipe"
     when reuseCandidate $ forM_ [True,False] $ \missing -> do
-      let rejectedDirectory = directory </> if missing then "retain-missing" else "retain-replaced"
-      createDirectory rejectedDirectory
-      refused <- bracket (disturbCandidates missing) (const restoreCandidates) $ \_ ->
-        try (retainProgramProducts rejectedDirectory completed certified "CompletedOriginalConsumer" admitted)
+      let retainedDirectory = directory </> if missing then "retain-after-delete" else "retain-after-replace"
+      createDirectory retainedDirectory
+      retainedResult <- bracket (disturbCandidates missing) (const restoreCandidates) $ \_ ->
+        try (retainProgramProducts retainedDirectory completed certified "CompletedOriginalConsumer" admitted)
           :: IO (Either IOException ExactScope)
-      copied <- BS.readFile (rejectedDirectory </> "retained-cached-original-0.hi")
-      unless (copied == candidateIfaceBytes
-          && case refused of Left exception -> "request original input" `isInfixOf` show exception; Right _ -> False)
-        (fail "retention reopened candidate originals or published persistent producer drift")
+      retained <- either (\exception -> fail ("retention rejected captured candidate bytes: " ++ show exception)) pure retainedResult
+      copied <- BS.readFile (retainedDirectory </> "retained-cached-original-0.hi")
+      unless (copied == candidateIfaceBytes)
+        (fail "retention did not publish the captured candidate interface bytes")
     (retained,retentionDiagnostics) <- captureDiagnostics $
       retainProgramProducts directory completed certified "CompletedOriginalConsumer" admitted
     let finalProofs = length [() | line <- lines retentionDiagnostics
@@ -1160,9 +1171,9 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
           unless (captured == candidateIfaceBytes && exactPath artifact `notElem` candidatePaths)
             (fail "retained candidate did not transfer the captured owner to its durable support path")
         _ -> fail "retained candidate has no unique durable support row"
-      refused <- revalidateExactScope (prHscEnv (pprPipelineResult completed)) retained
-      unless (either (const True) (const False) refused)
-        (fail "copied support alias hid persistent producer drift from terminal publication")
+      reused <- revalidateExactScope (prHscEnv (pprPipelineResult completed)) retained
+      unless (either (const False) (const True) reused)
+        (fail "retained candidate scope reopened historical captured paths")
     revalidateExactScope (prHscEnv (pprPipelineResult completed)) retained >>= either fail pure
     when reuseCandidate $ do
       let unrelatedTarget = work </> "UnselectedOriginalConsumer.hs"
@@ -6039,9 +6050,9 @@ verifyCollectivePackageProof work prepared = withTiming $ do
     unless (calls == 1 && count "package_proof.sidecar_decodes" diagnostics == 0
         && count "exact_scope.certificate_decodes" diagnostics == 0
         && count "package_proof.union_extensions" diagnostics == 0
-        && length (counterValues ("hash_bytes.observed_file." ++ exactSha256 firstArtifact) diagnostics) == 1
-        && length (counterValues ("hash_bytes.observed_file." ++ firstSidecarSha) diagnostics) == 1) $
-      fail "required proof redecoded facts, reread checked interface or skipped current Finder"
+        && null (counterValues ("hash_bytes.observed_file." ++ exactSha256 firstArtifact) diagnostics)
+        && null (counterValues ("hash_bytes.observed_file." ++ firstSidecarSha) diagnostics)) $
+      fail "warm proof reread captured interface/sidecar bytes or skipped current Finder"
   -- Add a second real compiled owner and a previously absent installed root.
   secondInterface <- maybe (fail "snapshot extension lacks its compiled support interface") pure
     (Map.lookup (mkModuleName "OptionalSupport") (pprProductInterfaces prepared))
@@ -6067,10 +6078,19 @@ verifyCollectivePackageProof work prepared = withTiming $ do
   conflictResult <- extendExactScopeInputs admitted [(conflictWitness,LexicalJoinEvidence)]
   unless (either (const True) (const False) conflictResult) (fail "extension admitted conflicting root union")
   revalidateExactScope environment admitted >>= requireRight "old snapshot after failed extension"
-  forM_ [exactPath firstArtifact,firstSidecar,packagePath firstRoot] $ \path ->
+  firstInterfaceBytes <- BS.readFile (exactPath firstArtifact)
+  firstSidecarBytes <- BS.readFile firstSidecar
+  forM_ [("captured interface",exactPath firstArtifact),("captured sidecar",firstSidecar)] $ \(label,path) ->
     bracket (BS.readFile path) (BS.writeFile path) $ \_ -> do
       BS.writeFile path "changed after input admission"
-      revalidateExactScope environment admitted >>= requireLeft "snapshot byte mutation"
+      revalidateExactScope environment admitted >>= requireRight (label ++ " source path changed after admission")
+      heldInterface <- scopeInterfaceBytes admitted firstArtifact
+      heldSidecar <- scopeOriginalBytes admitted firstSidecar firstSidecarSha
+      unless (heldInterface == firstInterfaceBytes && heldSidecar == firstSidecarBytes)
+        (fail "scope did not retain admitted interface and sidecar payloads")
+  bracket (BS.readFile (packagePath firstRoot)) (BS.writeFile (packagePath firstRoot)) $ \_ -> do
+    BS.writeFile (packagePath firstRoot) "changed after input admission"
+    revalidateExactScope environment admitted >>= requireLeft "current installed package root mutation"
   let snapshotAlternate = work </> "snapshot-alternate.hi"
       snapshotOwner = mkModule (stringToUnit (packageUnit firstRoot)) (mkModuleName (packageModule firstRoot))
   BS.writeFile snapshotAlternate rootBytes
