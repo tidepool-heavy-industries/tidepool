@@ -1968,9 +1968,51 @@ impl ArtifactInventory {
             }
             ArtifactRootIntent::SuppliedArtifacts => None,
         };
+        let mut published_groups = BTreeMap::<LogicalNodeKey, BTreeSet<InventoryNodeKey>>::new();
+        let mut published_native_carriers = BTreeSet::new();
+        if let ArtifactRootIntent::Projected(projection) = root_intent {
+            for role in projection.roles() {
+                let CompilerInputRole::PublishedSourceOriginal {
+                    original,
+                    selection,
+                    ..
+                } = role
+                else {
+                    continue;
+                };
+                let graph = selection.graph_selection();
+                validate_issued_selection(&state, parent_nodes, graph)?;
+                if !graph
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.artifact == original)
+                {
+                    return Err(admission_failure(
+                        ArtifactInventoryFailure::NativeRootOutsideView { artifact: original },
+                    ));
+                }
+                // A published native closure can select dependency originals
+                // without offering them to the compiler as reusable modules.
+                // Their retained payloads still own the certified native rows.
+                published_native_carriers.extend(graph.bindings.iter().filter_map(|binding| {
+                    parent_entries
+                        .get(&binding.artifact)
+                        .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
+                        .map(|_| binding.artifact)
+                }));
+                for group in &graph.native_groups {
+                    let node = InventoryNodeKey::Group(*group);
+                    published_groups
+                        .entry(node.logical())
+                        .or_default()
+                        .insert(node);
+                }
+            }
+        }
         if let Some(ids) = &namespace_ids {
             selected.retain(|id, entry| {
                 ids.contains(id)
+                    || published_native_carriers.contains(id)
                     || match &entry.payload {
                         ArtifactPayload::Original(product) => {
                             !parent_ids.contains(id)
@@ -2008,39 +2050,7 @@ impl ArtifactInventory {
                 "recovered native group closure differs from certified demand",
             ));
         }
-        let mut published_groups = BTreeMap::<LogicalNodeKey, BTreeSet<InventoryNodeKey>>::new();
-        if let ArtifactRootIntent::Projected(projection) = root_intent {
-            for role in projection.roles() {
-                let CompilerInputRole::PublishedSourceOriginal {
-                    original,
-                    selection,
-                    ..
-                } = role
-                else {
-                    continue;
-                };
-                let graph = selection.graph_selection();
-                validate_issued_selection(&state, parent_nodes, graph)?;
-                if !graph
-                    .bindings
-                    .iter()
-                    .any(|binding| binding.artifact == original)
-                {
-                    return Err(admission_failure(
-                        ArtifactInventoryFailure::NativeRootOutsideView { artifact: original },
-                    ));
-                }
-                for group in &graph.native_groups {
-                    let node = InventoryNodeKey::Group(*group);
-                    if planned.contains_key(&node.logical()) {
-                        published_groups
-                            .entry(node.logical())
-                            .or_default()
-                            .insert(node);
-                    }
-                }
-            }
-        }
+        published_groups.retain(|key, _| planned.contains_key(key));
         // Reuse inherited bindings only while their entire qualified outgoing
         // edge set matches the newly issued namespace. Changes propagate through
         // parents; unrelated inherited vertices are never rebound or orphaned.
@@ -5234,6 +5244,19 @@ mod tests {
             &[&child],
             &BTreeMap::new(),
         );
+        let (_, unrelated_values, _) = native_scope_fixture();
+        let unrelated = issued_native_groups(
+            "UnrelatedNative",
+            vec![(
+                19,
+                vec![crate::certified_products::PendingImportOwner::Retained {
+                    identity: tidepool_repr::execution_schema::testing::identity("Values", "value"),
+                    generation: 4,
+                }],
+            )],
+            &[],
+            &BTreeMap::new(),
+        );
         let target = entry_in_unit("fixture", "Target", vec![]);
         let carriers = inventory
             .admit_shared_with_demand(
@@ -5259,6 +5282,8 @@ mod tests {
                 vec![
                     Arc::new(child.clone()),
                     Arc::new(entry_in_unit("fixture", "Unrelated", vec![])),
+                    Arc::new(unrelated.clone()),
+                    Arc::new(unrelated_values.clone()),
                 ],
                 NativeArtifactDemand::AllGroups,
             )
@@ -5269,7 +5294,12 @@ mod tests {
             .into_iter()
             .find(|group| group.binding.artifact == child.descriptor.id)
             .unwrap();
-        let sibling_child = sibling.capture_graph_selection().native_groups[0];
+        let sibling_child = sibling
+            .capture_graph_selection()
+            .native_groups
+            .into_iter()
+            .find(|group| group.binding.artifact == child.descriptor.id)
+            .unwrap();
         assert_ne!(original_child, sibling_child);
         let projection = CompilerInputProjection::from_issued_entries(&[
             Arc::new(root.clone()),
@@ -5291,75 +5321,101 @@ mod tests {
                 imports: vec![],
             },
         ];
-        let issued = ExactDeclarationContext::from_authenticated_execution(
-            [2; 32],
-            &original,
-            projection,
-            lexical.clone(),
-            target.descriptor.owner.clone(),
-            &lexical
-                .iter()
-                .map(|node| node.owner.clone())
-                .collect::<Vec<_>>(),
-        )
-        .unwrap();
-        let publication = issued
-            .issue_published_source_original("revision", "input", &root.descriptor.owner)
-            .unwrap();
-        let published = publication.context();
-        let expected = published
-            .artifact_view()
-            .capture_graph_selection()
-            .native_groups;
-        assert!(expected.contains(&original_child));
-        assert!(!expected.contains(&sibling_child));
-        for joined in [
-            original.merge(&sibling).unwrap(),
-            sibling.merge(&original).unwrap(),
+        for projection in [
+            projection.clone(),
+            projection.for_source_owners(&BTreeSet::from([root.descriptor.owner.clone()])),
         ] {
-            let groups = joined.capture_graph_selection().native_groups;
-            assert!(groups.contains(&original_child));
-            assert!(groups.contains(&sibling_child));
-            let scopes_before = inventory.0.lock().unwrap().selection_plans.len();
-            let admitted = inventory
-                .admit_projected(
-                    &joined,
-                    vec![Arc::new(root.clone())],
-                    published.compiler_input_projection(),
-                )
+            let child_reusable = projection
+                .roles()
+                .iter()
+                .any(|role| role.original() == Some(child.descriptor.id));
+            let issued = ExactDeclarationContext::from_authenticated_execution(
+                [2; 32],
+                &original,
+                projection,
+                lexical.clone(),
+                target.descriptor.owner.clone(),
+                &lexical
+                    .iter()
+                    .map(|node| node.owner.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let publication = issued
+                .issue_published_source_original("revision", "input", &root.descriptor.owner)
                 .unwrap();
-            let selected = admitted
-                .select_admission_roots(vec![root.descriptor.id])
-                .unwrap();
-            assert_eq!(selected.capture_graph_selection().native_groups, expected);
-            assert_eq!(
-                inventory.0.lock().unwrap().selection_plans.len(),
-                scopes_before
-            );
-            let recovered_inventory = ArtifactInventory::default();
-            let recovered = recovered_inventory
-                .recover_selection(
-                    &recovered_inventory.empty_view(),
-                    joined.entries(),
-                    &joined.capture_graph_selection(),
-                    &joined.binding_dependencies(),
-                )
-                .unwrap();
-            let repeated = recovered_inventory
-                .admit_projected(
-                    &recovered,
-                    vec![Arc::new(root.clone())],
-                    published.compiler_input_projection(),
-                )
-                .unwrap();
-            assert_eq!(
-                repeated
+            let published = publication.context();
+            let expected = published
+                .artifact_view()
+                .capture_graph_selection()
+                .native_groups;
+            assert!(expected.contains(&original_child));
+            assert!(!expected.contains(&sibling_child));
+            assert!(!expected
+                .iter()
+                .any(|group| group.binding.artifact == unrelated.descriptor.id));
+            for joined in [
+                original.merge(&sibling).unwrap(),
+                sibling.merge(&original).unwrap(),
+            ] {
+                let groups = joined.capture_graph_selection().native_groups;
+                assert!(groups.contains(&original_child));
+                assert!(groups.contains(&sibling_child));
+                let scopes_before = inventory.0.lock().unwrap().selection_plans.len();
+                let admitted = inventory
+                    .admit_projected(
+                        &joined,
+                        vec![Arc::new(root.clone())],
+                        published.compiler_input_projection(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    admitted.namespace().contains_key(&child.descriptor.id),
+                    child_reusable
+                );
+                assert!(!admitted.namespace().contains_key(&unrelated.descriptor.id));
+                assert!(!admitted
+                    .namespace()
+                    .contains_key(&unrelated_values.descriptor.id));
+                assert!(!admitted
+                    .lease
+                    .roots
+                    .iter()
+                    .any(|node| node.artifact() == unrelated.descriptor.id));
+                assert!(admitted.artifact_ids().contains(&unrelated.descriptor.id));
+                let selected = admitted
                     .select_admission_roots(vec![root.descriptor.id])
-                    .unwrap()
-                    .capture_graph_selection()
-                    .native_groups,
-                expected
-            );
+                    .unwrap();
+                assert_eq!(selected.capture_graph_selection().native_groups, expected);
+                assert_eq!(
+                    inventory.0.lock().unwrap().selection_plans.len(),
+                    scopes_before
+                );
+                let recovered_inventory = ArtifactInventory::default();
+                let recovered = recovered_inventory
+                    .recover_selection(
+                        &recovered_inventory.empty_view(),
+                        joined.entries(),
+                        &joined.capture_graph_selection(),
+                        &joined.binding_dependencies(),
+                    )
+                    .unwrap();
+                let repeated = recovered_inventory
+                    .admit_projected(
+                        &recovered,
+                        vec![Arc::new(root.clone())],
+                        published.compiler_input_projection(),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    repeated
+                        .select_admission_roots(vec![root.descriptor.id])
+                        .unwrap()
+                        .capture_graph_selection()
+                        .native_groups,
+                    expected
+                );
+            }
         }
     }
 
