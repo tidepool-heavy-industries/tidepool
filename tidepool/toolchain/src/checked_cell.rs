@@ -5061,6 +5061,10 @@ mod tests {
                 vec![native, ArtifactEntry::canonical(next), value.clone()],
             )
             .unwrap();
+        let old_body = old.select_roots(vec![native_id]).unwrap();
+        let old_body_selection =
+            crate::artifact_inventory::ExactArtifactSelection::capture(&old_body);
+        let old_body_graph = old_body.capture_graph_selection();
         let projection = CompilerInputProjection::from_issued_entries(&[Arc::new(value)]).unwrap();
         let grown = old.merge_selected(&new, &projection).unwrap();
         assert!(
@@ -5110,6 +5114,7 @@ mod tests {
             .iter()
             .any(|entry| matches!(entry.payload, ArtifactPayload::Original(_))));
         let edges = captured.artifact_view().binding_dependencies();
+        drop(old_body);
         drop(old);
         drop(new);
         drop(grown);
@@ -5125,6 +5130,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(restored.capture_graph_selection(), graph);
+        for view in [captured.artifact_view(), &restored] {
+            let old_body = view
+                .select_issued(vec![native_id], &old_body_selection)
+                .unwrap();
+            old_body
+                .native_requirements_from_roots(&[
+                    crate::artifact_inventory::NativeRequirementRoot::Group {
+                        artifact: native_id,
+                        original_ordinal: 7,
+                    },
+                ])
+                .unwrap();
+            assert_eq!(old_body.capture_graph_selection(), old_body_graph);
+        }
         drop(captured);
         drop(restored);
         assert_eq!(inventory.node_count(), 0);
