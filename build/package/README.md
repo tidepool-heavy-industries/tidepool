@@ -339,7 +339,15 @@ acquisition receipt, and return typed answers of 41 through its native probe.
 External-quoter execution bytes must remain unchanged from preparation before
 its input changes from 41 to 42 through the parent's public spec import, every
 child installation and every native reply. Each child setup and its attributed
-compiled installer phase must submit zero compiler requests. Partial progress
+compiled installer phase must submit zero compiler requests. Each child's
+provider-visible preview must match its distinct `NativeInput` ordinal.
+The home-module `Display`/`WorkbenchDisplay` instances exercise original
+source and literal images: one complete retained image bundle serves separately
+issued child machine sessions, and each renderer invocation must install its
+target with zero successful native image constructions. The focused
+`source_prepared_toolset_two_children_share_distinct_native_renderer_inputs`
+control uses the same scenario with source preparation; it does not qualify a
+frozen release. Partial progress
 and per-child rows retain observed counts on failure. The existing hosted
 outcome records scenario and cleanup separately;
 scenario completion alone does not establish confirmed host cleanup.

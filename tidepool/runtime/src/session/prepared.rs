@@ -858,6 +858,9 @@ impl NativeImageBundle {
             images.push(image);
         }
         tracing::info!(target: "tidepool_runtime::activation_renderer", image_instance = images[0].image_instance_id(), images = images.len(), outcome = "prepared", "activation renderer native custody");
+        for (index, image) in images.iter().enumerate() {
+            tracing::info!(target: "tidepool_runtime::activation_renderer", bundle_target = images[0].image_instance_id(), image_instance = image.image_instance_id(), role = if index == 0 { "target" } else { "source" }, literal_producer = !image.source_literals().is_empty(), outcome = "native_image", "activation renderer native custody");
+        }
         Ok(Self {
             registry: registry.clone(),
             images,
@@ -867,6 +870,10 @@ impl NativeImageBundle {
     #[cfg(test)]
     pub(super) fn image_owners(&self) -> &[Arc<CompiledProgram>] {
         &self.images
+    }
+
+    pub(super) fn image_instances(&self) -> impl Iterator<Item = u64> + '_ {
+        self.images.iter().map(|image| image.image_instance_id())
     }
 }
 

@@ -5275,9 +5275,9 @@ where
                         session.publish_source_originals(pending_originals)?;
                     }
                     if let Some(prepared) = code.prepared() {
-                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), source_revision = %prepared.source_revision, acquisition = ?prepared.acquisition, "actor phase");
+                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, session = %context.placement.session, phase = "toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), source_revision = %prepared.source_revision, acquisition = ?prepared.acquisition, "actor phase");
                     } else {
-                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "explicit_toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), install, "actor phase");
+                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, session = %context.placement.session, phase = "explicit_toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), install, "actor phase");
                     }
                     Ok(PreparedToolInstallation {
                         tools: ResidentWorkbenchTools {
