@@ -72,9 +72,17 @@ where
         kernel: &KernelContext,
         definition: crate::ActorReplacementDefinition,
     ) -> Result<LocalActorRef, ResidentActorWorkbenchError> {
-        let mut staged = self
+        let staged = self
             .stage_replacement(kernel.identity(), definition)
             .await?;
+        self.admit_staged_successor(kernel, staged).await
+    }
+
+    async fn admit_staged_successor(
+        &mut self,
+        kernel: &KernelContext,
+        mut staged: StagedHandler,
+    ) -> Result<LocalActorRef, ResidentActorWorkbenchError> {
         let placement_custody = staged.placement_custody.clone();
         let root_admission = self
             .environment
