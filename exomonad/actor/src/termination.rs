@@ -1209,6 +1209,215 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn finalization_histories_keep_active_and_captured_admission_closed() {
+        for kind in [
+            ActorExitKind::Completed,
+            ActorExitKind::Failed,
+            ActorExitKind::Cancelled,
+        ] {
+            for retain_first in [false, true] {
+                let retained = RetainedActorExit::new();
+                let active =
+                    crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(retained.clone());
+                active.register_work().unwrap().consume(
+                    tidepool_runtime::CompilerTransactionOutcome {
+                        action: (),
+                        close: tidepool_runtime::CompilerTransactionClose::NotStarted,
+                    },
+                );
+                retained.request_shutdown(ActorTerminal::new(kind, "stop active work"));
+                assert!(active.register_work().is_err());
+                let guard = retained.begin_compiler_finalization().unwrap();
+                assert!(retained.begin_compiler_finalization().is_err());
+                let finalizer = guard
+                    .scope(async { crate::ActorCompilerCloseOwner::current().unwrap() })
+                    .await;
+                finalizer
+                    .run(|close| close(tidepool_runtime::CompilerTransactionClose::Clean))
+                    .unwrap();
+                assert!(
+                    active.register_work().is_err(),
+                    "finalization must not reopen active work"
+                );
+                let pending = guard
+                    .scope(async {
+                        crate::resident_workbench::CompilerCloseOwner::current()
+                            .unwrap()
+                            .register_work()
+                            .unwrap()
+                    })
+                    .await;
+                let actor = crate::ActorRef::first(crate::ActorId(331));
+                if retain_first {
+                    retained.retain_cleanup(clean_actor_cleanup(actor));
+                    drop(guard);
+                } else {
+                    drop(guard);
+                    retained.retain_cleanup(clean_actor_cleanup(actor));
+                }
+                assert!(matches!(
+                    retained.cleanup().unwrap().hook,
+                    crate::CleanupComponentOutcome::Unconfirmed(_)
+                ));
+                let mut entered = false;
+                assert!(matches!(
+                    finalizer.run(|_| entered = true),
+                    Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
+                ));
+                assert!(!entered);
+                assert!(active.register_work().is_err());
+                pending.consume(tidepool_runtime::CompilerTransactionOutcome {
+                    action: (),
+                    close: tidepool_runtime::CompilerTransactionClose::NotStarted,
+                });
+                assert!(retained.cleanup().unwrap().is_confirmed());
+                let state = retained.state.cleanup.lock();
+                assert!(state.compiler_admission == CompilerAdmission::Closed);
+                assert!(state.outcome.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn retaining_cleanup_without_stop_interrupts_admitted_active_compiler() {
+        let retained = RetainedActorExit::new();
+        let ticket = admitted_compiler(&retained);
+        let actor = crate::ActorRef::first(crate::ActorId(332));
+        retained.retain_cleanup(clean_actor_cleanup(actor));
+        assert!(retained.requested_shutdown().is_none());
+        assert!(admitted_compiler_refusal(&retained));
+        assert!(retained.begin_compiler_finalization().is_err());
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("must-not-be-read");
+        let result = ticket.run(|_close| tidepool_toolchain::cache::source_root_manifest(&missing));
+        assert_eq!(
+            result.unwrap_err().source.kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert!(retained.cleanup().unwrap().is_confirmed());
+    }
+
+    fn admitted_compiler_refusal(retained: &RetainedActorExit) -> bool {
+        !retained.register_compiler_work(CompilerWorkReceipt::pending())
+    }
+
+    #[tokio::test]
+    async fn finalization_timeout_retains_pending_until_native_late_close() {
+        let retained = RetainedActorExit::new();
+        let terminal = ActorTerminal::new(ActorExitKind::Cancelled, "stop before hook");
+        retained.request_shutdown(terminal.clone());
+        let guard = retained.begin_compiler_finalization().unwrap();
+        let finalizer = guard
+            .scope(async { crate::ActorCompilerCloseOwner::current().unwrap() })
+            .await;
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("must-not-be-read");
+        let native_owner = finalizer.clone();
+        let native = tokio::task::spawn_blocking(move || {
+            native_owner.run(|_close| {
+                entered.send(()).unwrap();
+                proceed.recv_timeout(Duration::from_secs(5)).unwrap();
+                tidepool_toolchain::cache::source_root_manifest(&missing)
+            })
+        });
+        tokio::time::timeout(Duration::from_secs(5), observed)
+            .await
+            .unwrap()
+            .unwrap();
+        retained.request_shutdown(terminal);
+        finalizer
+            .run(|close| close(tidepool_runtime::CompilerTransactionClose::Clean))
+            .unwrap();
+        let observation = CompilerPreparationCleanup {
+            retained: retained.clone(),
+        }
+        .wait_for_settlement(Duration::from_millis(1))
+        .await;
+        assert!(!observation.is_confirmed());
+        assert!(observation
+            .work
+            .iter()
+            .any(|work| matches!(work, CompilerWorkClose::Pending)));
+        drop(guard);
+        retained.retain_cleanup(clean_actor_cleanup(crate::ActorRef::first(crate::ActorId(
+            333,
+        ))));
+        assert!(matches!(
+            retained.cleanup().unwrap().hook,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ));
+        let mut entered_late = false;
+        assert!(finalizer.run(|_| entered_late = true).is_err());
+        assert!(!entered_late);
+        release.send(()).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), native)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            outcome.action.unwrap_err().source.kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert!(matches!(
+            outcome.close,
+            tidepool_runtime::CompilerTransactionClose::NotStarted
+        ));
+        assert!(retained.cleanup().unwrap().is_confirmed());
+    }
+
+    #[tokio::test]
+    async fn finalization_preserves_primary_failure_and_uncertainty_on_unwind() {
+        for unwind in [false, true] {
+            let retained = RetainedActorExit::new();
+            retained.request_shutdown(ActorTerminal::new(
+                ActorExitKind::Failed,
+                "original actor failure",
+            ));
+            let expected = uncertain_close();
+            let operation = std::panic::AssertUnwindSafe(async {
+                let guard = retained.begin_compiler_finalization().unwrap();
+                guard
+                    .scope(async {
+                        let result = crate::ActorCompilerCloseOwner::current()
+                            .unwrap()
+                            .run(|close| {
+                                close(expected.clone());
+                                if unwind {
+                                    panic!("primary hook unwind");
+                                }
+                                Err::<(), _>("primary hook failure")
+                            })
+                            .unwrap();
+                        assert_eq!(result.action, Err("primary hook failure"));
+                        assert_eq!(result.close, expected);
+                    })
+                    .await;
+            });
+            let result = futures_util::FutureExt::catch_unwind(operation).await;
+            assert_eq!(result.is_err(), unwind);
+            assert!(retained.begin_compiler_finalization().is_err());
+            retained.retain_cleanup(clean_actor_cleanup(crate::ActorRef::first(crate::ActorId(
+                334,
+            ))));
+            assert_eq!(
+                retained.compiler_close_observations(),
+                vec![CompilerWorkClose::Settled(expected)]
+            );
+            assert!(matches!(
+                retained.cleanup().unwrap().hook,
+                crate::CleanupComponentOutcome::Unconfirmed(_)
+            ));
+            assert_eq!(
+                retained.requested_shutdown().unwrap().kind,
+                ActorExitKind::Failed
+            );
+        }
+    }
+
     #[test]
     fn pending_compiler_prevents_confirmed_actor_stop_until_actual_late_close() {
         let owner = RetainedActorExit::new();
