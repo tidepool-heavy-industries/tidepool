@@ -1371,6 +1371,11 @@ mod tests {
         let (_directory, store) = store();
         domain(&store, RecoveryDomainId::Root, 64);
         let external = Connection::open(store.path()).unwrap();
+        // Relational integrity remains satisfied; the immutable CID itself is
+        // malformed and must be refused by the owning typed decoder.
+        external
+            .execute("INSERT INTO blocks(cid,bytes) VALUES(x'01',x'00')", [])
+            .unwrap();
         external
             .execute(
                 "UPDATE recovery_domains SET snapshot_root=x'01' WHERE domain=?1",
