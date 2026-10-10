@@ -371,13 +371,20 @@ async fn custody_assert_request(
 
 #[tokio::test]
 async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
+    inherited_response_scenario(test_campaign::TestCampaign::start().await, false).await;
+}
+
+pub(super) async fn inherited_response_scenario(
+    campaign: test_campaign::TestCampaign,
+    dedicated: bool,
+) {
     // Each effectful assertion must evaluate its typed observation/value and
     // fail on a mismatch before committing; pure notebook values stay opaque.
     let assert_committed = |response: &serde_json::Value| {
         assert_eq!(response["status"], "committed", "{response:?}");
     };
-    let campaign = test_campaign::TestCampaign::start().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
+    let root_session = campaign.forest.actor_session(campaign.actor.identity()).unwrap();
     let root = campaign.root_installation.policy.clone();
     let producer_dispatch = tokio::spawn(async move {
         tests::dispatch_haskell_script(
@@ -398,6 +405,8 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
             },
         )
         .await;
+    let producer_session = campaign.forest.actor_session(producer.actor.identity()).unwrap();
+    assert_eq!(producer_session != root_session, dedicated, "actual producer placement");
     campaign.authority.install_grant(
         producer.actor.identity().into(),
         ActorWorktreeGrant::Bound {
@@ -418,12 +427,15 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
     // ExitCell is still pending at this fork boundary.
     let root = campaign.root_installation.policy.clone();
     let observer_policy = root.clone();
+    let observer_source = if dedicated {
+        tidepool_testing::fixture_source("bridge/facade/src/actor_host/fresh_inherited_response_observer.hs")
+    } else {
+        tidepool_testing::fixture_source("bridge/facade/src/actor_host/inherited_response_observer.hs")
+    };
     let observer_dispatch = tokio::spawn(async move {
         tests::dispatch_haskell_script(
             observer_policy.as_ref(),
-            &tidepool_testing::fixture_source(
-                "bridge/facade/src/actor_host/inherited_response_observer.hs",
-            ),
+            &observer_source,
         )
         .await
     });
@@ -437,6 +449,9 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
             },
         )
         .await;
+    let observer_session = campaign.forest.actor_session(observer.actor.identity()).unwrap();
+    assert_eq!(observer_session != root_session, dedicated, "actual observer placement");
+    assert_eq!(observer_session != producer_session, dedicated, "actual sibling placement");
     campaign.authority.install_grant(
         observer.actor.identity().into(),
         ActorWorktreeGrant::Bound {
@@ -452,6 +467,12 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
         .unwrap();
     assert_eq!(second["status"], "committed", "{second:?}");
     custody_activation(campaign).await;
+
+    if dedicated {
+        let borrowed = tests::dispatch_haskell_script(observer.policy.as_ref(),
+            "worker <- pure sessionInput").await;
+        assert_committed(&borrowed);
+    }
 
     let watch = tests::dispatch_haskell_script(
         observer.policy.as_ref(),
@@ -515,6 +536,24 @@ async fn inherited_response_late_fill_and_release_preserve_extracted_value() {
     )
     .await;
     assert_eq!(extracted["status"], "committed", "{extracted:?}");
+
+    producer.actor.shutdown(ActorTerminal {
+        kind: ActorExitKind::Completed,
+        summary: "original producer retired before forcing the extracted result".into(),
+        diagnostic: None,
+    }).await.unwrap();
+    campaign.next_deployment(
+        "original response producer retirement",
+        Duration::from_secs(120),
+        |event| match event {
+            LocalResidentDeployment::Retired { actor, terminal } if actor == producer.actor.identity() => Ok(terminal),
+            other => Err(other),
+        },
+    ).await;
+    if dedicated {
+        assert_eq!(campaign.forest.session_state_of(producer_session),
+            tidepool_runtime::session::ResidentSessionState::Gone);
+    }
 
     // The projection's private subscription is already released. Keep its
     // lazy value unforced until both the public watch and response are gone.

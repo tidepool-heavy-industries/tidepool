@@ -98,6 +98,13 @@ TEST_ONLY_FIXTURES = {
     }),
     'tidepool': frozenset({
         'bridge/facade/src/actor_host/cargo_report_contract.hs',
+        'bridge/facade/src/actor_host/fresh_callable_result_setup.hs',
+        'bridge/facade/src/actor_host/fresh_callable_result_read.hs',
+        'bridge/facade/src/actor_host/fresh_callable_result_release.hs',
+        'bridge/facade/src/actor_host/fresh_callable_exit_setup.hs',
+        'bridge/facade/src/actor_host/fresh_callable_exit_read.hs',
+        'bridge/facade/src/actor_host/fresh_result_source_actor.hs',
+        'bridge/facade/src/actor_host/fresh_inherited_response_observer.hs',
         'bridge/facade/src/actor_host/command_tool_facts_gate.hs',
         'bridge/facade/src/actor_host/embedded_captured_child_reuse_nominal.hs',
         'bridge/facade/src/actor_host/fixtures/browser_agent_spec.hs',

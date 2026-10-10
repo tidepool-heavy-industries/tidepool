@@ -388,6 +388,8 @@ impl TestCampaign {
     ) -> R {
         let campaign = tokio::sync::Mutex::new(Some(self));
         let observation = std::cell::RefCell::new(None);
+        let diagnostics =
+            super::hosted_test_context::HostedTestDiagnostics::root_from_environment();
         let (scenario, cleanup, report_errors) = super::hosted_test_context::settle_scenario(
             async {
                 let mut owner = campaign.lock().await;
@@ -407,11 +409,28 @@ impl TestCampaign {
                 observation.replace(Some(result));
                 settled
             },
-            |_, _| Ok(()),
+            |scenario, cleanup| match &diagnostics {
+                Ok(Some(root)) => {
+                    super::hosted_test_context::HostedTestDiagnostics::report_model_free(
+                        root,
+                        scenario,
+                        cleanup,
+                        observation
+                            .borrow()
+                            .as_ref()
+                            .map(|outcome| format!("{outcome:?}")),
+                    )
+                }
+                Ok(None) => Ok(()),
+                Err(error) => Err(error.clone()),
+            },
         )
         .await;
         if let Err(error) = &cleanup {
             eprintln!("model-free campaign cleanup failed: {error}");
+        }
+        for error in &report_errors {
+            eprintln!("model-free campaign outcome reporting failed: {error}");
         }
         let result = match scenario {
             Ok(result) => result,

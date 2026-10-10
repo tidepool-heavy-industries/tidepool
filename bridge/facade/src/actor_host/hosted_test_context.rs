@@ -470,7 +470,7 @@ where
 }
 
 #[derive(Clone)]
-struct HostedTestDiagnostics {
+pub(super) struct HostedTestDiagnostics {
     root: std::path::PathBuf,
     workspace: std::path::PathBuf,
     run_root: std::path::PathBuf,
@@ -478,7 +478,7 @@ struct HostedTestDiagnostics {
 }
 
 impl HostedTestDiagnostics {
-    fn root_from_environment() -> Result<Option<std::path::PathBuf>, String> {
+    pub(super) fn root_from_environment() -> Result<Option<std::path::PathBuf>, String> {
         if std::env::var_os("TIDEPOOL_TEST_DIAGNOSTIC_SCOPE").as_deref()
             != Some(std::ffi::OsStr::new("1"))
         {
@@ -499,16 +499,40 @@ impl HostedTestDiagnostics {
     }
 
     fn report(&self, scenario: &ScenarioOutcome, cleanup: &CleanupOutcome) -> Result<(), String> {
-        let bytes = serde_json::to_vec_pretty(&json!({
-            "schema": 2,
-            "startup": self.startup,
-            "scenario": scenario,
-            "cleanup": cleanup,
-            "workspace": self.workspace,
-            "run_root": self.run_root,
-        }))
-        .map_err(|error| error.to_string())?;
-        tidepool_atomic_write::write_durable(&self.root.join("hosted-outcome.json"), &bytes)
+        Self::write_report(
+            &self.root,
+            &json!({
+                "schema": 2,
+                "startup": self.startup,
+                "scenario": scenario,
+                "cleanup": cleanup,
+                "workspace": self.workspace,
+                "run_root": self.run_root,
+            }),
+        )
+    }
+
+    pub(super) fn report_model_free(
+        root: &std::path::Path,
+        scenario: &ScenarioOutcome,
+        cleanup: &CleanupOutcome,
+        owner_shutdown: Option<String>,
+    ) -> Result<(), String> {
+        Self::write_report(
+            root,
+            &json!({
+                "schema": 2,
+                "mode": "model_free_resident",
+                "scenario": scenario,
+                "cleanup": cleanup,
+                "owner_shutdown": owner_shutdown,
+            }),
+        )
+    }
+
+    fn write_report(root: &std::path::Path, report: &serde_json::Value) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(report).map_err(|error| error.to_string())?;
+        tidepool_atomic_write::write_durable(&root.join("hosted-outcome.json"), &bytes)
             .map_err(|error| error.to_string())
     }
 }
