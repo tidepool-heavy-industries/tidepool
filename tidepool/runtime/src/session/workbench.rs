@@ -1468,8 +1468,8 @@ impl<Item, Committed> WorkSequence<Item, Committed> {
 }
 
 /// One already-parsed runnable block and its position in an assistant
-/// response. Parsing belongs to `exomonad-model-output`; this type begins the
-/// execution contract.
+/// response. Frontends supply parsed source; this type begins the execution
+/// contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedBlock {
     pub ordinal: usize,

@@ -188,8 +188,8 @@ redesigns, and distinguish structural savings from measured speedups.
   machine/session substrate.
 - `tidepool-protocol`, `tidepool-mcp`, `tidepool-handlers`: effect schemas,
   generated bridge, and concrete interpreters.
-- `exomonad-model`, `exomonad-model-output`: provider-neutral conversations
-  and model-output parsing.
+- `exomonad-model`: provider-neutral conversations. Provider tool-call parsing
+  belongs to the pinned Harness runtime.
 - `exomonad-actor`: actor identity, lifecycle, mailbox, and resident workbench.
 - `tidepool`: the public facade and the Exomonad runtime and binaries.
 - `exomonad-worktree`: managed coding checkouts and repository observation.
@@ -243,7 +243,7 @@ Keep detailed design references out of always-loaded instructions.
 | Jev operators | the pinned `jev-dsl` flake input, fronted per workspace by `.exomonad/Jev/Operators.hs` |
 | Run trace (structured JSONL under `.exomonad/logs/`) | `bridge/facade/src/exomonad.rs` |
 | Actor identity, lifecycle, mailbox, resident actor workbench | `exomonad-actor` |
-| Native provider transport and actor attachment | `bridge/facade/src/actor_host/{embedded_service,embedded_harness,provider_attachment}.rs`; provider transport in pinned Harness |
+| Native provider transport and actor attachment | `bridge/facade/src/actor_host/{embedded_service,embedded_harness,provider_attachment}.rs`; provider transport and tool-call parsing in pinned Harness |
 | Process mount boundary and durable inbox | `exomonad/node/src/process_boundary.rs`, `exomonad/node/src/inbox.rs` |
 | Git invocation and managed checkout registry | `exomonad/worktree/src/git.rs`, `exomonad/worktree/src/registry.rs` |
 | Discovery, artifact cache, paths and toolchain fingerprints | `tidepool-toolchain`; extractor process/daemon invocation: `tidepool-extract-cmd` |

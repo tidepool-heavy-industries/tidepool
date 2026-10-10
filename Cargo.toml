@@ -2,7 +2,6 @@
 members = [
     "exomonad/jev-integration",
     "exomonad/actor",
-    "exomonad/model-output",
     "exomonad/model",
     "exomonad/node",
     "exomonad/tool",
@@ -67,7 +66,6 @@ tidepool-extract-report = { version = "0.1.0", path = "tidepool/extract-report" 
 tidepool-handlers = { version = "0.1.0", path = "bridge/handlers" }
 tidepool-heap = { version = "0.1.0", path = "tidepool/heap" }
 tidepool-mcp = { version = "0.1.0", path = "bridge/mcp" }
-exomonad-model-output = { version = "0.1.0", path = "exomonad/model-output" }
 exomonad-model = { version = "0.1.0", path = "exomonad/model" }
 exomonad-node = { version = "0.1.0", path = "exomonad/node" }
 exomonad-tool = { version = "0.1.0", path = "exomonad/tool" }

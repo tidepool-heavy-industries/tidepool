@@ -1115,10 +1115,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "exomonad-model-output"
-version = "0.1.0"
-
-[[package]]
 name = "exomonad-node"
 version = "0.1.0"
 dependencies = [
