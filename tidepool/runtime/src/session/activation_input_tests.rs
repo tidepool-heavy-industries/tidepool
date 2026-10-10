@@ -429,18 +429,23 @@ fn compile_turn(
     let injected = view.injected_module_names();
     assert!(injected.is_empty(), "startup has no retained environment");
     assert!(retained.is_empty(), "startup has no retained native inputs");
-    run_turn(TurnRequest {
-        exact_context: None,
-        session_id: None,
-        turn_text: source,
-        templates: &templates,
-        include: &include,
-        session_root: view.session_root(),
-        inject_modules: &injected,
-        gen: view.next_value_generation().0,
-        verdict: None,
-        target: None,
-        retained_imports: retained,
+    tidepool_testing::with_settlement(|settlement| {
+        run_turn(
+            TurnRequest {
+                exact_context: None,
+                session_id: None,
+                turn_text: source,
+                templates: &templates,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                gen: view.next_value_generation().0,
+                verdict: None,
+                target: None,
+                retained_imports: retained,
+            },
+            settlement,
+        )
     })
     .expect("compile actual startup fixture")
 }
@@ -709,7 +714,9 @@ fn try_check_fixture_cell(
             None,
         )
         .expect("admit checked fixture bindings with their selected interfaces");
-    let (checked, program) = turn::compile_cell_program_admitted(admission.clone())?;
+    let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+        turn::compile_cell_program_admitted(admission.clone(), settlement)
+    })?;
     let prefix = resident
         .begin_cell_program(admission, program)
         .unwrap()
@@ -955,7 +962,10 @@ fn refuse_changed_checked_sites(resident: &mut TestSession, fixture: &InputFixtu
             None,
         )
         .unwrap();
-    let (checked, program) = turn::compile_cell_program_admitted(admission.clone()).unwrap();
+    let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+        turn::compile_cell_program_admitted(admission.clone(), settlement)
+    })
+    .unwrap();
     let item = checked.checked_item(0).unwrap();
     let prefix = resident
         .begin_cell_program(admission, program)
@@ -4094,9 +4104,13 @@ fn compile_activation_preview(
         .expect("admitted renderer slot")
     {
         RendererAccess::Ready(renderer) => renderer,
-        RendererAccess::Produce(producer) => producer.publish(turn::compile_activation_renderer(
-            &admission, template, budget, includes,
-        )?),
+        RendererAccess::Produce(producer) => {
+            producer.publish(tidepool_testing::with_settlement(|settlement| {
+                turn::compile_activation_renderer(
+                    &admission, template, budget, includes, settlement,
+                )
+            })?)
+        }
         RendererAccess::Wait(_) => {
             panic!("synchronous semantic fixture has no concurrent producer")
         }

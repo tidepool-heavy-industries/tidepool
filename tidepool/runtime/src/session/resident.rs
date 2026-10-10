@@ -8286,7 +8286,10 @@ mod authored_publication_tests {
                 None,
             )
             .unwrap();
-        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(admission.clone(), settlement)
+        })
+        .unwrap();
         let first = checked.checked_item(0).unwrap();
         let prefix = state
             .begin_cell_program(admission, program)
@@ -9816,7 +9819,10 @@ mod authored_publication_tests {
                 None,
             )
             .unwrap();
-        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(admission.clone(), settlement)
+        })
+        .unwrap();
         let item = checked.checked_item(0).unwrap();
         let prefix = session
             .begin_cell_program(admission, program)
@@ -9969,18 +9975,23 @@ mod authored_publication_tests {
         let mut includes = effects.include_paths().to_vec();
         includes.push(root.path().to_path_buf());
         let includes = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let TurnResult::Bind { compiled, .. } = run_turn(TurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: "let retained = (42 :: Int)",
-            templates: &templates,
-            include: &includes,
-            session_root: root.path(),
-            inject_modules: &[],
-            gen: 1,
-            verdict: None,
-            target: None,
-            retained_imports: &[],
+        let TurnResult::Bind { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: "let retained = (42 :: Int)",
+                    templates: &templates,
+                    include: &includes,
+                    session_root: root.path(),
+                    inject_modules: &[],
+                    gen: 1,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
         })
         .unwrap() else {
             panic!("expected compiler-owned binding");

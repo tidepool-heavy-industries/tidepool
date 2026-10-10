@@ -108,8 +108,10 @@ fn run() {
     );
     std::fs::write(scratch.join("contract.hs"), &source).unwrap();
     let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
-    let compiled =
-        tidepool_runtime::compile_targets(&source, &[target], &includes, |_, _, _| {}).unwrap();
+    let compiled = tidepool_testing::with_settlement(|settlement| {
+        tidepool_runtime::compile_targets(&source, &[target], &includes, |_, _, _| {}, settlement)
+    })
+    .unwrap();
     let cases = [
         (
             "committed",

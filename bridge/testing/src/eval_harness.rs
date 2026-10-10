@@ -328,7 +328,7 @@ impl EvalHarness {
     pub fn compile(&self, source: &str, target: &str) -> Result<CompileResult, CompileError> {
         let includes = self.owned_includes();
         let refs: Vec<&Path> = includes.iter().map(|p| p.as_path()).collect();
-        compile_haskell(source, target, &refs)
+        crate::with_settlement(|settlement| compile_haskell(source, target, &refs, settlement))
     }
 
     /// Compile MULTIPLE named top-level bindings sharing ONE module against
@@ -344,7 +344,9 @@ impl EvalHarness {
         targets: &[&str],
     ) -> Result<CompiledArtifacts, CompileError> {
         let includes = self.owned_includes();
-        compile_targets(source, targets, &includes, |_, _, _| {})
+        crate::with_settlement(|settlement| {
+            compile_targets(source, targets, &includes, |_, _, _| {}, settlement)
+        })
     }
 
     /// Compile + run an EFFECTFUL expression against `handlers` (user context
@@ -370,15 +372,20 @@ impl EvalHarness {
         Outcome(with_eval_stack(move || {
             let refs: Vec<&Path> = includes.iter().map(|p| p.as_path()).collect();
             match nursery {
-                Some(n) => compile_and_run_with_nursery_size(
-                    &source,
-                    &target,
-                    &refs,
-                    &mut handlers,
-                    &user,
-                    n,
-                ),
-                None => compile_and_run(&source, &target, &refs, &mut handlers, &user),
+                Some(n) => crate::with_settlement(|settlement| {
+                    compile_and_run_with_nursery_size(
+                        &source,
+                        &target,
+                        &refs,
+                        &mut handlers,
+                        &user,
+                        n,
+                        settlement,
+                    )
+                }),
+                None => crate::with_settlement(|settlement| {
+                    compile_and_run(&source, &target, &refs, &mut handlers, &user, settlement)
+                }),
             }
         }))
     }
@@ -413,15 +420,20 @@ impl EvalHarness {
         let (result, handlers) = with_eval_stack(move || {
             let refs: Vec<&Path> = includes.iter().map(|p| p.as_path()).collect();
             let result = match nursery {
-                Some(n) => compile_and_run_with_nursery_size(
-                    &source,
-                    &target,
-                    &refs,
-                    &mut handlers,
-                    &user,
-                    n,
-                ),
-                None => compile_and_run(&source, &target, &refs, &mut handlers, &user),
+                Some(n) => crate::with_settlement(|settlement| {
+                    compile_and_run_with_nursery_size(
+                        &source,
+                        &target,
+                        &refs,
+                        &mut handlers,
+                        &user,
+                        n,
+                        settlement,
+                    )
+                }),
+                None => crate::with_settlement(|settlement| {
+                    compile_and_run(&source, &target, &refs, &mut handlers, &user, settlement)
+                }),
             };
             (result, handlers)
         });

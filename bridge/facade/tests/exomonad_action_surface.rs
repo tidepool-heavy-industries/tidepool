@@ -71,8 +71,10 @@ fn parameterized_invocation_row_keeps_external_nominal_owner_imports() {
         "pure (41 :: Int)",
         tidepool_runtime::session::ExpressionLift::Effectful,
     );
-    compile_haskell(&source, "result", &includes)
-        .expect("the explicit invocation row resolves its external nominal protocol owner");
+    tidepool_testing::with_settlement(|settlement| {
+        compile_haskell(&source, "result", &includes, settlement)
+    })
+    .expect("the explicit invocation row resolves its external nominal protocol owner");
 }
 
 #[test]
@@ -87,18 +89,24 @@ fn reusable_event_and_async_helpers_compile_with_narrow_rows() {
     include.push(eval_harness::prelude_path());
     let refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
 
-    compile_haskell(
-        include_str!("exomonad_action_surface/reusable_helper_rows.hs"),
-        "result",
-        &refs,
-    )
+    tidepool_testing::with_settlement(|settlement| {
+        compile_haskell(
+            include_str!("exomonad_action_surface/reusable_helper_rows.hs"),
+            "result",
+            &refs,
+            settlement,
+        )
+    })
     .expect("one checked source supports Green-only, RepoEvent-only and empty rows");
 
-    let error = compile_haskell(
-        include_str!("exomonad_action_surface/async_without_green.hs"),
-        "result",
-        &refs,
-    )
+    let error = tidepool_testing::with_settlement(|settlement| {
+        compile_haskell(
+            include_str!("exomonad_action_surface/async_without_green.hs"),
+            "result",
+            &refs,
+            settlement,
+        )
+    })
     .expect_err("calling async requires Green even when its module imports successfully");
     assert_eq!(
         tidepool_runtime::classify_compile(&error).class,
@@ -119,8 +127,10 @@ fn public_agents_accept_raw_inputs_and_dimensional_deadlines() {
         "submitWithOnlyReplies",
         "subSecondRequest",
     ] {
-        compile_haskell(source, target, &include_refs)
-            .unwrap_or_else(|error| panic!("public {target} should compile: {error}"));
+        tidepool_testing::with_settlement(|settlement| {
+            compile_haskell(source, target, &include_refs, settlement)
+        })
+        .unwrap_or_else(|error| panic!("public {target} should compile: {error}"));
     }
 
     let raw_deadline = concat!(
@@ -130,17 +140,22 @@ fn public_agents_accept_raw_inputs_and_dimensional_deadlines() {
         "result agent = Exomonad.request @Bool agent (7 :: Int) ",
         "(Exomonad.defaultRequestOptions { Exomonad.requestDeadline = Just (600 :: Int) })\n",
     );
-    let error = compile_haskell(raw_deadline, "result", &include_refs)
-        .expect_err("request deadlines require Duration rather than an integer");
+    let error = tidepool_testing::with_settlement(|settlement| {
+        compile_haskell(raw_deadline, "result", &include_refs, settlement)
+    })
+    .expect_err("request deadlines require Duration rather than an integer");
     let failure = tidepool_runtime::classify_compile(&error);
     assert_eq!(failure.class, tidepool_runtime::FailureClass::UserHaskell);
     assert!(failure.message.contains("Duration"), "{}", failure.message);
 
-    compile_haskell(
-        include_str!("exomonad_action_surface/skill_promised_names.hs"),
-        "result",
-        &include_refs,
-    )
+    tidepool_testing::with_settlement(|settlement| {
+        compile_haskell(
+            include_str!("exomonad_action_surface/skill_promised_names.hs"),
+            "result",
+            &include_refs,
+            settlement,
+        )
+    })
     .expect("the public GitOid renderer remains callable");
 }
 
@@ -169,8 +184,10 @@ fn independent_spawns_select_context_and_workspace() {
         ),
     ] {
         for target in targets {
-            compile_haskell(source, target, &include_refs)
-                .unwrap_or_else(|error| panic!("explicit {target} should compile: {error}"));
+            tidepool_testing::with_settlement(|settlement| {
+                compile_haskell(source, target, &include_refs, settlement)
+            })
+            .unwrap_or_else(|error| panic!("explicit {target} should compile: {error}"));
         }
     }
 }
@@ -180,17 +197,23 @@ fn narrow_rows_refuse_unavailable_spawn_and_control_effects_after_valid_controls
     eval_harness::require_extract();
     let include = exomonad_include_paths();
     let include_refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-    compile_haskell(
-        include_str!("exomonad_action_surface/minimal_spawn.hs"),
-        "spawnMinimal",
-        &include_refs,
-    )
+    tidepool_testing::with_settlement(|settlement| {
+        compile_haskell(
+            include_str!("exomonad_action_surface/minimal_spawn.hs"),
+            "spawnMinimal",
+            &include_refs,
+            settlement,
+        )
+    })
     .expect("a row with AgentLaunch admits the explicit spawn expression");
-    compile_haskell(
-        include_str!("exomonad_action_surface/public_agents.hs"),
-        "stop",
-        &include_refs,
-    )
+    tidepool_testing::with_settlement(|settlement| {
+        compile_haskell(
+            include_str!("exomonad_action_surface/public_agents.hs"),
+            "stop",
+            &include_refs,
+            settlement,
+        )
+    })
     .expect("a row with AgentControl accepts ordinary retirement");
 
     for (source, target, missing_effect) in [
@@ -210,8 +233,10 @@ fn narrow_rows_refuse_unavailable_spawn_and_control_effects_after_valid_controls
             "AgentControl",
         ),
     ] {
-        let error = compile_haskell(source, target, &include_refs)
-            .expect_err("importing a helper does not grant its required effect");
+        let error = tidepool_testing::with_settlement(|settlement| {
+            compile_haskell(source, target, &include_refs, settlement)
+        })
+        .expect_err("importing a helper does not grant its required effect");
         let failure = tidepool_runtime::classify_compile(&error);
         assert_eq!(failure.class, tidepool_runtime::FailureClass::UserHaskell);
         assert!(
@@ -229,8 +254,10 @@ fn authored_delegation_composes_separate_spawn_request_and_observation_admission
     let include_refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let source = include_str!("exomonad_action_surface/delegate_request.hs");
     for target in ["delegateAndAwait", "delegateAndWatch"] {
-        compile_haskell(source, target, &include_refs)
-            .unwrap_or_else(|error| panic!("authored {target} should compile: {error}"));
+        tidepool_testing::with_settlement(|settlement| {
+            compile_haskell(source, target, &include_refs, settlement)
+        })
+        .unwrap_or_else(|error| panic!("authored {target} should compile: {error}"));
     }
 }
 
@@ -240,7 +267,10 @@ fn unresolved_request_result_is_a_source_diagnostic_with_annotation_guidance() {
     let include = exomonad_include_paths();
     let include_refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let source = include_str!("exomonad_action_surface/request_type_diagnostic.hs");
-    let error = compile_haskell(source, "unresolved", &include_refs).unwrap_err();
+    let error = tidepool_testing::with_settlement(|settlement| {
+        compile_haskell(source, "unresolved", &include_refs, settlement)
+    })
+    .unwrap_err();
     let tidepool_runtime::CompileError::Diagnostics(diagnostics) = error else {
         panic!("unresolved authored result must be a source rejection: {error:?}");
     };
@@ -252,8 +282,10 @@ fn unresolved_request_result_is_a_source_diagnostic_with_annotation_guidance() {
         "{diagnostics:?}"
     );
     for target in ["annotated", "functionAnswer"] {
-        compile_haskell(source, target, &include_refs)
-            .unwrap_or_else(|error| panic!("concrete {target} should compile: {error}"));
+        tidepool_testing::with_settlement(|settlement| {
+            compile_haskell(source, target, &include_refs, settlement)
+        })
+        .unwrap_or_else(|error| panic!("concrete {target} should compile: {error}"));
     }
 }
 
@@ -268,7 +300,9 @@ fn ordinary_text_labels_work_for_spawn_request_and_watch() {
         "requestWithOrdinaryLabel",
         "watchWithOrdinaryLabel",
     ] {
-        compile_haskell(source, target, &include_refs)
-            .unwrap_or_else(|error| panic!("ordinary Text label {target} should compile: {error}"));
+        tidepool_testing::with_settlement(|settlement| {
+            compile_haskell(source, target, &include_refs, settlement)
+        })
+        .unwrap_or_else(|error| panic!("ordinary Text label {target} should compile: {error}"));
     }
 }

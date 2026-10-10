@@ -90,15 +90,18 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     }
     let include = [work.path().to_path_buf(), prelude_path()];
     let compile = |source, name| {
-        compile_invocation(
-            &CompileInvocation {
-                source,
-                targets: &["__prepared"],
-                include: &include,
-                fallback_module_name: name,
-            },
-            |_, _, _| {},
-        )
+        tidepool_testing::with_settlement(|settlement| {
+            compile_invocation(
+                &CompileInvocation {
+                    source,
+                    targets: &["__prepared"],
+                    include: &include,
+                    fallback_module_name: name,
+                },
+                |_, _, _| {},
+                settlement,
+            )
+        })
         .expect("compile through the production candidate issuer and consumer")
     };
     let evaluator = EvalHarness::new();
@@ -138,15 +141,18 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     );
 
     let include_refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-    let executed = tidepool_runtime::compile_and_run_cancellable(
-        CONSUMER,
-        "result",
-        &include_refs,
-        &mut handlers,
-        &(),
-        1024 * 1024,
-        |_| {},
-    )
+    let executed = tidepool_testing::with_settlement(|settlement| {
+        tidepool_runtime::compile_and_run_cancellable(
+            CONSUMER,
+            "result",
+            &include_refs,
+            &mut handlers,
+            &(),
+            1024 * 1024,
+            |_| {},
+            settlement,
+        )
+    })
     .expect("production one-shot execution preserves certified imported groups");
     assert_eq!(executed.to_json(), expected);
 
@@ -241,16 +247,19 @@ fn candidates_preserve_native_demand_and_complete_original_siblings() {
     for owner in lexical.keys() {
         std::fs::remove_file(work.path().join(format!("{}.hs", owner.module))).unwrap();
     }
-    let later = compile_invocation_in_context(
-        &CompileInvocation {
-            source: SIBLING,
-            targets: &["__prepared"],
-            include: &include,
-            fallback_module_name: "CandidateDemandSibling",
-        },
-        Arc::new(context),
-        |_, _, _| {},
-    )
+    let later = tidepool_testing::with_settlement(|settlement| {
+        compile_invocation_in_context(
+            &CompileInvocation {
+                source: SIBLING,
+                targets: &["__prepared"],
+                include: &include,
+                fallback_module_name: "CandidateDemandSibling",
+            },
+            Arc::new(context),
+            |_, _, _| {},
+            settlement,
+        )
+    })
     .expect("later sibling consumer uses the source-less original inventory");
     assert!(
         !later.certified_groups.iter().any(|group| {

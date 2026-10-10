@@ -84,8 +84,10 @@ fn fresh_checked_program_retains_reexported_quoter_across_slots_cold_and_warm() 
             )
             .unwrap();
         let started = std::time::Instant::now();
-        let (_, program) = compile_cell_program_admitted(admission.clone())
-            .unwrap_or_else(|error| panic!("{phase} checked quoter program failed: {error:?}"));
+        let (_, program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(admission.clone(), settlement)
+        })
+        .unwrap_or_else(|error| panic!("{phase} checked quoter program failed: {error:?}"));
         assert_eq!(program.items().len(), 3);
         for item in program.items() {
             assert!(item.native().is_some());

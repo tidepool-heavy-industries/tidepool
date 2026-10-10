@@ -105,7 +105,9 @@ fn run() {
     let refs: Vec<&Path> = includes.iter().map(PathBuf::as_path).collect();
     let source = tidepool_runtime::session::assemble_expression_module(
         "{-# LANGUAGE DataKinds, OverloadedStrings #-}\nmodule CaptureRecipe where\nimport Control.Monad.Freer\nimport Tidepool.Check (RecipeCheck)\nimport qualified Project.BackgroundCommandExampleChecks\n",
-        "result", "'[RecipeCheck]", "Project.BackgroundCommandExampleChecks.completion",
+        "result",
+        "'[RecipeCheck]",
+        "Project.BackgroundCommandExampleChecks.completion",
         tidepool_runtime::session::ExpressionLift::Effectful,
     );
     let mut capture = Capture {
@@ -113,7 +115,9 @@ fn run() {
         cells: Vec::new(),
         assertions: Vec::new(),
     };
-    let result = tidepool_runtime::compile_and_run(&source, "result", &refs, &mut capture, &());
+    let result = tidepool_testing::with_settlement(|settlement| {
+        tidepool_runtime::compile_and_run(&source, "result", &refs, &mut capture, &(), settlement)
+    });
     assert!(result.is_ok(), "actual outer recipe capture: {result:?}");
     assert_eq!(capture.cells.len(), 7, "outer recipe cell count");
     assert!(capture.cells.iter().all(|(actor, source)| actor
