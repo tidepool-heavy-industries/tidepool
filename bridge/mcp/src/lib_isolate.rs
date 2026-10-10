@@ -139,8 +139,8 @@ fn probe_compiles(
 ) -> Result<bool, tidepool_runtime::CompileError> {
     match probe_import(module, include, settlement) {
         Ok(()) => Ok(true),
-        Err(error @ tidepool_runtime::CompileError::CompilerCloseUnconfirmed(_)) => Err(error),
-        Err(_) => Ok(false),
+        Err(tidepool_runtime::CompileError::Diagnostics(_)) => Ok(false),
+        Err(error) => Err(error),
     }
 }
 

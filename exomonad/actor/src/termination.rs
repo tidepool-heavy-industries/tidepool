@@ -296,12 +296,23 @@ impl CompilerWorkTicket {
     ) -> T {
         let mut close = outcome.close;
         for observed in self.receipt.attempts.lock().drain(..) {
-            if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(mut evidence) = observed
-            {
-                if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(previous) = close {
-                    evidence.earlier.push(previous);
+            match observed {
+                tidepool_runtime::CompilerTransactionClose::Unconfirmed(mut evidence) => {
+                    if let tidepool_runtime::CompilerTransactionClose::Unconfirmed(previous) = close
+                    {
+                        evidence.earlier.push(previous);
+                    }
+                    close = tidepool_runtime::CompilerTransactionClose::Unconfirmed(evidence);
                 }
-                close = tidepool_runtime::CompilerTransactionClose::Unconfirmed(evidence);
+                tidepool_runtime::CompilerTransactionClose::Clean
+                    if matches!(
+                        close,
+                        tidepool_runtime::CompilerTransactionClose::NotStarted
+                    ) =>
+                {
+                    close = tidepool_runtime::CompilerTransactionClose::Clean;
+                }
+                _ => {}
             }
         }
         *self.receipt.close.lock() = CompilerWorkClose::Settled(close);
