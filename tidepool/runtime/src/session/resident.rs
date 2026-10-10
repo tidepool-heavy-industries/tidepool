@@ -1309,6 +1309,13 @@ pub(super) enum ActivationRendererNative {
 }
 
 impl ActivationRendererNative {
+    fn target_image_instance(&self) -> Option<u64> {
+        match self {
+            Self::Renderable(bundle) => bundle.target_image_instance(),
+            Self::Opaque => None,
+        }
+    }
+
     fn image_instances(&self) -> Vec<u64> {
         match self {
             Self::Renderable(bundle) => bundle.image_instances().collect(),
@@ -6444,7 +6451,7 @@ where
     }
 
     /// Run only a sealed pure preview of this exact original committed root.
-    #[tracing::instrument(name = "activation_renderer_install", skip_all, fields(renderer_owner = Arc::as_ptr(&compiled.renderer) as usize, session = %self.state.lib().session_id(), binding = compiled.admission.mounted.binding.raw(), scope = ?compiled.admission.scope_lease.scope(), native_images = ?compiled.renderer.native.image_instances()))]
+    #[tracing::instrument(name = "activation_renderer_install", skip_all, fields(renderer_owner = Arc::as_ptr(&compiled.renderer) as usize, session = %self.state.lib().session_id(), binding = compiled.admission.mounted.binding.raw(), scope = ?compiled.admission.scope_lease.scope(), bundle_target = compiled.renderer.native.target_image_instance(), native_images = ?compiled.renderer.native.image_instances()))]
     pub fn run_activation_preview(
         &mut self,
         compiled: CompiledActivationPreview,

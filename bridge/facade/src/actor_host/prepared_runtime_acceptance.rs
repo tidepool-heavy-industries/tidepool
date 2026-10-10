@@ -45,6 +45,76 @@ struct RendererInstall {
     native_compilations_after: Option<u64>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum RendererInventoryRefusal {
+    DuplicateInstalledImage,
+    DuplicatePreparedImage,
+    TargetNotRetained,
+    DifferentImages,
+}
+
+fn exact_renderer_inventory(
+    target: u64,
+    installed: &[u64],
+    prepared: &[u64],
+) -> Result<HashSet<u64>, RendererInventoryRefusal> {
+    let installed_set: HashSet<_> = installed.iter().copied().collect();
+    let prepared_set: HashSet<_> = prepared.iter().copied().collect();
+    if installed_set.len() != installed.len() {
+        return Err(RendererInventoryRefusal::DuplicateInstalledImage);
+    }
+    if prepared_set.len() != prepared.len() {
+        return Err(RendererInventoryRefusal::DuplicatePreparedImage);
+    }
+    if !installed_set.contains(&target) || !prepared_set.contains(&target) {
+        return Err(RendererInventoryRefusal::TargetNotRetained);
+    }
+    if installed_set != prepared_set {
+        return Err(RendererInventoryRefusal::DifferentImages);
+    }
+    Ok(installed_set)
+}
+
+#[test]
+fn renderer_observation_accepts_permutations_and_refuses_missing_or_duplicate_images() {
+    let prepared = [302, 303, 304];
+    for target in prepared {
+        for installed in [
+            [302, 303, 304],
+            [302, 304, 303],
+            [303, 302, 304],
+            [303, 304, 302],
+            [304, 302, 303],
+            [304, 303, 302],
+        ] {
+            assert_eq!(
+                exact_renderer_inventory(target, &installed, &prepared),
+                Ok(prepared.into_iter().collect())
+            );
+        }
+    }
+    assert_eq!(
+        exact_renderer_inventory(302, &[303, 304], &prepared),
+        Err(RendererInventoryRefusal::TargetNotRetained)
+    );
+    assert_eq!(
+        exact_renderer_inventory(302, &prepared, &[303, 304]),
+        Err(RendererInventoryRefusal::TargetNotRetained)
+    );
+    assert_eq!(
+        exact_renderer_inventory(302, &[302, 303, 304, 305], &prepared),
+        Err(RendererInventoryRefusal::DifferentImages)
+    );
+    assert_eq!(
+        exact_renderer_inventory(302, &[302, 303, 303, 304], &prepared),
+        Err(RendererInventoryRefusal::DuplicateInstalledImage)
+    );
+    assert_eq!(
+        exact_renderer_inventory(302, &prepared, &[302, 303, 303, 304]),
+        Err(RendererInventoryRefusal::DuplicatePreparedImage)
+    );
+}
+
 struct ChildLaunch {
     at: Instant,
     compiler_requests: usize,
@@ -760,17 +830,20 @@ async fn prepared_children_execute_original_native_probe(
                 for image in &images {
                     assert_eq!(state.native_image_observations.get(image), Some(&1), "each retained image has one actual successful construction");
                 }
-                assert!(renderer.published_images.contains(&images[0]), "the target actually installed on this child machine");
+                let target = renderer.fields["bundle_target"].parse::<u64>().expect("the native owner emits its explicit target image instance");
+                assert!(renderer.published_images.contains(&target), "the issued target actually installed on this child machine");
                 assert!(renderer.published_images.iter().all(|image| images.contains(image)), "every installed renderer image belongs to its retained complete bundle");
-                let bundle = &state.renderer_bundles[&images[0].to_string()];
-                assert_eq!(bundle.iter().map(|image| image["image_instance"].parse::<u64>().unwrap()).collect::<Vec<_>>(), images, "prepared custody includes the exact complete image set used for installation");
+                let bundle = state.renderer_bundles.get(&target.to_string()).expect("the installation target belongs to an observed prepared bundle");
+                assert_eq!(bundle.iter().filter(|image| image["role"] == "target").map(|image| image["image_instance"].parse::<u64>().unwrap()).collect::<Vec<_>>(), vec![target], "the preparation owner and installation agree on the sole issued target");
+                let prepared_images = bundle.iter().map(|image| image["image_instance"].parse::<u64>().unwrap()).collect::<Vec<_>>();
+                let exact_images = exact_renderer_inventory(target, &images, &prepared_images).expect("prepared custody includes every installed image exactly once, independent of inventory order");
                 assert!(bundle.iter().any(|image| image["role"] == "source"), "the fixture exercises original home-source code custody");
                 assert!(bundle.iter().filter(|image| image["role"] == "source").any(|image| state.native_images[&image["image_instance"].parse::<u64>().unwrap()]["literal_storage_entries"].parse::<usize>().unwrap() > 0), "the original home-source image owns actual literal storage");
                 assert!(images.iter().any(|image| state.native_images[image]["constructors"].parse::<usize>().unwrap() > 0), "the complete retained bundle owns actual constructor declarations");
                 let custody = images.iter().map(|image| state.native_images[image].clone()).collect::<Vec<_>>();
                 match &shared_renderer_images {
-                    Some(shared) => assert_eq!(&images, shared, "independent child machines reuse every retained native image"),
-                    None => shared_renderer_images = Some(images),
+                    Some(shared) => assert_eq!(&exact_images, shared, "independent child machines reuse every retained native image"),
+                    None => shared_renderer_images = Some(exact_images),
                 }
                 (renderer.fields.clone(), custody)
             };

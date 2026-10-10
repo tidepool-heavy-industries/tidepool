@@ -929,6 +929,12 @@ impl NativeImageBundle {
     pub(super) fn image_instances(&self) -> impl Iterator<Item = u64> + '_ {
         self.images.values().map(|image| image.image_instance_id())
     }
+
+    pub(super) fn target_image_instance(&self) -> Option<u64> {
+        self.images
+            .get(&self.target)
+            .map(|image| image.image_instance_id())
+    }
 }
 
 fn immutable_literal_owners(
