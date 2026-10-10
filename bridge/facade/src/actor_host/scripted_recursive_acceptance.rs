@@ -367,16 +367,6 @@ async fn stopped(host: &HostedTestRuntime, actor: ActorRef, parent: ActorRef) {
     assert!(cleanup.is_confirmed(), "{cleanup:?}");
 }
 
-async fn command_resources(
-) -> std::sync::Arc<exomonad_node::command_resources::CommandResourceClient> {
-    crate::exomonad::resources::connect_existing(
-        Default::default(),
-        &uuid::Uuid::new_v4().to_string(),
-    )
-    .await
-    .expect("the production command service is available without starting or restarting it")
-}
-
 async fn command_cleanup(host: &HostedTestRuntime, actor: ActorRef) {
     host.context
         .config
@@ -388,12 +378,19 @@ async fn command_cleanup(host: &HostedTestRuntime, actor: ActorRef) {
         .expect("the exact actor has no active commands or retained resource allocations");
 }
 
-fn prepared_default_sol_workspace(
-    config: &mut ActorHostConfig,
-    resources: std::sync::Arc<exomonad_node::command_resources::CommandResourceClient>,
-) {
+fn prepared_default_sol_workspace(config: &mut ActorHostConfig) {
     super::scaffold_admission_tests::prepared_scaffold(config);
-    config.command_resources = Some(resources);
+    let owner = exomonad_node::command_resources::CommandResources::delegated(
+        exomonad_node::command_resources::CommandResourcePolicy {
+            general_bytes: 512 * 1024 * 1024,
+            protected_bytes: 0,
+            swap_max_bytes: 0,
+            ..Default::default()
+        },
+    )
+    .expect("the isolated test cgroup delegates production command resources");
+    config.command_resources =
+        Some(exomonad_node::command_resources::CommandResourceClient::local(owner));
     config.model = "gpt-6.1-sol".into();
     config.jev = Some(std::sync::Arc::new(super::test_campaign::FixtureJev));
     crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
@@ -410,9 +407,8 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
     let files = tempfile::TempDir::new().unwrap();
     let settings = hosted_test_settings(&files, 3);
     let (provider, mut requests) = hosted_script_provider_with_envelopes();
-    let resources = command_resources().await;
     let host = HostedTestRuntime::start_prepared_configured(&settings, &provider, |config| {
-        prepared_default_sol_workspace(config, resources);
+        prepared_default_sol_workspace(config);
     })
     .await
     .expect("production preparation and host startup succeed");
@@ -592,9 +588,8 @@ async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply()
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 2);
     let (provider, mut requests) = hosted_script_provider_with_envelopes();
-    let resources = command_resources().await;
     let host = HostedTestRuntime::start_prepared_configured(&settings, &provider, |config| {
-        prepared_default_sol_workspace(config, resources)
+        prepared_default_sol_workspace(config)
     })
     .await
     .expect("the shipped workspace prepares its exact original");
