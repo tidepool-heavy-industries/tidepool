@@ -315,25 +315,13 @@ pub(super) async fn run_interactive_applications(
                     Ok(completion) => completion,
                     Err(error) => break Some(error),
                 };
-                let lifecycle = match local_actor.terminal().get().map(|terminal| terminal.kind) {
-                    Some(ActorExitKind::Completed | ActorExitKind::Cancelled) => {
-                        harness::server::HostActorLifecycle::Retired
-                    }
-                    Some(ActorExitKind::Failed) | None => harness::server::HostActorLifecycle::Lost,
-                };
-                embedded_lifecycle_tx.publish(actor, lifecycle);
-                if let Some(binding) = embedded_binding(&application_owners, actor) {
-                    update_embedded_state(&application_owners, actor, |state| {
-                        if let Some(binding) = state.conversation.as_ref() {
-                            binding.mark_retired();
-                        }
-                    });
-                    schedule_embedded_notification_drain(actor, binding, &mut notifications);
-                }
                 match completion {
+                    EmbeddedTaskCompletion::RecoveryRequired(detail) => {
+                        break Some(detail);
+                    }
                     EmbeddedTaskCompletion::Completed if local_actor.terminal().get().is_none() => {
                         if let Err(error) = apply_application_failure(
-                            local_actor,
+                            local_actor.clone(),
                             ExternalApplicationFailure {
                                 class: ExternalApplicationFailureClass::UnexpectedExit,
                                 detail: "embedded Engine exited before actor settlement".into(),
@@ -348,7 +336,7 @@ pub(super) async fn run_interactive_applications(
                         tracing::error!(?actor, %detail, "embedded Engine failed");
                         if local_actor.terminal().get().is_none() {
                             if let Err(error) = apply_application_failure(
-                                local_actor,
+                                local_actor.clone(),
                                 ExternalApplicationFailure {
                                     class: ExternalApplicationFailureClass::UnexpectedExit,
                                     detail,
@@ -358,6 +346,21 @@ pub(super) async fn run_interactive_applications(
                             }
                         }
                     }
+                }
+                let lifecycle = match local_actor.terminal().get().map(|terminal| terminal.kind) {
+                    Some(ActorExitKind::Completed | ActorExitKind::Cancelled) => {
+                        harness::server::HostActorLifecycle::Retired
+                    }
+                    Some(ActorExitKind::Failed) | None => harness::server::HostActorLifecycle::Lost,
+                };
+                embedded_lifecycle_tx.publish(actor, lifecycle);
+                if let Some(binding) = embedded_binding(&application_owners, actor) {
+                    update_embedded_state(&application_owners, actor, |state| {
+                        if let Some(binding) = state.conversation.as_ref() {
+                            binding.mark_retired();
+                        }
+                    });
+                    schedule_embedded_notification_drain(actor, binding, &mut notifications);
                 }
             }
             Some(((actor, provider_attachment), local_actor, conversation, ready_ack)) = embedded_ready_rx.recv() => {
@@ -1228,7 +1231,8 @@ pub(super) async fn drain_resident_shutdown<L: Send + 'static>(
                                 Ok(EmbeddedTaskCompletion::CleanupFailed(detail)) => {
                                     failures.push(format!("embedded Engine {actor:?}: {detail}"));
                                 }
-                                Ok(EmbeddedTaskCompletion::ExecutionFailed(detail)) => {
+                                Ok(EmbeddedTaskCompletion::ExecutionFailed(detail))
+                                | Ok(EmbeddedTaskCompletion::RecoveryRequired(detail)) => {
                                     driver_failures.push(format!("embedded Engine {actor:?}: {detail}"));
                                 }
                                 Err(failure) => failures.push(failure),
@@ -1325,6 +1329,7 @@ pub(super) async fn drain_resident_shutdown<L: Send + 'static>(
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum EmbeddedTaskCompletion {
     Completed,
+    RecoveryRequired(String),
     ExecutionFailed(String),
     CleanupFailed(String),
 }
@@ -1340,6 +1345,9 @@ pub(super) fn settle_embedded_completion(
 ) -> Result<EmbeddedTaskCompletion, String> {
     let completion = match &outcome {
         Ok(()) => EmbeddedTaskCompletion::Completed,
+        Err(error) if error.requires_recovery() => {
+            EmbeddedTaskCompletion::RecoveryRequired(error.to_string())
+        }
         Err(error) if error.cleanup_failed() => {
             EmbeddedTaskCompletion::CleanupFailed(error.to_string())
         }

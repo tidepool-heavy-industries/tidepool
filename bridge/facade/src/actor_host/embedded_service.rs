@@ -486,6 +486,8 @@ impl Drop for EmbeddedService {
 pub(super) enum EmbeddedDriverError {
     #[error(transparent)]
     Engine(#[from] harness::engine::EngineError),
+    #[error("native provider admission failed: {0}")]
+    NativeAdmission(#[source] Box<exomonad_actor::ResidentActorWorkbenchError>),
     #[error("{0}")]
     Host(String),
 }
@@ -503,6 +505,26 @@ impl From<&str> for EmbeddedDriverError {
 }
 
 impl EmbeddedDriverError {
+    pub(super) fn requires_recovery(&self) -> bool {
+        fn engine_requires_recovery(error: &harness::engine::EngineError) -> bool {
+            match error {
+                harness::engine::EngineError::Store(
+                    harness::store::StoreError::RecoveryRequired(_)
+                    | harness::store::StoreError::AdmissionFenced,
+                ) => true,
+                harness::engine::EngineError::Cleanup { primary, .. } => {
+                    engine_requires_recovery(primary)
+                }
+                _ => false,
+            }
+        }
+        match self {
+            Self::NativeAdmission(error) => error.requires_recovery(),
+            Self::Engine(error) => engine_requires_recovery(error),
+            Self::Host(_) => false,
+        }
+    }
+
     pub(super) fn cleanup_failed(&self) -> bool {
         matches!(
             self,
@@ -617,10 +639,10 @@ where
         // forwarded hint remained in its receiver; the Store is authoritative.
         let frontier = store
             .embedded_round_frontier(conversation.identity())
-            .map_err(|error| error.to_string())?;
+            .map_err(harness::engine::EngineError::from)?;
         let first = store
             .unread(&actor.0)
-            .map_err(|error| error.to_string())?
+            .map_err(harness::engine::EngineError::from)?
             .first()
             .map(|envelope| harness::mailbox::DurableMailboxWake {
                 envelope_id: envelope.id,
@@ -654,7 +676,7 @@ where
                 provider_admission
                     .begin_provider_turn(provider_thread.clone(), round.id().0.to_string())
             })
-            .map_err(|error| error.to_string())?
+            .map_err(|error| EmbeddedDriverError::NativeAdmission(Box::new(error)))?
         {
             Ok(lease) => lease,
             Err(exomonad_actor::NativeProviderStartError::RetirementPending) => {

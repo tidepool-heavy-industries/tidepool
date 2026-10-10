@@ -4031,7 +4031,8 @@ async fn drain_embedded_shutdown<L: Send + 'static>(
                         actor, task_id, outcome, application_owners, release_waiters,
                     ) {
                         Ok(application_supervisor::EmbeddedTaskCompletion::Completed) => {}
-                        Ok(application_supervisor::EmbeddedTaskCompletion::ExecutionFailed(detail)) => {
+                        Ok(application_supervisor::EmbeddedTaskCompletion::ExecutionFailed(detail))
+                        | Ok(application_supervisor::EmbeddedTaskCompletion::RecoveryRequired(detail)) => {
                             tracing::warn!(?actor, %detail, "embedded Engine stopped with an error during host shutdown");
                             result.driver_failure.get_or_insert_with(|| format!("embedded Engine {actor:?}: {detail}"));
                         }

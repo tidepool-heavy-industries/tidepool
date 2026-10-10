@@ -16,6 +16,89 @@ fn registered_shutdown_owners(
     ))
 }
 
+fn native_recovery_driver_error() -> embedded_service::EmbeddedDriverError {
+    embedded_service::EmbeddedDriverError::NativeAdmission(Box::new(
+        exomonad_actor::ResidentActorWorkbenchError::Resident(
+            tidepool_runtime::session::resident::ResidentError::Session(
+                tidepool_runtime::session::SessionError::RecoveryStore(Box::new(
+                    tidepool_runtime::session::StoreError {
+                        path: PathBuf::from("run-recovery.sqlite"),
+                        kind: tidepool_runtime::session::StoreErrorKind::RecoveryRequired,
+                        detail: "commit outcome is uncertain".into(),
+                    },
+                )),
+            ),
+        ),
+    ))
+}
+
+#[tokio::test]
+async fn driver_observed_recovery_escalates_without_erasing_cleanup_uncertainty() {
+    use application_supervisor::{settle_embedded_completion, EmbeddedTaskCompletion};
+    use embedded_service::EmbeddedDriverError;
+    use exomonad_actor::{ActorId, ResourceRelease};
+    use harness::engine::EngineError;
+    use harness::store::StoreError;
+
+    for (error, recovery, retained) in [
+        (native_recovery_driver_error(), true, false),
+        (
+            EngineError::Store(StoreError::AdmissionFenced).into(),
+            true,
+            false,
+        ),
+        (
+            EngineError::Cleanup {
+                primary: Box::new(EngineError::Store(StoreError::AdmissionFenced)),
+                cleanup: "native release was not acknowledged".into(),
+            }
+            .into(),
+            true,
+            true,
+        ),
+        (
+            EngineError::Cleanup {
+                primary: Box::new(EngineError::InvalidFunctionCall),
+                cleanup: "native release was not acknowledged".into(),
+            }
+            .into(),
+            false,
+            true,
+        ),
+        (
+            EmbeddedDriverError::Host("RecoveryRequired: admission fenced".into()),
+            false,
+            false,
+        ),
+    ] {
+        let actor = ActorRef::first(ActorId(42));
+        let mut tasks = JoinSet::new();
+        let task = tasks.spawn(async {});
+        let owners = registered_shutdown_owners([(actor, task.id())]);
+        let completion =
+            settle_embedded_completion(actor, task.id(), Err(error), &owners, &mut HashMap::new())
+                .unwrap();
+        assert_eq!(
+            matches!(completion, EmbeddedTaskCompletion::RecoveryRequired(_)),
+            recovery,
+            "{completion:?}"
+        );
+        assert_eq!(
+            matches!(
+                observed_resource_release(actor, &owners),
+                Some(ResourceRelease::Retained(_))
+            ),
+            retained,
+            "{completion:?}"
+        );
+        assert_eq!(
+            with_embedded_state(&owners, actor, |state| state.task_id),
+            Some(None)
+        );
+        tasks.join_next().await.unwrap().unwrap();
+    }
+}
+
 #[tokio::test]
 async fn embedded_shutdown_reports_driver_failure_and_accepts_confirmed_cancellation() {
     use embedded_service::EmbeddedDriverError;
@@ -544,6 +627,9 @@ async fn generated_driver_receipt_histories_preserve_exact_owner_and_cleanup() {
         Success,
         ExecutionFailure,
         CleanupFailure,
+        NativeRecovery,
+        HarnessRecovery,
+        RecoveryCleanupFailure,
     }
     #[derive(Clone, Copy, Debug)]
     enum Registration {
@@ -585,7 +671,10 @@ async fn generated_driver_receipt_histories_preserve_exact_owner_and_cleanup() {
             prop::sample::select(vec![
                 CompletionKind::Success,
                 CompletionKind::ExecutionFailure,
-                CompletionKind::CleanupFailure
+                CompletionKind::CleanupFailure,
+                CompletionKind::NativeRecovery,
+                CompletionKind::HarnessRecovery,
+                CompletionKind::RecoveryCleanupFailure,
             ])
         )
             .prop_map(|(actor, registration, kind)| Operation::Complete(
@@ -673,6 +762,20 @@ async fn generated_driver_receipt_histories_preserve_exact_owner_and_cleanup() {
                                     },
                                 ))
                             }
+                            CompletionKind::NativeRecovery => Err(native_recovery_driver_error()),
+                            CompletionKind::HarnessRecovery => Err(
+                                harness::engine::EngineError::Store(
+                                    harness::store::StoreError::AdmissionFenced,
+                                ).into(),
+                            ),
+                            CompletionKind::RecoveryCleanupFailure => Err(
+                                harness::engine::EngineError::Cleanup {
+                                    primary: Box::new(harness::engine::EngineError::Store(
+                                        harness::store::StoreError::AdmissionFenced,
+                                    )),
+                                    cleanup: "release unconfirmed".into(),
+                                }.into(),
+                            ),
                         };
                         let expected_admission = matches!(models[index], Model::Pending)
                             && matches!(registration, Registration::Exact);
@@ -685,7 +788,11 @@ async fn generated_driver_receipt_histories_preserve_exact_owner_and_cleanup() {
                         );
                         prop_assert_eq!(completion.is_ok(), expected_admission);
                         if expected_admission {
-                            models[index] = if matches!(kind, CompletionKind::CleanupFailure) {
+                            prop_assert_eq!(
+                                matches!(completion, Ok(application_supervisor::EmbeddedTaskCompletion::RecoveryRequired(_))),
+                                matches!(kind, CompletionKind::NativeRecovery | CompletionKind::HarnessRecovery | CompletionKind::RecoveryCleanupFailure),
+                            );
+                            models[index] = if matches!(kind, CompletionKind::CleanupFailure | CompletionKind::RecoveryCleanupFailure) {
                                 Model::Retained
                             } else {
                                 Model::Released

@@ -4325,7 +4325,8 @@ pub enum ResidentActorWorkbenchError {
 }
 
 impl ResidentActorWorkbenchError {
-    pub(crate) fn requires_recovery(&self) -> bool {
+    /// The run owner must stop admission and recover before any further execution.
+    pub fn requires_recovery(&self) -> bool {
         match self {
             Self::PrivatePublication { source, .. }
             | Self::ActivationBindingCommitted { source, .. } => source.requires_recovery(),
