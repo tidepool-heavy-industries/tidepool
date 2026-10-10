@@ -62,7 +62,7 @@ import Text.Read (readMaybe)
 import Tidepool.ExactHydration (ExactIfaceArtifact(..), checkedValueOwner, CheckedTemplateInterface(..), CheckedTemplateImports(..), RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, VerifiedExactIfaceClosure, readCapturedExactIfaceArtifacts, readCapturedExactIfaceClosureWithCheckedValues)
 import GHC.Unit.Module.ModIface (ModIface)
 import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256)
-import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, capturedRequestInputToken, requestInputRetained, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, revalidateRequestInputs, revalidateRequestInputsWith, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes)
+import Tidepool.RequestInputs (RequestOriginalInputs, RequestInputReader, capturedRequestInputToken, requestInputRetained, retainRequestEncodedBytes, captureRequestInputs, captureRequestInputTokens, mergeRequestInputs, aliasRequestInputs, capturedRequestInput, revalidateRequestInputs, revalidateRequestInputsWith, CapturedOriginalContent, emptyCapturedOriginalContent, OriginalInputReference(..), ownedArenaRange, continueRequestInputs, selectedOriginalContent, capturedOriginalContentBytes, capturedOriginalContentKeys, mergeCapturedOriginalContent, requestCaptureByteLimit, requestInputBytes)
 import Tidepool.Session (Generation(..), SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString)
 import Tidepool.CheckedPrefixImports (CompletedValueImport(..))
 import Tidepool.CheckedCell
@@ -1825,7 +1825,8 @@ decodeInputAcquisition = do
             (fail "owned original input exceeds its artifact bound")
           origins <- bounded 4096 absolute
           unique "original input origins" origins
-          pure (kind,OriginalInputReference path sha (fromIntegral bytes) origins)
+          transport <- ownedArenaRange path (toInteger bytes) 0
+          pure (kind,OriginalInputReference path sha (fromIntegral bytes) origins transport)
         let identities = [(kind,originalInputSha256 reference) | (kind,reference) <- parts]
         unless (not (null parts) && and (zipWith (<) identities (drop 1 identities))
           && inputImageDigest producer key parts == imageSha)

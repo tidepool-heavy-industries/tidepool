@@ -4,7 +4,7 @@
 module Tidepool.RequestInputs
   ( RequestOriginalInputs, RequestInputReader, captureRequestInputs, RequestInputTokenReader, captureRequestInputTokens
   , CapturedOriginalContent, emptyCapturedOriginalContent, capturedOriginalContentBytes
-  , OriginalInputReference(..), continueRequestInputs, selectedOriginalContent
+  , OriginalInputReference(..), OwnedArenaRange, ownedArenaRange, continueRequestInputs, selectedOriginalContent
   , mergeCapturedOriginalContent, selectCapturedOriginalContent, capturedOriginalContentKeys
   , requestCaptureByteLimit
   , capturedRequestInputToken
@@ -16,6 +16,8 @@ import qualified Data.ByteString as BS
 import Control.Concurrent.MVar (newMVar, modifyMVar, modifyMVar_, readMVar)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import System.IO (withBinaryFile, IOMode(ReadMode), SeekMode(AbsoluteSeek), hSeek, hFileSize)
+import System.FilePath (isAbsolute)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
 import Tidepool.BoundedRead (readFileAtMost, FileObservations, FileObservation(..), observeFile, withFileObservations)
@@ -63,11 +65,39 @@ mergeCapturedOriginalContent :: CapturedOriginalContent -> CapturedOriginalConte
 mergeCapturedOriginalContent (CapturedOriginalContent selected) (CapturedOriginalContent previous) =
   CapturedOriginalContent (Map.union selected previous)
 
+-- The range is a transport view, independent of logical path identity. Its
+-- issuer retains the sealed backing arena through worker request completion.
+data OwnedArenaRange = OwnedArenaRange !FilePath !Integer !Integer
+  deriving (Eq, Show)
+
+ownedArenaRange :: FilePath -> Integer -> Integer -> Either String OwnedArenaRange
+ownedArenaRange endpoint extent offset
+  | not (isAbsolute endpoint) = Left "owned arena endpoint is not absolute"
+  | extent < 0 || offset < 0 || offset > extent = Left "invalid owned arena extent or offset"
+  | otherwise = Right (OwnedArenaRange endpoint extent offset)
+
+validateOwnedArenaRange :: OwnedArenaRange -> Int -> Either String ()
+validateOwnedArenaRange (OwnedArenaRange _ extent offset) count
+  | count < 0 || offset + toInteger count > extent = Left "owned input range leaves its arena"
+  | otherwise = Right ()
+
+readOwnedArenaRange :: OwnedArenaRange -> Int -> IO BS.ByteString
+readOwnedArenaRange (OwnedArenaRange endpoint extent offset) count = do
+  either fail pure (validateOwnedArenaRange (OwnedArenaRange endpoint extent offset) count)
+  withBinaryFile endpoint ReadMode $ \handle -> do
+    actualExtent <- hFileSize handle
+    unless (actualExtent == extent) (fail "owned arena extent differs from its descriptor")
+    hSeek handle AbsoluteSeek offset
+    bytes <- BS.hGet handle count
+    unless (BS.length bytes == count) (fail "owned arena range is truncated")
+    pure bytes
+
 data OriginalInputReference = OriginalInputReference
   { originalInputPath :: FilePath
   , originalInputSha256 :: String
   , originalInputLength :: Int
   , originalInputOrigins :: [FilePath]
+  , originalInputTransport :: OwnedArenaRange
   } deriving (Eq, Show)
 
 requestCaptureByteLimit :: IO Integer
@@ -94,6 +124,7 @@ continueRequestInputs (CapturedOriginalContent content) references = do
           sha = originalInputSha256 reference
           count = originalInputLength reference
       when (count < 0 || count == maxBound) (fail "invalid original input length")
+      either fail pure (validateOwnedArenaRange (originalInputTransport reference) count)
       input <- case Map.lookup (sha,count) available of
         Just retained -> do
           emitCount timing "original_inputs.content_hits" 1
@@ -101,7 +132,7 @@ continueRequestInputs (CapturedOriginalContent content) references = do
           pure retained
         Nothing -> do
           when (used + toInteger count > limit) (fail "continued original inputs exceed receiving byte budget")
-          bytes <- readFileAtMost path (count + 1)
+          bytes <- readOwnedArenaRange (originalInputTransport reference) count
           let body = captureArtifactBytes bytes
           unless (artifactLength body == count && artifactSha256 body == sha)
             (fail "owned original materialization differs from its admitted bytes")

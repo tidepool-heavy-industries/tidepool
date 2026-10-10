@@ -608,6 +608,7 @@ requestInputHistories = do
           receiving = directory </> "receiving-alias"
           changed = bytes <> BS.singleton 123
           reference path = OriginalInputReference path (digest bytes) (BS.length bytes) [original]
+            (either error id (ownedArenaRange path (toInteger (BS.length bytes)) 0))
       BS.writeFile historical bytes
       BS.writeFile oldManifest (BS.singleton 7)
       BS.writeFile original bytes
@@ -699,6 +700,7 @@ requestInputBoundaries = withScratch $ \directory -> do
   BS.writeFile path bytes
   BS.writeFile other bytes
   let reference destination = OriginalInputReference destination (digest bytes) 3 []
+        (either error id (ownedArenaRange destination 3 0))
   (shared,counts) <- withTiming $ captureDiagnostics
     (continueRequestInputs emptyCapturedOriginalContent [reference path,reference other])
   left <- capturedRequestInput shared path (digest bytes)
