@@ -2457,10 +2457,22 @@ impl SessionLib {
             .path
             .parent()
             .ok_or_else(|| invalid("recovery manifest has no parent"))?;
+        let own = certified.product().owner();
+        if certified.introduced_exports().iter().any(|export| {
+            export.head.unit != own.unit
+                || export.head.module != own.module
+                || export
+                    .children
+                    .iter()
+                    .any(|child| child.unit != own.unit || child.module != own.module)
+        }) {
+            return Err(invalid(
+                "authored inventory includes nonlocal export identities",
+            ));
+        }
         let (refs, interfaces) = context
             .materialize_recovery_products_and_interfaces(root)
             .map_err(|error| invalid(&error.to_string()))?;
-        let own = certified.product().owner();
         if refs
             .iter()
             .filter(|reference| {
@@ -2475,18 +2487,6 @@ impl SessionLib {
         {
             return Err(invalid(
                 "authored recovery closure lacks its exact declaration owner",
-            ));
-        }
-        if certified.introduced_exports().iter().any(|export| {
-            export.head.unit != own.unit
-                || export.head.module != own.module
-                || export
-                    .children
-                    .iter()
-                    .any(|child| child.unit != own.unit || child.module != own.module)
-        }) {
-            return Err(invalid(
-                "authored inventory includes nonlocal export identities",
             ));
         }
         let exports = certified
