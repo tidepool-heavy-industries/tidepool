@@ -545,3 +545,242 @@ async fn tool_abort_validates_original_owner_before_empty_settlement() {
         .unwrap()
         .unwrap();
 }
+
+#[tokio::test]
+async fn native_mailbox_casts_retain_recipient_compiler_close_after_caller_retirement() {
+    use crate::resident_workbench::CompilerCloseOwner;
+    use std::path::PathBuf;
+    use tidepool_codegen::scope::ScopeId;
+    use tidepool_runtime::session::{
+        insert_preamble_imports, resident_workbench_templates, turn::run_turn, PersistentSession,
+        SessionRunContext, TurnRequest, TurnResult,
+    };
+
+    tidepool_testing::eval_harness::require_extract();
+    let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[
+        tidepool_mcp::actor_local_decl(),
+        tidepool_mcp::actor_kernel_decl(),
+    ])
+    .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let session_id = tidepool_runtime::session::fresh_session_id();
+    let lib = SessionLib::open(session_id, root.path(), ModuleEnv::standalone_default())
+        .unwrap()
+        .with_validation_include(surface.include_paths().to_vec());
+    let mut persistent = PersistentSession::new(Some(lib), tidepool_runtime::DEFAULT_NURSERY_SIZE);
+    let view = persistent.compile_view_in(ScopeId::ROOT).unwrap();
+    let preamble = insert_preamble_imports(
+        surface.preamble(),
+        "qualified Tidepool.Actor as Actor\nqualified Tidepool.Effects.Core as Core",
+    );
+    let templates = resident_workbench_templates(&preamble, "'[Core.ActorLocal Maybe]", "");
+    let include = view.include_paths(surface.include_paths());
+    let paths = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let compile = |source: &str, gen| {
+        tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: source,
+                    templates: &templates,
+                    include: &paths,
+                    session_root: view.session_root(),
+                    inject_modules: &[],
+                    gen,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &[],
+                },
+                settlement,
+            )
+        })
+        .unwrap()
+    };
+    let TurnResult::Bind {
+        compiled: values,
+        bound,
+        ..
+    } = compile(
+        "(mailboxCast, mailboxQuery) <- pure (Just (), Just (42 :: Int))",
+        1,
+    )
+    else {
+        panic!("native mailbox payload bindings")
+    };
+    let TurnResult::Expr { compiled: receiver, .. } = compile(
+        "Actor.serve @() @Maybe () (\\() request -> case request of Just value -> pure (value, ()); Nothing -> error \"unused mailbox request\") :: Eff '[Core.ActorLocal Maybe] ()",
+        2,
+    ) else {
+        panic!("native receiver loop")
+    };
+    let mut session = ResidentSession::unbootstrapped(
+        frunk::HNil,
+        tidepool_mcp::CapturedOutput::new(),
+        tidepool_runtime::DEFAULT_NURSERY_SIZE,
+        persistent.take_lib(),
+    );
+    tidepool_testing::with_settlement(|settlement| {
+        session.run_projected_bind_with_sites(
+            "native-mailbox-values",
+            values.code(),
+            &bound,
+            tidepool_repr::Generation(1),
+            settlement,
+        )
+    })
+    .unwrap();
+    let placement = crate::ActorPlacement {
+        session: session_id,
+        resource_scope: RealmId::fresh(),
+        lexical_scope: session.mint_isolated_scope(),
+    };
+    session
+        .set_actor_execution(
+            SessionRunContext {
+                lexical_scope: placement.lexical_scope,
+                resource_scope: placement.resource_scope,
+                ..SessionRunContext::ROOT
+            },
+            tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+            tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        )
+        .unwrap();
+    let prepared = tidepool_testing::with_settlement(|settlement| {
+        session.run_with_sites("native-mailbox-receiver", receiver.code(), settlement)
+    })
+    .unwrap();
+    let (forest, _deployments) = Forest::new(
+        ActorWorkbenchSource::new(preamble, include),
+        session_id,
+        session,
+        None,
+        crate::Incarnation::FIRST,
+    );
+    let (recipient, recipient_task) = forest
+        .admit_root(
+            ActorDescriptor::new("native-mailbox-recipient", placement),
+            prepared,
+        )
+        .await
+        .unwrap();
+    let caller_placement = forest
+        .environment
+        .runner
+        .provision_root_scope(session_id)
+        .await
+        .unwrap();
+    let (caller, caller_task) = crate::local_actor::spawn_local_actor_in_directory(
+        None,
+        Behavior::with_boot(
+            ActorDescriptor::new("completed-mailbox-caller", caller_placement),
+            forest.environment.clone(),
+            ResidentBoot::Workbench,
+            Vec::new(),
+        ),
+        forest.incarnation,
+        forest.directory.clone(),
+    )
+    .await
+    .unwrap();
+    caller
+        .shutdown(ActorTerminal::new(
+            ActorExitKind::Completed,
+            "caller finished",
+        ))
+        .await
+        .unwrap();
+    caller_task.await.unwrap();
+    let caller_closes = caller.terminal().compiler_close_observations();
+    assert!(CompilerCloseOwner::current().is_err());
+    let machines = forest.environment.runner.machines_for_test();
+    let payload = |name: &str| {
+        let mut checkout = machines.checkout_run(session_id).unwrap();
+        let custody = checkout
+            .machine()
+            .retain_binding_custody(name)
+            .unwrap()
+            .unwrap();
+        let holes = checkout
+            .machine()
+            .parked_holes()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        checkout.restore_suspended(holes);
+        MailboxValue::new(session_id, custody)
+    };
+    let mut observed = recipient.terminal().compiler_close_observations().len();
+    for _ in 0..3 {
+        recipient
+            .cast(caller.identity(), payload("mailboxCast"))
+            .unwrap();
+        recipient
+            .address()
+            .call(
+                |reply| KernelMessage::SealHostedWork { reply },
+                Some(Duration::from_secs(30)),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let closes = recipient.terminal().compiler_close_observations();
+        assert!(
+            closes.len() > observed,
+            "each native cast issues recipient-owned compiler work"
+        );
+        assert!(
+            closes
+                .iter()
+                .all(crate::termination::CompilerWorkClose::is_confirmed),
+            "{closes:?}"
+        );
+        observed = closes.len();
+        assert!(CompilerCloseOwner::current().is_err());
+    }
+    let reply = tokio::time::timeout(
+        Duration::from_secs(30),
+        recipient.call(
+            caller.identity(),
+            crate::CallAncestry::begin(caller.identity()),
+            payload("mailboxQuery"),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut checkout = machines.checkout_run(session_id).unwrap();
+    assert!(checkout
+        .machine()
+        .render_retained_preview(&reply.into_custody(), 64)
+        .unwrap()
+        .contains("42"));
+    let holes = checkout
+        .machine()
+        .parked_holes()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    checkout.restore_suspended(holes);
+    assert_eq!(
+        caller.terminal().compiler_close_observations(),
+        caller_closes
+    );
+    recipient
+        .shutdown(ActorTerminal::new(
+            ActorExitKind::Cancelled,
+            "native mailbox checked",
+        ))
+        .await
+        .unwrap();
+    recipient_task.await.unwrap();
+    let closes = recipient.terminal().compiler_close_observations();
+    assert!(!closes.is_empty());
+    assert!(
+        closes
+            .iter()
+            .all(crate::termination::CompilerWorkClose::is_confirmed),
+        "{closes:?}"
+    );
+    assert!(CompilerCloseOwner::current().is_err());
+}
