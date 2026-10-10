@@ -624,12 +624,24 @@ impl RecoveryGraphCandidate {
         if let Some(root) = &surface.context_root {
             self.graph.context(root)?;
         }
+        // The receiving graph owns the predecessor receipts and their block
+        // custody. A copied surface supplies facts, not another candidate's
+        // uncommitted materialization baseline.
+        let predecessor = self.graph.surface(&surface.owner)?;
         let previous = self.graph.owner_roots.get(&surface.owner).cloned();
         let mut materializer = Materializer::new(&self.graph);
-        let bindings =
-            materializer.materialize_map(surface.binding_receipt.as_ref(), &surface.bindings)?;
-        let sources = materializer
-            .materialize_map(surface.source_receipt.as_ref(), &surface.source_instances)?;
+        let bindings = materializer.materialize_map(
+            predecessor
+                .as_ref()
+                .and_then(|surface| surface.binding_receipt.as_ref()),
+            &surface.bindings,
+        )?;
+        let sources = materializer.materialize_map(
+            predecessor
+                .as_ref()
+                .and_then(|surface| surface.source_receipt.as_ref()),
+            &surface.source_instances,
+        )?;
         let root = PublicSurfaceRoot::new(materializer.materialize_value(&SurfaceSnapshot {
             version: VERSION,
             declaration_root: surface.declaration_root,
@@ -871,6 +883,38 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_surface_receipts_are_rebuilt_from_receiving_candidate() {
+        let (_directory, base) = fixture();
+        let owning = owner(1);
+        let binding = RecoveryBindingId {
+            session: u64::MAX,
+            variable: u64::MAX,
+        };
+        let mut authored = RecoveryPublicSurface::empty(owning.clone());
+        authored.epoch = 1;
+        authored.bindings.insert("winner".into(), binding);
+        let mut cancelled = base.candidate();
+        cancelled.replace_surface(authored).unwrap();
+        let cancelled = cancelled.seal().unwrap();
+        let transferred = (*cancelled.surface(&owning).unwrap().unwrap()).clone();
+        let binding_root = *transferred.binding_receipt.as_ref().unwrap().root().cid();
+        assert!(cancelled.pending.contains_key(&binding_root));
+        assert!(base.store().get(&binding_root).unwrap().is_none());
+        drop(cancelled);
+        assert!(base.surface(&owning).unwrap().is_none());
+
+        let mut receiving = base.candidate();
+        receiving.replace_surface(transferred).unwrap();
+        let committed = publish(receiving, &base);
+        let cold = reopened(&committed);
+        let actual = cold.surface(&owning).unwrap().unwrap();
+        assert_eq!(actual.epoch, 1);
+        assert_eq!(actual.bindings.len(), 1);
+        assert_eq!(actual.bindings["winner"], binding);
+        assert!(actual.source_instances.is_empty());
+    }
+
+    #[test]
     fn binding_tombstones_and_source_removal_preserve_sibling_roots_and_u64() {
         let (_directory, mut graph) = fixture();
         let sibling_domain = RecoveryDomainId::Session(SessionId(u64::MAX));
@@ -1027,8 +1071,143 @@ mod tests {
         owners: BTreeMap<u64, (u64, BTreeMap<String, RecoveryBindingId>)>,
         revision: u64,
     }
+
+    #[derive(Clone, Debug)]
+    enum SurfacePacketDisposition {
+        Cancelled,
+        Refused,
+        Stale,
+    }
+    #[derive(Clone, Debug)]
+    enum SurfaceEdit {
+        PutBinding(u8, u64),
+        RemoveBinding(u8),
+        PutSource(u64),
+        RemoveSource(u64),
+    }
+    #[derive(Clone, Default)]
+    struct SurfaceModel {
+        epoch: u64,
+        bindings: BTreeMap<String, RecoveryBindingId>,
+        sources: std::collections::BTreeSet<RecoveryPublicSourceInstance>,
+    }
+    fn source(identity: u64) -> RecoveryPublicSourceInstance {
+        RecoveryPublicSourceInstance {
+            machine_incarnation: identity,
+            instance: u32::MAX,
+            module_version: [identity as u8; 32],
+            binder: RecoverySourceIdentity {
+                unit: "main".into(),
+                module: "Own".into(),
+                namespace: "value".into(),
+                occurrence: format!("source{identity}"),
+                record_parent: None,
+            },
+        }
+    }
+    fn surface_operation() -> impl Strategy<Value = (SurfacePacketDisposition, u64, SurfaceEdit)> {
+        let disposition = prop_oneof![
+            Just(SurfacePacketDisposition::Cancelled),
+            Just(SurfacePacketDisposition::Refused),
+            Just(SurfacePacketDisposition::Stale),
+        ];
+        let identity = prop_oneof![0u64..4, Just(u64::MAX)];
+        let edit = prop_oneof![
+            (0u8..4, any::<u64>()).prop_map(|(key, value)| SurfaceEdit::PutBinding(key, value)),
+            (0u8..4).prop_map(SurfaceEdit::RemoveBinding),
+            identity.clone().prop_map(SurfaceEdit::PutSource),
+            identity.prop_map(SurfaceEdit::RemoveSource),
+        ];
+        (disposition, 1u64..4, edit)
+    }
     proptest! {
         #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
+        #[test]
+        fn transferred_surface_histories_match_independent_facts(
+            generated in prop::collection::vec(surface_operation(), 1..32)
+        ) {
+            let (_directory, mut graph) = fixture();
+            let mut model = BTreeMap::<u64, SurfaceModel>::new();
+            // Every case reaches lost-packet transfer after cancellation,
+            // definitive rollback and stale rejection, plus actual tombstones.
+            let mut operations = vec![
+                (SurfacePacketDisposition::Cancelled, 1, SurfaceEdit::PutBinding(0, u64::MAX)),
+                (SurfacePacketDisposition::Refused, 1, SurfaceEdit::PutSource(u64::MAX)),
+                (SurfacePacketDisposition::Stale, 1, SurfaceEdit::RemoveBinding(0)),
+                (SurfacePacketDisposition::Cancelled, 1, SurfaceEdit::RemoveSource(u64::MAX)),
+            ];
+            operations.extend(generated);
+            let original_domain_root = graph.domain_root().cloned();
+            for (disposition, incarnation, edit) in operations {
+                let owning = owner(incarnation);
+                let mut expected = model.get(&incarnation).cloned().unwrap_or_default();
+                expected.epoch += 1;
+                match edit {
+                    SurfaceEdit::PutBinding(key, variable) => {
+                        expected.bindings.insert(format!("name{key}"), RecoveryBindingId {session: u64::MAX, variable});
+                    },
+                    SurfaceEdit::RemoveBinding(key) => { expected.bindings.remove(&format!("name{key}")); },
+                    SurfaceEdit::PutSource(identity) => { expected.sources.insert(source(identity)); },
+                    SurfaceEdit::RemoveSource(identity) => { expected.sources.remove(&source(identity)); },
+                }
+                let mut authored = graph.surface(&owning).unwrap()
+                    .map(|surface| (*surface).clone())
+                    .unwrap_or_else(|| RecoveryPublicSurface::empty(owning.clone()));
+                authored.epoch = expected.epoch;
+                authored.bindings = expected.bindings.iter().map(|(name, binding)| (name.clone(), *binding)).collect();
+                authored.source_instances = expected.sources.iter().cloned().map(|source| (source, ())).collect();
+                let before = graph.store().read_domain(graph.domain_id()).unwrap().unwrap();
+                let mut abandoned = graph.candidate();
+                abandoned.replace_surface(authored).unwrap();
+                let abandoned = abandoned.seal().unwrap();
+                let transferred = (*abandoned.surface(&owning).unwrap().unwrap()).clone();
+                match disposition {
+                    SurfacePacketDisposition::Cancelled => drop(abandoned),
+                    SurfacePacketDisposition::Refused | SurfacePacketDisposition::Stale => {
+                        let staged = abandoned.candidate().prepare(graph.store_revision(), graph.high_water()).unwrap();
+                        drop(abandoned);
+                        if matches!(disposition, SurfacePacketDisposition::Refused) {
+                            graph.store().inject_fault(StoreFault::BeforeCommit);
+                        } else {
+                            graph = publish(graph.candidate(), &graph);
+                        }
+                        let installed = std::cell::Cell::new(false);
+                        let outcome = staged.publish_and_install(|_, _| installed.set(true));
+                        prop_assert!(matches!(outcome, StoreDisposition::Refused(_)), "{outcome:?}");
+                        if matches!(disposition, SurfacePacketDisposition::Stale) {
+                            prop_assert!(matches!(outcome, StoreDisposition::Refused(crate::session::recovery_store::StoreRefusal::StaleRevision)));
+                        } else {
+                            prop_assert_eq!(graph.store().read_domain(graph.domain_id()).unwrap().unwrap(), before);
+                        }
+                        prop_assert!(!installed.get());
+                        prop_assert!(!graph.store().is_recovery_required());
+                    },
+                }
+                let sibling_roots = graph.owner_roots.clone();
+                let mut receiving = graph.candidate();
+                receiving.replace_surface(transferred).unwrap();
+                graph = publish(receiving, &graph);
+                model.insert(incarnation, expected);
+                // Independent cold acquisition cannot consult the warm sibling
+                // cache that retained the transferred map receipts.
+                graph = reopened(&graph);
+                prop_assert_eq!(graph.domain_root(), original_domain_root.as_ref());
+                prop_assert_eq!(graph.high_water(), Generation(u64::MAX));
+                prop_assert_eq!(graph.public_owners().count(), model.len());
+                for (sibling, root) in sibling_roots.iter().filter(|(sibling, _)| *sibling != &owning) {
+                    prop_assert_eq!(graph.public_owner_state(sibling), Some(root));
+                }
+                for (&incarnation, expected) in &model {
+                    let actual = graph.surface(&owner(incarnation)).unwrap().unwrap();
+                    prop_assert_eq!(actual.epoch, expected.epoch);
+                    prop_assert_eq!(actual.bindings.iter().map(|(name, binding)| (name.clone(), *binding)).collect::<BTreeMap<_, _>>(), expected.bindings.clone());
+                    prop_assert_eq!(actual.source_instances.keys().cloned().collect::<std::collections::BTreeSet<_>>(), expected.sources.clone());
+                    prop_assert!(actual.declaration_root.is_none());
+                    prop_assert!(actual.context_root.is_none());
+                }
+            }
+        }
+
         #[test]
         fn persistent_graph_histories_match_independent_maps(operations in prop::collection::vec((0u8..10, 0u8..4, any::<u64>()), 1..64)) {
             let (_directory, mut graph) = fixture();
