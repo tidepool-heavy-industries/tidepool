@@ -26,7 +26,6 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
     let root = tempfile::tempdir().unwrap();
     let recovery =
         matches!(persistence, Persistence::Durable).then(|| RecoveryFixture::create(root.path()));
-    let stored = || recovery.as_ref().map(RecoveryFixture::state);
     let mut lib = SessionLib::open(
         SessionId(4483),
         root.path().join("session"),
@@ -66,6 +65,18 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
                 .unwrap()
         }
         Persistence::Ephemeral => session.begin_ephemeral_private_execution(public).unwrap(),
+    };
+    let stored = || {
+        recovery.as_ref().map(|recovery| {
+            (
+                recovery.state(),
+                recovery
+                    .store
+                    .read_public_owner(crate::session::RecoveryDomainId::Root, &owner)
+                    .unwrap()
+                    .unwrap(),
+            )
+        })
     };
     let private = admission.private_scope();
     let new_winner =
@@ -150,8 +161,10 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
                 Persistence::Durable => {
                     let before = domain_before.as_ref().unwrap();
                     let published = domain_published.as_ref().unwrap();
-                    assert_ne!(published.content_revision, before.content_revision);
-                    assert_ne!(published.snapshot_root, before.snapshot_root);
+                    assert_ne!(published.0.content_revision, before.0.content_revision);
+                    assert_eq!(published.0.snapshot_root, before.0.snapshot_root);
+                    assert_ne!(published.1.surface_root, before.1.surface_root);
+                    assert_eq!(published.1.epoch, before.1.epoch + 1);
                 }
                 Persistence::Ephemeral => assert_eq!(domain_published, None),
             }
