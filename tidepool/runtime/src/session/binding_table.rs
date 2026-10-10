@@ -508,7 +508,8 @@ mod tests {
     mod properties {
         use super::*;
         use proptest::prelude::*;
-        use proptest::test_runner::{Config, FileFailurePersistence};
+        use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
+        use std::cell::RefCell;
 
         const IDENTITIES: u8 = 4;
         const ROOTS: usize = 3;
@@ -922,16 +923,72 @@ mod tests {
             config
         }
 
-        proptest! {
-            #![proptest_config(config())]
+        #[derive(Default, serde::Serialize)]
+        struct Observed {
+            callbacks: usize,
+            completed_histories: usize,
+            binds: usize,
+            reads: usize,
+            held_roots: usize,
+            released_roots: usize,
+            cohorts: [usize; 4],
+        }
 
-            #[test]
-            fn arbitrary_histories_match_scanning_oracle(ops in arbitrary_history()) {
-                replay(&ops);
+        impl Observed {
+            fn completed(&mut self, support: &Support) {
+                self.completed_histories += 1;
+                self.binds += support.binds;
+                self.reads += support.reads;
+                self.held_roots += support.held_roots;
+                self.released_roots += support.released_roots;
             }
+        }
 
-            #[test]
-            fn guided_histories_match_scanning_oracle((cohort, ops) in guided_history()) {
+        #[test]
+        fn arbitrary_histories_match_scanning_oracle() {
+            let mut config = proptest::test_runner::contextualize_config(config());
+            config.source_file = Some(file!());
+            config.test_name = Some(concat!(
+                module_path!(),
+                "::arbitrary_histories_match_scanning_oracle"
+            ));
+            let configuration = format!("{config:?}");
+            let cases = config.cases;
+            let observed = RefCell::new(Observed::default());
+            let result = TestRunner::new(config).run(&arbitrary_history(), |ops| {
+                observed.borrow_mut().callbacks += 1;
+                let support = replay(&ops);
+                observed.borrow_mut().completed(&support);
+                Ok(())
+            });
+            eprintln!(
+                "binding_index_campaign={}",
+                serde_json::json!({
+                    "campaign": "arbitrary",
+                    "configured_cases": cases,
+                    "configuration": configuration,
+                    "observation_scope": "runner callbacks in this process, including replay and shrinking",
+                    "observed": &*observed.borrow(),
+                })
+            );
+            if let Err(error) = result {
+                panic!("arbitrary BindingIndex property failed: {error}");
+            }
+        }
+
+        #[test]
+        fn guided_histories_match_scanning_oracle() {
+            let mut config = proptest::test_runner::contextualize_config(config());
+            config.source_file = Some(file!());
+            config.test_name = Some(concat!(
+                module_path!(),
+                "::guided_histories_match_scanning_oracle"
+            ));
+            let configuration = format!("{config:?}");
+            let cases = config.cases;
+            let observed = RefCell::new(Observed::default());
+            let result = TestRunner::new(config).run(&guided_history(), |(cohort, ops)| {
+                observed.borrow_mut().callbacks += 1;
                 let support = replay(&ops);
                 prop_assert!(support.binds >= 2, "{support:?}");
                 prop_assert!(support.reads >= 4, "{support:?}");
@@ -956,6 +1013,23 @@ mod tests {
                     _ => unreachable!("bounded cohort selector"),
                 }
                 prop_assert!(support.released_roots >= 1, "{support:?}");
+                let mut observed = observed.borrow_mut();
+                observed.completed(&support);
+                observed.cohorts[usize::from(cohort)] += 1;
+                Ok(())
+            });
+            eprintln!(
+                "binding_index_campaign={}",
+                serde_json::json!({
+                    "campaign": "guided",
+                    "configured_cases": cases,
+                    "configuration": configuration,
+                    "observation_scope": "runner callbacks in this process, including replay and shrinking",
+                    "observed": &*observed.borrow(),
+                })
+            );
+            if let Err(error) = result {
+                panic!("guided BindingIndex property failed: {error}");
             }
         }
 
