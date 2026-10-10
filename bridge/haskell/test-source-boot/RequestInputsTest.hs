@@ -12,8 +12,12 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, removeFile, setPermissions, Permissions(..))
+import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, makeAbsolute, removeFile, setPermissions, Permissions(..))
 import System.FilePath ((</>), takeDirectory)
+import System.IO (hFlush, hGetLine, hPutStrLn)
+import System.Process (CreateProcess(..), StdStream(CreatePipe), callProcess, proc, waitForProcess, withCreateProcess)
+import System.Exit (ExitCode(ExitSuccess))
+import GHC.Conc (ThreadStatus(..), threadStatus)
 import System.Timeout (timeout)
 import Test.QuickCheck
 import Test.QuickCheck.Random (mkQCGen)
@@ -29,10 +33,10 @@ import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..) )
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.ExactScope
-  ( ExactCompilation(..), SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
+  ( ExactScope, ExactCompilation(..), SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
   , scopeInterfaces, scopeModuleInterfaceProofs, canonicalCertificatePath
   , canonicalCoreArtifact, canonicalCorePath, readExactScope, revalidateExactScope
-  , writeCheckedExactCompilation, writeRetainedExactCompilation, newExactInputOwner, readExactScopeWithOwner )
+  , writeCheckedExactCompilation, writeRetainedExactCompilation, newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), PreparedPipelineResult(..), PipelineResult(..)
@@ -87,7 +91,92 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work -> do
     unless (counterValues "original_inputs.retained_encoded_bytes" evicted == [0]
         && total "original_inputs.certificate.misses" evicted == 2)
       (fail "zero inactive allowance retained content or decoded facts")
-  putStrLn ("owned exact inputs: A/B/A reuse, deleted manifests, rotation and zero-budget eviction passed\n" ++ warm)
+  -- Permit either genuine image alone, but not both. The receiving scope owns
+  -- both images even while the inactive pool evicts one of them.
+  term <- readCodecTerm thirdPath
+  imageSizes <- case term of
+    TList fields -> case last fields of
+      TList [TString "continue-originals",TList images] -> forM images $ \image -> case image of
+        TList [_,_,_,_,TList parts] -> do
+          sizes <- forM parts $ \part -> case part of
+            TList [_,_,TString sha,size,_] -> case size of
+              TInt amount -> pure ((sha,toInteger amount),toInteger amount)
+              TInteger amount -> pure ((sha,amount),amount)
+              _ -> fail "owned image has another byte-count representation"
+            _ -> fail "owned image has another part representation"
+          pure (sum (Map.elems (Map.fromList sizes)))
+        _ -> fail "owned image has another envelope"
+      _ -> fail "genuine scope lacks continued original images"
+    _ -> fail "genuine scope has another envelope"
+  unless (length imageSizes == 2 && all (> 0) imageSizes)
+    (fail "positive eviction fixture lacks two separately retainable images")
+  let positiveLimit = maximum imageSizes
+  unless (positiveLimit < sum imageSizes)
+    (fail "positive eviction fixture lacks two separately retainable images")
+  withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" (show positiveLimit) $ do
+    bounded <- newExactInputOwner
+    (live,evicted) <- captureDiagnostics (readExactScopeWithOwner bounded thirdPath >>= either fail pure)
+    unless (total "original_inputs.retained_encoded_bytes" evicted > 0
+        && total "original_inputs.evicted_encoded_bytes" evicted > 0)
+      (fail "positive allowance did not retain and evict genuine images")
+    putStrLn ("owned input positive allowance=" ++ show positiveLimit
+      ++ " retained=" ++ show (total "original_inputs.retained_encoded_bytes" evicted)
+      ++ " evicted=" ++ show (total "original_inputs.evicted_encoded_bytes" evicted))
+    receiving <- writeGenuineMetadataScope work ["CanonicalDependency"] fixture
+    _ <- readExactScopeWithOwner bounded receiving >>= either fail pure
+    forM_ (scopeInterfaces live) $ \(iface,_,_) -> do
+      bytes <- scopeInterfaceBytes live iface
+      bracket (BS.readFile (exactPath iface)) (BS.writeFile (exactPath iface)) $ \_ -> do
+        BS.writeFile (exactPath iface) (BS.singleton 0)
+        held <- scopeInterfaceBytes live iface
+        unless (held == bytes) (fail "inactive eviction dropped live original custody")
+        revalidateExactScope (prHscEnv (pprPipelineResult original)) live >>= \result ->
+          unless (either (const True) (const False) result)
+            (fail "live custody bypassed terminal receiving-path drift")
+    revalidateExactScope (prHscEnv (pprPipelineResult original)) live >>= either fail pure
+  -- GHC opens FIFO descriptors nonblocking, so an already-open RDWR peer
+  -- prevents an early EOF. The reader's blocked state then establishes that
+  -- admission has started its incomplete-manifest read before cancellation.
+  python <- lookupEnv "TIDEPOOL_TEST_PYTHON" >>= maybe (fail "missing declared fixture Python") pure
+  fifo <- makeAbsolute (work </> "pending-exact-scope.cbor")
+  callProcess python ["-c","import os,sys; os.mkfifo(sys.argv[1])",fifo]
+  let script = "import os,sys; fd=os.open(sys.argv[1],os.O_RDWR); os.write(fd,b'\\x00'); print('ready',flush=True); sys.stdin.readline(); os.close(fd)"
+      peer = (proc python ["-c",script,fifo]) {std_in=CreatePipe,std_out=CreatePipe}
+  withCreateProcess peer $ \input output _ processHandle -> case (input,output) of
+    (Just commands,Just responses) -> do
+      ready <- timeout 5000000 (hGetLine responses)
+      unless (ready == Just "ready") (fail "input cancellation peer did not open its FIFO")
+      readerDone <- newEmptyMVar
+      bracket (forkIO ((try (readExactScopeWithOwner owner fifo) :: IO (Either SomeException (Either String ExactScope)))
+          >>= putMVar readerDone)) killThread $ \reader -> do
+        let await = do
+              status <- threadStatus reader
+              case status of
+                ThreadBlocked reason -> pure reason
+                ThreadRunning -> threadDelay 1000 >> await
+                _ -> fail ("exact input admission did not block on its partial manifest: " ++ show status)
+        blocked <- timeout 5000000 await
+        case blocked of
+          Just reason -> putStrLn ("owned input cancelled admission blocked=" ++ show reason)
+          Nothing -> fail "exact input admission did not reach its pending read"
+        killThread reader
+        settled <- timeout 5000000 (takeMVar readerDone)
+        unless (case settled of
+          Just (Left problem) -> fromException problem == Just ThreadKilled
+          _ -> False) (fail "exact input admission swallowed cancellation or failed to settle")
+      hPutStrLn commands "release"
+      hFlush commands
+      completed <- timeout 5000000 (waitForProcess processHandle)
+      unless (completed == Just ExitSuccess) (fail "cancelled input admission retained its fixture peer")
+    _ -> fail "input cancellation peer lacks its declared pipes"
+  (_,afterCancellation) <- captureDiagnostics (readExactScopeWithOwner owner thirdPath >>= either fail pure)
+  unless (total "original_inputs.certificate.hits" afterCancellation == 2)
+    (fail "cancelled admission discarded the previous complete owner state")
+  replacement <- newExactInputOwner
+  (_,afterReplacement) <- captureDiagnostics (readExactScopeWithOwner replacement thirdPath >>= either fail pure)
+  unless (total "original_inputs.certificate.misses" afterReplacement == 2)
+    (fail "replacement owner inherited cancelled physical-worker facts")
+  putStrLn ("owned exact inputs: A/B/A reuse, deleted manifests, rotation, positive/live and zero-budget eviction, cancelled admission and replacement passed\n" ++ warm)
 
 -- This fault injector invokes the actual libtest binary. It never derives
 -- success from rendered test output; receipt mutations use independently known
