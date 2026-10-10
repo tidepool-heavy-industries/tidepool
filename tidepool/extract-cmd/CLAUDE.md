@@ -185,6 +185,12 @@ the compiler CLI owns daemon process observability. Its wire formats are small,
 versioned, and implemented in-repo. Keep framing and field validation here;
 keep compiler interpretation in the Haskell worker.
 
+Encoded request fields are transport data until operation admission. Admit one
+operation before its compiler or artifact I/O, and dispatch on that admitted sum
+rather than flag precedence. Activation preview refines a turn, inspection queries
+share one inspection operation, and declaration operations carry their manifest
+and output together. Common compiler context does not select another operation.
+
 When adding a request field:
 
 1. add it to the typed Rust request;

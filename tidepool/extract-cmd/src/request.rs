@@ -161,6 +161,7 @@ pub struct ExtractRequest {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RequestMode {
+    Invalid,
     ActivationPreview,
     DeclarationInterface,
     CellPlan,
@@ -175,6 +176,7 @@ pub(crate) enum RequestMode {
 impl std::fmt::Display for RequestMode {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
+            Self::Invalid => "invalid",
             Self::ActivationPreview => "activation_preview",
             Self::DeclarationInterface => "declaration_interface",
             Self::CellPlan => "cell_plan",
@@ -203,40 +205,81 @@ impl ExtractRequest {
         self.execution_grant = grant;
     }
 
-    /// Diagnostic mode selected from typed fields, without reparsing rendered flags.
+    /// Diagnostic mode comes from the same admission used by the CLI.
     pub(crate) fn mode(&self) -> RequestMode {
+        self.admitted_mode().unwrap_or(RequestMode::Invalid)
+    }
+
+    fn admitted_mode(&self) -> Result<RequestMode, CliError> {
         let has = |predicate: fn(&Field) -> bool| self.fields.iter().any(predicate);
-        if has(|field| matches!(field, Field::DeclarationJoin(_))) {
-            RequestMode::DeclarationInterface
-        } else if has(|field| matches!(field, Field::ActivationPreview)) {
-            RequestMode::ActivationPreview
-        } else if has(|field| matches!(field, Field::CheckSource)) {
-            RequestMode::CheckSource
-        } else if has(|field| matches!(field, Field::CellPlan)) {
-            RequestMode::CellPlan
-        } else if has(|field| matches!(field, Field::Cell)) {
-            RequestMode::CellProgram
-        } else if has(|field| matches!(field, Field::Classify)) {
-            RequestMode::Classify
-        } else if has(|field| {
-            matches!(
-                field,
-                Field::InspectType(_)
-                    | Field::InspectInfo(_)
-                    | Field::InspectBrowse(_)
-                    | Field::InspectBrowseExpanded(_)
-                    | Field::InspectScopeBrowse
-                    | Field::InspectSearch(_)
-                    | Field::InspectStructuredInfo(_)
-                    | Field::InspectStructuredType(_)
-            )
-        }) {
-            RequestMode::Inspection
-        } else if has(|field| matches!(field, Field::Turn)) {
-            RequestMode::Turn
-        } else {
-            RequestMode::Source
+        let join = has(|field| matches!(field, Field::DeclarationJoin(_)));
+        let join_out = has(|field| matches!(field, Field::DeclarationJoinOut(_)));
+        if join != join_out {
+            return Err(CliError::new(
+                "declaration operation requires both --declaration-join and --declaration-join-out",
+            ));
         }
+        let turn = has(|field| matches!(field, Field::Turn));
+        let preview = has(|field| matches!(field, Field::ActivationPreview));
+        if preview && !turn {
+            return Err(CliError::new("activation preview requires turn mode"));
+        }
+        let selections = [
+            (join, RequestMode::DeclarationInterface),
+            (
+                turn,
+                if preview {
+                    RequestMode::ActivationPreview
+                } else {
+                    RequestMode::Turn
+                },
+            ),
+            (
+                has(|field| matches!(field, Field::CheckSource)),
+                RequestMode::CheckSource,
+            ),
+            (
+                has(|field| matches!(field, Field::CellPlan)),
+                RequestMode::CellPlan,
+            ),
+            (
+                has(|field| matches!(field, Field::Cell)),
+                RequestMode::CellProgram,
+            ),
+            (
+                has(|field| matches!(field, Field::Classify)),
+                RequestMode::Classify,
+            ),
+            (
+                has(|field| {
+                    matches!(
+                        field,
+                        Field::InspectType(_)
+                            | Field::InspectInfo(_)
+                            | Field::InspectBrowse(_)
+                            | Field::InspectBrowseExpanded(_)
+                            | Field::InspectScopeBrowse
+                            | Field::InspectSearch(_)
+                            | Field::InspectStructuredInfo(_)
+                            | Field::InspectStructuredType(_)
+                    )
+                }),
+                RequestMode::Inspection,
+            ),
+        ];
+        let mut selected = selections
+            .into_iter()
+            .filter_map(|(present, mode)| present.then_some(mode));
+        let mode = selected.next().unwrap_or(RequestMode::Source);
+        if selected.next().is_some()
+            || (has(|field| matches!(field, Field::CertifyHomeProducts))
+                && mode != RequestMode::Source)
+        {
+            return Err(CliError::new(
+                "compiler request selects conflicting operations",
+            ));
+        }
+        Ok(mode)
     }
 
     /// Parse the human CLI into the same typed request used by
@@ -350,6 +393,7 @@ impl ExtractRequest {
         if !has_input {
             return Err(CliError::new("an input file is required"));
         }
+        request.admitted_mode()?;
         Ok(request)
     }
 
@@ -1255,7 +1299,7 @@ impl std::error::Error for CliError {}
 #[cfg(test)]
 mod tests {
     #[test]
-    fn diagnostic_mode_preserves_dispatch_precedence_and_wire_roundtrip() {
+    fn diagnostic_mode_preserves_preview_refinement_and_wire_roundtrip() {
         use super::{ExtractRequest, RequestMode};
         let mut command = crate::ExtractCmd::with_bin(crate::ResolvedExtractBin::assume_resolved(
             "selected-frontend",
@@ -1652,7 +1696,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_protocol_round_trips_every_field_shape() {
+    fn typed_protocol_round_trips_common_turn_fields() {
         let args = vec![
             "Expr.hs".into(),
             "--output-dir".into(),
@@ -1672,10 +1716,6 @@ mod tests {
             "/tmp/build".into(),
             "--module-candidates".into(),
             "/tmp/module-candidates.cbor".into(),
-            "--declaration-join".into(),
-            "/tmp/declaration-join.cbor".into(),
-            "--declaration-join-out".into(),
-            "/tmp/declaration-join.json".into(),
             "--session-root".into(),
             "/tmp/session".into(),
             "--session-incarnation".into(),
@@ -1685,23 +1725,126 @@ mod tests {
             "--bind-gen".into(),
             "7".into(),
             "--harness-profile".into(),
-            "--inspect-type".into(),
-            "fmap".into(),
-            "--inspect-info".into(),
-            "Maybe".into(),
-            "--inspect-browse".into(),
-            "Tidepool.Prelude".into(),
-            "--inspect-browse-expanded".into(),
-            "Tidepool.Actors.Exomonad".into(),
-            "--inspect-scope-browse".into(),
-            "--inspect-search".into(),
-            "Response result -> Await (Settlement result)".into(),
-            "--inspect-out".into(),
-            "/tmp/inspection.cbor".into(),
         ];
         let request = ExtractRequest::from_cli(&args).unwrap();
         let decoded = ExtractRequest::decode(&request.encode()).unwrap();
         assert_eq!(decoded.cli_argv(), request.cli_argv());
+    }
+
+    #[test]
+    fn cli_admits_one_operation_and_rejects_near_valid_conflicts() {
+        // Operation recipes are independent of dispatch ordering. Reordering,
+        // repeated selection and compile-context additions retain the operation.
+        let recipes: &[(&[&str], RequestMode)] = &[
+            (&[], RequestMode::Source),
+            (&["--turn"], RequestMode::Turn),
+            (&["--classify"], RequestMode::Classify),
+            (&["--cell"], RequestMode::CellProgram),
+            (&["--cell-plan"], RequestMode::CellPlan),
+            (&["--check-source"], RequestMode::CheckSource),
+            (
+                &[
+                    "--inspect-type",
+                    "Int",
+                    "--inspect-info",
+                    "Maybe",
+                    "--inspect-browse",
+                    "Tidepool.Prelude",
+                    "--inspect-browse-expanded",
+                    "Tidepool.Actors.Exomonad",
+                    "--inspect-scope-browse",
+                    "--inspect-search",
+                    "Response result -> Await result",
+                    "--inspect-out",
+                    "inspection.cbor",
+                ],
+                RequestMode::Inspection,
+            ),
+            (
+                &[
+                    "--declaration-join",
+                    "join",
+                    "--declaration-join-out",
+                    "receipt",
+                ],
+                RequestMode::DeclarationInterface,
+            ),
+        ];
+        let parse = |args: Vec<&str>| {
+            ExtractRequest::from_cli(&args.into_iter().map(OsString::from).collect::<Vec<_>>())
+        };
+        for (index, (recipe, expected)) in recipes.iter().enumerate() {
+            for context_first in [false, true] {
+                let mut args = vec!["input.hs"];
+                let context = ["--include", "lib", "--build-products-dir", "products"];
+                if context_first {
+                    args.extend(context);
+                }
+                args.extend_from_slice(recipe);
+                args.extend_from_slice(recipe);
+                if !context_first {
+                    args.extend(context);
+                }
+                let request = parse(args).unwrap();
+                assert_eq!(request.mode(), *expected);
+                let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+                assert_eq!(decoded.mode(), *expected);
+                assert_eq!(decoded.cli_argv(), request.cli_argv());
+            }
+            if index == 0 {
+                continue;
+            }
+            for (other, _) in recipes.iter().skip(index + 1) {
+                for reverse in [false, true] {
+                    let mut args = vec!["input.hs"];
+                    let (first, second) = if reverse {
+                        (*other, *recipe)
+                    } else {
+                        (*recipe, *other)
+                    };
+                    args.extend_from_slice(first);
+                    args.extend_from_slice(second);
+                    assert!(
+                        parse(args).is_err(),
+                        "conflicting operation recipes accepted"
+                    );
+                }
+            }
+        }
+        for orphan in [
+            vec!["--declaration-join", "join"],
+            vec!["--declaration-join-out", "receipt"],
+        ] {
+            for (recipe, _) in recipes.iter().take(7) {
+                let mut args = vec!["input.hs"];
+                args.extend_from_slice(recipe);
+                args.extend_from_slice(&orphan);
+                assert!(
+                    parse(args).is_err(),
+                    "incomplete declaration operation accepted"
+                );
+            }
+        }
+        for mode in [
+            "--turn",
+            "--classify",
+            "--cell",
+            "--cell-plan",
+            "--check-source",
+        ] {
+            assert!(parse(vec!["input.hs", "--certify-home-products", mode]).is_err());
+        }
+        assert_eq!(
+            parse(vec![
+                "input.hs",
+                "--certify-home-products",
+                "--session-artifacts",
+                "scope"
+            ])
+            .unwrap()
+            .mode(),
+            RequestMode::Source
+        );
     }
 
     #[test]
