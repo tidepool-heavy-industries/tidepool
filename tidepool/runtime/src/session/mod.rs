@@ -1471,7 +1471,7 @@ impl SessionLib {
             recovery_store::StoreDisposition::Refused(error) => {
                 Err(SessionError::RecoveryManifest {
                     path: state.path.clone(),
-                    detail: error.to_string(),
+                    detail: format!("{error:?}"),
                 })
             }
             recovery_store::StoreDisposition::RecoveryRequired(error) => {
