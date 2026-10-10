@@ -110,6 +110,8 @@
     "bridge/facade/src/actor_host/fixtures/independent_peer_setup.hs",
     "bridge/facade/src/actor_host/fixtures/independent_worker_setup.hs",
     "bridge/facade/src/actor_host/fixtures/invalid_configured_bootstrap_spec.hs",
+    "bridge/facade/src/actor_host/fixtures/m3_fresh_default_cleanup.hs",
+    "bridge/facade/src/actor_host/fixtures/m3_fresh_default_request.hs",
     "bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs",
     "bridge/facade/src/actor_host/fixtures/m3_recursive_child_reply.hs",
     "bridge/facade/src/actor_host/fixtures/m3_recursive_cleanup.hs",

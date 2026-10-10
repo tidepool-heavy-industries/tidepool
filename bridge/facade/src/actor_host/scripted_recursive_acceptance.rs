@@ -19,6 +19,8 @@ const REFUSAL: &str = include_str!("fixtures/m3_recursive_grandchild_refusal.hs"
 const GRANDCHILD_REPLY: &str = include_str!("fixtures/m3_recursive_grandchild_reply.hs");
 const CHILD_REPLY: &str = include_str!("fixtures/m3_recursive_child_reply.hs");
 const CLEANUP: &str = include_str!("fixtures/m3_recursive_cleanup.hs");
+const FRESH_REQUEST: &str = include_str!("fixtures/m3_fresh_default_request.hs");
+const FRESH_CLEANUP: &str = include_str!("fixtures/m3_fresh_default_cleanup.hs");
 const ROOT_CALL: &str = "recursive-root-await";
 const CHILD_CALL: &str = "recursive-child-await";
 
@@ -60,6 +62,7 @@ async fn next_descendant(
     requests: &mut tokio::sync::mpsc::UnboundedReceiver<HostedScriptRound>,
     pending: &mut VecDeque<HostedScriptRound>,
     parent: ActorRef,
+    context_parent: Option<ActorRef>,
     parent_operation: &OperationId,
 ) -> (ActorRef, HostedScriptRound) {
     pending_claim(host, parent_operation);
@@ -78,7 +81,7 @@ async fn next_descendant(
                             _ = poll.tick() => {
                                 pending_claim(host, parent_operation);
                                 for node in host.context.forest.inspect_host_graph() {
-                                    if node.context_parent == Some(parent) {
+                                    if node.creator == Some(parent) && node.context_parent == context_parent {
                                         let installation = host.context.observer.installation(node.actor).await;
                                         if let Some(terminal) = installation.actor.terminal().get() {
                                             panic!("captured descendant {} retired before its provider turn: {:?}: {}",
@@ -109,7 +112,7 @@ async fn next_descendant(
         .expect("provider origin belongs to one actual hosted actor");
     assert_eq!(node.creator, Some(parent));
     assert_eq!(node.supervisor_parent, Some(parent));
-    assert_eq!(node.context_parent, Some(parent));
+    assert_eq!(node.context_parent, context_parent);
     assert!(node.model_actor);
     assert!(node.bound_worktree.is_some());
     assert_eq!(round.request.model, "gpt-6-luna");
@@ -298,14 +301,18 @@ fn issuing_request(host: &HostedTestRuntime, round: &HostedScriptRound) -> Reque
         .expect("provider request has its issuing frontier")
 }
 
-fn workspace_provenance(host: &HostedTestRuntime, child: &str, grandchild: &str) {
+fn worktree_registry(host: &HostedTestRuntime) -> exomonad_worktree::WorktreeRegistry {
     let root = actor_worktree_storage_root(
         &host.context.config.workspace,
         host.context.config.run_directory.path(),
     )
     .unwrap();
     let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(root).unwrap();
-    let registry = exomonad_worktree::WorktreeRegistry::open(&anchor, "registry").unwrap();
+    exomonad_worktree::WorktreeRegistry::open(&anchor, "registry").unwrap()
+}
+
+fn workspace_provenance(host: &HostedTestRuntime, child: &str, grandchild: &str) {
+    let registry = worktree_registry(host);
     let child_id = exomonad_worktree::WorktreeId::from_raw(child.to_owned());
     let child = registry.get(&child_id).unwrap().unwrap();
     let grandchild = registry
@@ -360,6 +367,18 @@ async fn stopped(host: &HostedTestRuntime, actor: ActorRef, parent: ActorRef) {
     assert!(cleanup.is_confirmed(), "{cleanup:?}");
 }
 
+fn prepared_default_sol_workspace(config: &mut ActorHostConfig) {
+    super::scaffold_admission_tests::prepared_scaffold(config);
+    config.model = "gpt-6.1-sol".into();
+    config.jev = Some(std::sync::Arc::new(super::test_campaign::FixtureJev));
+    crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
+        project.defaults.model = "gpt-6.1-sol".into();
+        project.models.insert("luna".into(), "gpt-6-luna".into());
+        project.defaults.effort = crate::exomonad::ExomonadEffort::Low;
+    });
+    commit_workspace(&config.workspace);
+}
+
 #[tokio::test]
 #[ignore = "requires production hosted compiler and prepared runtime inputs"]
 async fn production_harness_recursive_captured_helper_and_typed_replies() {
@@ -367,18 +386,7 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
     let settings = hosted_test_settings(&files, 3);
     let (provider, mut requests) = hosted_script_provider_with_envelopes();
     let host = HostedTestRuntime::start_prepared_configured(&settings, &provider, |config| {
-        super::scaffold_admission_tests::prepared_scaffold(config);
-        config.model = "gpt-6.1-sol".into();
-        config.jev = Some(std::sync::Arc::new(super::test_campaign::FixtureJev));
-        crate::exomonad::edit_fixture_project_config(
-            &config.workspace.join(".exomonad"),
-            |project| {
-                project.defaults.model = "gpt-6.1-sol".into();
-                project.models.insert("luna".into(), "gpt-6-luna".into());
-                project.defaults.effort = crate::exomonad::ExomonadEffort::Low;
-            },
-        );
-        commit_workspace(&config.workspace);
+        prepared_default_sol_workspace(config);
     })
     .await
     .expect("production preparation and host startup succeed");
@@ -418,6 +426,7 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
                 &mut requests,
                 &mut pending,
                 root_actor,
+                Some(root_actor),
                 &root_operation,
             )
             .await;
@@ -463,6 +472,7 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
                 &mut requests,
                 &mut pending,
                 child_actor,
+                Some(child_actor),
                 &child_operation,
             )
             .await;
@@ -545,4 +555,88 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
         })
     })
     .await;
+}
+
+/// FreshCtx exercises the shipped original toolset without model portability.
+#[tokio::test]
+#[ignore = "requires production hosted compiler and prepared runtime inputs"]
+async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 2);
+    let (provider, mut requests) = hosted_script_provider_with_envelopes();
+    let host = HostedTestRuntime::start_prepared_configured(
+        &settings,
+        &provider,
+        prepared_default_sol_workspace,
+    )
+    .await
+    .expect("the shipped workspace prepares its exact original");
+    host.run_scenario(|host| { Box::pin(async move {
+        host.assert_fresh_prepared_workspace_original().await;
+        host.http_input("Exercise a fresh full-default child and its typed Text reply.").await.unwrap();
+        let root_actor = host.context.actor.identity();
+        let root_path = AgentPath("/root".into());
+        let mut pending = VecDeque::new();
+        let root = next(host, &mut requests, &mut pending, &root_path).await;
+        assert_eq!(root.request.model, "gpt-6.1-sol");
+        let operation = operation(host, &root, "fresh-default-request");
+        root.async_call("fresh-default-request", FRESH_REQUEST);
+        let root_wait = next(host, &mut requests, &mut pending, &root_path).await;
+        unsettled(&root_wait, "fresh-default-request");
+        let (child_actor, child) = next_descendant(
+            host, &mut requests, &mut pending, root_actor, None, &operation,
+        ).await;
+        let child_path = identity(&child).actor;
+        assert!(!serde_json::to_string(&child.request.input).unwrap()
+            .contains("visible-provider-history-gpt-6.1-sol"), "FreshCtx excludes parent history");
+        let installation = host.context.observer.installation(child_actor).await;
+        assert!(!installation.checkpoint);
+        for name in ["bash", "haskell_sync", "haskell", "lookup", "submit_review"] {
+            assert!(installation.tools.iter().any(|tool| tool.name() == name),
+                "the actual default workspace installs {name}");
+        }
+        let graph = host.context.forest.inspect_host_graph();
+        let child_node = graph.iter().find(|node| node.actor == child_actor).unwrap();
+        assert!(child_node.bound_worktree.is_some());
+        let worktree = worktree_registry(host).get(&exomonad_worktree::WorktreeId::from_raw(
+            child_node.bound_worktree.as_ref().unwrap().clone(),
+        )).unwrap().unwrap();
+        assert_eq!(worktree.origin, exomonad_worktree::WorktreeOrigin::CurrentRepository);
+        assert_ne!(worktree.cwd, host.context.config.workspace);
+        assert_eq!(worktree.source_repository, std::fs::canonicalize(&host.context.config.workspace).unwrap());
+        yield_pending(host, root_wait, "fresh-default-yield", &operation).await;
+        child.function("fresh-default-bash", "bash", json!({
+            "cmd": "printf fresh-default-shell", "workdir": null, "environment": null,
+            "memory_mib": null, "tty": null, "stdin": null, "yield_time_ms": 30000,
+            "max_output_bytes": 2048, "intent": "execute the full default workspace command closure",
+        }));
+        let terminal = installation.actor.terminal();
+        let child = tokio::select! {
+            biased;
+            terminal = terminal.wait() => panic!("fresh default child retired after bash: {:?}: {}", terminal.kind, terminal.summary),
+            child = next(host, &mut requests, &mut pending, &child_path) => child,
+        };
+        let shell = child.settled_output("fresh-default-bash");
+        assert_eq!(shell["status"], "committed", "{shell}");
+        assert!(shell.to_string().contains("fresh-default-shell"), "{shell}");
+        child.call("fresh-default-reply", "respond (\"fresh-default-native-reply\" :: Text)");
+        let child = tokio::select! {
+            biased;
+            terminal = terminal.wait() => panic!("fresh default child retired before its typed reply: {:?}: {}", terminal.kind, terminal.summary),
+            child = next(host, &mut requests, &mut pending, &child_path) => child,
+        };
+        replied(&child, "fresh-default-reply");
+        child.finish();
+        let root = next(host, &mut requests, &mut pending, &root_path).await;
+        root.assert_value("fresh-default-request", "True");
+        assert_eq!(root.settled_output("fresh-default-yield"),
+            json!({"reason": "tool_result", "ready_results": [&operation]}));
+        root.call("fresh-default-cleanup", FRESH_CLEANUP);
+        let root = next(host, &mut requests, &mut pending, &root_path).await;
+        root.assert_value("fresh-default-cleanup", "True");
+        let terminal = installation.actor.terminal();
+        tokio::time::timeout(Duration::from_secs(30), terminal.wait()).await.unwrap();
+        assert!(terminal.cleanup().unwrap().is_confirmed());
+        root.finish();
+    }) }).await;
 }

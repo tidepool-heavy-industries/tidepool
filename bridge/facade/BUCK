@@ -777,6 +777,8 @@ rust_filegroup(
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
         "src/actor_host/fixtures/harness_usecase_async.hs": "bridge/facade/src/actor_host/fixtures/harness_usecase_async.hs",
         "src/actor_host/fixtures/harness_usecase_publish.hs": "bridge/facade/src/actor_host/fixtures/harness_usecase_publish.hs",
+        "src/actor_host/fixtures/m3_fresh_default_cleanup.hs": "bridge/facade/src/actor_host/fixtures/m3_fresh_default_cleanup.hs",
+        "src/actor_host/fixtures/m3_fresh_default_request.hs": "bridge/facade/src/actor_host/fixtures/m3_fresh_default_request.hs",
         "src/actor_host/fixtures/m3_recursive_child.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs",
         "src/actor_host/fixtures/m3_recursive_child_reply.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_child_reply.hs",
         "src/actor_host/fixtures/m3_recursive_cleanup.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_cleanup.hs",
@@ -950,6 +952,8 @@ rust_filegroup(
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
         "src/actor_host/fixtures/harness_usecase_async.hs": "bridge/facade/src/actor_host/fixtures/harness_usecase_async.hs",
         "src/actor_host/fixtures/harness_usecase_publish.hs": "bridge/facade/src/actor_host/fixtures/harness_usecase_publish.hs",
+        "src/actor_host/fixtures/m3_fresh_default_cleanup.hs": "bridge/facade/src/actor_host/fixtures/m3_fresh_default_cleanup.hs",
+        "src/actor_host/fixtures/m3_fresh_default_request.hs": "bridge/facade/src/actor_host/fixtures/m3_fresh_default_request.hs",
         "src/actor_host/fixtures/m3_recursive_child.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs",
         "src/actor_host/fixtures/m3_recursive_child_reply.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_child_reply.hs",
         "src/actor_host/fixtures/m3_recursive_cleanup.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_cleanup.hs",
@@ -1123,6 +1127,8 @@ rust_filegroup(
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
         "src/actor_host/fixtures/harness_usecase_async.hs": "bridge/facade/src/actor_host/fixtures/harness_usecase_async.hs",
         "src/actor_host/fixtures/harness_usecase_publish.hs": "bridge/facade/src/actor_host/fixtures/harness_usecase_publish.hs",
+        "src/actor_host/fixtures/m3_fresh_default_cleanup.hs": "bridge/facade/src/actor_host/fixtures/m3_fresh_default_cleanup.hs",
+        "src/actor_host/fixtures/m3_fresh_default_request.hs": "bridge/facade/src/actor_host/fixtures/m3_fresh_default_request.hs",
         "src/actor_host/fixtures/m3_recursive_child.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs",
         "src/actor_host/fixtures/m3_recursive_child_reply.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_child_reply.hs",
         "src/actor_host/fixtures/m3_recursive_cleanup.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_cleanup.hs",
@@ -1296,6 +1302,8 @@ rust_filegroup(
         "src/actor_host/embedded_service.rs": "bridge/facade/src/actor_host/embedded_service.rs",
         "src/actor_host/fixtures/harness_usecase_async.hs": "bridge/facade/src/actor_host/fixtures/harness_usecase_async.hs",
         "src/actor_host/fixtures/harness_usecase_publish.hs": "bridge/facade/src/actor_host/fixtures/harness_usecase_publish.hs",
+        "src/actor_host/fixtures/m3_fresh_default_cleanup.hs": "bridge/facade/src/actor_host/fixtures/m3_fresh_default_cleanup.hs",
+        "src/actor_host/fixtures/m3_fresh_default_request.hs": "bridge/facade/src/actor_host/fixtures/m3_fresh_default_request.hs",
         "src/actor_host/fixtures/m3_recursive_child.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs",
         "src/actor_host/fixtures/m3_recursive_child_reply.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_child_reply.hs",
         "src/actor_host/fixtures/m3_recursive_cleanup.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_cleanup.hs",
@@ -1512,6 +1520,8 @@ rust_filegroup(
         "src/actor_host/fixtures/deferred_reply_spawn.hs": "bridge/facade/src/actor_host/fixtures/deferred_reply_spawn.hs",
         "src/actor_host/fixtures/harness_usecase_async.hs": "bridge/facade/src/actor_host/fixtures/harness_usecase_async.hs",
         "src/actor_host/fixtures/harness_usecase_publish.hs": "bridge/facade/src/actor_host/fixtures/harness_usecase_publish.hs",
+        "src/actor_host/fixtures/m3_fresh_default_cleanup.hs": "bridge/facade/src/actor_host/fixtures/m3_fresh_default_cleanup.hs",
+        "src/actor_host/fixtures/m3_fresh_default_request.hs": "bridge/facade/src/actor_host/fixtures/m3_fresh_default_request.hs",
         "src/actor_host/fixtures/m3_recursive_child.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs",
         "src/actor_host/fixtures/m3_recursive_child_reply.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_child_reply.hs",
         "src/actor_host/fixtures/m3_recursive_cleanup.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_cleanup.hs",
@@ -1701,6 +1711,8 @@ tidepool_rust_binary(
         "bridge/facade/src/actor_host/command_tool_facts_gate.hs",
         "bridge/facade/src/actor_host/embedded_captured_child_reuse_nominal.hs",
         "bridge/facade/src/actor_host/fixtures/browser_agent_spec.hs",
+        "bridge/facade/src/actor_host/fixtures/m3_fresh_default_cleanup.hs",
+        "bridge/facade/src/actor_host/fixtures/m3_fresh_default_request.hs",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_child_reply.hs",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_cleanup.hs",
@@ -2615,6 +2627,8 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/deferred_reply_spawn.hs": "src/actor_host/fixtures/deferred_reply_spawn.hs",
         "bridge/facade/src/actor_host/fixtures/harness_usecase_async.hs": "src/actor_host/fixtures/harness_usecase_async.hs",
         "bridge/facade/src/actor_host/fixtures/harness_usecase_publish.hs": "src/actor_host/fixtures/harness_usecase_publish.hs",
+        "bridge/facade/src/actor_host/fixtures/m3_fresh_default_cleanup.hs": "src/actor_host/fixtures/m3_fresh_default_cleanup.hs",
+        "bridge/facade/src/actor_host/fixtures/m3_fresh_default_request.hs": "src/actor_host/fixtures/m3_fresh_default_request.hs",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs": "src/actor_host/fixtures/m3_recursive_child.hs",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_child_reply.hs": "src/actor_host/fixtures/m3_recursive_child_reply.hs",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_cleanup.hs": "src/actor_host/fixtures/m3_recursive_cleanup.hs",
@@ -3393,6 +3407,20 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f696e76616c69645f636f6e666967757265645f626f6f7473747261705f737065632e6873",
     src = "src/actor_host/fixtures/invalid_configured_bootstrap_spec.hs",
     out = "invalid_configured_bootstrap_spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6d335f66726573685f64656661756c745f636c65616e75702e6873",
+    src = "src/actor_host/fixtures/m3_fresh_default_cleanup.hs",
+    out = "m3_fresh_default_cleanup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6d335f66726573685f64656661756c745f726571756573742e6873",
+    src = "src/actor_host/fixtures/m3_fresh_default_request.hs",
+    out = "m3_fresh_default_request.hs",
     visibility = ["PUBLIC"],
 )
 

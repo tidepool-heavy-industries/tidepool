@@ -238,6 +238,8 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/independent_peer_setup.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f696e646570656e64656e745f706565725f73657475702e6873",
         "bridge/facade/src/actor_host/fixtures/independent_worker_setup.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f696e646570656e64656e745f776f726b65725f73657475702e6873",
         "bridge/facade/src/actor_host/fixtures/invalid_configured_bootstrap_spec.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f696e76616c69645f636f6e666967757265645f626f6f7473747261705f737065632e6873",
+        "bridge/facade/src/actor_host/fixtures/m3_fresh_default_cleanup.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6d335f66726573685f64656661756c745f636c65616e75702e6873",
+        "bridge/facade/src/actor_host/fixtures/m3_fresh_default_request.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6d335f66726573685f64656661756c745f726571756573742e6873",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6d335f7265637572736976655f6368696c642e6873",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_child_reply.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6d335f7265637572736976655f6368696c645f7265706c792e6873",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_cleanup.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6d335f7265637572736976655f636c65616e75702e6873",

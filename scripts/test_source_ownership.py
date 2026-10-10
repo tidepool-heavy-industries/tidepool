@@ -120,6 +120,8 @@ TEST_ONLY_FIXTURES = {
         'bridge/facade/src/actor_host/command_tool_facts_gate.hs',
         'bridge/facade/src/actor_host/embedded_captured_child_reuse_nominal.hs',
         'bridge/facade/src/actor_host/fixtures/browser_agent_spec.hs',
+        'bridge/facade/src/actor_host/fixtures/m3_fresh_default_cleanup.hs',
+        'bridge/facade/src/actor_host/fixtures/m3_fresh_default_request.hs',
         'bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs',
         'bridge/facade/src/actor_host/fixtures/m3_recursive_child_reply.hs',
         'bridge/facade/src/actor_host/fixtures/m3_recursive_cleanup.hs',
