@@ -2024,7 +2024,8 @@ where
                         reserved_generation = reserved.0,
                     );
                     let _entered = span.enter();
-                    base.certify().unwrap()
+                    tidepool_testing::with_settlement(|settlement| base.certify(settlement))
+                        .unwrap()
                 },
             );
             let CertifiedDeclarationPublication::Accepted(accepted) = certified else {

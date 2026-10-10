@@ -8868,10 +8868,13 @@ mod authored_publication_tests {
         let intent = producer
             .freeze_execution_intent(&admission, vec![], vec![])
             .unwrap();
-        let CertifiedDeclarationPublication::Accepted(accepted) = producer
-            .restage_declaration_publication(owner(1), intent)
-            .unwrap()
-            .certify()
+        let CertifiedDeclarationPublication::Accepted(accepted) =
+            tidepool_testing::with_settlement(|settlement| {
+                producer
+                    .restage_declaration_publication(owner(1), intent)
+                    .unwrap()
+                    .certify(settlement)
+            })
             .unwrap()
         else {
             panic!("original declarations must publish");
@@ -9542,7 +9545,9 @@ mod authored_publication_tests {
         else {
             panic!("certified D must produce a declaration publication");
         };
-        let CertifiedDeclarationPublication::Accepted(joined) = base.certify().unwrap() else {
+        let CertifiedDeclarationPublication::Accepted(joined) =
+            tidepool_testing::with_settlement(|settlement| base.certify(settlement)).unwrap()
+        else {
             panic!("certified D join rejected");
         };
         assert_eq!(
@@ -9612,7 +9617,9 @@ mod authored_publication_tests {
         else {
             panic!("certified E must produce a declaration publication");
         };
-        let CertifiedDeclarationPublication::Accepted(joined) = base.certify().unwrap() else {
+        let CertifiedDeclarationPublication::Accepted(joined) =
+            tidepool_testing::with_settlement(|settlement| base.certify(settlement)).unwrap()
+        else {
             panic!("certified E join rejected");
         };
         assert_eq!(

@@ -1461,7 +1461,7 @@ mod tests {
     };
 
     fn accepted(base: DeclarationPublicationBase) -> AcceptedDeclarationPublication {
-        match base.certify().unwrap() {
+        match tidepool_testing::with_settlement(|settlement| base.certify(settlement)).unwrap() {
             CertifiedDeclarationPublication::Accepted(accepted) => accepted,
             CertifiedDeclarationPublication::Rejected(rejected) => {
                 panic!("unexpected rejection: {:?}", rejected.receipt.outcome())
@@ -2574,11 +2574,11 @@ mod tests {
             PublicManifestCommit::Durable
         );
         assert!(matches!(
-            session
+            tidepool_testing::with_settlement(|settlement| session
                 .restage_declaration_publication(owner, intent)
                 .unwrap()
-                .certify()
-                .unwrap(),
+                .certify(settlement))
+            .unwrap(),
             CertifiedDeclarationPublication::Rejected(_)
         ));
     }

@@ -340,9 +340,9 @@ fn publish_checked_fixture(
     let ticket = match publication {
         crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
         crate::session::ExecutionPublication::Declarations(base) => {
-            let crate::session::CertifiedDeclarationPublication::Accepted(accepted) = base
-                .certify()
-                .expect("certify the checked declaration/value publication")
+            let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
+                tidepool_testing::with_settlement(|settlement| base.certify(settlement))
+                    .expect("certify the checked declaration/value publication")
             else {
                 panic!("checked fixture publication must be accepted");
             };

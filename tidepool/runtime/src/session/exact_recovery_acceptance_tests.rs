@@ -553,10 +553,13 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
     let intent = session
         .freeze_execution_intent(&admission, vec![], vec![])
         .unwrap();
-    let CertifiedDeclarationPublication::Accepted(accepted) = session
-        .restage_declaration_publication(owner(1), intent)
-        .unwrap()
-        .certify()
+    let CertifiedDeclarationPublication::Accepted(accepted) =
+        tidepool_testing::with_settlement(|settlement| {
+            session
+                .restage_declaration_publication(owner(1), intent)
+                .unwrap()
+                .certify(settlement)
+        })
         .unwrap()
     else {
         panic!("materialized declaration retraction must publish");
@@ -621,10 +624,13 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
     let intent = producer
         .freeze_execution_intent(&admission, vec![], vec![])
         .unwrap();
-    let CertifiedDeclarationPublication::Accepted(accepted) = producer
-        .restage_declaration_publication(owner(1), intent)
-        .unwrap()
-        .certify()
+    let CertifiedDeclarationPublication::Accepted(accepted) =
+        tidepool_testing::with_settlement(|settlement| {
+            producer
+                .restage_declaration_publication(owner(1), intent)
+                .unwrap()
+                .certify(settlement)
+        })
         .unwrap()
     else {
         panic!("real retained declarations must publish");

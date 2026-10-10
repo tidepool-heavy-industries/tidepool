@@ -6133,7 +6133,8 @@ mod tests {
                 crate::session::ExecutionPublication::Bindings(base) => base.stage().unwrap(),
                 crate::session::ExecutionPublication::Declarations(base) => {
                     let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
-                        base.certify().unwrap()
+                        tidepool_testing::with_settlement(|settlement| base.certify(settlement))
+                            .unwrap()
                     else {
                         panic!("checked history publication must be accepted");
                     };
@@ -7601,7 +7602,7 @@ mod tests {
             panic!("original declaration and value winners require paired publication")
         };
         let crate::session::CertifiedDeclarationPublication::Accepted(accepted) =
-            base.certify().unwrap()
+            tidepool_testing::with_settlement(|settlement| base.certify(settlement)).unwrap()
         else {
             panic!("the original declaration and certified private Value overlay must join")
         };
@@ -7709,10 +7710,13 @@ mod tests {
             session.retract_in(private, "HiddenResult", settlement)
         })
         .unwrap();
-        let CertifiedDeclarationPublication::Accepted(accepted) = session
-            .snapshot_declaration_publication(owner, &admitted, private, vec![], vec![])
-            .unwrap()
-            .certify()
+        let CertifiedDeclarationPublication::Accepted(accepted) =
+            tidepool_testing::with_settlement(|settlement| {
+                session
+                    .snapshot_declaration_publication(owner, &admitted, private, vec![], vec![])
+                    .unwrap()
+                    .certify(settlement)
+            })
             .unwrap()
         else {
             panic!("first authored declaration must be accepted");
