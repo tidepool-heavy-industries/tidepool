@@ -1,9 +1,7 @@
 //! Durable observations of the exact dependency selection issued for an entry.
 
 use super::*;
-use crate::artifact_inventory::{
-    ArtifactEntry, ArtifactId, CompilerInputRole, ExactArtifactSelection,
-};
+use crate::artifact_inventory::{CompilerInputRole, ExactArtifactSelection};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -46,32 +44,15 @@ impl CertifiedSourceSelection {
     ) -> CertResult<EntryDependencySelection> {
         let closure = self.selected_original_closure(view)?;
         let projection = self.compiler_projection(view)?;
-        let interfaces = self
-            .visible_modules()
-            .map(|(_, row)| row.interface())
-            .collect::<BTreeSet<ArtifactId>>();
-        let originals = closure
-            .native_closure
-            .entries()
-            .into_iter()
-            .filter_map(|entry| match &entry.payload {
-                crate::artifact_inventory::ArtifactPayload::Original(product) => {
-                    Some(product.owner().clone())
-                }
-                _ => None,
-            })
+        let borrowed = self
+            .native_selections()
+            .filter(|selection| matches!(selection.version, ReceiptSourceVersion::Original))
+            .map(|selection| selection.owner.clone())
             .collect::<BTreeSet<_>>();
         let linked = candidates
             .by_owner
             .values()
-            .filter(|candidate| {
-                originals.contains(&candidate.owner)
-                    || interfaces.contains(
-                        &ArtifactEntry::canonical(candidate.original_module_interface.clone())
-                            .descriptor
-                            .id,
-                    )
-            })
+            .filter(|candidate| borrowed.contains(&candidate.owner))
             .map(|candidate| LinkedOriginal::from_owner(&candidate.owner))
             .collect();
         Ok(EntryDependencySelection {

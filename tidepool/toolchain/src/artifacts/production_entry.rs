@@ -817,6 +817,7 @@ mod source_selection_tests {
         use crate::toolchain::CatalogSelection;
         use tidepool_extract_cmd::extract_spawn_count;
         const CHILD_ENTRY: &str = "TIDEPOOL_LINKED_ENTRY_REOPEN";
+        const CHILD_MISSING: &str = "TIDEPOOL_LINKED_ENTRY_MISSING_DEPENDENCY";
         let CompilerDeploymentConfiguration::Configured(authority) =
             CompilerDeploymentConfiguration::from_env().unwrap()
         else {
@@ -828,9 +829,20 @@ mod source_selection_tests {
                 serde_json::from_slice(&std::fs::read(directory.join(MANIFEST)).unwrap()).unwrap();
             let counter = directory.parent().unwrap().join("quote-input.executions");
             let before = std::fs::read(&counter).unwrap();
-            let entry =
-                load_selected_production_entry(&directory, &authority, &manifest.sources).unwrap();
-            assert!(entry.products().original_compile_input.is_some());
+            let reopened =
+                load_selected_production_entry(&directory, &authority, &manifest.sources);
+            if std::env::var_os(CHILD_MISSING).is_some() {
+                assert!(
+                    matches!(reopened, Err(CompileError::ModulePackage(_))),
+                    "missing catalog artifact must refuse during fresh acquisition"
+                );
+            } else {
+                assert!(reopened
+                    .unwrap()
+                    .products()
+                    .original_compile_input
+                    .is_some());
+            }
             assert_eq!(
                 extract_spawn_count(),
                 0,
@@ -843,7 +855,14 @@ mod source_selection_tests {
             .unwrap()
             .expect("requires the matched native catalog");
         let catalog = CatalogSelection::Acquired(Some(Arc::clone(&package)));
-        let root = tempfile::tempdir().unwrap();
+        let mut root = match std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
+            Some(path) => tempfile::Builder::new()
+                .prefix("linked-entry-")
+                .tempdir_in(path)
+                .unwrap(),
+            None => tempfile::tempdir().unwrap(),
+        };
+        root.disable_cleanup(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").is_some());
         let authored = root.path().join("sources");
         std::fs::create_dir(&authored).unwrap();
         let input = root.path().join("quote-input");
@@ -881,12 +900,16 @@ mod source_selection_tests {
             executions, b"37\n",
             "fresh entry executes its quotation once"
         );
-        assert!(entry
-            .products()
-            .certified_groups
+        let receipt = certified_products::decode_receipt_in(
+            &std::fs::read(output.join("raw/certified-products.cbor")).unwrap(),
+            Some(&output.join("raw")),
+        )
+        .unwrap();
+        assert!(receipt
+            .modules
             .iter()
-            .any(|group| group.origin() == ProductOrigin::Cached
-                && group.owner().module == "Tidepool.Prelude"));
+            .any(|module| module.origin == ProductOrigin::Cached
+                && module.module == "Tidepool.Prelude"));
         let original = std::fs::read(output.join(MANIFEST)).unwrap();
         let mut manifest: serde_json::Value = serde_json::from_slice(&original).unwrap();
         assert_eq!(manifest["schema"], 3);
@@ -901,7 +924,7 @@ mod source_selection_tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|original| original["module"].as_str().unwrap())
+            .map(|original| original["module"].as_str().unwrap().to_owned())
             .collect::<std::collections::BTreeSet<_>>();
         assert!(
             entry
@@ -1029,6 +1052,52 @@ mod source_selection_tests {
             String::from_utf8_lossy(&child.stderr)
         );
         assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+        let catalog_root = package.catalog_path().parent().unwrap().to_owned();
+        let copied = root.path().join("missing-dependency-catalog");
+        std::fs::create_dir(&copied).unwrap();
+        for relative in inventory(&catalog_root).unwrap().keys() {
+            let destination = copied.join(relative);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::copy(catalog_root.join(relative), destination).unwrap();
+        }
+        let catalog_manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(copied.join("catalog.json")).unwrap()).unwrap();
+        let required = catalog_manifest["modules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|module| {
+                let owner: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(copied.join(module["owner"]["path"].as_str().unwrap())).unwrap(),
+                )
+                .unwrap();
+                linked_modules.contains(owner["module"].as_str().unwrap())
+            })
+            .unwrap();
+        for relative in [
+            required["products"]["path"].as_str().unwrap(),
+            required["module_interface"]["core"]["path"]
+                .as_str()
+                .unwrap(),
+        ] {
+            let missing = copied.join(relative);
+            std::fs::remove_file(&missing).unwrap();
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "artifacts::production_entry::source_selection_tests::linked_entry_reopens_exact_selection_in_new_process_without_source_replay", "--ignored", "--nocapture"])
+                .env(CHILD_ENTRY, &output).env(CHILD_MISSING, "1")
+                .env(crate::toolchain::ENV_COMPILER_MODULES, copied.join("catalog.json"))
+                .output().unwrap();
+            assert!(
+                child.status.success(),
+                "missing dependency refusal failed: {} {}",
+                String::from_utf8_lossy(&child.stdout),
+                String::from_utf8_lossy(&child.stderr)
+            );
+            assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+            std::fs::copy(catalog_root.join(relative), missing).unwrap();
+        }
+        assert_eq!(extract_spawn_count(), before);
+        let source_bytes = std::fs::read(&source).unwrap();
         std::fs::write(
             &source,
             "module LinkedPreparedOriginal where\n__prepared = (91 :: Int)\n",
@@ -1038,7 +1107,59 @@ mod source_selection_tests {
             &output, &authority, &selected, &catalog
         )
         .is_err());
+        std::fs::write(&source, source_bytes).unwrap();
+        load_selected_production_entry_with_catalog(&output, &authority, &selected, &catalog)
+            .unwrap();
+        assert_eq!(extract_spawn_count(), before);
         assert_eq!(std::fs::read(counter).unwrap(), executions);
+        let fresh = prepare_frozen_production_entry_with_catalog(
+            &sources,
+            root.path(),
+            &root.path().join("fresh-control"),
+            &CatalogSelection::Acquired(None),
+        )
+        .unwrap();
+        let candidates = module_candidates::select_acquired_catalog(
+            &package,
+            &authority.producer_identity,
+            &roots,
+            &root.path().join("control-offer"),
+        )
+        .unwrap()
+        .unwrap();
+        let projection = fresh
+            .products()
+            .source_selection
+            .compiler_projection(&fresh.products().artifact_view)
+            .unwrap();
+        assert!(
+            candidates.by_owner.values().any(|candidate| {
+                let interface = crate::artifact_inventory::ArtifactEntry::canonical(
+                    candidate.original_module_interface.clone(),
+                )
+                .descriptor
+                .id;
+                projection
+                    .roles()
+                    .iter()
+                    .any(|role| role.interface() == interface)
+            }),
+            "fresh control must have an interface identical to an available catalog original"
+        );
+        let issued = fresh
+            .products()
+            .source_selection
+            .entry_dependency_selection(&fresh.products().artifact_view, &candidates)
+            .unwrap();
+        assert!(
+            !issued.has_linked_originals(),
+            "fresh compiler issuance cannot borrow identity-equal available originals"
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("quote-input.executions")).unwrap(),
+            b"37\n91\n",
+            "the independent fresh control executes its own quotation exactly once"
+        );
     }
 
     #[derive(Clone, Debug)]
