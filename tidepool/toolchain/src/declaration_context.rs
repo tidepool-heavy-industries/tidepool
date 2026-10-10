@@ -638,6 +638,8 @@ impl From<Arc<ExactDeclarationContext>> for ExactCompileContext {
 }
 
 const EXACT_SCOPE_BYTES_LIMIT: usize = 4 << 20;
+const EXACT_SCOPE_SCHEMA_VERSION: &str = "11";
+const EXACT_SCOPE_SCHEMA_FIELDS: usize = 10;
 const EXACT_SCOPE_GRAPHS_LIMIT: usize = 4096;
 
 fn validate_execution_graph_budget<'a>(
@@ -860,10 +862,11 @@ fn encode_scope_manifest_with_published(
     authorization: Option<Value>,
     published: Value,
 ) -> Result<Vec<u8>, CompileError> {
-    fields[1] = text("11");
+    fields[1] = text(EXACT_SCOPE_SCHEMA_VERSION);
     fields.push(execution_scope.unwrap_or(Value::Null));
     fields.push(authorization.unwrap_or(Value::Null));
     fields.push(published);
+    debug_assert_eq!(fields.len(), EXACT_SCOPE_SCHEMA_FIELDS);
     let value = Value::Array(fields);
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&value, &mut bytes).map_err(failure)?;
@@ -5719,7 +5722,7 @@ impl ExactDeclarationContext {
             .collect::<BTreeSet<_>>();
         let fields = vec![
             text("TPEXACTSCOPE"),
-            text("2"),
+            text(EXACT_SCOPE_SCHEMA_VERSION),
             text(hex(&semantic_sha256)),
             text(
                 crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
@@ -6196,6 +6199,14 @@ mod tests {
 
     include!("declaration_context/program_source_support_history.rs");
     include!("declaration_context/materialization_capture_history.rs");
+
+    fn current_scope_fields(manifest: &Value) -> &[Value] {
+        let fields = manifest.as_array().expect("issued scope is an array");
+        assert_eq!(fields.len(), EXACT_SCOPE_SCHEMA_FIELDS);
+        assert_eq!(fields[0], text("TPEXACTSCOPE"));
+        assert_eq!(fields[1], text(EXACT_SCOPE_SCHEMA_VERSION));
+        fields
+    }
 
     #[test]
     fn lexical_composition_retains_shared_owners_idempotently() {
@@ -7325,9 +7336,7 @@ mod tests {
             .unwrap();
         let bytes = std::fs::read(&request.manifest).unwrap();
         let manifest: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-        let fields = manifest.as_array().unwrap();
-        assert_eq!(fields.len(), 10);
-        assert_eq!(fields[1], text("11"));
+        let fields = current_scope_fields(&manifest);
         let published = fields[9].as_array().unwrap();
         assert_eq!(published.len(), 1);
         let row = published[0].as_array().unwrap();
@@ -8226,8 +8235,7 @@ mod tests {
         let native_descriptor = |request: &ExactCompilationRequest| {
             let bytes = std::fs::read(&request.manifest).unwrap();
             let manifest: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-            assert_eq!(manifest.as_array().unwrap()[1], text("11"));
-            let row = manifest.as_array().unwrap()[6]
+            let row = current_scope_fields(&manifest)[6]
                 .as_array()
                 .unwrap()
                 .iter()
@@ -12498,7 +12506,7 @@ mod tests {
             .collect();
         let fields = vec![
             text("TPEXACTSCOPE"),
-            text("2"),
+            text(EXACT_SCOPE_SCHEMA_VERSION),
             text(hex(&[8; 32])),
             text(hex(&[7; 32])),
             Value::Array(interfaces),
@@ -12507,7 +12515,7 @@ mod tests {
         ];
         let manifest = encode_scope_manifest(fields, Some(execution), None).unwrap();
         let decoded: Value = ciborium::de::from_reader(manifest.as_slice()).unwrap();
-        assert_eq!(decoded.as_array().unwrap()[1], text("11"));
+        current_scope_fields(&decoded);
         std::fs::write(root.join("exact-declaration-scope.cbor"), manifest).unwrap();
         let missing = execution_scope_fixture(&entries[..1], &root)
             .unwrap()
@@ -12517,7 +12525,7 @@ mod tests {
             .unwrap()
             .is_empty());
         println!(
-            "scope6 complete retained closure: two graphs above four MiB retained; missing original refused"
+            "complete retained closure: two graphs above four MiB retained; missing original refused"
         );
     }
 
@@ -12694,9 +12702,7 @@ mod tests {
             .unwrap();
         let bytes = std::fs::read(&request.manifest).unwrap();
         let value: Value = ciborium::de::from_reader(bytes.as_slice()).unwrap();
-        let fields = value.as_array().unwrap();
-        assert_eq!(fields.len(), 10);
-        assert_eq!(fields[1], text("11"));
+        let fields = current_scope_fields(&value);
         assert_eq!(fields[8], Value::Null);
         assert_eq!(
             fields[7].as_array().unwrap()[1].as_array().unwrap().len(),
@@ -12740,7 +12746,7 @@ mod tests {
         assert_eq!(inflated_value.as_array().unwrap()[7], fields[7]);
         std::fs::write(root.join("ordinary/budget-scope.cbor"), &inflated_bytes).unwrap();
         println!(
-            "scope6 independent budgets: metadata={} graph={} combined={}",
+            "independent budgets: metadata={} graph={} combined={}",
             inflated_bytes.len(),
             graph.bytes().len(),
             inflated_bytes.len() + graph.bytes().len()
@@ -12752,17 +12758,16 @@ mod tests {
             text(hex(&request.semantic_sha256)),
         ]);
         for authorization in [None, Some(authorization)] {
-            let mut expected = base.clone();
-            expected[1] = text("9");
-            expected.push(Value::Null);
-            expected.push(authorization.clone().unwrap_or(Value::Null));
-            let mut legacy = Vec::new();
-            ciborium::ser::into_writer(&Value::Array(expected), &mut legacy).unwrap();
+            let encoded = encode_scope_manifest(base.clone(), None, authorization.clone()).unwrap();
+            let decoded: Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+            let without_recipe = current_scope_fields(&decoded);
+            assert_eq!(without_recipe[7], Value::Null);
             assert_eq!(
-                encode_scope_manifest(base.clone(), None, authorization.clone()).unwrap(),
-                legacy,
-                "v9 always retains explicit execution and purpose fields"
+                without_recipe[8],
+                authorization.clone().unwrap_or(Value::Null),
+                "omitting execution graphs must preserve explicit purpose authority"
             );
+            assert_eq!(without_recipe[9], Value::Array(vec![]));
             let overflow = Value::Array(vec![
                 Value::Bytes(vec![0; EXACT_SCOPE_BYTES_LIMIT - 32]),
                 Value::Array(vec![]),
@@ -12775,8 +12780,8 @@ mod tests {
                 encode_scope_manifest(base.clone(), Some(fields[7].clone()), authorization.clone())
                     .unwrap();
             let decoded: Value = ciborium::de::from_reader(with_recipe.as_slice()).unwrap();
-            let decoded = decoded.as_array().unwrap();
-            assert_eq!(decoded[1], text("9"));
+            let decoded = current_scope_fields(&decoded);
+            assert_eq!(decoded[7], fields[7]);
             assert_eq!(decoded[8], authorization.unwrap_or(Value::Null));
         }
     }
