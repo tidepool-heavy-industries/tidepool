@@ -3,37 +3,12 @@
 use super::*;
 use crate::session::{
     ModuleEnv, PublicManifestCommit, PublicationCancellation, PublicationDecision,
-    PublicationPhase, RecoveryRunAuthority, SessionId,
+    PublicationPhase, SessionId,
 };
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tidepool_codegen::prepared_program::{PreparedOuter, PreparedResult};
 
-struct RunOwner {
-    root: PathBuf,
-    _lock: std::fs::File,
-}
-
-impl RecoveryRunAuthority for RunOwner {
-    fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
-        Ok(root.canonicalize()? == self.root)
-    }
-}
-
-fn run_owner(root: &Path) -> Arc<RunOwner> {
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(root.join("run-owner.lock"))
-        .unwrap();
-    lock.try_lock().unwrap();
-    Arc::new(RunOwner {
-        root: root.canonicalize().unwrap(),
-        _lock: lock,
-    })
-}
+use crate::session::recovery_test_fixture::RecoveryFixture;
 
 #[derive(Clone, Copy)]
 enum Persistence {
@@ -49,18 +24,18 @@ enum First {
 
 fn actual_binding_publication_keeps_winner(persistence: Persistence, first: First) {
     let root = tempfile::tempdir().unwrap();
-    let manifest = root.path().join("declarations.json");
+    let recovery =
+        matches!(persistence, Persistence::Durable).then(|| RecoveryFixture::create(root.path()));
+    let stored = || recovery.as_ref().map(RecoveryFixture::state);
     let mut lib = SessionLib::open(
         SessionId(4483),
         root.path().join("session"),
         ModuleEnv::standalone_default(),
     )
     .unwrap();
-    if matches!(persistence, Persistence::Durable) {
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_owned_recovery_graph_v3(&manifest, run_owner(root.path()), settlement)
-        })
-        .unwrap();
+    if let Some(recovery) = &recovery {
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
     }
     let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
     let public = session.mint_isolated_scope();
@@ -123,7 +98,7 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
     };
     let staged = stage(&mut session);
     let before = session.public_visibility_snapshot_in(public).unwrap();
-    let manifest_before = std::fs::read(&manifest).ok();
+    let domain_before = stored();
     let decision = PublicationDecision::new();
     let eligible = AtomicBool::new(true);
 
@@ -144,7 +119,7 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
                 session.public_visibility_snapshot_in(public).unwrap(),
                 before
             );
-            assert_eq!(std::fs::read(&manifest).ok(), manifest_before);
+            assert_eq!(stored(), domain_before);
             assert_eq!(session.resolve_in(public, "winner").unwrap().id, old_id);
             assert!(session.resolve_in(public, "addition").is_none());
             assert_eq!(session.resolve_in(private, "winner").unwrap().id, new_id);
@@ -169,10 +144,15 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
                 .bindings
                 .contains(&("addition".into(), addition_id)));
             assert!(published.bindings.contains(&("kept".into(), kept_id)));
-            let manifest_published = std::fs::read(&manifest).ok();
+            let domain_published = stored();
             match persistence {
-                Persistence::Durable => assert_ne!(manifest_published, manifest_before),
-                Persistence::Ephemeral => assert_eq!(manifest_published, None),
+                Persistence::Durable => {
+                    let before = domain_before.as_ref().unwrap();
+                    let published = domain_published.as_ref().unwrap();
+                    assert_ne!(published.content_revision, before.content_revision);
+                    assert_ne!(published.snapshot_root, before.snapshot_root);
+                }
+                Persistence::Ephemeral => assert_eq!(domain_published, None),
             }
             assert_eq!(
                 decision.request_cancellation_if(|| eligible.swap(false, Ordering::AcqRel)),
@@ -188,14 +168,14 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
                 session.public_visibility_snapshot_in(public).unwrap(),
                 published
             );
-            assert_eq!(std::fs::read(&manifest).ok(), manifest_published);
+            assert_eq!(stored(), domain_published);
         }
     }
 
     // Restaging the same completed intent is not permission to publish twice,
     // whether the original decision cancelled or committed its writes.
     let settled = session.public_visibility_snapshot_in(public).unwrap();
-    let settled_bytes = std::fs::read(&manifest).ok();
+    let settled_domain = stored();
     let restaged = stage(&mut session);
     assert_eq!(
         session
@@ -207,7 +187,7 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
         session.public_visibility_snapshot_in(public).unwrap(),
         settled
     );
-    assert_eq!(std::fs::read(&manifest).ok(), settled_bytes);
+    assert_eq!(stored(), settled_domain);
 
     drop(intent);
     drop(admission);
@@ -241,7 +221,7 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
         session.public_visibility_snapshot_in(public).unwrap(),
         settled
     );
-    assert_eq!(std::fs::read(&manifest).ok(), settled_bytes);
+    assert_eq!(stored(), settled_domain);
 }
 
 #[test]
@@ -259,7 +239,7 @@ fn paired_publication_before_guarded_cancellation_preserves_committed_winner() {
 }
 
 #[test]
-fn fixed_sibling_intents_restage_after_observation_and_manifest_changes_without_reexecution() {
+fn fixed_sibling_intents_restage_after_observation_and_domain_changes_without_reexecution() {
     let root = tempfile::tempdir().unwrap();
     let mut lib = SessionLib::open(
         SessionId(4484),
@@ -267,14 +247,9 @@ fn fixed_sibling_intents_restage_after_observation_and_manifest_changes_without_
         ModuleEnv::standalone_default(),
     )
     .unwrap();
-    tidepool_testing::with_settlement(|settlement| {
-        lib.attach_owned_recovery_graph_v3(
-            &root.path().join("declarations.json"),
-            run_owner(root.path()),
-            settlement,
-        )
-    })
-    .unwrap();
+    let recovery = RecoveryFixture::create(root.path());
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+        .unwrap();
     let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
     let public_a = session.mint_isolated_scope();
     let public_b = session.mint_isolated_scope();
@@ -317,7 +292,7 @@ fn fixed_sibling_intents_restage_after_observation_and_manifest_changes_without_
     let staged_a = base_a.stage().unwrap();
 
     // The sibling completes once after A has frozen and staged its exact
-    // result. Its observation invalidates caches, and its manifest makes A's
+    // result. Its observation invalidates caches, and its domain commit makes A's
     // staged graph stale; neither event changes A's private semantic view.
     let value_b = crate::session::prepared::tests::evaluated_publication_fixture(
         &mut session,
