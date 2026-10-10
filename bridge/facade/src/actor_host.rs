@@ -1733,6 +1733,7 @@ async fn apply_application_failure(
 
 struct InteractiveFleet {
     provider_forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
+    recovery_store: Arc<tidepool_runtime::session::RunRecoveryStore>,
     root: LocalActorRef,
     config: ActorHostConfig,
     run_root: PathBuf,
@@ -2454,6 +2455,7 @@ async fn run_owned(
         application_owners.clone(),
         InteractiveFleet {
             provider_forest: Arc::clone(&forest),
+            recovery_store: Arc::clone(&recovery_store),
             root: root_actor.clone(),
             config: config.clone(),
             run_root: run_root.clone(),

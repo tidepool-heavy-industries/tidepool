@@ -1,14 +1,42 @@
 use super::*;
 
-/// Refusal before provider attachment belongs to this exact child admission.
-/// The existing actor failure owner performs retirement and records cleanup.
+#[derive(Debug, thiserror::Error)]
+enum RunStoreAdmissionFailure {
+    #[error("native run store admission is unavailable; authenticated recovery is required: {0}")]
+    Native(#[source] tidepool_runtime::session::StoreError),
+    #[error(
+        "embedded run store admission is unavailable; authenticated recovery is required: {0}"
+    )]
+    Embedded(#[source] harness::store::StoreError),
+}
+
+/// External provider adapters can render native failures before returning them.
+/// The original store owners retain the authoritative admission state.
+fn ensure_run_store_admission(
+    native: &tidepool_runtime::session::RunRecoveryStore,
+    embedded: &harness::store::Store,
+) -> Result<(), RunStoreAdmissionFailure> {
+    native
+        .ensure_ready()
+        .map_err(RunStoreAdmissionFailure::Native)?;
+    embedded
+        .ensure_ready()
+        .map_err(RunStoreAdmissionFailure::Embedded)
+}
+
+/// Run-store unavailability takes precedence over child-local attachment refusal.
+/// Otherwise the actor failure owner performs retirement and records cleanup.
 fn refuse_child_attachment(
     installation: &LocalResidentInstallation,
     detail: String,
-) -> impl std::future::Future<Output = ()> + Send + 'static {
+    native: &tidepool_runtime::session::RunRecoveryStore,
+    embedded: &harness::store::Store,
+) -> impl std::future::Future<Output = Result<(), RunStoreAdmissionFailure>> + Send + 'static {
+    let run_admission = ensure_run_store_admission(native, embedded);
     let actor = installation.actor.clone();
     let admission = installation.spawn_admission.clone();
     async move {
+        run_admission?;
         let identity = actor.identity();
         if let Some(admission) = admission {
             admission.fail(detail.clone());
@@ -24,6 +52,7 @@ fn refuse_child_attachment(
         {
             tracing::warn!(actor = ?identity, %failure, "child attachment refusal cleanup remains unconfirmed");
         }
+        Ok(())
     }
 }
 
@@ -38,6 +67,7 @@ pub(super) async fn run_interactive_applications(
 ) -> Result<(), String> {
     let InteractiveFleet {
         provider_forest,
+        recovery_store,
         root,
         config,
         run_root,
@@ -315,6 +345,9 @@ pub(super) async fn run_interactive_applications(
                     Ok(completion) => completion,
                     Err(error) => break Some(error),
                 };
+                if let Err(error) = ensure_run_store_admission(&recovery_store, &output_store) {
+                    break Some(error.to_string());
+                }
                 match completion {
                     EmbeddedTaskCompletion::RecoveryRequired(detail) => {
                         break Some(detail);
@@ -460,7 +493,9 @@ pub(super) async fn run_interactive_applications(
                                     installation.actor.identity(),
                                 );
                                 if installation.creator.is_none() { break Some(detail); }
-                                refuse_child_attachment(&installation, detail).await;
+                                if let Err(error) = refuse_child_attachment(&installation, detail, &recovery_store, &output_store).await {
+                                    break Some(error.to_string());
+                                }
                                 continue;
                             },
                         };
@@ -490,7 +525,9 @@ pub(super) async fn run_interactive_applications(
                                 ) {
                                     Ok(parent) => Some(parent),
                                     Err(error) => {
-                                        refuse_child_attachment(&installation, error).await;
+                                        if let Err(error) = refuse_child_attachment(&installation, error, &recovery_store, &output_store).await {
+                                            break Some(error.to_string());
+                                        }
                                         continue;
                                     },
                                 }
@@ -502,9 +539,11 @@ pub(super) async fn run_interactive_applications(
                             } else {
                                 let Some(captured) = installation.checkpoint_attachment.as_ref()
                                     .and_then(|attachment| attachment.downcast::<embedded_harness::EmbeddedHostedCheckpoint>()) else {
-                                    refuse_child_attachment(&installation, format!(
+                                    if let Err(error) = refuse_child_attachment(&installation, format!(
                                         "embedded child {actor:?} has no admitted checkpoint identity"
-                                    )).await;
+                                    ), &recovery_store, &output_store).await {
+                                        break Some(error.to_string());
+                                    }
                                     continue;
                                 };
                                 captured.child_path(actor)
@@ -522,7 +561,9 @@ pub(super) async fn run_interactive_applications(
                                             "embedded actor {actor:?} notification owner could not open: {error}"
                                         );
                                         if installation.creator.is_none() { break Some(detail); }
-                                        refuse_child_attachment(&installation, detail).await;
+                                        if let Err(error) = refuse_child_attachment(&installation, detail, &recovery_store, &output_store).await {
+                                            break Some(error.to_string());
+                                        }
                                         continue;
                                     },
                                 };
@@ -542,7 +583,9 @@ pub(super) async fn run_interactive_applications(
                                 Ok(None) => launch_context.config.model.clone(),
                                 Err(error) => {
                                     if is_root { break Some(error); }
-                                    refuse_child_attachment(&installation, error).await;
+                                    if let Err(error) = refuse_child_attachment(&installation, error, &recovery_store, &output_store).await {
+                                        break Some(error.to_string());
+                                    }
                                     continue;
                                 },
                             };
@@ -583,9 +626,11 @@ pub(super) async fn run_interactive_applications(
                                     break Some(error);
                                 }
                             } else if installation.checkpoint_attachment.is_none() && installation.context_parent.is_some() {
-                                refuse_child_attachment(&installation, format!(
+                                if let Err(error) = refuse_child_attachment(&installation, format!(
                                     "embedded child actor {actor:?} requires a hosted checkpoint"
-                                )).await;
+                                ), &recovery_store, &output_store).await {
+                                    break Some(error.to_string());
+                                }
                                 continue;
                             }
                             let initial_input = installation.initial_user_message.clone();
@@ -593,9 +638,11 @@ pub(super) async fn run_interactive_applications(
                                 let queue_admission = match local_actor.admit_transaction() {
                                     Ok(admission) => admission,
                                     Err(error) => {
-                                        refuse_child_attachment(&installation, format!(
+                                        if let Err(error) = refuse_child_attachment(&installation, format!(
                                             "embedded child queue admission refused: {error}"
-                                        )).await;
+                                        ), &recovery_store, &output_store).await {
+                                            break Some(error.to_string());
+                                        }
                                         continue;
                                     }
                                 };
@@ -1377,4 +1424,60 @@ pub(super) fn settle_embedded_completion(
     };
     answer_release_waiters(release_waiters, actor, release);
     Ok(completion)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ensure_run_store_admission, RunStoreAdmissionFailure};
+    use tidepool_runtime::session::{RunRecoveryStore, StoreErrorKind};
+
+    #[test]
+    fn original_native_owner_refuses_replaced_database_while_successor_is_ready() {
+        let directory = tempfile::tempdir().unwrap();
+        let native_path = directory.path().join("native.sqlite");
+        let native = RunRecoveryStore::create(&native_path).unwrap();
+        let embedded =
+            harness::store::Store::open(directory.path().join("embedded.sqlite")).unwrap();
+        ensure_run_store_admission(&native, &embedded).unwrap();
+
+        std::fs::rename(&native_path, directory.path().join("retained.sqlite")).unwrap();
+        let replacement = RunRecoveryStore::create(&native_path).unwrap();
+        ensure_run_store_admission(&replacement, &embedded).unwrap();
+        assert!(matches!(
+            ensure_run_store_admission(&native, &embedded),
+            Err(RunStoreAdmissionFailure::Native(error)) if error.kind == StoreErrorKind::Integrity
+        ));
+        embedded.ensure_ready().unwrap();
+    }
+
+    #[test]
+    fn original_embedded_commit_fence_survives_healthy_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let native = RunRecoveryStore::create(&directory.path().join("native.sqlite")).unwrap();
+        let embedded_path = directory.path().join("embedded.sqlite");
+        let embedded = harness::store::Store::open(&embedded_path).unwrap();
+        ensure_run_store_admission(&native, &embedded).unwrap();
+
+        rusqlite::Connection::open(&embedded_path)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE commit_fault_parent(id INTEGER PRIMARY KEY);
+                 CREATE TABLE commit_fault_child(id INTEGER REFERENCES commit_fault_parent(id) DEFERRABLE INITIALLY DEFERRED);
+                 CREATE TRIGGER event_commit_fault AFTER INSERT ON events BEGIN INSERT INTO commit_fault_child VALUES(1); END;",
+            )
+            .unwrap();
+        assert!(matches!(
+            embedded.record_event(None, "diagnostic", &serde_json::json!({})),
+            Err(harness::store::StoreError::RecoveryRequired(_))
+        ));
+        let reopened = harness::store::Store::open(&embedded_path).unwrap();
+        ensure_run_store_admission(&native, &reopened).unwrap();
+        assert!(matches!(
+            ensure_run_store_admission(&native, &embedded),
+            Err(RunStoreAdmissionFailure::Embedded(
+                harness::store::StoreError::AdmissionFenced
+            ))
+        ));
+        native.ensure_ready().unwrap();
+    }
 }
