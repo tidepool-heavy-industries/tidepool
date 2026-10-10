@@ -46,6 +46,58 @@ impl CompilerInputRole {
     pub fn is_published_source_original(&self) -> bool {
         matches!(self, Self::PublishedSourceOriginal { .. })
     }
+
+    fn semantic_observation(&self) -> Result<CompilerRoleObservation<'_>, CompileError> {
+        Ok(match self {
+            Self::InterfaceOnly { interface } => CompilerRoleObservation::InterfaceOnly {
+                interface: *interface,
+            },
+            Self::ReusableOriginal {
+                interface,
+                original,
+            } => CompilerRoleObservation::ReusableOriginal {
+                interface: *interface,
+                original: *original,
+            },
+            Self::PublishedSourceOriginal {
+                interface,
+                original,
+                source_revision,
+                original_input_identity,
+                selection,
+                selection_sha256,
+            } => CompilerRoleObservation::PublishedSourceOriginal {
+                interface: *interface,
+                original: *original,
+                source_revision,
+                original_input_identity,
+                selection: selection.observation_digest()?,
+                selection_sha256: *selection_sha256,
+            },
+        })
+    }
+}
+
+/// Context identity observes selected semantics without encoding proof transport.
+/// The full immutable selection remains with its owning role and durable root.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum CompilerRoleObservation<'a> {
+    InterfaceOnly {
+        interface: ArtifactId,
+    },
+    ReusableOriginal {
+        interface: ArtifactId,
+        original: ArtifactId,
+    },
+    PublishedSourceOriginal {
+        interface: ArtifactId,
+        original: ArtifactId,
+        source_revision: &'a str,
+        original_input_identity: &'a str,
+        selection: ExactArtifactSelectionDigest,
+        selection_sha256: [u8; 32],
+    },
 }
 
 /// One compiler namespace selected by accepted declarations and import proofs.
@@ -73,6 +125,15 @@ impl CompilerInputProjection {
     }
     pub fn roles(&self) -> Vec<CompilerInputRole> {
         self.roles.values().cloned().collect()
+    }
+
+    pub(crate) fn semantic_observations(
+        &self,
+    ) -> Result<Vec<CompilerRoleObservation<'_>>, CompileError> {
+        self.roles
+            .values()
+            .map(CompilerInputRole::semantic_observation)
+            .collect()
     }
 
     fn project_roles(

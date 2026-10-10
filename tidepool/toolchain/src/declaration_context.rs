@@ -5254,9 +5254,9 @@ impl ExactDeclarationContext {
                     self.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
-                    "2"
+                    "3"
                 } else {
-                    "4"
+                    "5"
                 },
             ),
             text(hex(&sha2::Sha256::digest(
@@ -5264,7 +5264,9 @@ impl ExactDeclarationContext {
                     metadata.descriptors(),
                     metadata.dependencies(),
                     &metadata.selected_native_groups,
-                    self.compiler_projection.roles(),
+                    self.compiler_projection
+                        .semantic_observations()
+                        .expect("issued role observation"),
                 ))
                 .expect("inventory encoding"),
             )
@@ -8326,6 +8328,71 @@ mod tests {
     fn published_original_history_fixture() -> &'static ExactDeclarationContext {
         static FIXTURE: std::sync::OnceLock<ExactDeclarationContext> = std::sync::OnceLock::new();
         FIXTURE.get_or_init(published_original_fixture)
+    }
+
+    #[test]
+    fn context_role_observations_are_compact_and_bind_publication_policy() {
+        let source = published_original_history_fixture();
+        let root = identity("fixture", "Alpha");
+        let selected = source
+            .issue_published_source_original("revision", "input", &root)
+            .unwrap();
+        let context = selected.context();
+        let roles = context.compiler_input_roles();
+        let CompilerInputRole::PublishedSourceOriginal {
+            interface,
+            original,
+            source_revision,
+            original_input_identity,
+            selection,
+            selection_sha256,
+        } = &roles[0]
+        else {
+            panic!("issuer must retain published policy")
+        };
+        let observations = context.compiler_projection.semantic_observations().unwrap();
+        let compact = serde_json::to_vec(&observations).unwrap();
+        let proof_transport = serde_json::to_vec(&roles).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&compact).unwrap(),
+            serde_json::json!([{
+                "kind": "published_source_original",
+                "interface": interface,
+                "original": original,
+                "source_revision": source_revision,
+                "original_input_identity": original_input_identity,
+                "selection": selection.observation_digest().unwrap(),
+                "selection_sha256": selection_sha256,
+            }])
+        );
+        assert!(
+            compact.len() < 1024,
+            "one role contains fixed identities and policy strings"
+        );
+        assert!(proof_transport.len() > compact.len());
+        assert_eq!(
+            compact,
+            serde_json::to_vec(&context.compiler_projection.semantic_observations().unwrap())
+                .unwrap()
+        );
+        let digest = context.semantic_sha256();
+        for (revision, input) in [("other-revision", "input"), ("revision", "other-input")] {
+            let changed = source
+                .issue_published_source_original(revision, input, &root)
+                .unwrap();
+            assert_ne!(changed.context().semantic_sha256(), digest);
+        }
+        let interface_only = context
+            .as_ref()
+            .clone()
+            .with_compiler_input_projection(context.compiler_projection.interface_only())
+            .unwrap();
+        assert_ne!(interface_only.semantic_sha256(), digest);
+        eprintln!(
+            "context role observation: compact={} proof_transport={}",
+            compact.len(),
+            proof_transport.len()
+        );
     }
 
     proptest::proptest! {
