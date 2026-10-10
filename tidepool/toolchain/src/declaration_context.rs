@@ -5285,6 +5285,11 @@ impl ExactDeclarationContext {
         values: &[Arc<CertifiedValueInterface>],
         lexical: Vec<ExactLexicalNode>,
     ) -> Result<Self, CompileError> {
+        let requirements = crate::artifact_inventory::NativeOriginalRequirement::for_projection(
+            &self.compiler_projection,
+            &self.inventory,
+            &[],
+        )?;
         let mut entries = Vec::new();
         for value in values {
             self.admit_producer(value.interface().toolchain_identity_sha256())?;
@@ -5297,10 +5302,15 @@ impl ExactDeclarationContext {
         let entries = entries.into_iter().map(Arc::new).collect::<Vec<_>>();
         let issued = CompilerInputProjection::from_issued_entries(&entries)?;
         let projection = self.compiler_projection.merge(&issued)?;
-        self.inventory =
-            self.inventory
-                .inventory()
-                .admit_projected(&self.inventory, entries, &projection)?;
+        self.inventory = self
+            .inventory
+            .inventory()
+            .admit_projected_with_native_requirements(
+                &self.inventory,
+                entries,
+                &projection,
+                &requirements,
+            )?;
         self.compiler_projection = projection;
         self.lexical = self.lexical.replace(lexical)?;
         self.original_instance_environment = OriginalInstanceEnvironment::Unknown;

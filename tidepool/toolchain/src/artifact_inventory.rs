@@ -1883,15 +1883,6 @@ impl ArtifactInventory {
     }
     /// The compiler-role owner supplies the exact namespace before adding
     /// authenticated interface facts. Historical parents remain independent custody.
-    pub(crate) fn admit_projected(
-        &self,
-        parent: &ArtifactView,
-        entries: Vec<Arc<ArtifactEntry>>,
-        projection: &CompilerInputProjection,
-    ) -> Result<ArtifactView, CompileError> {
-        self.admit_projected_with_native_requirements(parent, entries, projection, &[])
-    }
-
     pub(crate) fn admit_projected_with_native_requirements(
         &self,
         parent: &ArtifactView,
@@ -5266,7 +5257,12 @@ mod tests {
         ])
         .unwrap();
         let new = inventory
-            .admit_projected(&old, vec![Arc::new(next_child)], &projection)
+            .admit_projected_with_native_requirements(
+                &old,
+                vec![Arc::new(next_child)],
+                &projection,
+                &[],
+            )
             .unwrap();
         let new_group = new
             .capture_graph_selection()
@@ -5404,10 +5400,11 @@ mod tests {
             for joined in [first.merge(&second).unwrap(), second.merge(&first).unwrap()] {
                 let scopes_before = inventory.0.lock().unwrap().selection_plans.len();
                 let admitted = inventory
-                    .admit_projected(
+                    .admit_projected_with_native_requirements(
                         &joined,
                         vec![Arc::new(native.clone())],
                         published_projection,
+                        &[],
                     )
                     .unwrap();
                 assert_eq!(
@@ -5438,7 +5435,7 @@ mod tests {
                 let unchanged = admitted.capture_graph_selection();
                 let nodes_before = inventory.node_count();
                 assert!(matches!(
-                    inventory.admit_projected(&admitted, vec![Arc::new(next_values.clone())], &conflicting),
+                    inventory.admit_projected_with_native_requirements(&admitted, vec![Arc::new(next_values.clone())], &conflicting, &[]),
                     Err(CompileError::ArtifactInventory(error))
                         if error.failure == ArtifactInventoryFailure::NativeGroupSelectionConflict {
                             artifact: native.descriptor.id,
@@ -5605,10 +5602,11 @@ mod tests {
                         &certified,
                     )
                 } else {
-                    inventory.admit_projected(
+                    inventory.admit_projected_with_native_requirements(
                         &joined,
                         vec![Arc::new(root.clone())],
                         published.compiler_input_projection(),
+                        &[],
                     )
                 }
                 .unwrap();
@@ -5651,10 +5649,11 @@ mod tests {
                         &certified,
                     )
                 } else {
-                    recovered_inventory.admit_projected(
+                    recovered_inventory.admit_projected_with_native_requirements(
                         &recovered,
                         vec![Arc::new(root.clone())],
                         published.compiler_input_projection(),
+                        &[],
                     )
                 }
                 .unwrap();
@@ -5850,6 +5849,158 @@ mod tests {
         assert!(matches!(inventory.admit_certified_with_demand(
             &joined, vec![Arc::new(root.clone())], NativeArtifactDemand::ScopeInterfaces, &ambiguous,
         ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })));
+    }
+
+    #[test]
+    fn value_interface_successors_keep_private_exact_native_requirements() {
+        use crate::declaration_context::ExactDeclarationContext;
+        use crate::declaration_join::ExactLexicalNode;
+        use crate::recovery_artifacts::CertifiedValueInterface;
+
+        let inventory = ArtifactInventory::default();
+        let child = issued_native_groups("ValueChild", vec![(7, vec![])], &[], &BTreeMap::new());
+        let root = issued_native_groups(
+            "ValueRoot",
+            vec![(12, vec![issued_source(&child, 7)])],
+            &[&child],
+            &BTreeMap::new(),
+        );
+        let issuer = inventory
+            .admit(&inventory.empty_view(), vec![root.clone(), child.clone()])
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[
+            Arc::new(root.clone()),
+            Arc::new(child.clone()),
+        ])
+        .unwrap()
+        .for_source_owners(&BTreeSet::from([root.descriptor.owner.clone()]));
+        assert!(!projection.roles().iter().any(|role| {
+            role.is_published_source_original() || role.original() == Some(child.descriptor.id)
+        }));
+        let make_context = |view: &ArtifactView| {
+            ExactDeclarationContext::from_authenticated_execution(
+                [2; 32],
+                view,
+                projection.clone(),
+                vec![ExactLexicalNode {
+                    owner: root.descriptor.owner.clone(),
+                    imports: Vec::new(),
+                }],
+                root.descriptor.owner.clone(),
+                &[],
+            )
+            .unwrap()
+        };
+        let make_value = |generation, requirements| {
+            let canonical = crate::certified_products::fixture_module_interface(
+                [2; 32],
+                &root.descriptor.owner.unit,
+                &format!("Tidepool.Session.Val.G{generation}"),
+                BTreeMap::new(),
+            );
+            Arc::new(
+                CertifiedValueInterface::from_checked_compilation(
+                    [2; 32],
+                    ExactModuleIdentity {
+                        unit: canonical.unit().into(),
+                        module: canonical.module().into(),
+                    },
+                    canonical.interface_bytes().to_vec(),
+                    canonical.package_imports_bytes().to_vec(),
+                    requirements,
+                )
+                .unwrap(),
+            )
+        };
+        let extend = |context: ExactDeclarationContext,
+                      program: bool,
+                      value: Arc<CertifiedValueInterface>| {
+            if program {
+                context.extend_program_value_interface(value)
+            } else {
+                let lexical = context.lexical_graph().to_vec();
+                context.extend_with_value_interfaces(&[value], lexical)
+            }
+        };
+        let expected = issuer.capture_graph_selection().native_groups;
+        let expected_edges = issuer.binding_dependencies();
+        let mut observations = Vec::new();
+        for cold_start in [false, true] {
+            let cold = ArtifactInventory::default();
+            let view = if cold_start {
+                cold.recover_selection(
+                    &cold.empty_view(),
+                    issuer.entries(),
+                    &issuer.capture_graph_selection(),
+                    &issuer.binding_dependencies(),
+                )
+                .unwrap()
+            } else {
+                issuer.clone()
+            };
+            for program in [false, true] {
+                let first = make_value(77, vec![root.descriptor.owner.clone()]);
+                let following = match extend(make_context(&view), program, first.clone()) {
+                    Ok(context) => context,
+                    Err(error) => {
+                        eprintln!(
+                            "value_extension cold_start={cold_start} program={program}: {error:?}"
+                        );
+                        observations.push(false);
+                        continue;
+                    }
+                };
+                let second = make_value(
+                    78,
+                    vec![
+                        root.descriptor.owner.clone(),
+                        ExactModuleIdentity {
+                            unit: first.interface().unit().into(),
+                            module: first.interface().module().into(),
+                        },
+                    ],
+                );
+                let following = extend(following, program, second).unwrap();
+                let graph = following.artifact_view().capture_graph_selection();
+                let repeated = following
+                    .clone()
+                    .extend_with_value_interfaces(&[first], following.lexical_graph().to_vec())
+                    .unwrap();
+                assert_eq!(repeated.artifact_view().capture_graph_selection(), graph);
+                assert_eq!(graph.native_groups, expected);
+                assert!(expected_edges.iter().all(|edge| following
+                    .artifact_view()
+                    .binding_dependencies()
+                    .contains(edge)));
+                assert!(!following
+                    .compiler_input_roles()
+                    .iter()
+                    .any(|role| { role.original() == Some(child.descriptor.id) }));
+                assert!(!following
+                    .lexical_graph()
+                    .iter()
+                    .any(|node| node.owner == child.descriptor.owner));
+                assert_eq!(
+                    following
+                        .artifact_view()
+                        .namespace()
+                        .get(&root.descriptor.id),
+                    issuer.namespace().get(&root.descriptor.id),
+                );
+                let reopened_inventory = ArtifactInventory::default();
+                let reopened = reopened_inventory
+                    .recover_selection(
+                        &reopened_inventory.empty_view(),
+                        following.artifact_view().entries(),
+                        &graph,
+                        &following.artifact_view().binding_dependencies(),
+                    )
+                    .unwrap();
+                assert_eq!(reopened.capture_graph_selection(), graph);
+                observations.push(true);
+            }
+        }
+        assert_eq!(observations, vec![true; 4]);
     }
 
     #[test]
@@ -6094,10 +6245,11 @@ mod tests {
                 let mut admitted = parent;
                 for _ in 0..2 {
                     admitted = owning
-                        .admit_projected(
+                        .admit_projected_with_native_requirements(
                             &admitted,
                             vec![Arc::new(native.clone())],
                             published.compiler_input_projection(),
+                            &[],
                         )
                         .unwrap();
                     assert_eq!(admitted.namespace()[&values.descriptor.id], original_values);
