@@ -7689,9 +7689,9 @@ mod tests {
             proof
                 .validate_runtime_admission(reservation.digest(), protected.admission().digest())
                 .unwrap();
-            assert!(proof
-                .validate_runtime_admission([0; 32], protected.admission().digest())
-                .is_err());
+            // Original cell targets carry cell admission; later runtime recipes
+            // carry item admission. Corrupt both to refuse either issuing family.
+            assert!(proof.validate_runtime_admission([0; 32], [0; 32]).is_err());
             proof
                 .validate_settled_native_bindings(snapshot.settled_native_bindings())
                 .unwrap();
