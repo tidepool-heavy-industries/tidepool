@@ -541,8 +541,12 @@ mod tests {
             registry.observe_response(owner, request),
             Ok(ResponseObservation::Pending(_))
         ));
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         assert!(matches!(
             registry.observe_response(owner, request),
             Ok(ResponseObservation::Ready)
@@ -555,13 +559,17 @@ mod tests {
         let (update, delivery) = registry
             .update_request(owner, request, "tabs".into())
             .unwrap();
-        registry.begin_reply(target, request).unwrap();
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
         assert!(delivery.begin().is_none());
         assert_eq!(
             registry.observe_update(owner, update),
             Ok(RequestUpdateState::UpdateTooLate)
         );
-        registry.finish_reply(request, None);
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         // Once the reply has settled there is nobody left to show an update to,
         // so the send is refused outright. A caller must not have to make a
         // second observation to discover that its correction went nowhere.
@@ -577,8 +585,12 @@ mod tests {
         // lead sent a correction naming that child, and the send reported
         // success. It reached nobody, and only a separate observation said so.
         let (registry, owner, target, request) = active();
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_request,
+            None,
+        );
         assert_eq!(
             registry
                 .update_request(owner, request, "use this test name instead".into())
@@ -696,7 +708,7 @@ mod tests {
                 "backend unavailable".into()
             ))
         );
-        registry.begin_reply(target, request).unwrap();
+        let _claim = registry.begin_reply(target, request).unwrap();
     }
 
     #[test]
@@ -741,7 +753,7 @@ mod tests {
                     presentation.presented();
                 }
                 None => {
-                    assert_eq!(reply, Ok(()));
+                    assert!(reply.is_ok());
                     assert_eq!(
                         registry.observe_update(owner, update),
                         Ok(RequestUpdateState::UpdateTooLate)
@@ -796,7 +808,7 @@ mod tests {
             registry.observe_response(owner, request),
             Ok(ResponseObservation::Pending(_))
         ));
-        registry.begin_reply(target, request).unwrap();
+        let _claim = registry.begin_reply(target, request).unwrap();
     }
 
     #[test]
@@ -818,7 +830,7 @@ mod tests {
             registry.observe_update(owner, update),
             Ok(RequestUpdateState::UpdatePresented)
         );
-        registry.begin_reply(target, request).unwrap();
+        let _claim = registry.begin_reply(target, request).unwrap();
     }
 
     #[test]
@@ -886,7 +898,7 @@ mod tests {
             registry.observe_update(owner, update),
             Ok(RequestUpdateState::UpdatePresented)
         );
-        registry.begin_reply(target, request).unwrap();
+        let _claim = registry.begin_reply(target, request).unwrap();
     }
 
     #[test]

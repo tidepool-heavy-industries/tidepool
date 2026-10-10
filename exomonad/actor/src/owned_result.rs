@@ -23,18 +23,32 @@ impl RequestResultDestination {
         type_witness: Arc<CanonicalInputTypeWitness>,
         bindings: BindingLease,
     ) -> Self {
-        Self { issuer, session, type_witness, bindings }
+        Self {
+            issuer,
+            session,
+            type_witness,
+            bindings,
+        }
     }
 
-    pub(crate) fn issuer(&self) -> ActorRef { self.issuer }
-    pub(crate) fn session(&self) -> SessionId { self.session }
-    pub(crate) fn type_witness(&self) -> &Arc<CanonicalInputTypeWitness> { &self.type_witness }
-    pub(crate) fn bindings(&self) -> &BindingLease { &self.bindings }
+    pub(crate) fn issuer(&self) -> ActorRef {
+        self.issuer
+    }
+    pub(crate) fn session(&self) -> SessionId {
+        self.session
+    }
+    pub(crate) fn type_witness(&self) -> &Arc<CanonicalInputTypeWitness> {
+        &self.type_witness
+    }
+    pub(crate) fn bindings(&self) -> &BindingLease {
+        &self.bindings
+    }
 }
 
 impl std::fmt::Debug for RequestResultDestination {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("RequestResultDestination")
+        formatter
+            .debug_struct("RequestResultDestination")
             .field("issuer", &self.issuer)
             .field("session", &self.session)
             .field("type_witness", &self.type_witness)
@@ -61,15 +75,24 @@ impl OwnedResultSnapshot {
         if !publication.belongs_to_bindings(destination.bindings()) {
             return Err(ReplyError::ReplyResultUnavailable);
         }
-        Ok(Arc::new(Self { publication: Arc::new(publication), destination }))
+        Ok(Arc::new(Self {
+            publication: Arc::new(publication),
+            destination,
+        }))
     }
 
-    pub(crate) fn value(&self) -> &RootCustody { self.publication.custody() }
+    pub(crate) fn value(&self) -> &RootCustody {
+        self.publication.custody()
+    }
     pub(crate) fn type_witness(&self) -> &Arc<CanonicalInputTypeWitness> {
         self.publication.type_witness()
     }
-    pub(crate) fn session(&self) -> SessionId { self.destination.session() }
-    pub(crate) fn publication(&self) -> &RuntimeResultPublication { &self.publication }
+    pub(crate) fn session(&self) -> SessionId {
+        self.destination.session()
+    }
+    pub(crate) fn publication(&self) -> &RuntimeResultPublication {
+        &self.publication
+    }
     pub(crate) fn publication_owner(&self) -> Arc<RuntimeResultPublication> {
         Arc::clone(&self.publication)
     }

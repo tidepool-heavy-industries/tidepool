@@ -176,13 +176,15 @@ mod tests {
         target: ActorRef,
         invocation: &RequestReservationOwner,
     ) -> RequestId {
-        registry.reserve_for_operation(
+        let request = registry.reserve_for_operation(
             owner,
             target,
             "invocation request".into(),
             true,
             Some(invocation.clone()),
-        )
+        );
+        crate::request::test_support::admit_destination(registry, owner, request);
+        request
     }
 
     #[test]
@@ -454,12 +456,16 @@ mod tests {
             .detach_invocation_request(owner, detached, Some(&scope))
             .unwrap();
         registry.present(target, ready).unwrap();
-        registry.begin_reply(target, ready).unwrap();
+        let mut reply_claim_ready = Some(registry.begin_reply(target, ready).unwrap());
         assert_eq!(
             registry.request_cleanup_state(owner, ready),
             Ok(RequestCleanupState::ReplySettling)
         );
-        registry.finish_reply(ready, None);
+        crate::request::test_support::complete_optional_reply(
+            &registry,
+            &mut reply_claim_ready,
+            None,
+        );
         assert_eq!(registry.invocation_requests(owner, &scope), vec![ready]);
         assert_eq!(
             registry.cancel_request(owner, ready, CancellationReason::RequesterCancelled),

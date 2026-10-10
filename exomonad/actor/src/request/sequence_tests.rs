@@ -1,4 +1,4 @@
-//! A discovery suite for native request arbitration, independent of Haskell values.
+//! Stateful request arbitration with independently forced native result roots.
 //! Logical request keys survive shrinking; missing watch keys are exercised as stale
 //! handles. The oracle records accepted workflow facts and the owner's first outcome,
 //! never reads the registry's private table, and checks public observations after every
@@ -404,6 +404,8 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
         .map(|target| registry.reserve(owner, *target))
         .collect();
     let mut requests = vec![RequestModel::default(); targets.len()];
+    let mut reply_claims: Vec<Option<RequestReplyClaim>> =
+        (0..targets.len()).map(|_| None).collect();
     let mut watches: Vec<WatchModel> = Vec::new();
     let mut event_sequences = BTreeMap::<ActorRef, Vec<u64>>::new();
     let mut last_sequence = BTreeMap::<ActorRef, u64>::new();
@@ -481,7 +483,10 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
                         Err(ReplyError::Stale)
                     }
                 });
-                compare(registry.begin_reply(caller_target, id), expected, coverage)?;
+                let actual = registry.begin_reply(caller_target, id).map(|claim| {
+                    reply_claims[key] = Some(claim);
+                });
+                compare(actual, expected, coverage)?;
             }
             Action::FinishReply { failed } => {
                 // These completion hooks consume an already accepted transfer;
@@ -495,9 +500,14 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
                     });
                 }
                 notices = if failed {
+                    reply_claims[key] = None;
                     registry.fail_reply_settlement(id, "failed transfer")
                 } else {
-                    registry.finish_reply(id, Some("reply".into()))
+                    test_support::complete_optional_reply(
+                        &registry,
+                        &mut reply_claims[key],
+                        Some("reply".into()),
+                    )
                 };
             }
             Action::Cancel => {
@@ -798,6 +808,17 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
             }
         }
 
+        for (request, model) in ids.iter().zip(&requests) {
+            if !model.released && model.outcome == Some(Ok(())) {
+                let root = registry
+                    .observe_response_result(owner, *request)
+                    .map_err(|error| {
+                        TestCaseError::fail(format!("successful request has no root: {error:?}"))
+                    })?;
+                prop_assert_eq!(test_support::force(&root), 41);
+            }
+        }
+
         // Observe primary request facts independently. Each leaf keeps its
         // first terminal fact; the whole expression keeps its first terminal
         // outcome, including an initial left-biased race.
@@ -875,6 +896,20 @@ fn run_history(history: &History, coverage: &mut Coverage) -> Result<(), TestCas
                     }
                     watch.decision = Some(decision);
                     watch.result = WatchResult::Ready;
+                }
+            }
+            if watch.result == WatchResult::Ready {
+                for &(node, ref failure) in &watch.decision.as_ref().unwrap().leaves {
+                    if failure.is_none() {
+                        let root = registry
+                            .observe_watch_snapshot_response(watch.id, &[], node)
+                            .map_err(|error| {
+                                TestCaseError::fail(format!(
+                                    "captured watch lost result root: {error:?}"
+                                ))
+                            })?;
+                        prop_assert_eq!(test_support::force(&root), 41);
+                    }
                 }
             }
             if previous != watch.result {
