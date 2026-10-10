@@ -51,28 +51,36 @@ static MEMO: Mutex<Option<(String, LibLayer)>> = Mutex::new(None);
 /// the facade compiles cleanly, or when the facade's export list can't be
 /// parsed (nothing to reason about — the existing lib-brick diagnostic still
 /// fires on the resulting compile error).
-pub fn isolate_lib_layer(lib_dirs: &[PathBuf], include: &[PathBuf]) -> LibLayer {
+pub fn isolate_lib_layer(
+    lib_dirs: &[PathBuf],
+    include: &[PathBuf],
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+) -> Result<LibLayer, tidepool_runtime::CompileError> {
     // No user Library facade → nothing to isolate.
     let Some(lib_src) = read_first_library(lib_dirs) else {
-        return LibLayer::default();
+        return Ok(LibLayer::default());
     };
 
     let snapshot = lib_snapshot_hash(lib_dirs);
     if let Some((h, layer)) = MEMO.lock().as_ref() {
         if *h == snapshot {
-            return layer.clone();
+            return Ok(layer.clone());
         }
     }
 
-    let layer = compute_layer(&lib_src, include);
+    let layer = compute_layer(&lib_src, include, settlement)?;
     *MEMO.lock() = Some((snapshot, layer.clone()));
-    layer
+    Ok(layer)
 }
 
-fn compute_layer(lib_src: &str, include: &[PathBuf]) -> LibLayer {
+fn compute_layer(
+    lib_src: &str,
+    include: &[PathBuf],
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+) -> Result<LibLayer, tidepool_runtime::CompileError> {
     // The artifact cache validates compiler evidence for this import.
-    if probe_import("Library", include).is_ok() {
-        return LibLayer::default();
+    if probe_compiles("Library", include, settlement)? {
+        return Ok(LibLayer::default());
     }
 
     // Facade broken. Parse its intended re-export surface so we can rebuild a
@@ -81,13 +89,13 @@ fn compute_layer(lib_src: &str, include: &[PathBuf]) -> LibLayer {
     if reexports.is_empty() {
         // Unparseable export list: can't reason about the intended surface.
         // Leave it to the compile error + the lib-brick diagnostic.
-        return LibLayer::default();
+        return Ok(LibLayer::default());
     }
 
     let mut broken: Vec<String> = Vec::new();
     let mut healthy: Vec<String> = Vec::new();
     for m in &reexports {
-        if probe_import(m, include).is_ok() {
+        if probe_compiles(m, include, settlement)? {
             healthy.push(m.clone());
         } else {
             broken.push(m.clone());
@@ -106,13 +114,13 @@ fn compute_layer(lib_src: &str, include: &[PathBuf]) -> LibLayer {
 
     let sanitized = sanitized_library_source(&healthy, &broken);
     match stage_library(&sanitized) {
-        Ok(dir) => LibLayer {
+        Ok(dir) => Ok(LibLayer {
             prepend_include: vec![dir],
             brick_note: Some(brick_note(&excluded)),
-        },
+        }),
         Err(e) => {
             eprintln!("[tidepool] lib fault-isolation: failed to stage sanitized Library.hs: {e}");
-            LibLayer::default()
+            Ok(LibLayer::default())
         }
     }
 }
@@ -121,17 +129,32 @@ fn compute_layer(lib_src: &str, include: &[PathBuf]) -> LibLayer {
 /// forces GHC to build `module` (and its transitive deps) via the include path;
 /// a broken module fails the extract. Compiler dependency evidence invalidates
 /// an otherwise source-identical probe when a consumed dependency changes.
-/// Callers keep only `is_ok()`/`is_err()` from this result (see
-/// `compute_layer` below): the actual GHC diagnostic for a broken re-export
-/// is never rendered or surfaced to the model, which instead sees only a
-/// generic brick note naming the broken module.
-fn probe_import(module: &str, include: &[PathBuf]) -> Result<(), tidepool_runtime::CompileError> {
+/// An uncertain close stops fault isolation and retains the compiler result.
+/// Confirmed source errors select the sanitized facade without replaying the
+/// uncertain request.
+fn probe_compiles(
+    module: &str,
+    include: &[PathBuf],
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+) -> Result<bool, tidepool_runtime::CompileError> {
+    match probe_import(module, include, settlement) {
+        Ok(()) => Ok(true),
+        Err(error @ tidepool_runtime::CompileError::CompilerCloseUnconfirmed(_)) => Err(error),
+        Err(_) => Ok(false),
+    }
+}
+
+fn probe_import(
+    module: &str,
+    include: &[PathBuf],
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+) -> Result<(), tidepool_runtime::CompileError> {
     let src = format!(
         "{pragmas}\nmodule LibProbe where\nimport {module}\n__libProbe__ :: ()\n__libProbe__ = ()\n",
         pragmas = tidepool_runtime::session::generated_support_pragmas(),
     );
     let refs: Vec<&Path> = include.iter().map(PathBuf::as_path).collect();
-    tidepool_runtime::compile_haskell(&src, "__libProbe__", &refs).map(|_| ())
+    tidepool_runtime::compile_haskell(&src, "__libProbe__", &refs, settlement).map(|_| ())
 }
 
 /// Read the first `Library.hs` found across `lib_dirs` (project shadows global,
