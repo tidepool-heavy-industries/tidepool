@@ -4179,6 +4179,14 @@ fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirem
     let expected = source
         .request_result_type_witness(site, &submission)
         .unwrap();
+    assert!(matches!(
+        source.original_result_type_witness(site, &submission),
+        Err(ResidentError::InvalidActivationInput { .. })
+    ));
+    assert!(matches!(
+        source.original_result_type_witness(site ^ 1, &submission),
+        Err(ResidentError::InvalidActivationInput { .. })
+    ));
     let reply = source
         .retain_binding_custody("activationFunctionReply")
         .unwrap()

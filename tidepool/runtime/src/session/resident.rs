@@ -4434,6 +4434,23 @@ where
         self.progress_type_witness(continuation)
     }
 
+    /// Actor admission reads its singleton exit type from the exact original
+    /// carrier retained by the parked frame.
+    pub fn original_result_type_witness(
+        &mut self,
+        site: u64,
+        hole: &ResidentHole,
+    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
+    {
+        let invalid = || ResidentError::InvalidActivationInput { site };
+        let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
+        let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
+        if metadata.inputs.len() != 1 {
+            return Err(invalid());
+        }
+        self.parked_canonical_input_witness(hole.cont_id(), site, 0)
+    }
+
     pub fn capture_result_publication(
         &mut self,
         hole: &ResidentHole,
