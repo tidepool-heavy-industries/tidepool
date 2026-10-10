@@ -127,6 +127,7 @@
     "bridge/facade/src/actor_host/fixtures/request_reload_agent_spec.hs",
     "bridge/facade/src/actor_host/fixtures/retained_handler_agent_spec.hs",
     "bridge/facade/src/actor_host/fixtures/retained_handler_tools.hs",
+    "bridge/facade/src/actor_host/fixtures/retained_shell_agent_spec.hs",
     "bridge/facade/src/actor_host/fixtures/route.hs",
     "bridge/facade/src/actor_host/fixtures/scripted_three_actor_capture.hs",
     "bridge/facade/src/actor_host/fixtures/scripted_three_actor_cleanup.hs",

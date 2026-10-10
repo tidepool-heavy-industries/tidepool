@@ -609,7 +609,28 @@ use exomonad_tool::{ToolArguments, ToolInvocation};
 #[tokio::test]
 #[ignore = "requires delegated cgroups and bubblewrap"]
 async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
-    let campaign = TestCampaign::start_with_shell().await;
+    let campaign = TestCampaign::start_with_config(
+        |admission| admission,
+        |config| {
+            super::test_campaign::configure_shell_workspace(config);
+            std::fs::write(
+                config.workspace.join(".exomonad/AgentSpec.hs"),
+                tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/fixtures/retained_shell_agent_spec.hs",
+                ),
+            )
+            .unwrap();
+            super::test_campaign::commit_workspace(&config.workspace);
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_directory.path(),
+                )
+                .unwrap(),
+            );
+        },
+    )
+    .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
 
     let owner = exomonad_node::command_resources::CommandResources::delegated(
@@ -676,10 +697,26 @@ async fn embedded_host_hands_out_and_executes_the_resident_command_backend() {
         let output = result["items"][0]["output"]
             .as_str()
             .expect("command result is presented");
-        assert!(
-            output.contains("terminal: yes · CommandExited 0 · cleanup: clean"),
-            "{output}"
-        );
+        let issued_binding = result["items"][0]["installedBindings"][0]
+            .as_str()
+            .expect("retained command binding");
+        let terminal_evidence = super::tests::dispatch_haskell_script_result(
+            campaign.root_installation.policy.as_ref(),
+            &format!("Cmd.await {issued_binding} >>= display"),
+        )
+        .await;
+        let facts = &result["items"][0]["value"];
+        assert_eq!(facts["state"], "Finished", "{result}; retained terminal: {terminal_evidence:?}");
+        assert_eq!(facts["successful"], true, "{result}; retained terminal: {terminal_evidence:?}");
+        assert_eq!(facts["outcome"], serde_json::json!({"tag": "OutcomeExited", "contents": 0}), "{result}");
+        assert_eq!(facts["cleanup"], "CleanupClean", "{result}");
+        assert_eq!(facts["retained_binding"], issued_binding, "{result}");
+        let terminal = super::command_jobs_tests::committed(
+            campaign,
+            &format!("terminal <- Cmd.await {issued_binding}\ndisplay (Cmd.commandOutcome terminal == Cmd.CommandExited 0 && Cmd.commandCleanup terminal == Cmd.CommandClean)"),
+        )
+        .await;
+        assert_eq!(super::test_campaign::committed_display_text(&terminal), "True", "{terminal}");
         assert!(output.contains(text), "{output}");
         bindings.push(
             result["items"][0]["installedBindings"][0]

@@ -3530,6 +3530,13 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f72657461696e65645f7368656c6c5f6167656e745f737065632e6873",
+    src = "src/actor_host/fixtures/retained_shell_agent_spec.hs",
+    out = "retained_shell_agent_spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f726f7574652e6873",
     src = "src/actor_host/fixtures/route.hs",
     out = "route.hs",
