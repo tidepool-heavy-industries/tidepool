@@ -116,6 +116,11 @@ fn direct_endpoint(directory: &std::path::Path, phase: u8) {
         let mut command = [0];
         input.read_exact(&mut command).unwrap();
         if command == [0] {
+            if directory.join("input-at-end").exists() {
+                let path = std::fs::read_to_string(directory.join("input-at-end")).unwrap();
+                let bytes = std::fs::read(path).unwrap();
+                std::fs::write(directory.join("observed-input"), bytes).unwrap();
+            }
             if phase == 7 || phase == 11 {
                 output
                     .write_all(&std::fs::read(directory.join("failure-end")).unwrap())

@@ -10783,14 +10783,12 @@ mod renderer_slot_tests {
         let outcome = crate::CompilerTransactionOutcome {
             action: Err::<usize, _>("native failure"),
             close: crate::CompilerTransactionClose::Unconfirmed(
-                tidepool_extract_cmd::CompilerTransactionCloseEvidence {
-                    reason: tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest,
-                    retirement:
-                        tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
-                            disconnect: None,
-                        },
-                    earlier: Vec::new(),
-                },
+                tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                    tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest,
+                    tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
+                        disconnect: None,
+                    },
+                ),
             ),
         };
         assert!(matches!(
