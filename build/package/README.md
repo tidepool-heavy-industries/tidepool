@@ -310,16 +310,17 @@ python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" run "$DESCRIPTOR" \
 For the parallel command, `ADMITTED_USER_SLICE` names an existing user slice
 whose resource bounds have been checked for the chosen concurrency.
 
-To cancel a running qualification, signal its qualification owner using the
-private `run-owner.json` receipt in that output directory. The owner forwards
-the signal to the recorded isolated runner, which stops scheduling and cleans
-up its active exact case. Do not signal the runner or case process directly;
-that bypasses the queue owner's cancellation path.
+To cancel a running qualification, use the qualification owner's `cancel`
+command with the private `run-owner.json` receipt. It checks the owner's boot
+and process-start identity, then signals that exact opened process through a
+Linux pidfd. The owner forwards the request to the isolated runner, which owns
+the queue and stops scheduling while it cleans up its active exact case. Use
+the wrapper so both the qualification owner and runner retain the cancellation
+and cleanup evidence.
 
 ```sh
-OWNER_PID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["owner"]["pid"])' \
-  "$M2_EVIDENCE/run-owner.json")"
-kill -TERM "$OWNER_PID"
+python3 "$FINAL_BUNDLE/share/exomonad/qualification.py" cancel \
+  "$M2_EVIDENCE/run-owner.json"
 ```
 
 Wait for the qualification command or its process supervisor to exit, then
@@ -328,7 +329,8 @@ The private receipt binds the descriptor hash, source revision and owner/runner
 PID start identities. It records forwarded signals, runner exit/reaping, case
 cleanup observations and any retained interruption confirmation. Treat missing
 or unconfirmed cleanup evidence as unknown; an owner process exit alone does
-not establish descendant cleanup.
+not establish descendant cleanup. If the command reports that the owner is no
+longer running, inspect its retained result instead of retrying against a PID.
 
 Every new prepared release also requires the `prepared-child` cohort from its
 own frozen descriptor. The one-child control

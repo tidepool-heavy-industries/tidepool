@@ -14,6 +14,7 @@ import re
 import shutil
 import shlex
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -206,6 +207,59 @@ def process_start_identity(pid: int) -> dict:
         "start_time_ticks": int(fields[19]),
     }
 
+def cancel_qualification(receipt_path: Path) -> str:
+    """Signal only the qualification owner bound by this private receipt."""
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise OSError("safe qualification cancellation requires Linux pidfd support")
+    def read_private_receipt():
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        receipt_fd = os.open(receipt_path, flags)
+        try:
+            metadata = os.fstat(receipt_fd)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ValueError("qualification owner receipt must be a regular file")
+            if metadata.st_uid != os.getuid() or metadata.st_mode & 0o077:
+                raise ValueError("qualification owner receipt must be private to the current user")
+            with os.fdopen(receipt_fd, "r") as source:
+                receipt_fd = -1
+                return json.load(source)
+        finally:
+            if receipt_fd >= 0:
+                os.close(receipt_fd)
+
+    receipt = read_private_receipt()
+    owner = receipt.get("owner")
+    if (receipt.get("schema") != 1 or not isinstance(owner, dict)
+            or type(owner.get("pid")) is not int or not 0 < owner["pid"] < (1 << 31)
+            or not isinstance(owner.get("start_identity"), dict)):
+        raise ValueError("qualification owner receipt lacks its process identity")
+    pid = owner["pid"]
+    try:
+        pidfd = os.pidfd_open(pid, 0)
+    except ProcessLookupError:
+        return "owner_already_exited"
+    try:
+        if process_start_identity(pid) != owner["start_identity"]:
+            raise ValueError("qualification owner PID no longer matches the receipt start identity")
+        current_receipt = read_private_receipt()
+        current_owner = current_receipt.get("owner", {})
+        if (current_owner.get("pid") != pid
+                or current_owner.get("start_identity") != owner["start_identity"]):
+            raise ValueError("qualification owner identity changed in the running receipt")
+        if current_receipt.get("status") not in ("running", "cancellation_requested"):
+            return "qualification_not_running"
+        status = Path(f"/proc/{pid}/status").read_text()
+        uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
+        if int(uid_line.split()[1]) != os.getuid():
+            raise ValueError("qualification owner is not owned by the current user")
+        try:
+            signal.pidfd_send_signal(pidfd, signal.SIGTERM, None, 0)
+        except ProcessLookupError:
+            return "owner_already_exited"
+        return "signal_sent"
+    finally:
+        os.close(pidfd)
+
 def _forward_runner_signal(process, identity: dict | None, signum: int) -> str:
     if process.poll() is not None:
         return "runner_already_exited"
@@ -240,19 +294,26 @@ def run_owned_qualification_runner(command: list[str], environment: dict, stdout
         "output_directory": str(receipt_path.parent),
         "owner": {"pid": owner_pid, "start_identity": process_start_identity(owner_pid)},
         "runner": None,
-        "interruptions": [],
+        "cancellation_requests": [],
         "runner_reaped": False,
     }
     os.chmod(receipt_path.parent, 0o700)
     write_private_json(receipt_path, receipt)
     process = None
     runner_identity = None
-    interrupted = receipt["interruptions"]
+    cancellation_requests = receipt["cancellation_requests"]
+    published_request_count = 0
+
+    def publish_request_state():
+        nonlocal published_request_count
+        generation = len(cancellation_requests)
+        write_private_json(receipt_path, receipt)
+        published_request_count = generation
 
     def forward(signum, _frame):
         event = {"signal": signum, "name": signal.Signals(signum).name,
                  "forwarding_status": "pending"}
-        interrupted.append(event)
+        cancellation_requests.append(event)
         if process is not None:
             event["forwarding_status"] = _forward_runner_signal(process, runner_identity, signum)
 
@@ -281,25 +342,37 @@ def run_owned_qualification_runner(command: list[str], environment: dict, stdout
             raise RuntimeError(receipt["error"])
         receipt["status"] = "running"
         write_private_json(receipt_path, receipt)
-        for event in interrupted:
-            if event["forwarding_status"] == "pending":
+        for event in cancellation_requests:
+            if event["forwarding_status"] in ("pending", "runner_identity_unavailable"):
                 event["forwarding_status"] = _forward_runner_signal(process, runner_identity,
                                                                       event["signal"])
-        if interrupted:
+        if any(event["forwarding_status"] == "forwarded" for event in cancellation_requests):
             receipt["status"] = "cancellation_requested"
-            write_private_json(receipt_path, receipt)
+            publish_request_state()
         while True:
             try:
                 returncode = process.wait(timeout=0.2)
                 break
             except subprocess.TimeoutExpired:
-                if interrupted:
-                    receipt["status"] = "cancellation_requested"
-                    write_private_json(receipt_path, receipt)
+                has_forwarded_request = any(event["forwarding_status"] == "forwarded"
+                                            for event in cancellation_requests)
+                state_changed = (len(cancellation_requests) != published_request_count
+                                 or has_forwarded_request and receipt["status"] != "cancellation_requested")
+                if state_changed:
+                    if has_forwarded_request:
+                        receipt["status"] = "cancellation_requested"
+                    publish_request_state()
         receipt["runner_reaped"] = True
         receipt["runner_exit_code"] = returncode
-        receipt["status"] = "interrupted" if interrupted else "finished"
-        receipt["interruption_signal"] = interrupted[0]["signal"] if interrupted else None
+        confirmed_interruptions = [
+            event for event in cancellation_requests
+            if event["forwarding_status"] == "forwarded"
+            and returncode == 128 + event["signal"]
+        ]
+        receipt["confirmed_interruptions"] = confirmed_interruptions
+        receipt["status"] = "interrupted" if confirmed_interruptions else "finished"
+        receipt["interruption_signal"] = (confirmed_interruptions[0]["signal"]
+                                           if confirmed_interruptions else None)
         write_private_json(receipt_path, receipt)
         return subprocess.CompletedProcess(command, returncode), receipt
     except BaseException as error:
@@ -321,7 +394,7 @@ def run_owned_qualification_runner(command: list[str], environment: dict, stdout
                 receipt["runner_reap_status"] = "unconfirmed"
         else:
             receipt["runner_reap_status"] = "not_started"
-        receipt["interruptions"] = interrupted
+        receipt["cancellation_requests"] = cancellation_requests
         write_private_json(receipt_path, receipt)
         raise
     finally:
@@ -1723,13 +1796,10 @@ def run_cohort(args) -> int:
     else:
         case_process_cleanup_status = "unknown"
     interruption_receipts = []
-    for event in owner_receipt.get("interruptions", []):
+    for event in owner_receipt.get("confirmed_interruptions", []):
         signal_number = event["signal"]
-        runner_confirmed = (event["forwarding_status"] == "forwarded"
-                            and owner_receipt.get("runner_exit_code") == 128 + signal_number
-                            and owner_receipt.get("runner_reaped") is True)
         interruption_receipts.append({
-            "status": "interrupted" if runner_confirmed else "unconfirmed",
+            "status": "interrupted",
             "signal": signal_number,
             "forwarding_status": event["forwarding_status"],
             "runner_exit_code": owner_receipt.get("runner_exit_code"),
@@ -1739,10 +1809,13 @@ def run_cohort(args) -> int:
         })
     report["run_owner_receipt"] = str(output / "run-owner.json")
     report["runner_process"] = owner_receipt["runner"]
-    report["owner_interruptions"] = owner_receipt.get("interruptions", [])
+    report["owner_cancellation_requests"] = owner_receipt.get("cancellation_requests", [])
+    report["confirmed_interruptions"] = owner_receipt.get("confirmed_interruptions", [])
     report["case_interruption_records"] = [row for row in case_cleanup if row["status"] == "interrupted"]
     owner_receipt.update(
         interruption_receipts=interruption_receipts,
+        owner_cancellation_requests=owner_receipt.get("cancellation_requests", []),
+        confirmed_interruptions=owner_receipt.get("confirmed_interruptions", []),
         case_cleanup=case_cleanup,
         case_process_cleanup_status=case_process_cleanup_status,
         report_path=str(output / "report.json"),
@@ -1974,6 +2047,9 @@ def main(argv=None) -> int:
     live.add_argument("descriptor", type=Path)
     live.add_argument("--report", required=True, type=Path)
     live.add_argument("arguments", nargs=argparse.REMAINDER)
+    cancel = commands.add_parser("cancel")
+    cancel.add_argument("receipt", type=Path,
+                         help="private run-owner.json from the running qualification")
     args = parser.parse_args(argv)
     try:
         if args.command == "snapshot-sources":
@@ -2009,6 +2085,9 @@ def main(argv=None) -> int:
                 print(json.dumps({"set": selected, "unset": UNSET_ENVIRONMENT}, sort_keys=True))
         elif args.command == "run":
             return run_cohort(args)
+        elif args.command == "cancel":
+            print(cancel_qualification(args.receipt))
+            return 0
         elif args.command == "exec":
             arguments = args.arguments[1:] if args.arguments[:1] == ["--"] else args.arguments
             execution = launch_execution(args.descriptor, arguments)

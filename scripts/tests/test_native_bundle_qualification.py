@@ -170,7 +170,8 @@ class NativeQualificationTests(unittest.TestCase):
             'runner': {'pid': -1, 'start_identity': None},
             'runner_reaped': True,
             'runner_exit_code': result.returncode,
-            'interruptions': [],
+            'cancellation_requests': [],
+            'confirmed_interruptions': [],
         }
 
     def fixture_source(self, root, relative='workspace/fixtures/sample.hs', track_fixture=True):
@@ -1097,7 +1098,8 @@ class NativeQualificationTests(unittest.TestCase):
                         (tests / 'case.json').write_text(json.dumps(receipt))
                         owner = {'runner': {'pid': 123, 'start_identity': {'boot_id': 'fixture',
                                                                           'start_time_ticks': 1}},
-                                 'runner_reaped': True, 'interruptions': []}
+                                 'runner_reaped': True, 'cancellation_requests': [],
+                                 'confirmed_interruptions': []}
                         return subprocess.CompletedProcess(command, 0), owner
                     with patch.dict(os.environ, {}, clear=True), \
                          patch.object(qualification, 'verify', return_value=descriptor), \
@@ -1196,10 +1198,14 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertEqual(initial_receipt['source_oid'], descriptor['source_oid'])
             child = int(child_pid.read_text())
             child_identity = qualification.process_start_identity(child)
-            os.kill(owner.pid, signal.SIGTERM)
-            time.sleep(0.05)
-            if owner.poll() is None:
-                os.kill(owner.pid, signal.SIGTERM)
+            cancel_command = [sys.executable, str(SCRIPT), 'cancel', str(receipt_path)]
+            first_cancel = subprocess.run(cancel_command, capture_output=True, text=True, check=False)
+            second_cancel = subprocess.run(cancel_command, capture_output=True, text=True, check=False)
+            self.assertEqual(first_cancel.returncode, 0, first_cancel.stderr)
+            self.assertEqual(first_cancel.stdout.strip(), 'signal_sent')
+            self.assertEqual(second_cancel.returncode, 0, second_cancel.stderr)
+            self.assertIn(second_cancel.stdout.strip(),
+                          ('signal_sent', 'owner_already_exited', 'qualification_not_running'))
             returncode = owner.wait(timeout=15)
             stdout, stderr = owner.communicate()
             self.assertEqual(returncode, 128 + signal.SIGTERM, (stdout, stderr))
@@ -1220,8 +1226,9 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertEqual(receipt['status'], 'interrupted')
             self.assertTrue(receipt['runner_reaped'])
             self.assertEqual(receipt['runner_exit_code'], 128 + signal.SIGTERM)
-            self.assertTrue(receipt['interruptions'])
-            self.assertEqual(receipt['interruptions'][0]['forwarding_status'], 'forwarded')
+            self.assertTrue(receipt['cancellation_requests'])
+            self.assertEqual(receipt['cancellation_requests'][0]['forwarding_status'], 'forwarded')
+            self.assertTrue(receipt['confirmed_interruptions'])
             self.assertTrue(receipt['interruption_receipts'], receipt)
             interruption = receipt['interruption_receipts'][0]
             self.assertEqual(interruption['status'], 'interrupted', receipt)
@@ -1238,6 +1245,55 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertEqual(receipt['case_process_cleanup_status'], 'confirmed')
             self.assertEqual({case['test'] for case in receipt['case_cleanup']},
                              {'suite::complete', 'suite::active'})
+
+    def test_cancel_refuses_receipt_with_stale_owner_start_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            receipt_path = Path(directory) / 'run-owner.json'
+            identity = qualification.process_start_identity(os.getpid())
+            identity['start_time_ticks'] += 1
+            receipt_path.write_text(json.dumps({
+                'schema': 1,
+                'status': 'running',
+                'owner': {'pid': os.getpid(), 'start_identity': identity},
+            }))
+            receipt_path.chmod(0o600)
+            with patch.object(qualification.signal, 'pidfd_send_signal') as send_signal:
+                with self.assertRaisesRegex(ValueError, 'start identity'):
+                    qualification.cancel_qualification(receipt_path)
+            send_signal.assert_not_called()
+
+    def test_signal_after_runner_success_records_request_without_relabeling_run(self):
+        self._owned_runner_patch.stop()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            descriptor_path = root / 'descriptor.json'
+            descriptor_path.write_text('{}')
+            output = root / 'output'
+            output.mkdir(mode=0o700)
+            receipt_path = output / 'run-owner.json'
+
+            class CompletedRunner:
+                pid = os.getpid()
+                returncode = None
+
+                def poll(self):
+                    return self.returncode
+
+                def wait(self, timeout=None):
+                    self.returncode = 0
+                    os.kill(os.getpid(), signal.SIGTERM)
+                    return self.returncode
+
+            descriptor = {'source_oid': 'a' * 40, 'harness_revision': 'b' * 40}
+            with patch.object(qualification.subprocess, 'Popen', return_value=CompletedRunner()):
+                result, receipt = qualification.run_owned_qualification_runner(
+                    ['runner'], {}, io.BytesIO(), io.BytesIO(), receipt_path,
+                    descriptor_path, descriptor, 'fixture')
+            self.assertEqual(result.returncode, 0)
+            self.assertEqual(receipt['status'], 'finished')
+            self.assertEqual(receipt['runner_exit_code'], 0)
+            self.assertEqual(receipt['cancellation_requests'][0]['forwarding_status'], 'runner_already_exited')
+            self.assertEqual(receipt['confirmed_interruptions'], [])
 
     def test_runner_spawn_failure_retains_private_owner_receipt(self):
         self._owned_runner_patch.stop()
