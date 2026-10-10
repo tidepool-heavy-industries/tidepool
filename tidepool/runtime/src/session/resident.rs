@@ -1317,6 +1317,15 @@ impl RootCustody {
         &self.provenance
     }
 
+    fn checked_handle(&self, cleanup: &Arc<CustodyCleanup>) -> Result<ValueHandle, ResidentError> {
+        if !Arc::ptr_eq(&self.cleanup.0, cleanup) {
+            return Err(ResidentError::ForeignCustody);
+        }
+        Ok(self
+            .handle
+            .expect("live custody always contains its handle"))
+    }
+
     fn into_transfer(mut self) -> CustodyTransfer {
         let Some(handle) = self.handle.take() else {
             unreachable!("live custody always contains its handle");
@@ -4499,6 +4508,7 @@ where
         custody: RootCustody,
         owner: RealmId,
     ) -> Result<RootCustody, ResidentError> {
+        custody.checked_handle(&self.custody_cleanup)?;
         self.settle_dropped_custody();
         let transfer = custody.into_transfer();
         let handle = transfer.handle;
@@ -4516,6 +4526,9 @@ where
 
     /// Abandon a rooted value deliberately, releasing its root immediately.
     pub fn discard_custody(&mut self, custody: RootCustody) -> bool {
+        if custody.checked_handle(&self.custody_cleanup).is_err() {
+            return false;
+        }
         self.settle_dropped_custody();
         let transfer = custody.into_transfer();
         let discarded = self
@@ -4541,9 +4554,7 @@ where
         custody: RootCustody,
     ) -> Result<ResidentParcel, ResidentError> {
         self.settle_dropped_custody();
-        if !Arc::ptr_eq(&custody.cleanup.0, &self.custody_cleanup) {
-            return Err(ResidentError::ForeignCustody);
-        }
+        custody.checked_handle(&self.custody_cleanup)?;
         let transfer = custody.into_transfer();
         let handle = transfer.handle;
         let Some(engine) = self.state.prepared_mut() else {
@@ -4579,9 +4590,7 @@ where
         custody: &RootCustody,
     ) -> Result<ResidentParcel, ResidentError> {
         self.settle_dropped_custody();
-        if !Arc::ptr_eq(&custody.cleanup.0, &self.custody_cleanup) {
-            return Err(ResidentError::ForeignCustody);
-        }
+        custody.checked_handle(&self.custody_cleanup)?;
         let Some(handle) = custody.handle else {
             unreachable!("live custody always contains its handle");
         };
@@ -4707,6 +4716,9 @@ where
         hole: ResidentHole,
         custody: RootCustody,
     ) -> Result<ResidentOutcome, ResidentResumeError> {
+        custody
+            .checked_handle(&self.custody_cleanup)
+            .map_err(ResidentResumeError::Rejected)?;
         self.settle_dropped_custody();
         let seed = hole.seed();
         let cont_id = match hole {
@@ -4897,6 +4909,7 @@ where
         table: &DataConTable,
         custody: RootCustody,
     ) -> Result<(), ResidentError> {
+        custody.checked_handle(&self.custody_cleanup)?;
         self.settle_dropped_custody();
         if !self.state.scope_tree().is_live(scope) {
             self.discard_custody(custody);
@@ -5578,6 +5591,7 @@ where
         custody: RootCustody,
         interface_source: ValueInterfaceSource,
     ) -> Result<(), ResidentError> {
+        custody.checked_handle(&self.custody_cleanup)?;
         let transfer = custody.into_transfer();
         let provenance = Arc::clone(&transfer.provenance);
         let raw = transfer.handle;
@@ -5627,9 +5641,9 @@ where
         constructor: tidepool_repr::DataConId,
         prefix: Vec<HaskellValue>,
     ) -> Result<ResidentOutcome, ResidentResumeError> {
-        let Some(handle) = custody.handle else {
-            unreachable!("live custody always contains its handle");
-        };
+        let handle = custody
+            .checked_handle(&self.custody_cleanup)
+            .map_err(ResidentResumeError::Rejected)?;
         let seed = hole.seed();
         let cont_id = match hole {
             ResidentHole::Plain(hole) => hole.id,
@@ -5662,9 +5676,9 @@ where
     where
         T: tidepool_bridge::ToHaskell + Send + 'static,
     {
-        let Some(handle) = custody.handle else {
-            unreachable!("live custody always contains its handle");
-        };
+        let handle = custody
+            .checked_handle(&self.custody_cleanup)
+            .map_err(ResidentResumeError::Rejected)?;
         let seed = hole.seed();
         let cont_id = match hole {
             ResidentHole::Plain(hole) => hole.id,
@@ -5694,12 +5708,9 @@ where
         custody: &RootCustody,
         constructors: Vec<DataConId>,
     ) -> Result<ResidentOutcome, ResidentResumeError> {
-        if !Arc::ptr_eq(&custody.cleanup.0, &self.custody_cleanup) {
-            return Err(ResidentResumeError::Rejected(ResidentError::ForeignCustody));
-        }
-        let Some(handle) = custody.handle else {
-            unreachable!("live custody contains its handle")
-        };
+        let handle = custody
+            .checked_handle(&self.custody_cleanup)
+            .map_err(ResidentResumeError::Rejected)?;
         let seed = hole.seed();
         let cont_id = hole.cont_id().to_owned();
         self.reenter(
@@ -8235,6 +8246,89 @@ mod custody_release_tests {
             PreparedOuter::Constructor { fields, .. } if matches!(fields.as_slice(),
                 [PreparedResult::Scalar(99)]))
         );
+    }
+
+    #[test]
+    fn foreign_custody_never_enters_destination() {
+        let mut source = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        let mut destination = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, None);
+        bind_fixture(&mut source, ScopeId::ROOT, 47);
+        let destination_id = bind_fixture(&mut destination, ScopeId::ROOT, 47);
+        let local = destination.retain_binding_custody("x").unwrap().unwrap();
+        let foreign = source.retain_binding_custody("x").unwrap().unwrap();
+        assert_ne!(
+            foreign.handle, local.handle,
+            "native handles are process-unique; ownership is still checked before hole access"
+        );
+        let hole = ResidentHole::mint(
+            "not-a-parked-hole".into(),
+            HoleSeed {
+                obligation: HoleObligation::Plain,
+                checked: None,
+            },
+        );
+        let before = destination.value_handle_count();
+        for outcome in [
+            destination.resume_framed_custody_classified(
+                hole.clone(),
+                &foreign,
+                DataConId(0),
+                vec![],
+            ),
+            destination.resume_framed_custody_sources_classified(
+                hole.clone(),
+                &foreign,
+                DataConId(0),
+                Vec::<i64>::new(),
+            ),
+            destination.resume_nested_custody_classified(
+                hole.clone(),
+                &foreign,
+                vec![DataConId(0)],
+            ),
+        ] {
+            assert!(matches!(
+                outcome,
+                Err(ResidentResumeError::Rejected(ResidentError::ForeignCustody))
+            ));
+        }
+        assert!(matches!(
+            destination.resume_handle_classified(hole, foreign),
+            Err(ResidentResumeError::Rejected(ResidentError::ForeignCustody))
+        ));
+        source.settle_dropped_custody();
+        let foreign = source.retain_binding_custody("x").unwrap().unwrap();
+        assert!(matches!(
+            destination.rehome_custody(foreign, RealmId::ROOT),
+            Err(ResidentError::ForeignCustody)
+        ));
+        source.settle_dropped_custody();
+        let foreign = source.retain_binding_custody("x").unwrap().unwrap();
+        assert!(!destination.discard_custody(foreign));
+        let foreign = source.retain_binding_custody("x").unwrap().unwrap();
+        let binder = BoundBinder {
+            name: "foreignBinding".into(),
+            var_id: 1401,
+            module: SessionModule::val(Generation(47)).module_name(),
+            tier: ValueTier::ForceData,
+            type_display: "Int".into(),
+            root_head: None,
+            host_authority: None,
+        };
+        assert!(matches!(
+            destination.mount_compiled_binding_in(
+                ScopeId::ROOT,
+                &binder,
+                Generation(47),
+                &DataConTable::default(),
+                foreign
+            ),
+            Err(ResidentError::ForeignCustody)
+        ));
+        assert_eq!(destination.value_handle_count(), before);
+        major_collect(&mut destination);
+        assert_live_binding(&mut destination, ScopeId::ROOT, destination_id);
+        assert!(destination.discard_custody(local));
     }
 
     #[test]
