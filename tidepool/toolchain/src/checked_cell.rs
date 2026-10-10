@@ -2797,6 +2797,23 @@ impl ExactCompiledItem {
         self.original_interface_context(target, table, sites)?;
         Ok(self.original_execution.clone())
     }
+
+    /// Validate the exact output once before transferring both original contexts.
+    pub fn original_contexts(
+        &self,
+        target: &tidepool_repr::execution_schema::PreparedProgram,
+        table: &tidepool_repr::DataConTable,
+        sites: &[crate::YieldSite],
+    ) -> Result<
+        (
+            Arc<crate::declaration_context::ExactDeclarationContext>,
+            Arc<crate::declaration_context::ExactDeclarationContext>,
+        ),
+        CompileError,
+    > {
+        let interfaces = self.original_interface_context(target, table, sites)?;
+        Ok((interfaces, self.original_execution.clone()))
+    }
     pub fn original_interface_context(
         &self,
         target: &tidepool_repr::execution_schema::PreparedProgram,

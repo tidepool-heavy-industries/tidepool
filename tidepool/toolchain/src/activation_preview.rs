@@ -336,6 +336,17 @@ impl ExactCompiledActivationPreview {
         self.original_interface_context(target, table, sites)?;
         Ok(self.original_execution.clone())
     }
+
+    /// Validate the exact output once before transferring both original contexts.
+    pub fn original_contexts(
+        &self,
+        target: &PreparedProgram,
+        table: &DataConTable,
+        sites: &[crate::YieldSite],
+    ) -> Result<(Arc<ExactDeclarationContext>, Arc<ExactDeclarationContext>), CompileError> {
+        let interfaces = self.original_interface_context(target, table, sites)?;
+        Ok((interfaces, self.original_execution.clone()))
+    }
 }
 
 fn decode_disposition(value: &Value) -> Result<ActivationPreviewDisposition, CompileError> {

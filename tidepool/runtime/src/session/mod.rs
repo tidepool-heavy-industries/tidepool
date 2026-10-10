@@ -2457,12 +2457,9 @@ impl SessionLib {
             .path
             .parent()
             .ok_or_else(|| invalid("recovery manifest has no parent"))?;
-        let refs = tidepool_toolchain::recovery_artifacts::materialize_certified_products(
-            root,
-            certified.toolchain_identity_sha256(),
-            &context.recovery_products(),
-        )
-        .map_err(|error| invalid(&error.to_string()))?;
+        let (refs, interfaces) = context
+            .materialize_recovery_products_and_interfaces(root)
+            .map_err(|error| invalid(&error.to_string()))?;
         let own = certified.product().owner();
         if refs
             .iter()
@@ -2502,9 +2499,7 @@ impl SessionLib {
             .map(recovery::RecoveryArtifactClosure::Home)
             .collect::<Vec<_>>();
         artifacts.extend(
-            context
-                .materialize_module_interfaces(root)
-                .map_err(|error| invalid(&error.to_string()))?
+            interfaces
                 .into_iter()
                 .map(recovery::RecoveryArtifactClosure::ModuleInterface),
         );
