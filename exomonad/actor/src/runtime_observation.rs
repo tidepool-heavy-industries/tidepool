@@ -942,6 +942,303 @@ impl ActorRuntimeObservationHandle {
 mod provider_health_tests {
     use super::*;
     use exomonad_model::{ProviderObservation, ProviderTurnObservation, ProviderTurnState};
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, FileFailurePersistence, TestCaseError, TestRunner};
+    use std::cell::RefCell;
+
+    #[derive(Clone, Copy, Debug)]
+    struct ObservationEvent {
+        thread: u8,
+        revision: u8,
+        state: u8,
+        has_turn: bool,
+        has_usage: bool,
+    }
+
+    fn observation_events() -> impl Strategy<Value = Vec<ObservationEvent>> {
+        prop::collection::vec(
+            (0_u8..3, 0_u8..16, 0_u8..3, any::<bool>(), any::<bool>()).prop_map(
+                |(thread, revision, state, has_turn, has_usage)| ObservationEvent {
+                    thread,
+                    revision,
+                    state,
+                    has_turn,
+                    has_usage,
+                },
+            ),
+            0..32,
+        )
+    }
+
+    #[derive(Default)]
+    struct ReferenceObservation {
+        turn: Option<ProviderTurnObservation>,
+        stale: bool,
+        failures: Vec<ProviderTurnObservation>,
+        compactions: Option<u64>,
+        model: Option<String>,
+        effort: Option<String>,
+        usage_ids: Vec<String>,
+    }
+
+    #[derive(Default, Debug)]
+    struct ObservationCoverage {
+        accepted: usize,
+        stale_same_thread: usize,
+        accepted_same_thread: usize,
+        thread_switch: usize,
+        missing_turn: usize,
+        usage_published: usize,
+        usage_suppressed_by_stale_revision: usize,
+    }
+
+    fn event_payload(event: ObservationEvent, sequence: usize) -> ProviderObservation {
+        let state = match event.state {
+            0 => ProviderTurnState::Active,
+            1 => ProviderTurnState::Succeeded,
+            _ => ProviderTurnState::Interrupted,
+        };
+        let turn = event.has_turn.then(|| ProviderTurnObservation {
+            thread: format!("thread-{}", event.thread),
+            turn: format!("turn-{sequence}"),
+            revision: usize::from(event.revision),
+            state: state.clone(),
+        });
+        let usage = event.has_usage.then(|| {
+            let id = format!("usage-{sequence}");
+            let tokens = sequence as i64 + 1;
+            let item = exomonad_model::ProviderUsageObservation {
+                id,
+                timestamp: None,
+                usage: exomonad_model::TokenUsage {
+                    input_tokens: tokens * 3,
+                    cached_input_tokens: tokens,
+                    output_tokens: tokens + 1,
+                    reasoning_output_tokens: 0,
+                    total_tokens: tokens * 4 + 1,
+                },
+            };
+            exomonad_model::ProviderUsageSnapshot {
+                first: item.clone(),
+                latest: item,
+                thread_summary: None,
+                latest_turn_summary: None,
+            }
+        });
+        ProviderObservation {
+            compactions: Some(sequence as u64),
+            usage,
+            failures: vec![ProviderTurnObservation {
+                thread: format!("failure-thread-{}", event.thread),
+                turn: format!("failure-turn-{sequence}"),
+                revision: sequence,
+                state: ProviderTurnState::Failed(if event.state == 2 {
+                    exomonad_model::ProviderFailure::TransportFailed
+                } else {
+                    exomonad_model::ProviderFailure::RequestRejected
+                }),
+            }],
+            turn,
+            confirmed_model: Some(format!("model-{sequence}")),
+            confirmed_effort: Some(format!("effort-{sequence}")),
+        }
+    }
+
+    fn apply_reference(
+        model: &mut ReferenceObservation,
+        payload: &ProviderObservation,
+        coverage: &mut ObservationCoverage,
+    ) {
+        let stale_revision =
+            payload
+                .turn
+                .as_ref()
+                .zip(model.turn.as_ref())
+                .is_some_and(|(next, current)| {
+                    next.thread == current.thread && next.revision < current.revision
+                });
+        if stale_revision {
+            model.stale = true;
+            coverage.stale_same_thread += 1;
+            if payload.usage.is_some() {
+                coverage.usage_suppressed_by_stale_revision += 1;
+            }
+            return;
+        }
+
+        coverage.accepted += 1;
+        if payload.turn.is_none() {
+            coverage.missing_turn += 1;
+        } else if let (Some(next), Some(current)) = (payload.turn.as_ref(), model.turn.as_ref()) {
+            if next.thread == current.thread {
+                coverage.accepted_same_thread += 1;
+            } else {
+                coverage.thread_switch += 1;
+            }
+        } else if model.turn.is_some() {
+            coverage.thread_switch += 1;
+        }
+
+        model.stale = payload.turn.is_none();
+        model.failures.clone_from(&payload.failures);
+        model.compactions = payload.compactions;
+        model.model.clone_from(&payload.confirmed_model);
+        model.effort.clone_from(&payload.confirmed_effort);
+        if let Some(turn) = &payload.turn {
+            model.turn = Some(turn.clone());
+        }
+        if let Some(usage) = &payload.usage {
+            let id = usage.latest.id.clone();
+            if model.usage_ids.last() != Some(&id) {
+                model.usage_ids.push(id);
+                if model.usage_ids.len() > MAX_PROVIDER_SAMPLES {
+                    model.usage_ids.remove(0);
+                }
+                coverage.usage_published += 1;
+            }
+        }
+    }
+
+    fn check_observation(
+        actual: &ActorRuntimeObservation,
+        expected: &ReferenceObservation,
+    ) -> Result<(), TestCaseError> {
+        if actual.provider_turn != expected.turn
+            || actual.provider_observation_stale != expected.stale
+            || actual.provider_failures != expected.failures
+            || actual.compactions != expected.compactions
+            || actual.confirmed_model != expected.model
+            || actual.confirmed_effort != expected.effort
+            || actual
+                .provider_usage
+                .iter()
+                .map(|sample| sample.observation_id.as_str())
+                .collect::<Vec<_>>()
+                != expected
+                    .usage_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+        {
+            return Err(TestCaseError::fail(format!(
+                "provider observation differs from accepted-facts model: actual={actual:?} expected_turn={:?} expected_stale={} expected_failures={:?} expected_compactions={:?} expected_model={:?} expected_effort={:?} expected_usage_ids={:?}",
+                expected.turn,
+                expected.stale,
+                expected.failures,
+                expected.compactions,
+                expected.model,
+                expected.effort,
+                expected.usage_ids,
+            )));
+        }
+        Ok(())
+    }
+
+    fn replay_observation_history(
+        history: &[ObservationEvent],
+        coverage: &mut ObservationCoverage,
+    ) -> Result<(), TestCaseError> {
+        let handle = ActorRuntimeObservationHandle::default();
+        let mut model = ReferenceObservation::default();
+        // This minimized core establishes a useful baseline, presents a stale
+        // same-thread usage sample, then advances and changes provider thread.
+        let guided = [
+            ObservationEvent {
+                thread: 0,
+                revision: 10,
+                state: 0,
+                has_turn: true,
+                has_usage: true,
+            },
+            ObservationEvent {
+                thread: 0,
+                revision: 2,
+                state: 1,
+                has_turn: true,
+                has_usage: true,
+            },
+            ObservationEvent {
+                thread: 0,
+                revision: 11,
+                state: 1,
+                has_turn: true,
+                has_usage: true,
+            },
+            ObservationEvent {
+                thread: 1,
+                revision: 1,
+                state: 0,
+                has_turn: true,
+                has_usage: false,
+            },
+            ObservationEvent {
+                thread: 0,
+                revision: 3,
+                state: 2,
+                has_turn: true,
+                has_usage: true,
+            },
+            ObservationEvent {
+                thread: 0,
+                revision: 4,
+                state: 2,
+                has_turn: false,
+                has_usage: true,
+            },
+        ];
+        for (sequence, event) in guided
+            .into_iter()
+            .chain(history.iter().copied())
+            .enumerate()
+        {
+            let payload = event_payload(event, sequence);
+            apply_reference(&mut model, &payload, coverage);
+            handle.publish_provider_observation(payload);
+            check_observation(&handle.snapshot(), &model)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provider_observation_histories_match_accepted_facts_model() {
+        let mut config = Config::default();
+        if std::env::var_os("PROPTEST_CASES").is_none() {
+            config.cases = 96;
+        }
+        if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() {
+            config.max_shrink_iters = 4_096;
+        }
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+        }
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::provider_observation_histories_match_accepted_facts_model"
+        ));
+        eprintln!(
+            "provider observation configured fresh cases: {}",
+            config.cases
+        );
+        let coverage = RefCell::new(ObservationCoverage::default());
+        let result = TestRunner::new(config).run(&observation_events(), |history| {
+            replay_observation_history(&history, &mut coverage.borrow_mut())
+        });
+        eprintln!(
+            "provider observation generated coverage: {:?}",
+            coverage.borrow()
+        );
+        result.unwrap();
+        let observed = coverage.into_inner();
+        assert!(observed.accepted > 0);
+        assert!(observed.stale_same_thread > 0);
+        assert!(observed.accepted_same_thread > 0);
+        assert!(observed.thread_switch > 0);
+        assert!(observed.missing_turn > 0);
+        assert!(observed.usage_published > 0);
+        assert!(observed.usage_suppressed_by_stale_revision > 0);
+    }
 
     #[test]
     fn owned_provider_round_authorizes_idle_only_after_success() {
