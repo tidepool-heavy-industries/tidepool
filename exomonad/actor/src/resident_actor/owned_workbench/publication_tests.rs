@@ -247,3 +247,143 @@ fn publication_error_termination_prevents_a_later_cancellation_from_reclassifyin
         .native_cancel()
         .load(std::sync::atomic::Ordering::Acquire));
 }
+
+#[test]
+fn prepared_publication_observing_a_sibling_fence_requires_recovery() {
+    sibling_fence_before_preflight(false);
+}
+
+#[test]
+fn prepared_publication_observing_a_sibling_fence_preserves_recovery_during_cancellation() {
+    sibling_fence_before_preflight(true);
+}
+
+fn sibling_fence_before_preflight(cancel: bool) {
+    use crate::recovery::recovery_test_fixture::RecoveryFixture;
+    use tidepool_runtime::session::{
+        fresh_session_id, ModuleEnv, PersistentSession, RecoveryDomainId, RecoveryPublicOwner,
+        SessionError, SessionLib, StoreErrorKind,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let recovery = RecoveryFixture::create(root.path());
+    let mut lib = SessionLib::open(
+        fresh_session_id(),
+        root.path().join("machine-a"),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap();
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement));
+    let mut session = PersistentSession::new(Some(lib), 1024);
+    let scope = session.mint_isolated_scope();
+    let owner = RecoveryPublicOwner::new(&crate::ActorPath::parse("root/a").unwrap(), 1).unwrap();
+    assert!(matches!(
+        session
+            .initialize_durable_public_scope(owner.clone(), scope)
+            .unwrap(),
+        tidepool_runtime::session::PublicManifestCommit::Durable
+    ));
+    let confirmed = recovery.public_owner(&owner);
+    let admitted = session
+        .begin_durable_private_execution(&owner, scope)
+        .unwrap();
+    let prepared = session
+        .freeze_execution_intent(&admitted, Vec::new(), Vec::new())
+        .unwrap();
+    let before = session.public_visibility_snapshot_in(scope).unwrap();
+
+    let sibling_id = fresh_session_id();
+    let mut sibling = SessionLib::open(
+        sibling_id,
+        root.path().join("machine-b"),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        recovery.attach(
+            &mut sibling,
+            RecoveryDomainId::Session(sibling_id),
+            settlement,
+        )
+    });
+    recovery.fail_commits();
+    let failed = sibling
+        .initialize_captured_declaration_high_water(tidepool_repr::Generation(1))
+        .unwrap_err();
+    assert!(matches!(
+        failed,
+        SessionError::RecoveryStore(ref error) if error.kind == StoreErrorKind::RecoveryRequired
+    ));
+    recovery.clear_commit_failure();
+    assert!(recovery.store.is_recovery_required());
+
+    let control = Arc::new(crate::WorkbenchExecutionControl::untracked());
+    let preflight = std::thread::scope(|threads| {
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let cancellation = cancel.then(|| {
+            let control = Arc::clone(&control);
+            let barrier = Arc::clone(&barrier);
+            threads.spawn(move || {
+                barrier.wait();
+                assert!(control.request_cancellation());
+            })
+        });
+        if cancel {
+            barrier.wait();
+        }
+        let preflight = session.restage_execution_publication(owner.clone(), prepared);
+        if let Some(cancellation) = cancellation {
+            cancellation.join().unwrap();
+        }
+        preflight
+            .err()
+            .expect("old prepared publication observes the sibling fence")
+    });
+    let error = ResidentActorWorkbenchError::PrivatePublication {
+        actor: ActorRef::first(crate::ActorId(1)),
+        scope,
+        phase: crate::resident_workbench::PrivatePublicationPhase::Restage,
+        source: Box::new(ResidentActorWorkbenchError::Resident(
+            ResidentError::Session(preflight),
+        )),
+    };
+    assert!(error.requires_recovery());
+    let failure = private_publication_rejection(
+        &control,
+        Ok(KernelStep::Continue(response(
+            WorkbenchRunStatus::Committed,
+        ))),
+        error,
+    );
+    assert!(matches!(
+        failure.publication,
+        Some(WorkbenchPublicationOutcome::RecoveryRequired { .. })
+    ));
+    assert!(failure
+        .publication
+        .as_ref()
+        .unwrap()
+        .public_bindings()
+        .is_empty());
+    assert_eq!(failure.receipts.len(), 1);
+    assert_eq!(failure.receipts[0].status, WorkbenchItemStatus::Committed);
+    assert_eq!(failure.receipts[0].installed_bindings, ["privateProgress"]);
+    assert!(matches!(
+        failure.source,
+        ResidentActorWorkbenchError::PrivatePublication { ref source, .. }
+            if matches!(source.as_ref(), ResidentActorWorkbenchError::Resident(
+                ResidentError::Session(SessionError::RecoveryStore(error))
+            ) if error.kind == StoreErrorKind::RecoveryRequired)
+    ));
+    assert_eq!(
+        session.public_visibility_snapshot_in(scope).unwrap(),
+        before
+    );
+    assert_eq!(recovery.public_owner(&owner), confirmed);
+    assert_eq!(
+        control
+            .native_cancel()
+            .load(std::sync::atomic::Ordering::Acquire),
+        cancel
+    );
+}

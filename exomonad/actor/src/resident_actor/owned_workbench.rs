@@ -2636,10 +2636,14 @@ fn private_publication_rejection(
     result: Result<KernelStep<WorkbenchResponse>, WorkbenchExecutionFailure>,
     source: ResidentActorWorkbenchError,
 ) -> WorkbenchExecutionFailure {
-    // Settle the arbiter before reading its sticky winning-cancellation proof.
-    // A claimed write that fails before rename retains its real failure.
+    // A run fence remains a recovery requirement even if cancellation also
+    // wins this invocation. Retain the exact failure and completed receipts.
     control.publication_decision().terminate();
-    let publication = if control
+    let publication = if source.requires_recovery() {
+        WorkbenchPublicationOutcome::RecoveryRequired {
+            detail: source.to_string(),
+        }
+    } else if control
         .native_cancel()
         .load(std::sync::atomic::Ordering::Acquire)
     {

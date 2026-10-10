@@ -4325,6 +4325,21 @@ pub enum ResidentActorWorkbenchError {
 }
 
 impl ResidentActorWorkbenchError {
+    pub(crate) fn requires_recovery(&self) -> bool {
+        match self {
+            Self::PrivatePublication { source, .. }
+            | Self::ActivationBindingCommitted { source, .. } => source.requires_recovery(),
+            Self::PreparationAdmission(source) => source.requires_recovery(),
+            Self::Resident(ResidentError::Session(
+                tidepool_runtime::session::SessionError::RecoveryStore(error),
+            ))
+            | Self::Delivered(ResidentError::Session(
+                tidepool_runtime::session::SessionError::RecoveryStore(error),
+            )) => error.kind == tidepool_runtime::session::StoreErrorKind::RecoveryRequired,
+            _ => false,
+        }
+    }
+
     pub(crate) fn into_kernel_behavior_error(self) -> crate::KernelBehaviorError {
         crate::KernelBehaviorError::with_diagnostic(self.to_string(), self.failure_diagnostic())
     }

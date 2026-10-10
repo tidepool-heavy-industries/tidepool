@@ -1318,9 +1318,17 @@ pub(crate) mod recovery_test_fixture {
             lib: &mut SessionLib,
             settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
         ) {
+            self.attach(lib, RecoveryDomainId::Root, settlement);
+        }
+        pub(crate) fn attach(
+            &self,
+            lib: &mut SessionLib,
+            domain: RecoveryDomainId,
+            settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+        ) {
             lib.attach_owned_recovery_domain(
                 Arc::clone(&self.store),
-                RecoveryDomainId::Root,
+                domain,
                 lib.include_dir().canonicalize().unwrap(),
                 self.authority.clone(),
                 settlement,
