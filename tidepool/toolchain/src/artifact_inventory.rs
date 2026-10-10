@@ -1969,6 +1969,8 @@ impl ArtifactInventory {
             ArtifactRootIntent::SuppliedArtifacts => None,
         };
         let mut published_groups = BTreeMap::<LogicalNodeKey, BTreeSet<InventoryNodeKey>>::new();
+        let mut published_artifact_targets =
+            BTreeMap::<ArtifactId, BTreeSet<InventoryNodeKey>>::new();
         let mut published_native_carriers = BTreeSet::new();
         if let ArtifactRootIntent::Projected(projection) = root_intent {
             for role in projection.roles() {
@@ -2006,6 +2008,24 @@ impl ArtifactInventory {
                         .entry(node.logical())
                         .or_default()
                         .insert(node);
+                }
+                // Exact group rows choose their artifact targets independently
+                // of the ambient namespace's same-payload historical binding.
+                // Only the issued native closure supplies these constraints.
+                for node in admitted_closure(
+                    &state,
+                    graph
+                        .native_groups
+                        .iter()
+                        .copied()
+                        .map(InventoryNodeKey::Group),
+                ) {
+                    if let InventoryNodeKey::Artifact(binding) = node {
+                        published_artifact_targets
+                            .entry(binding.artifact)
+                            .or_default()
+                            .insert(node);
+                    }
                 }
             }
         }
@@ -2075,11 +2095,17 @@ impl ArtifactInventory {
                 continue;
             }
             if let InventoryNodeKey::Artifact(binding) = candidate {
-                if namespace
-                    .get(&binding.artifact)
-                    .is_some_and(|selected| selected != binding)
-                {
-                    continue;
+                match published_artifact_targets.get(&binding.artifact) {
+                    Some(issued) if !issued.contains(candidate) => continue,
+                    Some(_) => {}
+                    None => {
+                        if namespace
+                            .get(&binding.artifact)
+                            .is_some_and(|selected| selected != binding)
+                        {
+                            continue;
+                        }
+                    }
                 }
             }
             let actual = state
@@ -5415,6 +5441,119 @@ mod tests {
                         .native_groups,
                     expected
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn published_group_keeps_its_exact_artifact_child_over_equivalent_custody() {
+        use crate::declaration_context::ExactDeclarationContext;
+        use crate::declaration_join::ExactLexicalNode;
+
+        let inventory = ArtifactInventory::default();
+        let (native, values, _) = native_scope_fixture();
+        let target = entry_in_unit("fixture", "Target", vec![]);
+        let original = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![
+                    Arc::new(native.clone()),
+                    Arc::new(values.clone()),
+                    Arc::new(target.clone()),
+                ],
+                NativeArtifactDemand::AllGroups,
+            )
+            .unwrap();
+        let sibling = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![
+                    Arc::new(values.clone()),
+                    Arc::new(entry_in_unit("fixture", "Unrelated", vec![])),
+                ],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let original_values = original.namespace()[&values.descriptor.id];
+        let sibling_values = sibling.namespace()[&values.descriptor.id];
+        assert_ne!(original_values, sibling_values);
+        let projection = CompilerInputProjection::from_issued_entries(&[
+            Arc::new(native.clone()),
+            Arc::new(values.clone()),
+            Arc::new(target.clone()),
+        ])
+        .unwrap();
+        let lexical = vec![
+            ExactLexicalNode {
+                owner: target.descriptor.owner.clone(),
+                imports: vec![native.descriptor.owner.clone()],
+            },
+            ExactLexicalNode {
+                owner: native.descriptor.owner.clone(),
+                imports: vec![values.descriptor.owner.clone()],
+            },
+            ExactLexicalNode {
+                owner: values.descriptor.owner.clone(),
+                imports: vec![],
+            },
+        ];
+        let issued = ExactDeclarationContext::from_authenticated_execution(
+            [2; 32],
+            &original,
+            projection,
+            lexical.clone(),
+            target.descriptor.owner.clone(),
+            &lexical
+                .iter()
+                .map(|node| node.owner.clone())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let publication = issued
+            .issue_published_source_original("revision", "input", &native.descriptor.owner)
+            .unwrap();
+        let published = publication.context();
+        let expected = published.artifact_view().capture_graph_selection();
+        let group = expected.native_groups[0];
+        for joined in [
+            original.merge(&sibling).unwrap(),
+            sibling.merge(&original).unwrap(),
+        ] {
+            let narrowed = joined
+                .with_compiler_projection(&CompilerInputProjection::default())
+                .unwrap();
+            let restored_inventory = ArtifactInventory::default();
+            let restored = restored_inventory
+                .recover_selection(
+                    &restored_inventory.empty_view(),
+                    joined.entries(),
+                    &joined.capture_graph_selection(),
+                    &joined.binding_dependencies(),
+                )
+                .unwrap();
+            for parent in [joined, narrowed, restored] {
+                let owning = parent.inventory().clone();
+                let before = owning.0.lock().unwrap().selection_plans.len();
+                let mut admitted = parent;
+                for _ in 0..2 {
+                    admitted = owning
+                        .admit_projected(
+                            &admitted,
+                            vec![Arc::new(native.clone())],
+                            published.compiler_input_projection(),
+                        )
+                        .unwrap();
+                    assert_eq!(admitted.namespace()[&values.descriptor.id], original_values);
+                    let selected = admitted
+                        .select_admission_roots(vec![native.descriptor.id])
+                        .unwrap();
+                    assert_eq!(
+                        selected.capture_graph_selection().native_groups,
+                        vec![group]
+                    );
+                    assert_eq!(scoped_group_child(&selected, group).1, original_values);
+                    assert_eq!(owning.0.lock().unwrap().selection_plans.len(), before);
+                }
             }
         }
     }
