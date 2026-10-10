@@ -14492,9 +14492,9 @@ pub(crate) mod request_tests {
                     query: structured_query(name), provenance: provenance.clone(),
                 }).to_vec(),
             ] {
-                let answers = inspect_lookup_queries(&view, Some(&inputs), &prepared.preamble,
+                let answers = tidepool_testing::with_settlement(|settlement| inspect_lookup_queries(&view, Some(&inputs), &prepared.preamble,
                     &prepared.imports, &prepared.include, &prepared.injected,
-                    &context.haskell_effects_alias, &queries, None).unwrap();
+                    &context.haskell_effects_alias, &queries, None, settlement)).unwrap();
                 assert_eq!(answers.len(), 2);
                 assert!(answers.iter().all(|answer| matches!(answer,
                     tidepool_runtime::session::InspectionResult::Info { .. }
@@ -14631,17 +14631,20 @@ pub(crate) mod request_tests {
             crate::UsagePointerTable::default(),
             |queries| {
                 calls.set(calls.get() + 1);
-                let result = inspect_lookup_queries(
-                    &view,
-                    Some(&inputs),
-                    &prepared.preamble,
-                    &prepared.imports,
-                    &prepared.include,
-                    &prepared.injected,
-                    &context.haskell_effects_alias,
-                    queries,
-                    None,
-                )?;
+                let result = tidepool_testing::with_settlement(|settlement| {
+                    inspect_lookup_queries(
+                        &view,
+                        Some(&inputs),
+                        &prepared.preamble,
+                        &prepared.imports,
+                        &prepared.include,
+                        &prepared.injected,
+                        &context.haskell_effects_alias,
+                        queries,
+                        None,
+                        settlement,
+                    )
+                })?;
                 *inspected.borrow_mut() = Some(result.clone());
                 Ok(result)
             },
@@ -14813,17 +14816,20 @@ pub(crate) mod request_tests {
             .iter()
             .any(|owner| owner.module_name() == sibling_module));
         for _ in 0..2 {
-            let inspected = inspect_lookup_queries(
-                &view,
-                Some(&inputs),
-                &prepared.preamble,
-                &prepared.imports,
-                &prepared.include,
-                &prepared.injected,
-                &context.haskell_effects_alias,
-                &[InspectionQuery::Info("checkedLookupValue".into())],
-                None,
-            )
+            let inspected = tidepool_testing::with_settlement(|settlement| {
+                inspect_lookup_queries(
+                    &view,
+                    Some(&inputs),
+                    &prepared.preamble,
+                    &prepared.imports,
+                    &prepared.include,
+                    &prepared.injected,
+                    &context.haskell_effects_alias,
+                    &[InspectionQuery::Info("checkedLookupValue".into())],
+                    None,
+                    settlement,
+                )
+            })
             .expect("native bound lookup succeeds");
             assert!(
                 matches!(&inspected[..], [tidepool_runtime::session::InspectionResult::Info { entries, .. }]
@@ -14895,13 +14901,18 @@ pub(crate) mod request_tests {
         let (batch, status) = workbench
             .access
             .with_machine(context.clone(), move |session, context, _| {
-                let batch = inspect_actor_batch(session, context, &inspection_source, &queries)?;
-                let status = run_status_discovery(
-                    session,
-                    context,
-                    &inspection_source,
-                    crate::status_tool::StatusDiscovery::Bindings,
-                )?;
+                let batch = tidepool_testing::with_settlement(|settlement| {
+                    inspect_actor_batch(session, context, &inspection_source, &queries, settlement)
+                })?;
+                let status = tidepool_testing::with_settlement(|settlement| {
+                    run_status_discovery(
+                        session,
+                        context,
+                        &inspection_source,
+                        crate::status_tool::StatusDiscovery::Bindings,
+                        settlement,
+                    )
+                })?;
                 Ok((batch, status))
             })
             .await
@@ -15146,17 +15157,20 @@ pub(crate) mod request_tests {
         assert!(inputs.view().reachable_values().is_empty());
         assert!(inputs.view().exact_declaration_context().is_none());
         assert!(!prepared.include.is_empty());
-        let results = inspect_lookup_queries(
-            &view,
-            Some(&inputs),
-            &prepared.preamble,
-            &prepared.imports,
-            &prepared.include,
-            &prepared.injected,
-            &context.haskell_effects_alias,
-            &[InspectionQuery::TypeSearch("Int -> Int".into())],
-            None,
-        )
+        let results = tidepool_testing::with_settlement(|settlement| {
+            inspect_lookup_queries(
+                &view,
+                Some(&inputs),
+                &prepared.preamble,
+                &prepared.imports,
+                &prepared.include,
+                &prepared.injected,
+                &context.haskell_effects_alias,
+                &[InspectionQuery::TypeSearch("Int -> Int".into())],
+                None,
+                settlement,
+            )
+        })
         .expect("uncancelled actor type search must return its actual worker response");
         assert!(
             matches!(&results[..], [tidepool_runtime::session::InspectionResult::TypeMatches { matches, .. }]
@@ -15225,17 +15239,20 @@ pub(crate) mod request_tests {
         assert!(inputs.view().reachable_values().is_empty());
         assert!(inputs.view().exact_declaration_context().is_none());
         assert!(!prepared.include.is_empty());
-        let results = inspect_lookup_queries(
-            &view,
-            Some(&inputs),
-            &prepared.preamble,
-            &prepared.imports,
-            &prepared.include,
-            &prepared.injected,
-            &context.haskell_effects_alias,
-            &[InspectionQuery::TypeSearch("Int -> Int".into())],
-            None,
-        );
+        let results = tidepool_testing::with_settlement(|settlement| {
+            inspect_lookup_queries(
+                &view,
+                Some(&inputs),
+                &prepared.preamble,
+                &prepared.imports,
+                &prepared.include,
+                &prepared.injected,
+                &context.haskell_effects_alias,
+                &[InspectionQuery::TypeSearch("Int -> Int".into())],
+                None,
+                settlement,
+            )
+        });
         let cleanup_id = continuation_id.clone();
         workbench
             .access
@@ -18086,7 +18103,7 @@ pub(crate) mod request_tests {
             ActorWorkbenchSource::new("", Vec::new()),
         )
         .with_child_bootstrap_program(child_bootstrap_fixture())
-        .with_child_session_factory(Arc::new(move |id, _| {
+        .with_child_session_factory(Arc::new(move |id, _, _settlement| {
             let output = ChildOutput(Arc::new(ChildOutputLifetime(Arc::clone(&worker_dropped))));
             let weak = Arc::downgrade(&output.0);
             let machine = child_preparation_fixture(id, root_path.clone(), output);
@@ -18138,7 +18155,7 @@ pub(crate) mod request_tests {
             ActorWorkbenchSource::new("", Vec::new()),
         )
         .with_child_bootstrap_program(child_bootstrap_fixture())
-        .with_child_session_factory(Arc::new(move |id, _| {
+        .with_child_session_factory(Arc::new(move |id, _, _settlement| {
             Ok(child_preparation_fixture(
                 id,
                 root_path.clone(),
@@ -18171,15 +18188,16 @@ pub(crate) mod request_tests {
         // production factory instead captures the run's real session root.
         let held_root = std::sync::Mutex::new(None);
         let runner = ResidentActorRunner::new(Arc::clone(&machines), source)
-            .with_child_session_factory(Arc::new(move |session_id, _source_layer| {
+            .with_child_session_factory(Arc::new(move |session_id, _source_layer, _settlement| {
                 let (session, root) = bare_session_at(session_id);
                 *held_root.lock().unwrap() = Some(root);
                 Ok(Box::new(session))
             }));
         assert_eq!(machines.kind(child_id), None, "not present before spawning");
-        runner
-            .spawn_child_session(child_id)
-            .expect("factory-built session installs idle");
+        tidepool_testing::with_settlement(|settlement| {
+            runner.spawn_child_session(child_id, settlement)
+        })
+        .expect("factory-built session installs idle");
         assert_eq!(
             machines.kind(child_id),
             Some(tidepool_runtime::session::SlotKind::Idle)
@@ -18516,7 +18534,7 @@ pub(crate) mod request_tests {
         );
         let child_root = std::sync::Mutex::new(None);
         let runner = ResidentActorRunner::new(Arc::clone(&machines), source)
-            .with_child_session_factory(Arc::new(move |id, _source_layer| {
+            .with_child_session_factory(Arc::new(move |id, _source_layer, _settlement| {
                 let (session, root) = bare_session_at(id);
                 *child_root.lock().unwrap() = Some(root);
                 Ok(Box::new(session))
@@ -19643,9 +19661,10 @@ pub(crate) mod request_tests {
         let (machines, _context, source, _root) = actor_registry_fixture();
         let runner: ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput> =
             ResidentActorRunner::new(machines, source);
-        let error = runner
-            .spawn_child_session(tidepool_repr::SessionId(999_999))
-            .expect_err("no factory installed");
+        let error = tidepool_testing::with_settlement(|settlement| {
+            runner.spawn_child_session(tidepool_repr::SessionId(999_999), settlement)
+        })
+        .expect_err("no factory installed");
         assert!(error.contains("no child-session factory"));
     }
 
@@ -20656,11 +20675,10 @@ pub(crate) mod request_tests {
             panic!("scope delimiter captures live callback")
         };
         let body_realm = RealmId::fresh();
-        let body = tidepool_testing::with_settlement(|settlement| {
-            runner.run_rooted_entry(context.clone(), callback, body_realm, settlement)
-        })
-        .await
-        .unwrap();
+        let body = runner
+            .run_rooted_entry(context.clone(), callback, body_realm)
+            .await
+            .unwrap();
         let boundary = runner
             .capture_boundary(context.clone(), body, body_realm)
             .await
@@ -21357,19 +21375,17 @@ pub(crate) mod request_tests {
         private_context.placement.lexical_scope = execution.private_scope;
         let workbench = ResidentActorWorkbench::new(machines.clone(), source, None)
             .with_private_execution(execution);
-        let prepared = tidepool_testing::with_settlement(|settlement| {
-            workbench.mount_activation_input(
+        let prepared = workbench
+            .mount_activation_input(
                 private_context,
                 inputs.remove(0),
                 None,
                 "()".into(),
                 None,
                 Vec::new(),
-                settlement,
             )
-        })
-        .await
-        .unwrap();
+            .await
+            .unwrap();
         drop(inputs);
         drop(workbench);
         drop(runner);
@@ -21552,19 +21568,17 @@ pub(crate) mod request_tests {
                 ),
             )
             .with_private_execution(execution);
-            let prepared = tidepool_testing::with_settlement(|settlement| {
-                private_workbench.mount_activation_input(
+            let prepared = private_workbench
+                .mount_activation_input(
                     private_context.clone(),
                     input,
                     None,
                     "()".into(),
                     None,
                     vec![],
-                    settlement,
                 )
-            })
-            .await
-            .unwrap();
+                .await
+                .unwrap();
             let binding = prepared.binding;
             let requests = Arc::new(crate::request::RequestRegistry::default());
             let requester = crate::ActorRef::first(crate::ActorId(context.actor.id.0 + 100));
@@ -21682,19 +21696,17 @@ pub(crate) mod request_tests {
         let mut private_context = context.clone();
         private_context.placement.lexical_scope = execution.private_scope;
         let workbench = workbench.with_private_execution(execution);
-        let error = tidepool_testing::with_settlement(|settlement| {
-            workbench.mount_activation_input(
+        let error = workbench
+            .mount_activation_input(
                 private_context,
                 inputs.remove(0),
                 None,
                 "()".into(),
                 None,
                 vec![],
-                settlement,
             )
-        })
-        .await
-        .unwrap_err();
+            .await
+            .unwrap_err();
         assert!(
             matches!(error, ResidentActorWorkbenchError::InputMount(ref detail) if detail.contains("reserved"))
         );
@@ -21793,19 +21805,17 @@ pub(crate) mod request_tests {
                     }
                     Ok(())
                 }));
-                let prepared = tidepool_testing::with_settlement(|settlement| {
-                    activation.mount_activation_input(
+                let prepared = activation
+                    .mount_activation_input(
                         private_context.clone(),
                         input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
-                        settlement,
                     )
-                })
-                .await
-                .unwrap();
+                    .await
+                    .unwrap();
                 assert_eq!(prepared.input_preview.trim(), (index + 1).to_string());
                 assert!(bindings.insert(prepared.binding.raw()));
                 assert!(generations.insert(prepared.admission.generation()));
@@ -21886,36 +21896,32 @@ pub(crate) mod request_tests {
             let abandoned_input = inputs.remove(0);
             drop(inputs);
             let first_task = tokio::spawn(with_test_compiler_owner(async move {
-                tidepool_testing::with_settlement(|settlement| {
-                    first.mount_activation_input(
+                first
+                    .mount_activation_input(
                         first_context,
                         first_input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
-                        settlement,
                     )
-                })
-                .await
+                    .await
             }));
             tokio::time::timeout(Duration::from_secs(30), producer_seen)
                 .await
                 .unwrap()
                 .unwrap();
             let second_task = tokio::spawn(with_test_compiler_owner(async move {
-                tidepool_testing::with_settlement(|settlement| {
-                    second.mount_activation_input(
+                second
+                    .mount_activation_input(
                         second_context,
                         second_input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
-                        settlement,
                     )
-                })
-                .await
+                    .await
             }));
             tokio::time::timeout(Duration::from_secs(30), waiter_seen)
                 .await
@@ -21934,18 +21940,16 @@ pub(crate) mod request_tests {
                 .collect();
             machines.settle_suspended(receipt, session, holes);
             let abandoned_task = tokio::spawn(with_test_compiler_owner(async move {
-                tidepool_testing::with_settlement(|settlement| {
-                    abandoned.mount_activation_input(
+                abandoned
+                    .mount_activation_input(
                         abandoned_context,
                         abandoned_input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
-                        settlement,
                     )
-                })
-                .await
+                    .await
             }));
             tokio::time::timeout(Duration::from_secs(30), abandoned_seen)
                 .await
@@ -21995,18 +21999,16 @@ pub(crate) mod request_tests {
             drop(inputs);
             let submissions = tidepool_extract_cmd::extract_spawn_count();
             let first_task = tokio::spawn(with_test_compiler_owner(async move {
-                tidepool_testing::with_settlement(|settlement| {
-                    first.mount_activation_input(
+                first
+                    .mount_activation_input(
                         first_context,
                         first_input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
-                        settlement,
                     )
-                })
-                .await
+                    .await
             }));
             tokio::time::timeout(Duration::from_secs(60), sealed_seen)
                 .await
@@ -22015,19 +22017,17 @@ pub(crate) mod request_tests {
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions + 2);
             first_task.abort();
             assert!(matches!(first_task.await, Err(error) if error.is_cancelled()));
-            let fresh = tidepool_testing::with_settlement(|settlement| {
-                second.mount_activation_input(
+            let fresh = second
+                .mount_activation_input(
                     second_context,
                     second_input,
                     None,
                     "()".into(),
                     None,
                     Vec::new(),
-                    settlement,
                 )
-            })
-            .await
-            .unwrap();
+                .await
+                .unwrap();
             assert_eq!(fresh.input_preview.trim(), "2");
             assert_eq!(
                 tidepool_extract_cmd::extract_spawn_count(),
@@ -22085,18 +22085,16 @@ pub(crate) mod request_tests {
             let second_input = inputs.remove(0);
             drop(inputs);
             let first_task = tokio::spawn(with_test_compiler_owner(async move {
-                tidepool_testing::with_settlement(|settlement| {
-                    first.mount_activation_input(
+                first
+                    .mount_activation_input(
                         first_context,
                         first_input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
-                        settlement,
                     )
-                })
-                .await
+                    .await
             }));
             tokio::time::timeout(Duration::from_secs(60), started_seen)
                 .await
@@ -22105,18 +22103,16 @@ pub(crate) mod request_tests {
             first_task.abort();
             assert!(matches!(first_task.await, Err(error) if error.is_cancelled()));
             let second_task = tokio::spawn(with_test_compiler_owner(async move {
-                tidepool_testing::with_settlement(|settlement| {
-                    second.mount_activation_input(
+                second
+                    .mount_activation_input(
                         second_context,
                         second_input,
                         None,
                         "()".into(),
                         None,
                         Vec::new(),
-                        settlement,
                     )
-                })
-                .await
+                    .await
             }));
             tokio::time::timeout(Duration::from_secs(60), waiting_seen)
                 .await
@@ -22154,7 +22150,7 @@ pub(crate) mod request_tests {
             let third_input = inputs.remove(0);
             drop(inputs);
             let submissions = tidepool_extract_cmd::extract_spawn_count();
-            let warm = tidepool_testing::with_settlement(|settlement| first.mount_activation_input(first_context, first_input, None, "()".into(), None, Vec::new(), settlement)).await.unwrap();
+            let warm = first.mount_activation_input(first_context, first_input, None, "()".into(), None, Vec::new()).await.unwrap();
             assert_eq!(warm.input_preview.trim(), "1");
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions + 2);
             let observed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -22170,12 +22166,12 @@ pub(crate) mod request_tests {
                 }
                 Ok(())
             }));
-            let refused = tidepool_testing::with_settlement(|settlement| stale.mount_activation_input(stale_context, stale_input, None, "()".into(), None, Vec::new(), settlement)).await;
+            let refused = stale.mount_activation_input(stale_context, stale_input, None, "()".into(), None, Vec::new()).await;
             assert!(observed.load(std::sync::atomic::Ordering::SeqCst));
             assert!(matches!(refused, Err(ResidentActorWorkbenchError::ActivationBindingCommitted { source, .. })
                 if matches!(*source, ResidentActorWorkbenchError::Resident(_))));
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions + 3);
-            let fresh = tidepool_testing::with_settlement(|settlement| third.mount_activation_input(third_context, third_input, None, "()".into(), None, Vec::new(), settlement)).await.unwrap();
+            let fresh = third.mount_activation_input(third_context, third_input, None, "()".into(), None, Vec::new()).await.unwrap();
             assert_eq!(fresh.input_preview.trim(), "3");
             assert_ne!(fresh.binding, warm.binding);
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), submissions + 4,
@@ -23843,15 +23839,18 @@ pub(crate) mod request_tests {
                                     generation,
                                     observation,
                                 } = *ready;
-                                let step = begin_ready_bind_in_checkout(
-                                    session,
-                                    context,
-                                    &block,
-                                    bound,
-                                    compiled,
-                                    generation,
-                                    observation,
-                                )?;
+                                let step = tidepool_testing::with_settlement(|settlement| {
+                                    begin_ready_bind_in_checkout(
+                                        session,
+                                        context,
+                                        &block,
+                                        bound,
+                                        compiled,
+                                        generation,
+                                        observation,
+                                        settlement,
+                                    )
+                                })?;
                                 let ResidentWorkbenchStep::Running { outcome, .. } = &step else {
                                     panic!("expected late suspension")
                                 };

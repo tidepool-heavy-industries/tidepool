@@ -343,7 +343,10 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
     let valid = crate::exomonad::workspace::FrozenWorkspace::load(project.path(), valid_run.path())
         .unwrap();
     // Public check/init use this full-workspace validation owner.
-    validate_workspace_program(&valid, valid_run.path()).unwrap();
+    tidepool_testing::with_settlement(|settlement| {
+        validate_workspace_program(&valid, valid_run.path(), settlement)
+    })
+    .unwrap();
 
     write_bootstrap_workspace(
         project.path(),
@@ -354,13 +357,16 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
     let invalid =
         crate::exomonad::workspace::FrozenWorkspace::load(project.path(), invalid_run.path())
             .unwrap();
-    let bootstrap = compile_driver(
-        Path::new("unused-live-actors"),
-        Some(&invalid),
-        invalid_run.path(),
-        None,
-        DriverCompilePurpose::Bootstrap,
-    )
+    let bootstrap = tidepool_testing::with_settlement(|settlement| {
+        compile_driver(
+            Path::new("unused-live-actors"),
+            Some(&invalid),
+            invalid_run.path(),
+            None,
+            DriverCompilePurpose::Bootstrap,
+            settlement,
+        )
+    })
     .expect("the fixed driver has no dependency on the invalid workspace spec");
     let certification = bootstrap.compiled.certification.as_ref().unwrap();
     assert!(certification.recovery_products.iter().all(|product| {
@@ -383,7 +389,10 @@ fn runtime_driver_excludes_workspace_but_check_and_init_validate_configured_spec
     )
     .unwrap();
     assert_eq!(bootstrap.include, sources.include);
-    let failure = validate_workspace_program(&invalid, invalid_run.path()).unwrap_err();
+    let failure = tidepool_testing::with_settlement(|settlement| {
+        validate_workspace_program(&invalid, invalid_run.path(), settlement)
+    })
+    .unwrap_err();
     assert!(
         failure.to_string().contains("missingConfiguredStartupSpec"),
         "{failure}"

@@ -1925,34 +1925,28 @@ mod tests {
         );
         let anchor =
             tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
-        assert!(
-            retry
-                .seal_preparation(&anchor)
-                .unwrap_err()
-                .to_string()
-                .contains("only a completed")
-        );
+        assert!(retry
+            .seal_preparation(&anchor)
+            .unwrap_err()
+            .to_string()
+            .contains("only a completed"));
         assert_eq!(
             std::fs::read(directory.path().join("workspace/selection.json")).unwrap(),
             before
         );
         std::fs::write(&prompt, "changed root prompt").unwrap();
-        assert!(
-            retry
-                .verify_current_inputs(project.path())
-                .unwrap_err()
-                .to_string()
-                .contains("prompt changed")
-        );
+        assert!(retry
+            .verify_current_inputs(project.path())
+            .unwrap_err()
+            .to_string()
+            .contains("prompt changed"));
         std::fs::write(&prompt, "original root prompt").unwrap();
         std::fs::write(authored.join("Added.hs"), "module Added where\n").unwrap();
-        assert!(
-            retry
-                .verify_current_inputs(project.path())
-                .unwrap_err()
-                .to_string()
-                .contains("source bytes changed")
-        );
+        assert!(retry
+            .verify_current_inputs(project.path())
+            .unwrap_err()
+            .to_string()
+            .contains("source bytes changed"));
         assert_eq!(
             std::fs::read(directory.path().join("workspace/selection.json")).unwrap(),
             before
@@ -1969,11 +1963,9 @@ mod tests {
         let before = tidepool_extract_cmd::extract_spawn_count();
         let refuse = || {
             assert!(FrozenWorkspace::load_prepared_run(project.path(), run.path()).is_err());
-            assert!(
-                std::fs::read_dir(run.path())
-                    .unwrap()
-                    .all(|entry| { entry.unwrap().file_name() == "workspace-prepared.json" })
-            );
+            assert!(std::fs::read_dir(run.path())
+                .unwrap()
+                .all(|entry| { entry.unwrap().file_name() == "workspace-prepared.json" }));
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
         };
         // A consumed selection that disappears cannot become a fresh capture.
@@ -2043,13 +2035,11 @@ mod tests {
             version: 1,
             ..pointer
         };
-        assert!(
-            legacy
-                .read_selection()
-                .unwrap_err()
-                .to_string()
-                .contains("unsupported")
-        );
+        assert!(legacy
+            .read_selection()
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported"));
     }
 
     #[test]
@@ -2077,11 +2067,9 @@ mod tests {
             });
             std::fs::write(&manifest, serde_json::to_vec(&selected).unwrap()).unwrap();
             let error = FrozenWorkspace::load(project.path(), directory.path()).unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("unsupported frozen workspace format")
-            );
+            assert!(error
+                .to_string()
+                .contains("unsupported frozen workspace format"));
             assert!(!run.path().join("workspace-prepared.json").exists());
         }
     }
@@ -2135,28 +2123,24 @@ mod tests {
             .join("Tidepool/Prelude.hs");
         let original = std::fs::read(&prelude).unwrap();
         std::fs::write(&prelude, "module Tidepool.Prelude where\n").unwrap();
-        assert!(
-            FrozenWorkspace::load_with_deployment(
-                project.path(),
-                run.path(),
-                Some(selection.clone())
-            )
-            .is_err()
-        );
+        assert!(FrozenWorkspace::load_with_deployment(
+            project.path(),
+            run.path(),
+            Some(selection.clone())
+        )
+        .is_err());
         std::fs::write(&prelude, original).unwrap();
         let extra = selection
             .sources
             .root(NativeSourceRole::Stdlib)
             .join("Tidepool/DeploymentExtra.hs");
         std::fs::write(&extra, "module Tidepool.DeploymentExtra where\n").unwrap();
-        assert!(
-            FrozenWorkspace::load_with_deployment(
-                project.path(),
-                run.path(),
-                Some(selection.clone())
-            )
-            .is_err()
-        );
+        assert!(FrozenWorkspace::load_with_deployment(
+            project.path(),
+            run.path(),
+            Some(selection.clone())
+        )
+        .is_err());
         std::fs::remove_file(extra).unwrap();
         std::fs::remove_file(prelude).unwrap();
         assert!(
@@ -2179,14 +2163,12 @@ mod tests {
         let sentinel = actors.join("Tidepool/Check.hs");
         let original = std::fs::read(&sentinel).unwrap();
         std::fs::write(&sentinel, "changed actor source").unwrap();
-        assert!(
-            FrozenWorkspace::load_with_deployment(
-                project.path(),
-                run.path(),
-                Some(selection.clone())
-            )
-            .is_err()
-        );
+        assert!(FrozenWorkspace::load_with_deployment(
+            project.path(),
+            run.path(),
+            Some(selection.clone())
+        )
+        .is_err());
         std::fs::write(&sentinel, original).unwrap();
         std::fs::rename(&actors, fixture.path().join("original-actors")).unwrap();
         std::os::unix::fs::symlink(fixture.path().join("original-actors"), &actors).unwrap();
@@ -2223,10 +2205,12 @@ mod tests {
             .sha256
             .push_str("-changed");
         for selection in changed {
-            assert!(
-                FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
-                    .is_err()
-            );
+            assert!(FrozenWorkspace::load_with_deployment(
+                project.path(),
+                run.path(),
+                Some(selection)
+            )
+            .is_err());
             assert_eq!(std::fs::read(&manifest).unwrap(), admitted);
         }
         assert!(FrozenWorkspace::load_with_deployment(project.path(), run.path(), None).is_err());
@@ -2237,11 +2221,9 @@ mod tests {
         let error =
             FrozenWorkspace::load_with_deployment(project.path(), run.path(), Some(selection))
                 .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported frozen workspace format")
-        );
+        assert!(error
+            .to_string()
+            .contains("unsupported frozen workspace format"));
         assert_eq!(std::fs::read(manifest).unwrap(), old);
     }
 
@@ -2271,11 +2253,9 @@ mod tests {
             .find_map(|root| std::fs::read_to_string(root.join("Project/Shared.hs")).ok())
             .unwrap();
         assert!(winner.contains("value = 1"));
-        assert!(
-            std::fs::read_to_string(roots[1].join("Project/Shared.hs"))
-                .unwrap()
-                .contains("value = 2")
-        );
+        assert!(std::fs::read_to_string(roots[1].join("Project/Shared.hs"))
+            .unwrap()
+            .contains("value = 2"));
         assert!(frozen.include.last().unwrap().ends_with("resources"));
     }
 
@@ -2401,11 +2381,9 @@ mod tests {
         selection.as_object_mut().unwrap().remove("core_identity");
         std::fs::write(&manifest, serde_json::to_vec(&selection).unwrap()).unwrap();
         let error = FrozenWorkspace::load(project.path(), run.path()).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported frozen workspace format")
-        );
+        assert!(error
+            .to_string()
+            .contains("unsupported frozen workspace format"));
     }
 
     #[test]
@@ -2473,12 +2451,10 @@ mod tests {
                 .contains("New")
         );
         std::fs::write(frozen.include[0].join("Project/Types.hs"), "tampered").unwrap();
-        assert!(
-            FrozenWorkspace::load(project.path(), first.path())
-                .unwrap_err()
-                .to_string()
-                .contains("frozen workspace input changed")
-        );
+        assert!(FrozenWorkspace::load(project.path(), first.path())
+            .unwrap_err()
+            .to_string()
+            .contains("frozen workspace input changed"));
     }
 
     #[test]
@@ -2735,14 +2711,12 @@ mod tests {
         )
         .unwrap();
         for argv in [&["init", "-q"][..], &["add", "-A"][..]] {
-            assert!(
-                std::process::Command::new("git")
-                    .args(argv)
-                    .current_dir(project)
-                    .status()
-                    .unwrap()
-                    .success()
-            );
+            assert!(std::process::Command::new("git")
+                .args(argv)
+                .current_dir(project)
+                .status()
+                .unwrap()
+                .success());
         }
     }
 
@@ -2776,10 +2750,15 @@ mod tests {
             "module Project.Check where\ncheck :: Bool\ncheck = undefinedWorkspaceFunction\n",
         )
         .unwrap();
-        crate::actor_host::validate_workspace_program(&old, old_run.path()).unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            crate::actor_host::validate_workspace_program(&old, old_run.path(), settlement)
+        })
+        .unwrap();
         let new = FrozenWorkspace::load(project.path(), new_run.path()).unwrap();
-        let error =
-            crate::actor_host::validate_workspace_program(&new, new_run.path()).unwrap_err();
+        let error = tidepool_testing::with_settlement(|settlement| {
+            crate::actor_host::validate_workspace_program(&new, new_run.path(), settlement)
+        })
+        .unwrap_err();
         assert!(
             error.to_string().contains("undefinedWorkspaceFunction"),
             "{error}"

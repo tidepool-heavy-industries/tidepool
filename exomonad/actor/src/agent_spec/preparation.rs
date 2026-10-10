@@ -1083,13 +1083,16 @@ pub(crate) mod tests {
         assert!(entry_path_present(entry.path()).unwrap());
         std::fs::remove_dir(entry.path()).unwrap();
         let before = tidepool_extract_cmd::extract_spawn_count();
-        let result = retained_installer(
-            &recipe,
-            &storage,
-            "module RetainedMissing where\n__prepared = (1 :: Int)\n",
-            OriginalAcquisition::LoadCompleted,
-            &tidepool_toolchain::toolchain::CatalogSelection::Acquired(None),
-        );
+        let result = tidepool_testing::with_settlement(|settlement| {
+            retained_installer(
+                &recipe,
+                &storage,
+                "module RetainedMissing where\n__prepared = (1 :: Int)\n",
+                OriginalAcquisition::LoadCompleted,
+                &tidepool_toolchain::toolchain::CatalogSelection::Acquired(None),
+                settlement,
+            )
+        });
         assert!(result.is_err());
         assert!(!original.path().join("RetainedMissing.hs").exists());
         assert!(!entry.path().exists());
