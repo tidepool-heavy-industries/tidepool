@@ -363,12 +363,13 @@ impl NativeOriginalRequirement {
             return Ok(None);
         }
         drop(state);
-        let selected = view.retain_projected_materializations(view.inventory().retain(
+        let mut selected = view.retain_projected_materializations(view.inventory().retain(
             roots,
             Vec::new(),
             Vec::new(),
             Vec::new(),
         ))?;
+        selected.replace_namespace(&BTreeMap::new());
         Ok(Some(Self {
             original,
             selection: ExactArtifactSelection::capture(&selected),
@@ -2108,7 +2109,7 @@ impl ArtifactInventory {
                     ArtifactInventoryFailure::NativeRootOutsideView { artifact: original },
                 ));
             }
-            // A published native closure can select dependency originals
+            // An issued native closure can select dependency originals
             // without offering them to the compiler as reusable modules.
             // Their retained payloads still own the certified native rows.
             required_native_carriers.extend(graph.bindings.iter().filter_map(|binding| {
@@ -2248,7 +2249,7 @@ impl ArtifactInventory {
             if invalid.is_empty() {
                 for key in required_groups.keys() {
                     let LogicalNodeKey::Group(group) = key else {
-                        unreachable!("published constraints are typed group handles")
+                        unreachable!("native requirements are typed group handles")
                     };
                     match candidates[key].len() {
                         0 => {

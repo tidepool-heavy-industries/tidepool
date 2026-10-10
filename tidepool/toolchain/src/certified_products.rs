@@ -2402,6 +2402,17 @@ enum ReceiptSourceVersion {
 }
 
 impl CertifiedSourceSelection {
+    pub(crate) fn from_compiler_inputs(
+        inputs: &crate::declaration_context::RequestCompilerInputs,
+        metadata: &crate::artifact_inventory::ArtifactMetadataSnapshot,
+        operation: &InventoryOperation,
+    ) -> CertResult<Self> {
+        let mut selected = Self::from_compiler_projection(&inputs.projection, metadata, operation)?;
+        selected
+            .with_native_original_requirements(metadata, &inputs.native_original_requirements)?;
+        Ok(selected)
+    }
+
     pub(crate) fn native_original_requirements(
         &self,
     ) -> impl Iterator<Item = &crate::artifact_inventory::NativeOriginalRequirement> {
@@ -7610,16 +7621,15 @@ pub(crate) fn certify_products_with_validation(
     }
     validate_original_interface_owner_closure(&receipt.modules, &admitted_interfaces)?;
     let mut source_selection = match exact {
-        Some(_) => CertifiedSourceSelection::from_compiler_projection(
-            &compiler_inputs
+        Some(_) => {
+            let inputs = compiler_inputs
                 .as_ref()
-                .ok_or(CertificationError::Mismatch("compiler original projection"))?
-                .projection,
-            projected_metadata
+                .ok_or(CertificationError::Mismatch("compiler original projection"))?;
+            let metadata = projected_metadata
                 .as_ref()
-                .ok_or(CertificationError::Mismatch("compiler original projection"))?,
-            &validation.inventory,
-        )?,
+                .ok_or(CertificationError::Mismatch("compiler original projection"))?;
+            CertifiedSourceSelection::from_compiler_inputs(inputs, metadata, &validation.inventory)?
+        }
         None => CertifiedSourceSelection::default(),
     };
     for interface in &module_interfaces {
