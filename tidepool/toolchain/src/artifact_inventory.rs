@@ -51,6 +51,44 @@ impl CanonicalProducerIdentity {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 pub struct ArtifactId(pub [u8; 32]);
 
+/// Identity of one issued exact dependency binding. Payload identity alone does
+/// not identify the canonical children selected by a compiler transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+pub struct ArtifactSelectionId(pub [u8; 32]);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactBinding {
+    pub artifact: ArtifactId,
+    pub selection: ArtifactSelectionId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeGroupBinding {
+    pub binding: ArtifactBinding,
+    pub original_ordinal: u32,
+}
+
+/// Durable facts grant no authority until certified payloads, exact edges and
+/// the selected namespace have been validated by the inventory owner.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactBindingNode {
+    Artifact(ArtifactBinding),
+    Group(NativeGroupBinding),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactGraphSelection {
+    pub bindings: Vec<ArtifactBinding>,
+    pub namespace: Vec<ArtifactBinding>,
+    pub roots: Vec<ArtifactBinding>,
+    pub native_groups: Vec<NativeGroupBinding>,
+    pub native_custody: Vec<ArtifactBinding>,
+}
+
 /// Content-bound original group selection. These serialized facts grant no
 /// authority until the inventory checks the certified group and its closure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
@@ -3207,6 +3245,62 @@ mod tests {
             name,
             requirements,
         ))
+    }
+
+    #[test]
+    fn shared_canonical_payload_preserves_each_issued_child_binding() {
+        let inventory = ArtifactInventory::default();
+        let empty = inventory.empty_view();
+        let old_child = entry("Child", &[]);
+        let ArtifactPayload::Canonical(child) = &old_child.payload else {
+            unreachable!()
+        };
+        let new_child = ArtifactEntry::canonical(crate::certified_products::fixture_module_core(
+            child,
+            b"independently issued child Core".to_vec(),
+        ));
+        assert_eq!(
+            old_child.descriptor.interface_sha256,
+            new_child.descriptor.interface_sha256,
+        );
+        assert_ne!(old_child.descriptor.id, new_child.descriptor.id);
+        let shared_root = entry("Root", &["Child"]);
+        let root_id = shared_root.descriptor.id;
+        let old_child_id = old_child.descriptor.id;
+        let new_child_id = new_child.descriptor.id;
+        let old = inventory
+            .admit(&empty, vec![shared_root.clone(), old_child])
+            .unwrap();
+        let old_selected = old.select_roots(vec![root_id]).unwrap();
+        assert_eq!(
+            old_selected.artifact_ids().into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([root_id, old_child_id]),
+        );
+        // Both complete packets are independently valid. Their shared payload
+        // cannot inherit a child binding from another issued namespace.
+        let independent = ArtifactInventory::default();
+        independent
+            .admit(
+                &independent.empty_view(),
+                vec![shared_root.clone(), new_child.clone()],
+            )
+            .unwrap();
+        let new = inventory
+            .admit(&empty, vec![shared_root, new_child])
+            .unwrap();
+        assert_eq!(
+            new.select_roots(vec![root_id])
+                .unwrap()
+                .artifact_ids()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([root_id, new_child_id]),
+        );
+        drop(old);
+        assert_eq!(
+            old_selected.artifact_ids().into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([root_id, old_child_id]),
+        );
     }
 
     fn native_entry(name: &str, requirements: &[&str]) -> ArtifactEntry {
