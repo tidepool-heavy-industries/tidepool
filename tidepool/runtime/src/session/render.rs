@@ -844,28 +844,52 @@ impl DeclLog {
     /// This is the metadata-preserving form of [`Self::current_heads_at`].
     #[must_use]
     pub fn current_items_at(&self, tip: Generation) -> Vec<(ExportItem, u64)> {
-        let mut map: std::collections::BTreeMap<
-            (
-                tidepool_toolchain::declaration_join::ExportNamespace,
-                String,
-            ),
-            (ExportItem, u64),
-        > = std::collections::BTreeMap::new();
+        let mut map = BTreeMap::new();
         for g in self.chain_from_root(tip) {
             let turn = self
                 .turn(g)
                 .expect("scope chain contains only committed nodes");
-            for r in &turn.retracts {
-                map.retain(|(namespace, name), _| !r.selects(*namespace, name));
-            }
-            for item in &turn.items {
-                map.insert(
-                    (item.head_namespace(), item.head_name().to_string()),
-                    (item.clone(), g.0),
-                );
-            }
+            Self::apply_owned_turn(&mut map, turn, |item| (item.clone(), g.0));
         }
         map.into_values().collect()
+    }
+
+    /// Prepare the next selected declaration heads without activating a slot
+    /// or cloning the log. Retractions and shadowing use the committed fold.
+    pub(crate) fn current_items_with_turn(
+        &self,
+        parent: Generation,
+        turn: &DeclTurn,
+    ) -> Vec<ExportItem> {
+        let mut map = self
+            .current_items_at(parent)
+            .into_iter()
+            .map(|(item, _)| ((item.head_namespace(), item.head_name().to_owned()), item))
+            .collect();
+        Self::apply_owned_turn(&mut map, turn, Clone::clone);
+        map.into_values().collect()
+    }
+
+    fn apply_owned_turn<V>(
+        map: &mut BTreeMap<
+            (
+                tidepool_toolchain::declaration_join::ExportNamespace,
+                String,
+            ),
+            V,
+        >,
+        turn: &DeclTurn,
+        owned_item: impl Fn(&ExportItem) -> V,
+    ) {
+        for retraction in &turn.retracts {
+            map.retain(|(namespace, name), _| !retraction.selects(*namespace, name));
+        }
+        for item in &turn.items {
+            map.insert(
+                (item.head_namespace(), item.head_name().to_owned()),
+                owned_item(item),
+            );
+        }
     }
 
     /// The retained type of a value export in its exact defining generation.
@@ -1465,6 +1489,41 @@ mod tests {
                 DeclarationSlot::Committed(turn("answer = 43", vec![val("answer")])),
             )
             .is_err());
+    }
+
+    #[test]
+    fn prospective_items_preserve_branch_namespaces_retraction_and_shadowing() {
+        let mut log = DeclLog::new();
+        let parent = push_chained(
+            &mut log,
+            turn("", vec![val("shared"), ty("shared", &["Old"]), val("gone")]),
+        );
+        let mut sibling = turn("", vec![val("sibling")]);
+        sibling.parent = Some(parent);
+        log.push(sibling);
+        let generation = log.generation();
+        let revision = log.publication_revision();
+        let mut next = turn("", vec![val("shared"), ty("shared", &["New"])]);
+        next.parent = Some(parent);
+        next.retracts = vec![DeclarationRetraction::Value("gone".into())];
+        assert_eq!(
+            log.current_items_with_turn(parent, &next),
+            vec![val("shared"), ty("shared", &["New"])]
+        );
+        assert_eq!(log.generation(), generation);
+        assert_eq!(log.publication_revision(), revision);
+        assert!(log
+            .current_heads_at(parent)
+            .iter()
+            .any(|(name, _)| name == "gone"));
+        let committed = log.push(next);
+        assert_eq!(
+            log.current_items_at(committed)
+                .into_iter()
+                .map(|(item, _)| item)
+                .collect::<Vec<_>>(),
+            vec![val("shared"), ty("shared", &["New"])]
+        );
     }
 
     fn val(name: &str) -> ExportItem {
