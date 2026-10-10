@@ -1019,6 +1019,7 @@ pub struct RuntimeActivationPreviewAdmission {
     exact_context: Arc<tidepool_toolchain::declaration_join::ExactCompileContext>,
     catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
     scope_lease: Arc<super::RuntimeLexicalScopeLease>,
+    pub(super) image_registry: Arc<ImageRegistry>,
     consumed: AtomicBool,
 }
 
@@ -1050,6 +1051,22 @@ impl RuntimeActivationPreviewAdmission {
 pub struct CompiledActivationRenderer {
     pub(super) compiled: super::turn::CompiledTurn,
     pub(super) proof: Arc<tidepool_toolchain::activation_preview::ExactCompiledActivationPreview>,
+    pub(super) native: ActivationRendererNative,
+}
+
+#[derive(Debug)]
+pub(super) enum ActivationRendererNative {
+    Renderable(super::prepared::NativeImageBundle),
+    Opaque,
+}
+
+impl ActivationRendererNative {
+    fn image_instances(&self) -> Vec<u64> {
+        match self {
+            Self::Renderable(bundle) => bundle.image_instances().collect(),
+            Self::Opaque => Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -2033,7 +2050,10 @@ struct PreparedCheckedTurn {
 
 enum PreparedExecutionPurpose {
     Authored(Option<Arc<CheckedTurnCompletion>>),
-    HostActivationPreview(Arc<super::RuntimeLexicalScopeLease>),
+    HostActivationPreview {
+        lease: Arc<super::RuntimeLexicalScopeLease>,
+        registry: Arc<ImageRegistry>,
+    },
 }
 
 fn checked_turn_plan(
@@ -6044,6 +6064,7 @@ where
             exact_context,
             catalog_selection: self.state.catalog_selection().clone(),
             scope_lease,
+            image_registry: self.state.certified_image_registry(),
             consumed: AtomicBool::new(false),
         }))
     }
@@ -6073,11 +6094,15 @@ where
     }
 
     /// Run only a sealed pure preview of this exact original committed root.
+    #[tracing::instrument(name = "activation_renderer_install", skip_all, fields(renderer_owner = Arc::as_ptr(&compiled.renderer) as usize, session = %self.state.lib().session_id(), binding = compiled.admission.mounted.binding.raw(), scope = ?compiled.admission.scope_lease.scope(), native_images = ?compiled.renderer.native.image_instances()))]
     pub fn run_activation_preview(
         &mut self,
         compiled: CompiledActivationPreview,
     ) -> Result<ResidentOutcome, ResidentError> {
         self.settle_dropped_custody();
+        let ActivationRendererNative::Renderable(images) = &compiled.renderer.native else {
+            return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+        };
         let admission = &compiled.admission;
         let mounted = &admission.mounted;
         self.validate_mounted_activation_input(mounted)?;
@@ -6129,7 +6154,10 @@ where
             compiled.renderer.compiled.code(),
             PreparedTurnMode::Value,
             Some(mounted.handle),
-            PreparedExecutionPurpose::HostActivationPreview(admission.scope_lease.clone()),
+            PreparedExecutionPurpose::HostActivationPreview {
+                lease: admission.scope_lease.clone(),
+                registry: images.registry.clone(),
+            },
             provenance,
         )
     }
@@ -6189,15 +6217,15 @@ where
         purpose: PreparedExecutionPurpose,
         provenance: Arc<ProgramProvenance>,
     ) -> Result<ResidentOutcome, ResidentError> {
-        let (checked, lexical_scope, _execution_scope_lease) = match purpose {
+        let (checked, lexical_scope, _execution_scope_lease, image_registry) = match purpose {
             PreparedExecutionPurpose::Authored(checked) => {
-                (checked, self.run_context.lexical_scope, None)
+                (checked, self.run_context.lexical_scope, None, None)
             }
-            PreparedExecutionPurpose::HostActivationPreview(lease) => {
+            PreparedExecutionPurpose::HostActivationPreview { lease, registry } => {
                 self.state
                     .validate_lexical_scope_lease(lease.scope(), &lease)?;
                 let scope = lease.scope();
-                (None, scope, Some(lease))
+                (None, scope, Some(lease), Some(registry))
             }
         };
         let prepared = code.prepared.into_owned();
@@ -6213,10 +6241,11 @@ where
         // Preview source instances belong to its detached authority, so dropping
         // that lease releases them without changing the public source plane.
         let install_prepared_started = std::time::Instant::now();
-        let (program, source_keys) = self.install_turn_program_in(
+        let (program, source_keys) = self.install_turn_program_in_with_registry(
             lexical_scope,
             prepared,
             code.certification.as_ref().as_ref(),
+            image_registry.as_deref(),
         )?;
         timing::record_stage(
             timing::NO_NODE,
@@ -6279,13 +6308,31 @@ where
         ),
         ResidentError,
     > {
+        self.install_turn_program_in_with_registry(lexical_scope, prepared, certification, None)
+    }
+
+    fn install_turn_program_in_with_registry(
+        &mut self,
+        lexical_scope: ScopeId,
+        prepared: PreparedProgram,
+        certification: Option<&super::turn::TurnCertification>,
+        retained_registry: Option<&ImageRegistry>,
+    ) -> Result<
+        (
+            ProgramId,
+            tidepool_codegen::binding_table::SourceScopeAdmission,
+        ),
+        ResidentError,
+    > {
         if let Some(certification) = certification {
             let resolved =
                 self.state
                     .resolve_certification_in(lexical_scope, &prepared, certification)?;
             let registry = self.state.certified_image_registry();
             let (target, demanded) = super::prepared::CertifiedTargetImage::compile_scoped(
-                prepared, &resolved, &registry,
+                prepared,
+                &resolved,
+                retained_registry.unwrap_or(&registry),
             )?;
             self.install_certified_turn_in(
                 lexical_scope,

@@ -5344,9 +5344,9 @@ where
                         session.publish_source_originals(pending_originals)?;
                     }
                     if let Some(prepared) = code.prepared() {
-                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), source_revision = %prepared.source_revision, acquisition = ?prepared.acquisition, "actor phase");
+                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, session = %context.placement.session, phase = "toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), source_revision = %prepared.source_revision, acquisition = ?prepared.acquisition, "actor phase");
                     } else {
-                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, phase = "explicit_toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), install, "actor phase");
+                        tracing::info!(target: "exomonad_actor::workbench_phase", actor = %context.actor, session = %context.placement.session, phase = "explicit_toolset_installed", installation_scope = ?(context.placement.session, installation_scope.scope()), install, "actor phase");
                     }
                     Ok(PreparedToolInstallation {
                         tools: ResidentWorkbenchTools {
@@ -5741,10 +5741,11 @@ where
                     }
                     Err(failure) => return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error })),
                 },
-                Err(failure) if matches!(failure.error, CompileError::Diagnostics(_)) => {
+                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure)) if matches!(failure.error, CompileError::Diagnostics(_)) => {
                     return Ok((ActivationPreviewOutcome::Unavailable(ActivationPreviewUnavailable::Language), input_binding, admission));
                 }
-                Err(failure) => return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error })),
+                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Frontend(failure)) => return Err(committed(ResidentActorWorkbenchError::InputCompilation { stage: ActivationCompileStage::Preview, error: failure.error })),
+                Err(tidepool_runtime::session::turn::ActivationRendererFailure::Native(error)) => return Err(committed(ResidentActorWorkbenchError::Resident(error.into()))),
             };
             if compiled.proof().disposition() == tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Opaque {
                 return Ok((ActivationPreviewOutcome::Opaque, input_binding, admission));
@@ -21606,14 +21607,31 @@ pub(crate) mod request_tests {
             let mut generations = std::collections::BTreeSet::new();
             let mut scopes = std::collections::BTreeSet::new();
             let producers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let native_at_selection = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let preparation_start = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let prepared_images = Arc::new(std::sync::atomic::AtomicU64::new(0));
             for (index, input) in inputs.into_iter().enumerate() {
                 let (mut activation, private_context) =
                     renderer_activation_workbench(&workbench, &context).await;
                 assert!(scopes.insert(private_context.placement.lexical_scope));
                 let observed = producers.clone();
+                let selected = native_at_selection.clone();
+                let started = preparation_start.clone();
+                let prepared = prepared_images.clone();
                 activation.activation_preview_observer = Some(Arc::new(move |event| {
-                    if matches!(event, ActivationPublicationObservation::RendererProducer) {
-                        observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    use tidepool_codegen::prepared_program::CompiledProgram;
+                    match event {
+                        ActivationPublicationObservation::RendererProducer => {
+                            observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            started.store(CompiledProgram::successful_image_compilations(), std::sync::atomic::Ordering::SeqCst);
+                        }
+                        ActivationPublicationObservation::RendererSealed => {
+                            prepared.store(CompiledProgram::successful_image_compilations() - started.load(std::sync::atomic::Ordering::SeqCst), std::sync::atomic::Ordering::SeqCst);
+                        }
+                        ActivationPublicationObservation::RendererSelected(_) => {
+                            selected.store(CompiledProgram::successful_image_compilations(), std::sync::atomic::Ordering::SeqCst);
+                        }
+                        _ => {}
                     }
                     Ok(())
                 }));
@@ -21629,6 +21647,7 @@ pub(crate) mod request_tests {
                     .await
                     .unwrap();
                 assert_eq!(prepared.input_preview.trim(), (index + 1).to_string());
+                assert_eq!(tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(), native_at_selection.load(std::sync::atomic::Ordering::SeqCst), "fresh preview installation must compile no native images");
                 assert!(bindings.insert(prepared.binding.raw()));
                 assert!(generations.insert(prepared.admission.generation()));
                 // Exactly one fresh interface request each; only the first
@@ -21649,11 +21668,51 @@ pub(crate) mod request_tests {
                     .unwrap();
             }
             assert_eq!(producers.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert!(prepared_images.load(std::sync::atomic::Ordering::SeqCst) > 0, "the shared producer must complete actual native preparation");
             assert_eq!(bindings.len(), 20);
             assert_eq!(generations.len(), 20);
             assert_eq!(scopes.len(), 20);
         })
         .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn four_concurrent_distinct_values_share_prepared_native_renderer() {
+        with_test_compiler_owner(async {
+            let (session, context, source, inputs, _root) = distinct_renderer_input_fixture();
+            let machines = Arc::new(ActorMachineRegistry::new());
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(machines, source, None);
+            let producers = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let sealed_count = Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let mut tasks = Vec::new();
+            for input in inputs.into_iter().take(4) {
+                let (mut activation, context) = renderer_activation_workbench(&workbench, &context).await;
+                let produced = producers.clone();
+                let sealed = sealed_count.clone();
+                activation.activation_preview_observer = Some(Arc::new(move |event| {
+                    match event {
+                        ActivationPublicationObservation::RendererProducer => { produced.fetch_add(1, std::sync::atomic::Ordering::SeqCst); }
+                        ActivationPublicationObservation::RendererSealed => { sealed.store(tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(), std::sync::atomic::Ordering::SeqCst); }
+                        _ => {}
+                    }
+                    Ok(())
+                }));
+                tasks.push(tokio::spawn(with_test_compiler_owner(async move {
+                    activation.mount_activation_input(context, input, None, "()".into(), None, Vec::new()).await
+                })));
+            }
+            let mut bindings = std::collections::BTreeSet::new();
+            let mut generations = std::collections::BTreeSet::new();
+            for (index, task) in tasks.into_iter().enumerate() {
+                let prepared = task.await.unwrap().unwrap();
+                assert_eq!(prepared.input_preview.trim(), (index + 1).to_string());
+                assert!(bindings.insert(prepared.binding.raw()));
+                assert!(generations.insert(prepared.admission.generation()));
+            }
+            assert_eq!(producers.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(), sealed_count.load(std::sync::atomic::Ordering::SeqCst), "four installations compile no images after the producer publishes complete native custody");
+        }).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

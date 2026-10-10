@@ -260,20 +260,28 @@ impl ImageRegistry {
         group: &CertifiedGroup,
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
-        self.get_or_compile_key(ImageKey::Group(group.code_identity()), compile)
+        self.get_or_compile_group_code(&group.code_identity(), compile)
+    }
+
+    pub fn get_or_compile_group_code<E>(
+        &self,
+        group: &CertifiedGroupCode,
+        compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
+    ) -> Result<Arc<CompiledProgram>, E> {
+        self.get_or_compile_key(ImageKey::Group(group.clone()), compile)
     }
 
     pub(super) fn get_or_compile_literal_group<E>(
         &self,
-        group: &CertifiedGroup,
+        group: &CertifiedGroupCode,
         literals: &super::package_literals::GroupPackageLiterals,
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
         if literals.iter().next().is_none() {
-            return self.get_or_compile_group(group, compile);
+            return self.get_or_compile_group_code(group, compile);
         }
         self.get_or_compile_key(
-            ImageKey::LiteralGroup(group.code_identity(), literals.clone()),
+            ImageKey::LiteralGroup(group.clone(), literals.clone()),
             compile,
         )
     }

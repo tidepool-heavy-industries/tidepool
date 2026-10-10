@@ -2502,13 +2502,34 @@ pub fn bind_activation_renderer(
     ))
 }
 
+/// Preserve frontend language refusal separately from native preparation failure.
+#[derive(Debug, thiserror::Error)]
+pub enum ActivationRendererFailure {
+    #[error(transparent)]
+    Frontend(#[from] TurnFailure),
+    #[error(transparent)]
+    Native(#[from] super::prepared::PreparedRuntimeError),
+}
+
+impl From<CompileError> for ActivationRendererFailure {
+    fn from(error: CompileError) -> Self {
+        Self::Frontend(error.into())
+    }
+}
+
+impl From<std::io::Error> for ActivationRendererFailure {
+    fn from(error: std::io::Error) -> Self {
+        Self::Frontend(error.into())
+    }
+}
+
 /// Specialize immutable pure renderer code against the original compiler context.
 pub fn compile_activation_renderer(
     admission: &super::RuntimeActivationPreviewAdmission,
     template_source: &str,
     budget: u64,
     includes: &[PathBuf],
-) -> Result<super::SharedActivationRenderer, TurnFailure> {
+) -> Result<super::SharedActivationRenderer, ActivationRendererFailure> {
     use tidepool_toolchain::activation_preview::{
         ActivationPreviewSelection, ActivationPreviewSpecification,
     };
@@ -2592,7 +2613,24 @@ pub fn compile_activation_renderer(
     proof.validate_table(&compiled.table)?;
     proof.validate_yield_sites(&compiled.asks)?;
     let disposition = proof.disposition();
-    let renderer = Arc::new(super::CompiledActivationRenderer { compiled, proof });
+    let native = match disposition {
+        tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Rendered => {
+            super::resident::ActivationRendererNative::Renderable(
+                super::prepared::NativeImageBundle::prepare_activation_renderer(
+                    &compiled,
+                    &admission.image_registry,
+                )?,
+            )
+        }
+        tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Opaque => {
+            super::resident::ActivationRendererNative::Opaque
+        }
+    };
+    let renderer = Arc::new(super::CompiledActivationRenderer {
+        compiled,
+        proof,
+        native,
+    });
     Ok(match disposition {
         tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Rendered => {
             super::SharedActivationRenderer::Renderable(renderer)

@@ -22,8 +22,9 @@ use std::sync::Arc;
 use tidepool_heap::execution_descriptor::ObjectDescriptor;
 use tidepool_heap::static_region::{StaticImage, StaticImageError};
 use tidepool_repr::execution_schema::{
-    Architecture, CertifiedGroup, DefinitionsView, Endianness, GlobalId, LinkedProgram,
-    PreparedProgram, ResultContract, RuntimeRep, Signature, TargetDescriptor, ValueId,
+    Architecture, CertifiedGroup, CertifiedGroupCode, DefinitionsView, Endianness, GlobalId,
+    LinkedProgram, PreparedProgram, ResultContract, RuntimeRep, Signature, TargetDescriptor,
+    ValueId,
 };
 use tidepool_repr::DataConId;
 
@@ -37,7 +38,7 @@ mod emit;
 mod image;
 mod image_registry;
 mod package_literals;
-pub use package_literals::{PackageLiteral, SourceLiteral};
+pub use package_literals::{LiteralOwner, PackageLiteral, SourceLiteral};
 mod instance;
 #[cfg(test)]
 mod invocation;
@@ -431,9 +432,12 @@ unsafe extern "C" fn prepared_recorded_failure(vmctx: *mut crate::context::VMCon
     machine.prepared_call_status() as i32
 }
 
+static NEXT_IMAGE_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Pins generated entries, descriptors and immutable images together. Each run
 /// owns its mutable heap; materialization may force values before releasing it.
 pub struct CompiledProgram {
+    image_instance: u64,
     definition_facts: Arc<DefinitionFacts>,
     pub(crate) pipeline: CodegenPipeline,
     pub(crate) entries: BTreeMap<ValueId, CompiledEntry>,
@@ -553,6 +557,17 @@ unsafe impl Sync for CompiledProgram {}
 static_assertions::assert_impl_all!(CompiledProgram: Send, Sync);
 
 impl CompiledProgram {
+    /// Process-local observation identity; never an image key or authority.
+    pub fn image_instance_id(&self) -> u64 {
+        self.image_instance
+    }
+
+    /// Number of successful native image constructions in this process.
+    /// This observation includes images already released; registry hits add none.
+    pub fn successful_image_compilations() -> u64 {
+        NEXT_IMAGE_INSTANCE.load(std::sync::atomic::Ordering::Relaxed) - 1
+    }
+
     /// Shared immutable evidence for every installation of this image.
     pub fn definition_facts(&self) -> &Arc<DefinitionFacts> {
         &self.definition_facts
@@ -603,6 +618,13 @@ impl CompiledProgram {
         group: &CertifiedGroup,
         literals: &package_literals::GroupPackageLiterals,
     ) -> Result<Self, CompileError> {
+        Self::compile_group_code_with_literals(&group.code_identity(), literals)
+    }
+
+    fn compile_group_code_with_literals(
+        group: &CertifiedGroupCode,
+        literals: &package_literals::GroupPackageLiterals,
+    ) -> Result<Self, CompileError> {
         let mut image = Self::compile_definitions_with_literals(
             group.definitions(),
             &mut DescriptorInterner::default(),
@@ -616,8 +638,44 @@ impl CompiledProgram {
             error
         })?;
         image.certified_source = Some((group.owner().clone(), group.original_ordinal()));
-        image.source_literal_producer = package_literals::SourceLiteralOwner::from_group(group);
+        image.source_literal_producer = package_literals::SourceLiteralOwner::from_code(group);
         Ok(image)
+    }
+
+    /// Compile an original group's code with immutable storage facts only.
+    /// Import handles and lexical source authority remain installation inputs.
+    pub fn prepare_group_code(
+        group: &CertifiedGroupCode,
+        owners: &[Option<LiteralOwner>],
+        packages: &BTreeMap<tidepool_repr::execution_schema::SymbolIdentity, PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
+        registry: &ImageRegistry,
+    ) -> Result<Arc<Self>, CompileError> {
+        let literals = package_literals::GroupPackageLiterals::select_immutable(
+            &group.definitions(),
+            owners,
+            packages,
+            sources,
+        )?;
+        registry.get_or_compile_literal_group(group, &literals, || {
+            Self::compile_group_code_with_literals(group, &literals).map(Arc::new)
+        })
+    }
+
+    /// Prepare target code without issuing runtime import or source-scope authority.
+    pub fn prepare_target_code(
+        prepared: &PreparedProgram,
+        owners: &[Option<LiteralOwner>],
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
+        registry: &ImageRegistry,
+    ) -> Result<Arc<Self>, CompileError> {
+        let literals = package_literals::GroupPackageLiterals::select_immutable(
+            &prepared.definitions(),
+            owners,
+            &BTreeMap::new(),
+            sources,
+        )?;
+        Self::compile_target_literals(prepared, &literals, registry)
     }
 
     /// Compile a target's validated definitions off machine checkout. Its
@@ -646,12 +704,20 @@ impl CompiledProgram {
             &BTreeMap::new(),
             sources,
         )?;
-        registry.get_or_compile_literal_prepared(prepared, &literals, || {
+        Self::compile_target_literals(prepared, &literals, registry)
+    }
+
+    fn compile_target_literals(
+        prepared: &PreparedProgram,
+        literals: &package_literals::GroupPackageLiterals,
+        registry: &ImageRegistry,
+    ) -> Result<Arc<Self>, CompileError> {
+        registry.get_or_compile_literal_prepared(prepared, literals, || {
             Self::compile_definitions_with_literals(
                 prepared.definitions(),
                 &mut DescriptorInterner::default(),
                 &Arc::new(static_bytes::PinnedBytes::empty()),
-                &literals,
+                literals,
             )
             .map(Arc::new)
         })
@@ -1426,7 +1492,9 @@ impl CompiledProgram {
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         phases.descriptors = clock.lap();
         native_metrics.report();
+        let image_instance = NEXT_IMAGE_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         compile_phases::record(
+            image_instance,
             &phases,
             &compile_phases::CompileScale {
                 plan_functions: plan.functions.len(),
@@ -1437,9 +1505,12 @@ impl CompiledProgram {
                 functions_defined: pipeline.functions_defined(),
                 blocks_emitted: pipeline.blocks_emitted(),
                 code_bytes: pipeline.code_bytes(),
+                literal_storage_entries: plan.bytes.storage_entries(),
+                literal_storage_bytes: plan.bytes.storage_bytes(),
             },
         );
         Ok(Self {
+            image_instance,
             definition_facts: Arc::new(DefinitionFacts::new(plan.program)),
             pipeline,
             entries,
@@ -1583,3 +1654,9 @@ mod entry_tests;
 mod freer_boundary_tests;
 #[cfg(test)]
 mod tests;
+
+impl Drop for CompiledProgram {
+    fn drop(&mut self) {
+        tracing::info!(target: "tidepool_codegen::image_lifetime", image_instance = self.image_instance, process_id = std::process::id(), outcome = "released", "native image lifetime");
+    }
+}

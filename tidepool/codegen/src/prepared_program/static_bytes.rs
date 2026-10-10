@@ -81,6 +81,18 @@ impl PinnedBytes {
         self.tables.by_value.get(logical)
     }
 
+    pub(super) fn storage_entries(&self) -> usize {
+        self.tables.by_address.len()
+    }
+
+    pub(super) fn storage_bytes(&self) -> usize {
+        self.tables
+            .by_address
+            .values()
+            .map(|literal| literal.storage.len())
+            .sum()
+    }
+
     /// Exact-address admission preflight; content equality cannot prove that
     /// this pool owns the allocation embedded by another image.
     pub(crate) fn contains_allocations(&self, other: &Self) -> bool {

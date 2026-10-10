@@ -1163,12 +1163,9 @@ pub struct CertifiedGroupCode {
     group: ProjectedGroup,
 }
 
-impl CertifiedGroup {
-    pub fn admit(
-        owner: CachedHomeOwner,
-        group: ProjectedGroup,
-        imports: Vec<ImportOwner>,
-    ) -> Result<Self, ParseError> {
+impl CertifiedGroupCode {
+    /// Validate immutable source identity without resolving installation imports.
+    pub fn admit(owner: CachedHomeOwner, group: ProjectedGroup) -> Result<Self, ParseError> {
         if owner.unit.is_empty() || owner.module.is_empty() {
             return Err(ParseError::InvalidReference(
                 "empty cached home owner".into(),
@@ -1197,6 +1194,34 @@ impl CertifiedGroup {
                 "cached group binder inventory differs from its definitions".into(),
             ));
         }
+        Ok(Self {
+            owner: Arc::new(owner),
+            group,
+        })
+    }
+
+    pub fn owner(&self) -> &CachedHomeOwner {
+        &self.owner
+    }
+    pub fn original_ordinal(&self) -> u32 {
+        self.group.original_ordinal()
+    }
+    pub fn binders(&self) -> &[SymbolIdentity] {
+        self.group.binders()
+    }
+    pub fn definitions(&self) -> DefinitionsView<'_> {
+        self.group.definitions()
+    }
+}
+
+impl CertifiedGroup {
+    pub fn admit(
+        owner: CachedHomeOwner,
+        group: ProjectedGroup,
+        imports: Vec<ImportOwner>,
+    ) -> Result<Self, ParseError> {
+        let code = CertifiedGroupCode::admit(owner, group)?;
+        let group = &code.group;
         if imports.len() != group.globals().len() {
             return Err(ParseError::InvalidReference(
                 "cached group import count differs from its globals".into(),
@@ -1236,8 +1261,8 @@ impl CertifiedGroup {
             }
         }
         Ok(Self {
-            owner: Arc::new(owner),
-            group,
+            owner: code.owner,
+            group: code.group,
             imports: imports.into(),
         })
     }
