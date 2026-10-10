@@ -3316,6 +3316,45 @@ impl ArtifactView {
         &self.lease.selection
     }
 
+    /// Attach hydrated sharing only after inventory recovery has reissued the
+    /// same exact facts. Native graph counts remain owned by a separate lease.
+    pub(crate) fn bind_selection_snapshot_baseline(
+        &mut self,
+        snapshot: Arc<ExactSelectionSnapshot>,
+    ) -> Result<(), CompileError> {
+        let live = self.selection_snapshot();
+        if Arc::ptr_eq(live, &snapshot) {
+            return Ok(());
+        }
+        if live.roots != snapshot.roots
+            || live.namespace != snapshot.namespace
+            || live.native_custody != snapshot.native_custody
+            || live.scopes.len() != snapshot.scopes.len()
+            || live.scopes.iter().any(|(scope, proof)| {
+                snapshot
+                    .scopes
+                    .get(scope)
+                    .is_none_or(|provided| proof.proof().as_ref() != provided.proof().as_ref())
+            })
+        {
+            return Err(failure(
+                "hydrated selection snapshot differs from inventory-issued facts",
+            ));
+        }
+        let retained = self.lease.inventory.retain(
+            self.roots().to_vec(),
+            self.native_custody().to_vec(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut retained = self.retain_projected_materializations(retained)?;
+        Arc::get_mut(&mut retained.lease)
+            .expect("new selection lease")
+            .selection = snapshot;
+        *self = retained;
+        Ok(())
+    }
+
     fn replace_namespace(&mut self, namespace: &BTreeMap<ArtifactId, ArtifactBinding>) {
         let lease = Arc::get_mut(&mut self.lease).expect("new selection lease");
         replace_snapshot_namespace(Arc::make_mut(&mut lease.selection), namespace);
@@ -5457,6 +5496,91 @@ mod tests {
                 .is_err());
             assert_eq!(recovered.node_count(), 0, "mutation={mutation}");
         }
+    }
+
+    #[test]
+    fn hydrated_snapshot_baseline_preserves_exact_facts_and_native_lease_custody() {
+        let inventory = ArtifactInventory::default();
+        let (native, values, _) = native_scope_fixture();
+        let unused = entry_in_unit("fixture", "Unused", vec![]);
+        let unused_id = unused.descriptor.id;
+        let carriers = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![Arc::new(native.clone()), Arc::new(values), Arc::new(unused)],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let selected = inventory
+            .admit_shared_with_demand(
+                &carriers,
+                vec![Arc::new(native.clone())],
+                NativeArtifactDemand::AllGroups,
+            )
+            .unwrap()
+            .select_admission_roots(vec![native.descriptor.id])
+            .unwrap();
+        let baseline = Arc::clone(selected.selection_snapshot());
+        let graph = selected.capture_graph_selection();
+        assert!(!selected.artifact_ids().contains(&unused_id));
+        assert!(graph
+            .selections
+            .iter()
+            .any(|proof| proof.nodes.iter().any(|node| node.artifact() == unused_id)));
+        let recovered_inventory = ArtifactInventory::default();
+        let mut recovered = recovered_inventory
+            .recover_selection(
+                &recovered_inventory.empty_view(),
+                selected.entries(),
+                &graph,
+                &selected.binding_dependencies(),
+            )
+            .unwrap();
+        let issued = Arc::clone(recovered.selection_snapshot());
+        let live_nodes = recovered_inventory.node_count();
+        for mutation in 0..5 {
+            let mut changed = baseline.as_ref().clone();
+            match mutation {
+                0 => changed.roots.clear(),
+                1 => changed.namespace.clear(),
+                2 => {
+                    changed.native_custody.insert(graph.bindings[0], ());
+                }
+                3 => {
+                    let (scope, reference) = changed.scopes.iter().next().unwrap();
+                    let scope = *scope;
+                    let mut proof = Arc::clone(reference.proof());
+                    let duplicate = proof.nodes[0];
+                    Arc::make_mut(&mut proof).nodes.push(duplicate);
+                    changed
+                        .scopes
+                        .insert(scope, ImmutableScopeProofRef::from_issued(proof));
+                }
+                _ => {
+                    changed.scopes.remove(&graph.selections[0].selection);
+                }
+            }
+            assert!(recovered
+                .bind_selection_snapshot_baseline(Arc::new(changed))
+                .is_err());
+            assert!(Arc::ptr_eq(recovered.selection_snapshot(), &issued));
+            assert_eq!(recovered_inventory.node_count(), live_nodes);
+            assert_eq!(recovered.capture_graph_selection(), graph);
+        }
+        recovered
+            .bind_selection_snapshot_baseline(Arc::clone(&baseline))
+            .unwrap();
+        assert!(Arc::ptr_eq(recovered.selection_snapshot(), &baseline));
+        assert_eq!(recovered.capture_graph_selection(), graph);
+        assert_eq!(recovered_inventory.node_count(), live_nodes);
+        let group = graph.native_groups[0];
+        assert_eq!(
+            scoped_group_child(&recovered, group),
+            scoped_group_child(&selected, group)
+        );
+        drop(recovered);
+        assert_eq!(recovered_inventory.node_count(), 0);
+        assert!(!baseline.scopes.is_empty());
     }
 
     #[test]
