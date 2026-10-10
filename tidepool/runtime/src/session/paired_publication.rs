@@ -639,7 +639,10 @@ impl PersistentSession {
                     .is_none_or(|proof| !proof.matches(entry))
             })
         }) {
-            return Err(invalid_at(&lib.root, "a final value write overlaps a retained declaration without certified private Value ownership or an exact retraction"));
+            return Err(invalid_at(
+                &lib.root,
+                "a final value write overlaps a retained declaration without certified private Value ownership or an exact retraction",
+            ));
         }
         let source_keys = source_keys
             .into_iter()
@@ -948,7 +951,10 @@ impl DeclarationPublicationBase {
         &self.intent
     }
 
-    pub fn certify(self) -> Result<CertifiedDeclarationPublication, SessionError> {
+    pub fn certify(
+        self,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<CertifiedDeclarationPublication, SessionError> {
         let selection = self.selected_facts()?;
         if let Some(projection) = self.reusable_projection(&selection) {
             let generation = self.reserved;
@@ -962,12 +968,13 @@ impl DeclarationPublicationBase {
                 },
             ));
         }
-        self.certify_new_join(selection)
+        self.certify_new_join(selection, settlement)
     }
 
     fn certify_new_join(
         self,
         selection: PublicationSelection,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<CertifiedDeclarationPublication, SessionError> {
         let mut lexical = self.surface.lexical.clone();
         let authored = self
@@ -1004,7 +1011,7 @@ impl DeclarationPublicationBase {
         } else {
             ExactDeclarationContext::new(&authored, &[], lexical)?
         };
-        let scratch = tempfile::tempdir()?;
+        let scratch = Arc::new(tempfile::tempdir()?);
         let materialized = context.materialize_scratch(&scratch)?;
         let anchor = |identity: &ExactModuleIdentity| -> Result<ModuleSnapshot, SessionError> {
             let module = identity.module.clone();
@@ -1078,6 +1085,8 @@ impl DeclarationPublicationBase {
             &context,
             &self.includes,
             &self.session_root,
+            Arc::clone(&scratch),
+            settlement,
         )? {
             CertifiedDeclarationJoin::Accepted(receipt) => Ok(
                 CertifiedDeclarationPublication::Accepted(AcceptedDeclarationPublication {
@@ -1479,10 +1488,15 @@ mod tests {
         let (candidate, values) = session
             .render_declaration_candidate_in(scope, &receipt, &SourceImports::new())
             .unwrap();
-        let staged =
-            crate::session::validate_declaration_candidate(candidate, session.lib().include_dir())
-                .unwrap()
-                .with_visible_values(values);
+        let staged = tidepool_testing::with_settlement(|settlement| {
+            crate::session::validate_declaration_candidate(
+                candidate,
+                session.lib().include_dir(),
+                settlement,
+            )
+        })
+        .unwrap()
+        .with_visible_values(values);
         session
             .adopt_staged_declaration_in(staged)
             .unwrap()
@@ -2606,10 +2620,13 @@ mod tests {
             let (candidate, values) = session
                 .render_declaration_candidate_in(scope, &receipt, &SourceImports::new())
                 .unwrap();
-            let staged = crate::session::validate_declaration_candidate(
-                candidate,
-                session.lib().include_dir(),
-            )
+            let staged = tidepool_testing::with_settlement(|settlement| {
+                crate::session::validate_declaration_candidate(
+                    candidate,
+                    session.lib().include_dir(),
+                    settlement,
+                )
+            })
             .unwrap()
             .with_visible_values(values);
             session.adopt_staged_declaration_in(staged).unwrap();
@@ -2786,10 +2803,12 @@ mod tests {
         expected_refs.sort();
         assert_eq!(joined.implementation_refs, expected_refs);
         assert_eq!(joined.exports.len(), proof.exports().len());
-        assert!(joined.exports.iter().all(|export| export
-            .children
-            .iter()
-            .all(|child| child.occurrence != "OldShape")));
+        assert!(joined.exports.iter().all(|export| {
+            export
+                .children
+                .iter()
+                .all(|child| child.occurrence != "OldShape")
+        }));
         assert_eq!(
             graph.public_surfaces().next().unwrap().declaration_root,
             Some(generation)
@@ -2815,12 +2834,11 @@ mod tests {
             .lexical_graph()
             .iter()
             .any(|node| node.owner.module == SessionModule::lib(generation).module_name()));
-        assert!(context
-            .lexical_graph()
-            .iter()
-            .all(|node| ![original_a, original_b]
+        assert!(context.lexical_graph().iter().all(|node| {
+            ![original_a, original_b]
                 .iter()
-                .any(|original| node.owner.module == SessionModule::lib(*original).module_name())));
+                .any(|original| node.owner.module == SessionModule::lib(*original).module_name())
+        }));
         for original in [original_a, original_b] {
             assert!(context.recovery_products().iter().any(|product| {
                 product.owner().module == SessionModule::lib(original).module_name()
@@ -2866,10 +2884,15 @@ mod tests {
         let (candidate, values) = session
             .render_declaration_candidate_in(private, &receipt, &SourceImports::new())
             .unwrap();
-        let staged =
-            crate::session::validate_declaration_candidate(candidate, session.lib().include_dir())
-                .unwrap()
-                .with_visible_values(values);
+        let staged = tidepool_testing::with_settlement(|settlement| {
+            crate::session::validate_declaration_candidate(
+                candidate,
+                session.lib().include_dir(),
+                settlement,
+            )
+        })
+        .unwrap()
+        .with_visible_values(values);
         session.adopt_staged_declaration_in(staged).unwrap();
         assert_eq!(session.lib().scope_tip(private), Generation(1));
         let authored = session

@@ -87,6 +87,7 @@ pub trait SuspendableSession {
         hole: Self::Hole,
         answer: Self::Answer,
         cx: Self::Context,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Self::Outcome, Self::Error>;
 
     /// Abort the turn parked on `hole` without running its continuation.
@@ -95,6 +96,7 @@ pub trait SuspendableSession {
         hole: Self::Hole,
         reason: String,
         cx: Self::Context,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Self::Outcome, Self::Error>;
 }
 

@@ -48,15 +48,18 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
         unit: "main".into(),
         module: "RetainedReceiveSupport".into(),
     };
-    let original = compile_invocation(
-        &CompileInvocation {
-            source: include_str!("fixtures/RetainedReceiveProbe.hs"),
-            targets: &["result"],
-            include: &include,
-            fallback_module_name: "RetainedReceiveProbe",
-        },
-        |_, _, _| {},
-    )
+    let original = tidepool_testing::with_settlement(|settlement| {
+        compile_invocation(
+            &CompileInvocation {
+                source: include_str!("fixtures/RetainedReceiveProbe.hs"),
+                targets: &["result"],
+                include: &include,
+                fallback_module_name: "RetainedReceiveProbe",
+            },
+            |_, _, _| {},
+            settlement,
+        )
+    })
     .expect("production issuer finalizes import-only originals");
     let inventory = original
         .module_inventory
@@ -132,16 +135,19 @@ fn retained_core_typed_receive_executes_after_original_sources_are_removed() {
     std::fs::remove_file(&support_source).unwrap();
     assert!(!owner_source.exists() && !support_source.exists());
     drop(original);
-    let mut compiled = compile_invocation_in_context(
-        &CompileInvocation {
-            source: include_str!("fixtures/RetainedReceiveConsumer.hs"),
-            targets: &["__prepared"],
-            include: &include,
-            fallback_module_name: "RetainedReceiveConsumer",
-        },
-        Arc::new(context),
-        |_, _, _| {},
-    )
+    let mut compiled = tidepool_testing::with_settlement(|settlement| {
+        compile_invocation_in_context(
+            &CompileInvocation {
+                source: include_str!("fixtures/RetainedReceiveConsumer.hs"),
+                targets: &["__prepared"],
+                include: &include,
+                fallback_module_name: "RetainedReceiveConsumer",
+            },
+            Arc::new(context),
+            |_, _, _| {},
+            settlement,
+        )
+    })
     .expect("exact consumer prepares original Core without authored source");
     for expected in [&owner, &support] {
         let groups = compiled

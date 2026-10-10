@@ -403,8 +403,9 @@ pub struct InspectionRequest<'a> {
 /// singleton sources remain available if that combined source is rejected.
 pub fn run_inspections(
     request: InspectionRequest<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<Vec<InspectionResult>, CompileError> {
-    run_inspections_with_policy(request, false, None)
+    run_inspections_with_policy(request, false, None, settlement)
 }
 
 /// Consume the immutable checked value snapshot captured with the caller's view.
@@ -413,6 +414,7 @@ pub fn run_admitted_inspections(
     request: InspectionRequest<'_>,
     view: &super::SessionCompileView,
     inputs: &AdmittedInspectionInputs,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<Vec<InspectionResult>, CompileError> {
     if view.session() != inputs.view.session()
         || view.lexical_scope() != inputs.view.lexical_scope()
@@ -420,21 +422,23 @@ pub fn run_admitted_inspections(
     {
         return Err(invalid("inspection inputs belong to another compile view"));
     }
-    run_inspections_with_policy(request, false, Some(inputs))
+    run_inspections_with_policy(request, false, Some(inputs), settlement)
 }
 
 /// Declaration staging variant: source rejection must remain a request-level
 /// structured diagnostic so declaration span remapping is preserved.
 pub(super) fn run_inspections_strict(
     request: InspectionRequest<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<Vec<InspectionResult>, CompileError> {
-    run_inspections_with_policy(request, true, None)
+    run_inspections_with_policy(request, true, None, settlement)
 }
 
 fn run_inspections_with_policy(
     request: InspectionRequest<'_>,
     strict: bool,
     inputs: Option<&AdmittedInspectionInputs>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<Vec<InspectionResult>, CompileError> {
     if inputs.is_some_and(|inputs| !inputs.matches_request(&request)) {
         return Err(invalid(
@@ -468,7 +472,9 @@ fn run_inspections_with_policy(
     let imports = match request.effects {
         Some(_) => format!(
             "{}\nqualified Data.Proxy\nqualified Tidepool.Effects.Core\nqualified Tidepool.Agent.Contract\n",
-            issued_imports.as_deref().expect("effects imports assembled")
+            issued_imports
+                .as_deref()
+                .expect("effects imports assembled")
         ),
         None => request.imports.to_owned(),
     };
@@ -667,7 +673,10 @@ fn run_inspections_with_policy(
             }
         }
     }
-    let run = endpoint.execute(&command).map_err(map_spawn)?;
+    let run =
+        endpoint.execute_with_input_files(&command, offer.input_transport_files(), |close| {
+            settlement(close)
+        })?;
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,
@@ -1340,20 +1349,23 @@ mod tests {
         assert!(values.is_empty());
         let inputs = AdmittedInspectionInputs::capture(view.clone(), values, Default::default());
         let queries = [InspectionQuery::TypeSearch("Int -> Int".into())];
-        let results = run_admitted_inspections(
-            InspectionRequest {
-                exact_context: None,
-                preamble: "module Expr where\nimport Prelude\n",
-                imports: "",
-                include: &[include.path()],
-                session_root: view.session_root(),
-                inject_modules: &[],
-                queries: &queries,
-                effects: None,
-            },
-            &view,
-            &inputs,
-        )
+        let results = tidepool_testing::with_settlement(|settlement| {
+            run_admitted_inspections(
+                InspectionRequest {
+                    exact_context: None,
+                    preamble: "module Expr where\nimport Prelude\n",
+                    imports: "",
+                    include: &[include.path()],
+                    session_root: view.session_root(),
+                    inject_modules: &[],
+                    queries: &queries,
+                    effects: None,
+                },
+                &view,
+                &inputs,
+                settlement,
+            )
+        })
         .expect("fresh empty checked snapshot supports a valid type search");
         assert!(
             matches!(&results[..], [InspectionResult::TypeMatches { matches, .. }]
@@ -1745,15 +1757,20 @@ mod tests {
         // A preamble declaration lives only in the typechecked query module;
         // a request's `respond` is bound this way.
         queries.push(InspectionQuery::Info("localPreambleValue".into()));
-        let results = run_inspections(InspectionRequest {
-            exact_context: None,
-            preamble,
-            imports: "",
-            include: &[include.path()],
-            session_root: session.path(),
-            inject_modules: &[],
-            queries: &queries,
-            effects: None,
+        let results = tidepool_testing::with_settlement(|settlement| {
+            run_inspections(
+                InspectionRequest {
+                    exact_context: None,
+                    preamble,
+                    imports: "",
+                    include: &[include.path()],
+                    session_root: session.path(),
+                    inject_modules: &[],
+                    queries: &queries,
+                    effects: None,
+                },
+                settlement,
+            )
         })
         .unwrap();
 
@@ -1964,26 +1981,31 @@ mod tests {
             .map(std::path::PathBuf::as_path)
             .collect::<Vec<_>>();
         let inspect = |queries: &[InspectionQuery]| {
-            run_inspections(InspectionRequest {
-                exact_context: None,
-                preamble: concat!(
-                    "{-# LANGUAGE NoImplicitPrelude, DataKinds, TypeOperators #-}\n",
-                    "{-# LANGUAGE FlexibleContexts, TypeFamilies, ConstraintKinds #-}\n",
-                    "module Expr where\n",
-                    "import Prelude\n",
-                    "import qualified Tidepool.Effects.Core as LookupEffects\n",
-                    "import Tidepool.Actors.Spawn (checkpoint, spawnSubagent)\n",
-                ),
-                imports: "",
-                include: &include,
-                session_root: session.path(),
-                inject_modules: &[],
-                queries,
-                effects: Some(&super::super::HaskellTypeSource::from(
-                    "Tidepool.Effects.Core.AgentTools ': \
+            tidepool_testing::with_settlement(|settlement| {
+                run_inspections(
+                    InspectionRequest {
+                        exact_context: None,
+                        preamble: concat!(
+                            "{-# LANGUAGE NoImplicitPrelude, DataKinds, TypeOperators #-}\n",
+                            "{-# LANGUAGE FlexibleContexts, TypeFamilies, ConstraintKinds #-}\n",
+                            "module Expr where\n",
+                            "import Prelude\n",
+                            "import qualified Tidepool.Effects.Core as LookupEffects\n",
+                            "import Tidepool.Actors.Spawn (checkpoint, spawnSubagent)\n",
+                        ),
+                        imports: "",
+                        include: &include,
+                        session_root: session.path(),
+                        inject_modules: &[],
+                        queries,
+                        effects: Some(&super::super::HaskellTypeSource::from(
+                            "Tidepool.Effects.Core.AgentTools ': \
                  Tidepool.Agent.Contract.SyncEffects \
                  (Tidepool.Effects.Core.AgentLaunch ': '[])",
-                )),
+                        )),
+                    },
+                    settlement,
+                )
             })
             .unwrap()
         };
@@ -2041,15 +2063,20 @@ mod tests {
             InspectionQuery::TypeOf("const".into()),
         ];
         let inspect = |queries: &[InspectionQuery]| {
-            run_inspections(InspectionRequest {
-                exact_context: None,
-                preamble,
-                imports: "",
-                include: &[],
-                session_root: session.path(),
-                inject_modules: &[],
-                queries,
-                effects: None,
+            tidepool_testing::with_settlement(|settlement| {
+                run_inspections(
+                    InspectionRequest {
+                        exact_context: None,
+                        preamble,
+                        imports: "",
+                        include: &[],
+                        session_root: session.path(),
+                        inject_modules: &[],
+                        queries,
+                        effects: None,
+                    },
+                    settlement,
+                )
             })
             .unwrap()
         };
@@ -2181,19 +2208,24 @@ mod tests {
         let queries = (0..95)
             .map(|_| InspectionQuery::TypeOf("id".into()))
             .collect::<Vec<_>>();
-        let results = run_inspections(InspectionRequest {
-            exact_context: None,
-            preamble: concat!(
-                "{-# LANGUAGE NoImplicitPrelude #-}\n",
-                "module Expr where\n",
-                "import Prelude\n",
-            ),
-            imports: "",
-            include: &[],
-            session_root: session.path(),
-            inject_modules: &[],
-            queries: &queries,
-            effects: None,
+        let results = tidepool_testing::with_settlement(|settlement| {
+            run_inspections(
+                InspectionRequest {
+                    exact_context: None,
+                    preamble: concat!(
+                        "{-# LANGUAGE NoImplicitPrelude #-}\n",
+                        "module Expr where\n",
+                        "import Prelude\n",
+                    ),
+                    imports: "",
+                    include: &[],
+                    session_root: session.path(),
+                    inject_modules: &[],
+                    queries: &queries,
+                    effects: None,
+                },
+                settlement,
+            )
         })
         .unwrap();
 

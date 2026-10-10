@@ -122,18 +122,23 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
     );
     let templates = resident_workbench_templates(&preamble, "FaultEffects", "");
     let include_refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-    let compiled = match run_turn(TurnRequest {
-        exact_context: None,
-        session_id: None,
-        turn_text: "faultDriver",
-        templates: &templates,
-        include: &include_refs,
-        session_root: session_root.path(),
-        inject_modules: &[],
-        gen: 1,
-        verdict: None,
-        target: None,
-        retained_imports: &[],
+    let compiled = match tidepool_testing::with_settlement(|settlement| {
+        run_turn(
+            TurnRequest {
+                exact_context: None,
+                session_id: None,
+                turn_text: "faultDriver",
+                templates: &templates,
+                include: &include_refs,
+                session_root: session_root.path(),
+                inject_modules: &[],
+                gen: 1,
+                verdict: None,
+                target: None,
+                retained_imports: &[],
+            },
+            settlement,
+        )
     })
     .expect("compile the real agent attachment and mailbox driver")
     {

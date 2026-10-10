@@ -120,7 +120,10 @@ fn adopt_recovery_declaration(
             None,
         )
         .unwrap();
-    let (_, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+    let (_, program) = tidepool_testing::with_settlement(|settlement| {
+        compile_cell_program_admitted(admission.clone(), settlement)
+    })
+    .unwrap();
     let [item] = program.items() else {
         panic!("recovery fixture must issue one original declaration");
     };
@@ -382,17 +385,22 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
         InspectionQuery::TypeOf("answer (41 :: Int)".into()),
         InspectionQuery::TypeOf("(undefined :: HiddenResult)".into()),
     ];
-    let inspected = run_inspections(InspectionRequest {
-        exact_context: Some(Arc::new(
-            tidepool_toolchain::declaration_join::ExactCompileContext::new(context.clone()),
-        )),
-        preamble: effects.preamble(),
-        imports: &imports,
-        include: &include,
-        session_root: view.session_root(),
-        inject_modules: &injected,
-        queries: &queries,
-        effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
+    let inspected = tidepool_testing::with_settlement(|settlement| {
+        run_inspections(
+            InspectionRequest {
+                exact_context: Some(Arc::new(
+                    tidepool_toolchain::declaration_join::ExactCompileContext::new(context.clone()),
+                )),
+                preamble: effects.preamble(),
+                imports: &imports,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                queries: &queries,
+                effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
+            },
+            settlement,
+        )
     })
     .unwrap();
     assert!(matches!(&inspected[0], InspectionResult::Type { display, .. } if display == "Int"));
@@ -408,20 +416,25 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
             ExpressionLift::Pure,
         ),
     }];
-    let TurnResult::Expr { compiled, .. } = run_turn(TurnRequest {
-        exact_context: Some(Arc::new(
-            tidepool_toolchain::declaration_join::ExactCompileContext::new(context),
-        )),
-        session_id: Some(view.session()),
-        turn_text: "recoveredAnswer (41 :: Int)",
-        templates: &templates,
-        include: &include,
-        session_root: view.session_root(),
-        inject_modules: &injected,
-        gen: view.next_value_generation().0,
-        verdict: None,
-        target: None,
-        retained_imports: &[],
+    let TurnResult::Expr { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
+        run_turn(
+            TurnRequest {
+                exact_context: Some(Arc::new(
+                    tidepool_toolchain::declaration_join::ExactCompileContext::new(context),
+                )),
+                session_id: Some(view.session()),
+                turn_text: "recoveredAnswer (41 :: Int)",
+                templates: &templates,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                gen: view.next_value_generation().0,
+                verdict: None,
+                target: None,
+                retained_imports: &[],
+            },
+            settlement,
+        )
     })
     .unwrap() else {
         panic!("dependent declaration must compile as a native expression");
@@ -951,17 +964,22 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
         InspectionQuery::TypeOf("answer (41 :: Int)".into()),
         InspectionQuery::TypeOf("(undefined :: HiddenResult)".into()),
     ];
-    let inspected = run_inspections(InspectionRequest {
-        exact_context: Some(Arc::new(
-            tidepool_toolchain::declaration_join::ExactCompileContext::new(context.clone()),
-        )),
-        preamble: effects.preamble(),
-        imports: &imports,
-        include: &include,
-        session_root: view.session_root(),
-        inject_modules: &injected,
-        queries: &queries,
-        effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
+    let inspected = tidepool_testing::with_settlement(|settlement| {
+        run_inspections(
+            InspectionRequest {
+                exact_context: Some(Arc::new(
+                    tidepool_toolchain::declaration_join::ExactCompileContext::new(context.clone()),
+                )),
+                preamble: effects.preamble(),
+                imports: &imports,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                queries: &queries,
+                effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
+            },
+            settlement,
+        )
     })
     .unwrap();
     assert!(matches!(&inspected[0], InspectionResult::Type { display, .. } if display == "Int"));
@@ -977,20 +995,25 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
             ExpressionLift::Pure,
         ),
     }];
-    let TurnResult::Expr { compiled, .. } = run_turn(TurnRequest {
-        exact_context: Some(Arc::new(
-            tidepool_toolchain::declaration_join::ExactCompileContext::new(context),
-        )),
-        session_id: Some(view.session()),
-        turn_text: "recoveredAnswer (41 :: Int)",
-        templates: &templates,
-        include: &include,
-        session_root: view.session_root(),
-        inject_modules: &injected,
-        gen: view.next_value_generation().0,
-        verdict: None,
-        target: None,
-        retained_imports: &[],
+    let TurnResult::Expr { compiled, .. } = tidepool_testing::with_settlement(|settlement| {
+        run_turn(
+            TurnRequest {
+                exact_context: Some(Arc::new(
+                    tidepool_toolchain::declaration_join::ExactCompileContext::new(context),
+                )),
+                session_id: Some(view.session()),
+                turn_text: "recoveredAnswer (41 :: Int)",
+                templates: &templates,
+                include: &include,
+                session_root: view.session_root(),
+                inject_modules: &injected,
+                gen: view.next_value_generation().0,
+                verdict: None,
+                target: None,
+                retained_imports: &[],
+            },
+            settlement,
+        )
     })
     .unwrap() else {
         panic!("recovered transitive call must compile as an expression");
@@ -1092,7 +1115,10 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
                 None,
             )
             .unwrap();
-        let (checked, program) = compile_cell_program_admitted(admission.clone()).unwrap();
+        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted(admission.clone(), settlement)
+        })
+        .unwrap();
         assert_eq!(checked.items.len(), 1);
         let [item] = program.items() else {
             panic!("recovered cell must issue exactly one executable item");

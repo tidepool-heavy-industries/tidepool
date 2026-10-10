@@ -79,18 +79,23 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
         );
         let retained = machine.prepared_retained();
         let include_refs = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        let compiled = match run_turn(HaskellTurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: &source,
-            templates: &templates,
-            include: &include_refs,
-            session_root: run_root.path(),
-            inject_modules: &[],
-            gen: 1,
-            verdict: None,
-            target: None,
-            retained_imports: &retained,
+        let compiled = match tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                HaskellTurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: &source,
+                    templates: &templates,
+                    include: &include_refs,
+                    session_root: run_root.path(),
+                    inject_modules: &[],
+                    gen: 1,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &retained,
+                },
+                settlement,
+            )
         })
         .unwrap()
         {

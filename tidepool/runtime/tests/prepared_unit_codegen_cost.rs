@@ -166,18 +166,23 @@ impl Notebook {
         let retained = self.session.prepared_retained();
         let templates = self.templates();
         let include: Vec<&Path> = self.include.iter().map(PathBuf::as_path).collect();
-        run_turn(TurnRequest {
-            exact_context: None,
-            session_id: None,
-            turn_text: text,
-            templates: &templates,
-            include: &include,
-            session_root: self.root.path(),
-            inject_modules: &self.injected,
-            gen: self.generation,
-            verdict: None,
-            target: None,
-            retained_imports: &retained,
+        tidepool_testing::with_settlement(|settlement| {
+            run_turn(
+                TurnRequest {
+                    exact_context: None,
+                    session_id: None,
+                    turn_text: text,
+                    templates: &templates,
+                    include: &include,
+                    session_root: self.root.path(),
+                    inject_modules: &self.injected,
+                    gen: self.generation,
+                    verdict: None,
+                    target: None,
+                    retained_imports: &retained,
+                },
+                settlement,
+            )
         })
         .unwrap_or_else(|failure| {
             panic!(
