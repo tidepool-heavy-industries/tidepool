@@ -367,8 +367,28 @@ async fn stopped(host: &HostedTestRuntime, actor: ActorRef, parent: ActorRef) {
     assert!(cleanup.is_confirmed(), "{cleanup:?}");
 }
 
+async fn command_cleanup(host: &HostedTestRuntime) {
+    let resources = host.context.config.command_resources.as_ref().unwrap();
+    let observation = resources.observation().await.unwrap();
+    assert_eq!(observation.active, 0, "{observation:?}");
+    assert_eq!(observation.retained_allocations, 0, "{observation:?}");
+    assert_eq!(observation.cleanup_failures, 0, "{observation:?}");
+}
+
 fn prepared_default_sol_workspace(config: &mut ActorHostConfig) {
     super::scaffold_admission_tests::prepared_scaffold(config);
+    let resources = exomonad_node::command_resources::CommandResources::delegated(
+        exomonad_node::command_resources::CommandResourcePolicy {
+            general_bytes: 512 * 1024 * 1024,
+            protected_bytes: 0,
+            swap_max_bytes: 0,
+            ..Default::default()
+        },
+    )
+    .expect("the admitted test service delegates production command resources");
+    config.command_resources = Some(std::sync::Arc::new(
+        exomonad_node::command_resources::CommandResourceClient::local(resources),
+    ));
     config.model = "gpt-6.1-sol".into();
     config.jev = Some(std::sync::Arc::new(super::test_campaign::FixtureJev));
     crate::exomonad::edit_fixture_project_config(&config.workspace.join(".exomonad"), |project| {
@@ -458,6 +478,7 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             child = next(host, &mut requests, &mut pending, &child_path).await;
             let shell = child.settled_output("recursive-default-bash");
             assert_eq!(shell["status"], "committed", "{shell}");
+            assert_eq!(shell["value"]["successful"], true, "{shell}");
             assert!(
                 shell.to_string().contains("captured-default-shell"),
                 "{shell}"
@@ -551,6 +572,7 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             root = next(host, &mut requests, &mut pending, &root_path).await;
             root.assert_value("recursive-cleanup", "True");
             stopped(host, child_actor, root_actor).await;
+            command_cleanup(host).await;
             root.finish();
         })
     })
@@ -605,12 +627,19 @@ async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply()
         assert_ne!(worktree.cwd, host.context.config.workspace);
         assert_eq!(worktree.source_repository, std::fs::canonicalize(&host.context.config.workspace).unwrap());
         yield_pending(host, root_wait, "fresh-default-yield", &operation).await;
+        let terminal = installation.actor.terminal();
+        child.call("fresh-default-input", "let inputText = sessionInput :: Text\ndisplay (inputText == \"return fresh-default-native-reply\")");
+        let child = tokio::select! {
+            biased;
+            terminal = terminal.wait() => panic!("fresh default child retired while binding its request input: {:?}: {}", terminal.kind, terminal.summary),
+            child = next(host, &mut requests, &mut pending, &child_path) => child,
+        };
+        child.assert_value("fresh-default-input", "True");
         child.function("fresh-default-bash", "bash", json!({
             "cmd": "printf fresh-default-shell", "workdir": null, "environment": null,
             "memory_mib": null, "tty": null, "stdin": null, "yield_time_ms": 30000,
             "max_output_bytes": 2048, "intent": "execute the full default workspace command closure",
         }));
-        let terminal = installation.actor.terminal();
         let child = tokio::select! {
             biased;
             terminal = terminal.wait() => panic!("fresh default child retired after bash: {:?}: {}", terminal.kind, terminal.summary),
@@ -618,6 +647,7 @@ async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply()
         };
         let shell = child.settled_output("fresh-default-bash");
         assert_eq!(shell["status"], "committed", "{shell}");
+        assert_eq!(shell["value"]["successful"], true, "{shell}");
         assert!(shell.to_string().contains("fresh-default-shell"), "{shell}");
         child.call("fresh-default-reply", "respond (\"fresh-default-native-reply\" :: Text)");
         let child = tokio::select! {
@@ -637,6 +667,7 @@ async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply()
         let terminal = installation.actor.terminal();
         tokio::time::timeout(Duration::from_secs(30), terminal.wait()).await.unwrap();
         assert!(terminal.cleanup().unwrap().is_confirmed());
+        command_cleanup(host).await;
         root.finish();
     }) }).await;
 }
