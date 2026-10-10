@@ -1175,11 +1175,13 @@ impl SessionLib {
             .as_ref()
             .ok_or_else(|| SessionError::RecoveryManifest {
                 path: self.root.clone(),
-                detail: "v2 recovery graph is not attached".into(),
+                detail: "recovery domain is not attached".into(),
             })?;
-        if state.store.is_recovery_required()
-            || self.durable_public_scopes.get(&owner) != Some(&public_scope)
-        {
+        state
+            .store
+            .ensure_ready()
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+        if self.durable_public_scopes.get(&owner) != Some(&public_scope) {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         Ok(PublicManifestBase {
@@ -2457,7 +2459,11 @@ impl SessionLib {
             path: state.path.clone(),
             detail: detail.into(),
         };
-        if state.store.is_recovery_required() || state.allocation_ceiling < staged.generation {
+        state
+            .store
+            .ensure_ready()
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+        if state.allocation_ceiling < staged.generation {
             return Err(SessionError::StaleStagedDeclaration);
         }
         let prepared = staged

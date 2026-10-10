@@ -2458,12 +2458,10 @@ impl PersistentSession {
             .as_ref()
             .ok_or(SessionError::WrongPublicManifestTicket)?;
         manifest_owner.validate_owner()?;
-        if state.store.is_recovery_required() {
-            return Err(SessionError::InvalidRecoveryInitialization {
-                scope,
-                reason: Failure::UnconfirmedPublication,
-            });
-        }
+        state
+            .store
+            .ensure_ready()
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         if !self.lib().durable_public_scopes.is_empty() {
             return Err(SessionError::InvalidRecoveryInitialization {
                 scope,
