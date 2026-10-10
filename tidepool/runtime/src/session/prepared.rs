@@ -3306,7 +3306,8 @@ impl PreparedEngine {
     }
 
     /// Compare the original request graph with the access site installed in
-    /// this machine. The third accessor input is its complete reply evidence.
+    /// this machine. Its raw reply is independent of the final canonical
+    /// response input retained for result observation.
     pub fn request_scope_types_match(
         &self,
         request: &SiteTypeEvidence,
@@ -3321,7 +3322,7 @@ impl PreparedEngine {
         let Some(row) = facts.sites.get(witness.row) else {
             return Ok(false);
         };
-        let (Some(input), Some(reply)) = (row.inputs.first(), row.inputs.get(2)) else {
+        let [input, raw_reply, _canonical_response] = row.inputs.as_slice() else {
             return Ok(false);
         };
         let mut budget = TypeWorkBudget::new(GraphLimits::default().max_work);
@@ -3331,7 +3332,7 @@ impl PreparedEngine {
             && request.types.rooted_compatible(
                 request.answer,
                 &facts.types,
-                *reply,
+                *raw_reply,
                 &mut budget,
             )?)
     }
@@ -11935,7 +11936,7 @@ pub(super) mod tests {
                 1,
                 &response_family,
             ),
-            2,
+            1,
             &[0],
         ))
         .expect("install request site");
