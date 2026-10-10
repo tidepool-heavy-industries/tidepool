@@ -19413,8 +19413,8 @@ pub(crate) mod request_tests {
             verify_message(later_message).await.unwrap(),
             ResidentOutcome::Completed { .. }
         ));
-        registry.begin_reply(target, request).unwrap();
-        registry.finish_reply(request, None);
+        let claim = registry.begin_reply(target, request).unwrap();
+        crate::request::test_support::complete_reply(&registry, claim, None);
         let closed = tokio::time::timeout(Duration::from_secs(2), source_events.recv())
             .await
             .unwrap()
@@ -19459,7 +19459,10 @@ pub(crate) mod request_tests {
                 .unwrap();
         }
         drop(sources);
-        assert!(registry.finish_reply(request, None).is_empty());
+        assert!(matches!(
+            registry.begin_reply(target, request),
+            Err(crate::ReplyError::Stale | crate::ReplyError::AlreadySettled)
+        ));
         assert_eq!(
             registry.forget_watch(owner, watch).unwrap(),
             crate::request::ForgetWatchOutcome::Forgotten

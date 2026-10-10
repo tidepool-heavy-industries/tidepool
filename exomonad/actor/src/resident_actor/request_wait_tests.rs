@@ -64,10 +64,11 @@ impl Fixture {
     }
 
     fn complete(&self) {
-        self.registry
+        let claim = self
+            .registry
             .begin_reply(self.target, self.request)
             .unwrap();
-        self.registry.finish_reply(self.request, None);
+        crate::request::test_support::complete_reply(&self.registry, claim, None);
     }
 
     async fn wait(&self) -> WatchWaitEvent {
@@ -133,16 +134,16 @@ async fn either_finishes_with_one_request_and_all_waits_for_both() {
         ));
         if any_of {
             assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
-            fixture.registry.begin_reply(unrelated, request).unwrap();
-            fixture.registry.finish_reply(request, None);
+            let claim = fixture.registry.begin_reply(unrelated, request).unwrap();
+            crate::request::test_support::complete_reply(&fixture.registry, claim, None);
             assert!(matches!(
                 waiting.await,
                 WatchWaitEvent::Resume(Ok(WatchObservation::Ready(_)))
             ));
         } else {
             assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
-            fixture.registry.begin_reply(unrelated, request).unwrap();
-            fixture.registry.finish_reply(request, None);
+            let claim = fixture.registry.begin_reply(unrelated, request).unwrap();
+            crate::request::test_support::complete_reply(&fixture.registry, claim, None);
             assert!(matches!(futures_util::poll!(&mut waiting), Poll::Pending));
             fixture.complete();
             assert!(matches!(
@@ -671,7 +672,12 @@ fn direct_command_wait_cancellation_restores_notice_but_capture_consumes_it() {
             )
             .unwrap();
         assert!(registry
-            .settle_command(request, "exit 0".into(), Some("revision".into()), None)
+            .settle_command(
+                request,
+                "exit 0".into(),
+                Some("revision".into()),
+                crate::request::test_support::command_report()
+            )
             .is_empty());
         assert!(registry.take_settlement_notifications().is_empty());
         if captured {
@@ -711,7 +717,7 @@ fn restore_command_notice(
             request,
             format!("{job}: exit 0"),
             Some("revision".into()),
-            None
+            crate::request::test_support::command_report()
         )
         .is_empty());
     // Cancellation releases the observation without consuming its wake.
