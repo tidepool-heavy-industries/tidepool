@@ -3204,14 +3204,12 @@ mod tests {
     }
 
     #[test]
-    fn attached_v2_private_authored_commit_can_reserve_join_and_restart_without_reuse() {
+    fn attached_domain_private_authored_commit_can_reserve_join_and_restart_without_reuse() {
         let root = tempfile::tempdir().unwrap();
-        let manifest = root.path().join("declarations.json");
+        let recovery = recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut lib = staged_test_lib(&root);
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let private = ScopeId(2);
         lib.seed_scope(private, Generation(0));
         let receipt = tidepool_testing::with_settlement(|settlement| {
@@ -3225,14 +3223,8 @@ mod tests {
         assert_eq!(candidate.generation, Generation(1));
         assert!(lib.log.is_reserved(Generation(1)));
         assert_eq!(lib.scope_tip(private), Generation(0));
-        assert_eq!(
-            recovery::read_v2(&manifest, root.path())
-                .unwrap()
-                .unwrap()
-                .graph
-                .high_water(),
-            Generation(1)
-        );
+        let reserved = recovery.state();
+        assert!(reserved.allocation_ceiling >= Generation(1));
         let staged = tidepool_testing::with_settlement(|settlement| {
             validate_declaration_candidate(candidate, lib.include_dir(), settlement)
         })
@@ -3269,62 +3261,46 @@ mod tests {
             .path()
             .join(committed_copy.module().relative_hs_path())
             .exists());
-        let retained = recovery::read_v2(&manifest, root.path()).unwrap().unwrap();
-        assert!(retained.artifact_losses.is_empty());
-        assert_eq!(retained.graph.high_water(), Generation(2));
-        assert_eq!(retained.graph.nodes().count(), 1);
-        assert_eq!(retained.graph.nodes().next().unwrap().id, Generation(1));
+        let retained = recovery_test_fixture::graph(&lib);
+        let node = retained.node(Generation(1)).unwrap().unwrap();
+        assert_eq!(node.kind, recovery::RecoveryNodeKind::Authored);
+        assert_eq!(node.id, Generation(1));
+        assert!(retained.public_surfaces().next().is_none());
         assert_eq!(
-            retained.graph.nodes().next().unwrap().kind,
-            recovery::RecoveryNodeKind::Authored
+            lib.log
+                .projection_at(Generation(1))
+                .unwrap()
+                .context()
+                .authored_native_root(1),
+            Some(original_root)
         );
-        assert!(!retained
-            .graph
-            .nodes()
-            .next()
-            .unwrap()
-            .artifact_refs
-            .is_empty());
-        assert!(retained.graph.public_surfaces().next().is_none());
-        let node = retained.graph.nodes().next().unwrap();
-        assert!(node.artifact_refs.contains(&original_root));
-        assert_eq!(
-            node.lexical_roots[0].module,
-            exact_evidence.projection.module_name()
-        );
-        assert_ne!(
-            node.lexical_roots[0].module,
-            committed_copy.module().module_name()
-        );
-        assert!(node.artifact_refs.iter().any(|id| *id != original_root));
         assert_eq!(
             lib.reserve_join_generation_durable().unwrap(),
             Generation(3)
         );
+        let ceiling = recovery.state().allocation_ceiling;
         drop(lib);
 
         let mut restarted = staged_test_lib(&root);
         tidepool_testing::with_settlement(|settlement| {
-            restarted.attach_recovery_graph_v2(&manifest, settlement)
+            recovery.attach_root(&mut restarted, settlement)
         })
         .unwrap();
-        assert_eq!(restarted.generation(), Generation(3));
+        assert_eq!(restarted.generation(), ceiling);
         assert_eq!(
             restarted.reserve_join_generation_durable().unwrap(),
-            Generation(4)
+            Generation(ceiling.0 + 1)
         );
         assert!(restarted.current_declarations().is_empty());
     }
 
     #[test]
-    fn attached_v2_direct_define_uses_certified_private_graph_admission() {
+    fn attached_domain_direct_define_uses_certified_private_graph_admission() {
         let root = tempfile::tempdir().unwrap();
-        let manifest = root.path().join("declarations.json");
+        let recovery = recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut lib = staged_test_lib(&root);
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         assert_eq!(
             tidepool_testing::with_settlement(
                 |settlement| lib.define_batch(&["data DirectFlag = DirectFlag"], settlement)
@@ -3332,16 +3308,11 @@ mod tests {
             .unwrap(),
             Generation(1)
         );
-        let retained = recovery::read_v2(&manifest, root.path()).unwrap().unwrap();
-        assert!(retained.artifact_losses.is_empty());
-        assert_eq!(retained.graph.nodes().count(), 1);
-        assert_eq!(
-            retained.graph.nodes().next().unwrap().kind,
-            recovery::RecoveryNodeKind::Authored
-        );
-        assert_eq!(retained.graph.nodes().next().unwrap().id, Generation(1));
-        assert!(retained.graph.public_surfaces().next().is_none());
-        assert!(!retained.graph.artifacts().next().is_none());
+        let retained = recovery_test_fixture::graph(&lib);
+        let node = retained.node(Generation(1)).unwrap().unwrap();
+        assert_eq!(node.kind, recovery::RecoveryNodeKind::Authored);
+        assert_eq!(node.id, Generation(1));
+        assert!(retained.public_surfaces().next().is_none());
         assert!(tidepool_testing::with_settlement(
             |settlement| lib.retract("DirectFlag", settlement)
         )

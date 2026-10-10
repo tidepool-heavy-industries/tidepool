@@ -9333,17 +9333,8 @@ mod authored_publication_tests {
             RecoverySuccessorAuthority,
         };
 
-        struct RunOwner {
-            root: std::path::PathBuf,
-            _lock: std::fs::File,
-        }
-        impl RecoveryRunAuthority for RunOwner {
-            fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
-                Ok(root.canonicalize()? == self.root)
-            }
-        }
         struct Successor {
-            run: Arc<RunOwner>,
+            run: Arc<crate::session::recovery_test_fixture::TestRunOwner>,
             predecessor: RecoveryPublicOwner,
             successor: RecoveryPublicOwner,
             session: SessionId,
@@ -9368,20 +9359,10 @@ mod authored_publication_tests {
 
         tidepool_testing::eval_harness::require_extract();
         let durable = tempfile::tempdir().unwrap();
-        let producer_source = tempfile::tempdir().unwrap();
-        let manifest = durable.path().join("declarations.json");
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(durable.path().join("run-owner.lock"))
-            .unwrap();
-        lock.try_lock().unwrap();
-        let run = Arc::new(RunOwner {
-            root: durable.path().canonicalize().unwrap(),
-            _lock: lock,
-        });
+        let producer_source = durable.path().join("producer-source");
+        let recovery =
+            crate::session::recovery_test_fixture::RecoveryFixture::create(durable.path());
+        let run = recovery.owner.clone();
         let owner = |incarnation| {
             RecoveryPublicOwner::new(
                 &tidepool_repr::ActorPath::parse("root/startup-transfer").unwrap(),
@@ -9394,13 +9375,13 @@ mod authored_publication_tests {
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
             tidepool_testing::with_settlement(|settlement| {
-                lib.attach_owned_recovery_graph_v3(&manifest, run.clone(), settlement)
+                recovery.attach_root(&mut lib, settlement)
             })
             .unwrap();
             lib
         };
         let mut producer = PersistentSession::new(
-            Some(library(SessionId(4501), producer_source.path())),
+            Some(library(SessionId(4501), &producer_source)),
             1024 * 1024,
         );
         let public = producer.mint_isolated_scope();
@@ -9441,18 +9422,15 @@ mod authored_publication_tests {
         );
         let published = producer.public_visibility_snapshot_in(public).unwrap();
         assert_ne!(published.declaration_tip, Generation(0));
-        let predecessor_bytes = std::fs::read(&manifest).unwrap();
         drop(producer);
-        drop(producer_source);
 
-        for uncertain in [false, true] {
-            std::fs::write(&manifest, &predecessor_bytes).unwrap();
-            let source = tempfile::tempdir().unwrap();
+        {
+            let source = durable.path().join("successor-source");
             let mut session = TestSession::unbootstrapped(
                 frunk::HNil,
                 EmptyOutput,
                 1024 * 1024,
-                Some(library(SessionId(4502), source.path())),
+                Some(library(SessionId(4502), &source)),
             );
             let scope = session.mint_isolated_scope();
             session
@@ -9477,7 +9455,6 @@ mod authored_publication_tests {
             assert!(!original.source_instances.is_empty());
             session.seal_recovery_initialization_scope(scope).unwrap();
             let compiled = session.state.prepared().unwrap().codegen_totals();
-            session.state.lib_mut().fail_recovery_durability_once = uncertain;
             let commit = session
                 .transfer_recovered_public_owner(
                     &owner(1),
@@ -9492,17 +9469,7 @@ mod authored_publication_tests {
                     }),
                 )
                 .unwrap();
-            if uncertain {
-                assert!(matches!(
-                    commit,
-                    PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
-                ));
-                session
-                    .confirm_durable_public_scope(&owner(2), scope)
-                    .unwrap();
-            } else {
-                assert_eq!(commit, PublicManifestCommit::Durable);
-            }
+            assert_eq!(commit, PublicManifestCommit::Durable);
             let transferred = session.public_visibility_snapshot_in(scope).unwrap();
             assert_eq!(transferred.declaration_tip, published.declaration_tip);
             assert_eq!(transferred.epoch, published.epoch + 1);
@@ -9516,7 +9483,7 @@ mod authored_publication_tests {
             assert_eq!(transferred.source_selection, original.source_selection);
             assert_eq!(session.state.prepared().unwrap().codegen_totals(), compiled);
             assert_eq!(entry.program, Some(program));
-            let committed_bytes = std::fs::read(&manifest).unwrap();
+            let committed = recovery.state();
             session
                 .state
                 .require_prepared()
@@ -9530,7 +9497,7 @@ mod authored_publication_tests {
                 Ok(ResidentOutcome::Completed { .. })
             ));
             assert_eq!(session.outstanding_custody(), 0);
-            assert_eq!(std::fs::read(&manifest).unwrap(), committed_bytes);
+            assert_eq!(recovery.state(), committed);
             assert!(!session.state.require_prepared().unwrap().unpin(program));
             session.state.require_prepared().unwrap().unpin(producer);
         }
@@ -10059,10 +10026,9 @@ mod authored_publication_tests {
         )
         .unwrap()
         .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session =
             TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024 * 1024, Some(lib));
         let public = session.state.mint_scope(ScopeId::ROOT).unwrap();
@@ -10376,10 +10342,9 @@ mod authored_publication_tests {
             SessionLib::open(SessionId(993), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(effects.include_paths().to_vec());
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = TestSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));
         tidepool_testing::with_settlement(|settlement| {
             session.define_scoped_with_imports_in(
@@ -10571,10 +10536,9 @@ mod authored_publication_tests {
         let mut lib = SessionLib::open(SessionId(991), root, ModuleEnv::standalone_default())
             .unwrap()
             .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(root.join("declarations.json"), settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root);
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         lib
     }
 
@@ -10695,70 +10659,8 @@ mod authored_publication_tests {
         );
     }
 
-    fn assert_published_and_confirm_only(
-        session: &mut TestSession,
-        root: &Path,
-        error: &SessionError,
-    ) {
-        let commit = error.published_declaration_commit().unwrap_or_else(|| {
-            panic!("post-rename failure retains published commit facts: {error:?}")
-        });
-        assert_eq!(commit.generation, Generation(1));
-        assert_eq!(commit.evicted_values, ["answer"]);
-        assert!(session.state.resolve_in(ScopeId::ROOT, "answer").is_none());
-        let snapshot = session
-            .public_visibility_snapshot_in(ScopeId::ROOT)
-            .unwrap();
-        assert_eq!(snapshot.epoch, 1);
-        assert_eq!(snapshot.declaration_tip, Generation(1));
-        assert!(snapshot.bindings.is_empty());
-        assert!(session
-            .state
-            .lib()
-            .durable_graph
-            .as_ref()
-            .unwrap()
-            .unconfirmed
-            .is_some());
-        let manifest = root.join("declarations.json");
-        let graph = recovery::read_v2(&manifest, root).unwrap().unwrap().graph;
-        assert_eq!(graph.nodes().count(), 1);
-        assert_eq!(graph.nodes().next().unwrap().id, Generation(1));
-        assert!(session
-            .state
-            .lib()
-            .log
-            .certified_authored_at(Generation(1))
-            .is_some());
-        let bytes = std::fs::read(&manifest).unwrap();
-        session
-            .state
-            .lib_mut()
-            .confirm_recovery_durability()
-            .unwrap();
-        session
-            .state
-            .lib_mut()
-            .confirm_recovery_durability()
-            .unwrap();
-        assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
-        assert_eq!(session.state.lib().generation(), Generation(1));
-        assert_eq!(
-            session.public_visibility_snapshot_in(ScopeId::ROOT),
-            Some(snapshot)
-        );
-        assert!(session
-            .state
-            .lib()
-            .durable_graph
-            .as_ref()
-            .unwrap()
-            .unconfirmed
-            .is_none());
-    }
-
     #[test]
-    fn staged_authored_uncertainty_finalizes_binding_visibility_and_epoch() {
+    fn staged_authored_refusal_preserves_binding_visibility_before_retry() {
         let root = tempfile::tempdir().unwrap();
         let lib = authored_lib(root.path());
         let mut session = resident_with_replaced_binding(lib);
@@ -10779,18 +10681,42 @@ mod authored_publication_tests {
                 settlement,
             )
         })
-        .unwrap_or_else(|error| panic!("stage against the actual binding environment: {error:?}"));
-        assert_eq!(staged.generation(), Generation(1));
+        .unwrap();
         let before = session
             .public_visibility_snapshot_in(ScopeId::ROOT)
             .unwrap();
-        assert_eq!(before.epoch, 0);
-        assert_eq!(before.bindings.len(), 1);
-        session.state.lib_mut().fail_recovery_durability_once = true;
-        let error = session
-            .adopt_staged_declaration_in(staged.clone())
-            .unwrap_err();
-        assert_published_and_confirm_only(&mut session, root.path(), &error);
+        let durable_before =
+            crate::session::recovery_test_fixture::domain_state(session.state.lib());
+        let store = session
+            .state
+            .lib()
+            .durable_graph
+            .as_ref()
+            .unwrap()
+            .store
+            .clone();
+        store.inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
+        assert!(session.adopt_staged_declaration_in(staged.clone()).is_err());
+        assert_eq!(
+            session.public_visibility_snapshot_in(ScopeId::ROOT),
+            Some(before)
+        );
+        assert!(session.state.resolve_in(ScopeId::ROOT, "answer").is_some());
+        assert_eq!(
+            crate::session::recovery_test_fixture::domain_state(session.state.lib()),
+            durable_before
+        );
+        assert!(store.ensure_ready().is_ok());
+        let commit = session.adopt_staged_declaration_in(staged.clone()).unwrap();
+        assert_eq!(commit.generation, Generation(1));
+        assert_eq!(commit.evicted_values, ["answer"]);
+        assert!(session.state.resolve_in(ScopeId::ROOT, "answer").is_none());
+        let published = session
+            .public_visibility_snapshot_in(ScopeId::ROOT)
+            .unwrap();
+        assert_eq!(published.epoch, 1);
+        assert_eq!(published.declaration_tip, Generation(1));
+        assert!(published.bindings.is_empty());
         assert!(matches!(
             session.adopt_staged_declaration_in(staged.clone()),
             Err(SessionError::StaleStagedDeclaration)
@@ -10800,17 +10726,10 @@ mod authored_publication_tests {
             .path()
             .join(staged.module().relative_hs_path())
             .exists());
-        assert_eq!(
-            session
-                .public_visibility_snapshot_in(ScopeId::ROOT)
-                .unwrap()
-                .epoch,
-            1
-        );
     }
 
     #[test]
-    fn direct_authored_reservation_uncertainty_preserves_visibility_until_confirmed_retry() {
+    fn direct_authored_reservation_refusal_preserves_visibility_before_retry() {
         let root = tempfile::tempdir().unwrap();
         let lib = authored_lib(root.path());
         let mut session = resident_with_replaced_binding(lib);
@@ -10822,11 +10741,18 @@ mod authored_publication_tests {
             .resolve_in(ScopeId::ROOT, "answer")
             .unwrap()
             .id;
-        assert_eq!(before.epoch, 0);
-        assert_eq!(before.declaration_tip, Generation(0));
-        assert_eq!(before.bindings, vec![("answer".into(), original)]);
-        session.state.lib_mut().fail_recovery_durability_once = true;
-        let error = tidepool_testing::with_settlement(|settlement| {
+        let durable_before =
+            crate::session::recovery_test_fixture::domain_state(session.state.lib());
+        let store = session
+            .state
+            .lib()
+            .durable_graph
+            .as_ref()
+            .unwrap()
+            .store
+            .clone();
+        store.inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
+        let refused = tidepool_testing::with_settlement(|settlement| {
             session.define_scoped_with_imports_in(
                 ScopeId::ROOT,
                 &["answer :: Int\nanswer = 42"],
@@ -10835,16 +10761,10 @@ mod authored_publication_tests {
             )
         })
         .unwrap_err();
-        // Direct define must first publish its identity reservation. At that
-        // boundary no authored product or visibility replacement exists yet.
-        assert!(
-            matches!(&error, SessionError::RecoveryManifest { .. }),
-            "{error:?}"
-        );
-        assert!(error.published_declaration_commit().is_none(), "{error:?}");
+        assert!(refused.published_declaration_commit().is_none());
         assert_eq!(
             session.public_visibility_snapshot_in(ScopeId::ROOT),
-            Some(before.clone())
+            Some(before)
         );
         assert_eq!(
             session
@@ -10854,56 +10774,12 @@ mod authored_publication_tests {
                 .id,
             original
         );
-        assert_eq!(session.state.lib().generation(), Generation(1));
-        assert_eq!(session.state.lib().scope_tip(ScopeId::ROOT), Generation(0));
-        assert!(session
-            .state
-            .lib()
-            .log
-            .certified_authored_at(Generation(1))
-            .is_none());
-        let manifest = root.path().join("declarations.json");
-        let graph = recovery::read_v2(&manifest, root.path())
-            .unwrap()
-            .unwrap()
-            .graph;
-        assert_eq!(graph.high_water(), Generation(1));
-        assert_eq!(graph.nodes().count(), 0);
-        let reserved_bytes = std::fs::read(&manifest).unwrap();
-        assert!(session
-            .state
-            .lib()
-            .durable_graph
-            .as_ref()
-            .unwrap()
-            .unconfirmed
-            .is_some());
-        assert!(matches!(
-            session
-                .state
-                .lib_mut()
-                .reserve_declaration_generation_durable(),
-            Err(SessionError::RecoveryManifest { .. })
-        ));
-        assert_eq!(session.state.lib().generation(), Generation(1));
-        session
-            .state
-            .lib_mut()
-            .confirm_recovery_durability()
-            .unwrap();
-        session
-            .state
-            .lib_mut()
-            .confirm_recovery_durability()
-            .unwrap();
-        assert_eq!(std::fs::read(&manifest).unwrap(), reserved_bytes);
+        assert_eq!(session.state.lib().generation(), Generation(0));
         assert_eq!(
-            session.public_visibility_snapshot_in(ScopeId::ROOT),
-            Some(before)
+            crate::session::recovery_test_fixture::domain_state(session.state.lib()),
+            durable_before
         );
-
-        // Retrying confirmed direct source is new admission: slot1 stays burned,
-        // and actual validated adoption at slot2 alone evicts the live value.
+        assert!(store.ensure_ready().is_ok());
         let committed = tidepool_testing::with_settlement(|settlement| {
             session.define_scoped_with_imports_in(
                 ScopeId::ROOT,
@@ -10912,92 +10788,34 @@ mod authored_publication_tests {
                 settlement,
             )
         })
-        .unwrap_or_else(|error| {
-            panic!("confirmed direct retry must adopt the real declaration: {error:?}")
-        });
-        assert_eq!(committed, Generation(2));
+        .unwrap();
+        assert_eq!(committed, Generation(1));
         assert!(session.state.resolve_in(ScopeId::ROOT, "answer").is_none());
-        assert!(session
-            .current_decl_heads_in(ScopeId::ROOT)
-            .iter()
-            .any(|(name, _)| name == "answer"));
         let published = session
             .public_visibility_snapshot_in(ScopeId::ROOT)
             .unwrap();
         assert_eq!(published.epoch, 1);
-        assert_eq!(published.declaration_tip, Generation(2));
+        assert_eq!(published.declaration_tip, Generation(1));
         assert!(published.bindings.is_empty());
         assert!(session
             .state
             .lib()
             .log
-            .certified_authored_at(Generation(2))
+            .certified_authored_at(Generation(1))
             .is_some());
-        let graph = recovery::read_v2(&manifest, root.path())
-            .unwrap()
-            .unwrap()
-            .graph;
-        assert_eq!(graph.high_water(), Generation(2));
-        assert_eq!(graph.nodes().count(), 1);
-        assert_eq!(graph.nodes().next().unwrap().id, Generation(2));
-        assert!(session
-            .state
-            .lib()
-            .durable_graph
-            .as_ref()
-            .unwrap()
-            .unconfirmed
-            .is_none());
-        let published_bytes = std::fs::read(&manifest).unwrap();
-        session
-            .state
-            .lib_mut()
-            .confirm_recovery_durability()
-            .unwrap();
-        assert_eq!(std::fs::read(&manifest).unwrap(), published_bytes);
-        assert_eq!(
-            session.public_visibility_snapshot_in(ScopeId::ROOT),
-            Some(published)
-        );
     }
 
     #[test]
-    fn authored_native_readiness_shares_confirmation_and_rejects_transferred_epoch() {
-        use std::os::unix::fs::PermissionsExt;
-        struct RunOwner {
-            root: PathBuf,
-            _lock: std::fs::File,
-        }
-        impl crate::session::RecoveryRunAuthority for RunOwner {
-            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
-                Ok(root.canonicalize()? == self.root)
-            }
-        }
+    fn authored_native_readiness_shares_run_fence_and_rejects_transferred_epoch() {
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(root.path().join("run-owner.lock"))
-            .unwrap();
-        lock.try_lock().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let mut lib =
             SessionLib::open(SessionId(997), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_owned_recovery_graph_v3(
-                root.path().join("declarations.json"),
-                Arc::new(RunOwner {
-                    root: root.path().canonicalize().unwrap(),
-                    _lock: lock,
-                }),
-                settlement,
-            )
-        })
-        .unwrap();
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session =
             ResidentSession::unbootstrapped(frunk::HNil, EmptyOutput, 1024, Some(lib));
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
@@ -11031,124 +10849,62 @@ mod authored_publication_tests {
         assert!(readiness.is_ready());
         assert!(sibling.is_ready());
 
-        // The first manifest write reserves an identity, before declaration
-        // validation or adoption. Its uncertainty must not claim a declaration
-        // commit, and the burned identity must remain unavailable afterward.
-        session.state.lib_mut().fail_recovery_durability_once = true;
-        let error = tidepool_testing::with_settlement(|settlement| {
-            session.define_scoped_with_imports_in(
-                private,
-                &["answer :: Int\nanswer = 42"],
-                &SourceImports::new(),
-                settlement,
-            )
-        })
-        .unwrap_err();
-        assert!(
-            matches!(&error, SessionError::RecoveryManifest { .. }),
-            "{error:?}"
-        );
-        assert!(error.published_declaration_commit().is_none(), "{error:?}");
-        assert_eq!(session.state.lib().generation(), Generation(1));
-        assert_eq!(session.state.lib().scope_tip(private), Generation(0));
-        let manifest = root.path().join("declarations.json");
-        let reserved = recovery::read_v2(&manifest, root.path())
-            .unwrap()
-            .unwrap()
-            .graph;
-        assert_eq!(reserved.high_water(), Generation(1));
-        assert_eq!(reserved.nodes().count(), 0);
-        assert_eq!(
-            session.public_visibility_snapshot_in(public),
-            Some(public_before.clone())
-        );
-        assert_eq!(
-            session.public_visibility_snapshot_in(sibling_scope),
-            Some(sibling_before.clone())
-        );
-        assert!(!readiness.is_ready());
-        assert!(!sibling.is_ready());
-        assert!(readiness.is_current());
-        assert!(sibling.is_current());
-        session
-            .confirm_durable_public_scope(&owner, public)
-            .unwrap();
-        assert!(readiness.is_ready());
-        assert!(sibling.is_ready());
-
-        let receipt = tidepool_testing::with_settlement(|settlement| {
-            session
-                .state
-                .lib()
-                .declaration_receipt(&["answer :: Int\nanswer = 42"], settlement)
-        })
-        .unwrap()
-        .unwrap();
-        let staged = tidepool_testing::with_settlement(|settlement| {
-            session.stage_declarations_in(private, &receipt, &SourceImports::new(), &[], settlement)
-        })
-        .unwrap();
-        assert_eq!(staged.generation(), Generation(2));
-        session.state.lib_mut().fail_recovery_durability_once = true;
-        let error = session.adopt_staged_declaration_in(staged).unwrap_err();
-        let commit = error.published_declaration_commit().unwrap_or_else(|| {
-            panic!("validated adoption must retain its published declaration commit: {error:?}")
-        });
-        assert_eq!(commit.generation, Generation(2));
-        assert_eq!(session.state.lib().scope_tip(private), Generation(2));
-        assert_eq!(
-            session.public_visibility_snapshot_in(public),
-            Some(public_before.clone())
-        );
-        assert_eq!(
-            session.public_visibility_snapshot_in(sibling_scope),
-            Some(sibling_before.clone())
-        );
-        let published = recovery::read_v2(&manifest, root.path())
-            .unwrap()
-            .unwrap()
-            .graph;
-        assert_eq!(published.high_water(), Generation(2));
-        assert_eq!(published.nodes().count(), 1);
-        assert_eq!(published.nodes().next().unwrap().id, Generation(2));
-        for surface in published.public_surfaces() {
-            assert!(surface.declaration_root.is_none());
-        }
-        let published_bytes = std::fs::read(&manifest).unwrap();
-        assert!(!readiness.is_ready());
-        assert!(!sibling.is_ready());
-        assert!(readiness.is_current());
-        assert!(sibling.is_current());
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+        recovery
+            .store
+            .inject_fault(crate::session::recovery_store::StoreFault::CommitError);
         assert!(session
-            .confirm_durable_public_scope(&owner, public)
+            .state
+            .lib_mut()
+            .reserve_declaration_generation_durable()
             .is_err());
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         assert!(!readiness.is_ready());
         assert!(!sibling.is_ready());
-        session
-            .confirm_durable_public_scope(&owner, public)
+        assert!(session
+            .begin_durable_private_execution(&owner, public)
+            .is_err());
+        assert!(session
+            .begin_durable_private_execution(&sibling_owner, sibling_scope)
+            .is_err());
+        assert_eq!(
+            session.public_visibility_snapshot_in(public),
+            Some(public_before)
+        );
+        assert_eq!(
+            session.public_visibility_snapshot_in(sibling_scope),
+            Some(sibling_before)
+        );
+        let reopened =
+            crate::session::recovery_test_fixture::RecoveryFixture::reopen(recovery.owner.clone());
+        assert!(reopened.state().allocation_ceiling >= Generation(1));
+        let mut lib =
+            SessionLib::open(SessionId(998), root.path(), ModuleEnv::standalone_default()).unwrap();
+        tidepool_testing::with_settlement(|settlement| reopened.attach_root(&mut lib, settlement))
             .unwrap();
-        session
-            .confirm_durable_public_scope(&sibling_owner, sibling_scope)
+        let mut recovered = PersistentSession::new(Some(lib), 1024);
+        let recovered_public = recovered.recover_public_scope(&owner).unwrap();
+        let recovered_sibling = recovered.recover_public_scope(&sibling_owner).unwrap();
+        recovered
+            .begin_durable_private_execution(&owner, recovered_public)
             .unwrap();
-        assert_eq!(std::fs::read(&manifest).unwrap(), published_bytes);
-        assert!(readiness.is_ready());
-        assert!(sibling.is_ready());
-        let next = session
-            .state
+        recovered
+            .begin_durable_private_execution(&sibling_owner, recovered_sibling)
+            .unwrap();
+        assert!(!readiness.is_ready());
+        assert!(!sibling.is_ready());
+        let current = recovered
+            .durable_public_readiness(&owner, recovered_public)
+            .unwrap();
+        let next = recovered
             .prepare_execution_admission_epoch_advance()
             .unwrap();
-        session
-            .state
-            .invalidate_execution_admissions_after_owner_transfer(next);
-        assert!(!readiness.is_ready());
-        assert!(!sibling.is_ready());
-        assert!(!readiness.is_current());
-        assert!(!sibling.is_current());
-        let current = session.durable_public_readiness(&owner, public).unwrap();
+        recovered.invalidate_execution_admissions_after_owner_transfer(next);
+        assert!(!current.is_ready());
+        assert!(!current.is_current());
+        let current = recovered
+            .durable_public_readiness(&owner, recovered_public)
+            .unwrap();
         assert!(current.is_ready());
-        drop(session);
+        drop(recovered);
         assert!(!current.is_ready());
         assert!(!current.is_current());
     }

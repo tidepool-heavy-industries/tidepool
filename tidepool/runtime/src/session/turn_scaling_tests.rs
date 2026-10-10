@@ -5,8 +5,8 @@ use super::*;
 use crate::session::{
     resident_cell_check_template, resident_workbench_templates, CertifiedDeclarationPublication,
     ExecutionPublication, ModuleEnv, OutputSink, PersistentSession, PreparedRuntimeError,
-    PublicManifestCommit, PublicationDecision, RecoveryPublicOwner, RecoveryRunAuthority,
-    ResidentError, ResidentSession, SessionLib, SessionRunContext, SourceImports,
+    PublicManifestCommit, PublicationDecision, RecoveryPublicOwner, ResidentError, ResidentSession,
+    SessionLib, SessionRunContext, SourceImports,
 };
 use parking_lot::Mutex as CaptureMutex;
 use sha2::Digest;
@@ -801,33 +801,8 @@ pub(in crate::session) enum ScalePublication {
     Ephemeral,
     Durable {
         owner: RecoveryPublicOwner,
-        manifest: PathBuf,
+        recovery: crate::session::recovery_test_fixture::RecoveryFixture,
     },
-}
-
-/// Hold the reference workspace's real exclusive file lock for the session.
-struct ScaleRunOwner {
-    root: PathBuf,
-    _lock: std::fs::File,
-}
-impl RecoveryRunAuthority for ScaleRunOwner {
-    fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
-        Ok(root.canonicalize()? == self.root)
-    }
-}
-fn scale_run_owner(root: &Path) -> Arc<ScaleRunOwner> {
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(root.join("performance-run-owner.lock"))
-        .unwrap();
-    lock.try_lock().unwrap();
-    Arc::new(ScaleRunOwner {
-        root: root.canonicalize().unwrap(),
-        _lock: lock,
-    })
 }
 
 fn scale_workspace(durable: bool) -> (PathBuf, Option<tempfile::TempDir>) {
@@ -2017,7 +1992,7 @@ where
                 resident,
                 images,
                 scenario,
-                &format!("{label}.metadata_stage_file_sync"),
+                &format!("{label}.metadata_stage_blocks"),
                 None,
                 |_| base.stage().unwrap(),
             );
@@ -2056,7 +2031,7 @@ where
                 resident,
                 images,
                 scenario,
-                &format!("{label}.metadata_stage_file_sync"),
+                &format!("{label}.metadata_stage_blocks"),
                 None,
                 |_| accepted.stage().unwrap(),
             );
@@ -2068,7 +2043,7 @@ where
         resident,
         images,
         scenario,
-        &format!("{label}.publication_rename_directory_sync"),
+        &format!("{label}.publication_transaction_commit"),
         None,
         |resident| {
             let result = resident
@@ -2112,23 +2087,27 @@ where
         view.exact_declaration_context()
             .map(|context| context.artifact_view().inventory().metrics())
     });
-    if let ScalePublication::Durable { manifest, .. } = publication_target {
-        let bytes = std::fs::read(manifest).unwrap();
-        let document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let snapshot = manifest.with_file_name(format!("declarations-{label}.json"));
-        std::fs::write(&snapshot, &bytes).unwrap();
+    if let ScalePublication::Durable { recovery, .. } = publication_target {
+        let state = recovery.state();
+        let snapshot = recovery
+            .store
+            .path()
+            .with_file_name(format!("domain-{label}.json"));
+        let diagnostic = serde_json::to_vec(&state).unwrap();
+        std::fs::write(&snapshot, &diagnostic).unwrap();
         eprintln!(
             "durable-performance {}",
             serde_json::json!({
                 "schema": 1, "composition": "durable-publication", "cell": label,
                 "prefix": scenario.0, "baseline": scenario.1, "completed": true,
                 "elapsed_ns": elapsed.as_nanos(), "certification_ns": certification_ns,
-                "metadata_stage_file_sync_ns": stage_ns,
-                "publication_rename_directory_sync_ns": publication_ns,
-                "manifest_path": snapshot, "manifest_bytes": bytes.len(),
-                "manifest_blake3": blake3::hash(&bytes).to_hex().to_string(),
-                "manifest_checksum": document.get("checksum"),
-                "public_schema": document.get("public_schema"),
+                "metadata_stage_blocks_ns": stage_ns,
+                "publication_transaction_commit_ns": publication_ns,
+                "domain_state_path": snapshot, "domain_state_bytes": diagnostic.len(),
+                "domain_root": state.snapshot_root.cid().to_string(),
+                "domain_revision": state.revision.0,
+                "domain_content_revision": state.content_revision.0,
+                "allocation_ceiling": state.allocation_ceiling.0,
                 "checksum_encode_bytes": recovery_work.checksum_encode_bytes,
                 "recovery_validation_hash_bytes": recovery_work.recovery_validation_hash_bytes,
                 "recovery_materialization_hash_bytes": recovery_work.recovery_materialization_hash_bytes,
@@ -2217,18 +2196,16 @@ fn growing_prefix_with_publication(prefix: usize, baseline: usize, durable: bool
         .unwrap()
         .with_validation_include(effects.include_paths().to_vec());
     let publication = if durable {
-        let manifest = root_path.join("declarations.json");
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path), settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(&root_path);
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         ScalePublication::Durable {
             owner: RecoveryPublicOwner::new(
                 &tidepool_repr::ActorPath::parse("root/performance").unwrap(),
                 1,
             )
             .unwrap(),
-            manifest,
+            recovery,
         }
     } else {
         ScalePublication::Ephemeral
@@ -2532,18 +2509,16 @@ fn resident_capture_cells(count: usize, durable: bool) {
         .unwrap()
         .with_validation_include(effects.include_paths().to_vec());
     let publication = if durable {
-        let manifest = root_path.join("declarations.json");
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path), settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(&root_path);
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         ScalePublication::Durable {
             owner: RecoveryPublicOwner::new(
                 &tidepool_repr::ActorPath::parse("root/performance").unwrap(),
                 1,
             )
             .unwrap(),
-            manifest,
+            recovery,
         }
     } else {
         ScalePublication::Ephemeral
@@ -3504,18 +3479,23 @@ fn complete_cell_preserves_exact_local_fixity() {
 }
 
 fn persisted_root_state(
-    manifest: &Path,
+    resident: &ScaleSession,
     owner: &RecoveryPublicOwner,
 ) -> crate::session::recovery::RecoveryNodeState {
-    let graph: crate::session::recovery::RecoveryGraph =
-        serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
-    let root = graph
+    let attached = resident.state.lib().durable_graph.as_ref().unwrap();
+    assert!(attached
+        .store
+        .read_public_owner(attached.domain_id, owner)
+        .unwrap()
+        .is_some());
+    let root = attached
+        .graph
         .public_surfaces()
         .find(|surface| &surface.owner == owner)
         .unwrap()
         .declaration_root
         .unwrap();
-    graph.node(root).unwrap().state.clone()
+    attached.graph.node(root).unwrap().unwrap().state.clone()
 }
 
 #[test]
@@ -3528,7 +3508,13 @@ fn durable_mixed_originals_recover_independent_native_entry() {
     } else {
         scale_workspace(true)
     };
-    let manifest = root_path.join("declarations.json");
+    let recovery = if child_root.is_some() {
+        crate::session::recovery_test_fixture::RecoveryFixture::reopen(
+            crate::session::recovery_test_fixture::run_owner(&root_path),
+        )
+    } else {
+        crate::session::recovery_test_fixture::RecoveryFixture::create(&root_path)
+    };
     let owner = RecoveryPublicOwner::new(
         &tidepool_repr::ActorPath::parse("root/performance").unwrap(),
         1,
@@ -3550,10 +3536,8 @@ fn durable_mixed_originals_recover_independent_native_entry() {
     )
     .unwrap()
     .with_validation_include(effects.include_paths().to_vec());
-    tidepool_testing::with_settlement(|settlement| {
-        lib.attach_owned_recovery_graph_v3(&manifest, scale_run_owner(&root_path), settlement)
-    })
-    .unwrap();
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+        .unwrap();
     let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
     persistent.set_image_registry(images.clone());
     let public = if child_root.is_some() {
@@ -3565,7 +3549,7 @@ fn durable_mixed_originals_recover_independent_native_entry() {
         ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
     let publication = ScalePublication::Durable {
         owner: owner.clone(),
-        manifest: manifest.clone(),
+        recovery,
     };
     if child_root.is_some() {
         assert!(!resident
@@ -3652,7 +3636,7 @@ fn durable_mixed_originals_recover_independent_native_entry() {
         &publication,
     );
     assert!(matches!(
-        persisted_root_state(&manifest, &owner),
+        persisted_root_state(&resident, &owner),
         crate::session::recovery::RecoveryNodeState::ExactArtifactClosure
     ));
     execute_cell(
@@ -3667,10 +3651,11 @@ fn durable_mixed_originals_recover_independent_native_entry() {
         &publication,
     );
     assert!(matches!(
-        persisted_root_state(&manifest, &owner),
+        persisted_root_state(&resident, &owner),
         crate::session::recovery::RecoveryNodeState::LiveValueDependency { .. }
     ));
     drop(resident);
+    drop(publication);
     // Execute the already-built native test binary in a fresh process. The
     // battery still owns the one compiler daemon and configured endpoint.
     let output = std::process::Command::new(std::env::current_exe().unwrap())

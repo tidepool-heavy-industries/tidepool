@@ -3535,7 +3535,9 @@ mod checkpoint_scope_tests {
         use std::sync::atomic::Ordering;
         for count in [1, 10, 100] {
             let dir = tempfile::tempdir().unwrap();
-            let mut session = publication_session(dir.path(), 410);
+            let recovery =
+                crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
+            let mut session = publication_session(&recovery, dir.path(), 410);
             let public = session.mint_isolated_scope();
             let scope = session.mint_detached_scope(public).unwrap();
             for index in 0..count {
@@ -3570,7 +3572,8 @@ mod checkpoint_scope_tests {
     #[test]
     fn compile_view_readers_share_metadata_and_isolate_later_shadowing() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = publication_session(dir.path(), 417);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
+        let mut session = publication_session(&recovery, dir.path(), 417);
         let scope = session.mint_isolated_scope();
         let original =
             super::super::prepared::tests::rooted_publication_fixture(&mut session, "answer", 417);
@@ -3610,7 +3613,8 @@ mod checkpoint_scope_tests {
     #[test]
     fn scoped_view_refreshes_sibling_inventory_and_counter_without_staleness() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = publication_session(dir.path(), 411);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
+        let mut session = publication_session(&recovery, dir.path(), 411);
         let public = session.mint_isolated_scope();
         let private = session.mint_detached_scope(public).unwrap();
         let cached = session.scoped_compile_view_in(private).unwrap();
@@ -3640,7 +3644,8 @@ mod checkpoint_scope_tests {
     #[test]
     fn scoped_view_rebuilds_for_owned_binding_declaration_and_library_changes() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = publication_session(dir.path(), 412);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
+        let mut session = publication_session(&recovery, dir.path(), 412);
         let entry =
             super::super::prepared::tests::rooted_publication_fixture(&mut session, "value", 412);
         session.bind(entry).unwrap();
@@ -3725,7 +3730,8 @@ mod checkpoint_scope_tests {
     #[test]
     fn late_binding_identity_conflict_refuses_entire_materialization_set() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = publication_session(dir.path(), 402);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
+        let mut session = publication_session(&recovery, dir.path(), 402);
         let existing = super::super::prepared::tests::rooted_publication_fixture(
             &mut session,
             "existing",
@@ -3772,7 +3778,7 @@ mod checkpoint_scope_tests {
         );
         assert!(machine.prepared_handle_of(first_handle.raw()).is_none());
         assert!(machine.prepared_handle_of(conflict_handle.raw()).is_none());
-        assert!(!dir.path().join("declarations.json").exists());
+        assert!(session.lib().durable_graph.is_none());
     }
 
     #[test]
@@ -3808,7 +3814,11 @@ mod checkpoint_scope_tests {
         RecoveryPublicOwner::new(&tidepool_repr::ActorPath::parse(path).unwrap(), 1).unwrap()
     }
 
-    fn publication_session(root: &Path, id: u64) -> PersistentSession {
+    fn publication_session(
+        recovery: &crate::session::recovery_test_fixture::RecoveryFixture,
+        root: &Path,
+        id: u64,
+    ) -> PersistentSession {
         let mut lib = SessionLib::open(
             tidepool_repr::SessionId(id),
             root.join(format!("session-{id}")),
@@ -3816,7 +3826,13 @@ mod checkpoint_scope_tests {
         )
         .unwrap();
         tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(root.join("declarations.json"), settlement)
+            recovery.attach(
+                &mut lib,
+                crate::session::recovery_store::RecoveryDomainId::Session(
+                    tidepool_repr::SessionId(id),
+                ),
+                settlement,
+            )
         })
         .unwrap();
         PersistentSession::new(Some(lib), 1024)
@@ -3826,26 +3842,15 @@ mod checkpoint_scope_tests {
         root: &Path,
         id: u64,
     ) -> (PersistentSession, ScopeId, RecoveryPublicOwner) {
-        struct RunOwner(PathBuf);
-        impl super::super::RecoveryRunAuthority for RunOwner {
-            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
-                Ok(root.canonicalize()? == self.0)
-            }
-        }
         let mut lib = SessionLib::open(
             tidepool_repr::SessionId(id),
             root.join("session"),
             super::super::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_owned_recovery_graph_v3(
-                root.join("declarations.json"),
-                Arc::new(RunOwner(root.canonicalize().unwrap())),
-                settlement,
-            )
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root);
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_isolated_scope();
         let initial =
@@ -3899,7 +3904,7 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
-    fn durable_bootstrap_uncertainty_refuses_private_admission_until_confirmation() {
+    fn durable_bootstrap_commit_error_fences_private_admission() {
         let root = tempfile::tempdir().unwrap();
         let (mut session, public, owner) = bootstrap_session(root.path(), 931);
         let seal = session
@@ -3912,24 +3917,16 @@ mod checkpoint_scope_tests {
         );
         session.bind_in(public, binding).unwrap();
         session.advance_public_visibility(public);
-        session.lib_mut().fail_recovery_durability_once = true;
+        let store = session.lib().durable_graph.as_ref().unwrap().store.clone();
+        store.inject_fault(crate::session::recovery_store::StoreFault::CommitError);
         assert!(matches!(
             session.publish_durable_public_bootstrap(seal).unwrap(),
-            PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+            PublicManifestCommit::RecoveryRequired { .. }
         ));
-        assert!(matches!(
-            session.begin_durable_private_execution(&owner, public),
-            Err(SessionError::InvalidDurablePublicAdmission {
-                reason: super::super::DurablePublicAdmissionFailure::Unconfirmed,
-                ..
-            })
-        ));
-        session
-            .confirm_durable_public_scope(&owner, public)
-            .unwrap();
-        session
+        assert!(session
             .begin_durable_private_execution(&owner, public)
-            .unwrap();
+            .is_err());
+        assert!(store.ensure_ready().is_err());
         assert!(session.resolve_in(public, "bootstrapResult").is_some());
     }
 
@@ -3942,7 +3939,7 @@ mod checkpoint_scope_tests {
         let seal = session
             .begin_durable_public_bootstrap(owner.clone(), public)
             .unwrap();
-        let original = std::fs::read(foreign_root.path().join("declarations.json")).unwrap();
+        let original = crate::session::recovery_test_fixture::domain_state(foreign.lib());
         assert!(matches!(
             foreign.publish_durable_public_bootstrap(seal),
             Err(SessionError::InvalidDurablePublicAdmission {
@@ -3951,13 +3948,13 @@ mod checkpoint_scope_tests {
             })
         ));
         assert_eq!(
-            std::fs::read(foreign_root.path().join("declarations.json")).unwrap(),
+            crate::session::recovery_test_fixture::domain_state(foreign.lib()),
             original
         );
         let seal = session
             .begin_durable_public_bootstrap(owner.clone(), public)
             .unwrap();
-        let original = std::fs::read(root.path().join("declarations.json")).unwrap();
+        let original = crate::session::recovery_test_fixture::domain_state(session.lib());
         session.lib_mut().set_scope_tip_in(public, Generation(99));
         assert!(matches!(
             session.publish_durable_public_bootstrap(seal),
@@ -3970,39 +3967,28 @@ mod checkpoint_scope_tests {
             })
         ));
         assert_eq!(
-            std::fs::read(root.path().join("declarations.json")).unwrap(),
+            crate::session::recovery_test_fixture::domain_state(session.lib()),
             original
         );
     }
 
     #[test]
-    fn durable_bootstrap_write_failure_keeps_published_surface_and_blocks_admission() {
-        use std::os::unix::fs::PermissionsExt;
-        struct Restore(PathBuf, std::fs::Permissions);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                std::fs::set_permissions(&self.0, self.1.clone()).unwrap();
-            }
-        }
+    fn durable_bootstrap_transaction_refusal_keeps_published_surface_and_blocks_admission() {
         let root = tempfile::tempdir().unwrap();
         let (mut session, public, owner) = bootstrap_session(root.path(), 935);
         let seal = session
             .begin_durable_public_bootstrap(owner.clone(), public)
             .unwrap();
-        let original = std::fs::read(root.path().join("declarations.json")).unwrap();
+        let original = crate::session::recovery_test_fixture::domain_state(session.lib());
         session.advance_public_visibility(public);
-        let restore = Restore(
-            root.path().to_owned(),
-            std::fs::metadata(root.path()).unwrap().permissions(),
-        );
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        let store = session.lib().durable_graph.as_ref().unwrap().store.clone();
+        store.inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
         assert!(matches!(
-            session.publish_durable_public_bootstrap(seal),
-            Err(SessionError::RecoveryManifest { .. })
+            session.publish_durable_public_bootstrap(seal).unwrap(),
+            PublicManifestCommit::Refused { .. }
         ));
-        drop(restore);
         assert_eq!(
-            std::fs::read(root.path().join("declarations.json")).unwrap(),
+            crate::session::recovery_test_fixture::domain_state(session.lib()),
             original
         );
         assert!(matches!(
@@ -4060,7 +4046,8 @@ mod checkpoint_scope_tests {
     fn binding_publication_retains_independent_source_instances_without_selecting_them() {
         use super::super::prepared::tests::install_selected_source_fixture;
         let root = tempfile::tempdir().unwrap();
-        let mut session = publication_session(root.path(), 821);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 821);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let a = session.mint_detached_scope(public).unwrap();
         let b = session.mint_detached_scope(public).unwrap();
@@ -4150,7 +4137,8 @@ mod checkpoint_scope_tests {
     fn authored_source_selection_preserves_late_group_support_after_binding_publication() {
         use super::super::prepared::tests::install_selected_source_fixture;
         let root = tempfile::tempdir().unwrap();
-        let mut session = publication_session(root.path(), 822);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 822);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let authored = session.mint_detached_scope(public).unwrap();
         let unrelated = session.mint_detached_scope(public).unwrap();
@@ -4221,7 +4209,8 @@ mod checkpoint_scope_tests {
     fn conflicting_authored_source_selection_refuses_before_machine_changes() {
         use super::super::prepared::tests::install_selected_source_fixture;
         let root = tempfile::tempdir().unwrap();
-        let mut session = publication_session(root.path(), 823);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 823);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let a = session.mint_detached_scope(public).unwrap();
         let b = session.mint_detached_scope(public).unwrap();
@@ -4281,7 +4270,8 @@ mod checkpoint_scope_tests {
         };
         use tidepool_toolchain::artifact_inventory::{ArtifactId, NativeBindingRequirement};
         let root = tempfile::tempdir().unwrap();
-        let mut session = publication_session(root.path(), 825);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 825);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private = session.mint_detached_scope(public).unwrap();
         let sibling = session.mint_detached_scope(public).unwrap();
@@ -4419,7 +4409,8 @@ mod checkpoint_scope_tests {
         };
         use tidepool_repr::execution_schema::{testing, ModuleVersion};
         let root = tempfile::tempdir().unwrap();
-        let mut session = publication_session(root.path(), 824);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 824);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let d = session.mint_detached_scope(public).unwrap();
         let e = session.mint_detached_scope(public).unwrap();
@@ -4486,7 +4477,9 @@ mod checkpoint_scope_tests {
         use tidepool_repr::execution_schema::{testing, ModuleVersion};
         for reversed in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let mut session = publication_session(root.path(), 825);
+            let recovery =
+                crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+            let mut session = publication_session(&recovery, root.path(), 825);
             let public = session.mint_scope(ScopeId::ROOT).unwrap();
             let d = session.mint_detached_scope(public).unwrap();
             let groups = [
@@ -4611,7 +4604,8 @@ mod checkpoint_scope_tests {
         };
         use tidepool_repr::execution_schema::{testing, ModuleVersion};
         let root = tempfile::tempdir().unwrap();
-        let mut session = publication_session(root.path(), 828);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 828);
         let scope = session.mint_detached_scope(ScopeId::ROOT).unwrap();
         let observation = super::super::prepared::tests::evaluated_publication_fixture(
             &mut session,
@@ -4666,7 +4660,8 @@ mod checkpoint_scope_tests {
         };
         use tidepool_repr::execution_schema::{testing, ModuleVersion};
         let root = tempfile::tempdir().unwrap();
-        let mut session = publication_session(root.path(), 826);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 826);
         let scope = session.mint_detached_scope(ScopeId::ROOT).unwrap();
         let groups = [certified_source_group_modules("D", "d1", 1, "D", "d1")];
         let source = SourceBinder {
@@ -4697,7 +4692,8 @@ mod checkpoint_scope_tests {
         };
         use tidepool_repr::execution_schema::{testing, ModuleVersion};
         let root = tempfile::tempdir().unwrap();
-        let mut session = publication_session(root.path(), 827);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 827);
         let a = session.mint_detached_scope(ScopeId::ROOT).unwrap();
         let groups = [certified_sibling_fixture()];
         let source = |name| SourceBinder {
@@ -4759,7 +4755,8 @@ mod checkpoint_scope_tests {
         };
         use tidepool_repr::execution_schema::{testing, ModuleVersion};
         let root = tempfile::tempdir().unwrap();
-        let mut session = publication_session(root.path(), 828);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut session = publication_session(&recovery, root.path(), 828);
         let a = session.mint_detached_scope(ScopeId::ROOT).unwrap();
         let groups = [certified_sibling_fixture()];
         let source = |name| SourceBinder {
@@ -4910,7 +4907,8 @@ mod checkpoint_scope_tests {
     #[test]
     fn staged_sibling_publications_restage_without_erasing_the_other_actor() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = publication_session(dir.path(), 72);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
+        let mut session = publication_session(&recovery, dir.path(), 72);
         let public_a = session.mint_scope(ScopeId::ROOT).unwrap();
         let public_b = session.mint_scope(ScopeId::ROOT).unwrap();
         let private_a = session.mint_detached_scope(public_a).unwrap();
@@ -4979,11 +4977,7 @@ mod checkpoint_scope_tests {
                 .epoch,
             1
         );
-        let restored =
-            super::super::recovery::read_v2(&dir.path().join("declarations.json"), dir.path())
-                .unwrap()
-                .unwrap()
-                .graph;
+        let restored = crate::session::recovery_test_fixture::graph(session.lib());
         assert_eq!(restored.public_surfaces().count(), 2);
         assert_eq!(
             restored
@@ -5004,7 +4998,8 @@ mod checkpoint_scope_tests {
     #[test]
     fn private_revision_invalidates_stage_before_cancellation_claim() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = publication_session(dir.path(), 72);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
+        let mut session = publication_session(&recovery, dir.path(), 72);
         let public = ScopeId::ROOT;
         let private = session.mint_detached_scope(public).unwrap();
         let owner = public_owner("root");
@@ -5032,7 +5027,9 @@ mod checkpoint_scope_tests {
             PublicManifestCommit::Stale
         );
         assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
-        assert!(!dir.path().join("declarations.json").exists());
+        assert!(!crate::session::recovery_test_fixture::has_public_owners(
+            session.lib()
+        ));
         let retry = session
             .snapshot_binding_publication(owner, public, private, vec![])
             .unwrap()
@@ -5049,13 +5046,16 @@ mod checkpoint_scope_tests {
             session.public_visibility_snapshot_in(public).unwrap(),
             public_base
         );
-        assert!(!dir.path().join("declarations.json").exists());
+        assert!(!crate::session::recovery_test_fixture::has_public_owners(
+            session.lib()
+        ));
     }
 
     #[test]
     fn public_revision_invalidates_stage_and_retry_advances_once() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = publication_session(dir.path(), 72);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
+        let mut session = publication_session(&recovery, dir.path(), 72);
         let public = ScopeId::ROOT;
         let private = session.mint_detached_scope(public).unwrap();
         let owner = public_owner("root");
@@ -5097,7 +5097,8 @@ mod checkpoint_scope_tests {
     #[test]
     fn exhausted_public_revision_refuses_before_manifest_and_claim() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = publication_session(dir.path(), 72);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
+        let mut session = publication_session(&recovery, dir.path(), 72);
         let public = ScopeId::ROOT;
         let private = session.mint_detached_scope(public).unwrap();
         let owner = public_owner("root");
@@ -5116,14 +5117,17 @@ mod checkpoint_scope_tests {
             Err(SessionError::RecoveryManifest { .. })
         ));
         assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
-        assert!(!dir.path().join("declarations.json").exists());
+        assert!(!crate::session::recovery_test_fixture::has_public_owners(
+            session.lib()
+        ));
     }
 
     #[test]
     fn staged_publication_refuses_retired_scope_and_foreign_session() {
         let dir = tempfile::tempdir().unwrap();
-        let mut first = publication_session(dir.path(), 72);
-        let mut second = publication_session(dir.path(), 73);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
+        let mut first = publication_session(&recovery, dir.path(), 72);
+        let mut second = publication_session(&recovery, dir.path(), 73);
         let public = first.mint_scope(ScopeId::ROOT).unwrap();
         let private = first.mint_detached_scope(public).unwrap();
         let owner = public_owner("root/a");
@@ -5156,13 +5160,16 @@ mod checkpoint_scope_tests {
             PublicManifestCommit::Stale
         );
         assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
-        assert!(!dir.path().join("declarations.json").exists());
+        assert!(!crate::session::recovery_test_fixture::has_public_owners(
+            first.lib()
+        ));
     }
 
     #[test]
     fn staged_publication_refuses_foreign_owner_and_changed_graph_generation() {
         let dir = tempfile::tempdir().unwrap();
-        let mut session = publication_session(dir.path(), 72);
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
+        let mut session = publication_session(&recovery, dir.path(), 72);
         let public_a = session.mint_scope(ScopeId::ROOT).unwrap();
         let public_b = session.mint_scope(ScopeId::ROOT).unwrap();
         let private_a = session.mint_detached_scope(public_a).unwrap();
@@ -5206,9 +5213,11 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
-    fn cancellation_and_pre_rename_failure_do_not_publish() {
+    fn cancellation_and_transaction_refusal_do_not_publish() {
         let cancelled_dir = tempfile::tempdir().unwrap();
-        let mut cancelled = publication_session(cancelled_dir.path(), 72);
+        let cancelled_recovery =
+            crate::session::recovery_test_fixture::RecoveryFixture::create(cancelled_dir.path());
+        let mut cancelled = publication_session(&cancelled_recovery, cancelled_dir.path(), 72);
         let private = cancelled.mint_detached_scope(ScopeId::ROOT).unwrap();
         let owner = public_owner("root");
         cancelled
@@ -5227,10 +5236,14 @@ mod checkpoint_scope_tests {
                 .unwrap(),
             PublicManifestCommit::Cancelled
         );
-        assert!(!cancelled_dir.path().join("declarations.json").exists());
+        assert!(!crate::session::recovery_test_fixture::has_public_owners(
+            cancelled.lib()
+        ));
 
         let failed_dir = tempfile::tempdir().unwrap();
-        let mut failed = publication_session(failed_dir.path(), 73);
+        let failed_recovery =
+            crate::session::recovery_test_fixture::RecoveryFixture::create(failed_dir.path());
+        let mut failed = publication_session(&failed_recovery, failed_dir.path(), 73);
         let private = failed.mint_detached_scope(ScopeId::ROOT).unwrap();
         failed
             .bind_durable_public_scope(owner.clone(), ScopeId::ROOT)
@@ -5240,13 +5253,15 @@ mod checkpoint_scope_tests {
             .unwrap()
             .stage()
             .unwrap();
-        std::fs::create_dir(failed_dir.path().join("declarations.json")).unwrap();
+        failed_recovery
+            .store
+            .inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
         let decision = PublicationDecision::new();
         assert!(matches!(
             failed
                 .publish_staged_public_manifest(stage, &decision)
                 .unwrap(),
-            PublicManifestCommit::BeforeRename { .. }
+            PublicManifestCommit::Refused { .. }
         ));
         assert_eq!(decision.phase(), super::super::PublicationPhase::Terminated);
         assert!(failed
@@ -5263,17 +5278,15 @@ mod checkpoint_scope_tests {
     #[test]
     fn durable_public_owners_require_live_minted_scopes() {
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("declarations.json");
         let mut lib = SessionLib::open(
             tidepool_repr::SessionId(72),
             dir.path().join("session"),
             super::super::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024);
         let first = session.mint_scope(ScopeId::ROOT).unwrap();
         let second = session.mint_scope(ScopeId::ROOT).unwrap();

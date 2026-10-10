@@ -82,3 +82,26 @@ impl RecoveryFixture {
             .unwrap()
     }
 }
+
+pub(super) fn domain_state(lib: &SessionLib) -> RecoveryDomainState {
+    let attached = lib.durable_graph.as_ref().unwrap();
+    attached
+        .store
+        .read_domain(attached.domain_id)
+        .unwrap()
+        .unwrap()
+}
+
+pub(super) fn graph(lib: &SessionLib) -> super::recovery::RecoveryGraph {
+    let attached = lib.durable_graph.as_ref().unwrap();
+    assert_eq!(domain_state(lib).revision, attached.store_revision);
+    attached.graph.clone()
+}
+
+pub(super) fn has_public_owners(lib: &SessionLib) -> bool {
+    let attached = lib.durable_graph.as_ref().unwrap();
+    attached
+        .store
+        .has_public_owners(attached.domain_id)
+        .unwrap()
+}

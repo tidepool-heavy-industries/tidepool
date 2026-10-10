@@ -1469,8 +1469,10 @@ mod tests {
                 1,
             )
             .unwrap();
+            let recovery =
+                crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
             tidepool_testing::with_settlement(|settlement| {
-                lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
+                recovery.attach_root(&mut lib, settlement)
             })
             .unwrap();
             let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
@@ -1522,10 +1524,10 @@ mod tests {
             );
             assert_eq!(session.lib().scope_tip(public), Generation(0));
             if durable {
-                let path = root.path().join("declarations.json");
-                let previous = std::fs::read(&path).unwrap();
-                std::fs::remove_file(&path).unwrap();
-                std::fs::create_dir(&path).unwrap();
+                let before = recovery.state();
+                recovery
+                    .store
+                    .inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
                 let ExecutionPublication::Declarations(base) = restage(&mut session) else {
                     panic!("authored publication")
                 };
@@ -1534,12 +1536,11 @@ mod tests {
                     session
                         .publish_staged_public_manifest(accepted(base).stage().unwrap(), &decision)
                         .unwrap(),
-                    PublicManifestCommit::BeforeRename { .. }
+                    PublicManifestCommit::Refused { .. }
                 ));
                 assert_eq!(decision.phase(), PublicationPhase::Terminated);
                 assert_eq!(session.lib().scope_tip(public), Generation(0));
-                std::fs::remove_dir(&path).unwrap();
-                std::fs::write(&path, previous).unwrap();
+                assert_eq!(recovery.state(), before);
             }
             let ExecutionPublication::Declarations(base) = restage(&mut session) else {
                 panic!("authored publication")
@@ -1562,16 +1563,12 @@ mod tests {
                 publication.receipt,
                 PublicationEvidence::ReusedProjection { .. }
             ));
-            if durable {
-                session.lib_mut().fail_recovery_durability_once = true;
-            }
             let commit = session
                 .publish_staged_public_manifest(publication.stage().unwrap(), &decision)
                 .unwrap();
             assert!(matches!(
                 commit,
-                PublicManifestCommit::Ephemeral
-                    | PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+                PublicManifestCommit::Ephemeral | PublicManifestCommit::Durable
             ));
             assert_eq!(decision.phase(), PublicationPhase::Published);
             assert_eq!(
@@ -1596,50 +1593,22 @@ mod tests {
                 format!("import {}", projection.module_name())
             );
             if durable {
-                session.lib_mut().confirm_recovery_durability().unwrap();
-                let graph = recovery::read_v2(&root.path().join("declarations.json"), root.path())
+                let retained = recovery
+                    .store
+                    .read_public_owner(
+                        crate::session::recovery_store::RecoveryDomainId::Root,
+                        &owner,
+                    )
                     .unwrap()
-                    .unwrap()
-                    .graph;
-                let summary = graph.node(intent.reserved_generation()).unwrap();
+                    .unwrap();
+                assert_eq!(
+                    retained.epoch,
+                    session.public_visibility_snapshot_in(public).unwrap().epoch
+                );
+                let graph = crate::session::recovery_test_fixture::graph(session.lib());
+                let summary = graph.node(intent.reserved_generation()).unwrap().unwrap();
                 assert_eq!(summary.kind, recovery::RecoveryNodeKind::Join);
                 assert_eq!(summary.parent, None);
-                assert_eq!(summary.lexical_roots[0].module, projection.module_name());
-                assert_eq!(
-                    summary.exports,
-                    projection
-                        .receipt()
-                        .exports()
-                        .iter()
-                        .map(super::super::certified_recovery_export)
-                        .collect::<Vec<_>>()
-                );
-                let mut full_work =
-                    tidepool_toolchain::recovery_artifacts::RecoveryArtifactWork::default();
-                let (losses, observations) = graph
-                    .capture_artifact_observations(root.path(), &mut full_work)
-                    .unwrap();
-                assert!(losses.is_empty());
-                assert!(full_work.decoded_bytes > 0);
-                let mut observed_work =
-                    tidepool_toolchain::recovery_artifacts::RecoveryArtifactWork::default();
-                observations
-                    .observe(root.path(), &mut observed_work)
-                    .unwrap();
-                assert!(observed_work.hash_bytes > 0);
-                assert_eq!(observed_work.decoded_bytes, 0);
-                let recovery::RecoveryArtifactClosure::Home(component) = graph
-                    .artifacts()
-                    .find(|artifact| matches!(artifact, recovery::RecoveryArtifactClosure::Home(_)))
-                    .unwrap()
-                else {
-                    unreachable!()
-                };
-                let component = &component.interface_path;
-                std::fs::write(root.path().join(component), b"corrupt").unwrap();
-                assert!(observations
-                    .observe(root.path(), &mut Default::default())
-                    .is_err());
             }
         }
     }
@@ -1647,15 +1616,8 @@ mod tests {
     #[test]
     fn paired_reused_projection_restores_detached_summary_under_original_interface() {
         tidepool_testing::eval_harness::require_extract();
-        struct RunOwner(PathBuf);
-        impl super::super::RecoveryRunAuthority for RunOwner {
-            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
-                Ok(root == self.0)
-            }
-        }
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("declarations.json");
-        let authority = Arc::new(RunOwner(root.path().canonicalize().unwrap()));
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
         let open = |id| {
             SessionLib::open(
                 SessionId(id),
@@ -1666,10 +1628,8 @@ mod tests {
             .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()])
         };
         let mut lib = open(9833);
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_owned_recovery_graph_v3(&path, authority.clone(), settlement)
-        })
-        .unwrap();
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_isolated_scope();
         let owner = RecoveryPublicOwner::new(
@@ -1716,26 +1676,14 @@ mod tests {
         session
             .validate_durable_public_admission(&owner, public)
             .unwrap();
-        let retained = session
-            .lib()
-            .durable_graph
-            .as_ref()
-            .unwrap()
-            .retained
-            .lock()
-            .clone()
-            .unwrap();
-        assert!(retained
-            .observe(
-                &session.lib().durable_graph.as_ref().unwrap().graph,
-                &path,
-                root.path()
-            )
-            .unwrap());
+        let retained = recovery.state();
         drop(session);
+        let reopened_recovery =
+            crate::session::recovery_test_fixture::RecoveryFixture::reopen(recovery.owner.clone());
+        assert_eq!(reopened_recovery.state(), retained);
         let mut lib = open(9834);
         tidepool_testing::with_settlement(|settlement| {
-            lib.attach_owned_recovery_graph_v3(&path, authority, settlement)
+            reopened_recovery.attach_root(&mut lib, settlement)
         })
         .unwrap();
         let mut reopened = PersistentSession::new(Some(lib), 1024 * 1024);
@@ -1797,7 +1745,6 @@ mod tests {
     fn paired_rich_projection_reuses_exact_members_and_instance_graph() {
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("declarations.json");
         let mut lib = SessionLib::open(
             SessionId(9835),
             root.path(),
@@ -1805,10 +1752,9 @@ mod tests {
         )
         .unwrap()
         .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&path, settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -1899,14 +1845,18 @@ mod tests {
             session.lib().import_line_in(public).unwrap(),
             format!("import {}", projection.module_name())
         );
-        let graph = recovery::read_v2(&path, root.path())
-            .unwrap()
-            .unwrap()
-            .graph;
-        let summary = graph.node(intent.reserved_generation()).unwrap();
+        let graph = crate::session::recovery_test_fixture::graph(session.lib());
+        let summary = graph.node(intent.reserved_generation()).unwrap().unwrap();
         assert_eq!(summary.instances.classes.len(), 1);
         assert_eq!(summary.instances.selected_family_axioms.len(), 1);
-        assert_eq!(summary.lexical_roots[0].module, projection.module_name());
+        assert_eq!(
+            session
+                .lib()
+                .current_declaration_projection_in(public)
+                .unwrap()
+                .module_name(),
+            projection.module_name()
+        );
         assert_eq!(summary.parent, None);
     }
 
@@ -1918,7 +1868,8 @@ mod tests {
             let root = tempfile::tempdir().unwrap();
             let mut lib = SessionLib::open(SessionId(9832), root.path(), ModuleEnv::standalone_default()).unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-            tidepool_testing::with_settlement(|settlement| lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)).unwrap();
+            let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+            tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement)).unwrap();
             let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
             let public = session.mint_scope(ScopeId::ROOT).unwrap();
             let execution = session.begin_private_execution(public).unwrap();
@@ -2046,17 +1997,15 @@ mod tests {
     #[test]
     fn paired_ephemeral_ticket_keeps_attached_manifest_and_admission_mode() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("declarations.json");
         let mut lib = SessionLib::open(
             SessionId(4481),
             root.path().join("source"),
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&path, settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_isolated_scope();
         let admission = session.begin_ephemeral_private_execution(public).unwrap();
@@ -2067,7 +2016,7 @@ mod tests {
         let intent = session
             .freeze_execution_intent(&admission, vec![id], vec![])
             .unwrap();
-        let bytes = std::fs::read(&path).unwrap();
+        let before = recovery.state();
         let cancelled = PublicationDecision::new();
         cancelled.request_cancellation();
         let stage = ephemeral_binding_stage(&mut session, intent.clone());
@@ -2119,7 +2068,7 @@ mod tests {
                 .unwrap(),
             PublicManifestCommit::Ephemeral
         );
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(recovery.state(), before);
         let owner = RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root/ephemeral-mode").unwrap(),
             1,
@@ -2132,7 +2081,7 @@ mod tests {
             .restage_execution_publication(owner, intent)
             .is_err());
         assert!(session.begin_ephemeral_private_execution(public).is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(recovery.state(), before);
     }
 
     #[test]
@@ -2190,13 +2139,11 @@ mod tests {
     #[test]
     fn paired_foreign_staged_ticket_never_claims_publication() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("declarations.json");
         let mut lib =
             SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default()).unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&path, settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut first = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = first.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -2221,7 +2168,11 @@ mod tests {
         let mut second_lib =
             SessionLib::open(SessionId(986), root.path(), ModuleEnv::standalone_default()).unwrap();
         tidepool_testing::with_settlement(|settlement| {
-            second_lib.attach_recovery_graph_v2(&path, settlement)
+            recovery.attach(
+                &mut second_lib,
+                crate::session::recovery_store::RecoveryDomainId::Session(SessionId(986)),
+                settlement,
+            )
         })
         .unwrap();
         let mut second = PersistentSession::new(Some(second_lib), 1024 * 1024);
@@ -2260,15 +2211,13 @@ mod tests {
     fn paired_materialized_value_retracts_only_admitted_value_namespace() {
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("declarations.json");
         let mut lib =
             SessionLib::open(SessionId(987), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&path, settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -2363,15 +2312,13 @@ mod tests {
     fn paired_binding_only_intent_removes_later_value_head_and_preserves_type_namespace() {
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("declarations.json");
         let mut lib =
             SessionLib::open(SessionId(984), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&path, settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -2470,15 +2417,13 @@ mod tests {
     fn paired_authored_parent_inventory_survives_value_only_tip_and_instance_only_suffix() {
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("declarations.json");
         let mut lib =
             SessionLib::open(SessionId(985), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&path, settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -2572,15 +2517,13 @@ mod tests {
     fn paired_independent_authored_rebase_preserves_originals_and_current_winners() {
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("declarations.json");
         let mut lib =
             SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&path, settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private_a = session.mint_detached_scope(public).unwrap();
@@ -2778,11 +2721,8 @@ mod tests {
                 .value_types
                 .get("answer")
         );
-        let graph = recovery::read_v2(&path, root.path())
-            .unwrap()
-            .unwrap()
-            .graph;
-        let joined = graph.nodes().find(|node| node.id == generation).unwrap();
+        let graph = crate::session::recovery_test_fixture::graph(session.lib());
+        let joined = graph.node(generation).unwrap().unwrap();
         let mut expected_refs = vec![original_b, first_generation];
         expected_refs.sort();
         assert_eq!(joined.implementation_refs, expected_refs);
@@ -2841,18 +2781,16 @@ mod tests {
     }
 
     #[test]
-    fn paired_first_authored_publication_fences_outcomes_and_finishes_uncertain_swap() {
+    fn paired_first_authored_publication_preserves_atomic_visibility() {
         tidepool_testing::eval_harness::require_extract();
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("declarations.json");
         let mut lib =
             SessionLib::open(SessionId(993), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(vec![tidepool_testing::eval_harness::prelude_path()]);
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&path, settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private = session.mint_detached_scope(public).unwrap();
@@ -3047,12 +2985,11 @@ mod tests {
         let proof = retry.receipt.clone();
         let ticket = retry.stage().unwrap();
         let before_epoch = session.public_visibility_snapshot_in(public).unwrap().epoch;
-        session.lib_mut().fail_recovery_durability_once = true;
         assert!(matches!(
             session
                 .publish_staged_public_manifest(ticket, &decision)
                 .unwrap(),
-            PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+            PublicManifestCommit::Durable
         ));
         assert_eq!(decision.phase(), PublicationPhase::Published);
         let published = session.public_visibility_snapshot_in(public).unwrap();
@@ -3100,11 +3037,8 @@ mod tests {
                 .exact_declaration_context()
                 .unwrap(),
         ));
-        let graph = recovery::read_v2(&path, root.path())
-            .unwrap()
-            .unwrap()
-            .graph;
-        let joined = graph.nodes().find(|node| node.id == generation).unwrap();
+        let graph = crate::session::recovery_test_fixture::graph(session.lib());
+        let joined = graph.node(generation).unwrap().unwrap();
         assert_eq!(joined.kind, recovery::RecoveryNodeKind::Join);
         assert_eq!(joined.implementation_refs, vec![Generation(1)]);
         assert_eq!(
@@ -3139,10 +3073,10 @@ mod tests {
             .interface_bytes,
             proof.interface_bytes()
         );
-        let bytes = std::fs::read(&path).unwrap();
-        session.lib_mut().confirm_recovery_durability().unwrap();
-        session.lib_mut().confirm_recovery_durability().unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            recovery.state().revision,
+            session.lib().durable_graph.as_ref().unwrap().store_revision
+        );
         assert_eq!(
             session.public_visibility_snapshot_in(public).unwrap(),
             published
@@ -3167,13 +3101,11 @@ mod tests {
     #[test]
     fn paired_rich_fixed_suffix_rebases_nonempty_base_and_final_value_winners() {
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("declarations.json");
         let mut lib =
             SessionLib::open(SessionId(996), root.path(), ModuleEnv::standalone_default()).unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&path, settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let owner = RecoveryPublicOwner::new(
@@ -3350,18 +3282,19 @@ mod tests {
             .bindings
             .iter()
             .any(|(name, id)| name == "retractValue" && *id == value_id));
-        let graph = recovery::read_v2(&path, root.path())
-            .unwrap()
-            .unwrap()
-            .graph;
-        let node = graph.nodes().find(|node| node.id == reserved).unwrap();
+        let graph = crate::session::recovery_test_fixture::graph(session.lib());
+        let node = graph.node(reserved).unwrap().unwrap();
         assert!(node
             .implementation_refs
             .iter()
             .any(|reference| *reference > reserved));
         assert_eq!(node.instances.classes.len(), 2);
         assert_eq!(
-            node.lexical_roots[0].module,
+            session
+                .lib()
+                .current_declaration_projection_in(public)
+                .unwrap()
+                .module_name(),
             SessionModule::lib(reserved).module_name()
         );
         session.retire_scope(a.private_scope());

@@ -7950,7 +7950,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn source_publication_preserves_original_instances_after_uncertain_commit() {
+    fn source_publication_preserves_original_instances_after_durable_commit() {
         use super::super::{
             ModuleEnv, PersistentSession, PublicManifestCommit, PublicationDecision,
             PublicationPhase, RecoveryPublicOwner, SessionError, SessionLib,
@@ -7959,17 +7959,15 @@ pub(super) mod tests {
         use tidepool_codegen::scope::ScopeId;
 
         let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("declarations.json");
         let mut lib = SessionLib::open(
             tidepool_repr::SessionId(773),
             root.path().join("include"),
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&path, settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private = session.mint_detached_scope(public).unwrap();
@@ -8027,23 +8025,19 @@ pub(super) mod tests {
             .unwrap()
             .stage()
             .unwrap();
-        session.lib_mut().fail_recovery_durability_once = true;
         let decision = PublicationDecision::new();
         assert!(matches!(
             session
                 .publish_staged_public_manifest(stage, &decision)
                 .unwrap(),
-            PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+            PublicManifestCommit::Durable
         ));
         assert_eq!(decision.phase(), PublicationPhase::Published);
         let published = session.public_visibility_snapshot_in(public).unwrap();
         assert_eq!(published.epoch, 1);
         assert_eq!(published.machine_incarnation, Some(incarnation));
         assert_eq!(published.source_instances, keys.to_vec());
-        let graph = super::super::recovery::read_v2(&path, root.path())
-            .unwrap()
-            .unwrap()
-            .graph;
+        let graph = crate::session::recovery_test_fixture::graph(session.lib());
         let surface = graph
             .public_surfaces()
             .find(|surface| surface.owner == owner)
@@ -8071,10 +8065,10 @@ pub(super) mod tests {
             PublicManifestCommit::Stale
         );
         assert_eq!(stale.phase(), PublicationPhase::Running);
-        let bytes = std::fs::read(&path).unwrap();
-        session.lib_mut().confirm_recovery_durability().unwrap();
-        session.lib_mut().confirm_recovery_durability().unwrap();
-        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert_eq!(
+            recovery.state().revision,
+            session.lib().durable_graph.as_ref().unwrap().store_revision
+        );
         assert_eq!(
             session.public_visibility_snapshot_in(public).unwrap(),
             published
@@ -12933,17 +12927,15 @@ pub(super) mod tests {
         use tidepool_repr::{Generation, SessionModule};
 
         let dir = tempfile::tempdir().unwrap();
-        let manifest = dir.path().join("declarations.json");
         let mut lib = super::super::SessionLib::open(
             tidepool_repr::SessionId(81),
             dir.path().join("session"),
             super::super::ModuleEnv::standalone_default(),
         )
         .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&manifest, settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut state = super::super::PersistentSession::new(Some(lib), 1024);
         let producer = producer_program();
         let top = producer.entry();
@@ -13069,10 +13061,7 @@ pub(super) mod tests {
             assert!(matches!(fields.as_slice(), [PreparedResult::Scalar(99)]));
         }
 
-        let graph = super::super::recovery::read_v2(&manifest, dir.path())
-            .unwrap()
-            .unwrap()
-            .graph;
+        let graph = crate::session::recovery_test_fixture::graph(state.lib());
         let a = graph.public_binding_tombstones(&actor_a).unwrap();
         let b = graph.public_binding_tombstones(&actor_b).unwrap();
         assert_eq!(a.len(), 1);

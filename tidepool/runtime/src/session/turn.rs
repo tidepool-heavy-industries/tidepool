@@ -7358,10 +7358,9 @@ mod tests {
         let mut lib = SessionLib::open(SessionId(995), root.path(), env)
             .unwrap()
             .with_validation_include(effects.include_paths().to_vec());
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(&root.path().join("declarations.json"), settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let prior_declarations = include_str!("fixtures/checked-prior-declaration.hs")
@@ -7827,10 +7826,9 @@ mod tests {
             SessionLib::open(SessionId(994), root.path(), ModuleEnv::standalone_default())
                 .unwrap()
                 .with_validation_include(effects.include_paths().to_vec());
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_recovery_graph_v2(root.path().join("declarations.json"), settlement)
-        })
-        .unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
         let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
         let public = session.mint_scope(ScopeId::ROOT).unwrap();
         let private = session.mint_detached_scope(public).unwrap();
