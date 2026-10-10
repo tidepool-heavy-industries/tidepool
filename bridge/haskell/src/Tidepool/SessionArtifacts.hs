@@ -70,7 +70,7 @@ import Tidepool.ExactHydration
   ( ExactIfaceArtifact(..), ExactInterfaceOperations, runExactInterfaceOperation, hydrateExactScope
   , newOriginalInterfaceArtifactsWithReader )
 import Tidepool.ExactScope
-  ( CanonicalInterfaceAdmission, ExactScope , scopeProducerSha256, scopeInterfaces, readExactScope, revalidateExactScope, scopeCanonicalInterfaces, readScopedInterfaces, scopeInterfaceBytes, validateExactScopeEnvironment )
+  ( CanonicalInterfaceAdmission, ExactScope , scopeProducerSha256, scopeInterfaces, readExactScope, revalidateExactScope, scopeCanonicalInterfaces, readScopedInterfaces, scopeInterfaceToken, validateExactScopeEnvironment )
 import Tidepool.CheckedCell (CheckedSignature, resolveCheckedSignature
   , captureCheckedTypeWitness, sealCheckedTypeWitness, encodeCheckedTypeWitness
   , validateOriginalInputTypeWitness, validateCheckedTypeWitnessBytes)
@@ -307,7 +307,7 @@ emitHostBindingInterface operations producer generation name signature manifest 
         (hostBindingRepresentationForType authorities ty)
       pure (Just representation, HostBuilt)
     OriginalLiveInput offered -> withWitnessScratch $ \scratch -> do
-      originalInterfaces <- newOriginalInterfaceArtifactsWithReader (scopeInterfaceBytes scope) hydrated Map.empty artifacts [] [] scratch
+      originalInterfaces <- newOriginalInterfaceArtifactsWithReader (scopeInterfaceToken scope) hydrated Map.empty artifacts [] [] scratch
       witness <- captureCheckedTypeWitness hydrated ty
         >>= maybe (fail "original input type has no canonical witness") pure
       sealed <- sealCheckedTypeWitness originalInterfaces witness

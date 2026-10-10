@@ -63,6 +63,7 @@ pub fn issue_host_binding_interface(
     generation: u64,
     binding: &str,
     includes: &[PathBuf],
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<Arc<crate::checked_cell::ExactHostBindingInterface>, CompileError> {
     let _span = tracing::debug_span!("host_binding_interface", generation, binding).entered();
     let mut command = ExtractCmd::new().map_err(|error| CompileError::Io(error.into()))?;
@@ -95,9 +96,11 @@ pub fn issue_host_binding_interface(
         .declaration_join_out(&receipt);
     crate::paths::apply_admitted_build_products_dir(&mut command, &endpoint);
     HOST_BINDING_INTERFACE_REQUESTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let run = endpoint
-        .execute(&command)
-        .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
+    let run = endpoint.execute_with_input_files(
+        &command,
+        offer.request.input_transport_files(),
+        |close| settlement(close),
+    )?;
     crate::diag::decode_extract_result(
         run.output.status.success(),
         &run.output.stdout,
@@ -130,7 +133,10 @@ pub struct SourceCheckRequest<'a> {
 ///
 /// This operation emits no prepared or native artifacts and grants no authority
 /// to publish a mutable source graph. Diagnostics retain the selected inputs.
-pub fn check_source(request: &SourceCheckRequest<'_>) -> Result<(), CompileError> {
+pub fn check_source(
+    request: &SourceCheckRequest<'_>,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
+) -> Result<(), CompileError> {
     let directory = compiler_scratch_directory()?;
     let module = extract_module_name(request.source)
         .unwrap_or_else(|| request.fallback_module_name.to_owned());
@@ -153,13 +159,11 @@ pub fn check_source(request: &SourceCheckRequest<'_>) -> Result<(), CompileError
         command.module_candidates(manifest);
     }
     let diagnostics = CompilerDiagnosticCapture::start(directory.path(), &command);
-    let run = endpoint.execute(&command).map_err(|error| {
-        offer.retain_execution_failure(
-            directory.path(),
-            &command,
-            CompileError::Io(extract_spawn_error(error.source)),
-        )
-    })?;
+    let run = endpoint
+        .execute_with_input_files(&command, offer.input_transport_files(), |close| {
+            settlement(close)
+        })
+        .map_err(|error| offer.retain_execution_failure(directory.path(), &command, error))?;
     diagnostics.completed(
         directory.path(),
         &command,
@@ -850,6 +854,24 @@ fn checked_candidate_reservations(
 }
 
 impl ModuleCandidateOffer {
+    /// Physical transport leases carry no selection or compiler authority.
+    /// Execution transfers these exact files into the compiler close owner.
+    pub fn input_transport_files(&self) -> Vec<Arc<std::fs::File>> {
+        let mut files = self
+            .exact
+            .as_ref()
+            .map_or_else(Vec::new, |request| request.input_transport_files());
+        if let Some(selected) = &self.selected {
+            files.extend(
+                selected
+                    .input_transport
+                    .iter()
+                    .map(|slice| slice.compiler_file_lease()),
+            );
+        }
+        files
+    }
+
     pub fn select_admitted(
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
         include: &[PathBuf],
@@ -885,6 +907,7 @@ impl ModuleCandidateOffer {
         &self,
         endpoint: crate::toolchain::AdmittedCompilerEndpoint,
         command: &mut ExtractCmd,
+        settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
     ) -> Result<AdmittedTurnOutput, CompileError> {
         let request = tidepool_extract_cmd::ExtractRequest::decode(&command.request_bytes())
             .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
@@ -909,13 +932,11 @@ impl ModuleCandidateOffer {
         let directory = compiler_scratch_directory()?;
         command.relocate_turn_outputs(directory.path());
         let diagnostics = CompilerDiagnosticCapture::start(directory.path(), command);
-        let run = endpoint.execute(command).map_err(|error| {
-            self.retain_execution_failure(
-                directory.path(),
-                command,
-                CompileError::ExtractFailed(error.to_string()),
-            )
-        })?;
+        let run = endpoint
+            .execute_with_input_files(command, self.input_transport_files(), |close| {
+                settlement(close)
+            })
+            .map_err(|error| self.retain_execution_failure(directory.path(), command, error))?;
         diagnostics.completed(directory.path(), command, run.success(), &run.output.stderr);
         let (turn, native) = if run.success()
             && diag::decode_extract_result(true, &run.output.stdout, &run.output.stderr).is_ok()
@@ -3688,12 +3709,22 @@ pub struct CompileInvocation<'a> {
 /// through its own collector without this crate needing to know what a
 /// "node" or "round" is. A caller with no use for timing passes `|_, _, _|
 /// {}`.
+///
+/// `settlement` belongs to the calling operation and must retain uncertain
+/// close evidence through operation unwind. Each standalone attempt reports
+/// its independent close; scoped calls keep the existing transaction owner.
+/// The recipient is borrowed across known-unsubmitted retries.
 pub fn compile_invocation(
     inv: &CompileInvocation<'_>,
     mut on_stage: impl FnMut(&str, Duration, u64),
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(inv, &mut on_stage, CompilationPolicy::Runtime)
-        .map(|output| output.artifacts)
+    compile_invocation_inner(
+        inv,
+        &mut on_stage,
+        CompilationPolicy::Runtime { settlement },
+    )
+    .map(|output| output.artifacts)
 }
 
 /// Compile fresh source against immutable declaration owners through the same
@@ -3703,9 +3734,17 @@ pub fn compile_invocation_in_context(
     inv: &CompileInvocation<'_>,
     context: Arc<crate::declaration_join::ExactDeclarationContext>,
     mut on_stage: impl FnMut(&str, Duration, u64),
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CompiledArtifacts, CompileError> {
-    compile_invocation_inner(inv, &mut on_stage, CompilationPolicy::Exact { context })
-        .map(|output| output.artifacts)
+    compile_invocation_inner(
+        inv,
+        &mut on_stage,
+        CompilationPolicy::Exact {
+            context,
+            settlement,
+        },
+    )
+    .map(|output| output.artifacts)
 }
 
 /// Compile a declaration probe in full-home-product mode, which produces
@@ -3719,6 +3758,7 @@ pub(crate) fn compile_authored_products(
     session_root: &Path,
     context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
     authored: &crate::declaration_join::NativeAuthoredDeclarationAdmission,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CompiledArtifacts, CompileError> {
     let inv = CompileInvocation {
         source,
@@ -3733,6 +3773,7 @@ pub(crate) fn compile_authored_products(
             session_root,
             context,
             admission: authored,
+            settlement,
         },
     )
     .map(|output| output.artifacts)
@@ -3837,22 +3878,26 @@ fn prepare_deployment_module_action(
 }
 
 /// Authority selected by the compilation owner, independently of cache hints.
-#[derive(Clone)]
 enum CompilationPolicy<'a> {
-    Runtime,
+    Runtime {
+        settlement: &'a mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
+    },
     RetainedEntry {
         source_path: &'a Path,
         output: &'a Path,
         sources: &'a ProductionEntrySources,
         catalog: Option<Arc<crate::toolchain::DeploymentModulePackage>>,
+        settlement: &'a mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
     },
     Exact {
         context: Arc<crate::declaration_join::ExactDeclarationContext>,
+        settlement: &'a mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
     },
     Authored {
         session_root: &'a Path,
         context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
         admission: &'a crate::declaration_join::NativeAuthoredDeclarationAdmission,
+        settlement: &'a mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
     },
     BuildAction {
         source_path: &'a Path,
@@ -4111,7 +4156,7 @@ struct CompilationOutput {
 fn compile_invocation_inner(
     inv: &CompileInvocation<'_>,
     mut on_stage: &mut impl FnMut(&str, Duration, u64),
-    policy: CompilationPolicy<'_>,
+    mut policy: CompilationPolicy<'_>,
 ) -> Result<CompilationOutput, CompileError> {
     assert!(
         !inv.targets.is_empty(),
@@ -4120,7 +4165,7 @@ fn compile_invocation_inner(
     let multi = inv.targets.len() > 1;
 
     let (session_root, exact_context, deployment_export, authored) = match &policy {
-        CompilationPolicy::Runtime
+        CompilationPolicy::Runtime { .. }
         | CompilationPolicy::RetainedEntry { .. }
         | CompilationPolicy::BuildAction {
             export:
@@ -4129,17 +4174,13 @@ fn compile_invocation_inner(
                 | BuildActionExport::ProductionEntry { .. },
             ..
         } => (None, None, None, None),
-        CompilationPolicy::Exact { context } => (None, Some(context), None, None),
+        CompilationPolicy::Exact { context, .. } => (None, Some(Arc::clone(context)), None, None),
         CompilationPolicy::Authored {
             session_root,
             context,
             admission,
-        } => (
-            Some(*session_root),
-            context.as_ref(),
-            None,
-            Some(*admission),
-        ),
+            ..
+        } => (Some(*session_root), context.clone(), None, Some(*admission)),
         CompilationPolicy::BuildAction {
             export:
                 BuildActionExport::DeploymentPackage {
@@ -4160,7 +4201,7 @@ fn compile_invocation_inner(
         } => Some((*output_root, *source_selection)),
         _ => None,
     };
-    let allow_candidates = matches!(&policy, CompilationPolicy::Runtime);
+    let allow_candidates = matches!(&policy, CompilationPolicy::Runtime { .. });
     let mut output_owner = match &policy {
         CompilationPolicy::RetainedEntry { output, .. }
         | CompilationPolicy::BuildAction {
@@ -4225,7 +4266,7 @@ fn compile_invocation_inner(
     {
         cmd.certify_home_products();
     }
-    let exact_request = if let Some(context) = exact_context {
+    let exact_request = if let Some(ref context) = exact_context {
         let endpoint = cmd
             .bind()
             .map_err(|error| CompileError::Io(extract_spawn_error(error.source)))?;
@@ -4406,9 +4447,54 @@ fn compile_invocation_inner(
             crate::host_work::checkpoint()
                 .map_err(|error| CompileAttemptError::Diagnostic(error.into()))?;
             let previous_submission = output_owner.begin_execution();
-            let execution = endpoint.execute(&cmd).map_err(|error| {
-                output_owner.endpoint_failure(&error, previous_submission);
-                CompileAttemptError::Endpoint(error)
+            let execution = match &mut policy {
+                CompilationPolicy::Runtime {
+                    settlement: recipient,
+                }
+                | CompilationPolicy::Exact {
+                    settlement: recipient,
+                    ..
+                }
+                | CompilationPolicy::Authored {
+                    settlement: recipient,
+                    ..
+                }
+                | CompilationPolicy::RetainedEntry {
+                    settlement: recipient,
+                    ..
+                } => {
+                    let mut files = exact_request
+                        .as_ref()
+                        .map_or_else(Vec::new, |request| request.input_transport_files());
+                    if let Some(selected) = &candidate_set {
+                        files.extend(
+                            selected
+                                .input_transport
+                                .iter()
+                                .map(|slice| slice.compiler_file_lease()),
+                        );
+                    }
+                    CompileError::compiler_invocation_result(endpoint.execute_with_input_files(
+                        &cmd,
+                        files,
+                        |close| recipient(close),
+                    ))
+                }
+                CompilationPolicy::BuildAction { .. } => endpoint
+                    .execute(&cmd)
+                    .map_err(CompileError::CompilerEndpoint),
+            }
+            .map_err(|error| match error {
+                CompileError::CompilerEndpoint(error) => {
+                    output_owner.endpoint_failure(&error, previous_submission);
+                    CompileAttemptError::Endpoint(error)
+                }
+                error => {
+                    if let CompilationOutputOwner::Original(preparation) = &mut output_owner {
+                        preparation.mark_uncertain_submission();
+                    }
+                    CompileAttemptError::Diagnostic(error)
+                }
             });
             execution.map(|run| {
                 diagnostics.completed(output_owner.path(), &cmd, run.success(), &run.output.stderr);
@@ -5318,7 +5404,7 @@ enum CompileAttemptError {
 impl CompileAttemptError {
     fn into_compile_error(self) -> CompileError {
         match self {
-            Self::Endpoint(error) => CompileError::Io(extract_spawn_error(error.source)),
+            Self::Endpoint(error) => CompileError::CompilerEndpoint(error),
             Self::Deployment(error) => CompileError::ExtractFailed(error.to_string()),
             Self::ModulePackage(error) => CompileError::ModulePackage(error),
             Self::Diagnostic(error) => error,
@@ -5352,6 +5438,7 @@ pub fn compile_targets(
     targets: &[&str],
     include: &[PathBuf],
     on_stage: impl FnMut(&str, Duration, u64),
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CompiledArtifacts, CompileError> {
     assert!(
         !targets.is_empty(),
@@ -5363,7 +5450,7 @@ pub fn compile_targets(
         include,
         fallback_module_name: "Expr",
     };
-    compile_invocation(&inv, on_stage)
+    compile_invocation(&inv, on_stage, settlement)
 }
 
 // ---------------------------------------------------------------------------
@@ -6254,7 +6341,7 @@ mod typed_site_tests {
             std::env::remove_var(crate::toolchain::ENV_COMPILER_DEPLOYMENT);
             std::env::remove_var(tidepool_extract_cmd::DAEMON_SOCKET_ENV);
         }
-        let error = compile_targets(
+        let error = crate::artifacts::test_support::compile_targets(
             "result = 1",
             &["result"],
             &[directory.path().into()],
@@ -6887,7 +6974,13 @@ mod module_product_tests {
         let root =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell/test-prepared-stg");
         let source = std::fs::read_to_string(root.join("ModuleProductB.hs")).unwrap();
-        let compiled = compile_targets(&source, &["consume"], &[root], |_, _, _| {}).unwrap();
+        let compiled = crate::artifacts::test_support::compile_targets(
+            &source,
+            &["consume"],
+            &[root],
+            |_, _, _| {},
+        )
+        .unwrap();
         let modules: std::collections::BTreeSet<_> = compiled
             .module_products
             .iter()
@@ -6946,8 +7039,13 @@ mod module_product_tests {
             assert_eq!(std::fs::read_dir(directory).unwrap().count(), 0);
         }
         let source = include_str!("../tests/fixtures/deployment-module-package/Consumer.hs");
-        let original = compile_targets(source, &["result"], &roots, |_, _, _| {})
-            .expect("fresh-process packaged cohort reuse");
+        let original = crate::artifacts::test_support::compile_targets(
+            source,
+            &["result"],
+            &roots,
+            |_, _, _| {},
+        )
+        .expect("fresh-process packaged cohort reuse");
         let cached: std::collections::BTreeSet<_> = original
             .certified_groups
             .iter()
@@ -6979,7 +7077,13 @@ mod module_product_tests {
         std::fs::write(shadow.path().join("Tidepool/FilePath.hs"), changed).unwrap();
         let mut shadow_roots = vec![shadow.path().to_owned()];
         shadow_roots.extend(roots);
-        let shadowed = compile_targets(source, &["result"], &shadow_roots, |_, _, _| {}).unwrap();
+        let shadowed = crate::artifacts::test_support::compile_targets(
+            source,
+            &["result"],
+            &shadow_roots,
+            |_, _, _| {},
+        )
+        .unwrap();
         for module in ["Tidepool.FilePath", "Tidepool.Prelude"] {
             assert!(
                 shadowed
@@ -7097,7 +7201,13 @@ mod module_product_tests {
         let refusal = with_compiler_transaction_for_workload(
             CompileWorkload::Preparation,
             |_| {},
-            || prepare_frozen_production_entry(&sources, root.path(), &output),
+            || {
+                crate::artifacts::test_support::prepare_frozen_production_entry(
+                    &sources,
+                    root.path(),
+                    &output,
+                )
+            },
         );
         assert!(matches!(refusal.action,
             Err(CompileError::Io(ref error)) if error.kind() == std::io::ErrorKind::WouldBlock));
@@ -7108,7 +7218,13 @@ mod module_product_tests {
         let foreground = with_compiler_transaction_for_workload(
             CompileWorkload::Foreground,
             |_| {},
-            || prepare_frozen_production_entry(&sources, root.path(), &output),
+            || {
+                crate::artifacts::test_support::prepare_frozen_production_entry(
+                    &sources,
+                    root.path(),
+                    &output,
+                )
+            },
         );
         foreground.action.unwrap();
         assert_eq!(foreground.close, CompilerTransactionClose::Clean);
@@ -7131,7 +7247,11 @@ mod module_product_tests {
         let absent_target = root.path().join("absent-target");
         std::os::unix::fs::symlink(&absent_target, &output).unwrap();
         assert!(matches!(
-            prepare_frozen_production_entry(&sources, root.path(), &output),
+            crate::artifacts::test_support::prepare_frozen_production_entry(
+                &sources,
+                root.path(),
+                &output
+            ),
             Err(CompileError::ExtractFailed(_))
         ));
         assert_eq!(std::fs::read_link(&output).unwrap(), absent_target);
@@ -7148,7 +7268,13 @@ mod module_product_tests {
         let output = root.path().join("entry");
         let error = production_entry::with_failure(
             production_entry::EntryCheckpoint::ReservationSync,
-            || prepare_frozen_production_entry(&sources, root.path(), &output),
+            || {
+                crate::artifacts::test_support::prepare_frozen_production_entry(
+                    &sources,
+                    root.path(),
+                    &output,
+                )
+            },
         )
         .unwrap_err();
         assert!(matches!(error, CompileError::Io(_)));
@@ -7157,7 +7283,7 @@ mod module_product_tests {
         assert!(unfinished.is_dir());
         assert!(!unfinished.join("raw").exists());
         assert!(matches!(
-            prepare_frozen_production_entry(&sources, root.path(), &output),
+            crate::artifacts::test_support::prepare_frozen_production_entry(&sources, root.path(), &output),
             Err(CompileError::EntryPreparationUnfinished { path }) if path == unfinished
         ));
         assert_eq!(std::fs::read_dir(unfinished).unwrap().count(), 0);
@@ -7212,7 +7338,11 @@ mod module_product_tests {
             let output = root.path().join(format!("entry-{index}"));
             let unfinished = root.path().join(format!("entry-{index}.preparing"));
             let error = production_entry::with_failure(stage, || {
-                prepare_frozen_production_entry(&sources, root.path(), &output)
+                crate::artifacts::test_support::prepare_frozen_production_entry(
+                    &sources,
+                    root.path(),
+                    &output,
+                )
             })
             .unwrap_err();
             let executions = std::fs::read_to_string(&counter).unwrap();
@@ -7247,7 +7377,7 @@ mod module_product_tests {
                 assert!(matches!(error, CompileError::Io(_)));
                 assert!(!output.exists());
                 assert!(matches!(
-                    prepare_frozen_production_entry(&sources, root.path(), &output),
+                    crate::artifacts::test_support::prepare_frozen_production_entry(&sources, root.path(), &output),
                     Err(CompileError::EntryPreparationUnfinished { ref path }) if path == &unfinished
                 ));
             }
@@ -7296,7 +7426,13 @@ mod module_product_tests {
                     .unwrap();
                 }
             },
-            || prepare_frozen_production_entry(&sources, root.path(), &output),
+            || {
+                crate::artifacts::test_support::prepare_frozen_production_entry(
+                    &sources,
+                    root.path(),
+                    &output,
+                )
+            },
         )
         .unwrap_err();
         assert!(
@@ -7364,7 +7500,13 @@ mod module_product_tests {
                     with_compiler_transaction_cancellable(
                         cancellation,
                         |_| {},
-                        || prepare_frozen_production_entry(&sources, root.path(), &output),
+                        || {
+                            crate::artifacts::test_support::prepare_frozen_production_entry(
+                                &sources,
+                                root.path(),
+                                &output,
+                            )
+                        },
                     )
                 },
             );
@@ -7388,7 +7530,11 @@ mod module_product_tests {
                 assert!(!output.exists());
                 let unfinished = root.path().join(format!("entry-{index}.preparing"));
                 assert!(matches!(
-                    prepare_frozen_production_entry(&sources, root.path(), &output),
+                    crate::artifacts::test_support::prepare_frozen_production_entry(
+                        &sources,
+                        root.path(),
+                        &output
+                    ),
                     Err(CompileError::EntryPreparationUnfinished { .. })
                 ));
                 unfinished.join("raw")
@@ -7443,7 +7589,12 @@ mod module_product_tests {
         let sources = FrozenEntrySources::capture(&[authored.clone()], &source).unwrap();
         let output = root.path().join("entry");
         let before = production_entry::entry_load_count();
-        let first = prepare_frozen_production_entry(&sources, root.path(), &output).unwrap();
+        let first = crate::artifacts::test_support::prepare_frozen_production_entry(
+            &sources,
+            root.path(),
+            &output,
+        )
+        .unwrap();
         assert_eq!(
             production_entry::entry_load_count() - before,
             1,
@@ -7601,7 +7752,7 @@ mod module_product_tests {
             unit: "main".into(),
             module: "QuotedContextProvider".into(),
         };
-        let context_products = compile_invocation(
+        let context_products = crate::artifacts::test_support::compile_invocation(
             &CompileInvocation {
                 source:
                     "module QuotedContextProvider where\ncontextValue :: Int\ncontextValue = 0\n",
@@ -7662,9 +7813,13 @@ mod module_product_tests {
                 }
             };
             let compiled = if exact {
-                compile_invocation_in_context(&invocation, Arc::new(context.clone()), &mut on_stage)
+                crate::artifacts::test_support::compile_invocation_in_context(
+                    &invocation,
+                    Arc::new(context.clone()),
+                    &mut on_stage,
+                )
             } else {
-                compile_invocation(&invocation, &mut on_stage)
+                crate::artifacts::test_support::compile_invocation(&invocation, &mut on_stage)
             }
             .expect("completed quoted source must retain genuine canonical/native originals");
             assert_eq!(completed_requests, 1, "each explicit request compiles once");
@@ -7855,8 +8010,12 @@ mod module_product_tests {
         std::fs::remove_file(&provider).unwrap();
         std::fs::write(&input, "99").unwrap();
         let (context, original_owner) = retained.unwrap();
-        let consumed = compile_invocation_in_context(&invocation, context, |_, _, _| {})
-            .expect("source-less original use must not replay its quotation");
+        let consumed = crate::artifacts::test_support::compile_invocation_in_context(
+            &invocation,
+            context,
+            |_, _, _| {},
+        )
+        .expect("source-less original use must not replay its quotation");
         assert_eq!(std::fs::read_to_string(&counter).unwrap(), observed);
         assert_quoted_value(&consumed, 37);
         assert!(consumed.targets["result"]
@@ -7908,7 +8067,7 @@ mod module_product_tests {
             std::fs::write(&owner_source, owner_bytes).unwrap();
             std::fs::write(&support_source, support_bytes).unwrap();
             std::fs::write(&unrelated_source, unrelated_bytes).unwrap();
-            let original = compile_invocation(
+            let original = crate::artifacts::test_support::compile_invocation(
                 &CompileInvocation {
                     source: probe_bytes,
                     targets: &["result"],
@@ -7998,7 +8157,7 @@ mod module_product_tests {
             (context, extended)
         };
         let consume = |context: ExactDeclarationContext| {
-            compile_invocation_in_context(
+            crate::artifacts::test_support::compile_invocation_in_context(
                 &CompileInvocation {
                     source: consumer_bytes,
                     targets: &["result"],
@@ -8088,8 +8247,13 @@ mod module_product_tests {
         )
         .unwrap();
         let first = std::fs::read_to_string(fixtures.join("ModuleProductB.hs")).unwrap();
-        let first_artifacts =
-            compile_targets(&first, &["consume"], &[root.clone()], |_, _, _| {}).unwrap();
+        let first_artifacts = crate::artifacts::test_support::compile_targets(
+            &first,
+            &["consume"],
+            &[root.clone()],
+            |_, _, _| {},
+        )
+        .unwrap();
         assert!(!first_artifacts.certified_groups.is_empty());
         assert_eq!(
             first_artifacts.targets["consume"].pending_imports.len(),
@@ -8101,8 +8265,13 @@ mod module_product_tests {
         );
         let changed = first.replace("produce + 1", "produce + 2");
         assert_ne!(changed, first);
-        let second =
-            compile_targets(&changed, &["consume"], &[root.clone()], |_, _, _| {}).unwrap();
+        let second = crate::artifacts::test_support::compile_targets(
+            &changed,
+            &["consume"],
+            &[root.clone()],
+            |_, _, _| {},
+        )
+        .unwrap();
         assert!(second
             .module_products
             .iter()
@@ -8127,7 +8296,13 @@ mod module_product_tests {
             .write_all(b"\n-- changed original dependency\n")
             .unwrap();
         let changed_again = first.replace("produce + 1", "produce + 3");
-        let third = compile_targets(&changed_again, &["consume"], &[root], |_, _, _| {}).unwrap();
+        let third = crate::artifacts::test_support::compile_targets(
+            &changed_again,
+            &["consume"],
+            &[root],
+            |_, _, _| {},
+        )
+        .unwrap();
         assert!(third
             .certified_groups
             .iter()
@@ -8408,7 +8583,7 @@ mod completed_response_tests {
             let include = [directory.path().to_owned()];
             let dependency = directory.path().join("ResponseDependency.hs");
             std::fs::write(&dependency, DEPENDENCY).unwrap();
-            let compiled = compile_invocation(
+            let compiled = crate::artifacts::test_support::compile_invocation(
                 &CompileInvocation {
                     source: CONSUMER,
                     targets: &["result"],
@@ -8446,14 +8621,81 @@ mod completed_response_tests {
     }
 
     #[test]
+    fn owned_candidate_request_uses_captured_companions_after_alias_drift() {
+        let fixture = CandidateFixture::new();
+        let root = fixture._directory.path();
+        let command = ExtractCmd::new().unwrap();
+        let endpoint =
+            crate::toolchain::AdmittedCompilerEndpoint::from_bound(command.bind().unwrap())
+                .unwrap();
+        let output = root.join("captured-candidate-output");
+        std::fs::create_dir(&output).unwrap();
+        let offer =
+            ModuleCandidateOffer::select_admitted(&endpoint, &fixture.include, &output).unwrap();
+        let selected = offer.selected.as_ref().expect("production candidate owner");
+        let envelope: Value =
+            ciborium::de::from_reader(std::fs::read(&selected.manifest_path).unwrap().as_slice())
+                .unwrap();
+        let acquisition = envelope.as_array().unwrap()[7].as_array().unwrap();
+        assert_eq!(acquisition[0].as_text(), Some("continue-originals"));
+        let mut aliases = BTreeSet::new();
+        for image in acquisition[2].as_array().unwrap() {
+            for part in image.as_array().unwrap()[4].as_array().unwrap() {
+                let path = PathBuf::from(part.as_array().unwrap()[1].as_text().unwrap());
+                if aliases.insert(path.clone()) {
+                    if aliases.len() % 2 == 0 {
+                        std::fs::remove_file(path).unwrap();
+                    } else {
+                        std::fs::write(path, b"changed after candidate capture").unwrap();
+                    }
+                }
+            }
+        }
+        assert!(aliases.len() >= 5);
+        let input = root.join("ResponseConsumer.hs");
+        std::fs::write(&input, CONSUMER).unwrap();
+        let mut command = ExtractCmd::new().unwrap();
+        command
+            .input(input)
+            .target("result")
+            .includes(&fixture.include)
+            .output_dir(&output);
+        offer.apply_to(&mut command).unwrap();
+        let run = crate::artifacts::test_support::with_settlement(|recipient| {
+            endpoint.execute_with_input_files(&command, offer.input_transport_files(), |close| {
+                recipient(close)
+            })
+        })
+        .unwrap();
+        diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
+            .expect("cold worker consumes captured candidate companions");
+        let receipt = certified_products::decode_receipt_in(
+            &std::fs::read(output.join("certified-products.cbor")).unwrap(),
+            Some(&output),
+        )
+        .unwrap();
+        assert!(
+            receipt
+                .modules
+                .iter()
+                .any(|module| module.module == "ResponseDependency"
+                    && module.origin == certified_products::ProductOrigin::Cached),
+            "alias drift cannot silently fall back to source recompilation"
+        );
+    }
+
+    #[test]
     fn offered_candidates_do_not_replay_source_failure() {
         let fixture = CandidateFixture::new();
         let mut completed_requests = 0;
-        let result = compile_invocation(&fixture.invocation(REJECTED), |stage, _, _| {
-            if stage == timing::STAGE_EXTRACT_SPAWN {
-                completed_requests += 1;
-            }
-        });
+        let result = crate::artifacts::test_support::compile_invocation(
+            &fixture.invocation(REJECTED),
+            |stage, _, _| {
+                if stage == timing::STAGE_EXTRACT_SPAWN {
+                    completed_requests += 1;
+                }
+            },
+        );
         assert_eq!(completed_requests, 1, "completed source failures are final");
         let Err(CompileError::Diagnostics(diagnostics)) = result else {
             panic!("expected the original source failure");
@@ -8465,8 +8707,11 @@ mod completed_response_tests {
                     .as_ref()
                     .is_some_and(|span| span.file.ends_with("ResponseConsumer.hs"))
         }));
-        compile_invocation(&fixture.invocation(CONSUMER), |_, _, _| {})
-            .expect("an explicit repaired request can still compile");
+        crate::artifacts::test_support::compile_invocation(
+            &fixture.invocation(CONSUMER),
+            |_, _, _| {},
+        )
+        .expect("an explicit repaired request can still compile");
     }
 
     #[test]
@@ -8474,17 +8719,20 @@ mod completed_response_tests {
         let fixture = CandidateFixture::new();
         let mut completed_requests = 0;
         let mut output_read = false;
-        let result = compile_invocation(&fixture.invocation(CONSUMER), |stage, _, _| {
-            if stage == timing::STAGE_EXTRACT_SPAWN {
-                completed_requests += 1;
-            }
-            if stage == timing::STAGE_CBOR_READ && !output_read {
-                output_read = true;
-                // The worker has completed, but Rust has not admitted its
-                // dependency witnesses or product receipt yet.
-                std::fs::write(&fixture.dependency, DEPENDENCY.replace("41", "42")).unwrap();
-            }
-        });
+        let result = crate::artifacts::test_support::compile_invocation(
+            &fixture.invocation(CONSUMER),
+            |stage, _, _| {
+                if stage == timing::STAGE_EXTRACT_SPAWN {
+                    completed_requests += 1;
+                }
+                if stage == timing::STAGE_CBOR_READ && !output_read {
+                    output_read = true;
+                    // The worker has completed, but Rust has not admitted its
+                    // dependency witnesses or product receipt yet.
+                    std::fs::write(&fixture.dependency, DEPENDENCY.replace("41", "42")).unwrap();
+                }
+            },
+        );
         assert!(
             output_read,
             "the failure must follow completed output reading"
@@ -8493,12 +8741,44 @@ mod completed_response_tests {
             completed_requests, 1,
             "product refusal cannot replay source"
         );
-        let Err(CompileError::ExtractFailed(message)) = result else {
-            panic!("expected the original product admission failure");
+        let Err(CompileError::CompilerEvidence(evidence)) = result else {
+            panic!(
+                "expected typed current-source refusal, got {}",
+                match result {
+                    Ok(_) => "accepted changed current source".to_owned(),
+                    Err(error) => format!("{error:?}"),
+                }
+            );
         };
-        assert!(message.starts_with("module or target owner lacks valid final dependency evidence"));
-        compile_invocation(&fixture.invocation(CONSUMER), |_, _, _| {})
-            .expect("an explicit request can compile the changed dependency");
+        let certified_products::CertificationError::CompletedSourceEvidence { failure, .. } =
+            *evidence
+        else {
+            panic!("expected completed source evidence refusal");
+        };
+        let cache::DependencyEvidenceFailure::Source {
+            reason: cache::SourceWitnessFailure::Changed { expected, actual },
+            ..
+        } = *failure
+        else {
+            panic!("expected changed authored source evidence");
+        };
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            expected,
+            format!("{:x}", Sha256::digest(DEPENDENCY.as_bytes()))
+        );
+        assert_eq!(
+            actual,
+            format!(
+                "{:x}",
+                Sha256::digest(DEPENDENCY.replace("41", "42").as_bytes())
+            )
+        );
+        crate::artifacts::test_support::compile_invocation(
+            &fixture.invocation(CONSUMER),
+            |_, _, _| {},
+        )
+        .expect("an explicit request can compile the changed dependency");
     }
 }
 
@@ -8530,7 +8810,7 @@ mod dependency_cache_tests {
         };
         let compile = || {
             let mut prepared = false;
-            compile_invocation(&invocation, |stage, _, _| {
+            crate::artifacts::test_support::compile_invocation(&invocation, |stage, _, _| {
                 prepared |= stage == timing::STAGE_EXTRACT_SPAWN;
             })
             .expect("fixture compiler request");
@@ -8677,7 +8957,7 @@ mod source_proof_pairing_tests {
             let support_path = root.join("PrefixSelectedSupport.hs");
             std::fs::write(&support_path, support).unwrap();
             let includes = vec![root.to_path_buf()];
-            let certificate = crate::declaration_join::certify_authored_declaration(
+            let certificate = crate::artifacts::test_support::certify_authored_declaration(
                 module,
                 &original_path,
                 original,
@@ -8735,5 +9015,110 @@ mod source_proof_pairing_tests {
             );
             std::panic::resume_unwind(panic);
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use tidepool_extract_cmd::CompilerTransactionClose;
+
+    // The operation owns this observation outside the induced unwind boundary.
+    // These tests expect settled compilers; uncertainty is inspected as a failure.
+    pub(crate) fn with_settlement<T>(
+        action: impl FnOnce(&mut dyn FnMut(CompilerTransactionClose)) -> T,
+    ) -> T {
+        let observation = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recipient = Arc::clone(&observation);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            action(&mut |close| recipient.lock().unwrap().push(close))
+        }));
+        let closes = observation.lock().unwrap();
+        assert!(
+            closes.iter().all(|close| matches!(
+                close,
+                CompilerTransactionClose::Clean | CompilerTransactionClose::NotStarted
+            )),
+            "compiler close is unconfirmed: {closes:?}"
+        );
+        drop(closes);
+        match result {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    pub(crate) fn compile_invocation(
+        inv: &CompileInvocation<'_>,
+        stage: impl FnMut(&str, Duration, u64),
+    ) -> Result<CompiledArtifacts, CompileError> {
+        with_settlement(|recipient| super::compile_invocation(inv, stage, recipient))
+    }
+    pub(crate) fn compile_invocation_in_context(
+        inv: &CompileInvocation<'_>,
+        context: Arc<crate::declaration_join::ExactDeclarationContext>,
+        stage: impl FnMut(&str, Duration, u64),
+    ) -> Result<CompiledArtifacts, CompileError> {
+        with_settlement(|recipient| {
+            super::compile_invocation_in_context(inv, context, stage, recipient)
+        })
+    }
+    pub(crate) fn compile_targets(
+        source: &str,
+        targets: &[&str],
+        include: &[PathBuf],
+        stage: impl FnMut(&str, Duration, u64),
+    ) -> Result<CompiledArtifacts, CompileError> {
+        with_settlement(|recipient| {
+            super::compile_targets(source, targets, include, stage, recipient)
+        })
+    }
+    pub(crate) fn certify_authored_declaration(
+        module: tidepool_repr::SessionModule,
+        path: &Path,
+        source: &str,
+        includes: &[PathBuf],
+        root: &Path,
+    ) -> Result<crate::declaration_join::CertifiedAuthoredDeclaration, CompileError> {
+        with_settlement(|recipient| {
+            crate::declaration_join::certify_authored_declaration(
+                module, path, source, includes, root, recipient,
+            )
+        })
+    }
+    pub(crate) fn certify_authored_declaration_in_context(
+        module: tidepool_repr::SessionModule,
+        path: &Path,
+        source: &str,
+        includes: &[PathBuf],
+        root: &Path,
+        context: Arc<crate::declaration_join::ExactDeclarationContext>,
+    ) -> Result<crate::declaration_join::CertifiedAuthoredDeclaration, CompileError> {
+        with_settlement(|recipient| {
+            crate::declaration_join::certify_authored_declaration_in_context(
+                module, path, source, includes, root, context, recipient,
+            )
+        })
+    }
+    pub(crate) fn prepare_frozen_production_entry_with_catalog(
+        sources: &FrozenEntrySources,
+        scratch: &Path,
+        output: &Path,
+        catalog: &crate::toolchain::CatalogSelection,
+    ) -> Result<ProductionEntryOutput, CompileError> {
+        with_settlement(|recipient| {
+            super::prepare_frozen_production_entry_with_catalog(
+                sources, scratch, output, catalog, recipient,
+            )
+        })
+    }
+    pub(crate) fn prepare_frozen_production_entry(
+        sources: &FrozenEntrySources,
+        scratch: &Path,
+        output: &Path,
+    ) -> Result<ProductionEntryOutput, CompileError> {
+        with_settlement(|recipient| {
+            super::prepare_frozen_production_entry(sources, scratch, output, recipient)
+        })
     }
 }

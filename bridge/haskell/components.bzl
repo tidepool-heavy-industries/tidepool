@@ -132,6 +132,7 @@ def declare_haskell_components():
         "Tidepool/FinalizedCore.hs": "src/Tidepool/FinalizedCore.hs",
         "Tidepool/GhcPipeline.hs": "src/Tidepool/GhcPipeline.hs",
         "Tidepool/ExactHydration.hs": "src/Tidepool/ExactHydration.hs",
+        "Tidepool/ArtifactBytes.hs": "src/Tidepool/ArtifactBytes.hs",
         "Tidepool/RequestInputs.hs": "src/Tidepool/RequestInputs.hs",
         "Tidepool/ExactScope.hs": "src/Tidepool/ExactScope.hs",
         "Tidepool/ExecutionSource.hs": "src/Tidepool/ExecutionSource.hs",
@@ -178,6 +179,7 @@ def declare_haskell_components():
         "Tidepool/LocalNativeDeclaration.hs": "src/Tidepool/LocalNativeDeclaration.hs",
         "Tidepool/ResumePackage.hs": "src/Tidepool/ResumePackage.hs",
         "Tidepool/TypedSegment/Types.hs": "src/Tidepool/TypedSegment/Types.hs",
+        "Tidepool/OwnedInputTransport.hs": "src/Tidepool/OwnedInputTransport.hs",
         "Tidepool/NativeOriginalCensus.hs": "src/Tidepool/NativeOriginalCensus.hs"
     },
         deps = [],
@@ -268,6 +270,7 @@ def declare_haskell_components():
         "Tidepool/FinalizedCore.hs": "src/Tidepool/FinalizedCore.hs",
         "Tidepool/GhcPipeline.hs": "src/Tidepool/GhcPipeline.hs",
         "Tidepool/ExactHydration.hs": "src/Tidepool/ExactHydration.hs",
+        "Tidepool/ArtifactBytes.hs": "src/Tidepool/ArtifactBytes.hs",
         "Tidepool/RequestInputs.hs": "src/Tidepool/RequestInputs.hs",
         "Tidepool/ExactScope.hs": "src/Tidepool/ExactScope.hs",
         "Tidepool/ExecutionSource.hs": "src/Tidepool/ExecutionSource.hs",
@@ -314,6 +317,7 @@ def declare_haskell_components():
         "Tidepool/LocalNativeDeclaration.hs": "src/Tidepool/LocalNativeDeclaration.hs",
         "Tidepool/ResumePackage.hs": "src/Tidepool/ResumePackage.hs",
         "Tidepool/TypedSegment/Types.hs": "src/Tidepool/TypedSegment/Types.hs",
+        "Tidepool/OwnedInputTransport.hs": "src/Tidepool/OwnedInputTransport.hs",
         "Tidepool/NativeOriginalCensus.hs": "src/Tidepool/NativeOriginalCensus.hs"
     },
         deps = [],
@@ -572,6 +576,7 @@ def declare_haskell_components():
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
         compiler_flags = haskell_component_flags([
+        "QuickCheck",
         "bytestring",
         "cborg",
         "containers",
@@ -589,6 +594,7 @@ def declare_haskell_components():
         "-rtsopts"
     ]),
         linker_flags = haskell_component_link_flags([
+        "QuickCheck",
         "bytestring",
         "cborg",
         "containers",

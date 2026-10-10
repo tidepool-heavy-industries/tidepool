@@ -118,6 +118,8 @@ pub struct FailureEnvelope {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CompileFailureCause {
     Io,
+    CompilerEndpoint,
+    CompilerCloseUnconfirmed,
     ExtractorContract,
     InputRejected,
     SourceDiagnostics,
@@ -462,6 +464,8 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         }
         // Spawn/IO failure reaching the extractor.
         CompileError::Io(_)
+        | CompileError::CompilerEndpoint(_)
+        | CompileError::CompilerCloseUnconfirmed(_)
         | CompileError::EntryPreparationUnfinished { .. }
         | CompileError::EntryReservationReleaseUnconfirmed { .. }
         | CompileError::EntryPublicationUnconfirmed { .. } => {
@@ -499,6 +503,8 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         | CompileError::EntryPreparationUnfinished { .. }
         | CompileError::EntryReservationReleaseUnconfirmed { .. }
         | CompileError::EntryPublicationUnconfirmed { .. } => CompileFailureCause::Io,
+        CompileError::CompilerEndpoint(_) => CompileFailureCause::CompilerEndpoint,
+        CompileError::CompilerCloseUnconfirmed(_) => CompileFailureCause::CompilerCloseUnconfirmed,
         CompileError::ExtractFailed(_) => CompileFailureCause::ExtractorContract,
         CompileError::CompilerEvidence(error) => CompileFailureCause::CompilerEvidence {
             failure: error.as_ref().into(),
@@ -548,7 +554,69 @@ fn version_skew_message(re: &ReadError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
     use std::path::PathBuf;
+
+    #[test]
+    fn invocation_projection_preserves_submission_and_uncertain_completed_action() {
+        use tidepool_extract_cmd::{
+            CompilerTransactionClose, CompilerTransactionCloseEvidence,
+            CompilerTransactionCloseReason, CompilerTransactionOutcome,
+            CompilerTransactionRetirement, ExtractCmd, ExtractRun, ResolvedExtractBin,
+        };
+        let command = ExtractCmd::with_bin(ResolvedExtractBin::assume_resolved(
+            "/nonexistent/compiler-input-custody-control",
+        ));
+        let failure = command.bind_direct().unwrap_err();
+        let result = CompileError::compiler_invocation_result(CompilerTransactionOutcome {
+            action: Err(failure),
+            close: CompilerTransactionClose::NotStarted,
+        });
+        let Err(CompileError::CompilerEndpoint(failure)) = result else {
+            panic!("settled transport failure retains typed submission facts");
+        };
+        assert!(failure.permits_rebind());
+        assert!(failure.definitely_unsubmitted());
+        assert!(failure.is_not_found());
+        assert_eq!(
+            failure.source.to_string(),
+            crate::extract_spawn_error(std::io::Error::from(std::io::ErrorKind::NotFound))
+                .to_string()
+        );
+
+        let completed = ExtractRun {
+            output: std::process::Output {
+                status: std::process::ExitStatus::from_raw(0),
+                stdout: b"completed compiler response".to_vec(),
+                stderr: b"retained compiler diagnostics".to_vec(),
+            },
+            elapsed: std::time::Duration::from_millis(17),
+        };
+        let close = CompilerTransactionClose::Unconfirmed(CompilerTransactionCloseEvidence::new(
+            CompilerTransactionCloseReason::FailedRequest,
+            CompilerTransactionRetirement::DaemonUnobserved { disconnect: None },
+        ));
+        let error = CompileError::compiler_invocation_result(CompilerTransactionOutcome {
+            action: Ok(completed),
+            close: close.clone(),
+        })
+        .unwrap_err();
+        let envelope = classify_compile(&error);
+        assert_eq!(envelope.class, FailureClass::Infra);
+        assert_eq!(
+            envelope.cause,
+            Some(CompileFailureCause::CompilerCloseUnconfirmed)
+        );
+        let CompileError::CompilerCloseUnconfirmed(outcome) = error else {
+            panic!("completed action cannot erase uncertain settlement");
+        };
+        assert_eq!(outcome.close, close);
+        let completed = outcome.action.unwrap();
+        assert!(completed.success());
+        assert_eq!(completed.output.stdout, b"completed compiler response");
+        assert_eq!(completed.output.stderr, b"retained compiler diagnostics");
+        assert_eq!(completed.elapsed, std::time::Duration::from_millis(17));
+    }
 
     #[test]
     fn completed_source_evidence_keeps_typed_refusal_in_failure_envelope() {

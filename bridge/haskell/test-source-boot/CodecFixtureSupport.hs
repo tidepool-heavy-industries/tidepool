@@ -56,7 +56,7 @@ data ScopeCodecField
 
 data ScopeCodecAcquisition
   = FreshCodecInputs
-  | ContinueCodecOriginals Term
+  | ContinueCodecOriginals Term Term
   deriving (Eq,Show)
 
 readScopeCodecFixture :: FilePath -> IO (ExactScope, ScopeCodecFixture)
@@ -90,15 +90,15 @@ replaceScopeCodecField field value fixture = case field of
 scopeCodecAcquisition :: ScopeCodecFixture -> Maybe ScopeCodecAcquisition
 scopeCodecAcquisition fixture = case codecScopeAcquisition fixture of
   TList [TString tag] | tag == T.pack "fresh-files" -> Just FreshCodecInputs
-  TList [TString tag,images] | tag == T.pack "continue-originals" ->
-    Just (ContinueCodecOriginals images)
+  TList [TString tag,arenas,images] | tag == T.pack "continue-originals" ->
+    Just (ContinueCodecOriginals arenas images)
   _ -> Nothing
 
 replaceScopeCodecAcquisition :: ScopeCodecAcquisition -> ScopeCodecFixture -> ScopeCodecFixture
 replaceScopeCodecAcquisition acquisition fixture = fixture
   { codecScopeAcquisition=case acquisition of
       FreshCodecInputs -> TList [text "fresh-files"]
-      ContinueCodecOriginals images -> TList [text "continue-originals",images]
+      ContinueCodecOriginals arenas images -> TList [text "continue-originals",arenas,images]
   }
 
 scopeCodecTerm :: ScopeCodecFixture -> Term

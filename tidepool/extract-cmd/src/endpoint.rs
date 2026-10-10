@@ -1253,6 +1253,98 @@ impl CompilerEndpoint {
         })
     }
 
+    /// Execute against this exact endpoint, retaining the original input
+    /// descriptors through transaction cleanup. A scoped endpoint joins its
+    /// existing owner; `NotStarted` then means this invocation opened no local
+    /// transaction, and only the outer owner can establish final settlement.
+    ///
+    /// A standalone invocation opens and closes an explicit transaction on the
+    /// already bound endpoint. Its affine sink receives close evidence once on
+    /// normal finish or unwind, and must retain it without panicking. The action
+    /// and independent close remain separate; an uncertain close never permits
+    /// replay, even when the action returned a successful response.
+    pub fn execute_with_input_files(
+        self,
+        cmd: &ExtractCmd,
+        input_files: Vec<Arc<File>>,
+        close_sink: impl FnOnce(CompilerTransactionClose),
+    ) -> CompilerTransactionOutcome<Result<ExtractRun, SpawnError>> {
+        self.invoke_with_input_files(cmd, input_files, close_sink, |endpoint| {
+            endpoint.execute(cmd)
+        })
+    }
+
+    fn invoke_with_input_files<T>(
+        self,
+        cmd: &ExtractCmd,
+        input_files: Vec<Arc<File>>,
+        close_sink: impl FnOnce(CompilerTransactionClose),
+        action: impl FnOnce(CompilerEndpoint) -> Result<T, SpawnError>,
+    ) -> CompilerTransactionOutcome<Result<T, SpawnError>> {
+        let invoke = || {
+            let endpoint = self.join_transaction_scope(cmd)?;
+            TRANSACTION_SCOPE.with(|scope| {
+                let mut scope = scope.borrow_mut();
+                let scope = scope.as_mut().expect("owned compiler invocation scope");
+                for file in input_files {
+                    scope.input_files.insert(file);
+                }
+            });
+            action(endpoint)
+        };
+        if TRANSACTION_SCOPE.with(|scope| scope.borrow().is_some()) {
+            CompilerTransactionOutcome {
+                action: invoke(),
+                close: CompilerTransactionClose::NotStarted,
+            }
+        } else {
+            with_compiler_transaction_for_workload(cmd.request.workload(), close_sink, invoke)
+        }
+    }
+
+    /// Adopt an already bound endpoint only when this scope has no compiler
+    /// selection. Borrowed endpoints continue through their original owner.
+    fn join_transaction_scope(self, cmd: &ExtractCmd) -> Result<Self, SpawnError> {
+        if matches!(self.transport, Transport::Scoped) {
+            return Ok(self);
+        }
+        let (workload, cancellation) = TRANSACTION_SCOPE.with(|scope| {
+            let scope = scope.borrow();
+            let state = scope.as_ref().expect("owned compiler invocation scope");
+            if !matches!(state.compiler, ScopedCompiler::Unbound) {
+                return Err(SpawnError::not_submitted(
+                    &cmd.program,
+                    io::Error::other("compiler scope already owns a bound endpoint"),
+                ));
+            }
+            Ok((state.workload, state.cancellation.clone()))
+        })?;
+        if cancellation
+            .as_ref()
+            .is_some_and(CompilerTransactionCancellation::is_cancelled)
+        {
+            return Err(SpawnError::not_submitted(
+                &cmd.program,
+                io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "compiler invocation was cancelled before admission",
+                ),
+            ));
+        }
+        let identity = self.identity.clone();
+        let transaction = self.transaction_with_cancellation(workload, cancellation)?;
+        TRANSACTION_SCOPE.with(|scope| {
+            scope.borrow_mut().as_mut().expect("owning scope").compiler = ScopedCompiler::Active {
+                transaction,
+                program: cmd.program.clone(),
+            };
+        });
+        Ok(Self {
+            identity,
+            transport: Transport::Scoped,
+        })
+    }
+
     /// Execute `cmd` through the producer captured by this endpoint.
     pub fn execute(mut self, cmd: &ExtractCmd) -> Result<ExtractRun, SpawnError> {
         let cwd = std::env::current_dir()
@@ -2510,6 +2602,310 @@ mod tests {
         format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd())
     }
 
+    fn standalone_input_fixture(
+        directory: &Path,
+        phase: u8,
+    ) -> (CompilerEndpoint, ExtractCmd, Arc<File>) {
+        let spec = direct_handshake_fixture(directory, phase);
+        let command = ExtractCmd::with_bin(crate::ResolvedExtractBin::assume_resolved(
+            PathBuf::from(&spec.program),
+        ));
+        let endpoint = CompilerEndpoint::bind_launch(spec).unwrap();
+        let file = compiler_input_file(b"standalone compiler input");
+        std::fs::write(directory.join("input-at-end"), compiler_input_path(&file)).unwrap();
+        (endpoint, command, file)
+    }
+
+    #[test]
+    fn standalone_input_invocation_releases_only_after_actual_clean_end() {
+        for phase in [5, 15] {
+            let directory = tempfile::tempdir().unwrap();
+            let (endpoint, command, file) = standalone_input_fixture(directory.path(), phase);
+            let weak = Arc::downgrade(&file);
+            let observed = RefCell::new(None);
+            let outcome = endpoint.execute_with_input_files(
+                &command,
+                vec![Arc::clone(&file), file],
+                |close| *observed.borrow_mut() = Some(close),
+            );
+            assert_eq!(outcome.close, CompilerTransactionClose::Clean);
+            assert_eq!(observed.into_inner(), Some(outcome.close.clone()));
+            let run = outcome.action.unwrap();
+            assert_eq!(run.success(), phase == 5);
+            assert_eq!(run.output.stdout, b"1");
+            assert_eq!(
+                std::fs::read(directory.path().join("observed-input")).unwrap(),
+                b"standalone compiler input"
+            );
+            assert!(weak.upgrade().is_none());
+        }
+    }
+
+    #[test]
+    fn standalone_input_invocation_preserves_response_failure_and_uncertain_close() {
+        let directory = tempfile::tempdir().unwrap();
+        let (endpoint, command, file) = standalone_input_fixture(directory.path(), 14);
+        let weak = Arc::downgrade(&file);
+        let observed = RefCell::new(None);
+        let before = crate::extract_spawn_count();
+        let outcome = endpoint.execute_with_input_files(&command, vec![file], |close| {
+            *observed.borrow_mut() = Some(close)
+        });
+        assert_eq!(crate::extract_spawn_count() - before, 1);
+        let failure = outcome.action.as_ref().unwrap_err();
+        assert!(!failure.permits_rebind());
+        assert!(!failure.definitely_unsubmitted());
+        let CompilerTransactionClose::Unconfirmed(evidence) = &outcome.close else {
+            panic!("accepted response loss remains uncertain");
+        };
+        assert_eq!(
+            evidence.reason,
+            CompilerTransactionCloseReason::FailedRequest
+        );
+        assert!(weak.upgrade().is_some());
+        drop(outcome);
+        let observed = observed.into_inner().unwrap();
+        assert!(weak.upgrade().is_some());
+        drop(observed);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn standalone_input_invocation_preserves_completed_response_after_end_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let (endpoint, command, file) = standalone_input_fixture(directory.path(), 6);
+        let weak = Arc::downgrade(&file);
+        let observed = RefCell::new(None);
+        let outcome = endpoint.execute_with_input_files(&command, vec![file], |close| {
+            *observed.borrow_mut() = Some(close)
+        });
+        let run = outcome.action.as_ref().unwrap();
+        assert!(run.success());
+        assert_eq!(run.output.stdout, b"1");
+        let CompilerTransactionClose::Unconfirmed(evidence) = &outcome.close else {
+            panic!("response success cannot substitute for END");
+        };
+        assert_eq!(
+            evidence.reason,
+            CompilerTransactionCloseReason::FrontendExitUnsuccessful
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("observed-input")).unwrap(),
+            b"standalone compiler input"
+        );
+        drop(outcome);
+        assert!(weak.upgrade().is_some());
+        drop(observed.into_inner());
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn standalone_input_invocation_close_timeout_retains_exact_descriptor() {
+        let directory = tempfile::tempdir().unwrap();
+        let (endpoint, command, file) = standalone_input_fixture(directory.path(), 16);
+        let weak = Arc::downgrade(&file);
+        let observed = RefCell::new(None);
+        let outcome = endpoint.execute_with_input_files(&command, vec![file], |close| {
+            *observed.borrow_mut() = Some(close)
+        });
+        assert!(outcome.action.as_ref().unwrap().success());
+        let CompilerTransactionClose::Unconfirmed(evidence) = &outcome.close else {
+            panic!("missing END acknowledgement cannot release inputs");
+        };
+        let CompilerTransactionCloseReason::EndFailed(failure) = &evidence.reason else {
+            panic!("absolute END deadline is retained");
+        };
+        assert_eq!(failure.phase, CompilerTransactionClosePhase::EndRead);
+        assert_eq!(failure.source.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(
+            std::fs::read(directory.path().join("observed-input")).unwrap(),
+            b"standalone compiler input"
+        );
+        drop(outcome);
+        assert!(weak.upgrade().is_some());
+        drop(observed.into_inner());
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn standalone_input_invocation_unwind_transfers_custody_to_affine_sink() {
+        let directory = tempfile::tempdir().unwrap();
+        let (endpoint, command, file) = standalone_input_fixture(directory.path(), 5);
+        let weak = Arc::downgrade(&file);
+        let observed = RefCell::new(None);
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            endpoint.invoke_with_input_files(
+                &command,
+                vec![file],
+                |close| *observed.borrow_mut() = Some(close),
+                |endpoint| -> Result<ExtractRun, SpawnError> {
+                    assert!(endpoint.execute(&command).unwrap().success());
+                    TRANSACTION_SCOPE.with(|scope| {
+                        let mut scope = scope.borrow_mut();
+                        let ScopedCompiler::Active { transaction, .. } =
+                            &mut scope.as_mut().unwrap().compiler
+                        else {
+                            panic!("admitted invocation retains original owner");
+                        };
+                        let Some(TransactionTransport::Direct(endpoint)) =
+                            transaction.transport.as_mut()
+                        else {
+                            panic!("direct fixture required");
+                        };
+                        endpoint.wait_observation_fault = true;
+                    });
+                    panic!("standalone action unwind");
+                },
+            )
+        }));
+        assert_eq!(
+            unwind.unwrap_err().downcast_ref::<&str>(),
+            Some(&"standalone action unwind")
+        );
+        assert!(weak.upgrade().is_some());
+        let close = observed.into_inner().unwrap();
+        let CompilerTransactionClose::Unconfirmed(evidence) = &close else {
+            panic!("unwind close sink retains exact evidence");
+        };
+        assert_eq!(evidence.reason, CompilerTransactionCloseReason::Abandoned);
+        let CompilerTransactionRetirement::Direct(retirement) = &evidence.retirement else {
+            panic!("same direct process owner must retain retirement");
+        };
+        let retained = retirement._retained_child.as_ref().unwrap();
+        assert!(retire_owned_child(&retained.0, false).exit.is_ok());
+        drop(close);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn input_invocations_join_outer_transaction_and_keep_its_workload() {
+        let directory = tempfile::tempdir().unwrap();
+        let (endpoint, command, file) = standalone_input_fixture(directory.path(), 5);
+        let identity = endpoint.identity.clone();
+        let weak = Arc::downgrade(&file);
+        let outer_close = RefCell::new(None);
+        let outer = with_compiler_transaction_for_workload(
+            CompileWorkload::Preparation,
+            |close| *outer_close.borrow_mut() = Some(close),
+            || {
+                let first = endpoint.execute_with_input_files(&command, vec![file], |_| {
+                    panic!("joined invocation does not acquire a local close owner")
+                });
+                assert_eq!(first.close, CompilerTransactionClose::NotStarted);
+                assert_eq!(first.action.unwrap().output.stdout, b"1");
+                assert!(weak.upgrade().is_some());
+                assert!(!directory.path().join("observed-input").exists());
+                TRANSACTION_SCOPE.with(|scope| {
+                    let scope = scope.borrow();
+                    let ScopedCompiler::Active { transaction, .. } =
+                        &scope.as_ref().unwrap().compiler
+                    else {
+                        panic!("one outer transport owner");
+                    };
+                    assert_eq!(transaction.workload, CompileWorkload::Preparation);
+                });
+                let second = CompilerEndpoint {
+                    identity,
+                    transport: Transport::Scoped,
+                }
+                .execute_with_input_files(&command, Vec::new(), |_| {
+                    panic!("borrowed invocation cannot close the outer transaction")
+                });
+                assert_eq!(second.close, CompilerTransactionClose::NotStarted);
+                assert_eq!(second.action.unwrap().output.stdout, b"2");
+            },
+        );
+        assert_eq!(outer.close, CompilerTransactionClose::Clean);
+        assert_eq!(outer_close.into_inner(), Some(outer.close));
+        assert_eq!(
+            std::fs::read(directory.path().join("observed-input")).unwrap(),
+            b"standalone compiler input"
+        );
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn standalone_input_invocation_begin_refusal_does_not_retain_unsubmitted_inputs() {
+        let directory = tempfile::tempdir().unwrap();
+        let (endpoint, command, file) = standalone_input_fixture(directory.path(), 13);
+        let weak = Arc::downgrade(&file);
+        let observed = RefCell::new(None);
+        let outcome = endpoint.execute_with_input_files(&command, vec![file], |close| {
+            *observed.borrow_mut() = Some(close)
+        });
+        assert!(outcome.action.is_err());
+        assert!(matches!(
+            outcome.close,
+            CompilerTransactionClose::Unconfirmed(_)
+        ));
+        assert!(weak.upgrade().is_none());
+        assert!(!directory.path().join("observed-input").exists());
+    }
+
+    #[test]
+    fn input_invocation_retains_files_when_earlier_admission_overrides_clean_end() {
+        let directory = tempfile::tempdir().unwrap();
+        let (endpoint, command, file) = standalone_input_fixture(directory.path(), 5);
+        let refused = tempfile::tempdir().unwrap();
+        let refusal_spec = direct_handshake_fixture(refused.path(), 8);
+        let weak = Arc::downgrade(&file);
+        let observed = RefCell::new(None);
+        let outer = with_compiler_transaction(
+            |close| *observed.borrow_mut() = Some(close),
+            || {
+                assert!(CompilerEndpoint::bind_launch(refusal_spec).is_err());
+                let local = endpoint.execute_with_input_files(&command, vec![file], |_| {
+                    panic!("outer owner retains all admission history")
+                });
+                assert_eq!(local.close, CompilerTransactionClose::NotStarted);
+                assert_eq!(local.action.unwrap().output.stdout, b"1");
+            },
+        );
+        let CompilerTransactionClose::Unconfirmed(evidence) = &outer.close else {
+            panic!("clean final END cannot erase earlier uncertain admission");
+        };
+        assert_eq!(
+            evidence.reason,
+            CompilerTransactionCloseReason::AdmissionAborted(
+                CompilerTransactionClosePhase::IdentityHandshake
+            )
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("observed-input")).unwrap(),
+            b"standalone compiler input"
+        );
+        drop(outer);
+        assert!(weak.upgrade().is_some());
+        drop(observed.into_inner());
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn input_invocation_pre_begin_cancellation_releases_unsubmitted_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let (endpoint, command, file) = standalone_input_fixture(directory.path(), 5);
+        let weak = Arc::downgrade(&file);
+        let observed = RefCell::new(None);
+        let cancellation = CompilerTransactionCancellation::new();
+        cancellation.cancel();
+        let outer = with_compiler_transaction_cancellable(
+            cancellation,
+            |close| *observed.borrow_mut() = Some(close),
+            || {
+                let local = endpoint.execute_with_input_files(&command, vec![file], |_| {
+                    panic!("existing cancellation and close owner remain authoritative")
+                });
+                let error = local.action.unwrap_err();
+                assert!(error.definitely_unsubmitted());
+                assert_eq!(error.source.kind(), io::ErrorKind::Interrupted);
+                assert_eq!(local.close, CompilerTransactionClose::NotStarted);
+            },
+        );
+        assert_eq!(observed.into_inner(), Some(outer.close));
+        assert!(weak.upgrade().is_none());
+        assert!(!directory.path().join("observed-input").exists());
+    }
+
     #[test]
     fn compiler_input_files_survive_action_return_until_real_end() {
         for primary_failure in [false, true] {
@@ -3282,6 +3678,70 @@ mod tests {
     impl Drop for DeferredDaemonFixture {
         fn drop(&mut self) {
             self.settle();
+        }
+    }
+
+    #[test]
+    fn standalone_daemon_input_invocation_keeps_exact_admission_and_close() {
+        for behavior in [
+            DaemonFixtureBehavior::Normal,
+            DaemonFixtureBehavior::CancelRequest,
+        ] {
+            let mut fixture =
+                DeferredDaemonFixture::new(behavior, CompilerTransactionCancellation::new());
+            let command = fixture.command();
+            let binding = daemon::preflight(&fixture.socket).unwrap();
+            let endpoint = CompilerEndpoint {
+                identity: CompilerIdentity::daemon(
+                    binding.producer,
+                    binding.consumed_worker,
+                    binding.epoch,
+                ),
+                transport: Transport::Daemon {
+                    socket: fixture.socket.clone(),
+                    epoch: binding.epoch,
+                },
+            };
+            let file = compiler_input_file(b"exact standalone daemon input");
+            let weak = Arc::downgrade(&file);
+            let observed = RefCell::new(None);
+            let outcome = endpoint.execute_with_input_files(&command, vec![file], |close| {
+                *observed.borrow_mut() = Some(close)
+            });
+            let expected_ends = if matches!(behavior, DaemonFixtureBehavior::Normal) {
+                assert_eq!(outcome.action.as_ref().unwrap().output.stdout, [1]);
+                assert_eq!(outcome.close, CompilerTransactionClose::Clean);
+                assert!(weak.upgrade().is_none());
+                1
+            } else {
+                let error = outcome.action.as_ref().unwrap_err();
+                assert!(!error.permits_rebind());
+                assert!(!error.definitely_unsubmitted());
+                assert!(matches!(
+                    outcome.close,
+                    CompilerTransactionClose::Unconfirmed(_)
+                ));
+                assert!(weak.upgrade().is_some());
+                0
+            };
+            drop(outcome);
+            assert_eq!(weak.upgrade().is_some(), expected_ends == 0);
+            drop(observed.into_inner());
+            assert!(weak.upgrade().is_none());
+            fixture.settle();
+            let counts = fixture.counts.lock().unwrap();
+            assert_eq!(
+                (
+                    counts.preflights,
+                    counts.begins,
+                    counts.admissions,
+                    counts.requests,
+                    counts.ends,
+                    counts.active
+                ),
+                (1, 1, 1, 1, expected_ends, 0),
+                "already bound endpoint admits and submits once without rebinding"
+            );
         }
     }
 

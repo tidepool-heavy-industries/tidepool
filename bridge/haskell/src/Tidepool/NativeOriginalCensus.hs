@@ -4,9 +4,9 @@
 -- The constructor is private so callers cannot mint or alter native evidence.
 module Tidepool.NativeOriginalCensus
   ( OriginalNativeCensus
-  , readOriginalNativeCensus, readOriginalNativeCensusWith
+  , readOriginalNativeCensus, readOriginalNativeCensusWith, decodeOriginalNativeCensusBody
   , nativeCensusOwner
-  , nativeCensusGroups
+  , ExactOriginalGroup(..), nativeCensusExactGroups, selectNativeCensusGroups, nativeCensusSelectionMatches
   , nativeCensusRequirements
   , nativeCensusCanonicalCertificate
   ) where
@@ -16,31 +16,52 @@ import Codec.CBOR.Encoding
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Write (toStrictByteString)
 import Control.Monad (replicateM, unless, when)
-import Crypto.Hash.SHA256 qualified as SHA
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as T
 import Data.Word (Word8, Word32, Word64)
-import Numeric (showHex)
 import System.FilePath (isAbsolute)
+import Tidepool.ArtifactBytes (ArtifactBytes, captureArtifactBytes, artifactBytes, checkArtifactSeal)
 import Tidepool.BoundedRead (readFileAtMost)
 import Tidepool.ExecutionSchema
   ( ResultContract(..), RuntimeRep(..), Signature(..), SymbolIdentity(..) )
 
 data OriginalNativeCensus = OriginalNativeCensus
   { censusOwner :: !(String, String, String, String, String)
-  , censusGroups :: ![(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])]
+  , censusExactGroups :: ![ExactOriginalGroup]
+  , censusOrdinalIndex :: !(Map.Map Word ExactOriginalGroup)
   , censusRequirements :: !(Map.Map (String, String) String)
   , censusCanonicalCertificate :: !(Maybe String)
   } deriving (Eq, Show)
 
+-- The authenticated census owns both projections once. Requests select existing
+-- group facts by ordinal; they cannot supply replacement binder/global outlines.
+data ExactOriginalGroup = ExactOriginalGroup
+  { originalOrdinal :: Word, originalBinders :: [SymbolIdentity]
+  , originalGlobals :: [(SymbolIdentity, Bool)]
+  } deriving (Eq, Show)
+
+nativeCensusExactGroups :: OriginalNativeCensus -> [ExactOriginalGroup]
+nativeCensusExactGroups = censusExactGroups
+
+selectNativeCensusGroups :: OriginalNativeCensus -> [Word] -> Either String [ExactOriginalGroup]
+selectNativeCensusGroups census ordinals
+  | length ordinals > 65536 = Left "selected native ordinal count exceeds bound"
+  | Set.size (Set.fromList ordinals) /= length ordinals = Left "duplicate selected native ordinal"
+  | otherwise = mapM find ordinals
+  where
+    find ordinal = maybe (Left "selected native ordinal is absent from its authenticated census")
+      Right (Map.lookup ordinal (censusOrdinalIndex census))
+
+nativeCensusSelectionMatches :: OriginalNativeCensus -> [ExactOriginalGroup] -> Bool
+nativeCensusSelectionMatches census groups =
+  Set.size (Set.fromList (map originalOrdinal groups)) == length groups
+    && all (\group -> Map.lookup (originalOrdinal group) (censusOrdinalIndex census) == Just group) groups
+
 nativeCensusOwner :: OriginalNativeCensus -> (String, String, String, String, String)
 nativeCensusOwner = censusOwner
-
-nativeCensusGroups :: OriginalNativeCensus -> [(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])]
-nativeCensusGroups = censusGroups
 
 nativeCensusRequirements :: OriginalNativeCensus -> Map.Map (String, String) String
 nativeCensusRequirements = censusRequirements
@@ -85,7 +106,13 @@ readOriginalNativeCensusWith readInput path expectedSha = do
   unless (canonicalDigest expectedSha) (fail "invalid native original census descriptor SHA256")
   bytes <- readInput path censusByteLimit
   when (BS.length bytes > censusByteLimit) (fail "native original census exceeds 32 MiB")
-  unless (sha256 bytes == expectedSha) (fail "native original census descriptor SHA256 mismatch")
+  decodeOriginalNativeCensusBody expectedSha (captureArtifactBytes bytes)
+
+decodeOriginalNativeCensusBody :: String -> ArtifactBytes -> IO OriginalNativeCensus
+decodeOriginalNativeCensusBody expectedSha body = do
+  either fail pure (checkArtifactSeal expectedSha body)
+  let bytes = artifactBytes body
+  when (BS.length bytes > censusByteLimit) (fail "native original census exceeds 32 MiB")
   case deserialiseFromBytes decodeCensus (BL.fromStrict bytes) of
     Left failure -> fail ("invalid native original census: " ++ show failure)
     Right (remaining, parsed) -> do
@@ -277,13 +304,15 @@ validateGlobal sources packages global = case nativeImportOwner global of
       Nothing -> fail "native package global lacks its owner declaration"
 
 project :: ParsedCensus -> OriginalNativeCensus
-project parsed = OriginalNativeCensus
+project parsed =
+  let groups =
+        [ExactOriginalGroup ordinal binders
+          [(nativeIdentity global, requiresDefinition global) | global <- globals]
+        | (ordinal, binders, globals) <- parsedGroups parsed]
+  in OriginalNativeCensus
   { censusOwner = parsedOwner parsed
-  , censusGroups =
-      [ (ordinal, binders,
-          [(nativeIdentity global, requiresDefinition global) | global <- globals])
-      | (ordinal, binders, globals) <- parsedGroups parsed
-      ]
+  , censusExactGroups = groups
+  , censusOrdinalIndex = Map.fromList [(originalOrdinal group,group) | group <- groups]
   , censusRequirements = Map.fromList (parsedRequirements parsed)
   , censusCanonicalCertificate = parsedCanonicalCertificate parsed
   }
@@ -414,11 +443,6 @@ canonicalDigest value = length value == 64 && all valid value
 
 zeroDigest :: String
 zeroDigest = replicate 64 '0'
-
-sha256 :: BS.ByteString -> String
-sha256 = concatMap byteHex . BS.unpack . SHA.hash
-  where byteHex byte = let digits = showHex byte ""
-                       in replicate (2 - length digits) '0' ++ digits
 
 encodeText :: String -> Encoding
 encodeText = encodeString . T.pack

@@ -639,7 +639,7 @@ impl From<Arc<ExactDeclarationContext>> for ExactCompileContext {
 }
 
 const EXACT_SCOPE_BYTES_LIMIT: usize = 4 << 20;
-const EXACT_SCOPE_SCHEMA_VERSION: &str = "12";
+const EXACT_SCOPE_SCHEMA_VERSION: &str = "13";
 const EXACT_SCOPE_SCHEMA_FIELDS: usize = 11;
 const EXACT_SCOPE_GRAPHS_LIMIT: usize = 4096;
 
@@ -1312,6 +1312,7 @@ pub(crate) struct RetainedArtifactMaterialization {
 #[derive(Clone)]
 struct OwnedExecutionGraphFile {
     path: PathBuf,
+    transport: crate::owned_input_arena::OwnedInputSlice,
     _directory: Arc<tempfile::TempDir>,
 }
 
@@ -1474,6 +1475,8 @@ impl RetainedArtifactMaterialization {
 
 #[derive(Clone)]
 struct RetainedArtifactRow {
+    owned_inputs:
+        BTreeMap<original_inputs::OriginalInputKind, crate::owned_input_arena::OwnedInputSlice>,
     _directory: Arc<tempfile::TempDir>,
     interface: ExactIfaceArtifact,
     interface_evidence: Value,
@@ -1513,12 +1516,14 @@ impl RetainedArtifactRow {
         let mut parts = vec![
             OriginalInputPart {
                 kind: Kind::Interface,
+                transport: self.owned_inputs[&Kind::Interface].clone(),
                 path: self.interface.path.clone(),
                 sha256: self.interface.sha256.clone(),
                 bytes: interface.len() as u64,
             },
             OriginalInputPart {
                 kind: Kind::Packages,
+                transport: self.owned_inputs[&Kind::Packages].clone(),
                 path: self.interface.path.with_extension("hi.packages"),
                 sha256: hex(&entry.descriptor.package_imports_sha256),
                 bytes: packages.len() as u64,
@@ -1528,6 +1533,7 @@ impl RetainedArtifactRow {
             let fields = row(&self.interface_evidence, 5)?;
             parts.push(OriginalInputPart {
                 kind: Kind::Certificate,
+                transport: self.owned_inputs[&Kind::Certificate].clone(),
                 path: PathBuf::from(string(&fields[1])?),
                 sha256: string(&fields[2])?.to_owned(),
                 bytes: canonical.certificate_bytes().len() as u64,
@@ -1535,6 +1541,7 @@ impl RetainedArtifactRow {
             if let Some(core) = canonical.core_bytes() {
                 parts.push(OriginalInputPart {
                     kind: Kind::Core,
+                    transport: self.owned_inputs[&Kind::Core].clone(),
                     path: PathBuf::from(string(&fields[3])?),
                     sha256: string(&fields[4])?.to_owned(),
                     bytes: core.len() as u64,
@@ -1552,6 +1559,7 @@ impl RetainedArtifactRow {
         {
             parts.push(OriginalInputPart {
                 kind: Kind::Native,
+                transport: self.owned_inputs[&Kind::Native].clone(),
                 path: product.path.clone(),
                 sha256: hex(&entry
                     .descriptor
@@ -1561,6 +1569,7 @@ impl RetainedArtifactRow {
             });
             parts.push(OriginalInputPart {
                 kind: Kind::Census,
+                transport: self.owned_inputs[&Kind::Census].clone(),
                 path: certification_path.clone(),
                 sha256: hex(certification_sha256),
                 bytes: original.certification_bytes().len() as u64,
@@ -2594,6 +2603,32 @@ impl ExactProductAdmission<'_> {
 }
 
 impl ExactCompilationRequest {
+    pub(crate) fn input_transport_files(&self) -> Vec<Arc<std::fs::File>> {
+        let Some(materialization) = &self.materialization else {
+            return Vec::new();
+        };
+        let metadata = &self.inputs.compiler.metadata;
+        let mut files = BTreeMap::new();
+        for row in materialization.selected_rows(metadata).into_values() {
+            for slice in row.owned_inputs.values() {
+                let file = slice.compiler_file_lease();
+                files.insert(Arc::as_ptr(&file) as usize, file);
+            }
+        }
+        let graph_paths = materialization.graph_path_refs();
+        for entry in metadata.entries.values() {
+            if let ArtifactPayload::Original(product) = &entry.payload {
+                if let Some(graph) = product.execution_source() {
+                    if let Some(owned) = graph_paths.get(&graph.digest()) {
+                        let file = owned.transport.compiler_file_lease();
+                        files.insert(Arc::as_ptr(&file) as usize, file);
+                    }
+                }
+            }
+        }
+        files.into_values().collect()
+    }
+
     pub(crate) fn context(&self) -> &Arc<ExactDeclarationContext> {
         &self.inputs.context
     }
@@ -4123,6 +4158,12 @@ fn identity(unit: &str, module: &str) -> ExactModuleIdentity {
     }
 }
 
+enum RequestInputTransport {
+    OwnedArena,
+    #[cfg(test)]
+    DurableFiles,
+}
+
 impl ExactDeclarationContext {
     pub fn new(
         authored: &[Arc<CertifiedAuthoredDeclaration>],
@@ -5488,7 +5529,15 @@ impl ExactDeclarationContext {
                 }
                 result
             })?;
-        self.prepare_compilation_from_metadata(root, producer, None, inputs, &scaffold, None)
+        self.prepare_compilation_from_metadata(
+            root,
+            producer,
+            None,
+            inputs,
+            &scaffold,
+            None,
+            RequestInputTransport::DurableFiles,
+        )
     }
 
     pub(crate) fn prepare_compilation_with_authorization(
@@ -5533,6 +5582,7 @@ impl ExactDeclarationContext {
             inputs,
             scaffold,
             private,
+            RequestInputTransport::OwnedArena,
         )
     }
 
@@ -5577,6 +5627,7 @@ impl ExactDeclarationContext {
             inputs,
             scaffold,
             private,
+            RequestInputTransport::OwnedArena,
         )
     }
 
@@ -5601,6 +5652,30 @@ impl ExactDeclarationContext {
             .cloned()
             .collect::<Vec<_>>();
         let mut rows = BTreeMap::new();
+        let mut arena_builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(
+            tidepool_repr::execution_schema::InventoryDecodeLimits::default().max_bytes as u64,
+        )
+        .map_err(failure)?;
+        let mut pending_inputs = BTreeMap::new();
+        let mut acquired_inputs = BTreeMap::new();
+        for entry in &new_entries {
+            let canonical = match &entry.payload {
+                ArtifactPayload::Canonical(interface) => Some(interface),
+                ArtifactPayload::Original(product) => product.module_interface(),
+                ArtifactPayload::Interface(..) => None,
+            };
+            if let Some(custody) = canonical.and_then(|canonical| canonical.catalog_input_custody())
+            {
+                acquired_inputs.insert(entry.descriptor.id, custody.owned_inputs.clone());
+                continue;
+            }
+            for (kind, bytes) in original_inputs::entry_payloads(entry) {
+                pending_inputs.insert(
+                    (entry.descriptor.id, kind),
+                    arena_builder.append(bytes).map_err(failure)?,
+                );
+            }
+        }
         let mut validation = PackageInterfaceValidation::default();
         let context_bytes = materialization_bytes(&new_entries);
         let start = std::time::Instant::now();
@@ -5635,6 +5710,9 @@ impl ExactDeclarationContext {
             rows.insert(
                 entry.descriptor.id,
                 RetainedArtifactRow {
+                    owned_inputs: acquired_inputs
+                        .remove(&entry.descriptor.id)
+                        .unwrap_or_default(),
                     _directory: Arc::clone(&directory),
                     interface: artifact.interface,
                     interface_evidence,
@@ -5710,6 +5788,46 @@ impl ExactDeclarationContext {
             &mut graph_paths,
             &mut scope_written_bytes,
         )?;
+        let mut pending_graphs = BTreeMap::new();
+        let mut graph_transports = BTreeMap::new();
+        for entry in &entries {
+            if let ArtifactPayload::Original(product) = &entry.payload {
+                if let Some(graph) = product.execution_source() {
+                    if !inherited_graphs.contains(&graph.digest())
+                        && graph_paths.contains_key(&graph.digest())
+                        && !pending_graphs.contains_key(&graph.digest())
+                    {
+                        if let Some(slice) = product
+                            .module_interface()
+                            .and_then(|canonical| canonical.catalog_input_custody())
+                            .and_then(|custody| {
+                                custody
+                                    .owned_inputs
+                                    .get(&original_inputs::OriginalInputKind::Graph)
+                                    .cloned()
+                            })
+                        {
+                            graph_transports.insert(graph.digest(), slice);
+                        } else if !graph_transports.contains_key(&graph.digest()) {
+                            pending_graphs.insert(
+                                graph.digest(),
+                                arena_builder.append(graph.bytes()).map_err(failure)?,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let arena = arena_builder.finish().map_err(failure)?;
+        for ((id, kind), pending) in pending_inputs {
+            rows.get_mut(&id)
+                .expect("new materialization row")
+                .owned_inputs
+                .insert(kind, arena.issue_slice(pending).map_err(failure)?);
+        }
+        for (digest, pending) in pending_graphs {
+            graph_transports.insert(digest, arena.issue_slice(pending).map_err(failure)?);
+        }
         let work = validation.work();
         tracing::info!(target: "tidepool_toolchain::artifacts", phase = "exact_immutable_materialization",
             retained_entries = inherited_row_count, new_entries = new_entries.len(),
@@ -5733,6 +5851,7 @@ impl ExactDeclarationContext {
                     (
                         digest,
                         OwnedExecutionGraphFile {
+                            transport: graph_transports[&digest].clone(),
                             path,
                             _directory: Arc::clone(&directory),
                         },
@@ -5752,6 +5871,7 @@ impl ExactDeclarationContext {
         inputs: RequestCompilerInputs,
         scaffold: &ProtectedScaffoldRequirements,
         private: Option<OriginalCompilerInputs>,
+        transport: RequestInputTransport,
     ) -> Result<ExactCompilationRequest, CompileError> {
         let metadata = &inputs.metadata;
         let semantic_sha256 = inputs.declaration_semantic_sha256;
@@ -5900,30 +6020,7 @@ impl ExactDeclarationContext {
                             Value::Array(
                                 census
                                     .into_iter()
-                                    .map(|group| {
-                                        Value::Array(vec![
-                                            Value::Integer(group.original_ordinal().into()),
-                                            Value::Array(
-                                                group.binders().iter().map(symbol_value).collect(),
-                                            ),
-                                            Value::Array(
-                                                group
-                                                    .globals()
-                                                    .iter()
-                                                    .map(|global| {
-                                                        Value::Array(vec![
-                                                            symbol_value(&global.identity),
-                                                            Value::Bool(
-                                                                global
-                                                                    .required_generation
-                                                                    .is_none(),
-                                                            ),
-                                                        ])
-                                                    })
-                                                    .collect(),
-                                            ),
-                                        ])
-                                    })
+                                    .map(|group| Value::Integer(group.original_ordinal().into()))
                                     .collect(),
                             ),
                             selected_rows[&metadata.entries[&identity(&owner.unit, &owner.module)]
@@ -5950,51 +6047,63 @@ impl ExactDeclarationContext {
             })
             .transpose()?
             .unwrap_or_default();
-        let image_producer = CanonicalProducerIdentity::from_producer_bytes(producer).hex();
-        let images = metadata
-            .entries
-            .values()
-            .map(|entry| {
-                let row = selected_rows[&entry.descriptor.id];
-                let mut parts = row.original_input_parts(entry)?;
-                if let ArtifactPayload::Original(product) = &entry.payload {
-                    if let Some(graph) = product
-                        .execution_source()
-                        .filter(|graph| admitted_graphs.contains(&hex(&graph.digest())))
-                    {
-                        parts.push(original_inputs::OriginalInputPart {
-                            kind: original_inputs::OriginalInputKind::Graph,
-                            path: graph_paths[&graph.digest()].path.clone(),
-                            sha256: hex(&graph.digest()),
-                            bytes: graph.bytes().len() as u64,
-                        });
-                    }
-                }
-                // Inherited rows own the unchanged materialized aliases. A new
-                // admission can strengthen provenance for equal bytes, so the
-                // receiving image observes the current selected payload owner.
-                let original_origins = match &entry.payload {
-                    ArtifactPayload::Canonical(interface) => interface.original_input_origins(),
-                    ArtifactPayload::Original(product) => product
-                        .module_interface()
-                        .and_then(|interface| interface.original_input_origins()),
-                    ArtifactPayload::Interface(..) => None,
-                };
-                original_inputs::encode_image(
-                    &image_producer,
-                    &entry.descriptor.owner.unit,
-                    &entry.descriptor.owner.module,
-                    parts,
-                    original_origins,
-                )
-            })
-            .collect::<Result<Vec<_>, CompileError>>()?;
+        let acquisition = match transport {
+            #[cfg(test)]
+            RequestInputTransport::DurableFiles => Value::Array(vec![text("fresh-files")]),
+            RequestInputTransport::OwnedArena => {
+                let image_producer = CanonicalProducerIdentity::from_producer_bytes(producer).hex();
+                let mut arenas = original_inputs::OriginalInputArenaTable::default();
+                let images = metadata
+                    .entries
+                    .values()
+                    .map(|entry| {
+                        let row = selected_rows[&entry.descriptor.id];
+                        let mut parts = row.original_input_parts(entry)?;
+                        if let ArtifactPayload::Original(product) = &entry.payload {
+                            if let Some(graph) = product
+                                .execution_source()
+                                .filter(|graph| admitted_graphs.contains(&hex(&graph.digest())))
+                            {
+                                parts.push(original_inputs::OriginalInputPart {
+                                    kind: original_inputs::OriginalInputKind::Graph,
+                                    transport: graph_paths[&graph.digest()].transport.clone(),
+                                    path: graph_paths[&graph.digest()].path.clone(),
+                                    sha256: hex(&graph.digest()),
+                                    bytes: graph.bytes().len() as u64,
+                                });
+                            }
+                        }
+                        // Inherited rows own the unchanged materialized aliases. A new
+                        // admission can strengthen provenance for equal bytes, so the
+                        // receiving image observes the current selected payload owner.
+                        let original_origins = match &entry.payload {
+                            ArtifactPayload::Canonical(interface) => {
+                                interface.original_input_origins()
+                            }
+                            ArtifactPayload::Original(product) => product
+                                .module_interface()
+                                .and_then(|interface| interface.original_input_origins()),
+                            ArtifactPayload::Interface(..) => None,
+                        };
+                        original_inputs::encode_image(
+                            &image_producer,
+                            &entry.descriptor.owner.unit,
+                            &entry.descriptor.owner.module,
+                            parts,
+                            original_origins,
+                            &mut arenas,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, CompileError>>()?;
+                arenas.acquisition(images)?
+            }
+        };
         let bytes = encode_scope_manifest_with_published(
             fields,
             execution_scope,
             authorization,
             self.published_scope_value()?,
-            Value::Array(vec![text("continue-originals"), Value::Array(images)]),
+            acquisition,
         )?;
         let manifest = root.join("exact-declaration-scope.cbor");
         use std::io::Write;
@@ -8067,7 +8176,7 @@ mod tests {
         let value: Value =
             ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
                 .unwrap();
-        let fields = row(&value, 9).unwrap();
+        let fields = row(&value, EXACT_SCOPE_SCHEMA_FIELDS).unwrap();
         assert_eq!(string(&fields[2]).unwrap(), hex(&expected));
         assert_eq!(row(&fields[8], 2).unwrap()[1], text(hex(&expected)));
         let mut foreign = request.artifacts.clone();
@@ -8082,6 +8191,18 @@ mod tests {
         let request = context
             .prepare_fixture_compilation(packet.path(), &producer)
             .unwrap();
+        let encoded = std::fs::read(&request.manifest).unwrap();
+        let manifest: Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+        assert_eq!(
+            manifest.as_array().unwrap()[10],
+            Value::Array(vec![text("fresh-files")])
+        );
+        assert!(
+            !encoded
+                .windows(b"/proc/".len())
+                .any(|bytes| bytes == b"/proc/"),
+            "persistable fixture must never serialize a process-owned arena endpoint"
+        );
         let paths = request
             .artifacts
             .iter()
@@ -11685,7 +11806,35 @@ mod tests {
         assert!(decoded.retained_generations().is_empty());
         std::fs::write(root.join("worker-request.cbor"), request_bytes).unwrap();
         let compiler_identity = endpoint.identity().clone();
-        let run = endpoint.execute(&command).unwrap();
+        let envelope = read_receipt(&request.manifest);
+        let acquisition = envelope.as_array().unwrap()[10].as_array().unwrap();
+        assert_eq!(acquisition[0].as_text(), Some("continue-originals"));
+        let mut changed_aliases = BTreeSet::new();
+        for image in acquisition[2].as_array().unwrap() {
+            for part in image.as_array().unwrap()[4].as_array().unwrap() {
+                let part = part.as_array().unwrap();
+                let path = PathBuf::from(part[1].as_text().unwrap());
+                if changed_aliases.insert(path.clone()) {
+                    if changed_aliases.len() % 2 == 0 {
+                        std::fs::remove_file(path).unwrap();
+                    } else {
+                        std::fs::write(path, b"changed after owned capture").unwrap();
+                    }
+                }
+            }
+        }
+        assert!(
+            changed_aliases.len() >= 6,
+            "actual owned request covers companion payloads"
+        );
+        let run = crate::artifacts::test_support::with_settlement(|recipient| {
+            crate::CompileError::compiler_invocation_result(endpoint.execute_with_input_files(
+                &command,
+                offer.input_transport_files(),
+                |close| recipient(close),
+            ))
+        })
+        .unwrap();
         std::fs::write(root.join("consumer.stdout"), &run.output.stdout).unwrap();
         std::fs::write(root.join("consumer.stderr"), &run.output.stderr).unwrap();
         crate::diag::decode_extract_result(run.success(), &run.output.stdout, &run.output.stderr)
@@ -11756,7 +11905,7 @@ mod tests {
         assert!(local.validate_receipt(receipt, None, &empty).is_err());
         let conflicting_root = root.join("conflicting-issuer");
         std::fs::create_dir(&conflicting_root).unwrap();
-        let changed = crate::declaration_join::certify_authored_declaration(
+        let changed = crate::artifacts::test_support::certify_authored_declaration(
             module,
             &original_path,
             original,
@@ -11941,7 +12090,7 @@ mod tests {
         )
         .unwrap();
         let certificate = Arc::new(
-            crate::declaration_join::certify_authored_declaration(
+            crate::artifacts::test_support::certify_authored_declaration(
                 owner,
                 &original_path,
                 original_source,

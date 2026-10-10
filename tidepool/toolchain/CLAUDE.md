@@ -27,6 +27,14 @@ Rust artifact cache. The resident compiler daemon has a separate,
 dependency-validated module memo that can reuse immutable support across those
 requests. Matched measurement tests are the evidence for costs and savings.
 
+Runtime, exact, authored and retained-entry policies carry a borrowed caller-owned
+compiler settlement recipient. It retains independent close evidence through
+operation unwind; each known-unsubmitted retry forwards another affine observation
+to the same recipient. Actual execution transfers selected sealed input files to
+the endpoint transaction owner. Keep `CompilerCloseUnconfirmed` and its completed
+action typed, and never replay it. Declared build actions use their file-only
+isolated invocation and do not acquire owned request transport.
+
 The recipe binds source bytes, the generated module filename, ordered targets
 and absolute import roots, and the bound compiler's producer identity. Unknown
 options are uncacheable. A recipe lookup does not scan entire import trees.

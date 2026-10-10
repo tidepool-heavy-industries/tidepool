@@ -59,23 +59,25 @@ qualification.
 
 ## Exact-scope transport
 
-Exact-scope manifests use strict `TPEXACTSCOPE` version 12 with eleven fields. The final
+Exact-scope manifests use strict `TPEXACTSCOPE` version 13 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization
 or null, the exact published source selection roots, and an input acquisition.
-Acquisition is `["fresh-files"]` or `["continue-originals", images]`. Each image
+Acquisition is `["fresh-files"]` or `["continue-originals", arenaDescriptors, images]`. Each arena descriptor binds a canonical absolute `/proc/<owner-pid>/fd/<fd>` endpoint and sealed extent; parts select the table index and bounded offset, with their existing positive length. Cold reads verify all four memfd seals, extent, range and SHA on the same opened FD. The host retains the actual files through compiler close; a replacement worker can capture them independently. Durable recovery and exported fixtures use authenticated files, never process endpoints. Each image
 binds the compiler producer, unit/module and ordered kind/SHA/length facts;
-receiving materialization paths and authenticated protected origins are sealed
-by the receiving envelope, independently of content identity. Closed part kinds
+receiving logical paths and authenticated issuing origins are provenance bound
+by the receiving envelope, independently of content identity. Their later drift
+does not revoke captured bytes. Closed part kinds
 are interface, packages, certificate, Core, native, census and graph. Interface rows have eight fields; their final field declares one
 closed artifact role: `["module", certificate path, certificate SHA, optional
 Core path, optional Core SHA]`, the same five-field `["native-declaration", ...]`
 for native authored originals, `["join"]`, or `["value"]`. Native product
 owners require canonical module evidence. Roles never come from module-name spelling.
 
-Native product rows retain their selected group outlines and a sealed path/SHA
+Native product rows retain exact selected ordinals and a logical path/SHA
 descriptor for the existing `TPHOMEOWNERS` version 5 certificate. The worker
-admits its full native census once against the original owner, native bytes,
-canonical certificate and selected outlines. Availability and selected roots
+admits and indexes its full native census once against the original owner, native
+bytes and canonical certificate. Selected projections borrow indexed groups;
+private availability explicitly selects the complete certified ordinal set. Availability and selected roots
 remain separate: later checked demand selects groups from the same stored native
 carrier, without promoting that owner's Core or emitting another native product.
 
@@ -95,9 +97,9 @@ encoded byte budget defaults to four GiB and is configured by the trusted host's
 `TIDEPOOL_REQUEST_CAPTURE_BYTES` positive integer. Decoded GHC data is accounted
 separately. The compiler universe retains path-free original content and decoded
 certificate, sidecar, census and graph facts. Each continuation creates a fresh
-receiving allowance, selected paths and terminal observations; no earlier
+receiving allowance, selected paths and current-source observations; no earlier
 manifest or scratch observation is inherited. Worker misses read only the
-offered owned materialization. Fresh acquisition always reads its offered files.
+offered sealed arena ranges. Fresh acquisition always reads its offered files.
 Inactive content uses union-unique byte accounting, at most 4096 images, and
 `TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES` (nonnegative bytes; experimental default
 128 MiB, clamped to the request allowance). Eviction prunes associated decoded
@@ -119,23 +121,21 @@ Installed packages belong to the matched pinned immutable compiler universe.
 Their exact resolution is checked in each consuming environment, with fresh
 interface seal observations at admission and terminal publication. Package
 objects and shared libraries are not request snapshots. Current source selection,
-source/dependency and negative-candidate checks remain fresh. Terminal publication
-also re-observes the receiving materializations and selected protected original
-paths issued by acquisition, refusing persistent drift while snapshot
-consumption stays independent of transient producer-path mutations. Prepared
-candidate results retain the issuer's opaque admission through certification and
-program retention. Durable support copies bind explicit path aliases to that
-same captured payload and budget; terminal publication observes both paths.
+source/dependency and negative-candidate checks remain fresh. Prepared candidate
+results retain the issuer's opaque admission through certification and program
+retention. Captured originals remain available from their immutable byte owner;
+terminal publication does not reopen their origin or materialization paths.
 Retention and checked receipt publication capture source evidence before one
-terminal proof over their required scopes. That proof shares current path
-observations only across its read-only checks; no observations survive into
-publication, cancellation recovery or further compiler work.
+terminal proof over their required scopes. That proof shares current scope,
+package/import and newly materialized output observations; no observations
+survive into publication, cancellation recovery or further compiler work.
 
 Execution parcels retain `[SHA, absolute graph-file path]` descriptors and exact
 original references. Exact-scope graph paths come from the retained immutable
 artifact owner; the request keeps its complete parent custody alive while the
-worker consumes them. Their sealed paths and digests transport selected bytes;
-graph producer and complete original identity checks establish compatibility.
+worker consumes them. Their logical paths and digests bind selected identity; owned acquisition transports
+the captured graph bytes through arena ranges. Graph producer and complete original
+identity checks establish compatibility.
 Unchanged `TPEXECUTIONSOURCE` bytes remain independent of the metadata envelope.
 Metadata is limited to four MiB. Execution graphs retain their 64 MiB aggregate
 and 4096-graph bounds. Authored source is bounded separately at 32 MiB of UTF-8;

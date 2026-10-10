@@ -1,7 +1,7 @@
 -- | Strict bounded prefixes without reserving the entire byte ceiling.
 -- Callers read their limit plus one byte to detect oversized or growing files.
 module Tidepool.BoundedRead
-  ( readFileAtMost, hGetAtMost
+  ( readFileAtMost, hGetAtMost, fileObservationTotals
   , FileObservations, FileObservation(..), withFileObservations, observeFile ) where
 
 import Control.Exception (evaluate)
@@ -24,6 +24,11 @@ data FileObservation = FileObservation
 
 withFileObservations :: (FileObservations -> IO a) -> IO a
 withFileObservations action = newIORef Map.empty >>= action . FileObservations
+
+fileObservationTotals :: FileObservations -> IO (Int,Integer)
+fileObservationTotals (FileObservations reference) = do
+  observations <- readIORef reference
+  pure (Map.size observations, sum (map (toInteger . observedByteCount) (Map.elems observations)))
 
 observeFile :: FileObservations -> FilePath -> Maybe Int -> IO FileObservation
 observeFile (FileObservations reference) path bound = do

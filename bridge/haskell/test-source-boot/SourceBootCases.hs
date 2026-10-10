@@ -1,9 +1,14 @@
 module SourceBootCases where
 
+import Tidepool.ArtifactBytes (captureArtifactBytes)
 import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..))
 import CandidateExecutionSourcesTest (executionScopeDescriptorChecks)
 
 import ExactScopeV9Test (exactScopeChecks, nativeOriginChecks, candidateCanonicalChecks)
+
+import Test.QuickCheck (quickCheckWithResult, stdArgs, maxSuccess, forAll, sublistOf, choose, classify, conjoin, counterexample, isSuccess)
+import Tidepool.OwnedInputTransport (decodeInputAcquisition)
+import Tidepool.NativeOriginalCensus (readOriginalNativeCensus, nativeCensusExactGroups, selectNativeCensusGroups)
 
 import SourceBootFixtureSupport
 
@@ -121,7 +126,7 @@ import Tidepool.CompilerProducts
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts
-  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts )
+  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, publishStagedOriginalProducts )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts
   ( captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface
@@ -222,7 +227,7 @@ import Tidepool.TurnSource (replaceTemplateMarker, spliceTemplate, preambleImpor
 import Tidepool.Binders (BoundBinder(..), analyzeCellWithFlags, defaultParserDynFlags, CellSourcePlan(..))
 import Tidepool.ExecutionSource
   ( WorkerExecutionSource(..)
-  , ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), ExecutionSourceNode(..)
+  , ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..), ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceNode(..)
   , executionSourceClosure, executionSourceOriginalNode, executionSourceOriginalClosure, executionIdentityKey
   , ExecutionSourceFailure(..), ExecutionSourceRecipe(..), issueExecutionSourceRecipe, executionSourceProspectiveReferences
   , executionNodeOriginalResolutions
@@ -609,8 +614,8 @@ exactScopeBinders = withScratch $ \work -> do
           fail "exact original group conversion changed binder identities or group order"
       refused groups = do
         result <- readGroups groups
-        unless (case result of Left reason -> "duplicate exact original binders" `isInfixOf` reason; Right _ -> False) $
-          fail "exact scope accepted duplicate original binder identity"
+        unless (case result of Left reason -> "expected word" `isInfixOf` reason || "expected uint" `isInfixOf` reason || "expected" `isInfixOf` reason; Right _ -> False) $
+          fail "exact scope accepted request-supplied native binder outlines"
       answer = binder "value" "answer" Nothing
       sameSpelling = [answer, binder "type" "answer" Nothing
         , binder "value" "answer" (Just "RecordA"), binder "value" "answer" (Just "RecordB")]
@@ -3051,14 +3056,9 @@ originalNativeAvailabilityChecks environment scope emitted = do
           | (T.unpack unit,T.unpack name) == owner -> TList
             [text (originalUnit selected),text (originalModule selected),text (originalVersion selected)
             ,text (originalIfaceSha256 selected),text (originalProductSha256 selected)
-            ,text (originalProductPath selected),TList (map groupTerm (originalGroups selected)),descriptor]
+            ,text (originalProductPath selected),TList (map (TInteger . fromIntegral . originalOrdinal) (originalGroups selected)),descriptor]
         _ -> entry
       text = TString . T.pack
-      identityTerm value = TList [TString (symbolUnit value),TString (symbolModule value)
-        ,TString (symbolNamespace value),TString (symbolOccurrence value),maybe TNull TString (symbolRecordParent value)]
-      groupTerm group = TList [TInteger (fromIntegral (originalOrdinal group))
-        ,TList (map identityTerm (originalBinders group))
-        ,TList [TList [identityTerm identity,TBool required] | (identity,required) <- originalGlobals group]]
       requireInvalid action = action >>= \case
         Left _ -> pure ()
         Right _ -> fail "altered native selection retained its admitted census"
@@ -3071,9 +3071,6 @@ originalNativeAvailabilityChecks environment scope emitted = do
       && not (null (originalBinders group))) full of
     group : _ -> pure group
     [] -> fail "native selection fixture needs a genuine native reference"
-  (reference,required,remaining) <- case originalGlobals selected of
-    (reference,required) : remaining -> pure (reference,required,remaining)
-    [] -> fail "selected native group lost its reference"
   selectedScope <- replaceOwner (snapshot {originalGroups=[selected]}) >>= either fail pure
   zeroScope <- replaceOwner (snapshot {originalGroups=[]}) >>= either fail pure
   let row groups = [(fst owner,snd owner,groups)]
@@ -3111,12 +3108,7 @@ originalNativeAvailabilityChecks environment scope emitted = do
   -- Serialized mutations reach admission against the issuer's original census.
   let altered group = replaceOwner (snapshot {originalGroups=[group]})
       absentOrdinal = 1 + foldr (max . originalOrdinal) 0 full
-      changedReference = reference {symbolOccurrence=symbolOccurrence reference <> "_changed"}
-  forM_ [ selected {originalOrdinal=absentOrdinal}
-        , selected {originalBinders=[]}
-        , selected {originalGlobals=(changedReference,required):remaining}
-        , selected {originalGlobals=(reference,not required):remaining}
-        ] (requireInvalid . altered)
+  requireInvalid (altered (selected {originalOrdinal=absentOrdinal}))
   requireInvalid (replaceOwner (snapshot {originalGroups=[selected,selected]}))
   let changedDigest value = case value of
         '0':rest -> '1':rest
@@ -3130,14 +3122,13 @@ originalNativeAvailabilityChecks environment scope emitted = do
         ] (requireInvalid . replaceOwner)
   requireInvalid (readScopeVariant selectedScope (\fields -> take 3 fields
     ++ [TString (T.pack (changedDigest (scopeProducerSha256 selectedScope)))] ++ drop 4 fields))
-  let normalized = selected {originalGlobals=reverse (originalGlobals selected) ++ [(reference,required)]}
-  normalizedScope <- altered normalized >>= either fail pure
-  revalidateExactScope environment normalizedScope >>= either fail pure
   productBytes <- BS.readFile (originalProductPath snapshot)
   (BS.writeFile (originalProductPath snapshot) (BS.snoc productBytes 0)
-      >> revalidateExactScope environment selectedScope >>= \case
-        Left _ -> pure ()
-        Right _ -> fail "changed native payload passed terminal revalidation")
+      >> readExactScope (scopeManifestPath selectedScope) >>= \case
+        Left _ -> revalidateExactScope environment selectedScope >>= \case
+          Right () -> pure ()
+          Left _ -> fail "captured native payload path drift invalidated terminal revalidation"
+        Right _ -> fail "fresh native product acquisition accepted a mismatched current output")
     `finally` BS.writeFile (originalProductPath snapshot) productBytes
   revalidateExactScope environment selectedScope >>= either fail pure
   originalNativeCensusRoundTripChecks environment scope owner available
@@ -3187,6 +3178,25 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
     _ -> fail "native census control lacks an actual HOME v5 certificate"
   unless (digest nativeBytes == descriptorSha && encode nativeTerm == nativeBytes) $
     fail "actual HOME v5 bytes did not retain their canonical roundtrip and SHA"
+  indexed <- readOriginalNativeCensus descriptorPath descriptorSha
+  let groups = nativeCensusExactGroups indexed
+      ordinals = map originalOrdinal groups
+      absent = 1 + maximum (0:ordinals)
+  property <- quickCheckWithResult stdArgs {maxSuccess=128} $ forAll (sublistOf groups) $ \selection ->
+    let requested = map originalOrdinal selection
+    in classify (null selection) "zero selected groups"
+      $ classify (not (null selection) && length selection < length groups) "proper selected projection"
+      $ conjoin
+        [ counterexample "ordinal projection differs from independently selected original facts"
+            (selectNativeCensusGroups indexed requested == Right selection)
+        , counterexample "ordinal projection changed caller order"
+            (selectNativeCensusGroups indexed (reverse requested) == Right (reverse selection))
+        , counterexample "absent ordinal acquired native authority"
+            (case selectNativeCensusGroups indexed [absent] of Left _ -> True; Right _ -> False)
+        , counterexample "duplicate ordinal acquired duplicate native authority"
+            (case requested of [] -> True; ordinal:_ -> case selectNativeCensusGroups indexed (ordinal:requested) of Left _ -> True; Right _ -> False)
+        ]
+  unless (isSuccess property) (fail "authenticated native census ordinal projection property failed")
   zero <- readAltered "zero-selection" (\case
       [unit,name,version,iface,productSha,path,_,descriptor] ->
         pure [unit,name,version,iface,productSha,path,TList [],descriptor]
@@ -3234,8 +3244,8 @@ originalNativeCensusRoundTripChecks environment scope owner available = do
       Right _ -> fail "changed issued native certificate retained its descriptor authority")
     `finally` BS.writeFile descriptorPath nativeBytes
   (BS.writeFile descriptorPath (BS.snoc nativeBytes 0) >> revalidateExactScope environment scope >>= \case
-      Left _ -> pure ()
-      Right () -> fail "cached native census bypassed current receipt integrity")
+      Right () -> pure ()
+      Left _ -> fail "captured native census path drift invalidated terminal revalidation")
     `finally` BS.writeFile descriptorPath nativeBytes
   restored <- readExactScope (scopeManifestPath scope) >>= either fail pure
   unless (scopeAvailableOriginalProducts restored == available && scopeProducts restored == scopeProducts scope) $
@@ -3425,11 +3435,12 @@ originalProjectionProducts = withScratch $ \work -> do
   sharedBytes <- BS.readFile (segmentDirectory </> "module-products.cbor")
   unless (sharedBytes == emittedInventory) $
     fail "segment original issuance changed the certified native inventory"
-  sharedFacts <- readCertificateCodecFacts work (segmentDirectory </> "certified-products.cbor")
+  let receiptDirectory = work </> ".exact-compilations"
+  receiptsBefore <- doesDirectoryExist receiptDirectory >>= \exists ->
+    if exists then listDirectory receiptDirectory else pure []
+  prematureCertificate <- doesFileExist (segmentDirectory </> "certified-products.cbor")
+  when prematureCertificate (fail "staged segment published its original certificate before completion")
   ordinaryFacts <- readCertificateCodecFacts work (captureDirectory </> "certified-products.cbor")
-  unless (codecCertificateModules sharedFacts == codecCertificateModules ordinaryFacts
-      && null (codecCertificateTargets sharedFacts)) $
-    fail "segment originals changed module ordinals or advertised executable targets"
   let ordinaryTarget = case codecCertificateTargets ordinaryFacts of
         [("usesGood",references)] -> references
         _ -> error "ordinary producer lost its selected target"
@@ -3449,6 +3460,22 @@ originalProjectionProducts = withScratch $ \work -> do
       when duplicated (fail ("item copied segment original facts: " ++ name))
     unchanged <- BS.readFile (segmentDirectory </> "module-products.cbor")
     unless (unchanged == sharedBytes) (fail "item emission changed immutable original facts")
+  receiptsAfterItems <- doesDirectoryExist receiptDirectory >>= \exists ->
+    if exists then listDirectory receiptDirectory else pure []
+  unless (receiptsAfterItems == receiptsBefore) $
+    fail "staged segment published a compilation receipt before completion"
+  _ <- publishStagedOriginalProducts paired sharedCertificate
+  sharedFacts <- readCertificateCodecFacts work (segmentDirectory </> "certified-products.cbor")
+  receiptsAfterCompletion <- doesDirectoryExist receiptDirectory >>= \exists ->
+    if exists then listDirectory receiptDirectory else pure []
+  let expectedReceiptCount = length receiptsBefore + case preparedExactCompilation paired of
+        Nothing -> 0
+        Just _ -> 1
+  unless (length receiptsAfterCompletion == expectedReceiptCount) $
+    fail "completed staged segment did not publish exactly one compilation receipt"
+  unless (codecCertificateModules sharedFacts == codecCertificateModules ordinaryFacts
+      && null (codecCertificateTargets sharedFacts)) $
+    fail "completed staged segment changed original certification facts"
   let packetDirectory = captureDirectory </> "projected-packet"
   packetCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
     packetDirectory paired (Just issuedContext) [("usesGood",currentProgram)]
@@ -3475,8 +3502,10 @@ originalProjectionProducts = withScratch $ \work -> do
     `finally` BS.writeFile (exactPath originInterface) originBytes
     :: IO (Either SomeException CertifiedOriginalProducts)
   case changedOrigin of
-    Left _ -> pure ()
-    Right _ -> fail "reused inventory published a packet from changed captured origin bytes"
+    Left failure -> fail ("captured finalized original depended on its old origin path: " ++ show failure)
+    Right reused -> unless (map moduleProductInput (certifiedOriginalProducts reused)
+        == map moduleProductInput (certifiedOriginalProducts currentCertificate)) $
+      fail "changed old origin path altered the captured original packet"
   restoredCertificate <- writeCertifiedProductsKeepingWithOriginals [work] currentInterfaces
     packetDirectory paired (Just issuedContext) [("usesGood",currentProgram)]
   unless (map moduleProductInput (certifiedOriginalProducts restoredCertificate)
@@ -3576,8 +3605,8 @@ originalProjectionProducts = withScratch $ \work -> do
     case changedOwner of
       Just (Right groups) | bad `notElem` concatMap projectedBinders groups -> pure ()
       other -> fail ("recovered-only generation change adopted stale original groups: " ++ show other)
-    -- Cached recovery consumes the admitted snapshot; persistent producer
-    -- drift is independently refused at terminal publication.
+    -- Cached recovery and terminal validation consume the admitted body; its
+    -- old producer path is no longer terminal authority.
     ownerProof <- maybe (fail "cache fixture lacks its canonical owner") pure
       (Map.lookup ("main","ProjectionOwner") (scopeModuleInterfaceProofs capturedScope))
     core <- maybe (fail "cache fixture lacks original Core") pure (canonicalCoreArtifact ownerProof)
@@ -3589,8 +3618,8 @@ originalProjectionProducts = withScratch $ \work -> do
       unless (snapshotBodies == firstBodies)
         (fail "cached original recovery replaced captured Core after producer mutation")
       terminal <- revalidateExactScope capturedEnv capturedScope
-      unless (either (const True) (const False) terminal)
-        (fail "terminal original publication accepted changed Core")
+      unless (either (const False) (const True) terminal)
+        (fail "terminal original validation depended on its captured Core path")
       ) `finally` BS.writeFile (canonicalCorePath core) originalCore
   let wrongUnitBinders = Set.map (\identity -> identity {symbolUnit = "other-unit"}) providerBinders
   case requireOriginalExecutableGlobals pairedEnv (Set.union wrongUnitBinders incompleteBinders)
@@ -3804,6 +3833,7 @@ candidateRequestSitedSiblingsAt work = do
 -- requirement; malformed controls mutate only the issued packet.
 candidateCompactInventory :: IO ()
 candidateCompactInventory = withScratch $ \work -> do
+  ownedInputTransportCodecChecks
   let identity = SymbolIdentity "main" "Fixture" "value" "entry" Nothing
       identities = [identity,identity {symbolRecordParent=Just "Parent"}
         ,identity {symbolUnit="other"},identity {symbolModule="Other"}
@@ -3825,7 +3855,7 @@ candidateCompactInventory = withScratch $ \work -> do
   issuedPath <- writeCandidateCodecFixture work CompactCandidateInventory
   issued <- readCodecTerm issuedPath
   (symbols,globalTable,rows,fields) <- case issued of
-    TList values@[TString "TPMCAN",TString "10",symbols,globalTable,TList rows,_,_] ->
+    TList values@[TString "TPMCAN",TString "11",symbols,globalTable,TList rows,_,_,_] ->
       pure (symbols,globalTable,rows,values)
     _ -> fail "production compact fixture has another candidate envelope"
   let envelope symbolTable globals' rows' = TList (replace 2 symbolTable
@@ -3880,7 +3910,7 @@ candidateCompactInventory = withScratch $ \work -> do
   _ <- readModuleCandidates expandedPath >>= either fail pure
   expanded <- readCodecTerm expandedPath
   expandedAggregate <- case expanded of
-    TList values@[_,_,_,_,TList [TList row],_,_] -> pure (TList
+    TList values@[_,_,_,_,TList [TList row],_,_,_] -> pure (TList
       (replace 4 (TList [TList row,TList (replace 1 (TString "Other") row)]) values))
     _ -> fail "production expanded-bound fixture has another candidate envelope"
   refuse "expanded-aggregate" "expanded candidate inventory exceeds" expandedAggregate
@@ -3891,6 +3921,56 @@ candidateCompactInventory = withScratch $ \work -> do
   where
     replace index value fields = [if ordinal == index then value else field
       | (ordinal,field) <- zip [0::Int ..] fields]
+
+-- This exercises framing only: decoding a descriptor does not open its FD or
+-- issue a canonical proof. Artifact admission separately authenticates bytes.
+ownedInputTransportCodecChecks :: IO ()
+ownedInputTransportCodecChecks = do
+  let text = TString . T.pack
+      seal = replicate 64 '0'
+      owner = [text seal,text "main",text "WireFixture"]
+      imageKey bytes = digest (toStrictByteString (encodeTerm (TList
+        ([text "TPORIGINALINPUT1"] ++ owner ++
+          [TList [TList [text "iface",text seal,TInt bytes]]]))))
+      part bytes index offset = TList [text "iface",text "/logical/iface.hi",text seal
+        ,TInt bytes,TList [text "/original/iface.hi"],TList [TInt index,TInteger offset]]
+      image bytes index offset = TList (owner ++ [text (imageKey bytes),TList [part bytes index offset]])
+      arena extent = TList [text "/proc/1/fd/3",TInteger extent]
+      envelope arenas images = TList [text "continue-originals",TList arenas,TList images]
+      valid = envelope [arena 4096] [image 16 0 8]
+      decode value = deserialiseFromBytes decodeInputAcquisition
+        (BSL.fromStrict (toStrictByteString (encodeTerm value)))
+      accepted value = case decode value of Right (remaining,_) -> BSL.null remaining; Left _ -> False
+      refuse label value = when (accepted value) (fail ("owned transport parser accepted " ++ label))
+  unless (accepted valid) (fail "owned transport parser refused a bounded indexed range")
+  forM_ [("absent arena",envelope [] [image 16 0 8])
+        ,("absent index",envelope [arena 4096] [image 16 1 8])
+        ,("negative offset",envelope [arena 4096] [image 16 0 (-1)])
+        ,("overflowing offset",envelope [arena 4096] [image 16 0 (2^(64::Int)-1)])
+        ,("range outside extent",envelope [arena 16] [image 16 0 1])
+        ,("zero part",envelope [arena 16] [image 0 0 0])
+        ,("duplicate endpoint",envelope [arena 4096,arena 4096] [image 16 0 8])
+        ,("excessive extent",envelope [arena (2^(63::Int))] [image 16 0 8])
+        ,("duplicate owner",envelope [arena 4096] [image 16 0 8,image 16 0 8])
+        ,("legacy acquisition",TList [text "continue-originals",TList [image 16 0 8]])] $
+    uncurry refuse
+  forM_ ["/tmp/arena","/proc/self/fd/3","/proc/01/fd/3","/proc/1/fd/03","/proc/0/fd/3"] $ \endpoint ->
+    refuse "noncanonical endpoint" (envelope [TList [text endpoint,TInt 4096]] [image 16 0 8])
+  case valid of
+    TList [tag,arenas,TList [TList fields]] -> do
+      forM_ [0,1,2,3] $ \index -> refuse "changed image identity"
+        (TList [tag,arenas,TList [TList [if position==index then text "changed" else field
+          | (position,field) <- zip [0::Int ..] fields]]])
+    _ -> fail "owned transport test envelope changed shape"
+  result <- quickCheckWithResult stdArgs {maxSuccess=128} $
+    forAll ((,,) <$> choose (0,4096) <*> choose (0,8192) <*> choose (0,4096)) $
+      \(extent,offset,bytes) ->
+        let expected = bytes > 0 && offset + bytes <= extent
+            value = envelope [arena extent] [image (fromInteger bytes) 0 offset]
+        in classify expected "bounded range" $ classify (not expected) "range refusal" $
+          counterexample (show (extent,offset,bytes)) (accepted value == expected)
+  unless (isSuccess result) (fail "owned transport framing disagreed with independent range arithmetic")
+  putStrLn "owned input transport: 128 range cases, index/extent/overflow/zero/endpoint/owner/identity/legacy refusals passed"
 
 candidateGhcLoad :: IO ()
 candidateGhcLoad = withTiming $ withScratch $ \work -> do
@@ -4504,7 +4584,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
         (executionNodeOriginalResolutions (firstContext:contexts) sharedSupport)
         == Right (map dependencyResolutionCandidates retainedResolutions)
       && case executionNodeOriginalResolutions [firstContext,secondContext {
-          executionGraphSha256=executionGraphSha256 firstContext}] sharedSupport of
+          executionGraphBody=executionGraphBody firstContext}] sharedSupport of
         Left (ExecutionSourceConflicting _) -> True; _ -> False) $
     fail "original witness inventory did not deduplicate identical graphs or refuse conflicting graph bytes"
   let changedSource = secondContext {executionGraphEvidence=(executionGraphEvidence secondContext) {
@@ -4539,7 +4619,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   unless (case executionSourceProspectiveReferences [promised] []
       [reference {executionRefGraph=executionGraphSha256 promised}] of Left _ -> True; _ -> False) $
     fail "missing promised original graph became optional unavailability"
-  let retainedLegacy = legacy {executionGraphSha256=replicate 64 'c'}
+  let retainedLegacy = legacy {executionGraphBody=captureArtifactBytes (BS.singleton 99)}
   nested <- issue legacyRecipe {recipeOwners=[ExecutionSourceOwner target True Nothing,
     ExecutionSourceOwner support False (Just (executionGraphSha256 retainedLegacy))]}
   unless (case executionSourceProspectiveReferences [nested,retainedLegacy] []
@@ -4548,7 +4628,7 @@ freshExecutionRecipeTest = withScratch $ \work -> do
   unless (case executionSourceProspectiveReferences [legacy]
       [reference {executionRefGraph=replicate 64 'b'}] [] of Left _ -> True; _ -> False) $
     fail "unsupported prospective recipe hid corrupt inherited advertised proof"
-  let oversized = graph {executionGraphBytes=BS.replicate (executionSourceGraphBytesLimit+1) 0}
+  let oversized = graph {executionGraphBody=captureArtifactBytes (BS.replicate (executionSourceGraphBytesLimit+1) 0)}
   unless (case decodeExecutionSourceGraph (executionGraphSha256 graph)
       (executionGraphBytes oversized) of Left _ -> True; _ -> False) $
     fail "direct graph decoder admitted an oversized byte envelope"

@@ -31,6 +31,7 @@ pub mod digest;
 mod execution_source;
 pub mod failclass;
 pub(crate) mod module_candidates;
+pub(crate) mod owned_input_arena;
 pub mod paths;
 pub mod prepared_artifact;
 pub mod recovery_artifacts;
@@ -58,6 +59,19 @@ pub enum CompileError {
     /// I/O error during file operations or process execution.
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
+    /// Transport failure with the endpoint's original submission classification.
+    #[error("compiler endpoint: {0}")]
+    CompilerEndpoint(#[source] tidepool_extract_cmd::SpawnError),
+    /// The action and its input descriptors remain owned by exact close
+    /// evidence. Neither a completed response nor this error permits replay.
+    #[error("compiler transaction close is unconfirmed")]
+    CompilerCloseUnconfirmed(
+        Box<
+            tidepool_extract_cmd::CompilerTransactionOutcome<
+                Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>,
+            >,
+        >,
+    ),
     /// This original preparation was reserved before compiler execution. Its
     /// retained output must never be mistaken for permission to execute again.
     #[error("entry preparation {} is unfinished; retain its original output and select a fresh preparation identity to compile again", path.display())]
@@ -134,6 +148,27 @@ pub enum CompileError {
     /// is deliberately out of scope.
     #[error("constructor identity mismatch: {0}")]
     ConstructorIdentity(#[from] artifacts::ConstructorIdentityMismatch),
+}
+
+impl CompileError {
+    /// Project a locally owned invocation only after inspecting its independent
+    /// close. A joined outer scope keeps settlement with that outer owner.
+    pub fn compiler_invocation_result(
+        outcome: tidepool_extract_cmd::CompilerTransactionOutcome<
+            Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>,
+        >,
+    ) -> Result<tidepool_extract_cmd::ExtractRun, Self> {
+        if matches!(
+            &outcome.close,
+            tidepool_extract_cmd::CompilerTransactionClose::Unconfirmed(_)
+        ) {
+            return Err(Self::CompilerCloseUnconfirmed(Box::new(outcome)));
+        }
+        outcome.action.map_err(|mut error| {
+            error.source = extract_spawn_error(error.source);
+            Self::CompilerEndpoint(error)
+        })
+    }
 }
 
 /// Rewrite an extractor spawn failure into a self-explaining `io::Error`:

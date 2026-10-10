@@ -28,17 +28,21 @@ import qualified Data.Map.Strict as Map
 import qualified Data.IntMap.Strict as IntMap
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
+import Tidepool.ArtifactBytes (ArtifactBytes, captureArtifactBytes, artifactBytes, artifactDigestBytes, checkArtifactSeal)
+import Tidepool.RequestInputs (RequestOriginalInputs, captureRequestInputTokens, continueRequestInputs, emptyCapturedOriginalContent, OriginalInputReference(..))
+import Tidepool.OwnedInputTransport (OriginalInputKind(..), OriginalInputImage(..), InputAcquisition(..), decodeInputAcquisition)
 import Tidepool.BoundedRead (readFileAtMost)
 import System.FilePath (isAbsolute)
 import Tidepool.ExecutionSchema
   ( SymbolIdentity(..), RuntimeRep(..), Signature(..), ResultContract(..) )
 import Tidepool.ExecutionSource
-  ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..)
-  , decodeExecutionSourceDescriptors, decodeExecutionSourceReferences, readExecutionSourceGraphs
+  ( ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceIdentity(..), ExecutionSourceOwner(..), ExecutionSourceRef(..)
+  , decodeExecutionSourceDescriptors, decodeExecutionSourceReferences, readExecutionSourceGraphs, readExecutionSourceGraphsWithFacts, decodeExecutionSourceBody
   , executionSourceGraphsFit, executionIdentityKey, executionSourceOriginalClosure )
 
 data ModuleCandidate = ModuleCandidate
-  { candidateUnit :: String
+  { candidateInputCustody :: Maybe RequestOriginalInputs
+  , candidateUnit :: String
   , candidateModule :: String
   , candidateSource :: FilePath
   , candidateSourceSha256 :: String
@@ -119,10 +123,10 @@ readModuleCandidates = readModuleCandidatesWithGraphs []
 
 -- The envelope is captured once. Its fingerprint and later candidate admission
 -- consume these same bounded bytes, including when the source file changes.
-data CapturedCandidateManifest = CapturedCandidateManifest FilePath BS.ByteString
+data CapturedCandidateManifest = CapturedCandidateManifest FilePath ArtifactBytes
 
 candidateManifestSha256 :: CapturedCandidateManifest -> BS.ByteString
-candidateManifestSha256 (CapturedCandidateManifest _ bytes) = SHA256.hash bytes
+candidateManifestSha256 (CapturedCandidateManifest _ bytes) = artifactDigestBytes bytes
 
 -- This is a selection key, never candidate admission. Current source,
 -- products and canonical evidence still pass the normal admission path.
@@ -130,10 +134,10 @@ newtype CandidateContextIdentity = CandidateContextIdentity BS.ByteString
   deriving (Eq)
 
 candidateContextIdentity :: CapturedCandidateManifest -> Either String CandidateContextIdentity
-candidateContextIdentity (CapturedCandidateManifest _ bytes) =
-  case deserialiseFromBytes decodeManifest (BL.fromStrict bytes) of
+candidateContextIdentity (CapturedCandidateManifest _ body) =
+  case deserialiseFromBytes decodeManifest (BL.fromStrict (artifactBytes body)) of
     Left failure -> Left (show failure)
-    Right (remaining,(candidates,_,_,producer))
+    Right (remaining,(candidates,_,_,producer,_))
       | BL.null remaining -> Right (CandidateContextIdentity (SHA256.hash (BS8.pack
           (show (producer,map identity candidates)))))
       | otherwise -> Left "candidate manifest has trailing bytes"
@@ -154,7 +158,7 @@ captureCandidateManifest path = do
     Left failure -> Left (show failure)
     Right bytes | toInteger (BS.length bytes) > maxManifestBytes ->
       Left "candidate manifest exceeds four MiB"
-    Right bytes -> Right (CapturedCandidateManifest path bytes)
+    Right bytes -> Right (CapturedCandidateManifest path (captureArtifactBytes bytes))
 
 -- Exact-scope graphs have already passed their digest and producer checks.
 -- Their inventory closes provenance; it does not grant lexical admission.
@@ -168,27 +172,67 @@ readModuleCandidatesWithGraphs exactGraphs path = do
 
 readCapturedModuleCandidatesWithGraphs
   :: [ExecutionSourceGraph] -> CapturedCandidateManifest -> IO (Either String [ModuleCandidate])
-readCapturedModuleCandidatesWithGraphs exactGraphs (CapturedCandidateManifest path bytes) = do
+readCapturedModuleCandidatesWithGraphs exactGraphs (CapturedCandidateManifest path body) = do
   result <- try (do
-    case deserialiseFromBytes decodeManifest (BL.fromStrict bytes) of
+    case deserialiseFromBytes decodeManifest (BL.fromStrict (artifactBytes body)) of
       Left failure -> pure (Left (show failure))
-      Right (remaining, (candidates, descriptors, references, producer))
+      Right (remaining, (candidates, descriptors, references, producer, acquisition))
         | BL.null remaining -> do
-            graphs <- readExecutionSourceGraphs path exactGraphs descriptors
-            pure (attachExecutionSources exactGraphs graphs references producer candidates)
+            case acquisition of
+              FreshFiles -> do
+                graphs <- readExecutionSourceGraphs path exactGraphs descriptors
+                pure (attachExecutionSources exactGraphs graphs references producer candidates)
+              ContinueOwnedOriginals images -> do
+                either fail pure (validateCandidateImages producer candidates descriptors references images)
+                base <- continueRequestInputs emptyCapturedOriginalContent
+                  [reference | OriginalInputImage _ _ _ parts <- images, (_,reference) <- parts]
+                (graphs,custody) <- captureRequestInputTokens (Just base) $ \readToken -> do
+                  forM_ candidates $ \candidate -> forM_ (candidateParts candidate) $ \(_,artifact,sha,bound) -> do
+                    token <- readToken artifact bound
+                    either fail pure (checkArtifactSeal sha token)
+                  readExecutionSourceGraphsWithFacts (\sha artifact -> do
+                    token <- readToken artifact (64 * 1024 * 1024)
+                    either fail pure (checkArtifactSeal sha token)
+                    either fail pure (decodeExecutionSourceBody token)) path descriptors
+                pure (map (\candidate -> candidate {candidateInputCustody=Just custody}) <$>
+                  attachExecutionSources exactGraphs graphs references producer candidates)
         | otherwise -> pure (Left "candidate manifest has trailing bytes"))
     :: IO (Either IOException (Either String [ModuleCandidate]))
   pure $ case result of
     Left failure -> Left (show failure)
     Right decoded -> decoded
 
-decodeManifest :: Decoder s ([ModuleCandidate], [(String, FilePath)], [ExecutionSourceRef], String)
+candidateParts :: ModuleCandidate -> [(OriginalInputKind,FilePath,String,Int)]
+candidateParts candidate =
+  [(InputInterface,candidateInterface candidate,candidateInterfaceSha256 candidate,32*1024*1024)
+  ,(InputPackages,candidatePackageImports candidate,candidatePackageImportsSha256 candidate,4*1024*1024)
+  ,(InputNative,candidateProductPath candidate,candidateProductSha256 candidate,64*1024*1024)
+  ,(InputCertificate,candidateCertificatePath proof,candidateCertificateSha256 proof,4*1024*1024)
+  ,(InputCore,fst core,snd core,32*1024*1024)]
+  where proof = candidateModuleInterface candidate; core = candidateCoreDescriptor proof
+
+validateCandidateImages :: String -> [ModuleCandidate] -> [(String,FilePath)] -> [ExecutionSourceRef]
+  -> [OriginalInputImage] -> Either String ()
+validateCandidateImages producer candidates graphs references images = do
+  let graphPaths = Map.fromList graphs
+      expected candidate = Set.fromList
+        ([(kind,path,sha) | (kind,path,sha,_) <- candidateParts candidate] ++
+          [(InputGraph,path,executionRefGraph reference) | reference <- references
+          , executionIdentityKey (executionRefIdentity reference) == (candidateUnit candidate,candidateModule candidate)
+          , Just path <- [Map.lookup (executionRefGraph reference) graphPaths]])
+      owners = Map.fromList [((candidateUnit candidate,candidateModule candidate),expected candidate) | candidate <- candidates]
+      supplied = Map.fromList [(key,Set.fromList [(kind,originalInputPath reference,originalInputSha256 reference)
+        | (kind,reference) <- parts]) | OriginalInputImage _ key _ parts <- images]
+  unless (owners == supplied && all (\(OriginalInputImage issuer _ _ _) -> issuer == producer) images)
+    (Left "candidate owned inputs differ from receiving owners and roles")
+
+decodeManifest :: Decoder s ([ModuleCandidate], [(String, FilePath)], [ExecutionSourceRef], String,InputAcquisition)
 decodeManifest = do
   count <- decodeListLen
   magic <- decodeString
   unless (magic == "TPMCAN") (fail "candidate manifest has wrong magic")
   version <- decodeString
-  unless (version == "10" && count == 7)
+  unless (version == "11" && count == 8)
     (fail "unsupported candidate manifest version or framing")
   symbols <- decodeTable $ do
     identity <- decodeIdentity
@@ -207,7 +251,8 @@ decodeManifest = do
   references <- decodeExecutionSourceReferences
   producer <- T.unpack <$> decodeString
   unless (canonicalDigest producer) (fail "invalid candidate compiler producer")
-  pure (candidates, descriptors, references, producer)
+  acquisition <- decodeInputAcquisition
+  pure (candidates, descriptors, references, producer,acquisition)
 
 attachExecutionSources :: [ExecutionSourceGraph] -> [ExecutionSourceGraph]
   -> [ExecutionSourceRef] -> String -> [ModuleCandidate] -> Either String [ModuleCandidate]
@@ -296,7 +341,7 @@ decodeCandidate symbols globals budget = do
       && isAbsolute corePath && canonicalDigest coreSha)
     (fail "invalid candidate canonical descriptor")
   let descriptor = CandidateModuleInterface certificatePath certificateSha (corePath,coreSha)
-      candidate = ModuleCandidate unit name source sourceSha interface interfaceSha
+      candidate = ModuleCandidate Nothing unit name source sourceSha interface interfaceSha
         version productSha evidenceSha imports groups packages packageSha productPath Nothing
         "" requirements descriptor
   unless (not (null (candidateUnit candidate))

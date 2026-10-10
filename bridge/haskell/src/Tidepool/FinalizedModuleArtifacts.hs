@@ -1,14 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE LambdaCase #-}
 
--- | Captured finalization files and their exact dependency seals. The receipt
--- names these bounded files; it never duplicates their payloads inline.
+-- | Compiler-issued finalization byte owners and their dependency seals.
+-- Receipts name bounded materialized views without duplicating bodies inline.
 module Tidepool.FinalizedModuleArtifacts
   ( FinalizedModuleArtifacts, captureFinalizedModuleArtifacts, materializeFinalizedModuleArtifacts
   , emptyFinalizedModuleArtifacts, encodeFinalizedModuleArtifacts, finalizedInterfaceSeals, finalizedValueInterfaceSeals
   , LocalFinalizedAdmission, finalizedLocalAdmissions
   , localFinalizedInterface, localFinalizedHomeUnits, localFinalizedSourceSha256
-  , localFinalizedRequirements, localFinalizedCore, revalidateLocalFinalizedAdmission
+  , localFinalizedRequirements, localFinalizedCore, localFinalizedInterfaceBody, localFinalizedPackageBody, localFinalizedCoreBody, revalidateLocalFinalizedAdmission
   , revalidateLocalFinalizedAdmissionWith
   , matchesCapturedFinalization ) where
 
@@ -17,7 +17,6 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Encoding
 import Control.Exception (Exception, IOException, bracket, evaluate, throwIO, try)
 import Control.Monad (forM, forM_, unless, when, replicateM)
-import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.List (sortOn)
@@ -29,7 +28,6 @@ import GHC.Unit.Home.ModInfo (HomeModInfo(..))
 import GHC.Unit.Module (ModuleName, moduleName, moduleUnit, moduleNameString, mkModule, mkModuleName)
 import GHC.Unit.Module.ModIface (mi_module)
 import GHC.Unit.Types (unitIdString, unitString, stringToUnit)
-import Numeric (showHex)
 import System.Directory (makeAbsolute, createDirectoryIfMissing, removeFile)
 import System.FilePath ((</>), normalise, isAbsolute)
 import System.IO.Error (isAlreadyExistsError)
@@ -37,14 +35,15 @@ import System.IO (openBinaryTempFile, hClose, hIsClosed)
 import System.Posix.Files (createLink, getSymbolicLinkStatus, isRegularFile)
 import System.Mem.StableName (StableName, makeStableName)
 
+import Tidepool.ArtifactBytes
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..), DependencySource(..))
-import Tidepool.BoundedRead (FileObservations, FileObservation(..), withFileObservations, observeFile, readFileAtMost)
+import Tidepool.BoundedRead (FileObservations, withFileObservations, readFileAtMost)
 import Tidepool.ExactHydration
-  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBytes, originalInterfaceSha256, originalSessionInterfaces, originalProducedSessionInterfaces )
+  ( OriginalInterfaceArtifacts, ExactIfaceArtifact(..), originalInterfaceBody, originalInterfaceSha256, originalSessionInterfaces, originalProducedSessionInterfaces )
 import Tidepool.FinalizedModule (FinalizedModule(..), homeInterfaceUsageOwners)
 import Tidepool.FinalizedCore (captureFinalizedCore, isUnsupportedFinalizedCore)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports, decodeCapturedPackageImports)
-import Tidepool.Session (capturedSessionInterface, capturedSessionInterfaceEvidence)
+import Tidepool.Session (capturedSessionInterface, capturedSessionInterfaceEvidence, capturedSessionInterfaceBody, capturedSessionInterfaceEvidenceBodies)
 
 -- The producer's strict profile limits match the owning Rust receipt decoder.
 interfaceLimit, packageLimit, coreLimit, payloadLimit :: Int
@@ -71,8 +70,6 @@ data FinalizedArtifactFailure
   deriving Show
 instance Exception FinalizedArtifactFailure
 
-data CapturedPayload = CapturedPayload FilePath T.Text Int deriving (Eq, Show)
-
 -- This identity pairs in-memory consumers with the exact compiler object that
 -- issued their files. A stable name retains neither that object nor its Core.
 newtype FinalizationIdentity = FinalizationIdentity (StableName FinalizedModule)
@@ -82,14 +79,14 @@ instance Show FinalizationIdentity where
   show _ = "FinalizationIdentity"
 
 data CapturedModule = CapturedModule
-  T.Text T.Text T.Text CapturedPayload CapturedPayload (Maybe CapturedPayload)
+  T.Text T.Text T.Text ArtifactBytes ArtifactBytes (Maybe ArtifactBytes)
   [(T.Text,T.Text,T.Text)] FinalizationIdentity
   deriving (Eq, Show)
 
 data CapturedModules = CapturedModules FilePath [CapturedModule]
 
 data CapturedValueInterface = CapturedValueInterface
-  T.Text T.Text CapturedPayload CapturedPayload [(T.Text,T.Text,T.Text)]
+  T.Text T.Text ArtifactBytes ArtifactBytes [(T.Text,T.Text,T.Text)]
 
 -- Selected type interfaces never enter the original source/native inventory.
 data FinalizedModuleArtifacts = FinalizedModuleArtifacts [T.Text] (Maybe CapturedModules) [CapturedValueInterface]
@@ -147,7 +144,7 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
         unit = unitString (moduleUnit owner)
         name = moduleNameString (moduleName owner)
     source <- T.pack <$> maybe (throwIO (MissingFinalizedSource unit name)) pure (consumedSource unit name)
-    interfaceBytes <- originalInterfaceBytes originals owner
+    interfaceBody <- originalInterfaceBody originals owner
       >>= maybe (throwIO (MissingFinalizedInterface unit name)) pure
     roots <- maybe (throwIO (MissingFinalizedPackages unit name)) pure (Map.lookup (moduleName owner) packages)
     forM_ (duplicates [(packageUnit root,packageModule root) | root <- packageInterfaces roots]) $
@@ -157,10 +154,10 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
           || null (packageUnit root) || null (packageModule root)
           || not (isAbsolute (packagePath root)) || not (validDigest (packageSha256 root))) $
         throwIO (InvalidFinalizedPackage (packageUnit root) (packageModule root))
-    let interfaceSHA = digest interfaceBytes
+    let interfaceSHA = T.pack (artifactSha256 interfaceBody)
         sidecar = encodePackageImports (ExactIfaceArtifact unit name "" (T.unpack interfaceSHA) []) roots
-    interface <- capture absoluteDirectory "hi" interfaceLimit interfaceBytes
-    package <- capture absoluteDirectory "packages.cbor" packageLimit sidecar
+    interface <- capture absoluteDirectory "hi" interfaceLimit interfaceBody
+    package <- capture absoluteDirectory "packages.cbor" packageLimit (captureArtifactBytes sidecar)
     core <- captureFinalizedCore env original absoluteDirectory >>= \case
       Right bytes -> Just <$> capture absoluteDirectory "core" coreLimit bytes
       Left refusal | isUnsupportedFinalizedCore refusal -> pure Nothing
@@ -181,12 +178,14 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
       , let (owner,_) = capturedSessionInterface snapshot
       , (T.pack (unitString (moduleUnit owner)),T.pack (moduleNameString (moduleName owner))) `Set.member` required
           || maybe False (const True) (capturedSessionInterfaceEvidence snapshot)] $ \snapshot -> do
-    let (owner,bytes) = capturedSessionInterface snapshot
+    let (owner,body) = capturedSessionInterfaceBody snapshot
         unit = unitString (moduleUnit owner)
         name = moduleNameString (moduleName owner)
-        artifact = ExactIfaceArtifact unit name "" (T.unpack (digest bytes)) []
-    (packageBytes,requirementBytes,nominalOwners) <- maybe
-      (throwIO (MissingFinalizedPackages unit name)) pure (capturedSessionInterfaceEvidence snapshot)
+        artifact = ExactIfaceArtifact unit name "" (artifactSha256 body) []
+    (packageBody,requirementBody,nominalOwners) <- maybe
+      (throwIO (MissingFinalizedPackages unit name)) pure (capturedSessionInterfaceEvidenceBodies snapshot)
+    let packageBytes = artifactBytes packageBody
+        requirementBytes = artifactBytes requirementBody
     _ <- either fail pure (decodeCapturedPackageImports artifact packageBytes)
     owners <- case deserialiseFromBytes decodeValueRequirements (BL.fromStrict requirementBytes) of
       Right (remaining,selected) | BL.null remaining
@@ -199,8 +198,8 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
       sha <- originalInterfaceSha256 originals (mkModule (stringToUnit requiredUnit) (mkModuleName requiredName))
         >>= maybe (throwIO (MissingFinalizedDependency requiredUnit requiredName)) pure
       pure (T.pack requiredUnit,T.pack requiredName,T.pack sha)
-    interface <- capture absoluteDirectory "value.hi" interfaceLimit bytes
-    package <- capture absoluteDirectory "value.packages.cbor" packageLimit packageBytes
+    interface <- capture absoluteDirectory "value.hi" interfaceLimit body
+    package <- capture absoluteDirectory "value.packages.cbor" packageLimit packageBody
     pure (CapturedValueInterface (T.pack unit) (T.pack name) interface package dependencies)
   forM_ (duplicates [(unit,name) | CapturedValueInterface unit name _ _ _ <- values]) $
     \(unit,name) -> throwIO (DuplicateFinalizedOwner (T.unpack unit) (T.unpack name))
@@ -215,13 +214,13 @@ captureFinalizedModuleArtifacts originals env finalized packages evidence direct
     sourcePath path = do
       when (null path) $ throwIO (InvalidFinalizedSource path)
       normalise <$> makeAbsolute path
-    capture absoluteDirectory suffix limit bytes = do
+    capture absoluteDirectory suffix limit body = do
+      let bytes = artifactBytes body
       when (BS.null bytes || BS.length bytes > limit) $ throwIO (FinalizedPayloadTooLarge suffix)
-      let sha = digest bytes
-          relative = T.unpack sha ++ ".finalized." ++ suffix
+      let relative = artifactSha256 body ++ ".finalized." ++ suffix
       BS.writeFile (absoluteDirectory </> relative) bytes
-      pure (CapturedPayload relative sha (BS.length bytes))
-    size (CapturedPayload _ _ count) = count
+      pure body
+    size = artifactLength
 
 -- Each packet owns every relative payload it encodes, even when projection
 -- reuses a finalization captured for another packet in the same transaction.
@@ -231,55 +230,48 @@ materializeFinalizedModuleArtifacts :: FilePath -> FinalizedModuleArtifacts -> I
 materializeFinalizedModuleArtifacts directory artifacts@(FinalizedModuleArtifacts units captured values) =
   case captured of
     Nothing -> pure artifacts
-    Just (CapturedModules source rows) -> do
+    Just (CapturedModules _ rows) -> do
       destination <- normalise <$> makeAbsolute directory
-      if destination == source then pure artifacts else do
-        createDirectoryIfMissing True destination
-        let payloads = concat
-              [[(interfaceLimit,interface),(packageLimit,package)]
-                ++ maybe [] (\payload -> [(coreLimit,payload)]) core
-              | CapturedModule _ _ _ interface package core _ _ <- rows]
-              ++ concat [[(interfaceLimit,interface),(packageLimit,package)]
-                | CapturedValueInterface _ _ interface package _ <- values]
-        forM_ payloads $ \(limit,payload@(CapturedPayload _ sha count)) -> do
-          let original = payloadPath source payload
-              output = payloadPath destination payload
-          when (count <= 0 || count > limit) $
-            throwIO (CapturedFinalizedPayloadChanged original)
-          originalStatus <- getSymbolicLinkStatus original
-          unless (isRegularFile originalStatus) $
-            throwIO (CapturedFinalizedPayloadChanged original)
-          bytes <- readFileAtMost original (count + 1)
-          unless (BS.length bytes == count && digest bytes == sha) $
-            throwIO (CapturedFinalizedPayloadChanged original)
-          bracket (openBinaryTempFile destination "finalized-payload.tmp")
-            (\(temporary,handle) -> do
-              closed <- hIsClosed handle
-              unless closed (hClose handle)
-              removeFile temporary)
-            (\(temporary,handle) -> do
-              BS.hPut handle bytes
-              hClose handle
-              linked <- try (createLink temporary output) :: IO (Either IOException ())
-              case linked of
-                Left failure | isAlreadyExistsError failure -> pure ()
-                             | otherwise -> throwIO failure
-                Right () -> pure ())
-          outputStatus <- getSymbolicLinkStatus output
-          unless (isRegularFile outputStatus) $
-            throwIO (CapturedFinalizedPayloadChanged output)
-          owned <- readFileAtMost output (count + 1)
-          unless (owned == bytes) $
-            throwIO (CapturedFinalizedPayloadChanged output)
-        pure (FinalizedModuleArtifacts units (Just (CapturedModules destination rows)) values)
-
+      createDirectoryIfMissing True destination
+      let payloads = concat
+            [[("hi",interfaceLimit,interface),("packages.cbor",packageLimit,package)]
+              ++ maybe [] (\payload -> [("core",coreLimit,payload)]) core
+            | CapturedModule _ _ _ interface package core _ _ <- rows]
+            ++ concat [[("value.hi",interfaceLimit,interface),("value.packages.cbor",packageLimit,package)]
+              | CapturedValueInterface _ _ interface package _ <- values]
+      forM_ payloads $ \(suffix,limit,body) -> do
+        let output = payloadPath destination suffix body
+            bytes = artifactBytes body
+            count = artifactLength body
+        when (count <= 0 || count > limit) $
+          throwIO (CapturedFinalizedPayloadChanged output)
+        bracket (openBinaryTempFile destination "finalized-payload.tmp")
+          (\(temporary,handle) -> do
+            closed <- hIsClosed handle
+            unless closed (hClose handle)
+            removeFile temporary)
+          (\(temporary,handle) -> do
+            BS.hPut handle bytes
+            hClose handle
+            linked <- try (createLink temporary output) :: IO (Either IOException ())
+            case linked of
+              Left failure | isAlreadyExistsError failure -> pure ()
+                           | otherwise -> throwIO failure
+              Right () -> pure ())
+        outputStatus <- getSymbolicLinkStatus output
+        unless (isRegularFile outputStatus) $
+          throwIO (CapturedFinalizedPayloadChanged output)
+        owned <- readFileAtMost output (count + 1)
+        unless (owned == bytes) $
+          throwIO (CapturedFinalizedPayloadChanged output)
+      pure (FinalizedModuleArtifacts units (Just (CapturedModules destination rows)) values)
 finalizedInterfaceSeals :: FinalizedModuleArtifacts -> [((T.Text,T.Text),T.Text)]
 finalizedInterfaceSeals artifacts =
-  finalizedValueInterfaceSeals artifacts ++ [((unit,name),sha) | CapturedModule unit name _ (CapturedPayload _ sha _) _ _ _ _ <- capturedRows artifacts]
+  finalizedValueInterfaceSeals artifacts ++ [((unit,name),T.pack (artifactSha256 body)) | CapturedModule unit name _ body _ _ _ _ <- capturedRows artifacts]
 
 finalizedValueInterfaceSeals :: FinalizedModuleArtifacts -> [((T.Text,T.Text),T.Text)]
 finalizedValueInterfaceSeals (FinalizedModuleArtifacts _ _ values) =
-  [((unit,name),sha) | CapturedValueInterface unit name (CapturedPayload _ sha _) _ _ <- values]
+  [((unit,name),T.pack (artifactSha256 body)) | CapturedValueInterface unit name body _ _ <- values]
 
 decodeValueRequirements :: D.Decoder s [(String,String)]
 decodeValueRequirements = do
@@ -300,9 +292,9 @@ finalizedLocalAdmissions (FinalizedModuleArtifacts units captured _) = case capt
 localFinalizedInterface :: LocalFinalizedAdmission -> (ExactIfaceArtifact,FilePath,String)
 localFinalizedInterface admission@(LocalFinalizedAdmission _ directory
     (CapturedModule unit name _ interface package _ _ _)) =
-  ( ExactIfaceArtifact (T.unpack unit) (T.unpack name) (payloadPath directory interface)
+  ( ExactIfaceArtifact (T.unpack unit) (T.unpack name) (payloadPath directory "hi" interface)
       (payloadSha interface) (Map.keys (localFinalizedRequirements admission))
-  , payloadPath directory package, payloadSha package )
+  , payloadPath directory "packages.cbor" package, payloadSha package )
 
 localFinalizedHomeUnits :: LocalFinalizedAdmission -> Set.Set String
 localFinalizedHomeUnits (LocalFinalizedAdmission units _ _) = Set.fromList (map T.unpack units)
@@ -316,7 +308,7 @@ localFinalizedRequirements (LocalFinalizedAdmission _ _ (CapturedModule _ _ _ _ 
 
 localFinalizedCore :: LocalFinalizedAdmission -> Maybe (FilePath,String)
 localFinalizedCore (LocalFinalizedAdmission _ directory (CapturedModule _ _ _ _ _ core _ _)) =
-  (\payload -> (payloadPath directory payload,payloadSha payload)) <$> core
+  (\payload -> (payloadPath directory "core" payload,payloadSha payload)) <$> core
 
 matchesCapturedFinalization :: LocalFinalizedAdmission -> FinalizedModule -> IO Bool
 matchesCapturedFinalization (LocalFinalizedAdmission _ _
@@ -324,41 +316,41 @@ matchesCapturedFinalization (LocalFinalizedAdmission _ _
   current <- evaluate original >>= makeStableName
   pure (captured == current)
 
--- Hash one bounded read of each captured file. Size/stat metadata is not proof;
--- substitutions, truncation and growth all refuse the local admission.
+-- Admission already owns these immutable bodies. Paths are receipt/provenance
+-- views; publishing a new file still requires its independent output checks.
 revalidateLocalFinalizedAdmission :: LocalFinalizedAdmission -> IO (Either String ())
 revalidateLocalFinalizedAdmission admission =
   withFileObservations (\observations -> revalidateLocalFinalizedAdmissionWith observations admission)
 
 revalidateLocalFinalizedAdmissionWith :: FileObservations -> LocalFinalizedAdmission -> IO (Either String ())
-revalidateLocalFinalizedAdmissionWith observations (LocalFinalizedAdmission _ directory
-    (CapturedModule _ _ _ interface package core _ _)) = do
-  checked <- mapM validate ((interfaceLimit,interface):(packageLimit,package)
-    : maybe [] (\payload -> [(coreLimit,payload)]) core)
-  pure (() <$ sequence checked)
+revalidateLocalFinalizedAdmissionWith _ (LocalFinalizedAdmission _ _
+    (CapturedModule _ _ _ interface package core _ _)) =
+  pure (() <$ mapM validate ((interfaceLimit,interface):(packageLimit,package)
+    : maybe [] (\body -> [(coreLimit,body)]) core))
   where
-    validate (limit,payload@(CapturedPayload _ sha count))
-      | count <= 0 || count > limit = pure (Left "invalid captured finalized payload length")
-      | otherwise = do
-          captured <- try (observeFile observations (payloadPath directory payload) (Just count))
-            :: IO (Either IOException FileObservation)
-          pure $ case captured of
-            Left _ -> Left "captured finalized payload is unavailable"
-            Right observed
-              | observedByteCount observed /= count -> Left "captured finalized payload length changed"
-              | observedSha256 observed /= T.unpack sha -> Left "captured finalized payload bytes changed"
-              | otherwise -> Right ()
+    validate (limit,body)
+      | artifactLength body <= 0 || artifactLength body > limit = Left "invalid captured finalized payload length"
+      | otherwise = Right ()
+
+localFinalizedInterfaceBody :: LocalFinalizedAdmission -> ArtifactBytes
+localFinalizedInterfaceBody (LocalFinalizedAdmission _ _ (CapturedModule _ _ _ body _ _ _ _)) = body
+
+localFinalizedPackageBody :: LocalFinalizedAdmission -> ArtifactBytes
+localFinalizedPackageBody (LocalFinalizedAdmission _ _ (CapturedModule _ _ _ _ body _ _ _)) = body
+
+localFinalizedCoreBody :: LocalFinalizedAdmission -> Maybe ArtifactBytes
+localFinalizedCoreBody (LocalFinalizedAdmission _ _ (CapturedModule _ _ _ _ _ body _ _)) = body
 
 capturedRows :: FinalizedModuleArtifacts -> [CapturedModule]
 capturedRows (FinalizedModuleArtifacts _ captured _) = case captured of
   Nothing -> []
   Just (CapturedModules _ rows) -> rows
 
-payloadPath :: FilePath -> CapturedPayload -> FilePath
-payloadPath directory (CapturedPayload path _ _) = directory </> path
+payloadPath :: FilePath -> String -> ArtifactBytes -> FilePath
+payloadPath directory suffix body = directory </> (artifactSha256 body ++ ".finalized." ++ suffix)
 
-payloadSha :: CapturedPayload -> String
-payloadSha (CapturedPayload _ sha _) = T.unpack sha
+payloadSha :: ArtifactBytes -> String
+payloadSha = artifactSha256
 
 encodeFinalizedModuleArtifacts :: FinalizedModuleArtifacts -> Encoding
 encodeFinalizedModuleArtifacts artifacts@(FinalizedModuleArtifacts units _ values) =
@@ -367,19 +359,16 @@ encodeFinalizedModuleArtifacts artifacts@(FinalizedModuleArtifacts units _ value
   where
     encodeModule (CapturedModule unit name source interface package core requirements _) =
       array ([encodeString unit,encodeString name,encodeString source]
-        ++ payloadFields interface ++ payloadFields package
-        ++ [maybe encodeNull (array . payloadFields) core,list encodeRequirement requirements])
+        ++ payloadFields "hi" interface ++ payloadFields "packages.cbor" package
+        ++ [maybe encodeNull (array . payloadFields "core") core,list encodeRequirement requirements])
     valueOwner (CapturedValueInterface unit name _ _ _) = (unit,name)
     encodeValue (CapturedValueInterface unit name interface package requirements) =
-      array ([encodeString unit,encodeString name] ++ payloadFields interface ++ payloadFields package
+      array ([encodeString unit,encodeString name] ++ payloadFields "value.hi" interface ++ payloadFields "value.packages.cbor" package
         ++ [list encodeRequirement requirements])
     encodeRequirement (unit,name,sha) = array (map encodeString [unit,name,sha])
-    payloadFields (CapturedPayload path sha count) =
-      [encodeString (T.pack path),encodeString sha,encodeWord64 (fromIntegral count)]
-
-digest :: BS.ByteString -> T.Text
-digest = T.pack . concatMap byteHex . BS.unpack . SHA256.hash
-  where byteHex byte = let rendered = showHex byte "" in replicate (2-length rendered) '0' ++ rendered
+    payloadFields suffix body =
+      [encodeString (T.pack (artifactSha256 body ++ ".finalized." ++ suffix))
+      ,encodeString (T.pack (artifactSha256 body)),encodeWord64 (fromIntegral (artifactLength body))]
 
 validDigest :: String -> Bool
 validDigest value = length value == 64 && all (`elem` (['0'..'9'] ++ ['a'..'f'])) value

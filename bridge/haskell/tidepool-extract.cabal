@@ -86,6 +86,7 @@ library tidepool-extract-internal
     Tidepool.FinalizedCore
     Tidepool.GhcPipeline
     Tidepool.ExactHydration
+    Tidepool.ArtifactBytes
     Tidepool.RequestInputs
     Tidepool.ExactScope
     Tidepool.ExecutionSource
@@ -132,6 +133,7 @@ library tidepool-extract-internal
   other-modules:   Tidepool.LocalNativeDeclaration
                    Tidepool.ResumePackage
                    Tidepool.TypedSegment.Types
+                   Tidepool.OwnedInputTransport
                    Tidepool.NativeOriginalCensus
   build-depends:
     base         >= 4.20 && < 5,
@@ -652,6 +654,7 @@ executable source-boot-child
     base >= 4.20 && < 5,
     ghc >= 9.12 && < 9.13,
     ghc-boot >= 9.12 && < 9.13,
+    QuickCheck >= 2.14 && < 2.16,
     containers,
     bytestring,
     cborg,

@@ -1,21 +1,27 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 
-module RequestInputsTest (requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, validationTimingControl) where
 
-import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, fromException, throwIO, try)
+import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try)
 import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Monad (foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (newIORef, modifyIORef', readIORef)
-import Data.List (isInfixOf, isPrefixOf, nub, stripPrefix)
+import Data.List (isInfixOf, isPrefixOf, nub, stripPrefix, tails)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, makeAbsolute, removeFile, setPermissions, Permissions(..))
 import System.FilePath ((</>), takeDirectory)
-import System.IO (hFlush, hGetLine, hPutStrLn)
+import System.IO (hClose, hFlush, hGetLine, hPutStrLn)
+import Foreign.C.String (CString, withCString)
+import Foreign.C.Types (CInt(..), CUInt(..))
+import System.Posix.Types (Fd(..))
+import System.Posix.IO (fdToHandle, closeFd)
+import System.Posix.Process (getProcessID)
 import System.Process (CreateProcess(..), StdStream(CreatePipe), callProcess, proc, waitForProcess, withCreateProcess)
 import System.Exit (ExitCode(ExitSuccess))
 import GHC.Conc (ThreadStatus(..), threadStatus)
@@ -35,25 +41,111 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.ExactScope
   ( ExactScope, ExactCompilation(..), SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
-  , scopeInterfaces, scopeModuleInterfaceProofs, canonicalCertificatePath
-  , canonicalCoreArtifact, canonicalCorePath, readExactScope, revalidateExactScope
-  , writeCheckedExactCompilation, writeRetainedExactCompilation, newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes )
+  , scopeInterfaces, scopeModuleInterfaceProofs, readExactScope, revalidateExactScope
+  , writeCheckedExactCompilation, writeRetainedExactCompilation
+  , writeRetainedExactCompilationWithOutputsAndPublication
+  , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), PreparedPipelineResult(..), PipelineResult(..)
   , runPipelineSessionSelected, preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents )
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
+import Tidepool.ArtifactBytes
 import Tidepool.RequestInputs
 import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..))
 import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope)
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
 import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer)
+import Tidepool.Timing (readSummaryTimingEnabled, withValidationTiming)
 import Codec.CBOR.Term (Term(..), encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
 import SourceBootCases (admitCheckedScope, counterValues)
 import CodecFixtureSupport (readCodecTerm)
 import SourceBootFixtureSupport (withScratch, withTiming, digest, capturePreparedFixture, captureDiagnostics)
+
+foreign import ccall unsafe "memfd_create" createArena :: CString -> CUInt -> IO CInt
+foreign import ccall unsafe "fcntl" sealArena :: CInt -> CInt -> CInt -> IO CInt
+
+-- Exercise the production cold reader against real sealed Linux arenas. The
+-- logical artifact path is absent throughout; it never becomes a read source.
+ownedArenaRangeReads :: IO ()
+ownedArenaRangeReads = withScratch $ \work -> do
+  let bytes = BS.pack [10,20,30]
+      backing = BS.pack [90,91] <> bytes <> BS.pack [92,93]
+      acquire seal = do
+        raw <- withCString "tidepool-artifact-byte-test" (\name -> createArena name 3)
+        when (raw < 0) (fail "memfd_create failed")
+        handle <- bracketOnError (pure (Fd raw)) closeFd fdToHandle
+        (do BS.hPut handle backing
+            hFlush handle
+            when seal $ do
+              result <- sealArena raw 1033 15
+              unless (result == 0) (fail "arena sealing failed")) `onException` hClose handle
+        pid <- getProcessID
+        pure (handle,"/proc/" ++ show pid ++ "/fd/" ++ show raw)
+      release (handle,_) = hClose handle
+      reference endpoint path sha count extent offset = do
+        transport <- either fail pure (ownedArenaRange endpoint extent offset)
+        pure (OriginalInputReference path sha count [work </> "missing-producer-origin"] transport)
+      refused action = do
+        result <- try action :: IO (Either IOException RequestOriginalInputs)
+        unless (either (const True) (const False) result) (fail "invalid owned arena input was accepted")
+  bracket (acquire True) release $ \(_,endpoint) -> do
+    selected <- reference endpoint (work </> "missing-logical-artifact") (digest bytes) 3 7 2
+    cold <- continueRequestInputs emptyCapturedOriginalContent [selected]
+    actual <- capturedRequestInput cold (originalInputPath selected) (digest bytes)
+    unless (actual == bytes && requestInputBytes cold == 3) (fail "cold arena range capture differs")
+    retained <- either fail pure (selectedOriginalContent [selected] cold)
+    badSha <- reference endpoint (work </> "bad-sha") (digest (BS.singleton 0)) 3 7 2
+    badLength <- reference endpoint (work </> "bad-length") (digest bytes) 2 7 2
+    badExtent <- reference endpoint (work </> "bad-extent") (digest bytes) 3 8 2
+    badRange <- reference endpoint (work </> "bad-range") (digest bytes) 3 7 6
+    forM_ [badSha,badLength,badExtent,badRange] $ \bad -> refused (continueRequestInputs emptyCapturedOriginalContent [bad])
+    refused (continueRequestInputs retained [badRange])
+    second <- reference endpoint (work </> "another-logical-artifact") (digest bytes) 3 7 2
+    shared <- continueRequestInputs emptyCapturedOriginalContent [selected,second]
+    firstBody <- capturedRequestInputToken shared (originalInputPath selected) (digest bytes)
+    secondBody <- capturedRequestInputToken shared (originalInputPath second) (digest bytes)
+    let (firstOwner,_,_) = BSI.toForeignPtr (artifactBytes firstBody)
+        (secondOwner,_,_) = BSI.toForeignPtr (artifactBytes secondBody)
+    unless (firstOwner == secondOwner && requestInputBytes shared == 6)
+      (fail "equal cold arena ranges copied bodies or lost per-path allowance")
+    withFixtureEnvironment "TIDEPOOL_REQUEST_CAPTURE_BYTES" "3" $
+      refused (continueRequestInputs retained [selected,second])
+    replacement <- continueRequestInputs emptyCapturedOriginalContent [selected]
+    replacementBytes <- capturedRequestInput replacement (originalInputPath selected) (digest bytes)
+    unless (replacementBytes == bytes) (fail "fresh worker owner could not rehydrate a live arena")
+  bracket (acquire False) release $ \(_,endpoint) -> do
+    selected <- reference endpoint (work </> "unsealed") (digest bytes) 3 7 2
+    before <- listDirectory "/proc/self/fd"
+    forM_ [1..20 :: Int] $ \_ -> refused (continueRequestInputs emptyCapturedOriginalContent [selected])
+    after <- listDirectory "/proc/self/fd"
+    unless (length before == length after) (fail "failed arena reads retained file descriptors")
+
+-- The byte primitive has content identity only. Admission and budgets remain
+-- the responsibility of RequestOriginalInputs, including empty bodies.
+artifactByteOwnership :: IO ()
+artifactByteOwnership = do
+  let check bytes =
+        let body = captureArtifactBytes bytes
+        in artifactBytes body == bytes
+          && artifactLength body == BS.length bytes
+          && artifactSha256 body == digest bytes
+          && BS.length (artifactDigestBytes body) == 32
+          && checkArtifactSeal (digest bytes) body == Right ()
+          && checkArtifactSeal "wrong" body /= Right ()
+          && body == captureArtifactBytes bytes
+  result <- quickCheckWithResult stdArgs {maxSuccess=180, replay=Just (mkQCGen 771208,0)}
+    (\bytes -> check (BS.pack bytes))
+  unless (isSuccess result) (fail "artifact byte identity property failed")
+  unless (check BS.empty) (fail "empty encoded byte body lost content identity")
+  let source = BS.pack [0..255]
+      body = captureArtifactBytes source
+      same = artifactBytes body
+      (sourceOwner,_,_) = BSI.toForeignPtr source
+      (bodyOwner,_,_) = BSI.toForeignPtr same
+  unless (sourceOwner == bodyOwner) (fail "artifact byte capture copied its strict body")
 
 ownedScopeInputReuse :: IO ()
 ownedScopeInputReuse = withTiming $ withScratch $ \work -> do
@@ -111,6 +203,7 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work -> do
     _ -> fail "genuine scope has another envelope"
   unless (length imageSizes == 2 && all (> 0) imageSizes)
     (fail "positive eviction fixture lacks two separately retainable images")
+
   let positiveLimit = maximum imageSizes
   unless (positiveLimit < sum imageSizes)
     (fail "positive eviction fixture lacks two separately retainable images")
@@ -132,8 +225,7 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work -> do
         held <- scopeInterfaceBytes live iface
         unless (held == bytes) (fail "inactive eviction dropped live original custody")
         revalidateExactScope (prHscEnv (pprPipelineResult original)) live >>= \result ->
-          unless (either (const True) (const False) result)
-            (fail "live custody bypassed terminal receiving-path drift")
+          either fail pure result
     revalidateExactScope (prHscEnv (pprPipelineResult original)) live >>= either fail pure
   -- GHC opens FIFO descriptors nonblocking, so an already-open RDWR peer
   -- prevents an early EOF. The reader's blocked state then establishes that
@@ -178,6 +270,51 @@ ownedScopeInputReuse = withTiming $ withScratch $ \work -> do
   unless (total "original_inputs.certificate.misses" afterReplacement == 2)
     (fail "replacement owner inherited cancelled physical-worker facts")
   putStrLn ("owned exact inputs: A/B/A reuse, deleted manifests, rotation, positive/live and zero-budget eviction, cancelled admission and replacement passed\n" ++ warm)
+
+validationTimingControl :: IO ()
+validationTimingControl = do
+  (minimalResult,minimalLog) <- bracket
+    ((,) <$> lookupEnv "TIDEPOOL_TIMING_SUMMARY" <*> lookupEnv "TIDEPOOL_TIMING")
+    (\(summary,detail) -> maybe (unsetEnv "TIDEPOOL_TIMING_SUMMARY") (setEnv "TIDEPOOL_TIMING_SUMMARY") summary
+      >> maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") detail)
+    $ \_ -> do
+      setEnv "TIDEPOOL_TIMING_SUMMARY" "1"
+      unsetEnv "TIDEPOOL_TIMING"
+      enabled <- readSummaryTimingEnabled
+      captureDiagnostics (withValidationTiming enabled "exact_scope" "explicit_scope_validation"
+        (pure [("scope_count",1)]) (pure (Right ())))
+  unless (minimalResult == Right () && length [() | line <- lines minimalLog
+      , "tidepool-validation " `isPrefixOf` line] == 1
+      && not ("tidepool-timing-detail " `isInfixOf` minimalLog))
+    (fail "minimal timing summary omitted its validation row or enabled detailed events")
+  withTiming $ do
+    let run :: IO (Either String ()) -> IO (Either String (),String)
+        run action = captureDiagnostics
+          (withValidationTiming True "exact_scope" "checked_receipt_publication"
+            (pure [("scope_count",1),("input_count",2),("observed_file_count",3),("observed_bytes",17)]) action)
+    (accepted,acceptedLog) <- run (pure (Right ()))
+    (refused,refusedLog) <- run (pure (Left "controlled refusal"))
+    (thrown,exceptionLog) <- captureDiagnostics
+      (try (withValidationTiming True "exact_scope" "checked_receipt_publication"
+        (pure []) (throwIO ThreadKilled)) :: IO (Either AsyncException (Either String ())))
+    unless (accepted == Right () && refused == Left "controlled refusal"
+        && either (const True) (const False) thrown)
+      (fail "validation timing changed a validation result or swallowed its exception")
+    let rows logText = filter ("tidepool-validation " `isPrefixOf`) (lines logText)
+        allRows = concatMap rows [acceptedLog,refusedLog,exceptionLog]
+        has outcome row = ("\"outcome\":\"" ++ outcome ++ "\"") `isInfixOf` row
+    unless (length allRows == 3
+        && length (filter (has "success") allRows) == 1
+        && length (filter (has "refused") allRows) == 1
+        && length (filter (has "exception") allRows) == 1
+        && all ("\"clock_domain\":\"ghc_monotonic_ns\"" `isInfixOf`) allRows
+        && all ("\"start_ns\":" `isInfixOf`) allRows
+        && all ("\"end_ns\":" `isInfixOf`) allRows
+        && all (\row -> "\"allocated_bytes\":" `isInfixOf` row
+            || "\"rts_scope\":\"unavailable\"" `isInfixOf` row) allRows
+        && all ("\"invocation_id\":" `isInfixOf`) allRows
+        && "\"observed_file_count\":3" `isInfixOf` acceptedLog)
+      (fail ("validation timing summary lost a bounded field or terminal outcome: " ++ show allRows))
 
 -- This fault injector invokes the actual libtest binary. It never derives
 -- success from rendered test output; receipt mutations use independently known
@@ -391,14 +528,9 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
   let environment = prHscEnv (pprPipelineResult prepared)
       evidence = preparedFreshDependencies prepared
       checked = compilationScope compilation
-      paths scope = scopeManifestPath scope
-        : concat [[exactPath iface,packages] | (iface,packages,_) <- scopeInterfaces scope]
-        ++ concat [[canonicalCertificatePath proof]
-             ++ maybe [] (pure . canonicalCorePath) (canonicalCoreArtifact proof)
-            | proof <- Map.elems (scopeModuleInterfaceProofs scope)]
-      observed = nub (paths retained ++ paths checked
+      observed = nub [scopeManifestPath retained,scopeManifestPath checked]
         ++ map dependencySourcePath (dependencySources evidence)
-        ++ map dependencySourcePath (dependencySources (selectedOriginalEvidence selected)))
+        ++ map dependencySourcePath (dependencySources (selectedOriginalEvidence selected))
       absent = nub [path | resolution <- dependencyResolutions (selectedOriginalEvidence selected)
         , path <- case dependencyResolutionSelected resolution of
             Nothing -> dependencyResolutionCandidates resolution
@@ -427,6 +559,22 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
       changed value = Just (maybe (BS.singleton 0) (<> BS.singleton 0) value)
       proofRows diagnostics = [line | line <- lines diagnostics
         , "tidepool-timing-detail parent=exact_scope phase=revalidate " `isPrefixOf` line]
+      validationRows diagnostics = [line | line <- lines diagnostics
+        , "tidepool-validation " `isPrefixOf` line]
+      validationLine diagnostics = case validationRows diagnostics of
+        [line] -> line
+        _ -> ""
+      jsonNumber key line = case
+          [value | suffix <- tails line, ("\"" ++ key ++ "\":") `isPrefixOf` suffix
+            , (value,_) <- reads (drop (length key + 3) suffix)] of
+        [value] -> value
+        _ -> error ("validation summary lacks numeric " ++ key ++ " field: " ++ line)
+      observedCounterRows diagnostics = [line | line <- lines diagnostics
+        , "tidepool-count name=hash_bytes.observed_file." `isPrefixOf` line]
+      counterNumber line = case [value | field <- words line
+          , Just raw <- [stripPrefix "count=" field], (value,_) <- reads raw] of
+        [value] -> value
+        _ -> error ("invalid observed-file counter: " ++ line)
       measurement variant diagnostics = putStrLn ("publication-proof variant=" ++ variant
         ++ " proofs=" ++ show (length (proofRows diagnostics))
         ++ " wall_ns=" ++ show (sum [read value :: Integer | line <- proofRows diagnostics
@@ -451,7 +599,15 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
             receipt <- BS.readFile (output </> "receipt.cbor")
             unless (snapshot == sourceBytes && not (BS.null receipt)) (fail "publication lost its captured source or receipt")
             unless (length (proofRows diagnostics) == 1
-                && length (counterValues ("hash_bytes.observed_file." ++ exactSha256 (fst shared)) diagnostics) == 1
+                && length (validationRows diagnostics) == 1
+                && "\"owner\":\"exact_scope\"" `isInfixOf` validationLine diagnostics
+                && "\"reason\":\"retained_receipt_publication\"" `isInfixOf` validationLine diagnostics
+                && "\"outcome\":\"success\"" `isInfixOf` validationLine diagnostics
+                && jsonNumber "observed_file_count" (validationLine diagnostics)
+                    == fromIntegral (length (observedCounterRows diagnostics))
+                && jsonNumber "observed_bytes" (validationLine diagnostics)
+                    == sum (map counterNumber (observedCounterRows diagnostics))
+                && null (counterValues ("hash_bytes.observed_file." ++ exactSha256 (fst shared)) diagnostics)
                 && length (counterValues ("hash_bytes.observed_file." ++ scopeRequestSha256 retained) diagnostics) == 1
                 && length (counterValues ("hash_bytes.observed_file." ++ scopeRequestSha256 checked) diagnostics) == 1)
               (fail "publication repeated a shared path observation or omitted one of its scopes")
@@ -480,12 +636,40 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
   (_,separateDiagnostics) <- captureDiagnostics $ do
     revalidateExactScope environment retained >>= either fail pure
     writeCheckedExactCompilation environment compilation evidence
-  unless (length (proofRows separateDiagnostics) == 2
-      && length (counterValues ("hash_bytes.observed_file." ++ exactSha256 (fst shared)) separateDiagnostics) == 2)
-    (fail "separate validation control did not observe the shared original twice")
+  unless (length (proofRows separateDiagnostics) == 2)
+    (fail "separate validation control did not produce two independent terminal proofs")
   measurement "separate" separateDiagnostics
   (_,combinedDiagnostics) <- captureDiagnostics (publish environment)
   measurement "combined" combinedDiagnostics
+  let freshOutput = work </> "fresh-retained-output.cbor"
+      publicationMarker = work </> "retained-publication-marker"
+      freshOutputBytes = BS.pack [12,34,56,78]
+      outputSeal = [(freshOutput,digest freshOutputBytes,Just (1024 * 1024))]
+      publishWithOutput = writeRetainedExactCompilationWithOutputsAndPublication
+        environment retained compilation evidence outputSeal
+        (BS.writeFile publicationMarker (BS.pack [9,8,7]))
+  BS.writeFile freshOutput freshOutputBytes
+  beforeOutputPublish <- receipts
+  (outputAccepted,outputDiagnostics) <- captureDiagnostics
+    (try publishWithOutput :: IO (Either IOException ()))
+  afterOutputPublish <- receipts
+  markerExists <- doesFileExist publicationMarker
+  unless (case outputAccepted of Right () -> markerExists && length afterOutputPublish == length beforeOutputPublish + 1; _ -> False)
+    (fail "terminal output proof did not publish exactly after observing a matching fresh output")
+  unless (length (counterValues ("hash_bytes.observed_file." ++ digest freshOutputBytes) outputDiagnostics) == 1)
+    (fail "terminal output proof omitted or repeated its fresh output observation")
+  removeFile publicationMarker
+  BS.writeFile freshOutput (BS.pack [0])
+  beforeOutputRefusal <- receipts
+  (outputRefused,refusalDiagnostics) <- captureDiagnostics
+    (try publishWithOutput :: IO (Either IOException ()))
+  afterOutputRefusal <- receipts
+  markerAfterRefusal <- doesFileExist publicationMarker
+  unless (case outputRefused of Left _ -> not markerAfterRefusal && afterOutputRefusal == beforeOutputRefusal; _ -> False)
+    (fail "mutated fresh output published a receipt or staged product")
+  unless (length (counterValues ("hash_bytes.observed_file." ++ digest (BS.pack [0])) refusalDiagnostics) == 1)
+    (fail "refused terminal output proof did not retain its observed mismatch evidence")
+  BS.writeFile freshOutput freshOutputBytes
   check environment originals
   -- Every issued file and negative candidate must reach the publication owner.
   forM_ (Map.toAscList originals) $ \(path,value) -> bracket (pure ()) (const restore) $ \_ -> do
@@ -525,11 +709,14 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
   afterCancellation <- receipts
   unless (beforeCancellation == afterCancellation) (fail "cancelled publication exposed a receipt")
   let sharedPath = exactPath (fst shared)
-      sharedBytes = originals Map.! sharedPath
-  write sharedPath (changed sharedBytes)
-  check environment (Map.insert sharedPath (changed sharedBytes) originals)
-  restore
-  check environment originals
+  sharedBytes <- BS.readFile sharedPath
+  beforeCapturedDrift <- receipts
+  BS.writeFile sharedPath (sharedBytes <> BS.singleton 0)
+  capturedDrift <- try (publish environment) :: IO (Either IOException ())
+  afterCapturedDrift <- receipts
+  BS.writeFile sharedPath sharedBytes
+  unless (case capturedDrift of Right () -> length afterCapturedDrift == length beforeCapturedDrift + 1; _ -> False)
+    (fail "terminal publication depended on a captured original materialization path")
   -- Equal installed bytes at another selected path must still refuse.
   roots <- concat <$> forM (scopeInterfaces retained) (\(iface,path,_) ->
     BS.readFile path >>= either fail (pure . packageInterfaces) . decodeCapturedPackageImports iface)
@@ -583,6 +770,7 @@ requestInputHistories = do
           receiving = directory </> "receiving-alias"
           changed = bytes <> BS.singleton 123
           reference path = OriginalInputReference path (digest bytes) (BS.length bytes) [original]
+            (either error id (ownedArenaRange path (toInteger (BS.length bytes)) 0))
       BS.writeFile historical bytes
       BS.writeFile oldManifest (BS.singleton 7)
       BS.writeFile original bytes
@@ -674,6 +862,7 @@ requestInputBoundaries = withScratch $ \directory -> do
   BS.writeFile path bytes
   BS.writeFile other bytes
   let reference destination = OriginalInputReference destination (digest bytes) 3 []
+        (either error id (ownedArenaRange destination 3 0))
   (shared,counts) <- withTiming $ captureDiagnostics
     (continueRequestInputs emptyCapturedOriginalContent [reference path,reference other])
   left <- capturedRequestInput shared path (digest bytes)
@@ -742,13 +931,13 @@ requestInputBoundaries = withScratch $ \directory -> do
       :: IO (Either IOException (BS.ByteString,RequestOriginalInputs))
     unless (either (const True) (const False) exceeds) (fail "aggregate capture budget was applied per file")
     unless (requestInputBytes bounded == 3) (fail "encoded input accounting differs from retained bytes")
-    unless (case retainRequestEncodedBytes [bytes] bounded of Nothing -> True; _ -> False)
+    unless (case retainRequestEncodedBytes [captureArtifactBytes bytes] bounded of Nothing -> True; _ -> False)
       (fail "new encoded graph bytes bypassed the request aggregate budget")
     let graphBytes = BS.pack [4,5]
     graphOwner <- maybe (fail "bounded encoded graph was refused") pure
-      (retainRequestEncodedBytes [graphBytes] bounded)
+      (retainRequestEncodedBytes [captureArtifactBytes graphBytes] bounded)
     unless (requestInputBytes graphOwner == 5
-        && fmap requestInputBytes (retainRequestEncodedBytes [graphBytes] graphOwner) == Just 5)
+        && fmap requestInputBytes (retainRequestEncodedBytes [captureArtifactBytes graphBytes] graphOwner) == Just 5)
       (fail "encoded graph generations lost accounting or charged the same graph again")
     -- A donor allowance cannot enlarge the receiver. Transfer shares bytes,
     -- including duplicate donors, and observes no current producer path.

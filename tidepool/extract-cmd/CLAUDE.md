@@ -22,8 +22,9 @@ and toolchain validation belong to `tidepool-toolchain`.
 
 `ExtractCmd::bind()` resolves one opaque compiler endpoint before callers use
 its identity. A daemon is preflighted and epoch-bound; an unavailable daemon
-before submission binds direct. `CompilerEndpoint::execute()` is the sole
-library execution route. An epoch/stamp rejection is known unsubmitted and may
+before submission binds direct. `CompilerEndpoint` owns library execution;
+requests with input descriptors use `execute_with_input_files`, while plain
+requests use `execute`. An epoch/stamp rejection is known unsubmitted and may
 be rebound and re-keyed; after acceptance, a lost response is indeterminate
 and is never replayed.
 
@@ -44,6 +45,13 @@ Request-owned input descriptors stay alive through that acknowledgement. Scoped
 callers register the original descriptor with the transaction owner; uncertain
 settlement carries physical custody in the retained close evidence. A request
 response, cancelled waiter or missing scope does not establish input release.
+Standalone input-owning invocations consume the exact bound endpoint into an
+explicit transaction. Their caller supplies an affine close sink whose recipient
+survives operation unwind; normal return preserves the action and independent
+close. Joining an existing scope keeps final settlement with its outer owner,
+and does not invoke the supplied local sink. Typed transport failure retains
+non-submission and retry facts; uncertain cleanup retains the original action
+and input custody and never authorizes replay.
 Every request against the pinned worker (plain and transaction-pinned alike),
 and each worker transaction begin/close acknowledgement, is bounded independently
 by the configured request deadline (`--request-deadline-secs`,

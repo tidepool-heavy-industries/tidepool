@@ -248,12 +248,14 @@ pub fn prepare_frozen_production_entry(
     sources: &FrozenEntrySources,
     scratch: &Path,
     output: &Path,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<ProductionEntryOutput, CompileError> {
     prepare_frozen_production_entry_with_catalog(
         sources,
         scratch,
         output,
         &crate::toolchain::CatalogSelection::FreshConfigured,
+        settlement,
     )
 }
 
@@ -262,6 +264,7 @@ pub fn prepare_frozen_production_entry_with_catalog(
     scratch: &Path,
     output: &Path,
     catalog: &crate::toolchain::CatalogSelection,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<ProductionEntryOutput, CompileError> {
     sources.revalidate()?;
     if output.exists() || !scratch.is_dir() {
@@ -285,6 +288,7 @@ pub fn prepare_frozen_production_entry_with_catalog(
             output,
             sources: &ProductionEntrySources::FrozenWorkspace(sources.clone()),
             catalog: catalog.acquire()?,
+            settlement,
         },
     )?;
     output
@@ -896,9 +900,13 @@ mod source_selection_tests {
         let selected = ProductionEntrySources::FrozenWorkspace(sources.clone());
         let output = root.path().join("entry");
         let started = std::time::Instant::now();
-        let entry =
-            prepare_frozen_production_entry_with_catalog(&sources, root.path(), &output, &catalog)
-                .unwrap();
+        let entry = crate::artifacts::test_support::prepare_frozen_production_entry_with_catalog(
+            &sources,
+            root.path(),
+            &output,
+            &catalog,
+        )
+        .unwrap();
         eprintln!("linked entry cold preparation: {:?}", started.elapsed());
         eprintln!(
             "linked entry cold first use: {:?}",
@@ -1127,7 +1135,7 @@ mod source_selection_tests {
             .unwrap();
         assert_eq!(extract_spawn_count(), before);
         assert_eq!(std::fs::read(counter).unwrap(), executions);
-        let fresh = prepare_frozen_production_entry_with_catalog(
+        let fresh = crate::artifacts::test_support::prepare_frozen_production_entry_with_catalog(
             &sources,
             root.path(),
             &root.path().join("fresh-control"),

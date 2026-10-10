@@ -5158,21 +5158,23 @@ mod tests {
             std::fs::write(&path, source).unwrap();
             let includes = [root.path().to_path_buf()];
             let certificate = match context {
-                None => crate::declaration_join::certify_authored_declaration(
+                None => crate::artifacts::test_support::certify_authored_declaration(
                     owner,
                     &path,
                     source,
                     &includes,
                     root.path(),
                 ),
-                Some(context) => crate::declaration_join::certify_authored_declaration_in_context(
-                    owner,
-                    &path,
-                    source,
-                    &includes,
-                    root.path(),
-                    context,
-                ),
+                Some(context) => {
+                    crate::artifacts::test_support::certify_authored_declaration_in_context(
+                        owner,
+                        &path,
+                        source,
+                        &includes,
+                        root.path(),
+                        context,
+                    )
+                }
             };
             Arc::new(
                 certificate.expect(

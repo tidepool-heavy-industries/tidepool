@@ -121,6 +121,9 @@ fn direct_endpoint(directory: &std::path::Path, phase: u8) {
                 let bytes = std::fs::read(path).unwrap();
                 std::fs::write(directory.join("observed-input"), bytes).unwrap();
             }
+            if phase == 16 {
+                stall(b"end");
+            }
             if phase == 7 || phase == 11 {
                 output
                     .write_all(&std::fs::read(directory.join("failure-end")).unwrap())
@@ -142,9 +145,13 @@ fn direct_endpoint(directory: &std::path::Path, phase: u8) {
         for _ in 0..u32::from_le_bytes(argc) {
             let _ = frame(&mut input);
         }
+        if phase == 14 {
+            return;
+        }
         requests += 1;
         let body = requests.to_string();
-        output.write_all(&0i32.to_le_bytes()).unwrap();
+        let exit_code: i32 = if phase == 15 { 1 } else { 0 };
+        output.write_all(&exit_code.to_le_bytes()).unwrap();
         output
             .write_all(&(body.len() as u32).to_le_bytes())
             .unwrap();

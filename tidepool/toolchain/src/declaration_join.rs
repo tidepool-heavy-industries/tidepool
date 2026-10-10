@@ -518,6 +518,7 @@ pub fn certify_authored_declaration(
     exact_source: &str,
     includes: &[PathBuf],
     session_root: &Path,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
     certify_authored_declaration_inner(
         module,
@@ -526,6 +527,7 @@ pub fn certify_authored_declaration(
         includes,
         session_root,
         None,
+        settlement,
     )
 }
 
@@ -539,6 +541,7 @@ pub fn certify_authored_declaration_in_context(
     includes: &[PathBuf],
     session_root: &Path,
     context: Arc<ExactDeclarationContext>,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
     certify_authored_declaration_inner(
         module,
@@ -547,6 +550,7 @@ pub fn certify_authored_declaration_in_context(
         includes,
         session_root,
         Some(context),
+        settlement,
     )
 }
 
@@ -557,6 +561,7 @@ fn certify_authored_declaration_inner(
     includes: &[PathBuf],
     session_root: &Path,
     context: Option<Arc<ExactDeclarationContext>>,
+    settlement: &mut dyn FnMut(tidepool_extract_cmd::CompilerTransactionClose),
 ) -> Result<CertifiedAuthoredDeclaration, CompileError> {
     if module.kind != SessionModuleKind::Lib
         || module.gen.0 == 0
@@ -592,6 +597,7 @@ fn certify_authored_declaration_inner(
         session_root,
         context.clone(),
         &authored,
+        settlement,
     )?;
     if std::fs::read(source_path)? != exact_source.as_bytes() {
         return Err(contract("authored source changed during certification"));
@@ -1993,7 +1999,7 @@ mod authored_tests {
         let path = root.path().join(module.relative_hs_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "module Tidepool.Session.Lib.G1 where\n").unwrap();
-        let error = certify_authored_declaration(
+        let error = crate::artifacts::test_support::certify_authored_declaration(
             module,
             &path,
             "module Tidepool.Session.Lib.G1 where\nx = 1\n",
@@ -2015,7 +2021,7 @@ mod authored_tests {
         let path = root.path().join(module.relative_hs_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, source).unwrap();
-        let certified = certify_authored_declaration(
+        let certified = crate::artifacts::test_support::certify_authored_declaration(
             module,
             &path,
             source,
@@ -2075,7 +2081,7 @@ mod authored_tests {
         let path = root.path().join(module.relative_hs_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, source).unwrap();
-        let result = certify_authored_declaration(
+        let result = crate::artifacts::test_support::certify_authored_declaration(
             module,
             &path,
             source,
@@ -2113,7 +2119,7 @@ mod authored_tests {
         std::fs::create_dir_all(baseline_path.parent().unwrap()).unwrap();
         std::fs::write(&baseline_path, baseline_source).unwrap();
         let baseline = Arc::new(
-            certify_authored_declaration(
+            crate::artifacts::test_support::certify_authored_declaration(
                 baseline_module,
                 &baseline_path,
                 baseline_source,
@@ -2175,7 +2181,7 @@ mod authored_tests {
         let path = root.path().join(module.relative_hs_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, source).unwrap();
-        let result = certify_authored_declaration_in_context(
+        let result = crate::artifacts::test_support::certify_authored_declaration_in_context(
             module,
             &path,
             source,
@@ -2281,7 +2287,7 @@ mod authored_tests {
         // Private executable bytes do not authorize a fresh authored import of
         // a hidden owner. Rust retains the typed outer refusal; the diagnostic
         // renders the Haskell source-selection failure and its exact owner.
-        let error = match crate::artifacts::compile_invocation_in_context(
+        let error = match crate::artifacts::test_support::compile_invocation_in_context(
             &invocation,
             Arc::clone(&hidden),
             |_, _, _| {},
@@ -2342,7 +2348,7 @@ mod authored_tests {
             context.artifact_view().selected_native_groups(),
             selected_before
         );
-        let compiled = crate::artifacts::compile_invocation_in_context(
+        let compiled = crate::artifacts::test_support::compile_invocation_in_context(
             &invocation,
             Arc::clone(&context),
             |_, _, _| {},
@@ -2380,7 +2386,7 @@ mod authored_tests {
             std::fs::write(path, source).unwrap();
         }
         let first_certificate = std::sync::Arc::new(
-            certify_authored_declaration(
+            crate::artifacts::test_support::certify_authored_declaration(
                 first,
                 &root.path().join(first.relative_hs_path()),
                 first_source,
@@ -2389,7 +2395,7 @@ mod authored_tests {
             )
             .unwrap(),
         );
-        let result = certify_authored_declaration(
+        let result = crate::artifacts::test_support::certify_authored_declaration(
             second,
             &root.path().join(second.relative_hs_path()),
             second_source,
@@ -2444,7 +2450,7 @@ mod authored_tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, source).unwrap();
         let certificate = Arc::new(
-            certify_authored_declaration(
+            crate::artifacts::test_support::certify_authored_declaration(
                 module,
                 &path,
                 source,
@@ -2654,7 +2660,7 @@ mod authored_tests {
         std::fs::create_dir_all(fresh_path.parent().unwrap()).unwrap();
         std::fs::write(&fresh_path, fresh_source).unwrap();
         let fresh_certificate = Arc::new(
-            certify_authored_declaration_in_context(
+            crate::artifacts::test_support::certify_authored_declaration_in_context(
                 fresh_module,
                 &fresh_path,
                 fresh_source,
@@ -2821,7 +2827,7 @@ mod authored_tests {
         let downstream = include_str!("../tests/fixtures/owned-declaration/ExactConsumer.hs");
         let source_free = tempfile::tempdir().unwrap();
         let include = [source_free.path().to_path_buf()];
-        let compiled = crate::artifacts::compile_invocation_in_context(
+        let compiled = crate::artifacts::test_support::compile_invocation_in_context(
             &crate::artifacts::CompileInvocation {
                 source: downstream,
                 targets: &["downstream"],

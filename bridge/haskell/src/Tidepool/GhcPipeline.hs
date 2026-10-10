@@ -174,6 +174,8 @@ import System.FilePath (takeBaseName, takeFileName, normalise, pathSeparator, (<
 import System.Directory (canonicalizePath, makeAbsolute, doesFileExist, getCurrentDirectory, getModificationTime, getTemporaryDirectory, removeDirectoryRecursive)
 import System.Posix.Temp (mkdtemp)
 import System.IO (hPutStrLn, stderr, readFile', hClose)
+import Tidepool.ArtifactBytes (ArtifactBytes, artifactBytes, artifactSha256, captureArtifactBytes)
+import Tidepool.RequestInputs (capturedRequestInputToken)
 import Tidepool.BoundedRead (readFileAtMost)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad (forM, forM_, when, unless, filterM, foldM, (>=>))
@@ -249,7 +251,7 @@ import Tidepool.ExactHydration
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
+  ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
   , scopeAvailableOriginalProducts
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner
   , ActivationPreviewAdmission(..), scopeActivationPreview
@@ -263,13 +265,13 @@ import Tidepool.ExactScope
   , canonicalCorePath, canonicalCoreSha256, canonicalHomeUnits, canonicalRequirements
   , scopeModuleInterfaceProofs, canonicalSourceSha256, canonicalSourceImports, isSourceOriginal )
 import Tidepool.ExecutionSource
-  ( ExecutionSourceGraph(..), ExecutionSourceIdentity(..)
+  ( ExecutionSourceGraph(..), executionGraphBytes, executionGraphSha256, ExecutionSourceIdentity(..)
   , ExecutionSourceFailure(..), ExecutionSourceValidationStage(..), ExecutionSourceInterfaceReason(..)
   , ExecutionSourceRef(..), executionSourceClosure, executionIdentityKey
   , executionSourceGraphsFit
   , executionNodeIdentity, executionNodeModule, executionNodeSourceSha256, executionNodeRequirements )
 import Tidepool.PackageWitness
-  ( PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports
+  ( PackageImportEvidence(..), CompilerProvidedImport(..), emptyPackageImports, packageImportRoot, readPackageImports, decodeCapturedPackageImports
   , validatePackageImportRoot, encodePackageImports )
 import Tidepool.ModuleCandidates
   ( ModuleCandidate(..), CandidateImport(..), CandidateQualifier(..), CandidateGroup(..)
@@ -4025,6 +4027,14 @@ captureDependencySources graph = do
 data CandidateLoading = CandidateInterfaceOnly | CandidateLoadForExecution
   deriving (Eq, Show)
 
+candidateInputBody :: ModuleCandidate -> FilePath -> String -> Int -> IO ArtifactBytes
+candidateInputBody candidate path sha bound = case candidateInputCustody candidate of
+  Just custody -> capturedRequestInputToken custody path sha
+  Nothing -> do
+    bytes <- readFileAtMost path (bound + 1)
+    when (BS.length bytes > bound) (fail "fresh candidate input exceeds its artifact bound")
+    pure (captureArtifactBytes bytes)
+
 data AdmittedSourceCandidate = AdmittedSourceCandidate
   { admittedCandidateOriginal :: ModuleCandidate
   , admittedCandidateRoots :: PackageImportEvidence
@@ -4261,14 +4271,19 @@ certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expect
                     inspected <- liftIO (try (sourceEvidenceWithFingerprint
                       (candidateSource candidate))
                       :: IO (Either IOException (DependencySource, Fingerprint)))
-                    packageWitness <- liftIO $ readPackageImports
-                      (candidatePackageImports candidate)
-                      (candidatePackageImportsSha256 candidate)
-                      (ExactIfaceArtifact (candidateUnit candidate)
-                        (candidateModule candidate) (candidateInterface candidate)
-                        (candidateInterfaceSha256 candidate) [])
-                    originalProduct <- liftIO (try (BS.readFile (candidateProductPath candidate))
-                      :: IO (Either IOException BS.ByteString))
+                    packageCapture <- liftIO (try (candidateInputBody candidate
+                      (candidatePackageImports candidate) (candidatePackageImportsSha256 candidate) (4 * 1024 * 1024))
+                      :: IO (Either IOException ArtifactBytes))
+                    let packageWitness = case packageCapture of
+                          Left failure -> Left (show failure)
+                          Right body | artifactSha256 body /= candidatePackageImportsSha256 candidate ->
+                            Left "candidate package sidecar differs from its seal"
+                          Right body -> decodeCapturedPackageImports
+                            (ExactIfaceArtifact (candidateUnit candidate) (candidateModule candidate)
+                              (candidateInterface candidate) (candidateInterfaceSha256 candidate) []) (artifactBytes body)
+                    originalProduct <- liftIO (try (candidateInputBody candidate
+                      (candidateProductPath candidate) (candidateProductSha256 candidate) (64 * 1024 * 1024))
+                      :: IO (Either IOException ArtifactBytes))
                     packageSelected <- liftIO $ case packageWitness of
                       Left _ -> pure False
                       Right roots -> do
@@ -4297,7 +4312,7 @@ certifyModuleCandidates requestIdentity forkContext compilerViewDirectory expect
                             recordCandidate candidate CandidateSourceSha Nothing >> pure Nothing
                         | fingerprint /= ms_hs_hash summary ->
                             recordCandidate candidate CandidateSummaryHash Nothing >> pure Nothing
-                        | hexBytes (SHA256.hash productBytes) /= candidateProductSha256 candidate ->
+                        | artifactSha256 productBytes /= candidateProductSha256 candidate ->
                             recordCandidate candidate CandidateNativeSha Nothing >> pure Nothing
                         | not packageSelected ->
                             recordCandidate candidate CandidatePackageSelection Nothing >> pure Nothing
@@ -5641,8 +5656,10 @@ validateCurrentCanonicalSources admitted interfaces sourceGraph roots = do
       liftIO (throwIO (ExecutionSourceResolutionChanged key))
     packageProof <- case [(artifact,path,sha) | (artifact,path,sha) <- scopeInterfaces admitted
         , (exactUnit artifact,exactModule artifact) == key] of
-      [(artifact,path,sha)] -> liftIO (readPackageImports path sha artifact)
-        >>= either (const (liftIO (throwIO (ExecutionSourcePackageChanged key)))) pure
+      [(artifact,path,sha)] -> do
+        bytes <- liftIO (scopeOriginalBytes admitted path sha)
+        either (const (liftIO (throwIO (ExecutionSourcePackageChanged key)))) pure
+          (decodeCapturedPackageImports artifact bytes)
       _ -> liftIO (throwIO (ExecutionSourceIncomplete key))
     forM_ (ms_textual_imps summary) $ \(qualifier,name) -> do
       resolved <- liftIO (findImportedModule env (unLoc name) qualifier)

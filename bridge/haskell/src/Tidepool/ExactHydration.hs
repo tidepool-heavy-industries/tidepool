@@ -5,7 +5,7 @@
 module Tidepool.ExactHydration
   ( OriginalInterfaceArtifacts, newOriginalInterfaceArtifacts, newOriginalInterfaceArtifactsWithSessionCaptures
   , newOriginalInterfaceArtifactsWithSessionOutputs, newOriginalInterfaceArtifactsWithReader
-  , originalInterfaceBytes, originalInterfaceSha256, originalSessionInterfaces, originalProducedSessionInterfaces, serializeOriginalInterface
+  , originalInterfaceBody, originalInterfaceBytes, originalInterfaceSha256, originalSessionInterfaces, originalProducedSessionInterfaces, serializeOriginalInterface
   , ExactIfaceArtifact(..)
   , ExactInterfaceOperations, exactInterfaceOperations, runExactInterfaceOperation
   , depanalSourceModules, freshExactState, freshExactContext, forkExactContext
@@ -39,10 +39,10 @@ module Tidepool.ExactHydration
   , installExactLexicalGraph
   ) where
 
-import Tidepool.RequestInputs (CapturedRequestInput, capturedInputBytes, capturedInputSha256)
+import Tidepool.ArtifactBytes (ArtifactBytes, captureArtifactBytes, artifactBytes, artifactSha256)
 import Tidepool.Timing (readTimingEnabled, emitCount, timeDetailPhase)
 import Tidepool.TypedSegment.Types (GeneratedSegmentOperations, generatedSegmentQualifier)
-import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterface, capturedSessionInterfaceEvidence)
+import Tidepool.Session (SessionModule(..), SessionModuleKind(..), parseSessionModule, sessionModuleString, CapturedSessionInterface, capturedSessionInterfaceBody, capturedSessionInterface, capturedSessionInterfaceEvidence)
 import Control.Monad (forM, forM_, unless)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import GHC.Types.Name.Cache (NameCache(nsNames,nsUniqChar), OrigNameCache)
@@ -834,16 +834,16 @@ pruneRequestIfaceDecoder selected (RequestIfaceDecoder state) = modifyMVar state
         | (cache,facts) <- universes]
   pure (retained,sum [Map.size facts | (_,facts) <- retained])
 
-readCapturedExactIfaceArtifacts :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO CapturedRequestInput)
+readCapturedExactIfaceArtifacts :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO ArtifactBytes)
   -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact,ModIface)])
 readCapturedExactIfaceArtifacts decoder readInput = readExactIfaceArtifactsUsing (readCapturedOne decoder readInput)
 
-readCapturedExactIfaceClosureWithCheckedValues :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO CapturedRequestInput)
+readCapturedExactIfaceClosureWithCheckedValues :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO ArtifactBytes)
   -> HscEnv -> [ExactIfaceArtifact] -> [ExactIfaceArtifact] -> IO (Either String VerifiedExactIfaceClosure)
 readCapturedExactIfaceClosureWithCheckedValues decoder readInput =
   readVerifiedExactIfaceClosureWithCheckedValuesUsing (readCapturedOne decoder readInput)
 
-readCapturedOne :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO CapturedRequestInput)
+readCapturedOne :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO ArtifactBytes)
   -> HscEnv -> ExactIfaceArtifact -> IO (Either String (ExactIfaceArtifact,ModIface))
 readCapturedOne (RequestIfaceDecoder state) readInput env artifact = do
   -- HscEnv unpacks NameCache: its selector can rebox the record on every
@@ -859,14 +859,14 @@ readCapturedOne (RequestIfaceDecoder state) readInput env artifact = do
         -- Authorization and a relocated alias's seal still belong to the
         -- consuming scope, even though decoding has already completed.
         token <- readInput artifact
-        unless (capturedInputSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
+        unless (artifactSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
         timing <- readTimingEnabled
         emitCount timing ("exact_iface_decode_reuse." ++ exactModule artifact) 1
         pure (universes,Right (artifact,iface))
       Nothing -> do
         token <- readInput artifact
-        unless (capturedInputSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
-        result <- readOneWith (const (pure (capturedInputBytes token))) env artifact
+        unless (artifactSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
+        result <- readOneWith (const (pure (artifactBytes token))) env artifact
         let retained = case result of
               Right (_,iface) -> [(cache,Map.insert key iface known)]
               Left _ -> universes
@@ -937,8 +937,8 @@ serializeOriginalInterface env directory interface =
 -- and immutable bytes. This cache belongs only to the completed transaction;
 -- it neither consults source nor survives in a worker-global map.
 data OriginalInterfaceArtifacts = OriginalInterfaceArtifacts
-  HscEnv (Map.Map Module FinalizedModule) (Map.Map Module BS.ByteString) [OriginalSessionInterface] FilePath
-  (IORef (Map.Map Module (Maybe (BS.ByteString, String))))
+  HscEnv (Map.Map Module FinalizedModule) (Map.Map Module ArtifactBytes) [OriginalSessionInterface] FilePath
+  (IORef (Map.Map Module (Maybe ArtifactBytes)))
 
 data SessionCaptureOrigin = ImportedSessionCapture | ProducedSessionCapture
   deriving Eq
@@ -963,25 +963,25 @@ newOriginalInterfaceArtifactsWithSessionCaptures env finalized retained injected
 newOriginalInterfaceArtifactsWithSessionOutputs :: HscEnv -> Map.Map ModuleName FinalizedModule
   -> [ExactIfaceArtifact] -> [CapturedSessionInterface] -> [CapturedSessionInterface]
   -> FilePath -> IO OriginalInterfaceArtifacts
-newOriginalInterfaceArtifactsWithSessionOutputs = newOriginalInterfaceArtifactsWithReader (BS.readFile . exactPath)
+newOriginalInterfaceArtifactsWithSessionOutputs = newOriginalInterfaceArtifactsWithReader (fmap captureArtifactBytes . BS.readFile . exactPath)
 
-newOriginalInterfaceArtifactsWithReader :: (ExactIfaceArtifact -> IO BS.ByteString)
+newOriginalInterfaceArtifactsWithReader :: (ExactIfaceArtifact -> IO ArtifactBytes)
   -> HscEnv -> Map.Map ModuleName FinalizedModule
   -> [ExactIfaceArtifact] -> [CapturedSessionInterface] -> [CapturedSessionInterface]
   -> FilePath -> IO OriginalInterfaceArtifacts
 newOriginalInterfaceArtifactsWithReader readInput env finalized retained injected produced directory = do
   captures <- forM retained $ \artifact -> do
-    bytes <- readInput artifact
-    unless (hexBytes (SHA256.hash bytes) == exactSha256 artifact) $
+    body <- readInput artifact
+    unless (artifactSha256 body == exactSha256 artifact) $
       throwIO (OriginalInterfaceChanged (exactUnit artifact) (exactModule artifact))
     let owner = mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
-    pure (owner, bytes)
+    pure (owner, body)
   let originals = Map.fromList
         [(mi_module (hm_iface (finalizedHomeModInfo original)), original)
         | original <- Map.elems finalized]
       snapshotsWithOrigin = [(ImportedSessionCapture,snapshot) | snapshot <- injected]
         ++ [(ProducedSessionCapture,snapshot) | snapshot <- produced]
-      selected = captures ++ map (capturedSessionInterface . snd) snapshotsWithOrigin
+      selected = captures ++ map (capturedSessionInterfaceBody . snd) snapshotsWithOrigin
       admitted = Map.fromList selected
   unless (all (\(owner,bytes) -> Map.lookup owner admitted == Just bytes) selected) $
     throwIO ConflictingOriginalInterfaces
@@ -1005,14 +1005,14 @@ originalProducedSessionInterfaces (OriginalInterfaceArtifacts _ _ _ selected _ _
   [snapshot | OriginalSessionInterface ProducedSessionCapture snapshot <- selected]
 
 originalInterfaceBytes :: OriginalInterfaceArtifacts -> Module -> IO (Maybe BS.ByteString)
-originalInterfaceBytes artifacts owner = fmap fst <$> originalInterfaceArtifact artifacts owner
+originalInterfaceBytes artifacts owner = fmap artifactBytes <$> originalInterfaceBody artifacts owner
 
 originalInterfaceSha256 :: OriginalInterfaceArtifacts -> Module -> IO (Maybe String)
-originalInterfaceSha256 artifacts owner = fmap snd <$> originalInterfaceArtifact artifacts owner
+originalInterfaceSha256 artifacts owner = fmap artifactSha256 <$> originalInterfaceBody artifacts owner
 
-originalInterfaceArtifact :: OriginalInterfaceArtifacts -> Module
-  -> IO (Maybe (BS.ByteString, String))
-originalInterfaceArtifact (OriginalInterfaceArtifacts env originals retained _ directory captured) owner = do
+originalInterfaceBody :: OriginalInterfaceArtifacts -> Module
+  -> IO (Maybe ArtifactBytes)
+originalInterfaceBody (OriginalInterfaceArtifacts env originals retained _ directory captured) owner = do
   known <- Map.lookup owner <$> readIORef captured
   case known of
     Just artifact -> pure artifact
@@ -1025,17 +1025,17 @@ originalInterfaceArtifact (OriginalInterfaceArtifacts env originals retained _ d
         Just interface -> do
           finalized <- serialize interface
           case (Map.lookup owner retained, finalized) of
-            (Just admitted, Just (bytes,_)) | admitted /= bytes ->
+            (Just admitted, Just bytes) | admitted /= bytes ->
               throwIO (FinalizedOriginalConflict (unitString (moduleUnit owner)) (moduleNameString (moduleName owner)))
             _ -> pure finalized
         Nothing -> case Map.lookup owner retained of
-          Just bytes -> pure (seal bytes)
+          Just bytes -> pure (Just bytes)
           Nothing | toUnitId (moduleUnit owner) `Set.member` hsc_all_home_unit_ids env -> pure Nothing
           Nothing -> packageArtifact packageInterface
       modifyIORef' captured (Map.insert owner artifact)
       pure artifact
   where
-    seal bytes = Just (bytes, hexBytes (SHA256.hash bytes))
+    seal bytes = Just (captureArtifactBytes bytes)
     serialize interface = seal <$> serializeOriginalInterface env directory interface
     sameOriginal selected actual = mi_module actual == owner
       && mi_iface_hash (mi_final_exts actual) == mi_iface_hash (mi_final_exts selected)
