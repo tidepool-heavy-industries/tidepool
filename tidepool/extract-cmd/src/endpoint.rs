@@ -2690,9 +2690,11 @@ mod tests {
     fn standalone_directory_inputs_survive_until_actual_clean_end() {
         let (fixture, endpoint, command, directory, path) = standalone_directory_fixture(5);
         let weak = Arc::downgrade(&directory);
+        let observed = RefCell::new(None);
         let outcome = endpoint.execute_with_input_directories(&command, vec![directory], |close| {
-            assert!(close.is_clean())
+            *observed.borrow_mut() = Some(close)
         });
+        assert_eq!(observed.into_inner(), Some(outcome.close.clone()));
         assert!(outcome.action.unwrap().success());
         assert!(outcome.close.is_clean());
         assert_eq!(
