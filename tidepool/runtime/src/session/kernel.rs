@@ -96,7 +96,6 @@ pub trait SuspendableSession {
         hole: Self::Hole,
         reason: String,
         cx: Self::Context,
-        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
     ) -> Result<Self::Outcome, Self::Error>;
 }
 
