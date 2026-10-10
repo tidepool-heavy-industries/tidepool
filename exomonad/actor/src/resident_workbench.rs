@@ -8337,6 +8337,9 @@ where
         session_id: tidepool_repr::SessionId,
         scopes: Vec<tidepool_codegen::scope::ScopeId>,
     ) -> Result<(), ResidentActorWorkbenchError> {
+        if scopes.is_empty() {
+            return Ok(());
+        }
         self.access
             .with_host_machine("checkpoint", session_id, None, move |session, _| {
                 for scope in scopes {
