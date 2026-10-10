@@ -1155,6 +1155,142 @@ mod tests {
     }
 
     #[test]
+    fn batch_source_descendants_retain_only_admitted_declaring_site_dependencies() {
+        use tidepool_repr::execution_schema::{SiteDelivery, SiteRow, TypeNodeId};
+        let options = PreparedMachineOptions {
+            nursery_bytes: 4096,
+        };
+        let producer_code = Arc::new(super::super::tests::boxed_shape_program(930, 931));
+        let (mut machine, producer) = PreparedMachine::new_shared(producer_code, options).unwrap();
+        let mut wire = testing::wire_program();
+        wire.types = testing::closed_type_graph(
+            testing::identity("BatchSites", "Reply"),
+            tidepool_repr::type_graph::DeclarationForm::Text,
+        );
+        wire.sites.push(SiteRow {
+            site: 601,
+            origin: "BatchSites.hs:1".into(),
+            ordinal: 0,
+            delivery: SiteDelivery::HostAnswer,
+            wire: TypeNodeId(0),
+            inputs: vec![TypeNodeId(0)],
+        });
+        let issuer_code = Arc::new(
+            CompiledProgram::compile(
+                &tidepool_repr::execution_schema::link_program(
+                    testing::prepare(wire).unwrap(),
+                    &Default::default(),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let issuer = machine
+            .install_shared(issuer_code.clone(), ImportBindings::new())
+            .unwrap();
+        let unrelated = machine
+            .install_shared(issuer_code, ImportBindings::new())
+            .unwrap();
+        let payload = machine.retain_top(producer, ValueId(0)).unwrap();
+        let token = super::super::tests::claim_declaring_site(
+            &mut machine,
+            issuer,
+            producer,
+            payload,
+            false,
+        );
+        let offered_signature = machine.programs[&producer].program.get().top_exports[&ValueId(0)]
+            .entry_signature
+            .clone();
+        let programs = machine
+            .install_shared_batch(vec![
+                BatchProgram {
+                    image: group("a", 0, "old"),
+                    imports: vec![BatchImport::Existing {
+                        handle: token,
+                        entry_signature: offered_signature,
+                    }],
+                },
+                BatchProgram {
+                    image: group("b", 1, "a"),
+                    imports: vec![BatchImport::Source {
+                        group: 0,
+                        binding: ValueId(0),
+                    }],
+                },
+                BatchProgram {
+                    image: group("c", 2, "a"),
+                    imports: vec![BatchImport::Source {
+                        group: 0,
+                        binding: ValueId(0),
+                    }],
+                },
+            ])
+            .unwrap();
+        let retained = machine.retain_top(programs[1], ValueId(0)).unwrap();
+        let sibling = machine.retain_top(programs[2], ValueId(0)).unwrap();
+        for handle in [retained, sibling] {
+            let sites = &machine.handles.handle(handle.raw()).unwrap().sites;
+            assert_eq!(sites.len(), 1);
+            assert_eq!(sites.iter().next().unwrap().owner(), issuer);
+        }
+        assert!(machine.release(sibling));
+        assert!(machine.release(token));
+        let retired = machine.collect_major(machine.quiesce().unwrap()).unwrap();
+        assert!(retired.programs.contains(&programs[2]));
+        assert!(retired.programs.contains(&unrelated));
+        assert!(!retired.programs.contains(&issuer));
+        assert!(!retired.programs.contains(&programs[0]));
+        let returned = machine
+            .run_entry_retained(
+                programs[1],
+                ValueId(0),
+                &[],
+                PreparedCallOptions {
+                    observation_budget: 100,
+                    collect_before_observation: true,
+                },
+                RealmId::ROOT,
+            )
+            .unwrap();
+        let [PreparedResult::Managed(returned)] = returned.values.as_slice() else {
+            panic!("source closure")
+        };
+        assert_eq!(
+            machine
+                .handles
+                .handle(returned.raw())
+                .unwrap()
+                .sites
+                .iter()
+                .next()
+                .unwrap()
+                .owner(),
+            issuer
+        );
+        assert!(machine.release(*returned));
+        let parcel = machine.export_parcel(retained).unwrap();
+        assert_eq!(parcel.images().len(), 4);
+        drop(machine);
+        let (mut receiver, _) = PreparedMachine::new_shared(
+            Arc::new(super::super::tests::boxed_shape_program(930, 931)),
+            options,
+        )
+        .unwrap();
+        let imported = receiver.import_parcel(parcel, RealmId::ROOT).unwrap();
+        for (_, handle) in imported.imports {
+            assert!(receiver.release(handle));
+        }
+        receiver.collect_major(receiver.quiesce().unwrap()).unwrap();
+        let repeated = receiver.export_parcel(imported.value).unwrap();
+        assert_eq!(repeated.images().len(), 4);
+        assert!(receiver.release(imported.value));
+        receiver.collect_major(receiver.quiesce().unwrap()).unwrap();
+        assert_eq!(receiver.handle_count(), 0);
+        assert_eq!(receiver.residency().root_cells, 0);
+    }
+
+    #[test]
     fn cyclic_batch_installs_atomically_and_retires_after_final_pin() {
         let a = group("a", 2, "b");
         let b = group("b", 7, "a");

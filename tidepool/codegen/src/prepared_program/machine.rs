@@ -10066,7 +10066,7 @@ mod tests {
         )
     }
 
-    fn claim_declaring_site(
+    pub(super) fn claim_declaring_site(
         machine: &mut PreparedMachine<'_>,
         issuer: ProgramId,
         runner: ProgramId,
@@ -11817,7 +11817,7 @@ mod tests {
 
     /// A program declaring a nullary `Unit` (its CAF's result) and a
     /// one-field `Box a`, so managed construction can build a nested value graph.
-    fn boxed_shape_program(unit_id: u64, box_id: u64) -> CompiledProgram {
+    pub(super) fn boxed_shape_program(unit_id: u64, box_id: u64) -> CompiledProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         wire.constructors.push(ConstructorDecl {
