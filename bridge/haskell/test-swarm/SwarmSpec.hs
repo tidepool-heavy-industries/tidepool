@@ -1,72 +1,103 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Property coverage for "Tidepool.Swarm"'s 'Cycles' budget currency
--- (operator's type-level review, 2026-08-17): the conservation law
--- 'splitAllowance' is supposed to hold by construction, checked against many
--- random inputs rather than the one scenario the dev-tree regression pins.
---
--- Also covers 'hyloConcurrentM' (the concurrent-sibling hylomorphism): plan
--- order is preserved regardless of a supplied traversal's own internal
--- processing order, and running it under plain sequential 'mapM' reproduces
--- 'hyloM' exactly — both checked under a bare 'Identity', with no JIT/extract
--- compile (see CONCURRENT_SIBLINGS_SPIKE_FINDINGS.md's addendum for why the
--- real concurrency proof is a separate GHC-heavy driver test instead).
-module SwarmSpec (properties) where
+-- | Independent allocation laws and order-sensitive recursion properties.
+module SwarmSpec (properties, allocationContractHistories, allocationContractPartitions) where
 
+import Control.Monad (unless)
 import Data.Functor.Identity (Identity (..))
+import Data.IORef (newIORef, modifyIORef', readIORef)
 import Data.List (sortOn)
-import Test.QuickCheck
+import Test.QuickCheck hiding (label)
 
 import Tidepool.Swarm (Alg, Coalg, PlanF (..), cyclesToInt, hyloConcurrentM, hyloM, mkCycles, splitAllowance)
 
--- | The conservation law itself: nothing 'splitAllowance' hands out was ever
--- minted from nothing — the sum of every child's share plus what the parent
--- kept never exceeds the input allowance.
-prop_splitAllowanceConserves :: Property
-prop_splitAllowanceConserves =
-  forAll (choose (0, 1000)) $ \inputN ->
-    forAll (choose (0, 1000)) $ \reservationN ->
-      forAll (choose (-2, 20)) $ \n ->
-        let (kept, parts) = splitAllowance (mkCycles inputN) (mkCycles reservationN) n
-            grandTotal = cyclesToInt kept + sum (map cyclesToInt parts)
-         in counterexample
-              ( "input=" <> show inputN <> " reservation=" <> show reservationN <> " n=" <> show n
-                  <> " kept=" <> show (cyclesToInt kept) <> " parts=" <> show (map cyclesToInt parts)
-              )
-              (grandTotal <= inputN)
+data Allocation = Allocation Int Int Int deriving (Eq, Show)
 
--- | Every value 'splitAllowance' returns is itself non-negative — 'Cycles'
--- own invariant, pinned here at the one call site authorized to mint a split.
-prop_splitAllowanceSharesNonNegative :: Property
-prop_splitAllowanceSharesNonNegative =
-  forAll (choose (0, 1000)) $ \inputN ->
-    forAll (choose (0, 1000)) $ \reservationN ->
-      forAll (choose (-2, 20)) $ \n ->
-        let (kept, parts) = splitAllowance (mkCycles inputN) (mkCycles reservationN) n
-         in cyclesToInt kept >= 0 .&&. conjoin [counterexample (show p) (p >= 0) | p <- map cyclesToInt parts]
+allocations :: Gen Allocation
+allocations = frequency
+  [ (2, Allocation <$> chooseInt (0, 1000) <*> chooseInt (0, 1000) <*> chooseInt (-2, 0))
+  , (1, Allocation 0 <$> chooseInt (0, 1000) <*> chooseInt (1, 20))
+  , (2, do
+      input <- chooseInt (0, 1000)
+      Allocation input <$> chooseInt (input, 1001) <*> chooseInt (1, 20))
+  , (3, do
+      input <- chooseInt (1, 1000)
+      Allocation input <$> chooseInt (0, input - 1) <*> chooseInt (1, 20))
+  , (1, Allocation <$> elements [0, 1, maxBound - 1, maxBound]
+      <*> elements [0, 1, maxBound - 1, maxBound] <*> chooseInt (-2, 20))
+  , (1, Allocation <$> chooseInt (0, 1000) <*> chooseInt (0, 1000) <*> chooseInt (-2, 20))
+  ]
 
--- | Zero or fewer children: nothing is divided out, so the whole input stays
--- kept rather than a bogus per-child figure for zero recipients.
-prop_splitAllowanceNoChildrenKeepsAll :: Property
-prop_splitAllowanceNoChildrenKeepsAll =
-  forAll (choose (0, 1000)) $ \inputN ->
-    forAll (choose (0, 1000)) $ \reservationN ->
-      forAll (choose (-5, 0)) $ \n ->
-        let (kept, parts) = splitAllowance (mkCycles inputN) (mkCycles reservationN) n
-         in null parts .&&. cyclesToInt kept === inputN
+shrinkAllocation :: Allocation -> [Allocation]
+shrinkAllocation (Allocation input reservation children) =
+  [Allocation i r n | (i,r,n) <- shrink (input,reservation,children), i >= 0, r >= 0]
 
--- | Every child gets exactly the same share (the floor of what remained
--- after the reservation, divided evenly) — 'splitAllowance' never favors one
--- child over another.
-prop_splitAllowanceSharesAreUniform :: Property
-prop_splitAllowanceSharesAreUniform =
-  forAll (choose (0, 1000)) $ \inputN ->
-    forAll (choose (0, 1000)) $ \reservationN ->
-      forAll (choose (1, 20)) $ \n ->
-        let (_, parts) = splitAllowance (mkCycles inputN) (mkCycles reservationN) n
-         in case parts of
-              (p : rest) -> conjoin [counterexample (show parts) (q === p) | q <- rest]
-              [] -> counterexample "n >= 1 must produce at least one share" False
+-- Count, conservation and maximal-share inequalities determine the contract
+-- without using the implementation's division or spendCycles operation.
+-- Integer observations keep an overflowing Int oracle from hiding a defect.
+allocationObservation :: Allocation -> (String, [(String, Bool)], [String])
+allocationObservation request@(Allocation input reservation children) =
+  let (kept, parts) = splitAllowance (mkCycles input) (mkCycles reservation) children
+      held = toInteger (cyclesToInt kept)
+      shares = map (toInteger . cyclesToInt) parts
+      offered = toInteger input
+      reserved = toInteger reservation
+      available = max 0 (offered - reserved)
+      count = toInteger children
+      laws =
+        [ ("exact child count", length shares == max 0 children)
+        , ("exact conservation", held + sum shares == offered)
+        , ("kept bounds", 0 <= held && held <= offered)
+        , ("share bounds", all (\q -> 0 <= q && q <= offered) shares)
+        , ("reservation remains kept", children <= 0 || held >= min offered reserved)
+        , ("no children keep the whole allowance", children > 0 || held == offered)
+        , ("maximal equal shares", children <= 0 || all
+            (\q -> count*q <= available && available < count*(q+1)) shares)
+        ]
+      partitions =
+        [ label | (label, reached) <-
+          [ ("no children", children <= 0)
+          , ("multiple children", children > 1)
+          , ("zero allowance", input == 0)
+          , ("reservation exhausted", children > 0 && reservation >= input)
+          , ("positive shares possible", children > 0 && available >= count)
+          , ("division remainder", children > 0 && available `mod` count /= 0)
+          , ("machine bounds", input == maxBound || reservation == maxBound)
+          ], reached ]
+  in (show request ++ " -> kept=" ++ show held ++ " shares=" ++ show shares, laws, partitions)
+
+allocationContractPartitions :: IO ()
+allocationContractPartitions = do
+  let requests =
+        [Allocation 10 2 2, Allocation 10 2 3, Allocation 10 2 1,
+         Allocation 10 2 0, Allocation 10 2 (-2), Allocation 0 0 2,
+         Allocation 10 10 2, Allocation 10 11 2, Allocation maxBound 1 3,
+         Allocation 1 maxBound 2]
+  mapM_ (\request -> let (trace,laws,_) = allocationObservation request
+    in unless (all snd laws) (fail (trace ++ ": " ++ show (filter (not . snd) laws)))) requests
+  putStrLn ("allocation deterministic partition evaluations=" ++ show (length requests))
+
+allocationContractHistories :: Args -> IO ()
+allocationContractHistories arguments = do
+  observed <- newIORef (0 :: Int, [] :: [(String, Int)])
+  initialFailure <- newIORef Nothing
+  result <- quickCheckWithResult arguments $ forAllShrink allocations shrinkAllocation $ \request ->
+    ioProperty $ do
+      let (trace,laws,partitions) = allocationObservation request
+      modifyIORef' observed $ \(callbacks,counts) ->
+        (callbacks+1, foldr (\label rows ->
+          (label, maybe 1 (+1) (lookup label rows)) : filter ((/= label) . fst) rows) counts partitions)
+      unless (all snd laws) $ modifyIORef' initialFailure $ \prior -> case prior of
+        Nothing -> Just trace
+        Just _ -> prior
+      pure (counterexample trace (conjoin [counterexample label passed | (label,passed) <- laws]))
+  (callbacks,partitions) <- readIORef observed
+  firstFailure <- readIORef initialFailure
+  putStrLn ("allocation configured fresh cases=" ++ show (maxSuccess arguments)
+    ++ " actual callbacks=" ++ show callbacks ++ " observed partitions=" ++ show partitions)
+  putStrLn ("allocation result=" ++ show result)
+  putStrLn ("allocation initial failure=" ++ show firstFailure)
+  unless (isSuccess result) (fail "allocation contract property failed")
 
 -- ---------------------------------------------------------------------------
 -- 'hyloConcurrentM' coverage
@@ -139,10 +170,6 @@ prop_hyloConcurrentWithSequentialTraverseIsHyloM tree =
 
 properties :: [(String, Property)]
 properties =
-  [ ("splitAllowance conserves (sum of parts + kept <= input)", prop_splitAllowanceConserves)
-  , ("splitAllowance shares and kept are never negative", prop_splitAllowanceSharesNonNegative)
-  , ("splitAllowance with no children keeps the whole input", prop_splitAllowanceNoChildrenKeepsAll)
-  , ("splitAllowance divides evenly among children", prop_splitAllowanceSharesAreUniform)
-  , ("hyloConcurrentM under a scrambled traversal matches hyloM (plan order, not completion order)", property prop_hyloConcurrentPreservesPlanOrder)
+  [ ("hyloConcurrentM under a scrambled traversal matches hyloM (plan order, not completion order)", property prop_hyloConcurrentPreservesPlanOrder)
   , ("hyloConcurrentM under sequential mapM is hyloM", property prop_hyloConcurrentWithSequentialTraverseIsHyloM)
   ]
