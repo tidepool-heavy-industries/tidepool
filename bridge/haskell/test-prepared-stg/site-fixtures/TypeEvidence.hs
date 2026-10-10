@@ -1,5 +1,5 @@
 {-# LANGUAGE AllowAmbiguousTypes, FlexibleContexts #-}
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GADTs, UnboxedTuples #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
@@ -120,12 +120,19 @@ data Console a where
   MismatchedCarrier :: RequestSite '[Int] Bool -> Console Int
   StrictCarrier :: {-# UNPACK #-} !(RequestSite '[Int] Int) -> Console Int
   IntegerPayload :: Int -> Console Int
+  ProvenLeading :: RequestSite '[Int] Int -> Console Int
+  ProvenSubmit :: Int -> RequestSite '[()] Int -> Int -> Console ()
+  ProvenPublication :: Int -> RequestSite '[(), Int] Int -> Int -> Console ()
+  ProvenProgressPublication :: Int -> RequestSite '[(), Bool, Int] Int -> Int -> Console ()
+  ProvenExit :: Int -> RequestSite '[Int] () -> Console ()
+  SplitCarrier :: Int -> RequestSite '[Int] () -> (# Int, Int #) -> Console ()
 
 class CarriesInt a where
   carrierInt :: Int
 
 data DictConsole parameter reply where
   DictionaryCarrier :: CarriesInt parameter => RequestSite '[] Int -> DictConsole parameter Int
+  DictionaryNonLeading :: CarriesInt parameter => Int -> RequestSite '[Int] () -> Int -> DictConsole parameter ()
 
 {-# OPAQUE customSend #-}
 customSend :: Member Console effects => Eff effects ()
@@ -193,3 +200,18 @@ auxiliaryRootDecodeHelper _ = Left "unused"
 
 auxiliaryRootDecode :: Text -> Either Text Int
 auxiliaryRootDecode = auxiliaryRootDecodeHelper
+
+provenLeading :: RequestSite '[Int] Int -> Console Int
+provenLeading = ProvenLeading
+provenSubmit :: Int -> RequestSite '[()] Int -> Int -> Console ()
+provenSubmit = ProvenSubmit
+provenPublication :: Int -> RequestSite '[(), Int] Int -> Int -> Console ()
+provenPublication = ProvenPublication
+provenProgressPublication :: Int -> RequestSite '[(), Bool, Int] Int -> Int -> Console ()
+provenProgressPublication = ProvenProgressPublication
+provenExit :: Int -> RequestSite '[Int] () -> Console ()
+provenExit = ProvenExit
+splitCarrier :: Int -> RequestSite '[Int] () -> (# Int, Int #) -> Console ()
+splitCarrier = SplitCarrier
+dictionaryNonLeading :: CarriesInt parameter => Int -> RequestSite '[Int] () -> Int -> DictConsole parameter ()
+dictionaryNonLeading = DictionaryNonLeading
