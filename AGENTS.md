@@ -73,7 +73,10 @@ Most changes touch one of three layers, and it helps to know which:
   recovery. Do not reconstruct exact selections from broader inventories, infer
   ownership from names, or treat missing state as proof of successful cleanup.
   Preserve distinctions such as available versus selected and completed versus
-  released in the types and their production constructors.
+  released in the types and their production constructors. Share immutable
+  evidence through exact references rather than embedding complete snapshots
+  at every consumer. Preserve typed failure distinctions, including missing
+  versus inaccessible storage; a failed observation does not establish absence.
 - Use types for control flow. If a string has a closed or partly closed set of
   meanings, represent it with an enum (an `Other(String)` case is fine).
   Rendered error text and labels must not secretly drive behavior.
@@ -136,7 +139,11 @@ exceptions and untested boundaries separately, and compile and test each repair.
 
 Learn from each mistake, including mistakes in tests, tooling and our own
 reasoning. Ask both why it happened and why the existing checks missed it;
-repair the mechanism and the detection gap. Prefer an enforced invariant or
+repair the mechanism and the detection gap. Keep retrospectives blameless:
+examine contracts, available evidence, workload assumptions and integration
+feedback. Distinguish latent defects exposed by a new workload from regressions
+introduced by a change; do not infer causes from worker count or chronology.
+Prefer an enforced invariant or
 executable check over another reminder. Update the nearest owning guidance
 when a reusable decision rule is missing, and replace obsolete advice rather
 than accumulating incident checklists. See [learning from mistakes](docs/rsi-loop.md#learning-from-mistakes).
@@ -159,6 +166,20 @@ Look for newly impossible states, duplicate owners, needless conversions,
 repeated fixed-fixture compilation, and tests of deleted behavior. Preserve
 real failure cases. Measure costs before proposing larger caches or dispatch
 redesigns, and distinguish structural savings from measured speedups.
+
+For persistent state, compare the size of a logical change with the work it
+triggers. Investigate whole-graph encoding, hashing, validation and writes for
+small metadata updates. Measure unique facts, references, encoded bytes and
+expanded memory separately; compact serialization alone does not establish
+cheap decoding or incremental publication.
+
+Give each resource limit an explicit purpose: external format constraint,
+operational budget, cache retention policy or runaway safeguard. Record its
+workload/resource basis and report observed usage and the limit on refusal.
+Do not turn an inherited constant into an unexplained limit on valid work.
+Check before expensive allocation where feasible; a check after serialization
+does not bound serialization memory. Review limits against current resources
+without weakening identity checks or reflexively raising every limit.
 
 ## Architecture and language boundary
 
@@ -256,6 +277,10 @@ Keep detailed design references out of always-loaded instructions.
 - Keep maintained property tests at component and component-cluster boundaries,
   with independent oracles, shrinking and observable coverage. See
   [property testing](docs/property-testing.md); end-to-end gates complement these tests.
+  Exercise accumulation over publication, branching, reuse and recovery histories.
+  For shared snapshots, cover both repeated identical references and distinct
+  snapshots with overlapping contents. Check structural growth and restored
+  sharing alongside semantic round trips through the production writer/reader.
 - Compile every changed or directly affected target and run the smallest tests
   that prove its behavior, including meaningful refusal and cleanup controls.
   Each worker runs these checks through the admitted repository commands;
@@ -264,6 +289,12 @@ Keep detailed design references out of always-loaded instructions.
   APIs, before describing a parcel as integration-ready. Formatting, metadata
   checks and source review do not replace compilation. Compile joined changes
   incrementally rather than deferring the first compile to release assembly.
+- Run a small representative history through the joined production path early,
+  using its declared compiler and runtime resources. Component passes and a
+  shrinking defect list do not establish release readiness. Final acceptance
+  belongs to the exact integrated bundle. Separate implementation, qualification
+  and deployment in estimates, and state the unresolved uncertainty rather than
+  predicting completion from the number of known bugs.
 - Use actual process peaks, enclosing cgroup limits and host headroom to admit
   independent builds and tests in parallel. Coordinate concrete conflicts over
   checkout/configuration/output ownership or insufficient resources, not every
