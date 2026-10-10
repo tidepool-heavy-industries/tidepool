@@ -63,21 +63,15 @@ fn deployment_evidence_sharing_reauthenticates_every_file_before_reusing_a_proof
         catalog.modules[0].evidence.sha256,
         catalog.modules[1].evidence.sha256
     );
-    assert_ne!(
+    assert_eq!(
         catalog.modules[0].evidence.path,
         catalog.modules[1].evidence.path
     );
-    let changed = fixture.output.join(&catalog.modules[1].evidence.path);
+    let changed = fixture.output.join(&catalog.modules[0].evidence.path);
     let original = fs::read(&changed).unwrap();
-    let counter = DecodeCounter::new();
     fs::write(&changed, b"changed duplicate physical evidence file").unwrap();
     assert!(
         matches!(fixture.load(), Err(ModulePackageError::ArtifactChanged(path)) if path == changed)
-    );
-    assert_eq!(
-        counter.count(),
-        1,
-        "first record admitted before second physical file refuses"
     );
     fs::write(changed, original).unwrap();
     let package = fixture.load().unwrap();
@@ -88,6 +82,31 @@ fn deployment_evidence_sharing_reauthenticates_every_file_before_reusing_a_proof
     let work = package
         .revalidate(&fixture.output.join("catalog.json"), RootPolicy::Fixture)
         .unwrap();
+    let distinct_evidence_paths = catalog
+        .modules
+        .iter()
+        .map(|module| &module.evidence.path)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+    assert_eq!(distinct_evidence_paths, 1);
+    assert_eq!(
+        fs::read_dir(fixture.output.join("evidence"))
+            .unwrap()
+            .count(),
+        1,
+        "producer writes one physical blob for the shared proof"
+    );
+    assert_eq!(
+        work.artifact_files,
+        1 + catalog.execution_graphs.len() as u64
+            + (catalog.modules.len() * 5) as u64
+            + distinct_evidence_paths as u64
+            + catalog
+                .modules
+                .iter()
+                .map(|module| 3 + usize::from(module.module_interface.core.is_some()))
+                .sum::<usize>() as u64
+    );
     assert_eq!(work.evidence.source_read_attempts, 2);
     assert_eq!(
         work.evidence.source_read_bytes,
@@ -99,7 +118,35 @@ fn deployment_evidence_sharing_reauthenticates_every_file_before_reusing_a_proof
             .map(|source| fs::metadata(&source.path).unwrap().len())
             .sum::<u64>()
     );
-    assert_eq!(counter.count(), 3);
+}
+
+#[test]
+fn deployment_export_writes_one_evidence_blob_for_78_module_rows() {
+    let names = (0..78)
+        .map(|index| format!("Owner{index:03}"))
+        .collect::<Vec<_>>();
+    let fixture = Fixture::with_modules(&names.iter().map(String::as_str).collect::<Vec<_>>());
+    let catalog = fixture.catalog();
+    assert_eq!(catalog.modules.len(), 78);
+    assert_eq!(
+        catalog
+            .modules
+            .iter()
+            .map(|module| (
+                module.evidence.path.clone(),
+                module.evidence.sha256.clone(),
+                module.evidence.length
+            ))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        1
+    );
+    assert_eq!(
+        fs::read_dir(fixture.output.join("evidence"))
+            .unwrap()
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -107,8 +154,8 @@ fn deployment_evidence_sharing_keeps_distinct_authenticated_wire_proofs_separate
     let fixture = Fixture::with_modules(&["A", "B"]);
     let mut catalog = fixture.catalog();
     let evidence = &mut catalog.modules[1].evidence;
-    let path = fixture.output.join(&evidence.path);
-    let original = fs::read(&path).unwrap();
+    let original_path = fixture.output.join(&evidence.path);
+    let original = fs::read(&original_path).unwrap();
     let altered = [original.as_slice(), b"\n"].concat();
     let decoded_original: crate::cache::DependencyEvidence =
         serde_json::from_slice(&original).unwrap();
@@ -118,6 +165,8 @@ fn deployment_evidence_sharing_keeps_distinct_authenticated_wire_proofs_separate
         serde_json::to_value(decoded_original).unwrap(),
         serde_json::to_value(decoded_altered).unwrap()
     );
+    evidence.path = PathBuf::from("evidence/alternate-dependencies.json");
+    let path = fixture.output.join(&evidence.path);
     fs::write(path, &altered).unwrap();
     evidence.length = altered.len() as u64;
     evidence.sha256 = sha(&altered);
@@ -139,6 +188,101 @@ fn deployment_evidence_sharing_keeps_distinct_authenticated_wire_proofs_separate
         .revalidate(&fixture.output.join("catalog.json"), RootPolicy::Fixture)
         .unwrap();
     assert_eq!(work.evidence.source_read_attempts, 4);
+}
+
+#[test]
+fn deployment_evidence_same_digest_at_distinct_paths_is_authenticated_per_path() {
+    let fixture = Fixture::with_modules(&["A", "B"]);
+    let mut catalog = fixture.catalog();
+    let original = catalog.modules[0].evidence.clone();
+    let original_path = fixture.output.join(&original.path);
+    let original_bytes = fs::read(&original_path).unwrap();
+    let alternate = PathBuf::from("evidence/second-copy.json");
+    fs::write(fixture.output.join(&alternate), &original_bytes).unwrap();
+    catalog.modules[1].evidence.path = alternate.clone();
+    fs::write(
+        fixture.output.join("catalog.json"),
+        serde_json::to_vec(&catalog).unwrap(),
+    )
+    .unwrap();
+
+    let package = fixture.load().unwrap();
+    let baseline = package
+        .revalidate(&fixture.output.join("catalog.json"), RootPolicy::Fixture)
+        .unwrap();
+    assert_eq!(
+        baseline.artifact_files,
+        1 + 2 * 5
+            + 2
+            + catalog
+                .modules
+                .iter()
+                .map(|module| 3 + usize::from(module.module_interface.core.is_some()))
+                .sum::<usize>() as u64
+    );
+
+    let alternate_path = fixture.output.join(&alternate);
+    fs::write(&alternate_path, b"changed second physical evidence blob").unwrap();
+    assert!(matches!(
+        package.revalidate(&fixture.output.join("catalog.json"), RootPolicy::Fixture),
+        Err(ModulePackageError::ArtifactChanged(path)) if path == alternate_path
+    ));
+    fs::write(alternate_path, original_bytes).unwrap();
+    assert!(
+        package
+            .revalidate(&fixture.output.join("catalog.json"), RootPolicy::Fixture)
+            .is_ok()
+    );
+}
+
+#[test]
+fn deployment_evidence_reference_graph_rejects_metadata_conflicts_and_aliases() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, FileFailurePersistence, RngSeed, TestRunner};
+
+    let mut config = Config::default();
+    config.cases = 24;
+    config.rng_seed = RngSeed::Fixed(2026101001);
+    if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+        config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+    }
+    let mut config = proptest::test_runner::contextualize_config(config);
+    config.source_file = Some(file!());
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::deployment_evidence_reference_graph_rejects_metadata_conflicts_and_aliases"
+    ));
+    let mut runner = TestRunner::new(config);
+    let result = runner.run(&proptest::collection::vec(0u8..5, 1..8), |actions| {
+        let fixture = Fixture::with_modules(&["A", "B"]);
+        let package = fixture.load().unwrap();
+        let catalog_path = fixture.output.join("catalog.json");
+        let original_catalog = fs::read(&catalog_path).unwrap();
+        let original = fixture.catalog();
+        for action in actions {
+            let mut changed = original.clone();
+            let products_path = changed.modules[0].products.path.clone();
+            let evidence = &mut changed.modules[1].evidence;
+            match action {
+                0 => evidence.sha256 = "0".repeat(64),
+                1 => evidence.length = evidence.length.saturating_add(1),
+                2 => evidence.path = products_path,
+                3 => evidence.path = PathBuf::from("../outside.json"),
+                _ => evidence.path = PathBuf::from("/absolute/evidence.json"),
+            }
+            fs::write(&catalog_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            prop_assert!(matches!(fixture.load(), Err(ModulePackageError::Format(_))));
+
+            fs::write(&catalog_path, &original_catalog).unwrap();
+            prop_assert!(
+                package
+                    .revalidate(&catalog_path, RootPolicy::Fixture)
+                    .is_ok()
+            );
+        }
+        Ok(())
+    });
+    assert!(result.is_ok(), "{result:?}");
 }
 
 #[test]

@@ -319,6 +319,72 @@ struct Catalog {
     execution_graphs: Vec<FileRef>,
 }
 
+/// Exact references to one physical dependency-evidence file. Catalog rows may
+/// share a path only when they agree on the complete authenticated identity.
+fn evidence_references(
+    catalog: &Catalog,
+) -> Result<std::collections::BTreeMap<PathBuf, FileRef>, ModulePackageError> {
+    let mut evidence = std::collections::BTreeMap::<PathBuf, FileRef>::new();
+    let mut other_artifacts = BTreeSet::new();
+    for reference in &catalog.execution_graphs {
+        other_artifacts.insert(reference.path.clone());
+    }
+    for module in &catalog.modules {
+        for reference in [
+            &module.owner,
+            &module.products,
+            &module.interface,
+            &module.packages,
+            &module.certification,
+        ] {
+            other_artifacts.insert(reference.path.clone());
+        }
+        other_artifacts.insert(module.module_interface.interface.interface_path.clone());
+        other_artifacts.insert(
+            module
+                .module_interface
+                .interface
+                .package_imports_path
+                .clone(),
+        );
+        other_artifacts.insert(module.module_interface.certificate_path.clone());
+        if let Some(core) = &module.module_interface.core {
+            other_artifacts.insert(core.path.clone());
+        }
+        let reference = &module.evidence;
+        if reference.path.as_os_str().is_empty()
+            || !reference
+                .path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+            || reference.sha256.len() != 64
+            || !reference
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(ModulePackageError::Format("dependency evidence reference"));
+        }
+        match evidence.entry(reference.path.clone()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(reference.clone());
+            }
+            std::collections::btree_map::Entry::Occupied(entry)
+                if entry.get().sha256 == reference.sha256
+                    && entry.get().length == reference.length => {}
+            std::collections::btree_map::Entry::Occupied(_) => {
+                return Err(ModulePackageError::Format(
+                    "conflicting dependency evidence reference",
+                ));
+            }
+        }
+    }
+    if evidence.keys().any(|path| other_artifacts.contains(path)) {
+        return Err(ModulePackageError::Format("dependency evidence path alias"));
+    }
+    Ok(evidence)
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Owner {
@@ -480,6 +546,7 @@ impl DeploymentModulePackage {
             return Err(ModulePackageError::ArtifactChanged(path.to_owned()));
         }
         self.catalog.source_selection.validate_under(policy)?;
+        let evidence = evidence_references(&self.catalog)?;
         let mut files = 1;
         let mut bytes = catalog.len() as u64;
         for (reference, limit) in self
@@ -493,12 +560,16 @@ impl DeploymentModulePackage {
                     (&module.products, inventory.limits().max_module_bytes),
                     (&module.interface, RECORD_LIMIT),
                     (&module.packages, RECORD_LIMIT),
-                    (&module.evidence, RECORD_LIMIT),
                     (&module.certification, RECORD_LIMIT),
                 ]
             }))
         {
             let observed = self.read_ref(reference, limit, &inventory)?;
+            files += 1;
+            bytes += observed.len() as u64;
+        }
+        for reference in evidence.values() {
+            let observed = self.read_ref(reference, RECORD_LIMIT, &inventory)?;
             files += 1;
             bytes += observed.len() as u64;
         }
@@ -777,6 +848,7 @@ impl DeploymentModulePackage {
         if producer != self.catalog.producer_identity {
             return Err(ModulePackageError::CompilerMismatch);
         }
+        let evidence_references = evidence_references(&self.catalog)?;
         inventory
             .reserve::<DecodedDeploymentRecord>(self.catalog.modules.len())
             .and_then(|_| {
@@ -794,6 +866,8 @@ impl DeploymentModulePackage {
             (String, u64),
             super::shared_evidence::SharedEvidence,
         >::new();
+        let mut evidence_paths =
+            std::collections::BTreeMap::<PathBuf, super::shared_evidence::SharedEvidence>::new();
         let mut evidence_validation = super::shared_evidence::ValidationStage::configured_package();
         let mut graphs = std::collections::BTreeMap::new();
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
@@ -843,21 +917,29 @@ impl DeploymentModulePackage {
             if !owners.insert((owner.unit.clone(), owner.module.clone())) {
                 return Err(ModulePackageError::Format("duplicate module owner"));
             }
-            let evidence_bytes = self.read_ref(&files.evidence, RECORD_LIMIT, &inventory)?;
-            let evidence_key = (files.evidence.sha256.clone(), files.evidence.length);
-            let evidence = if let Some(proof) = evidence_proofs.get(&evidence_key) {
+            let evidence = if let Some(proof) = evidence_paths.get(&files.evidence.path) {
                 proof.clone()
             } else {
-                inventory
-                    .reserve::<((String, u64), super::shared_evidence::SharedEvidence)>(1)
-                    .and_then(|_| inventory.charge(evidence_key.0.len()))
-                    .map_err(|_| ModulePackageError::Bounds)?;
-                let proof: super::shared_evidence::SharedEvidence =
-                    decode_json(&evidence_bytes, &inventory, "dependency evidence JSON")?;
-                evidence_proofs.insert(evidence_key, proof.clone());
+                let reference = evidence_references
+                    .get(&files.evidence.path)
+                    .ok_or(ModulePackageError::Format("dependency evidence reference"))?;
+                let evidence_bytes = self.read_ref(reference, RECORD_LIMIT, &inventory)?;
+                let evidence_key = (reference.sha256.clone(), reference.length);
+                let proof = if let Some(proof) = evidence_proofs.get(&evidence_key) {
+                    proof.clone()
+                } else {
+                    inventory
+                        .reserve::<((String, u64), super::shared_evidence::SharedEvidence)>(1)
+                        .and_then(|_| inventory.charge(evidence_key.0.len()))
+                        .map_err(|_| ModulePackageError::Bounds)?;
+                    let proof: super::shared_evidence::SharedEvidence =
+                        decode_json(&evidence_bytes, &inventory, "dependency evidence JSON")?;
+                    evidence_proofs.insert(evidence_key, proof.clone());
+                    proof
+                };
+                evidence_paths.insert(files.evidence.path.clone(), proof.clone());
                 proof
             };
-            drop(evidence_bytes);
             let mut record = Record {
                 evidence: evidence.clone(),
                 module_interface_proof: None,
@@ -2289,6 +2371,7 @@ fn export_under(
         .and_then(|_| inventory.reserve::<FileRef>(prepared.graphs.len()))
         .map_err(|_| ModulePackageError::Bounds)?;
     let mut modules = Vec::with_capacity(records.len());
+    let mut shared_evidence = std::collections::BTreeMap::<String, (Vec<u8>, FileRef)>::new();
     let mut validation =
         crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(inventory.clone());
     for record in records {
@@ -2344,6 +2427,38 @@ fn export_under(
             version_origin: Some(record.version_origin.clone()),
             execution_source_sha256: record.execution_source_sha256,
         };
+        let evidence_bytes = encode_json(
+            &record.evidence,
+            inventory,
+            RECORD_LIMIT,
+            "evidence encoding",
+            false,
+        )?;
+        let evidence_sha256 = sha(&evidence_bytes);
+        let evidence = if let Some((existing_bytes, reference)) =
+            shared_evidence.get(&evidence_sha256)
+        {
+            if existing_bytes.len() != evidence_bytes.len() || existing_bytes != &evidence_bytes {
+                return Err(ModulePackageError::Format(
+                    "dependency evidence digest collision",
+                ));
+            }
+            reference.clone()
+        } else {
+            inventory
+                .reserve::<(Vec<u8>, FileRef)>(1)
+                .and_then(|_| inventory.charge(evidence_bytes.len()))
+                .map_err(|_| ModulePackageError::Bounds)?;
+            let reference = write_ref(
+                output_root,
+                PathBuf::from("evidence").join(format!("{evidence_sha256}.json")),
+                &evidence_bytes,
+                RECORD_LIMIT,
+                inventory,
+            )?;
+            shared_evidence.insert(evidence_sha256, (evidence_bytes, reference.clone()));
+            reference
+        };
         modules.push(ModuleFiles {
             module_interface,
             owner: write_ref(
@@ -2374,19 +2489,7 @@ fn export_under(
                 RECORD_LIMIT,
                 inventory,
             )?,
-            evidence: write_ref(
-                output_root,
-                directory.join("dependencies.json"),
-                &encode_json(
-                    &record.evidence,
-                    inventory,
-                    RECORD_LIMIT,
-                    "evidence encoding",
-                    false,
-                )?,
-                RECORD_LIMIT,
-                inventory,
-            )?,
+            evidence,
             certification: write_ref(
                 output_root,
                 directory.join("home-certification.cbor"),
