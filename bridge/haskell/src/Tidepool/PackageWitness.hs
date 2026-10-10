@@ -5,6 +5,7 @@ module Tidepool.PackageWitness
   , sealPackageImports, readPackageImports, revalidatePackageImports, encodePackageImports, decodeCapturedPackageImports
   , AdmittedPackageImports, emptyAdmittedPackageImports, extendAdmittedPackageImports
   , revalidateAdmittedPackageImports, validateAdmittedPackageSelection, extendAdmittedPackageImportsWith
+  , extendAdmittedPackageImportsWithFacts
   , packageInputClosure ) where
 
 import Codec.CBOR.Decoding
@@ -75,6 +76,16 @@ extendAdmittedPackageImports = extendAdmittedPackageImportsWith (\path bound -> 
 extendAdmittedPackageImportsWith :: (FilePath -> Int -> IO BS.ByteString) -> AdmittedPackageImports
   -> [(ExactIfaceArtifact, FilePath, String)] -> IO (Either String AdmittedPackageImports)
 extendAdmittedPackageImportsWith readInput initial witnesses = do
+  extendAdmittedPackageImportsWithFacts
+    (\(iface,path,sha) -> readAuthenticatedPackageImportsWith readInput path sha iface)
+    initial witnesses
+
+-- A retained owner may share decoded sidecar facts. Installed package bytes
+-- still authenticate freshly, and each environment resolves its selection.
+extendAdmittedPackageImportsWithFacts :: ( (ExactIfaceArtifact,FilePath,String)
+  -> IO (Either String PackageImportEvidence)) -> AdmittedPackageImports
+  -> [(ExactIfaceArtifact,FilePath,String)] -> IO (Either String AdmittedPackageImports)
+extendAdmittedPackageImportsWithFacts readFacts initial witnesses = do
   result <- foldM authenticate (Right initial) witnesses
   case result of
     Right _ | not (null witnesses) -> do
@@ -84,8 +95,8 @@ extendAdmittedPackageImportsWith readInput initial witnesses = do
   pure result
   where
     authenticate (Left reason) _ = pure (Left reason)
-    authenticate (Right (AdmittedPackageImports selected references count)) (iface,path,sha) = do
-      authenticated <- readAuthenticatedPackageImportsWith readInput path sha iface
+    authenticate (Right (AdmittedPackageImports selected references count)) witness = do
+      authenticated <- readFacts witness
       case authenticated of
         Left reason -> pure (Left reason)
         Right evidence -> do

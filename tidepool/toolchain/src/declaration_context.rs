@@ -26,8 +26,8 @@ use crate::recovery_artifacts::{
 };
 use crate::CompileError;
 
-mod published_source;
 pub(crate) mod original_inputs;
+mod published_source;
 pub use published_source::PublishedSourceOriginalSelection;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -639,8 +639,8 @@ impl From<Arc<ExactDeclarationContext>> for ExactCompileContext {
 }
 
 const EXACT_SCOPE_BYTES_LIMIT: usize = 4 << 20;
-const EXACT_SCOPE_SCHEMA_VERSION: &str = "11";
-const EXACT_SCOPE_SCHEMA_FIELDS: usize = 10;
+const EXACT_SCOPE_SCHEMA_VERSION: &str = "12";
+const EXACT_SCOPE_SCHEMA_FIELDS: usize = 11;
 const EXACT_SCOPE_GRAPHS_LIMIT: usize = 4096;
 
 fn validate_execution_graph_budget<'a>(
@@ -854,6 +854,7 @@ fn encode_scope_manifest(
         execution_scope,
         authorization,
         Value::Array(vec![]),
+        Value::Array(vec![text("fresh-files")]),
     )
 }
 
@@ -862,12 +863,16 @@ fn encode_scope_manifest_with_published(
     execution_scope: Option<Value>,
     authorization: Option<Value>,
     published: Value,
+    acquisition: Value,
 ) -> Result<Vec<u8>, CompileError> {
     fields[1] = text(EXACT_SCOPE_SCHEMA_VERSION);
     fields.push(execution_scope.unwrap_or(Value::Null));
     fields.push(authorization.unwrap_or(Value::Null));
     fields.push(published);
-    debug_assert_eq!(fields.len(), EXACT_SCOPE_SCHEMA_FIELDS);
+    fields.push(acquisition);
+    if fields.len() != EXACT_SCOPE_SCHEMA_FIELDS {
+        return Err(failure("invalid current exact scope field count"));
+    }
     let value = Value::Array(fields);
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&value, &mut bytes).map_err(failure)?;
@@ -1473,6 +1478,7 @@ struct RetainedArtifactRow {
     interface: ExactIfaceArtifact,
     interface_evidence: Value,
     payload: RetainedArtifactPayload,
+    canonical_custody: Option<crate::certified_products::CertifiedModuleInterface>,
 }
 
 #[derive(Clone)]
@@ -1486,6 +1492,83 @@ enum RetainedArtifactPayload {
 }
 
 impl RetainedArtifactRow {
+    fn original_input_parts(
+        &self,
+        entry: &ArtifactEntry,
+    ) -> Result<Vec<original_inputs::OriginalInputPart>, CompileError> {
+        use original_inputs::{OriginalInputKind as Kind, OriginalInputPart};
+        let (interface, packages) = match &entry.payload {
+            ArtifactPayload::Original(product) => {
+                (product.interface_bytes(), product.package_imports_bytes())
+            }
+            ArtifactPayload::Canonical(interface) => (
+                interface.interface_bytes(),
+                interface.package_imports_bytes(),
+            ),
+            ArtifactPayload::Interface(interface, _) => (
+                interface.interface_bytes(),
+                interface.package_imports_bytes(),
+            ),
+        };
+        let mut parts = vec![
+            OriginalInputPart {
+                kind: Kind::Interface,
+                path: self.interface.path.clone(),
+                sha256: self.interface.sha256.clone(),
+                bytes: interface.len() as u64,
+            },
+            OriginalInputPart {
+                kind: Kind::Packages,
+                path: self.interface.path.with_extension("hi.packages"),
+                sha256: hex(&entry.descriptor.package_imports_sha256),
+                bytes: packages.len() as u64,
+            },
+        ];
+        if let Some(canonical) = &self.canonical_custody {
+            let fields = row(&self.interface_evidence, 5)?;
+            parts.push(OriginalInputPart {
+                kind: Kind::Certificate,
+                path: PathBuf::from(string(&fields[1])?),
+                sha256: string(&fields[2])?.to_owned(),
+                bytes: canonical.certificate_bytes().len() as u64,
+            });
+            if let Some(core) = canonical.core_bytes() {
+                parts.push(OriginalInputPart {
+                    kind: Kind::Core,
+                    path: PathBuf::from(string(&fields[3])?),
+                    sha256: string(&fields[4])?.to_owned(),
+                    bytes: core.len() as u64,
+                });
+            }
+        }
+        if let (
+            ArtifactPayload::Original(original),
+            RetainedArtifactPayload::Native {
+                product,
+                certification_path,
+                certification_sha256,
+            },
+        ) = (&entry.payload, &self.payload)
+        {
+            parts.push(OriginalInputPart {
+                kind: Kind::Native,
+                path: product.path.clone(),
+                sha256: hex(&entry
+                    .descriptor
+                    .product_sha256
+                    .ok_or_else(|| failure("original native seal absent"))?),
+                bytes: original.product_bytes().len() as u64,
+            });
+            parts.push(OriginalInputPart {
+                kind: Kind::Census,
+                path: certification_path.clone(),
+                sha256: hex(certification_sha256),
+                bytes: original.certification_bytes().len() as u64,
+            });
+        }
+        Ok(parts)
+    }
+
     fn artifact(&self) -> DeclarationArtifact {
         DeclarationArtifact {
             interface: self.interface.clone(),
@@ -5556,6 +5639,11 @@ impl ExactDeclarationContext {
                     interface: artifact.interface,
                     interface_evidence,
                     payload,
+                    canonical_custody: match &entry.payload {
+                        ArtifactPayload::Canonical(interface) => Some(interface.clone()),
+                        ArtifactPayload::Original(product) => product.module_interface().cloned(),
+                        ArtifactPayload::Interface(..) => None,
+                    },
                 },
             );
         }
@@ -5847,11 +5935,58 @@ impl ExactDeclarationContext {
                     .collect::<Result<Vec<_>, CompileError>>()?,
             ),
         ];
+        let graph_paths = retained.graph_path_refs();
+        let admitted_graphs = execution_scope
+            .as_ref()
+            .map(|scope| {
+                let fields = row(scope, 2)?;
+                list(&fields[0], 4096)?
+                    .iter()
+                    .map(|value| {
+                        let fields = row(value, 2)?;
+                        Ok(string(&fields[0])?.to_owned())
+                    })
+                    .collect::<Result<BTreeSet<_>, CompileError>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let image_producer = CanonicalProducerIdentity::from_producer_bytes(producer).hex();
+        let images = metadata
+            .entries
+            .values()
+            .map(|entry| {
+                let row = selected_rows[&entry.descriptor.id];
+                let mut parts = row.original_input_parts(entry)?;
+                if let ArtifactPayload::Original(product) = &entry.payload {
+                    if let Some(graph) = product
+                        .execution_source()
+                        .filter(|graph| admitted_graphs.contains(&hex(&graph.digest())))
+                    {
+                        parts.push(original_inputs::OriginalInputPart {
+                            kind: original_inputs::OriginalInputKind::Graph,
+                            path: graph_paths[&graph.digest()].path.clone(),
+                            sha256: hex(&graph.digest()),
+                            bytes: graph.bytes().len() as u64,
+                        });
+                    }
+                }
+                original_inputs::encode_image(
+                    &image_producer,
+                    &entry.descriptor.owner.unit,
+                    &entry.descriptor.owner.module,
+                    parts,
+                    row.canonical_custody
+                        .as_ref()
+                        .and_then(|canonical| canonical.original_input_origins()),
+                )
+            })
+            .collect::<Result<Vec<_>, CompileError>>()?;
         let bytes = encode_scope_manifest_with_published(
             fields,
             execution_scope,
             authorization,
             self.published_scope_value()?,
+            Value::Array(vec![text("continue-originals"), Value::Array(images)]),
         )?;
         let manifest = root.join("exact-declaration-scope.cbor");
         use std::io::Write;

@@ -59,9 +59,14 @@ qualification.
 
 ## Exact-scope transport
 
-Exact-scope manifests use strict `TPEXACTSCOPE` version 11 with ten fields. The final
+Exact-scope manifests use strict `TPEXACTSCOPE` version 12 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization
-or null, and the exact published source selection roots. Interface rows have eight fields; their final field declares one
+or null, the exact published source selection roots, and an input acquisition.
+Acquisition is `["fresh-files"]` or `["continue-originals", images]`. Each image
+binds the compiler producer, unit/module and ordered kind/SHA/length facts;
+receiving materialization paths and authenticated protected origins are sealed
+by the receiving envelope, independently of content identity. Closed part kinds
+are interface, packages, certificate, Core, native, census and graph. Interface rows have eight fields; their final field declares one
 closed artifact role: `["module", certificate path, certificate SHA, optional
 Core path, optional Core SHA]`, the same five-field `["native-declaration", ...]`
 for native authored originals, `["join"]`, or `["value"]`. Native product
@@ -88,9 +93,20 @@ certificates, Core and graphs. Scope generations extend that opaque owner; they
 cannot replace an admitted owner or expose a partially assembled closure. The
 encoded byte budget defaults to four GiB and is configured by the trusted host's
 `TIDEPOOL_REQUEST_CAPTURE_BYTES` positive integer. Decoded GHC data is accounted
-separately. Interface decoding uses a disposable captured-file adapter and a
-request-owned memo tied to the GHC NameCache's mutable intern-table cell and
-unique issuer character. Identity of a reboxed GHC record is not owner identity.
+separately. The compiler universe retains path-free original content and decoded
+certificate, sidecar, census and graph facts. Each continuation creates a fresh
+receiving allowance, selected paths and terminal observations; no earlier
+manifest or scratch observation is inherited. Worker misses read only the
+offered owned materialization. Fresh acquisition always reads its offered files.
+Inactive content uses union-unique byte accounting, at most 4096 images, and
+`TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES` (nonnegative bytes; experimental default
+128 MiB, clamped to the request allowance). Eviction prunes associated decoded
+facts; live scopes retain their own immutable inputs. Existing worker RSS
+admission and rotation bound total decoded GHC residency. Timing counters expose
+retained/evicted/receiving bytes, decoded fact counts and content hit/miss events.
+Interface decoding uses a disposable captured-file adapter and a
+universe-owned memo tied to the GHC NameCache's mutable intern-table cell and
+unique issuer character, retaining only its current cache epoch. Identity of a reboxed GHC record is not owner identity.
 Neither a retained cache nor an EPS lazy closure may retain a temporary path;
 executable GHC make views are separate disposable materializations.
 
@@ -104,7 +120,8 @@ Their exact resolution is checked in each consuming environment, with fresh
 interface seal observations at admission and terminal publication. Package
 objects and shared libraries are not request snapshots. Current source selection,
 source/dependency and negative-candidate checks remain fresh. Terminal publication
-also re-observes captured original paths, refusing persistent drift while snapshot
+also re-observes the receiving materializations and selected protected original
+paths issued by acquisition, refusing persistent drift while snapshot
 consumption stays independent of transient producer-path mutations. Prepared
 candidate results retain the issuer's opaque admission through certification and
 program retention. Durable support copies bind explicit path aliases to that
@@ -128,12 +145,12 @@ oversized parcels are rejected. Resolution evidence retains at most 65,536 rows,
 and exact-import edges retain their independent budgets.
 
 This is a strict matched worker/frontend migration. Earlier exact-scope versions
-2, 4, 6, 7 and 8 are rejected. Deploy both producers and consumers together and
+before 12 are rejected. Deploy both producers and consumers together and
 regenerate fixtures through their owning producers.
 
 Candidate offers use strict `TPMCAN` version 10 with seven fields and sixteen-field
-module rows. Its execution parcel uses graph-file descriptors beside the candidate
-manifest, with the same graph bounds as exact scopes and a separate four MiB
+module rows. Its execution parcel uses absolute authenticated graph-file
+descriptors; acquired artifact owners may retain them outside the request directory, with the same graph bounds as exact scopes and a separate four MiB
 metadata limit. This requires a matched producer/consumer deployment. Each native row retains its exact canonical requirements and sealed
 module certificate/Core descriptor. Optional proof validation retains metadata
 and permits absent Core. Admission captures selected interfaces, certificates,

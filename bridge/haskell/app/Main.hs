@@ -306,7 +306,7 @@ dispatch compilerScope caches timing args = do
       Left InvalidCellPlanShape -> throwIO InvalidCellPlanRequest
       Right () -> pure ()
     exact <- forM (requestSessionArtifacts args) $ \manifest -> do
-      scope <- readExactScope manifest >>= either fail pure
+      scope <- scopedReadExactScope compilerScope manifest >>= either fail pure
       forM_ (scopeIncludePaths scope) $ \includes ->
         unless (requestIncludes args == includes)
           (throwIO SearchInputsChanged)

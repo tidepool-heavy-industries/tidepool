@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
-module RequestInputsTest (requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories) where
+module RequestInputsTest (requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse) where
 
 import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, fromException, throwIO, try)
 import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
@@ -32,7 +32,7 @@ import Tidepool.ExactScope
   ( ExactCompilation(..), SourceSelectedOriginals(..), scopeManifestPath, scopeRequestSha256
   , scopeInterfaces, scopeModuleInterfaceProofs, canonicalCertificatePath
   , canonicalCoreArtifact, canonicalCorePath, readExactScope, revalidateExactScope
-  , writeCheckedExactCompilation, writeRetainedExactCompilation )
+  , writeCheckedExactCompilation, writeRetainedExactCompilation, newExactInputOwner, readExactScopeWithOwner )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), PreparedPipelineResult(..), PipelineResult(..)
@@ -40,7 +40,7 @@ import Tidepool.GhcPipeline
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
 import Tidepool.RequestInputs
 import Tidepool.Session (SessionScope(..), emptySessionScope, SessionModule(..), SessionModuleKind(..), Generation(..))
-import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope)
+import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCandidateManifestFor, writeGenuineAuthoredDeclarationScope, writeGenuineExecutionScope)
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
 import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer)
@@ -49,6 +49,45 @@ import Codec.CBOR.Write (toStrictByteString)
 import SourceBootCases (admitCheckedScope, counterValues)
 import CodecFixtureSupport (readCodecTerm)
 import SourceBootFixtureSupport (withScratch, withTiming, digest, capturePreparedFixture, captureDiagnostics)
+
+ownedScopeInputReuse :: IO ()
+ownedScopeInputReuse = withTiming $ withScratch $ \work -> do
+  forM_ ["CanonicalSource.hs","CanonicalDependency.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing (work </> "CanonicalSource.hs") [work] Nothing
+  fixture <- capturePreparedFixture work original
+  owner <- newExactInputOwner
+  firstPath <- writeGenuineExecutionScope ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture
+  (_,cold) <- captureDiagnostics (readExactScopeWithOwner owner firstPath >>= either fail pure)
+  secondPath <- writeGenuineMetadataScope work ["CanonicalDependency"] fixture
+  (_,contracted) <- captureDiagnostics (readExactScopeWithOwner owner secondPath >>= either fail pure)
+  thirdPath <- writeGenuineExecutionScope ["CanonicalSource","CanonicalDependency"] ["CanonicalSource"] work fixture
+  removeFile firstPath
+  removeFile secondPath
+  (third,warm) <- captureDiagnostics (readExactScopeWithOwner owner thirdPath >>= either fail pure)
+  revalidateExactScope (prHscEnv (pprPipelineResult original)) third >>= either fail pure
+  let total label = sum . counterValues label
+  unless (total "original_inputs.certificate.misses" cold == 2
+      && total "original_inputs.certificate.hits" contracted == 1
+      && total "original_inputs.certificate.hits" warm == 2
+      && total "original_inputs.certificate.misses" warm == 0
+      && total "original_inputs.packages.hits" warm == 2
+      && total "original_inputs.census.hits" warm == 2
+      && total "original_inputs.graph.hits" warm > 0)
+    (fail ("owned scope A/B/A failed to reuse its immutable facts: " ++ cold ++ contracted ++ warm))
+  rotated <- newExactInputOwner
+  (_,rehydrated) <- captureDiagnostics (readExactScopeWithOwner rotated thirdPath >>= either fail pure)
+  unless (total "original_inputs.certificate.misses" rehydrated == 2)
+    (fail "fresh physical owner inherited a prior worker's decoder")
+  withFixtureEnvironment "TIDEPOOL_RETAINED_ORIGINAL_INPUT_BYTES" "0" $ do
+    bounded <- newExactInputOwner
+    _ <- readExactScopeWithOwner bounded thirdPath >>= either fail pure
+    (_,evicted) <- captureDiagnostics (readExactScopeWithOwner bounded thirdPath >>= either fail pure)
+    unless (counterValues "original_inputs.retained_encoded_bytes" evicted == [0]
+        && total "original_inputs.certificate.misses" evicted == 2)
+      (fail "zero inactive allowance retained content or decoded facts")
+  putStrLn ("owned exact inputs: A/B/A reuse, deleted manifests, rotation and zero-budget eviction passed\n" ++ warm)
 
 -- This fault injector invokes the actual libtest binary. It never derives
 -- success from rendered test output; receipt mutations use independently known
@@ -439,7 +478,53 @@ requestInputHistories = do
       $ classify restored "restore captured input"
       $ ioProperty (history selected)
   unless (isSuccess result) (fail "request input custody history property failed")
+  continuation <- quickCheckWithResult stdArgs {maxSuccess=100,maxSize=64} $
+    \(NonEmpty generated) originDrift aliasDrift ->
+      classify originDrift "protected origin drift"
+      $ classify aliasDrift "receiving alias drift"
+      $ ioProperty (continued (BS.pack [if bit then 1 else 0 | bit <- take 64 (generated :: [Bool])]) originDrift aliasDrift)
+  unless (isSuccess continuation) (fail "continued original input history property failed")
   where
+    continued values originDrift aliasDrift = withScratch $ \directory -> do
+      let bytes = values
+          historical = directory </> "previous-offer"
+          oldManifest = directory </> "previous-manifest"
+          original = directory </> "protected-origin"
+          receiving = directory </> "receiving-alias"
+          changed = bytes <> BS.singleton 123
+          reference path = OriginalInputReference path (digest bytes) (BS.length bytes) [original]
+      BS.writeFile historical bytes
+      BS.writeFile oldManifest (BS.singleton 7)
+      BS.writeFile original bytes
+      (_,old) <- captureRequestInputs Nothing $ \reader -> do
+        _ <- reader oldManifest 1
+        reader historical 64
+      content <- either fail pure (selectedOriginalContent [reference historical] old)
+      removeFile historical
+      removeFile oldManifest
+      BS.writeFile receiving (if aliasDrift then changed else bytes)
+      BS.writeFile original (if originDrift then changed else bytes)
+      selected <- continueRequestInputs content [reference receiving]
+      actual <- capturedRequestInput selected receiving (digest bytes)
+      observed <- revalidateRequestInputs selected
+      unless (actual == bytes && requestInputBytes selected == toInteger (BS.length bytes))
+        (fail "continuation lost content or inherited historical accounting")
+      unless (either (const False) (const True) observed == not (originDrift || aliasDrift))
+        (fail "continuation publication disagreed with current selected-path model")
+      (_,fresh) <- captureRequestInputs Nothing (\reader -> reader receiving 65)
+      freshBytes <- capturedRequestInput fresh receiving (digest (if aliasDrift then changed else bytes))
+      unless (freshBytes == if aliasDrift then changed else bytes)
+        (fail "fresh acquisition consumed a retained original")
+      cold <- try (continueRequestInputs emptyCapturedOriginalContent [reference receiving])
+        :: IO (Either IOException RequestOriginalInputs)
+      unless (either (const False) (const True) cold == not aliasDrift)
+        (fail "rotation fallback used an unsealed materialization")
+      BS.writeFile receiving bytes
+      BS.writeFile original bytes
+      revalidateRequestInputs selected >>= either fail pure
+      rotated <- continueRequestInputs emptyCapturedOriginalContent [reference receiving]
+      revalidateRequestInputs rotated >>= either fail pure
+      pure True
     history steps = withScratch $ \directory -> do
       (_,empty) <- captureRequestInputs Nothing (const (pure ()))
       (_,model,owner) <- foldM (step directory) (Map.empty,Map.empty,empty) steps
@@ -562,6 +647,14 @@ requestInputBoundaries = withScratch $ \directory -> do
     setEnv config "64"
     (_,donor) <- captureRequestInputs Nothing (\reader -> reader other 3)
     setEnv config "5"
+    let reference destination = OriginalInputReference destination (digest bytes) 3 []
+    content <- either fail pure (selectedOriginalContent [reference other] donor)
+    continued <- continueRequestInputs content [reference path]
+    unless (requestInputBytes continued == 3) (fail "continued bytes inherited the donor allowance")
+    continuationOverflow <- try (continueRequestInputs content [reference path,reference copy])
+      :: IO (Either IOException RequestOriginalInputs)
+    unless (either (const True) (const False) continuationOverflow)
+      (fail "content hits bypassed the fresh receiving aggregate budget")
     (_,receiving) <- captureRequestInputs Nothing (const (pure ()))
     removeFile other
     transferred <- either fail pure (mergeRequestInputs receiving [donor,donor])

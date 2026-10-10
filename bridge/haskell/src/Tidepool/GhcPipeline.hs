@@ -251,6 +251,7 @@ import Tidepool.ExactHydration
 import Tidepool.ExactScope
   ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
   , scopeAvailableOriginalProducts
+  , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , compilationOriginalSourceImports, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin, normalizeInterfaceEvidence )
@@ -1168,6 +1169,7 @@ data CompilerUniverse = CompilerUniverse
   , universeRecovery :: RecoveryContext
   , universeInterpreter :: IORef CompilerInterpreterState
   , universePackageFinder :: PackageFinderFacts
+  , universeOriginalInputs :: ExactInputOwner
   }
 
 -- Executable seals come from the same module-version owner as the products.
@@ -4644,6 +4646,7 @@ withResidentPipelineSelectedRequests baseIncludes useRequests =
 -- capability cannot access contexts retained by the worker for later requests.
 data CompilerScope = CompilerScope
   { scopedCompile :: ResidentCompiler
+  , scopedReadExactScope :: FilePath -> IO (Either String ExactScope)
   , scopedRunGhc :: forall result. Ghc result -> IO result
   , scopedParserFlags :: DynFlags
   , scopedRecoveryCaches :: IO CompilerRecoveryCaches
@@ -4683,7 +4686,8 @@ withResidentCompilerScopes baseIncludes useRequests = do
     initialRecovery <- liftIO (RecoveryContext <$> RequestUnique.newUnique <*> pure auxiliaryRecovery)
     interpreter <- liftIO (newIORef (CompilerInterpreterState 0 Map.empty))
     packageFinder <- liftIO (newPackageFinderFacts baseEnv)
-    universe <- liftIO (newIORef (CompilerUniverse baseEnv Map.empty Map.empty initialRecovery interpreter packageFinder))
+    originalInputs <- liftIO newExactInputOwner
+    universe <- liftIO (newIORef (CompilerUniverse baseEnv Map.empty Map.empty initialRecovery interpreter packageFinder originalInputs))
     active <- liftIO (newIORef Nothing)
     availability <- liftIO (newIORef ResidentAvailable)
     ownerThread <- liftIO myThreadId
@@ -4745,6 +4749,9 @@ withResidentCompilerScopes baseIncludes useRequests = do
                   reflectGhc
                     (residentCompileOne producer selection retained universe active interpreterAttempt baseEnv baseFlags
                       timing requestIdentity purpose mscope path includes products) session
+                readScope manifest = runGuarded $ do
+                  selected <- readIORef universe
+                  readExactScopeWithOwner (universeOriginalInputs selected) manifest
                 runOperation :: forall result. Ghc result -> IO result
                 runOperation operation = runGuarded $ do
                   requestIdentity <- newTimingRequestIdentity
@@ -4793,7 +4800,7 @@ withResidentCompilerScopes baseIncludes useRequests = do
                     writeIORef availability ResidentBusy
                   writeIORef active Nothing
                   restoreBase
-            action (CompilerScope compile runOperation parserFlags recovery Nothing) `finally` finish
+            action (CompilerScope compile readScope runOperation parserFlags recovery Nothing) `finally` finish
           acquire = do
             caller <- myThreadId
             unless (caller == ownerThread) (throwIO CompilerTransactionWrongThread)
@@ -4953,6 +4960,8 @@ residentCompileOne producer selection retained universeRef active interpreterAtt
   liftIO $ do
     evictCompilerRecovery recovery (== targetOwner)
     writeIORef active (Just context)
+    emitCount timing "original_inputs.context_variants_before" (fromIntegral (Map.size (universeOriginalVersions universe)))
+    emitCount timing "original_inputs.context_variants_selected" (fromIntegral (Map.size originalVersions))
     modifyIORef' universeRef (\current -> current
       { universeEnvironment=retainedView, universeRecovery=recoveryContext
       , universeSourceVersions=Map.unionWith (Map.unionWith (Map.unionWith preferModuleVersion))

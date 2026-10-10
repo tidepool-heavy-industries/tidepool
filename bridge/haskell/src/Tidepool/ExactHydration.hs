@@ -12,7 +12,7 @@ module Tidepool.ExactHydration
   , PackageFinderFacts, newPackageFinderFacts, forkExactContextWithPackageFacts
   , ExactContextForkFailure(..)
   , readExactIfaceArtifacts, readExactIfaceArtifactsWith
-  , RequestIfaceDecoder, newRequestIfaceDecoder, readCapturedExactIfaceArtifacts
+  , RequestIfaceDecoder, newRequestIfaceDecoder, pruneRequestIfaceDecoder, readCapturedExactIfaceArtifacts
   , readCapturedExactIfaceClosureWithCheckedValues
   , hydrateExactScope, hydrateOriginalInterfaces, exactInterfaceSummary
   , exactHomeInstancesFor, withExactHomeInstances
@@ -828,6 +828,12 @@ instance Show RequestIfaceDecoder where show _ = "RequestIfaceDecoder"
 newRequestIfaceDecoder :: IO RequestIfaceDecoder
 newRequestIfaceDecoder = RequestIfaceDecoder <$> newMVar []
 
+pruneRequestIfaceDecoder :: Set.Set String -> RequestIfaceDecoder -> IO Int
+pruneRequestIfaceDecoder selected (RequestIfaceDecoder state) = modifyMVar state $ \universes -> do
+  let retained = [(cache,Map.filterWithKey (\(_,_,sha) _ -> sha `Set.member` selected) facts)
+        | (cache,facts) <- universes]
+  pure (retained,sum [Map.size facts | (_,facts) <- retained])
+
 readCapturedExactIfaceArtifacts :: RequestIfaceDecoder -> (ExactIfaceArtifact -> IO CapturedRequestInput)
   -> HscEnv -> [ExactIfaceArtifact] -> IO (Either String [(ExactIfaceArtifact,ModIface)])
 readCapturedExactIfaceArtifacts decoder readInput = readExactIfaceArtifactsUsing (readCapturedOne decoder readInput)
@@ -862,7 +868,7 @@ readCapturedOne (RequestIfaceDecoder state) readInput env artifact = do
         unless (capturedInputSha256 token == exactSha256 artifact) (fail "captured interface token differs from requested seal")
         result <- readOneWith (const (pure (capturedInputBytes token))) env artifact
         let retained = case result of
-              Right (_,iface) -> (cache,Map.insert key iface known) : filter ((/= cache) . fst) universes
+              Right (_,iface) -> [(cache,Map.insert key iface known)]
               Left _ -> universes
         pure (retained,result)
 
