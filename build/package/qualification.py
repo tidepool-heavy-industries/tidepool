@@ -56,6 +56,7 @@ HARNESS_THREE_ACTOR_PERFORMANCE_TESTS = [
 ]
 M3_RECURSIVE_TESTS = [
     "actor_host::scripted_recursive_acceptance::production_harness_recursive_captured_helper_and_typed_replies",
+    "actor_host::scripted_recursive_acceptance::production_harness_fresh_default_workspace_shell_and_typed_text_reply",
     "actor_host::embedded_agent_spec_tests::accepted_reply_resumes_after_parked_notebook_and_provider_completion",
 ]
 RESULT_DELIVERY_CASES = {

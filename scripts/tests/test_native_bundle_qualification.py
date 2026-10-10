@@ -548,9 +548,10 @@ class NativeQualificationTests(unittest.TestCase):
         recursive = qualification.cohorts()['m3-recursive']
         self.assertEqual(recursive['tests'], [
             'actor_host::scripted_recursive_acceptance::production_harness_recursive_captured_helper_and_typed_replies',
+            'actor_host::scripted_recursive_acceptance::production_harness_fresh_default_workspace_shell_and_typed_text_reply',
             'actor_host::embedded_agent_spec_tests::accepted_reply_resumes_after_parked_notebook_and_provider_completion',
         ])
-        self.assertEqual(recursive['expected_count'], 2)
+        self.assertEqual(recursive['expected_count'], 3)
         self.assertTrue(recursive['ignored'])
         self.assertEqual(recursive['compiler_mode'], 'owned-resident')
         self.assertEqual(recursive['max_jobs'], 1)
@@ -645,11 +646,15 @@ class NativeQualificationTests(unittest.TestCase):
                 for name, case in report['case_premises'].items():
                     self.assertEqual(case['premises'], qualification.RESULT_DELIVERY_CASES[name])
 
-    def test_recursive_m3_requires_both_exact_executed_receipts(self):
-        recursive, asynchronous = qualification.M3_RECURSIVE_TESTS
-        for mutation in ('control', 'missing_asynchronous', 'duplicate_recursive',
-                         'zero_asynchronous', 'failed_asynchronous'):
-            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+    def test_recursive_m3_requires_every_exact_executed_receipt(self):
+        selected = qualification.M3_RECURSIVE_TESTS
+        cases = [('control', None)] + [
+            (mutation, index)
+            for index in range(len(selected))
+            for mutation in ('missing', 'duplicate', 'zero', 'failed')
+        ]
+        for mutation, affected in cases:
+            with self.subTest(mutation=mutation, affected=affected), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 descriptor_path = root / 'descriptor.json'
                 descriptor_path.write_text('sealed descriptor')
@@ -666,8 +671,8 @@ class NativeQualificationTests(unittest.TestCase):
 
                 def execute(command, **kwargs):
                     self.assertEqual([command[index + 1] for index, value in enumerate(command)
-                                      if value == '--exact'], [recursive, asynchronous])
-                    self.assertEqual(command[command.index('--expected-count') + 1], '2')
+                                      if value == '--exact'], selected)
+                    self.assertEqual(command[command.index('--expected-count') + 1], str(len(selected)))
                     self.assertEqual(command[command.index('--jobs') + 1], '1')
                     self.assertEqual(command[command.index('--compiler-mode') + 1], 'owned-resident')
                     self.assertIn('--ignored', command)
@@ -677,14 +682,16 @@ class NativeQualificationTests(unittest.TestCase):
                     self.assertEqual(kwargs['env'], qualification.execution_environment(descriptor))
                     tests = output / 'tests'
                     tests.mkdir()
-                    names = [recursive] if mutation == 'missing_asynchronous' else [recursive, asynchronous]
-                    if mutation == 'duplicate_recursive':
-                        names[1] = recursive
+                    names = selected.copy()
+                    if mutation == 'missing':
+                        names.pop(affected)
+                    if mutation == 'duplicate':
+                        names[affected] = selected[(affected + 1) % len(selected)]
                     for index, name in enumerate(names):
                         qualification.write_json(tests / f'{index}.json', {
                             'test': name,
-                            'passed': not (index == 1 and mutation == 'failed_asynchronous'),
-                            'execution': {'executed_test_count': int(not (index == 1 and mutation == 'zero_asynchronous')),
+                            'passed': not (index == affected and mutation == 'failed'),
+                            'execution': {'executed_test_count': int(not (index == affected and mutation == 'zero')),
                                           'exit_code': 0},
                         })
                     return subprocess.CompletedProcess(command, 0)
@@ -700,7 +707,7 @@ class NativeQualificationTests(unittest.TestCase):
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(code, int(mutation != 'control'))
                 self.assertEqual(report['completed'], mutation == 'control')
-                self.assertEqual(report['expected_count'], 2)
+                self.assertEqual(report['expected_count'], len(selected))
                 self.assertEqual(report['runner_exit_code'], 0)
 
     def test_recursive_m3_missing_bundle_resources_refuses_before_execution(self):
