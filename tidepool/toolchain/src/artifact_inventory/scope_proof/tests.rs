@@ -131,7 +131,6 @@ fn proof_only_ancestors_survive_retirement_without_payload_authority() {
     let state = inventory.0.lock().unwrap();
     assert!(!state.payloads.contains_key(&ancestor_id));
     assert_eq!(state.selection_plans.len(), 2);
-    assert_eq!(state.scope_dependents.values().sum::<usize>(), 1);
     drop(state);
     let reopened_inventory = ArtifactInventory::default();
     let reopened = reopened_inventory
@@ -145,15 +144,14 @@ fn proof_only_ancestors_survive_retirement_without_payload_authority() {
     assert_eq!(reopened.capture_graph_selection(), graph);
     assert_eq!(reopened.artifact_ids(), vec![selected_id]);
     drop(selected);
-    assert!(inventory.0.lock().unwrap().selection_plans.is_empty());
-    assert!(inventory.0.lock().unwrap().scope_dependents.is_empty());
+    assert_eq!(inventory.node_count(), 0);
+    assert_eq!(inventory.0.lock().unwrap().selection_plans.len(), 2);
     drop(reopened);
-    assert!(reopened_inventory
-        .0
-        .lock()
-        .unwrap()
-        .selection_plans
-        .is_empty());
+    assert_eq!(reopened_inventory.node_count(), 0);
+    assert_eq!(
+        reopened_inventory.0.lock().unwrap().selection_plans.len(),
+        2
+    );
 }
 
 #[test]

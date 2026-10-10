@@ -3585,14 +3585,7 @@ fn program_support_artifacts(
     artifacts: &crate::artifact_inventory::ArtifactView,
     generated: &crate::declaration_join::ExactModuleIdentity,
 ) -> Result<crate::artifact_inventory::ArtifactView, CompileError> {
-    let support = artifacts.select_roots(
-        artifacts
-            .descriptors()
-            .into_iter()
-            .filter(|entry| &entry.owner != generated)
-            .map(|entry| entry.id)
-            .collect(),
-    )?;
+    let support = artifacts.support_without_owner(generated)?;
     if support
         .descriptors()
         .iter()

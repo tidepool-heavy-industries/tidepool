@@ -2542,7 +2542,7 @@ impl CertifiedSourceSelection {
         let native_closure = view
             .inventory()
             .admit_shared(view, entries)
-            .and_then(|view| view.select_roots(selected_ids.clone()))
+            .and_then(|view| view.select_admission_roots(selected_ids.clone()))
             .map_err(|error| CertificationError::OriginalClosure(Box::new(error)))?;
         if excluded.is_some_and(|(unit, module)| {
             native_closure.entries().iter().any(|entry| {

@@ -242,12 +242,7 @@ pub(super) fn install(
     additions: BTreeMap<ArtifactSelectionId, Arc<ScopeProofV3>>,
 ) {
     for (scope, proof) in additions {
-        if !state.selection_plans.contains_key(&scope) {
-            for ancestor in proof.scope_dependencies() {
-                *state.scope_dependents.entry(ancestor).or_default() += 1;
-            }
-            state.selection_plans.insert(scope, proof);
-        }
+        state.selection_plans.entry(scope).or_insert(proof);
     }
 }
 
@@ -269,33 +264,6 @@ pub(super) fn capture(
         .into_iter()
         .map(|scope| Arc::clone(&state.selection_plans[&scope]))
         .collect()
-}
-
-pub(super) fn retire(
-    state: &mut InventoryState,
-    lost_scopes: impl IntoIterator<Item = ArtifactSelectionId>,
-) {
-    let mut pending = lost_scopes.into_iter().collect::<Vec<_>>();
-    while let Some(scope) = pending.pop() {
-        if state.selection_nodes.contains_key(&scope) || state.scope_dependents.contains_key(&scope)
-        {
-            continue;
-        }
-        let Some(proof) = state.selection_plans.remove(&scope) else {
-            continue;
-        };
-        for ancestor in proof.scope_dependencies() {
-            let count = state
-                .scope_dependents
-                .get_mut(&ancestor)
-                .expect("retained ancestor proof");
-            *count -= 1;
-            if *count == 0 {
-                state.scope_dependents.remove(&ancestor);
-                pending.push(ancestor);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
