@@ -101,8 +101,8 @@ system_python_bootstrap_toolchain(
 
 nix_tool(name = "node", executable = read_root_config("nix", "node"), visibility = ["PUBLIC"])
 nix_tool(name = "npm", executable = read_root_config("nix", "npm"), visibility = ["PUBLIC"])
-nix_tool(name = "browser_node", executable = read_root_config("nix", "browser_node"), visibility = ["PUBLIC"])
-nix_tool(name = "browser_npm", executable = read_root_config("nix", "browser_npm"), visibility = ["PUBLIC"])
+nix_tool(name = "browser_node", executable = read_root_config("nix", "browser_node", ""), visibility = ["PUBLIC"])
+nix_tool(name = "browser_npm", executable = read_root_config("nix", "browser_npm", ""), visibility = ["PUBLIC"])
 nix_tool(name = "git", executable = read_root_config("nix", "git"), visibility = ["PUBLIC"])
 nix_tool(name = "python", executable = read_root_config("nix", "python"), visibility = ["PUBLIC"])
 nix_tool(name = "bash", executable = read_root_config("nix", "bash"), visibility = ["PUBLIC"])
@@ -121,21 +121,21 @@ nix_directory(
 nix_directory(
     name = "browser_npm_cache",
     cp = read_root_config("nix", "coreutils") + "/cp",
-    store_path = read_root_config("nix", "browser_npm_cache"),
+    store_path = read_root_config("nix", "browser_npm_cache", ""),
     visibility = ["PUBLIC"],
 )
 
 nix_directory(
     name = "playwright_browsers",
     cp = read_root_config("nix", "coreutils") + "/cp",
-    store_path = read_root_config("nix", "playwright_browsers"),
+    store_path = read_root_config("nix", "playwright_browsers", ""),
     visibility = ["PUBLIC"],
 )
 
 nix_directory(
     name = "browser_test_closure",
     cp = read_root_config("nix", "coreutils") + "/cp",
-    store_path = read_root_config("nix", "browser_test_closure"),
+    store_path = read_root_config("nix", "browser_test_closure", ""),
     visibility = ["PUBLIC"],
 )
 

@@ -71,6 +71,11 @@ elif args[0] == 'build':
         (target / 'bin').mkdir(exist_ok=True)
         (target / 'bin/buck2').write_text('#!/bin/sh\\nexit 0\\n')
         (target / 'bin/buck2').chmod(0o755)
+    if name == 'buck-browser-node' and not os.environ.get('TEST_MISSING_BROWSER_NODE'):
+        (target / 'bin').mkdir(exist_ok=True)
+        for tool in ('node', 'npm'):
+            (target / 'bin' / tool).write_text('#!/bin/sh\\nexit 0\\n')
+            (target / 'bin' / tool).chmod(0o755)
     if name == 'buck-lld' and not os.environ.get('TEST_MISSING_LLD'):
         (target / 'bin').mkdir(exist_ok=True)
         (target / 'bin/ld.lld').write_text('#!/bin/sh\\nexit 0\\n')
@@ -199,6 +204,32 @@ else:
         self.assertIn("haskell_test_closure = " + str(self.outputs / "buck-haskell-test-closure"), configured)
         self.assertIn("jev_sources = " + str(self.outputs / "buck-jev-sources"), configured)
 
+    def test_browser_selection_is_independent_from_host_test_selection(self):
+        browser_outputs = ("browser-node", "browser-npm-cache", "playwright-browsers", "browser-test-closure")
+        for flags in ((), ("--tests",), ("--browser",), ("--tests", "--browser")):
+            with self.subTest(flags=flags):
+                self.log.unlink(missing_ok=True)
+                result = self.run_configure(*flags)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                config = (self.root / ".buckconfig.local").read_text()
+                calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+                selected = {call[-1].split(".")[-1] for call in calls if call[0] == "build"}
+                for output in browser_outputs:
+                    self.assertEqual("buck-" + output in selected, "--browser" in flags)
+                self.assertEqual("buck-test-ghc" in selected, "--tests" in flags)
+                if "--browser" in flags:
+                    self.assertIn("browser_node = " + str(self.outputs / "buck-browser-node/bin/node"), config)
+                    self.assertIn("browser_npm = " + str(self.outputs / "buck-browser-node/bin/npm"), config)
+                else:
+                    for key in ("browser_node", "browser_npm", "browser_npm_cache", "playwright_browsers", "browser_test_closure"):
+                        self.assertIn(key + " = \n", config)
+
+    def test_missing_selected_browser_executables_preserve_prior_configuration(self):
+        (self.root / ".buckconfig.local").write_text("previous configuration\n")
+        result = self.run_configure("--browser", extra_env={"TEST_MISSING_BROWSER_NODE": "1"})
+        self.assert_failed_generation_preserves_config(result)
+        self.assertIn("Prepared browser Node/npm executables are unavailable", result.stderr)
+
     def test_runtime_tools_are_pinned_without_project_catalog_capture(self):
         result = self.run_configure()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -284,7 +315,7 @@ else:
     def test_build_failure_retains_evidence_without_switching_config(self):
         (self.root / ".buckconfig.local").write_text("previous configuration\n")
         self.assert_failed_generation_preserves_config(
-            self.run_configure(extra_env={"TEST_BUILD_FAILURE": "buck-browser-npm-cache"}))
+            self.run_configure("--browser", extra_env={"TEST_BUILD_FAILURE": "buck-browser-npm-cache"}))
         generation, = self.generations()
         self.assertIn("buck-browser-npm-cache", (generation / "outputs.tsv").read_text())
         self.assertTrue((generation / "roots/buck-ghc").is_symlink())

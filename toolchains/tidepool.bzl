@@ -69,6 +69,8 @@ nix_haskell_toolchain = rule(
 )
 
 def _nix_tool_impl(ctx):
+    if not ctx.attrs.executable:
+        fail("{} requires its pinned executable; rerun scripts/buck2-configure.sh with the required selection (--browser for browser targets, --tests for host Haskell tests)".format(ctx.label))
     return [
         DefaultInfo(),
         RunInfo(args = [ctx.attrs.executable]),

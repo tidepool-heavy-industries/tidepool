@@ -28,6 +28,7 @@ class DevShellTests(unittest.TestCase):
         nix.write_text("#!/usr/bin/env python3\nimport json,os,sys\nprint(json.dumps({'args':sys.argv[1:],'cwd':os.getcwd()}))\n")
         nix.chmod(0o755)
         (self.repo / "scripts").mkdir()
+        (self.repo / "scripts/toolchain-inputs.sh").write_bytes((SCRIPT.parent / "toolchain-inputs.sh").read_bytes())
         cargo_target = self.repo / "scripts" / "cargo-target.py"
         cargo_target.write_bytes((SCRIPT.parent / "cargo-target.py").read_bytes())
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("TIDEPOOL_DEV_")}
@@ -81,6 +82,21 @@ class DevShellTests(unittest.TestCase):
         selection2 = json.loads(result2.stdout)
         self.assertEqual(selection["args"][:2], selection2["args"][:2])
         self.assertEqual(self.git("rev-parse", f"refs/tidepool/dev-shell/{revision}"), revision)
+
+    def test_test_shell_uses_the_same_toolchain_source_with_explicit_selection(self):
+        result = self.run_shell("--tests", "ghc", "--version")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        selection = json.loads(result.stdout)
+        self.assertEqual(selection["args"][:2], ["develop", f"git+file://{self.repo}?rev={self.synthetic_default_revision()}#tests"])
+        for tool in ["ghc", "rustc"]:
+            path = self.bin / tool
+            path.write_text("#!/bin/sh\nexit 0\n")
+            path.chmod(0o755)
+        self.env.update(TIDEPOOL_DEV_SHELL=f"git+file://{self.repo}?rev={self.synthetic_default_revision()}#default",
+                        TIDEPOOL_DEV_GHC=str(self.bin / "ghc"), TIDEPOOL_DEV_RUSTC=str(self.bin / "rustc"))
+        self.assertIn("#tests", self.run_shell("--tests", "true").stdout)
+        self.env["TIDEPOOL_DEV_SHELL"] = self.env["TIDEPOOL_DEV_SHELL"].removesuffix("#default") + "#tests"
+        self.assertEqual(self.run_shell("--tests", "printf", "reused").stdout, "reused")
 
     def test_dirty_toolchain_requires_explicit_selection(self):
         (self.repo / "flake.nix").write_text("changed inputs\n")

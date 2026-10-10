@@ -5,13 +5,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 usage() {
-  printf 'Usage: scripts/buck2-configure.sh [--tests]\n'
+  printf 'Usage: scripts/buck2-configure.sh [--tests] [--browser]\n'
 }
 
 test_toolchain=false
+browser_toolchain=false
 for argument in "$@"; do
   case "$argument" in
     --tests) test_toolchain=true ;;
+    --browser) browser_toolchain=true ;;
     --help|-h) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -68,8 +70,8 @@ mkdir -p "$PWD/.buck2-toolchains/generations"
 generation=$(mktemp -d "$PWD/.buck2-toolchains/generations/generation.XXXXXXXX")
 mkdir "$generation/roots"
 : > "$generation/outputs.tsv"
-printf 'checkout=%s\nuid=%s\nselection=%s\nselection_mode=%s\ntests=%s\ntoolchain_tree=%s\n' \
-  "$PWD" "$(id -u)" "$TIDEPOOL_DEV_SHELL" "$selection_mode" "$test_toolchain" "$toolchain_tree" > "$generation/owner"
+printf 'checkout=%s\nuid=%s\nselection=%s\nselection_mode=%s\ntests=%s\nbrowser=%s\ntoolchain_tree=%s\n' \
+  "$PWD" "$(id -u)" "$TIDEPOOL_DEV_SHELL" "$selection_mode" "$test_toolchain" "$browser_toolchain" "$toolchain_tree" > "$generation/owner"
 printf 'preparing\n' > "$generation/status"
 tmp_config=
 finish_preparation() {
@@ -133,10 +135,22 @@ lld="$(output_path lld)"
 binutils="$(output_path binutils)"
 node="$(output_path node)"
 npm_cache="$(output_path npm-cache)"
-browser_node="$(output_path browser-node)"
-browser_npm_cache="$(output_path browser-npm-cache)"
-playwright_browsers="$(output_path playwright-browsers)"
-browser_test_closure="$(output_path browser-test-closure)"
+browser_node=
+browser_npm=
+browser_npm_cache=
+playwright_browsers=
+browser_test_closure=
+if [[ $browser_toolchain == true ]]; then
+  browser_node_root="$(output_path browser-node)"
+  browser_node=$browser_node_root/bin/node
+  browser_npm=$browser_node_root/bin/npm
+  browser_npm_cache="$(output_path browser-npm-cache)"
+  playwright_browsers="$(output_path playwright-browsers)"
+  browser_test_closure="$(output_path browser-test-closure)"
+  [[ -x $browser_node && -x $browser_npm ]] || {
+    echo 'Prepared browser Node/npm executables are unavailable' >&2; exit 1;
+  }
+fi
 test_tools="$(output_path test-tools)"
 test_tools_closure="$(output_path test-tools-closure)"
 matched_harness_source="$(output_path matched-harness-source)"
@@ -189,8 +203,8 @@ ar = $binutils/bin/ar
 node = $node/bin/node
 npm_cache = $npm_cache
 npm = $node/bin/npm
-browser_node = $browser_node/bin/node
-browser_npm = $browser_node/bin/npm
+browser_node = $browser_node
+browser_npm = $browser_npm
 browser_npm_cache = $browser_npm_cache
 playwright_browsers = $playwright_browsers
 browser_test_closure = $browser_test_closure

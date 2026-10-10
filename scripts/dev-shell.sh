@@ -3,10 +3,10 @@
 set -euo pipefail
 
 shell=default
-if [[ ${1:-} == --exomonad ]]; then
-  shell=exomonad
-  shift
-fi
+case ${1:-} in
+  --exomonad) shell=exomonad; shift ;;
+  --tests) shell=tests; shift ;;
+esac
 source_root=$(git rev-parse --show-toplevel)
 source "$source_root/scripts/toolchain-inputs.sh"
 requested_cargo_target=${CARGO_TARGET_DIR:-}
@@ -74,8 +74,8 @@ if [[ -n ${TIDEPOOL_DEV_FLAKE:-} ]]; then
 else
   # Nix can open a worktree root even when Git metadata is shared. Opening the
   # .git directory directly fails under a sandbox that protects nested .git.
-  if [[ $shell == default ]]; then
-    # default only needs the toolchain inputs, so pin a synthetic commit over
+  if [[ $shell != exomonad ]]; then
+    # Toolchain shells only need these inputs, so pin a synthetic commit over
     # them instead of HEAD: unrelated commits then reuse the same revision
     # instead of forcing Nix to re-fetch and re-evaluate the flake every time.
     tree=$(toolchain_input_tree)

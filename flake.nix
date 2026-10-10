@@ -285,9 +285,7 @@
           '';
           passthru.sourceRevision = "d04d4ccebfdd3a6b8507d44b3dc6f4fd9b796b14";
         };
-      in
-      {
-        devShells.default = pkgs.mkShell {
+        devShell = haskellEnv: pkgs.mkShell {
           nativeBuildInputs = [
             pkgs.pkg-config
             buck2Release
@@ -295,7 +293,7 @@
           ];
           buildInputs = [
             rust
-            ghcTestEnv
+            haskellEnv
             pkgs.cabal-install
             pkgs.openssl
             pkgs.jq
@@ -321,6 +319,10 @@
             echo "  sccache (rustc-wrapper, from ~/.cargo/config.toml): $(sccache --version 2>/dev/null || echo 'not on PATH')" >&2
           '';
         };
+      in
+      {
+        devShells.default = devShell ghcEnv;
+        devShells.tests = devShell ghcTestEnv;
 
         # Keep the resident development shell independent from provider clients.
         devShells.exomonad = pkgs.mkShell {
