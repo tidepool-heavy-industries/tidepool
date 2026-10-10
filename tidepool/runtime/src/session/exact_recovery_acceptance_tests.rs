@@ -609,15 +609,11 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
     )
     .unwrap();
     let child = producer.mint_detached_scope(public).unwrap();
-    let parent_surface = producer
-        .lib()
-        .durable_graph
-        .as_ref()
+    let parent_surface = recovery
+        .store
+        .read_public_owner(RecoveryDomainId::Root, &owner(1))
         .unwrap()
-        .graph
-        .surface(&owner(1))
-        .unwrap()
-        .clone();
+        .unwrap();
     assert_eq!(
         producer
             .initialize_durable_public_scope(child_owner.clone(), child)
@@ -627,14 +623,11 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
     let child_snapshot = producer.public_visibility_snapshot_in(child).unwrap();
     assert_eq!(child_snapshot.declaration_tip, expected.declaration_tip);
     assert_eq!(
-        producer
-            .lib()
-            .durable_graph
-            .as_ref()
-            .unwrap()
-            .graph
-            .surface(&owner(1)),
-        Some(&parent_surface)
+        recovery
+            .store
+            .read_public_owner(RecoveryDomainId::Root, &owner(1))
+            .unwrap(),
+        Some(parent_surface)
     );
     let child_admission = producer
         .begin_durable_private_execution(&child_owner, child)
@@ -1340,6 +1333,7 @@ fn successor_transfer_retains_only_the_sealed_live_bootstrap_dependencies() {
         assert!(persisted
             .surface(&owner(2))
             .unwrap()
+            .unwrap()
             .source_instances
             .is_empty());
         for lease in session
@@ -1470,15 +1464,11 @@ fn durable_child_initializer_preserves_parent_and_refuses_a_local_only_owner() {
         PublicManifestCommit::Durable
     );
     let before_parent = session.public_visibility_snapshot_in(parent).unwrap();
-    let parent_surface = session
-        .lib()
-        .durable_graph
-        .as_ref()
+    let parent_surface = recovery
+        .store
+        .read_public_owner(RecoveryDomainId::Root, &owner(1))
         .unwrap()
-        .graph
-        .surface(&owner(1))
-        .unwrap()
-        .clone();
+        .unwrap();
     let child = session.mint_detached_scope(parent).unwrap();
     let child_owner = RecoveryPublicOwner::new(
         &tidepool_repr::ActorPath::parse("root/exact-recovery/child").unwrap(),
@@ -1507,14 +1497,11 @@ fn durable_child_initializer_preserves_parent_and_refuses_a_local_only_owner() {
         Some(before_parent)
     );
     assert_eq!(
-        session
-            .lib()
-            .durable_graph
-            .as_ref()
-            .unwrap()
-            .graph
-            .surface(&owner(1)),
-        Some(&parent_surface)
+        recovery
+            .store
+            .read_public_owner(RecoveryDomainId::Root, &owner(1))
+            .unwrap(),
+        Some(parent_surface)
     );
     assert!(session.lib().tips.contains_key(&child));
     assert_eq!(
