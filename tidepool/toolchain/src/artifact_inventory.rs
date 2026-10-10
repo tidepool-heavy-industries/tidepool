@@ -130,7 +130,7 @@ pub struct NativeGroupKey {
 /// Immutable issuer-selected artifacts and executable groups. Decoding these
 /// facts grants no authority; retention checks them against authenticated live
 /// custody and requires their complete exact dependency closure.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ExactArtifactSelection(Arc<ExactArtifactSelectionFacts>);
 
 /// Observation compared only after the complete selection has been independently
@@ -138,21 +138,31 @@ pub struct ExactArtifactSelection(Arc<ExactArtifactSelectionFacts>);
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ExactArtifactSelectionDigest([u8; 32]);
 
-#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 struct ExactArtifactSelectionFacts {
-    graph: ArtifactGraphSelection,
+    snapshot: Arc<crate::exact_context::ExactSelectionSnapshot>,
+    graph: OnceLock<ArtifactGraphSelection>,
+    observation: OnceLock<ExactArtifactSelectionDigest>,
 }
 
 impl Serialize for ExactArtifactSelection {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.as_ref().serialize(serializer)
+        use serde::ser::SerializeStruct;
+        let mut row = serializer.serialize_struct("ExactArtifactSelectionFacts", 1)?;
+        row.serialize_field("graph", self.graph_selection())?;
+        row.end()
     }
 }
 
 impl<'de> Deserialize<'de> for ExactArtifactSelection {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        ExactArtifactSelectionFacts::deserialize(deserializer).map(|facts| Self(Arc::new(facts)))
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Transport {
+            graph: ArtifactGraphSelection,
+        }
+        Transport::deserialize(deserializer)
+            .map(|facts| Self::from_recovered_graph_selection(facts.graph))
     }
 }
 
@@ -160,23 +170,49 @@ impl ExactArtifactSelection {
     /// Borrow the issued graph facts without duplicating its complete witnesses.
     /// Consumers still validate these facts against authenticated live custody.
     pub fn graph_selection(&self) -> &ArtifactGraphSelection {
-        &self.0.graph
+        self.0.graph.get_or_init(|| {
+            self.0
+                .snapshot
+                .graph_selection()
+                .expect("issued or checked exact selection shape")
+        })
     }
 
     /// Reconstruct untrusted transport facts, equivalent to deserialization.
     /// This grants no selection authority; the inventory must authenticate the
     /// payloads, digest witnesses and exact closure before using the selection.
     pub fn from_recovered_graph_selection(graph: ArtifactGraphSelection) -> Self {
-        Self(Arc::new(ExactArtifactSelectionFacts { graph }))
-    }
-
-    pub(crate) fn capture(view: &ArtifactView) -> Self {
+        let snapshot =
+            Arc::new(crate::exact_context::ExactSelectionSnapshot::from_graph_selection(&graph));
         Self(Arc::new(ExactArtifactSelectionFacts {
-            graph: view.capture_graph_selection(),
+            snapshot,
+            graph: OnceLock::from(graph),
+            observation: OnceLock::new(),
         }))
     }
 
+    pub(crate) fn capture(view: &ArtifactView) -> Self {
+        Self::from_recovered_graph_selection(view.capture_graph_selection())
+    }
+
+    pub(crate) fn from_snapshot(
+        snapshot: Arc<crate::exact_context::ExactSelectionSnapshot>,
+    ) -> Self {
+        Self(Arc::new(ExactArtifactSelectionFacts {
+            snapshot,
+            graph: OnceLock::new(),
+            observation: OnceLock::new(),
+        }))
+    }
+
+    pub fn snapshot(&self) -> &Arc<crate::exact_context::ExactSelectionSnapshot> {
+        &self.0.snapshot
+    }
+
     pub(crate) fn observation_digest(&self) -> Result<ExactArtifactSelectionDigest, CompileError> {
+        if let Some(observation) = self.0.observation.get() {
+            return Ok(*observation);
+        }
         use std::io::Write;
 
         struct DigestWriter(Sha256);
@@ -190,13 +226,12 @@ impl ExactArtifactSelection {
             }
         }
 
-        crate::host_work::checkpoint()?;
         let mut sink = DigestWriter(Sha256::new());
         sink.0
             .update(b"Tidepool selected binding context observation v3\0");
         {
             let mut buffered = std::io::BufWriter::new(&mut sink);
-            let graph = &self.0.graph;
+            let graph = self.graph_selection();
             // Scope identities commit the immutable rows. Proof-only ancestry
             // and its transport layout do not change selected semantics.
             serde_json::to_writer(
@@ -212,9 +247,24 @@ impl ExactArtifactSelection {
             .map_err(|error| failure(&format!("exact selection observation: {error}")))?;
             buffered.flush()?;
         }
-        Ok(ExactArtifactSelectionDigest(sink.0.finalize().into()))
+        let digest = ExactArtifactSelectionDigest(sink.0.finalize().into());
+        let _ = self.0.observation.set(digest);
+        Ok(digest)
     }
 }
+
+impl PartialEq for ExactArtifactSelection {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+            || self
+                .observation_digest()
+                .expect("closed exact selection encoding")
+                == other
+                    .observation_digest()
+                    .expect("closed exact selection encoding")
+    }
+}
+impl Eq for ExactArtifactSelection {}
 
 /// Whole-module demand and a checked compiler entry cross the same admission
 /// owner. A raw ordinal or recovered selection cannot mint a checked entry.
@@ -3366,7 +3416,7 @@ impl ArtifactView {
         roots: Vec<ArtifactId>,
         selection: &ExactArtifactSelection,
     ) -> Result<Self, CompileError> {
-        let graph = &selection.0.graph;
+        let graph = selection.graph_selection();
         let ids = graph
             .bindings
             .iter()
@@ -6107,8 +6157,8 @@ mod tests {
             original: ArtifactId([3; 32]),
             source_revision: "source".into(),
             original_input_identity: "input".into(),
-            selection: ExactArtifactSelection(Arc::new(ExactArtifactSelectionFacts {
-                graph: ArtifactGraphSelection {
+            selection: ExactArtifactSelection::from_recovered_graph_selection(
+                ArtifactGraphSelection {
                     selections: vec![],
                     bindings: vec![
                         ArtifactBinding {
@@ -6122,7 +6172,7 @@ mod tests {
                     native_groups: vec![],
                     native_custody: vec![],
                 },
-            })),
+            ),
             selection_sha256: [5; 32],
         };
         let mut projection = CompilerInputProjection::default();

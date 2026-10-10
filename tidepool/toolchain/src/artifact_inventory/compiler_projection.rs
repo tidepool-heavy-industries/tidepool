@@ -52,12 +52,34 @@ impl CompilerInputRole {
 /// Availability and executable native demand remain in the retained view.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CompilerInputProjection {
-    roles: BTreeMap<ExactModuleIdentity, CompilerInputRole>,
+    roles: imbl::OrdMap<ExactModuleIdentity, CompilerInputRole>,
 }
 
 impl CompilerInputProjection {
+    pub(crate) fn snapshot_roles(&self) -> &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole> {
+        &self.roles
+    }
     pub fn roles(&self) -> Vec<CompilerInputRole> {
         self.roles.values().cloned().collect()
+    }
+
+    fn project_roles(
+        &self,
+        mut select: impl FnMut(&ExactModuleIdentity, &CompilerInputRole) -> Option<CompilerInputRole>,
+    ) -> Self {
+        let mut roles = self.roles.clone();
+        for (owner, previous) in &self.roles {
+            match select(owner, previous) {
+                Some(role) if &role == previous => {}
+                Some(role) => {
+                    roles.insert(owner.clone(), role);
+                }
+                None => {
+                    roles.remove(owner);
+                }
+            }
+        }
+        Self { roles }
     }
 
     pub(crate) fn from_issued_entries(
@@ -112,26 +134,17 @@ impl CompilerInputProjection {
             .into_iter()
             .map(|row| row.id)
             .collect::<BTreeSet<_>>();
-        Self {
-            roles: self
-                .roles
-                .iter()
-                .filter_map(|(owner, role)| {
-                    (ids.contains(&role.interface()) || role.is_published_source_original()).then(
-                        || {
-                            let selected = match role.original() {
-                                _ if role.is_published_source_original() => role.clone(),
-                                Some(original) if ids.contains(&original) => role.clone(),
-                                _ => CompilerInputRole::InterfaceOnly {
-                                    interface: role.interface(),
-                                },
-                            };
-                            (owner.clone(), selected)
-                        },
-                    )
-                })
-                .collect(),
-        }
+        self.project_roles(|_, role| {
+            (ids.contains(&role.interface()) || role.is_published_source_original()).then(|| {
+                match role.original() {
+                    _ if role.is_published_source_original() => role.clone(),
+                    Some(original) if ids.contains(&original) => role.clone(),
+                    _ => CompilerInputRole::InterfaceOnly {
+                        interface: role.interface(),
+                    },
+                }
+            })
+        })
     }
 
     /// A transient source or value support view owns only its selected carriers.
@@ -139,23 +152,15 @@ impl CompilerInputProjection {
     /// a canonical dependency here does not offer its absent implementation.
     pub(crate) fn for_selected_support(&self, view: &ArtifactView) -> Self {
         let ids = view.artifact_ids().into_iter().collect::<BTreeSet<_>>();
-        Self {
-            roles: self
-                .roles
-                .iter()
-                .filter_map(|(owner, role)| {
-                    ids.contains(&role.interface()).then(|| {
-                        let selected = match role.original() {
-                            Some(original) if ids.contains(&original) => role.clone(),
-                            _ => CompilerInputRole::InterfaceOnly {
-                                interface: role.interface(),
-                            },
-                        };
-                        (owner.clone(), selected)
-                    })
+        self.project_roles(|_, role| {
+            ids.contains(&role.interface())
+                .then(|| match role.original() {
+                    Some(original) if ids.contains(&original) => role.clone(),
+                    _ => CompilerInputRole::InterfaceOnly {
+                        interface: role.interface(),
+                    },
                 })
-                .collect(),
-        }
+        })
     }
 
     pub(crate) fn admit_role(
@@ -163,6 +168,9 @@ impl CompilerInputProjection {
         owner: ExactModuleIdentity,
         incoming: CompilerInputRole,
     ) -> Result<(), CompileError> {
+        if self.roles.get(&owner) == Some(&incoming) {
+            return Ok(());
+        }
         if let Some(previous) = self.roles.get_mut(&owner) {
             if let (Some(existing), Some(new)) = (previous.original(), incoming.original()) {
                 if existing != new {
@@ -212,43 +220,28 @@ impl CompilerInputProjection {
     }
 
     pub(crate) fn interface_only(&self) -> Self {
-        Self {
-            roles: self
-                .roles
-                .iter()
-                .map(|(owner, role)| {
-                    (
-                        owner.clone(),
-                        CompilerInputRole::InterfaceOnly {
-                            interface: role.interface(),
-                        },
-                    )
-                })
-                .collect(),
-        }
+        self.project_roles(|_, role| {
+            Some(CompilerInputRole::InterfaceOnly {
+                interface: role.interface(),
+            })
+        })
     }
 
     /// Importing a proved source surface preserves exact interface custody.
     /// Only its issued source roles offer native originals in the new compiler
     /// namespace; unrelated executable dependencies remain retained originals.
     pub(crate) fn for_source_owners(&self, owners: &BTreeSet<ExactModuleIdentity>) -> Self {
-        Self {
-            roles: self
-                .roles
-                .iter()
-                .map(|(owner, role)| {
-                    let selected = if owners.contains(owner) || role.is_published_source_original()
-                    {
-                        role.clone()
-                    } else {
-                        CompilerInputRole::InterfaceOnly {
-                            interface: role.interface(),
-                        }
-                    };
-                    (owner.clone(), selected)
-                })
-                .collect(),
-        }
+        self.project_roles(|owner, role| {
+            Some(
+                if owners.contains(owner) || role.is_published_source_original() {
+                    role.clone()
+                } else {
+                    CompilerInputRole::InterfaceOnly {
+                        interface: role.interface(),
+                    }
+                },
+            )
+        })
     }
 
     pub(crate) fn project_metadata(

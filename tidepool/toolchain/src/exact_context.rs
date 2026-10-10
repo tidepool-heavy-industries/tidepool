@@ -2,7 +2,9 @@
 //! operation-local materializer applies their library diff to FVM HAMTs.
 
 use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use cid::Cid;
 use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
@@ -13,8 +15,10 @@ use multihash_codetable::{Code, MultihashDigest};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::artifact_inventory::{
-    ArtifactBinding, ArtifactBindingNode, ArtifactId, ArtifactSelectionId, ScopeProofV3,
+    ArtifactBinding, ArtifactBindingNode, ArtifactGraphSelection, ArtifactId, ArtifactSelectionId,
+    CompilerInputRole, ScopeProofV3,
 };
+use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
 
 const HAMT_CONFIG: Config = Config {
     bit_width: 5,
@@ -79,11 +83,18 @@ fn malformed(error: impl std::fmt::Display) -> SnapshotError {
     SnapshotError::Malformed(error.to_string())
 }
 
+fn storage_error(source: anyhow::Error) -> SnapshotError {
+    match source.downcast::<SnapshotError>() {
+        Ok(error) => error,
+        Err(source) => SnapshotError::Storage(source),
+    }
+}
+
 fn hamt_error(error: fvm_ipld_hamt::Error) -> SnapshotError {
     match error {
         fvm_ipld_hamt::Error::Dynamic(source) => match source.downcast::<SnapshotError>() {
             Ok(error) => error,
-            Err(source) => malformed(source),
+            Err(source) => SnapshotError::Storage(source),
         },
         other => malformed(other),
     }
@@ -95,16 +106,14 @@ impl<BS: Blockstore> Blockstore for CheckedStore<'_, BS> {
         let bytes = self
             .0
             .get(cid)
-            .map_err(SnapshotError::Storage)?
+            .map_err(storage_error)?
             .ok_or(SnapshotError::MissingBlock(*cid))?;
         verify_block(cid, &bytes)?;
         Ok(Some(bytes))
     }
     fn put_keyed(&self, cid: &Cid, bytes: &[u8]) -> anyhow::Result<()> {
         verify_block(cid, bytes)?;
-        self.0
-            .put_keyed(cid, bytes)
-            .map_err(SnapshotError::Storage)?;
+        self.0.put_keyed(cid, bytes).map_err(storage_error)?;
         Ok(())
     }
 }
@@ -129,7 +138,7 @@ pub fn read_value<T: DeserializeOwned, BS: Blockstore>(
 ) -> Result<T, SnapshotError> {
     let bytes = store
         .get(cid)
-        .map_err(SnapshotError::Storage)?
+        .map_err(storage_error)?
         .ok_or(SnapshotError::MissingBlock(*cid))?;
     verify_block(cid, &bytes)?;
     fvm_ipld_encoding::from_slice(&bytes).map_err(malformed)
@@ -138,7 +147,7 @@ pub fn read_value<T: DeserializeOwned, BS: Blockstore>(
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MaterializationMetrics {
     pub blocks: u64,
-    pub encoded_bytes: u64,
+    pub staged_bytes: u64,
     pub changed_entries: u64,
 }
 
@@ -182,46 +191,42 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
 
     pub fn materialize_value<T: Serialize>(&mut self, value: &T) -> Result<Cid, SnapshotError> {
         self.put_cbor(value, Code::Blake2b256)
-            .map_err(SnapshotError::Storage)
+            .map_err(storage_error)
     }
 
-    /// Only borrowed structural differences are consumed. A bootstrap has no
-    /// resident predecessor; subsequent calls retain the actual base snapshot.
+    /// The base receipt couples its root, actual facts and fixed codec family.
     pub fn materialize_map<K, V>(
         &mut self,
-        base: Option<(&SnapshotMapRoot, &OrdMap<K, V>)>,
+        base: Option<&MaterializedMap<K, V>>,
         next: &OrdMap<K, V>,
-    ) -> Result<SnapshotMapRoot, SnapshotError>
+    ) -> Result<MaterializedMap<K, V>, SnapshotError>
     where
         K: SnapshotKey,
         V: Clone + Eq + Serialize + DeserializeOwned,
     {
-        self.materialize_map_with(base, next, |_, value| Ok(value.clone()))
+        self.materialize_map_with(base, next, &InlineValues)
     }
 
-    /// Large owner facts become CID leaves through this same diff traversal.
-    /// The mapper runs only for added or changed facts.
-    pub fn materialize_map_with<K, V, W>(
+    /// The codec is chosen by the fact owner, rather than a per-call closure.
+    pub fn materialize_map_with<K, V, C>(
         &mut self,
-        base: Option<(&SnapshotMapRoot, &OrdMap<K, V>)>,
+        base: Option<&MaterializedMap<K, V, C>>,
         next: &OrdMap<K, V>,
-        mut encode: impl FnMut(&mut Self, &V) -> Result<W, SnapshotError>,
-    ) -> Result<SnapshotMapRoot, SnapshotError>
+        codec: &C,
+    ) -> Result<MaterializedMap<K, V, C>, SnapshotError>
     where
         K: SnapshotKey,
-        V: Eq,
-        W: Eq + Serialize + DeserializeOwned,
+        V: Clone + Eq,
+        C: SnapshotValueCodec<V>,
     {
         let empty = OrdMap::new();
-        let previous = base.map_or(&empty, |(_, facts)| facts);
+        let previous = base.map_or(&empty, |base| &base.facts);
         let mut changes = previous.diff(next).peekable();
         if changes.peek().is_none() {
-            if let Some((root, _)) = base {
-                return Ok(root.clone());
+            if let Some(base) = base {
+                return Ok(base.clone());
             }
         }
-        // Encode values before borrowing the materializer as a HAMT store.
-        // This is the changed-entry set, never a cumulative map collection.
         let mut edits = Vec::new();
         for change in changes {
             self.changed_entries += 1;
@@ -230,14 +235,17 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
                 | DiffItem::Update {
                     new: (key, value), ..
                 } => {
-                    edits.push((BytesKey(key.encode_key()?), Some(encode(self, value)?)));
+                    edits.push((
+                        BytesKey(key.encode_key()?),
+                        Some(codec.encode(self, value)?),
+                    ));
                 }
                 DiffItem::Remove(key, _) => edits.push((BytesKey(key.encode_key()?), None)),
             }
         }
-        let mut hamt: Hamt<_, W> = match base {
-            Some((root, _)) => {
-                Hamt::load_with_config(root.cid(), &*self, HAMT_CONFIG).map_err(hamt_error)?
+        let mut hamt: Hamt<_, C::Wire> = match base {
+            Some(base) => {
+                Hamt::load_with_config(base.root.cid(), &*self, HAMT_CONFIG).map_err(hamt_error)?
             }
             None => Hamt::new_with_config(&*self, HAMT_CONFIG),
         };
@@ -251,7 +259,12 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
                 }
             }
         }
-        hamt.flush().map(SnapshotMapRoot).map_err(hamt_error)
+        let root = hamt.flush().map(SnapshotMapRoot).map_err(hamt_error)?;
+        Ok(MaterializedMap {
+            root,
+            facts: next.clone(),
+            codec: PhantomData,
+        })
     }
 
     pub fn finish(self) -> Result<StagedBlocks, SnapshotError> {
@@ -266,14 +279,12 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
             }
         }
         let collected = Collector(RefCell::new(Vec::new()));
-        self.pending
-            .copy_to(&collected)
-            .map_err(SnapshotError::Storage)?;
+        self.pending.copy_to(&collected).map_err(storage_error)?;
         let mut blocks = collected.0.into_inner();
         blocks.sort_by_key(|(cid, _)| *cid);
         let metrics = MaterializationMetrics {
             blocks: blocks.len() as u64,
-            encoded_bytes: blocks.iter().map(|(_, bytes)| bytes.len() as u64).sum(),
+            staged_bytes: blocks.iter().map(|(_, bytes)| bytes.len() as u64).sum(),
             changed_entries: self.changed_entries,
         };
         Ok(StagedBlocks { blocks, metrics })
@@ -290,56 +301,151 @@ impl<BS: Blockstore> Blockstore for Materializer<'_, BS> {
 
     fn put_keyed(&self, cid: &Cid, bytes: &[u8]) -> anyhow::Result<()> {
         verify_block(cid, bytes)?;
-        // Existing immutable bytes need no duplicate staged insert. Fresh base
-        // authentication is the blockstore owner's responsibility.
-        if self.base.has(cid)? {
+        if let Some(existing) = self.base.get(cid).map_err(storage_error)? {
+            verify_block(cid, &existing)?;
             return Ok(());
         }
-        self.pending.put_keyed(cid, bytes)
+        self.pending.put_keyed(cid, bytes).map_err(storage_error)?;
+        Ok(())
+    }
+}
+
+/// A structurally authenticated root and its actual immutable resident facts.
+/// Decoding establishes no compiler or source-instance authority.
+#[derive(Debug)]
+pub struct MaterializedMap<K: Ord, V, C = InlineValues> {
+    root: SnapshotMapRoot,
+    facts: OrdMap<K, V>,
+    codec: PhantomData<C>,
+}
+impl<K: Ord, V, C> Clone for MaterializedMap<K, V, C> {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            facts: self.facts.clone(),
+            codec: PhantomData,
+        }
+    }
+}
+impl<K: Ord, V, C> MaterializedMap<K, V, C> {
+    pub fn root(&self) -> &SnapshotMapRoot {
+        &self.root
+    }
+    pub fn facts(&self) -> &OrdMap<K, V> {
+        &self.facts
+    }
+    pub fn into_facts(self) -> OrdMap<K, V> {
+        self.facts
+    }
+}
+
+pub trait SnapshotValueCodec<V> {
+    type Wire: Clone + Eq + Serialize + DeserializeOwned;
+    fn encode<BS: Blockstore>(
+        &self,
+        store: &mut Materializer<'_, BS>,
+        value: &V,
+    ) -> Result<Self::Wire, SnapshotError>;
+    fn decode<BS: Blockstore>(&self, store: &BS, value: Self::Wire) -> Result<V, SnapshotError>;
+}
+#[derive(Clone, Copy, Debug)]
+pub struct InlineValues;
+impl<V: Clone + Eq + Serialize + DeserializeOwned> SnapshotValueCodec<V> for InlineValues {
+    type Wire = V;
+    fn encode<BS: Blockstore>(
+        &self,
+        _: &mut Materializer<'_, BS>,
+        value: &V,
+    ) -> Result<V, SnapshotError> {
+        Ok(value.clone())
+    }
+    fn decode<BS: Blockstore>(&self, _: &BS, value: V) -> Result<V, SnapshotError> {
+        Ok(value)
     }
 }
 
 pub fn hydrate_map<K, V, BS>(
     store: &BS,
     root: &SnapshotMapRoot,
-) -> Result<OrdMap<K, V>, SnapshotError>
+) -> Result<MaterializedMap<K, V>, SnapshotError>
 where
     K: SnapshotKey,
     V: Clone + Eq + Serialize + DeserializeOwned,
     BS: Blockstore,
 {
+    hydrate_map_with(store, root, &InlineValues)
+}
+
+pub fn hydrate_map_with<K, V, C, BS>(
+    store: &BS,
+    root: &SnapshotMapRoot,
+    codec: &C,
+) -> Result<MaterializedMap<K, V, C>, SnapshotError>
+where
+    K: SnapshotKey,
+    V: Clone + Eq,
+    C: SnapshotValueCodec<V>,
+    BS: Blockstore,
+{
     let checked = CheckedStore(store);
-    let hamt: Hamt<_, V> =
+    let hamt: Hamt<_, C::Wire> =
         Hamt::load_with_config(root.cid(), &checked, HAMT_CONFIG).map_err(hamt_error)?;
     let mut facts = OrdMap::new();
     hamt.for_each_cacheless(|key, value| {
         let key = K::decode_key(&key.0)?;
-        if facts.insert(key, value.clone()).is_some() {
-            return Err(anyhow::anyhow!("duplicate typed snapshot key"));
+        if facts
+            .insert(key, codec.decode(store, value.clone())?)
+            .is_some()
+        {
+            return Err(malformed("duplicate typed snapshot key").into());
         }
         Ok(())
     })
     .map_err(hamt_error)?;
-    Ok(facts)
+    Ok(MaterializedMap {
+        root: root.clone(),
+        facts,
+        codec: PhantomData,
+    })
 }
 
 /// Scope facts have a separately authenticated binding identity. Equality is
 /// compact; the immutable issuing owner never substitutes rows under that ID.
 #[derive(Clone, Debug)]
-pub struct ImmutableScopeProofRef(Arc<ScopeProofV3>);
+pub struct ImmutableScopeProofRef(Arc<ScopeFact>);
+
+#[derive(Debug)]
+struct ScopeFact {
+    proof: Arc<ScopeProofV3>,
+    encoded: OnceLock<(Cid, Arc<[u8]>)>,
+}
 
 impl ImmutableScopeProofRef {
     pub(crate) fn from_issued(proof: Arc<ScopeProofV3>) -> Self {
-        Self(proof)
+        Self(Arc::new(ScopeFact {
+            proof,
+            encoded: OnceLock::new(),
+        }))
     }
     pub fn proof(&self) -> &Arc<ScopeProofV3> {
-        &self.0
+        &self.0.proof
+    }
+    fn encoded(&self) -> Result<&(Cid, Arc<[u8]>), SnapshotError> {
+        if let Some(encoded) = self.0.encoded.get() {
+            return Ok(encoded);
+        }
+        let bytes: Arc<[u8]> = fvm_ipld_encoding::to_vec(self.proof().as_ref())
+            .map_err(malformed)?
+            .into();
+        let cid = Cid::new_v1(DAG_CBOR, Code::Blake2b256.digest(&bytes));
+        let _ = self.0.encoded.set((cid, bytes));
+        Ok(self.0.encoded.get().expect("scope fact initialized"))
     }
 }
 
 impl PartialEq for ImmutableScopeProofRef {
     fn eq(&self, other: &Self) -> bool {
-        self.0.selection == other.0.selection
+        self.proof().selection == other.proof().selection
     }
 }
 impl Eq for ImmutableScopeProofRef {}
@@ -351,6 +457,266 @@ pub struct ExactSelectionSnapshot {
     pub(crate) roots: OrdMap<ArtifactBindingNode, ()>,
     pub(crate) namespace: OrdMap<ArtifactId, ArtifactBinding>,
     pub(crate) native_custody: OrdMap<ArtifactBinding, ()>,
+}
+
+impl ExactSelectionSnapshot {
+    pub(crate) fn from_graph_selection(graph: &ArtifactGraphSelection) -> Self {
+        Self {
+            scopes: graph
+                .selections
+                .iter()
+                .map(|proof| {
+                    (
+                        proof.selection,
+                        ImmutableScopeProofRef::from_issued(proof.clone()),
+                    )
+                })
+                .collect(),
+            roots: graph.roots.iter().map(|root| (*root, ())).collect(),
+            namespace: graph
+                .namespace
+                .iter()
+                .map(|binding| (binding.artifact, *binding))
+                .collect(),
+            native_custody: graph
+                .native_custody
+                .iter()
+                .map(|binding| (*binding, ()))
+                .collect(),
+        }
+    }
+
+    fn selected_nodes(
+        &self,
+    ) -> Result<std::collections::BTreeSet<ArtifactBindingNode>, SnapshotError> {
+        let mut selected = std::collections::BTreeSet::new();
+        let mut pending: Vec<_> = self
+            .roots
+            .keys()
+            .copied()
+            .chain(
+                self.native_custody
+                    .keys()
+                    .copied()
+                    .map(ArtifactBindingNode::Artifact),
+            )
+            .collect();
+        while let Some(node) = pending.pop() {
+            if !selected.insert(node) {
+                continue;
+            }
+            let proof = self
+                .scopes
+                .get(&node.selection())
+                .ok_or_else(|| malformed("selected node lacks scope proof"))?
+                .proof();
+            if proof.nodes.binary_search(&node).is_err() {
+                return Err(malformed("selected node outside scope proof"));
+            }
+            let start = proof
+                .dependencies
+                .partition_point(|(source, _, _)| *source < node);
+            pending.extend(
+                proof.dependencies[start..]
+                    .iter()
+                    .take_while(|(source, _, _)| *source == node)
+                    .map(|(_, target, _)| *target),
+            );
+        }
+        Ok(selected)
+    }
+
+    /// Derive selected payload/group rows from exact typed roots and custody.
+    /// Proof-only ancestors remain available without becoming payload authority.
+    pub fn graph_selection(&self) -> Result<ArtifactGraphSelection, SnapshotError> {
+        let selected = self.selected_nodes()?;
+        if self
+            .namespace
+            .values()
+            .any(|binding| !selected.contains(&ArtifactBindingNode::Artifact(*binding)))
+        {
+            return Err(malformed("namespace outside exact selected closure"));
+        }
+        Ok(ArtifactGraphSelection {
+            selections: self
+                .scopes
+                .values()
+                .map(|proof| proof.proof().clone())
+                .collect(),
+            bindings: selected
+                .iter()
+                .filter_map(|node| match node {
+                    ArtifactBindingNode::Artifact(binding) => Some(*binding),
+                    _ => None,
+                })
+                .collect(),
+            namespace: self.namespace.values().copied().collect(),
+            roots: self.roots.keys().copied().collect(),
+            native_groups: selected
+                .iter()
+                .filter_map(|node| match node {
+                    ArtifactBindingNode::Group(group) => Some(*group),
+                    _ => None,
+                })
+                .collect(),
+            native_custody: self.native_custody.keys().copied().collect(),
+        })
+    }
+
+    pub fn binding_dependencies(
+        &self,
+    ) -> Result<
+        Vec<(
+            ArtifactBindingNode,
+            ArtifactBindingNode,
+            crate::artifact_inventory::ArtifactDependency,
+        )>,
+        SnapshotError,
+    > {
+        let selected = self.selected_nodes()?;
+        let mut edges = Vec::new();
+        for source in &selected {
+            let proof = self.scopes[&source.selection()].proof();
+            let start = proof
+                .dependencies
+                .partition_point(|(node, _, _)| node < source);
+            edges.extend(
+                proof.dependencies[start..]
+                    .iter()
+                    .take_while(|(node, _, _)| node == source)
+                    .cloned(),
+            );
+        }
+        Ok(edges)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectionDescriptor {
+    version: u32,
+    scopes: SnapshotMapRoot,
+    roots: SnapshotMapRoot,
+    namespace: SnapshotMapRoot,
+    native_custody: SnapshotMapRoot,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ScopeProofCodec;
+impl SnapshotValueCodec<ImmutableScopeProofRef> for ScopeProofCodec {
+    type Wire = Cid;
+    fn encode<BS: Blockstore>(
+        &self,
+        store: &mut Materializer<'_, BS>,
+        value: &ImmutableScopeProofRef,
+    ) -> Result<Cid, SnapshotError> {
+        let (cid, bytes) = value.encoded()?;
+        store.put_keyed(cid, bytes).map_err(storage_error)?;
+        Ok(*cid)
+    }
+    fn decode<BS: Blockstore>(
+        &self,
+        store: &BS,
+        cid: Cid,
+    ) -> Result<ImmutableScopeProofRef, SnapshotError> {
+        let proof: ScopeProofV3 = read_value(store, &cid)?;
+        // The inventory authenticates complete scope identities and ancestry
+        // before these decoded facts become live compiler custody.
+        Ok(ImmutableScopeProofRef::from_issued(Arc::new(proof)))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct MaterializedSelection {
+    root: SelectionRoot,
+    snapshot: Arc<ExactSelectionSnapshot>,
+    scopes: MaterializedMap<ArtifactSelectionId, ImmutableScopeProofRef, ScopeProofCodec>,
+    roots: MaterializedMap<ArtifactBindingNode, ()>,
+    namespace: MaterializedMap<ArtifactId, ArtifactBinding>,
+    native_custody: MaterializedMap<ArtifactBinding, ()>,
+}
+impl MaterializedSelection {
+    pub fn root(&self) -> &SelectionRoot {
+        &self.root
+    }
+    pub fn snapshot(&self) -> &Arc<ExactSelectionSnapshot> {
+        &self.snapshot
+    }
+}
+impl<BS: Blockstore> Materializer<'_, BS> {
+    pub fn materialize_selection(
+        &mut self,
+        base: Option<&MaterializedSelection>,
+        next: &ExactSelectionSnapshot,
+    ) -> Result<MaterializedSelection, SnapshotError> {
+        let scopes =
+            self.materialize_map_with(base.map(|b| &b.scopes), &next.scopes, &ScopeProofCodec)?;
+        let roots = self.materialize_map(base.map(|b| &b.roots), &next.roots)?;
+        let namespace = self.materialize_map(base.map(|b| &b.namespace), &next.namespace)?;
+        let native_custody =
+            self.materialize_map(base.map(|b| &b.native_custody), &next.native_custody)?;
+        let descriptor = SelectionDescriptor {
+            version: 1,
+            scopes: scopes.root.clone(),
+            roots: roots.root.clone(),
+            namespace: namespace.root.clone(),
+            native_custody: native_custody.root.clone(),
+        };
+        let root = if base.is_some_and(|base| {
+            base.scopes.root == scopes.root
+                && base.roots.root == roots.root
+                && base.namespace.root == namespace.root
+                && base.native_custody.root == native_custody.root
+        }) {
+            base.expect("equal descriptor implies base").root.clone()
+        } else {
+            SelectionRoot(self.materialize_value(&descriptor)?)
+        };
+        Ok(MaterializedSelection {
+            root,
+            snapshot: Arc::new(next.clone()),
+            scopes,
+            roots,
+            namespace,
+            native_custody,
+        })
+    }
+}
+pub fn hydrate_selection<BS: Blockstore>(
+    store: &BS,
+    root: &SelectionRoot,
+) -> Result<MaterializedSelection, SnapshotError> {
+    let descriptor: SelectionDescriptor = read_value(store, root.cid())?;
+    if descriptor.version != 1 {
+        return Err(malformed("selection encoding version"));
+    }
+    let scopes: MaterializedMap<ArtifactSelectionId, ImmutableScopeProofRef, ScopeProofCodec> =
+        hydrate_map_with(store, &descriptor.scopes, &ScopeProofCodec)?;
+    if scopes
+        .facts
+        .iter()
+        .any(|(id, proof)| *id != proof.proof().selection)
+    {
+        return Err(malformed("scope fact has another binding identity"));
+    }
+    let roots = hydrate_map(store, &descriptor.roots)?;
+    let namespace = hydrate_map(store, &descriptor.namespace)?;
+    let native_custody = hydrate_map(store, &descriptor.native_custody)?;
+    let snapshot = Arc::new(ExactSelectionSnapshot {
+        scopes: scopes.facts.clone(),
+        roots: roots.facts.clone(),
+        namespace: namespace.facts.clone(),
+        native_custody: native_custody.facts.clone(),
+    });
+    snapshot.graph_selection()?;
+    Ok(MaterializedSelection {
+        root: root.clone(),
+        snapshot,
+        scopes,
+        roots,
+        namespace,
+        native_custody,
+    })
 }
 
 #[cfg(test)]
