@@ -1697,9 +1697,10 @@ class CatalogSourceTests(unittest.TestCase):
             'product_inventory': qualification.native_catalog_products(catalog.parent), **selected})
         entry = shared / 'root-entry'
         qualification.write_json(entry / 'entry.json', {
-            'schema': 2, 'purpose': 'original_source', 'target': '__prepared',
+            'schema': qualification.PRODUCTION_ENTRY_SCHEMA, 'purpose': 'original_source', 'target': '__prepared',
             'source': str(original / qualification.ROOT_ENTRY_SOURCE),
             'sources': {'kind': 'native_catalog', 'selection': self.selection(original)},
+            'dependencies': None,
             'producer': [3] * 32, 'worker': [4] * 32, 'files': {}})
         shutil.copy2(record, entry / 'source-retention.json')
         entry_products = qualification.native_catalog_products(entry, qualification.NATIVE_ROOT_ENTRY_BUILD)
@@ -1719,9 +1720,10 @@ class CatalogSourceTests(unittest.TestCase):
         for name, (source_name, _) in qualification.BUILTIN_ENTRY_SOURCES.items():
             directory = shared / 'builtin-entries' / name
             qualification.write_json(directory / 'entry.json', {
-                'schema': 2, 'purpose': 'original_source', 'target': '__prepared',
+                'schema': qualification.PRODUCTION_ENTRY_SCHEMA, 'purpose': 'original_source', 'target': '__prepared',
                 'source': str(original / source_name),
                 'sources': {'kind': 'native_catalog', 'selection': self.selection(original)},
+                'dependencies': None,
                 'producer': [3] * 32, 'worker': [4] * 32, 'files': {}})
             shutil.copy2(record, directory / 'source-retention.json')
             products = qualification.native_catalog_products(directory, qualification.NATIVE_ROOT_ENTRY_BUILD)
@@ -1907,7 +1909,7 @@ class CatalogSourceTests(unittest.TestCase):
             self.assertEqual(verify_root.call_count, 3)
             source.write_bytes(before)
 
-    def test_root_entry_requires_schema_two_typed_source_selection(self):
+    def test_root_entry_requires_current_schema_and_typed_source_selection(self):
         original, tools, record, _, _ = self.retained_fixture()
         bundle, _, _ = self.catalog_fixture(original, tools, record)
         path = bundle / 'share/exomonad/root-entry/entry.json'
@@ -1918,10 +1920,37 @@ class CatalogSourceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'declared original settled driver'):
             qualification.root_entry_selection(path, original)
         manifest['source'] = str(original / qualification.ROOT_ENTRY_SOURCE)
-        manifest['schema'] = 1
-        qualification.write_json(path, manifest)
-        with self.assertRaisesRegex(ValueError, 'declared original settled driver'):
-            qualification.root_entry_selection(path, original)
+        for legacy_schema in (1, 2):
+            with self.subTest(legacy_schema=legacy_schema):
+                manifest['schema'] = legacy_schema
+                qualification.write_json(path, manifest)
+                with self.assertRaisesRegex(ValueError, 'declared original settled driver'):
+                    qualification.root_entry_selection(path, original)
+
+    def test_native_entries_require_explicit_standalone_dependency_ownership(self):
+        original, tools, record, _, _ = self.retained_fixture()
+        bundle, _, _ = self.catalog_fixture(original, tools, record)
+        entries = [('root-entry', qualification.ROOT_ENTRY_SOURCE)] + [
+            (f'builtin-entries/{name}', source)
+            for name, (source, _) in qualification.BUILTIN_ENTRY_SOURCES.items()
+        ]
+        for directory, source in entries:
+            path = bundle / 'share/exomonad' / directory / 'entry.json'
+            original_manifest = json.loads(path.read_text())
+            self.assertEqual(qualification.root_entry_selection(path, original, source), self.selection(original))
+            for dependency in ({'catalog_path': '/another/catalog.json'}, {}, [], False):
+                with self.subTest(entry=directory, dependency=dependency):
+                    qualification.write_json(path, {**original_manifest, 'dependencies': dependency})
+                    with self.assertRaisesRegex(ValueError, 'standalone dependency ownership'):
+                        qualification.root_entry_selection(path, original, source)
+            with self.subTest(entry=directory, dependency='missing'):
+                manifest = dict(original_manifest)
+                del manifest['dependencies']
+                qualification.write_json(path, manifest)
+                with self.assertRaisesRegex(ValueError, 'standalone dependency ownership'):
+                    qualification.root_entry_selection(path, original, source)
+            qualification.write_json(path, original_manifest)
+            self.assertEqual(qualification.root_entry_selection(path, original, source), self.selection(original))
 
     def test_frozen_bundle_transfers_real_source_root_and_survives_old_pin_removal(self):
         original, tools, record, pin, nar = self.retained_fixture()

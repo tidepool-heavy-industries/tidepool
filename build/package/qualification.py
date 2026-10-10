@@ -63,6 +63,7 @@ PREPARED_CHILD_TESTS = [
 ]
 DESCRIPTOR = "share/exomonad/qualification.json"
 QUALIFICATION_SCHEMA = 3
+PRODUCTION_ENTRY_SCHEMA = 3
 BROWSER_DRIVER_ROOT = "share/exomonad/browser-driver"
 BROWSER_DRIVER_TARGET = "//build/testing/browser:driver_bundle"
 BROWSER_DRIVER_SOURCES = {
@@ -618,10 +619,13 @@ def build_native_catalog(args) -> None:
 
 def root_entry_selection(entry: Path, original: Path, source_name: str = ROOT_ENTRY_SOURCE) -> dict:
     manifest = json.loads(entry.read_text())
-    if (manifest.get("schema") != 2 or manifest.get("purpose") != "original_source"
+    if (not isinstance(manifest, dict)
+            or manifest.get("schema") != PRODUCTION_ENTRY_SCHEMA or manifest.get("purpose") != "original_source"
             or manifest.get("target") != "__prepared"
             or manifest.get("source") != str(original / source_name)):
         raise ValueError("root entry does not retain the declared original settled driver")
+    if "dependencies" not in manifest or manifest["dependencies"] is not None:
+        raise ValueError("native root entry requires explicit standalone dependency ownership")
     sources = manifest.get("sources")
     if not isinstance(sources, dict) or set(sources) != {"kind", "selection"} or sources["kind"] != "native_catalog":
         raise ValueError("root entry requires the retained native source selection")
