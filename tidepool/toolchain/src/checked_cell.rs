@@ -1337,6 +1337,7 @@ impl ExactHostBindingPrototype {
             ));
         }
         let descriptors = original_context.artifact_view().descriptors();
+        let mut interface_roots = BTreeSet::new();
         for (unit, module, seal) in witness.interface_seals() {
             let originals = descriptors
                 .iter()
@@ -1357,6 +1358,7 @@ impl ExactHostBindingPrototype {
                     "original input differs from its certified interface seal",
                 ));
             }
+            interface_roots.extend(originals.iter().map(|descriptor| descriptor.id));
         }
         let owners = original_context
             .interface_owners()
@@ -1374,13 +1376,11 @@ impl ExactHostBindingPrototype {
                 "original input native signature lacks its certified Name owner",
             ));
         }
-        // Preserve producer independently of the possibly empty package-only
-        // projection and strip any unrelated lexical or native authority.
+        // Select this input's sealed roots and their issued dependency edges;
+        // the joint request context can also retain reply and progress types.
+        // Empty package-only projections still preserve the original producer.
         let context = Arc::new(
-            crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
-                producer,
-                original_context.artifact_view(),
-            )?,
+            original_context.select_interface_roots(interface_roots.into_iter().collect())?,
         );
         let mut encoded = Vec::new();
         ciborium::ser::into_writer(&encode_signature(witness.signature()), &mut encoded)

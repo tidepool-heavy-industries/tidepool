@@ -2968,6 +2968,14 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     let fixture = ordinary_home_display_fixture(SessionId(1739));
     let mut resident = fixture.fresh();
     let (owner, interface) = parked_input_owner(&fixture, &mut resident);
+    let input_types = interface.prototype().context();
+    assert!(input_types
+        .artifact_view()
+        .descriptors()
+        .iter()
+        .any(|descriptor| descriptor.owner.module == "ActivationDisplayOriginal"));
+    assert!(input_types.recovery_products().is_empty());
+    assert!(input_types.lexical_graph().is_empty());
     let mounted = mount_original(&mut resident, owner, interface);
     let binding = mounted.binding();
     let original_context = mounted.original_execution.clone();
@@ -3124,10 +3132,26 @@ fn activation_preview_package_only_input_preserves_original_producer_and_renders
     let reservation = fixture.start(&mut resident);
     let (_, hole) = fixture.deliver(&mut resident, reservation, 1);
     let site = parked_site(&mut resident, &hole);
+    let original = resident.parked_program_provenance(&hole).unwrap();
+    let joint_types = &original.authenticated_inputs[&site].types;
+    let joint_descriptors = joint_types.artifact_view().descriptors();
+    assert!(
+        !joint_descriptors.is_empty(),
+        "the joint request retains the ResponseResult home interface"
+    );
+    let input_witness = original.sites[&site].input_type_witnesses[0]
+        .as_ref()
+        .unwrap();
+    assert!(input_witness.interface_seals().all(|(unit, module, _)| {
+        joint_descriptors
+            .iter()
+            .all(|descriptor| descriptor.owner.unit != unit || descriptor.owner.module != module)
+    }));
     let input = resident
         .capture_activation_input(&hole, RealmId::ROOT, site)
         .unwrap();
     let producer = input.prototype.producer();
+    assert_eq!(producer, joint_types.toolchain_identity_sha256());
     assert!(input
         .prototype
         .context()
