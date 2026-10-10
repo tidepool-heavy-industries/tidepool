@@ -2065,12 +2065,16 @@ mod tests {
             .admit_with_startup(c, &root, &[], Some(changed_bootstrap))
             .is_err());
         let mut changed_content = third.clone();
-        changed_content
+        let changed_revision = &mut changed_content
             .manifest
             .as_mut()
             .unwrap()
             .domain
-            .content_revision = tidepool_runtime::session::StoreRevision(1);
+            .content_revision;
+        *changed_revision = tidepool_runtime::session::StoreRevision(
+            pin.domain.content_revision.0.checked_add(1).unwrap(),
+        );
+        assert_ne!(*changed_revision, pin.domain.content_revision);
         assert!(journal
             .admit_with_startup(c, &root, &[], Some(changed_content))
             .is_err());
