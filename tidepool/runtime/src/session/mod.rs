@@ -3423,10 +3423,6 @@ mod tests {
         assert_eq!(node.kind, recovery::RecoveryNodeKind::Authored);
         assert_eq!(node.id, Generation(1));
         assert!(retained.public_surfaces().next().is_none());
-        assert!(tidepool_testing::with_settlement(
-            |settlement| lib.retract("DirectFlag", settlement)
-        )
-        .is_err());
         assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(1));
         assert_eq!(lib.generation(), Generation(1));
         let projection = lib
@@ -3500,6 +3496,82 @@ mod tests {
             lib.import_line().unwrap(),
             format!("import {}", projection.module_name())
         );
+    }
+
+    #[test]
+    fn attached_domain_certified_retraction_rolls_back_then_preserves_original_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let recovery = recovery_test_fixture::RecoveryFixture::create(root.path());
+        let mut lib = staged_test_lib(&root);
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
+        let original = tidepool_testing::with_settlement(|settlement| {
+            lib.define_batch(&["data DirectFlag = DirectFlag"], settlement)
+        })
+        .unwrap();
+        let original_node = recovery_test_fixture::graph(&lib)
+            .node(original)
+            .unwrap()
+            .unwrap();
+        let original_root = lib
+            .log
+            .projection_at(original)
+            .unwrap()
+            .context()
+            .authored_native_root(original.0)
+            .unwrap();
+        let before = recovery.state();
+        let declarations = lib.current_declarations();
+        recovery
+            .store
+            .inject_fault(recovery_store::StoreFault::BeforeCommit);
+        assert!(matches!(
+            tidepool_testing::with_settlement(|settlement| {
+                lib.retract("DirectFlag", settlement)
+            }),
+            Err(SessionError::RecoveryStoreRefused(
+                recovery_store::StoreRefusal::Storage(_)
+            ))
+        ));
+        assert!(recovery.store.ensure_ready().is_ok());
+        assert_eq!(recovery.state(), before);
+        assert_eq!(lib.scope_tip(ScopeId::ROOT), original);
+        assert_eq!(lib.current_declarations(), declarations);
+        let refused_identity = lib.generation();
+        tidepool_testing::with_settlement(|settlement| lib.retract("DirectFlag", settlement))
+            .unwrap();
+        let tip = lib.scope_tip(ScopeId::ROOT);
+        assert!(tip > refused_identity);
+        assert!(lib.current_declarations().is_empty());
+        let after = recovery.state();
+        assert!(after.content_revision.0 > before.content_revision.0);
+        assert_ne!(after.snapshot_root, before.snapshot_root);
+        let graph = recovery_test_fixture::graph(&lib);
+        assert_eq!(graph.node(original).unwrap().unwrap(), original_node);
+        let retraction = graph.node(tip).unwrap().unwrap();
+        assert_eq!(retraction.kind, recovery::RecoveryNodeKind::Authored);
+        assert_eq!(retraction.parent, Some(original));
+        assert!(!retraction.retracts.is_empty());
+        assert!(retraction
+            .retracts
+            .iter()
+            .all(|head| head.occurrence == "DirectFlag"));
+        assert_eq!(
+            lib.log
+                .projection_at(original)
+                .unwrap()
+                .context()
+                .authored_native_root(original.0)
+                .unwrap(),
+            original_root
+        );
+        let published = recovery.state();
+        assert!(tidepool_testing::with_settlement(|settlement| {
+            lib.define("mustStayHidden = DirectFlag", settlement)
+        })
+        .is_err());
+        assert_eq!(recovery.state(), published);
+        assert_eq!(lib.scope_tip(ScopeId::ROOT), tip);
     }
 
     #[test]
