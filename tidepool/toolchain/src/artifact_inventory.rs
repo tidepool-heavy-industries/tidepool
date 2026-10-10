@@ -2097,6 +2097,60 @@ impl ArtifactInventory {
         if namespace_ids.is_some() {
             selected_groups.retain(|group| selected.contains_key(&group.artifact));
         }
+        if std::env::var_os("TIDEPOOL_NATIVE_SELECTION_TRACE").is_some() {
+            let required_native = selected_groups
+                .iter()
+                .flat_map(|group| {
+                    selected[&group.artifact]
+                        .native_requirements_for(group.original_ordinal)
+                        .into_iter()
+                        .filter_map(|(owner, dependency)| {
+                            let ArtifactDependency::NativeGroup { required_ordinal, .. } = dependency else {
+                                return None;
+                            };
+                            let source = &selected[&group.artifact];
+                            let native_owner = source.native_owners.get(owner);
+                            let matching = parent_entries.iter().filter_map(|(id, entry)| {
+                                let ArtifactPayload::Original(product) = &entry.payload else {
+                                    return None;
+                                };
+                                (Some(&NativeOwnerKey::from_owner(product.owner())) == native_owner)
+                                    .then_some(serde_json::json!({
+                                        "artifact": id,
+                                        "selected_for_planning": selected.contains_key(id),
+                                        "namespace": namespace_ids.as_ref().is_none_or(|ids| ids.contains(id)),
+                                        "owned_groups": parent_nodes.iter().filter(|node| matches!(node,
+                                            InventoryNodeKey::Group(binding) if binding.binding.artifact == *id
+                                        )).count(),
+                                    }))
+                            }).collect::<Vec<_>>();
+                            Some(serde_json::json!({
+                                "source": source.descriptor.owner,
+                                "artifact": group.artifact,
+                                "ordinal": group.original_ordinal,
+                                "required": owner,
+                                "required_ordinal": required_ordinal,
+                                "matches": matching,
+                            }))
+                        })
+                })
+                .collect::<Vec<_>>();
+            eprintln!(
+                "TIDEPOOL_NATIVE_SELECTION_TRACE {}",
+                serde_json::json!({
+                    "entry_point": match root_intent {
+                        ArtifactRootIntent::SuppliedArtifacts => "supplied",
+                        ArtifactRootIntent::Certified(_) => "certified",
+                        ArtifactRootIntent::Projected(_) => "projected",
+                    },
+                    "published_originals": root_intent.published_original_requirements().iter().map(|requirement| requirement.original).collect::<Vec<_>>(),
+                    "requested_groups": groups,
+                    "selected_groups": selected_groups,
+                    "parent_groups": native_groups(parent_nodes).len(),
+                    "native_requirements": required_native,
+                })
+            );
+        }
         let (planned, closed_groups) = owners.planned_edges(&state, &selected, &selected_groups)?;
         if exact && closed_groups != selected_groups {
             return Err(failure(
