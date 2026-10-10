@@ -2971,7 +2971,7 @@ fn candidate_owned_acquisition(
     let rows = fields[4].as_array()?;
     let graphs = fields[5].as_array()?[0].as_array()?;
     let mut builder =
-        crate::owned_input_arena::OwnedInputArenaBuilder::new(1024 * 1024 * 1024).ok()?;
+        crate::owned_input_arena::OwnedInputArenaBuilder::new(tidepool_repr::execution_schema::InventoryDecodeLimits::default().max_bytes as u64).ok()?;
     let mut pending = Vec::new();
     let mut pending_graphs = BTreeMap::new();
     let mut graph_receivers = BTreeMap::<[u8; 32], Vec<(String, String)>>::new();

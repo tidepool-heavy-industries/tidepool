@@ -5653,7 +5653,7 @@ impl ExactDeclarationContext {
             .collect::<Vec<_>>();
         let mut rows = BTreeMap::new();
         let mut arena_builder =
-            crate::owned_input_arena::OwnedInputArenaBuilder::new(1024 * 1024 * 1024)
+            crate::owned_input_arena::OwnedInputArenaBuilder::new(tidepool_repr::execution_schema::InventoryDecodeLimits::default().max_bytes as u64)
                 .map_err(failure)?;
         let mut pending_inputs = BTreeMap::new();
         let mut acquired_inputs = BTreeMap::new();
@@ -11822,7 +11822,10 @@ mod tests {
                 }
             }
         }
-        assert!(changed_aliases.len() >= 6, "actual owned request covers companion payloads");
+        assert!(
+            changed_aliases.len() >= 6,
+            "actual owned request covers companion payloads"
+        );
         let run = endpoint.execute(&command).unwrap();
         std::fs::write(root.join("consumer.stdout"), &run.output.stdout).unwrap();
         std::fs::write(root.join("consumer.stderr"), &run.output.stderr).unwrap();

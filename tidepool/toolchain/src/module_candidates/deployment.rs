@@ -904,7 +904,7 @@ impl DeploymentModulePackage {
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::with_inventory(
             Arc::clone(&inventory),
         );
-        let mut builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(1024 * 1024 * 1024)
+        let mut builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(tidepool_repr::execution_schema::InventoryDecodeLimits::default().max_bytes as u64)
             .map_err(|_| ModulePackageError::Format("catalog input arena"))?;
         let mut pending = Vec::new();
         let mut graph_pending = BTreeMap::new();
