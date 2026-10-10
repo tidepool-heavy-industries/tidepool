@@ -403,8 +403,9 @@ pub struct InspectionRequest<'a> {
 /// singleton sources remain available if that combined source is rejected.
 pub fn run_inspections(
     request: InspectionRequest<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<Vec<InspectionResult>, CompileError> {
-    run_inspections_with_policy(request, false, None)
+    run_inspections_with_policy(request, false, None, settlement)
 }
 
 /// Consume the immutable checked value snapshot captured with the caller's view.
@@ -413,6 +414,7 @@ pub fn run_admitted_inspections(
     request: InspectionRequest<'_>,
     view: &super::SessionCompileView,
     inputs: &AdmittedInspectionInputs,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<Vec<InspectionResult>, CompileError> {
     if view.session() != inputs.view.session()
         || view.lexical_scope() != inputs.view.lexical_scope()
@@ -420,21 +422,23 @@ pub fn run_admitted_inspections(
     {
         return Err(invalid("inspection inputs belong to another compile view"));
     }
-    run_inspections_with_policy(request, false, Some(inputs))
+    run_inspections_with_policy(request, false, Some(inputs), settlement)
 }
 
 /// Declaration staging variant: source rejection must remain a request-level
 /// structured diagnostic so declaration span remapping is preserved.
 pub(super) fn run_inspections_strict(
     request: InspectionRequest<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<Vec<InspectionResult>, CompileError> {
-    run_inspections_with_policy(request, true, None)
+    run_inspections_with_policy(request, true, None, settlement)
 }
 
 fn run_inspections_with_policy(
     request: InspectionRequest<'_>,
     strict: bool,
     inputs: Option<&AdmittedInspectionInputs>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<Vec<InspectionResult>, CompileError> {
     if inputs.is_some_and(|inputs| !inputs.matches_request(&request)) {
         return Err(invalid(
@@ -667,7 +671,7 @@ fn run_inspections_with_policy(
             }
         }
     }
-    let run = endpoint.execute(&command).map_err(map_spawn)?;
+    let run = endpoint.execute_with_input_files(&command, offer.input_transport_files(), |close| settlement(close))?;
     timing::record_stage(
         timing::NO_NODE,
         timing::NO_ROUND,

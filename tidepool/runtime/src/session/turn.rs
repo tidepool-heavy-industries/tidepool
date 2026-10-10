@@ -2464,8 +2464,10 @@ fn forward_extract_timing(stderr: &str, prefix: &str) {
 /// This lower-level check returns diagnostic observations. Admitted execution
 /// uses the complete cell program.
 #[tracing::instrument(name = "cell_check", level = "info", skip_all, fields(cell_bytes = req.cell_text.len()))]
-pub fn check_cell(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailure> {
-    check_cell_impl(req)
+pub fn check_cell(req: CellCheckRequest<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<CellCheck, CellCheckFailure> {
+    check_cell_impl(req, settlement)
 }
 
 /// Result of preparing the original-type display after the live binding commits.
@@ -2508,6 +2510,7 @@ pub fn compile_activation_renderer(
     template_source: &str,
     budget: u64,
     includes: &[PathBuf],
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<super::SharedActivationRenderer, TurnFailure> {
     use tidepool_toolchain::activation_preview::{
         ActivationPreviewSelection, ActivationPreviewSpecification,
@@ -2547,8 +2550,8 @@ pub fn compile_activation_renderer(
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
     let run = endpoint
-        .execute(&cmd)
-        .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, map_notfound(error)))?;
+        .execute_with_input_files(&cmd, offer.input_transport_files(), |close| settlement(close))
+        .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, error))?;
     diagnostics.completed(temp.path(), &cmd, run.success(), &run.output.stderr);
     timing::log_interface_counts(&run.output.stderr);
     forward_extract_timing(&String::from_utf8_lossy(&run.output.stderr), "extract");
@@ -2608,6 +2611,7 @@ pub fn compile_activation_renderer(
 /// program, including original declaration and Val interface identities.
 pub fn compile_cell_program_admitted(
     admission: Arc<super::RuntimeCellAdmission>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<
     (
         CellCheck,
@@ -2619,6 +2623,7 @@ pub fn compile_cell_program_admitted(
         admission,
         #[cfg(test)]
         CellProgramAudit::None,
+        settlement,
     )
 }
 
@@ -2777,6 +2782,7 @@ fn compile_cell_program_admitted_work_controls(
 fn compile_cell_program_admitted_inner(
     admission: Arc<super::RuntimeCellAdmission>,
     #[cfg(test)] audit: CellProgramAudit<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<
     (
         CellCheck,
@@ -2865,8 +2871,8 @@ fn compile_cell_program_admitted_inner(
     let diagnostics = CompilerDiagnosticCapture::start(scratch.path(), &command);
     drop(offer_span);
     let run = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.execute", inclusive = true)
-        .in_scope(|| endpoint.execute(&command)).map_err(|error| {
-        offer.retain_execution_failure(scratch.path(), &command, map_notfound(error))
+        .in_scope(|| endpoint.execute_with_input_files(&command, offer.input_transport_files(), |close| settlement(close))).map_err(|error| {
+        offer.retain_execution_failure(scratch.path(), &command, error)
     })?;
     let admission_span = tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.admit", inclusive = true).entered();
     diagnostics.completed(scratch.path(), &command, run.success(), &run.output.stderr);
@@ -2930,7 +2936,9 @@ fn compile_cell_program_admitted_inner(
     Ok((checked, program))
 }
 
-fn check_cell_impl(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFailure> {
+fn check_cell_impl(req: CellCheckRequest<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<CellCheck, CellCheckFailure> {
     let temp = compiler_scratch_directory()?;
     let cell_path = temp.path().join("cell.txt");
     let template_path = temp.path().join("CellCheckTemplate.hs");
@@ -2966,8 +2974,8 @@ fn check_cell_impl(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFail
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
     let run = endpoint
-        .execute(&cmd)
-        .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, map_notfound(error)))?;
+        .execute_with_input_files(&cmd, offer.input_transport_files(), |close| settlement(close))
+        .map_err(|error| offer.retain_execution_failure(temp.path(), &cmd, error))?;
     let output = &run.output;
     diagnostics.completed(temp.path(), &cmd, run.success(), &output.stderr);
     timing::log_interface_counts(&output.stderr);
@@ -3036,8 +3044,10 @@ fn check_cell_impl(req: CellCheckRequest<'_>) -> Result<CellCheck, CellCheckFail
 ///
 /// When `req.verdict` is supplied, a missing template for the verdict's
 /// selector is caught here, before any process is spawned.
-pub fn run_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
-    compile_turn(req)
+pub fn run_turn(req: TurnRequest<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<TurnResult, TurnFailure> {
+    compile_turn(req, settlement)
 }
 
 /// Select the precompiled native item from the complete immutable program.
@@ -3922,7 +3932,9 @@ pub fn assemble_activation_preview_module(budget: u64) -> String {
         kind = req.verdict.as_ref().map_or("", |verdict| turn_kind_wire_name(verdict.kind)),
     )
 )]
-fn compile_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
+fn compile_turn(req: TurnRequest<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<TurnResult, TurnFailure> {
     let verdict_arg = match &req.verdict {
         Some(TurnClassification { kind, binders, .. }) => {
             #[allow(
@@ -4002,10 +4014,10 @@ fn compile_turn(req: TurnRequest<'_>) -> Result<TurnResult, TurnFailure> {
     let diagnostics =
         (!ordinary_admitted).then(|| CompilerDiagnosticCapture::start(temp.path(), &cmd));
     let run = if ordinary_admitted {
-        TurnCompilerOutput::Admitted(offer.execute_admitted_turn(endpoint, &mut cmd)?)
+        TurnCompilerOutput::Admitted(offer.execute_admitted_turn(endpoint, &mut cmd, settlement)?)
     } else {
-        TurnCompilerOutput::Direct(endpoint.execute(&cmd).map_err(|error| {
-            offer.retain_execution_failure(temp.path(), &cmd, map_notfound(error))
+        TurnCompilerOutput::Direct(endpoint.execute_with_input_files(&cmd, offer.input_transport_files(), |close| settlement(close)).map_err(|error| {
+            offer.retain_execution_failure(temp.path(), &cmd, error)
         })?)
     };
     let (output, elapsed, output_dir) = match &run {
@@ -4856,7 +4868,9 @@ fn decode_turn_out(bytes: &[u8]) -> Result<DecodedTurnOut, CompileError> {
 /// statement item may reference decls earlier in the same block), so it
 /// classifies the block in one spawn rather than one spawn per item. One GHC
 /// session boots for the whole batch.
-pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, CompileError> {
+pub fn classify_block(items: &[&str],
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<Vec<TurnClassification>, CompileError> {
     if items.is_empty() {
         // With no positional files the extract falls through to its usage
         // branch, exits 0, and writes no `--classify-out` file — spawning
@@ -4882,7 +4896,7 @@ pub fn classify_block(items: &[&str]) -> Result<Vec<TurnClassification>, Compile
     let endpoint = bind_extract_cmd(&cmd)?;
     crate::paths::apply_admitted_build_products_dir(&mut cmd, &endpoint);
     let diagnostics = CompilerDiagnosticCapture::start(temp.path(), &cmd);
-    let run = endpoint.execute(&cmd).map_err(map_notfound)?;
+    let run = endpoint.execute_with_input_files(&cmd, Vec::new(), |close| settlement(close))?;
     diagnostics.completed(temp.path(), &cmd, run.success(), &run.output.stderr);
     let output = &run.output;
     // A failed classification still cost a real subprocess spawn — attribute
