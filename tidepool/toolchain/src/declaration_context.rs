@@ -27,6 +27,7 @@ use crate::recovery_artifacts::{
 use crate::CompileError;
 
 mod published_source;
+pub(crate) mod original_inputs;
 pub use published_source::PublishedSourceOriginalSelection;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
