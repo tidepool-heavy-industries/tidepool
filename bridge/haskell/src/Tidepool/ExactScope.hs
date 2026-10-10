@@ -20,8 +20,9 @@ module Tidepool.ExactScope
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner
   , readExactScope, ExactScopeValidationReason(..), revalidateExactScope, revalidateExactScopesAt, validateExactScopeEnvironment, scopeValueInterfaces
   , scopeInterfaceBytes, scopeInterfaceToken, scopeOriginalBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes
-  , writeExactCompilation, writeCheckedExactCompilation, writeCheckedExactCompilationWithPublication
-  , writeRetainedExactCompilation, writeRetainedExactCompilationWithPublication
+  , ExactCompilationPublication(..)
+  , writeExactCompilation, writeCheckedExactCompilation
+  , writeRetainedExactCompilation
   , writeRetainedExactCompilationWithOutputsAndPublication, extendSourceSelectedOriginals
   , writeCheckedExactCompilationWithOutputsAndPublication
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
@@ -1798,21 +1799,23 @@ writeExactCompilation
 writeExactCompilation compilation evidence =
   captureExactCompilationReceipt compilation evidence >>= publishExactCompilationReceipt
 
+-- Publication is data, so no compiler work or caller callback can intervene
+-- between the terminal observations and the receipt. Certified bytes are
+-- supplied by their product writer; this operation grants no artifact authority.
+data ExactCompilationPublication
+  = ReceiptOnly
+  | PublishCertificate FilePath BS.ByteString
+
 -- Metadata has completed all compiler work at this boundary. Capture and
 -- validate every consumed source before the terminal current scope/package
 -- proof; publishing the receipt afterwards consumes only captured bytes.
 writeCheckedExactCompilation
   :: HscEnv -> ExactCompilation -> DependencyEvidence -> IO ()
 writeCheckedExactCompilation env = writeCheckedExactCompilationWithScopes
-  CheckedReceiptPublication env [] emptyFreshOutputSeals (pure ())
-
-writeCheckedExactCompilationWithPublication
-  :: HscEnv -> ExactCompilation -> DependencyEvidence -> IO () -> IO ()
-writeCheckedExactCompilationWithPublication env compilation evidence publish =
-  writeCheckedExactCompilationWithScopes CheckedReceiptPublication env [] emptyFreshOutputSeals publish compilation evidence
+  CheckedReceiptPublication env [] emptyFreshOutputSeals ReceiptOnly
 
 writeCheckedExactCompilationWithOutputsAndPublication
-  :: HscEnv -> ExactCompilation -> DependencyEvidence -> FreshOutputSeals -> IO () -> IO ()
+  :: HscEnv -> ExactCompilation -> DependencyEvidence -> FreshOutputSeals -> ExactCompilationPublication -> IO ()
 writeCheckedExactCompilationWithOutputsAndPublication env compilation evidence outputs publish =
   writeCheckedExactCompilationWithScopes CheckedReceiptPublication env [] outputs publish compilation evidence
 
@@ -1822,28 +1825,25 @@ writeCheckedExactCompilationWithOutputsAndPublication env compilation evidence o
 writeRetainedExactCompilation
   :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence -> IO ()
 writeRetainedExactCompilation env retained = writeCheckedExactCompilationWithScopes
-  RetainedReceiptPublication env [retained] emptyFreshOutputSeals (pure ())
-
-writeRetainedExactCompilationWithPublication
-  :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence -> IO () -> IO ()
-writeRetainedExactCompilationWithPublication env retained compilation evidence publish =
-  writeCheckedExactCompilationWithScopes RetainedReceiptPublication env [retained] emptyFreshOutputSeals publish compilation evidence
+  RetainedReceiptPublication env [retained] emptyFreshOutputSeals ReceiptOnly
 
 writeRetainedExactCompilationWithOutputsAndPublication
   :: HscEnv -> ExactScope -> ExactCompilation -> DependencyEvidence
-  -> FreshOutputSeals -> IO () -> IO ()
+  -> FreshOutputSeals -> ExactCompilationPublication -> IO ()
 writeRetainedExactCompilationWithOutputsAndPublication env retained compilation evidence outputs publish =
   writeCheckedExactCompilationWithScopes RetainedReceiptPublication env [retained] outputs publish compilation evidence
 
 writeCheckedExactCompilationWithScopes
   :: ExactScopeValidationReason -> HscEnv -> [ExactScope] -> FreshOutputSeals
-  -> IO () -> ExactCompilation -> DependencyEvidence -> IO ()
+  -> ExactCompilationPublication -> ExactCompilation -> DependencyEvidence -> IO ()
 writeCheckedExactCompilationWithScopes reason env retained outputs publishCertificate compilation evidence = do
   selected <- either fail pure (extendSourceSelectedOriginals
     (compilationSourceSelection compilation) (compilationScope compilation))
   receipt <- captureExactCompilationReceipt compilation evidence
   revalidateExactScopesAtWithOutputs reason env (retained ++ [selected]) outputs >>= either fail pure
-  publishCertificate
+  case publishCertificate of
+    ReceiptOnly -> pure ()
+    PublishCertificate path bytes -> BS.writeFile path bytes
   publishExactCompilationReceipt receipt
 
 -- Kept private so a receipt cannot be constructed from unobserved inputs.

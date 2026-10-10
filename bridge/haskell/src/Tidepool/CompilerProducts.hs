@@ -61,7 +61,7 @@ import Tidepool.ExactScope
   ( ExactScope , scopeProducerSha256, scopeSemanticSha256, scopeProducts, scopeExecutionOwners, scopeInterfaces, ExactCompilation(..), ExactProduct(..), ExactOriginalGroup(..), scopeValueInterfaces
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs, revalidateExactScope
   , FreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
-  , writeCheckedExactCompilationWithOutputsAndPublication
+  , ExactCompilationPublication(..), writeCheckedExactCompilationWithOutputsAndPublication
   , writeRetainedExactCompilationWithOutputsAndPublication
   , scopeCanonicalInterfaces, scopeInterfaceToken, scopeOriginalBytes
   , canonicalProofInterfaceBody, canonicalProofOriginalBytes, relocateCanonicalInterfaceProof
@@ -662,7 +662,7 @@ publishStagedOriginalProducts prepared (StagedOriginalProducts certified path by
       revalidateExactScopesAtWithOutputs RetainedProductsPublication env [] outputs >>= either fail pure
       BS.writeFile path bytes
     Just compilation -> writeCheckedExactCompilationWithOutputsAndPublication env compilation
-      (preparedFreshDependencies prepared) outputs (BS.writeFile path bytes)
+      (preparedFreshDependencies prepared) outputs (PublishCertificate path bytes)
   pure certified
 
 writeCertifiedProducts
@@ -766,7 +766,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
       let publishCertificate = BS.writeFile (outDir </> "certified-products.cbor") certificateBytes
       case preparedExactCompilation prepared of
         Just compilation -> writeCheckedExactCompilationWithOutputsAndPublication hscEnv compilation
-          freshDependencies outputSeals publishCertificate
+          freshDependencies outputSeals (PublishCertificate (outDir </> "certified-products.cbor") certificateBytes)
         Nothing -> do
           revalidateExactScopesAtWithOutputs RetainedProductsPublication hscEnv [] outputSeals >>= either fail pure
           publishCertificate
@@ -1049,9 +1049,9 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
       publishStaged
     Just compilation -> case stagedCertificate of
       Nothing -> writeRetainedExactCompilationWithOutputsAndPublication env retained compilation
-        (preparedFreshDependencies prepared) outputSeals (pure ())
+        (preparedFreshDependencies prepared) outputSeals ReceiptOnly
       Just (path,bytes,_) -> writeRetainedExactCompilationWithOutputsAndPublication env retained compilation
-        (preparedFreshDependencies prepared) outputSeals (BS.writeFile path bytes)
+        (preparedFreshDependencies prepared) outputSeals (PublishCertificate path bytes)
   pure retained
   where
     localInterfaces = Map.filterWithKey (\(_,owner) _ -> owner /= target)

@@ -14,7 +14,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Data.Text as T
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, makeAbsolute, removeFile, setPermissions, Permissions(..))
+import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, makeAbsolute, removeFile, removeDirectory, setPermissions, Permissions(..))
 import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, hFlush, hGetLine, hPutStrLn)
 import Foreign.C.String (CString, withCString)
@@ -44,7 +44,7 @@ import Tidepool.ExactScope
   , scopeInterfaces, scopeModuleInterfaceProofs, readExactScope, revalidateExactScope
   , ExactScopeValidationReason(..), revalidateExactScopesAtWithOutputs
   , writeCheckedExactCompilation, writeRetainedExactCompilation
-  , writeRetainedExactCompilationWithOutputsAndPublication
+  , ExactCompilationPublication(..), writeRetainedExactCompilationWithOutputsAndPublication
   , FreshOutputSeals, emptyFreshOutputSeals, freshOutputSealsFromWrites, appendFreshOutputSeals
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes )
 import Tidepool.FatIface (readExactInterface)
@@ -649,7 +649,7 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
       outputSeal = either error id (freshOutputSealsFromWrites [(freshOutput,freshOutputBytes)])
       publishWithOutput = writeRetainedExactCompilationWithOutputsAndPublication
         environment retained compilation evidence outputSeal
-        (BS.writeFile publicationMarker (BS.pack [9,8,7]))
+        (PublishCertificate publicationMarker (BS.pack [9,8,7]))
   BS.writeFile freshOutput freshOutputBytes
   beforeOutputPublish <- receipts
   (outputAccepted,outputDiagnostics) <- captureDiagnostics
@@ -672,6 +672,12 @@ retainedCompilationPublication = withTiming $ withScratch $ \work -> do
   unless (length (counterValues ("hash_bytes.observed_file." ++ digest (BS.pack [0])) refusalDiagnostics) == 1)
     (fail "refused terminal output proof did not retain its observed mismatch evidence")
   BS.writeFile freshOutput freshOutputBytes
+  beforeWriteFailure <- receipts
+  bracket (createDirectory publicationMarker) (const (removeDirectory publicationMarker)) $ \_ -> do
+    writeFailed <- try publishWithOutput :: IO (Either IOException ())
+    afterWriteFailure <- receipts
+    unless (case writeFailed of Left _ -> afterWriteFailure == beforeWriteFailure; Right _ -> False)
+      (fail "failed certificate write issued a compilation receipt")
   check environment originals
   -- Every issued file and negative candidate must reach the publication owner.
   forM_ (Map.toAscList originals) $ \(path,value) -> bracket (pure ()) (const restore) $ \_ -> do
