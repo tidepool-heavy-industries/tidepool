@@ -41,9 +41,8 @@ import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
-  ( PipelineSelection(PreparedStg), PreparedPipelineResult(..), PipelineResult(..)
-  , CompilePurpose(..), runPipelineSelected, runPipelineSelectedRetaining
-  , withResidentPipelineSelected )
+  ( PipelineSelection(PreparedStg), PreparedPipelineResult, pprPipelineResult, pprModules, prHscEnv
+  , CompilePurpose(..), runPipelineSelected, runPipelineSelectedRetaining, withResidentPipelineSelected )
 import Tidepool.PreparedFormatting
   (FormattingAuthority(..), classifyFormatting, resolveFormattingAuthority)
 import Tidepool.PreparedTime

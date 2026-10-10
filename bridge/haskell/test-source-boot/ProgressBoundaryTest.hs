@@ -15,7 +15,9 @@ import System.Directory (createDirectoryIfMissing, copyFile, createDirectory, ge
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import Tidepool.EffectSchema (YieldSite(..), SiteType(..))
-import Tidepool.GhcPipeline (PipelineResult(..), PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..), runPipelineSelected, withResidentPipelineSelected)
+import Tidepool.GhcPipeline
+  ( prHscEnv, PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprModules
+  , pprProductInterfaces, CompilePurpose(..), runPipelineSelected, withResidentPipelineSelected )
 import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionEncode (encodeWireProgram, encodeProjectedGroup)

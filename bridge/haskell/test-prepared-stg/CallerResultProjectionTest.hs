@@ -6,7 +6,7 @@ import Data.Text qualified as Text
 import Tidepool.ExecutionProjection
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
-  ( PipelineSelection(PreparedStg), PreparedPipelineResult(..), runPipelineSelected )
+  ( PipelineSelection(PreparedStg), pprModules, runPipelineSelected )
 
 verifyCallerResultProjection :: IO ()
 verifyCallerResultProjection = do

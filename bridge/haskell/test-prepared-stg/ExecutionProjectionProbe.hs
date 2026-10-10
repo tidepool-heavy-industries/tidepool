@@ -8,8 +8,7 @@ import ExecutionProjectionTest
   (projectProjectionContract, verifyRetainedImportProjection, verifyUnboxedSumJoinProjection)
 import ModuleEvidenceProjectionTest (verifyModuleEvidenceProjection)
 import Tidepool.GhcPipeline
-  ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
-  , runPipelineSelected )
+  ( PipelineSelection(PreparedStg), pprModules, runPipelineSelected )
 import System.Directory (getCurrentDirectory)
 import System.FilePath ((</>))
 

@@ -29,8 +29,8 @@ import Tidepool.ExecutionProjection
   , projectPreparedTarget )
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
-  ( PipelineResult(prHscEnv), PipelineSelection(PreparedStg)
-  , PreparedPipelineResult(..), runPipelineSelected )
+  ( prHscEnv, PipelineSelection(PreparedStg), PreparedPipelineResult, pprPipelineResult, pprModules
+  , runPipelineSelected )
 import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
 import Tidepool.PreparedBuiltins (DeferredFunction(..), deferredFunction)
 import Tidepool.PreparedRecovery (RecoveredClosure(..), recoverPreparedClosure)

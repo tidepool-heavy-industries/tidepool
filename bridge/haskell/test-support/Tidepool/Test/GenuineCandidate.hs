@@ -28,7 +28,9 @@ import Tidepool.Test.FixturePacket
   ( PacketProducer(..), PacketCompletion, completedPacketOutput, newPacketDirectory, runPacketProducer )
 import Tidepool.ExecutionProjection (projectOriginalHomeModuleProducts)
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
-import Tidepool.GhcPipeline (PreparedPipelineResult(..), pprAcceptedCandidates, PipelineResult(..))
+import Tidepool.GhcPipeline
+  ( PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprAcceptedCandidates
+  , prHscEnv, prTargetTcGblEnv )
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, prepareCompilerProjectionContext, newPreparedOriginalInterfaceArtifacts
   , writeCertifiedProductsKeeping )

@@ -49,8 +49,8 @@ import Tidepool.ExactScope
   , newExactInputOwner, readExactScopeWithOwner, scopeInterfaceBytes )
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
-  ( PipelineSelection(..), CompilePurpose(..), PreparedPipelineResult(..), PipelineResult(..)
-  , runPipelineSessionSelected, preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents )
+  ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
+  , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents )
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
 import Tidepool.ArtifactBytes
 import Tidepool.RequestInputs

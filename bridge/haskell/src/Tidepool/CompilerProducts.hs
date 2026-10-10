@@ -97,9 +97,12 @@ import Tidepool.FinalizedModuleArtifacts
   , finalizedLocalAdmissions, localFinalizedCore, localFinalizedInterface, localFinalizedSourceSha256
   )
 import Tidepool.GhcPipeline
-  ( PreparedPipelineResult(..), pprAcceptedCandidates, PipelineResult(..), PreparedModuleObserver(..), PreparedModuleCompletionInputs(..)
-  , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
-  , preparedCandidateOriginal, preparedCandidateProof, revalidatePreparedCandidateInputs )
+  ( PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules
+  , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprAcceptedCandidates, prHscEnv
+  , prInjectedSessionInterfaces, prProducedSessionInterfaces, prTargetTcGblEnv, PreparedModuleObserver(..)
+  , PreparedModuleCompletionInputs(..), preparedFreshDependencies, preparedExactCompilation
+  , preparedHomeRequirements, preparedCandidateOriginal, preparedCandidateProof
+  , revalidatePreparedCandidateInputs )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), candidateExecutionSources)
 import Tidepool.PackageWitness (PackageImportEvidence(..), PackageImportRoot(..), encodePackageImports)
 import Tidepool.PreparedFormatting (resolveFormattingAuthority)

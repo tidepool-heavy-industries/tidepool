@@ -146,7 +146,8 @@ import Tidepool.PreparedStg
   , acquirePreparedModuleWithSiteEnvironment, resolvePreparedSiteEnvironment
   , runPreparedModuleTask, copyPreparedBodyCache, selectPreparedBodyCaches
   , preparedSiteDependenciesEquivalent )
-import Tidepool.GhcPipeline (PreparedModuleObserver(..), PreparedModuleCompletionInputs(..))
+import Tidepool.GhcPipeline
+  ( PreparedModuleObserver(..), PreparedModuleCompletionInputs(..) )
 import Tidepool.Timing (ReuseContext(..))
 import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor, runCompilerTasks, serialCompilerExecutionGrant)
 import System.Mem.StableName (makeStableName)
@@ -186,7 +187,10 @@ import Tidepool.ExactHydration (newPackageFinderFacts, forkExactContextWithPacka
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.HomeProducts (hydrateCandidateHomeProducts, admittedOriginalProof, admittedOriginalInterface)
 import Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedPipelineResult(..), pprAcceptedCandidates, preparedCandidateOriginal, preparedCandidateProof, PipelineResult(..), CheckedEnvironmentResult(..)
+  ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces
+  , pprFinalizedModules, pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprAcceptedCandidates
+  , preparedCandidateOriginal, preparedCandidateProof, prBinds, prHscEnv, prResultType, prWarnings
+  , prTargetTcGblEnv, CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , retainProgramSourceImports, withProgramSourceImports
   , finalizedTidyGuts, FinalizedExecutionFailure(..)
@@ -1161,10 +1165,17 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
         (fail "copied support alias hid persistent producer drift from terminal publication")
     revalidateExactScope (prHscEnv (pprPipelineResult completed)) retained >>= either fail pure
     when reuseCandidate $ do
-      unaccepted <- retainProgramSourceImports Nothing (completed {pprCandidateAdmissions=[]})
+      let unrelatedTarget = work </> "UnselectedOriginalConsumer.hs"
+      writeFile unrelatedTarget (unlines
+        ["module UnselectedOriginalConsumer where", "__result :: Int", "__result = 7"])
+      unrelated <- compile (PreparedProducts Nothing) Set.empty
+        (ExactScopeCompile GeneralCompile admitted) (Just session) unrelatedTarget includes Nothing
+      unless (null (pprAcceptedCandidates unrelated))
+        (fail "unselected original control unexpectedly accepted a candidate")
+      unaccepted <- retainProgramSourceImports Nothing unrelated
         (certifiedFinalizedArtifacts certified) retained
       unless (isNothing unaccepted)
-        (fail "unaccepted cached provider issued a completed import decision")
+        (fail "unselected retained inventory issued a completed import decision")
     imports <- retainProgramSourceImports Nothing completed (certifiedFinalizedArtifacts certified) retained
     unless (isJust imports) (fail "fresh authored root did not retain its completed decision")
     initialRuns <- lines <$> readFile marker
@@ -5824,11 +5835,10 @@ packageInputs = withScratch $ \work -> do
     reusedBody <- proof work "candidate" reused
     unless (normalized cold == normalized reused && coldBody == reusedBody) $
       fail "accepted candidate lost its checked direct package inputs"
-    let incomplete = reused { pprPackageImports = Map.delete (mkModuleName "OptionalSupport")
-          (pprPackageImports reused) }
+    let incompletePackages = Map.delete (mkModuleName "OptionalSupport") (pprPackageImports reused)
     requireUserError "compiler input missing candidate package owner"
       "compiler input proof lacks complete checked package-import owners"
-      (proof work "missing-owner" incomplete)
+      (proofWithPackages work "missing-owner" reused incompletePackages)
     let wiredRoot selection purpose = compile selection Set.empty purpose Nothing
           (work </> "OptionalWiredRoot.hs") [] Nothing
     wired <- wiredRoot (PreparedProducts Nothing) CertifyHomeProductsCompile
@@ -5875,13 +5885,13 @@ packageInputs = withScratch $ \work -> do
       { dependencyModules = sortOn (\node -> (dependencyModuleUnit node, dependencyModuleName node))
           [node { dependencyModuleProduct = ProductInterfaceOnly }
           | node <- dependencyModules (preparedFreshDependencies result)] })
-    proof work label result = do
+    proof work label result = proofWithPackages work label result (pprPackageImports result)
+    proofWithPackages work label result packages = do
       let directory = work </> ("input-proof-" ++ label)
           evidence = preparedFreshDependencies result
       createDirectory directory
       writeFile (directory </> "dependencies.json") (renderDependencyEvidence evidence)
-      writeCompileInputProof directory (prHscEnv (pprPipelineResult result)) evidence
-        (pprPackageImports result)
+      writeCompileInputProof directory (prHscEnv (pprPipelineResult result)) evidence packages
       let inputPath = directory </> "compiler-inputs.cbor"
       readCompilerInputCodecFacts directory inputPath (directory </> "dependencies.json")
 

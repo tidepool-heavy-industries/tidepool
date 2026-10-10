@@ -55,8 +55,9 @@ import System.FilePath ((</>), normalise)
 import GHC.Types.SourceError (SourceError)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), diagsFromSourceError)
 import Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..)
-  , PipelineResult(..), runPipelineSelected, withResidentPipelineSelected )
+  ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprModules, pprFinalizedModules
+  , CompilePurpose(..), prHscEnv, prCanonicalInterfaceAdmissions, runPipelineSelected
+  , withResidentPipelineSelected )
 import Tidepool.PreparedStg
   ( PreparedCoverage(..), pmModule, pmCoverage, pmBindings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections
   , RecoveredModuleInput(..), prepareRecoveredModule, newPreparedBodyCache, newPreparedBodyPreparer
@@ -174,8 +175,12 @@ jsonProjectionContext authority result modul entry = do
 -- even when the selected entry never otherwise reaches it.
 projectEntryWithAux :: PreparedPipelineResult -> String -> String -> [String]
   -> Map.Map Schema.SymbolIdentity Word -> Either Projection.ProjectionError Schema.WireProgram
-projectEntryWithAux result modul entry auxEntries retained =
-  Projection.projectPreparedTarget context (pprModules result)
+projectEntryWithAux result = projectModulesWithAux (pprModules result)
+
+projectModulesWithAux :: [PreparedModule] -> String -> String -> [String]
+  -> Map.Map Schema.SymbolIdentity Word -> Either Projection.ProjectionError Schema.WireProgram
+projectModulesWithAux modules modul entry auxEntries retained =
+  Projection.projectPreparedTarget context modules
   where
     context = Projection.ProjectionContext
       { Projection.projectionProfile = "ghc-9.12-prepared-stg"
@@ -694,9 +699,9 @@ verifyRepeatedConstructorEvidence result = do
           (IntMap.fromAscList [(index + offset, [(role, shifted offset child) | (role, child) <- children])
             | (index, children) <- IntMap.toAscList (TypePolicy.tgEdges graph)])
           | (offset, replacement) <- zip offsets pair]
-      project pair = projectEntry
-        (result { pprModules = map (replace pair) (pprModules result) })
-        "StrictPlainMetadata" "noUnpack" mempty
+      project pair = projectModulesWithAux
+        (map (replace pair) (pprModules result))
+        "StrictPlainMetadata" "noUnpack" [] mempty
       target = case filter ((== "StrictPlainMetadata")
             . moduleNameString . moduleName . pmModule) (pprModules result) of
         [prepared] -> prepared
@@ -915,10 +920,10 @@ verifyRecoveredTypedPreparation dir = do
       && length (pmYieldSites recovered) == 1 && null (pmSiteRejections recovered)
       && not (null (pmPreparedSites recovered)))
     "recovered typed Core bypassed site/carrier elaboration"
-  let replaced = result { pprModules = recovered : filter
-        ((/= pmModule recovered) . pmModule) (pprModules result) }
-  assertProjects "recovered unrelated entry" (projectEntry replaced "TypedPreparationOwner" "unrelated" mempty)
-  assertProjects "recovered issued receive" (projectEntry replaced "TypedPreparationOwner" "answer" mempty)
+  let replaced = recovered : filter
+        ((/= pmModule recovered) . pmModule) (pprModules result)
+  assertProjects "recovered unrelated entry" (projectModulesWithAux replaced "TypedPreparationOwner" "unrelated" [] mempty)
+  assertProjects "recovered issued receive" (projectModulesWithAux replaced "TypedPreparationOwner" "answer" [] mempty)
   case projectEntry result "Tidepool.Actor" "receive" mempty of
     Left Projection.UnelaboratedCompilerIntrinsic{} -> pure ()
     other -> fail ("emitted unsited intrinsic definition escaped: "

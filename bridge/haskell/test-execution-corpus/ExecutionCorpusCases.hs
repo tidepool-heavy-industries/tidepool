@@ -40,7 +40,8 @@ import Tidepool.ExecutionSchema
   ( Architecture(..), Endianness(..), SymbolIdentity(..), TargetDescriptor(..) )
 import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
 import Tidepool.GhcPipeline
-  ( PipelineResult(..), PreparedPipelineResult(..), preparedFreshDependencies )
+  ( prBinds, prTyCons, prHscEnv, prCapturedType, prWarnings, PreparedPipelineResult, pprPipelineResult
+  , pprModules, preparedFreshDependencies )
 import Tidepool.PreparedRecovery
   ( RecoveryFailure, RecoveredClosure(..), newPreparedRecovery )
 import Tidepool.PreparedStg (newPreparedBodyCache)

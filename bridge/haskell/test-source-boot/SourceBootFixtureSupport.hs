@@ -41,7 +41,8 @@ import System.IO.Error (isUserError, ioeGetErrorString)
 import GHC.IO.Handle (hDuplicate, hDuplicateTo)
 import Tidepool.DependencyEvidence (DependencyEvidence(..), DependencyModule(..))
 import Tidepool.GhcPipeline
-  ( PreparedPipelineResult(..), PipelineResult(..), CompilerTransactionFailure(..), preparedFreshDependencies )
+  ( PreparedPipelineResult, pprPipelineResult, pprModules, prHscEnv, prTargetTcGblEnv
+  , CompilerTransactionFailure(..), preparedFreshDependencies )
 import Tidepool.DiagJson (InputRejection(..))
 import Tidepool.ExecutionSource (ExecutionSourceFailure(..), ExecutionSourceValidationStage(..))
 import Tidepool.PreparedStg (pmModule)

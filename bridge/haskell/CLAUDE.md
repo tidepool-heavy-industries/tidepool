@@ -13,6 +13,12 @@ marker before authored syntax is inserted, then carries that typed fact through
 rendering. Do not infer defaulting authority from an import insertion marker or
 recapture an already qualified protected recipe.
 
+`GhcPipeline` alone issues completed pipeline results. Their read accessors keep
+compiler environments, prepared bodies, dependencies and admitted candidates
+paired; consumers cannot construct or update the issued records. Refusal tests
+change raw inputs at their admission owner, and projection tests change the
+projection inputs without reissuing compiler results.
+
 ## Build the compiler worker
 
 From the repository root, after materializing and configuring pinned tools:

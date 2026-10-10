@@ -3,14 +3,20 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedModuleCompletion, PreparedModuleCompletionInputs(..), PreparedModuleObserver(..), PreparedPipelineResult(..), AdmittedSourceCandidate, pprAcceptedCandidates, preparedCandidateOriginal, preparedCandidateProof, revalidatePreparedCandidateInputs, PreparedSegmentProductsResult(..), TypedSegmentPreparation, CheckedEnvironmentResult(..)
+  ( PipelineSelection(..), PreparedModuleCompletion, PreparedModuleCompletionInputs(..), PreparedModuleObserver(..)
+  , PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules
+  , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings
+  , AdmittedSourceCandidate, pprAcceptedCandidates, preparedCandidateOriginal, preparedCandidateProof, revalidatePreparedCandidateInputs, PreparedSegmentProductsResult(..), TypedSegmentPreparation, CheckedEnvironmentResult(..)
   , PreparedDependencies, preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , ProgramSourceImports, retainProgramSourceImports, withProgramSourceImports
   , runPipelineSelected, runPipelineSessionSelected
   , runPipelineSelectedRetaining
   , CompilerProducerIdentity, captureCompilerProducerIdentity
   , runPipelineSessionSelectedWithProducer
-  , CompilePurpose(..), withSourceImportIntents, PipelineResult(..)
+  , CompilePurpose(..), withSourceImportIntents
+  , PipelineResult, prBinds, prTyCons, prHscEnv, prInjectedSessionInterfaces, prProducedSessionInterfaces
+  , prCanonicalInterfaceAdmissions, prCapturedType, prCheckedBinderPins, prResultType, prWarnings
+  , prTargetRdrEnv, prTargetTcGblEnv
   , generatedScaffoldRecipe
   , FinalizedModule, finalizedHomeModInfo, finalizedTidyGuts
   , FinalizedExecutionFailure(..)
@@ -363,20 +369,42 @@ homeInterfaceConsumers summaries = drop 1 (scanr addConsumer Map.empty summaries
 -- | Prepared mode keeps the ordinary typed pipeline observations alongside
 -- the unflattened per-module STG handoff.
 data PreparedPipelineResult = PreparedPipelineResult
-  { pprPipelineResult :: PipelineResult
-  , pprModules :: [PreparedModule]
-  , pprDependencies :: PreparedDependencies
-  , pprProductInterfaces :: Map.Map ModuleName ModIface
-  , pprFinalizedModules :: Map.Map ModuleName FinalizedModule
-  , pprPackageImports :: Map.Map ModuleName PackageImportEvidence
-  , pprCandidateAdmissions :: [AdmittedSourceCandidate]
-  , pprOriginalBindings :: Map.Map Name SymbolIdentity
+  { ownedPprPipelineResult :: PipelineResult
+  , ownedPprModules :: [PreparedModule]
+  , ownedPprDependencies :: PreparedDependencies
+  , ownedPprProductInterfaces :: Map.Map ModuleName ModIface
+  , ownedPprFinalizedModules :: Map.Map ModuleName FinalizedModule
+  , ownedPprPackageImports :: Map.Map ModuleName PackageImportEvidence
+  , ownedPprCandidateAdmissions :: [AdmittedSourceCandidate]
+  , ownedPprOriginalBindings :: Map.Map Name SymbolIdentity
   }
+
+-- Read accessors expose issued facts without record-update labels.
+pprPipelineResult :: PreparedPipelineResult -> PipelineResult
+pprPipelineResult = ownedPprPipelineResult
+
+pprModules :: PreparedPipelineResult -> [PreparedModule]
+pprModules = ownedPprModules
+
+pprProductInterfaces :: PreparedPipelineResult -> Map.Map ModuleName ModIface
+pprProductInterfaces = ownedPprProductInterfaces
+
+pprFinalizedModules :: PreparedPipelineResult -> Map.Map ModuleName FinalizedModule
+pprFinalizedModules = ownedPprFinalizedModules
+
+pprPackageImports :: PreparedPipelineResult -> Map.Map ModuleName PackageImportEvidence
+pprPackageImports = ownedPprPackageImports
+
+pprCandidateAdmissions :: PreparedPipelineResult -> [AdmittedSourceCandidate]
+pprCandidateAdmissions = ownedPprCandidateAdmissions
+
+pprOriginalBindings :: PreparedPipelineResult -> Map.Map Name SymbolIdentity
+pprOriginalBindings = ownedPprOriginalBindings
 
 -- The opaque admissions retain the issuer's selected descriptor, loading
 -- demand and captured owner as one value through every prepared consumer.
 pprAcceptedCandidates :: PreparedPipelineResult -> [ModuleCandidate]
-pprAcceptedCandidates = map admittedCandidateOriginal . pprCandidateAdmissions
+pprAcceptedCandidates = map admittedCandidateOriginal . ownedPprCandidateAdmissions
 
 preparedCandidateOriginal :: AdmittedSourceCandidate -> ModuleCandidate
 preparedCandidateOriginal = admittedCandidateOriginal
@@ -386,7 +414,7 @@ preparedCandidateProof = admittedCandidateProof
 
 revalidatePreparedCandidateInputs :: PreparedPipelineResult -> IO ()
 revalidatePreparedCandidateInputs prepared =
-  revalidateAdmittedCandidateInputs (prHscEnv (pprPipelineResult prepared)) (pprCandidateAdmissions prepared)
+  revalidateAdmittedCandidateInputs (ownedPrHscEnv (ownedPprPipelineResult prepared)) (ownedPprCandidateAdmissions prepared)
 
 -- | One publication owns both source lookup and retained exact imports.
 -- Constructors stay private so consumers cannot pair unrelated compilations.
@@ -424,13 +452,13 @@ preparedDependencies env intents fresh (Just exact) = do
 
 -- | Fresh source lookup only; retained exact imports are deliberately absent.
 preparedFreshDependencies :: PreparedPipelineResult -> DependencyEvidence
-preparedFreshDependencies prepared = case pprDependencies prepared of
+preparedFreshDependencies prepared = case ownedPprDependencies prepared of
   SourceOnly fresh -> fresh
   ExactScoped fresh _ _ -> fresh
 
 -- | Exact-scope evidence only; fresh source imports remain in their own view.
 preparedExactCompilation :: PreparedPipelineResult -> Maybe ExactCompilation
-preparedExactCompilation prepared = case pprDependencies prepared of
+preparedExactCompilation prepared = case ownedPprDependencies prepared of
   SourceOnly _ -> Nothing
   ExactScoped _ exact _ -> Just exact
 
@@ -491,12 +519,12 @@ retainProgramSourceImports
   -> IO (Maybe ProgramSourceImports)
 retainProgramSourceImports previous prepared captured retained = do
   forM_ previous (either fail pure . validateProgramSourceImports retained)
-  case pprDependencies prepared of
+  case ownedPprDependencies prepared of
     SourceOnly _ -> pure previous
     ExactScoped _ _ (CompletedSourceImports []) -> pure previous
     ExactScoped fresh compilation (CompletedSourceImports roots) -> do
       let admitted = compilationScope compilation
-          env = prHscEnv (pprPipelineResult prepared)
+          env = ownedPrHscEnv (ownedPprPipelineResult prepared)
       case programImportIdentity admitted of
         Nothing -> pure previous
         Just identity -> do
@@ -510,10 +538,10 @@ retainProgramSourceImports previous prepared captured retained = do
                   (Nothing, _) -> pure (programImportOriginal admitted key == Just originalRow
                     && key `Set.notMember` scopeSourceSelectedOwners admitted)
                   (Just node, ModuleInterfaceEvidence canonical)
-                    | Just original <- Map.lookup (mkModuleName (snd key)) (pprFinalizedModules prepared)
+                    | Just original <- Map.lookup (mkModuleName (snd key)) (ownedPprFinalizedModules prepared)
                     , mi_module (hm_iface (finalizedHomeModInfo original)) ==
                         mkModule (stringToUnit (fst key)) (mkModuleName (snd key))
-                    , Just packages <- Map.lookup (mkModuleName (snd key)) (pprPackageImports prepared)
+                    , Just packages <- Map.lookup (mkModuleName (snd key)) (ownedPprPackageImports prepared)
                     , Just finalized <- Map.lookup key (finalizedLocalAdmissions captured)
                     , localFinalizedInterface finalized == row
                     , localFinalizedSourceSha256 finalized == canonicalSourceSha256 canonical
@@ -621,17 +649,17 @@ capturesProductInterfaces (WithPreparedModuleCompletion _ selection) = capturesP
 capturesProductInterfaces _ = False
 
 data PipelineResult = PipelineResult
-  { prBinds  :: [CoreBind]
-  , prTyCons :: [TyCon]
-  , prHscEnv :: HscEnv
+  { ownedPrBinds  :: [CoreBind]
+  , ownedPrTyCons :: [TyCon]
+  , ownedPrHscEnv :: HscEnv
   -- | Actual thin-interface bytes selected by session injection.
   -- These authorize type-dependency seals, not source or native products.
-  , prInjectedSessionInterfaces :: [CapturedSessionInterface]
+  , ownedPrInjectedSessionInterfaces :: [CapturedSessionInterface]
   -- | New typed capture outputs, kept distinct from injected inputs.
-  , prProducedSessionInterfaces :: [CapturedSessionInterface]
+  , ownedPrProducedSessionInterfaces :: [CapturedSessionInterface]
   -- | Verified canonical owners selected by this exact compiler request.
   -- Retained home interfaces have no source location in the GHC finder.
-  , prCanonicalInterfaceAdmissions :: Map.Map (String,String) CanonicalInterfaceAdmission
+  , ownedPrCanonicalInterfaceAdmissions :: Map.Map (String,String) CanonicalInterfaceAdmission
   -- | The GHC-inferred type of the target module's @__user@ binding (the eval's
   -- top-level expression), rendered to a string via 'ppr'. 'Nothing' when no
   -- @__user@ binding is present (e.g. fixture/Suite extraction). Captured at the
@@ -639,30 +667,68 @@ data PipelineResult = PipelineResult
   --
   -- This display string is not parser-faithful: 'ppr' can elide qualifiers or
   -- use Unicode. Cross-turn typechecking must use structured type data.
-  , prCapturedType :: Maybe String
+  , ownedPrCapturedType :: Maybe String
   -- | Post-zonk types of compiler-reserved local aliases emitted by the cell
   -- checker. These are structured separately from display-only inspection
   -- strings because the runtime replants them into staged statement compiles.
-  , prCheckedBinderPins :: [CheckedBinderPin]
+  , ownedPrCheckedBinderPins :: [CheckedBinderPin]
   -- | The GHC 'Type' of the target module's @result@ binding, captured for the
   -- value-binding mode. For @result = do { x <- action;
   -- pure x } :: Eff stack T@ this is the FULL @Eff stack T@; 'stripMonadHead'
   -- recovers the bound value type @T@. 'Nothing' when the module has no @result@
   -- binder (every non-bind extraction — reference turns, fixtures, one-shot
   -- evals — so the field is inert off the bind path).
-  , prResultType :: Maybe Type
+  , ownedPrResultType :: Maybe Type
   -- | GHC diagnostic warnings (@-Wincomplete-patterns@, name shadowing, ...)
   -- emitted while compiling the TARGET module — dependency modules (the
   -- preamble, stdlib) are excluded, see 'diagnosticCollectorHook'. Rendered by
   -- GHC's own diagnostic pretty-printer, so a warning carries its
   -- @Expr.hs:<line>:<col>@ location exactly like a compile error does. Empty
   -- on a clean compile.
-  , prWarnings :: [String]
+  , ownedPrWarnings :: [String]
   -- | GHC's resolved reader environment for the target module. Inspection
   -- uses this exact scope rather than reconstructing visibility from source.
-  , prTargetRdrEnv :: GlobalRdrEnv
-  , prTargetTcGblEnv :: TcGblEnv
+  , ownedPrTargetRdrEnv :: GlobalRdrEnv
+  , ownedPrTargetTcGblEnv :: TcGblEnv
   }
+
+-- Read accessors expose issued facts without record-update labels.
+prBinds :: PipelineResult -> [CoreBind]
+prBinds = ownedPrBinds
+
+prTyCons :: PipelineResult -> [TyCon]
+prTyCons = ownedPrTyCons
+
+prHscEnv :: PipelineResult -> HscEnv
+prHscEnv = ownedPrHscEnv
+
+prInjectedSessionInterfaces :: PipelineResult -> [CapturedSessionInterface]
+prInjectedSessionInterfaces = ownedPrInjectedSessionInterfaces
+
+prProducedSessionInterfaces :: PipelineResult -> [CapturedSessionInterface]
+prProducedSessionInterfaces = ownedPrProducedSessionInterfaces
+
+prCanonicalInterfaceAdmissions :: PipelineResult -> Map.Map (String,String) CanonicalInterfaceAdmission
+prCanonicalInterfaceAdmissions = ownedPrCanonicalInterfaceAdmissions
+
+prCapturedType :: PipelineResult -> Maybe String
+prCapturedType = ownedPrCapturedType
+
+prCheckedBinderPins :: PipelineResult -> [CheckedBinderPin]
+prCheckedBinderPins = ownedPrCheckedBinderPins
+
+prResultType :: PipelineResult -> Maybe Type
+prResultType = ownedPrResultType
+
+prWarnings :: PipelineResult -> [String]
+prWarnings = ownedPrWarnings
+
+prTargetRdrEnv :: PipelineResult -> GlobalRdrEnv
+prTargetRdrEnv = ownedPrTargetRdrEnv
+
+prTargetTcGblEnv :: PipelineResult -> TcGblEnv
+prTargetTcGblEnv = ownedPrTargetTcGblEnv
+
 
 checkCellInstances
   :: (CellSourcePlan -> IO result)
@@ -1399,7 +1465,7 @@ data CompilePlan = CompilePlan
     -- (which is the skeleton's, at one site).
   , cpKeepPrivateResult :: Bool
   , cpResultBinders :: [String]
-    -- ^ OccNames to try, in order, for 'prResultType' — the @result@ vs
+    -- ^ OccNames to try, in order, for 'ownedPrResultType' — the @result@ vs
     -- @__result@ convention, which differs by wrapper.
   , cpBeforeModule :: ModSummary -> Ghc ()
     -- ^ Runs immediately before one summary is reused or compiled. The
@@ -1412,7 +1478,7 @@ data CompilePlan = CompilePlan
     -- terminal proof belongs to its checked receipt publication owner.
   , cpInjectedSessionInterfaces :: IO [CapturedSessionInterface]
   , cpFinalEnv :: HscEnv -> HscEnv
-    -- ^ Applied to the post-loop session before it becomes 'prHscEnv'.
+    -- ^ Applied to the post-loop session before it becomes 'ownedPrHscEnv'.
   }
 
 -- | A deferred source's transient parse/typecheck/desugar handoff. It is
@@ -3773,19 +3839,19 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           injectedBaseline <- liftIO (cpInjectedSessionInterfaces plan)
           injectedTyped <- liftIO (readIORef typedSessionInterfacesRef)
           let pipelineResult = PipelineResult
-                { prBinds  = allBinds
-                , prTyCons = allTyCons
-                , prHscEnv = (cpFinalEnv plan hscFinal) {hsc_logger = loweringLogger}
-                , prInjectedSessionInterfaces = injectedBaseline
-                , prProducedSessionInterfaces = injectedTyped
-                , prCanonicalInterfaceAdmissions = maybe Map.empty scopeCanonicalInterfaces
+                { ownedPrBinds  = allBinds
+                , ownedPrTyCons = allTyCons
+                , ownedPrHscEnv = (cpFinalEnv plan hscFinal) {hsc_logger = loweringLogger}
+                , ownedPrInjectedSessionInterfaces = injectedBaseline
+                , ownedPrProducedSessionInterfaces = injectedTyped
+                , ownedPrCanonicalInterfaceAdmissions = maybe Map.empty scopeCanonicalInterfaces
                     (pvExactScope variant)
-                , prCapturedType = capturedType
-                , prCheckedBinderPins = checkedBinderPins
-                , prResultType   = resultTy
-                , prWarnings     = nub (map fst warnings)
-                , prTargetRdrEnv = tcg_rdr_env targetEnvironment
-                , prTargetTcGblEnv = targetEnvironment
+                , ownedPrCapturedType = capturedType
+                , ownedPrCheckedBinderPins = checkedBinderPins
+                , ownedPrResultType   = resultTy
+                , ownedPrWarnings     = nub (map fst warnings)
+                , ownedPrTargetRdrEnv = tcg_rdr_env targetEnvironment
+                , ownedPrTargetTcGblEnv = targetEnvironment
                 }
           capturedSources <- liftIO (captureDependencySources modGraphRaw)
           dependencies <- liftIO (dependencyEvidenceFor hscFinal capturedSources freshGraph
@@ -3928,35 +3994,35 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         finish selected = case selected of
           PreparedStg -> do
             (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
-            capturedDependencies <- liftIO (preparedDependencies (prHscEnv result)
+            capturedDependencies <- liftIO (preparedDependencies (ownedPrHscEnv result)
               (pvSourceImportIntents variant) dependencies exactCompilation)
             pure PreparedPipelineResult
-              { pprPipelineResult = result
-              , pprModules = modules
-              , pprDependencies = capturedDependencies
-              , pprProductInterfaces = productInterfaces
-              , pprFinalizedModules = finalizedModules
-              , pprPackageImports = packageRoots
-              , pprCandidateAdmissions = []
-              , pprOriginalBindings = Map.empty
+              { ownedPprPipelineResult = result
+              , ownedPprModules = modules
+              , ownedPprDependencies = capturedDependencies
+              , ownedPprProductInterfaces = productInterfaces
+              , ownedPprFinalizedModules = finalizedModules
+              , ownedPprPackageImports = packageRoots
+              , ownedPprCandidateAdmissions = []
+              , ownedPprOriginalBindings = Map.empty
               }
           PreparedProducts _ -> do
             (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
-            valid <- liftIO $ revalidateAcceptedCandidates (prHscEnv result) (Map.elems acceptedCandidates)
+            valid <- liftIO $ revalidateAcceptedCandidates (ownedPrHscEnv result) (Map.elems acceptedCandidates)
             when (not valid) $ liftIO $ ioError $ userError
               "accepted module candidate changed before artifact publication"
-            originalBindings <- liftIO (availableOriginalBindings (prHscEnv result))
-            capturedDependencies <- liftIO (preparedDependencies (prHscEnv result)
+            originalBindings <- liftIO (availableOriginalBindings (ownedPrHscEnv result))
+            capturedDependencies <- liftIO (preparedDependencies (ownedPrHscEnv result)
               (pvSourceImportIntents variant) dependencies exactCompilation)
             pure PreparedPipelineResult
-              { pprPipelineResult = result
-              , pprModules = modules
-              , pprDependencies = capturedDependencies
-              , pprProductInterfaces = productInterfaces
-              , pprFinalizedModules = finalizedModules
-              , pprPackageImports = packageRoots
-              , pprCandidateAdmissions = Map.elems acceptedCandidates
-              , pprOriginalBindings = originalBindings
+              { ownedPprPipelineResult = result
+              , ownedPprModules = modules
+              , ownedPprDependencies = capturedDependencies
+              , ownedPprProductInterfaces = productInterfaces
+              , ownedPprFinalizedModules = finalizedModules
+              , ownedPprPackageImports = packageRoots
+              , ownedPprCandidateAdmissions = Map.elems acceptedCandidates
+              , ownedPprOriginalBindings = originalBindings
               }
           PreparedSegmentProducts _ candidatePath -> do
             products <- finish (PreparedProducts candidatePath)

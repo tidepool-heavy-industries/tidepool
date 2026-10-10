@@ -37,9 +37,9 @@ import Tidepool.Binders
 import Tidepool.CheckedCell (CheckedSignature(..), CheckedSignatureName(..))
 import Tidepool.DeclarationJoin (InstanceInventory(..), DeclarationExport(..), ExportIdentity(..))
 import Tidepool.GhcPipeline
-  ( CompilePurpose(..), PipelineSelection(..), PreparedPipelineResult(..)
-  , PipelineResult(..), CheckedEnvironmentResult(..), runPipelineSessionSelected
-  , cellCheckedBinderSignatures, cellGeneratedInstanceRecipe )
+  ( CompilePurpose(..), PipelineSelection(..), pprPipelineResult, prHscEnv, prTargetRdrEnv
+  , CheckedEnvironmentResult(..), runPipelineSessionSelected, cellCheckedBinderSignatures
+  , cellGeneratedInstanceRecipe )
 import Tidepool.CheckedPrefixImports
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.Identity (stableVarId)

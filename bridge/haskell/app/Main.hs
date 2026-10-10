@@ -64,13 +64,13 @@ import Tidepool.TypedSegment
 import Tidepool.CompilerExecution (CompilerExecutor, compilerExecutionGrant, serialCompilerExecutionGrant, withCompilerExecutor)
 import GHC.Conc (getNumCapabilities, setNumCapabilities)
 import Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedPipelineResult(..), pprAcceptedCandidates, PreparedSegmentProductsResult(..), CheckedEnvironmentResult(..)
-  , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
-  , retainProgramSourceImports, withProgramSourceImports
-  , CompilePurpose(..), withSourceImportIntents, PipelineResult(..)
-  , CompilerScope(..), CompilerRecoveryCaches(..), withResidentCompilerScopes, withScopedExactInterfaceTransaction
-  , checkCellInstances, cellGeneratedInstanceRecipe
-  , cellExpressionEvidence, cellCheckedBinderSignatures
+  ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces
+  , pprPackageImports, pprAcceptedCandidates, PreparedSegmentProductsResult(..), CheckedEnvironmentResult(..)
+  , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements, retainProgramSourceImports
+  , withProgramSourceImports, CompilePurpose(..), withSourceImportIntents, prBinds, prTyCons, prHscEnv
+  , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope(..), CompilerRecoveryCaches(..)
+  , withResidentCompilerScopes, withScopedExactInterfaceTransaction, checkCellInstances
+  , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
   , satisfiesCapturedConstraint, activationPreviewInputType )
 import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, moduleProductBytes)
 import Tidepool.CompilerProducts

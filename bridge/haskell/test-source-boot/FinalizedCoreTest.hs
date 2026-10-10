@@ -71,9 +71,8 @@ import Tidepool.ExactScope
 import Tidepool.FinalizedModuleArtifacts (finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts)
 import Tidepool.CompilerProducts (certifiedFinalizedArtifacts)
 import Tidepool.GhcPipeline
-  ( PreparedPipelineResult(..), PipelineResult(..), PipelineSelection(..)
-  , CheckedEnvironmentResult(..), CompilePurpose(..), runPipelineSessionSelected
-  , withResidentPipelineSelected )
+  ( pprPipelineResult, pprFinalizedModules, prHscEnv, prResultType, PipelineSelection(..)
+  , CheckedEnvironmentResult(..), CompilePurpose(..), runPipelineSessionSelected, withResidentPipelineSelected )
 import Tidepool.Test.GenuineCandidate
   ( FixtureCompilerInput(..), captureCompilerFixture, capturedCertifiedProducts
   , writeGenuineMetadataScope, writeGenuineEmptyMetadataScope )

@@ -26,8 +26,8 @@ import Tidepool.RetainedUnfoldings
   ( installRetainedUnfoldingsPlugin, scopeRetainedModuleGraph
   , scopeRetainedSummaryHscEnv, retainedContext, emptyRetainedContext )
 import Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedPipelineResult(..), CompilePurpose(..)
-  , PipelineResult(..), withResidentPipelineSelected )
+  ( PipelineSelection(..), pprPipelineResult, pprModules, CompilePurpose(..), prHscEnv
+  , withResidentPipelineSelected )
 import Tidepool.PreparedStg (pmModule, pmBindings)
 
 -- Count actual compiler passes per module, independently of Tidepool's

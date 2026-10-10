@@ -22,8 +22,8 @@ import Tidepool.DependencyEvidence
 import Tidepool.ExactScope
 import Tidepool.ExecutionSource
 import Tidepool.GhcPipeline
-  ( PipelineSelection(..), PreparedPipelineResult(..), pprAcceptedCandidates, PipelineResult(..)
-  , CompilePurpose(..), runPipelineSessionSelected )
+  ( PipelineSelection(..), pprPipelineResult, pprAcceptedCandidates, prBinds, CompilePurpose(..)
+  , runPipelineSessionSelected )
 import Tidepool.ModuleCandidates
 import Tidepool.Session (emptySessionScope, SessionScope(..))
 import Tidepool.Test.GenuineCandidate (writeGenuineExecutionScope)

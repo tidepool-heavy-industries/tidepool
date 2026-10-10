@@ -53,8 +53,8 @@ import System.Posix.Files (createLink)
 
 import Tidepool.Binders (BoundBinder(..), ValueTier(..))
 import Tidepool.GhcPipeline
-  ( PipelineResult(..), isClosureType, renderType, stripMonadHead
-  , splitTupleType )
+  ( PipelineResult, prHscEnv, prCanonicalInterfaceAdmissions, prResultType, prTargetTcGblEnv, isClosureType
+  , renderType, stripMonadHead, splitTupleType )
 import Tidepool.Identity (stableVarId)
 import Tidepool.HostBindingAuthority
   ( HostBindingRepresentation, hostBindingRepresentationForType

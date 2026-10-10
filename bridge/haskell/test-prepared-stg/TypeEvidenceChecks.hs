@@ -28,8 +28,8 @@ import Tidepool.ExactHydration (freshExactState, hydrateOriginalInterfaces)
 import Tidepool.ExecutionProjection (ProjectionContext(..), projectPreparedTarget)
 import Tidepool.ExecutionSchema
 import Tidepool.GhcPipeline
-  ( PipelineSelection(PreparedStg), PreparedPipelineResult(..), PipelineResult(..)
-  , finalizedHomeModInfo, runPipelineSelected )
+  ( PipelineSelection(PreparedStg), PreparedPipelineResult, pprPipelineResult, pprModules, pprFinalizedModules
+  , prHscEnv, finalizedHomeModInfo, runPipelineSelected )
 import Tidepool.PreparedSites (requestReplyIndex)
 import Tidepool.PreparedStg (pmModule)
 import Tidepool.TypePolicy qualified as Policy

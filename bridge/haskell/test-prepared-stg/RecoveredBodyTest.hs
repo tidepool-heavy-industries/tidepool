@@ -56,8 +56,7 @@ import Tidepool.FatIface
   , readExactInterface
   , OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries, newOwnerInterfaceCache, lookupOwnerInterface, evictOwnerInterfaceMatching )
 import Tidepool.GhcPipeline
-  ( PipelineSelection(PreparedStg), PreparedPipelineResult(..)
-  , PipelineResult(prHscEnv), runPipelineSelected )
+  ( PipelineSelection(PreparedStg), pprPipelineResult, pprModules, prHscEnv, runPipelineSelected )
 import Tidepool.PreparedRecovery (RecoveredClosure(closureModules, closureFailures), recoverPreparedClosure)
 import Tidepool.PreparedStg
   ( pmModule, pmBindings, RecoveredModuleFailure(..), newPreparedBodyCache, prepareModule
