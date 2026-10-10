@@ -186,6 +186,29 @@ impl CertifiedRecoveryProduct {
         &self.certification_bytes
     }
 
+    pub(crate) fn merge_catalog_input_custody(
+        &self,
+        other: &Self,
+    ) -> Result<Self, crate::CompileError> {
+        if self != other {
+            return Err(crate::CompileError::ExtractFailed(
+                "native custody requires identical certified inputs".into(),
+            ));
+        }
+        let mut merged = self.clone();
+        if let (Some(first), Some(second)) = (&self.module_interface, &other.module_interface) {
+            merged.module_interface = Some(first.merge_catalog_input_custody(second)?);
+        }
+        Ok(merged)
+    }
+
+    pub(crate) fn without_catalog_input_custody(mut self) -> Self {
+        self.module_interface = self
+            .module_interface
+            .map(|interface| interface.without_catalog_input_custody());
+        self
+    }
+
     pub(crate) fn module_interface(
         &self,
     ) -> Option<&crate::certified_products::CertifiedModuleInterface> {

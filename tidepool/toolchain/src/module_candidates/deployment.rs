@@ -2,7 +2,7 @@
 //! Original products retain their producing roots and version recipe. Current
 //! source selection and interface admission still belong to the worker.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -429,7 +429,7 @@ pub(super) struct DecodedDeploymentRecord {
 /// owners retain these paths after the run or an earlier offer is released.
 #[derive(Debug)]
 pub(crate) struct DeploymentArtifactPaths {
-    _directory: Arc<tempfile::TempDir>,
+    _directories: Vec<Arc<tempfile::TempDir>>,
     pub(super) interface: PathBuf,
     pub(super) packages: PathBuf,
     pub(super) product: PathBuf,
@@ -437,6 +437,63 @@ pub(crate) struct DeploymentArtifactPaths {
     pub(super) canonical: crate::recovery_artifacts::RecoveryModuleInterfaceRef,
     pub(super) graph: Option<([u8; 32], PathBuf)>,
     pub(crate) origins: crate::declaration_context::original_inputs::OwnedOriginalInputOrigins,
+}
+
+impl DeploymentArtifactPaths {
+    pub(crate) fn merge(
+        first: &Arc<Self>,
+        second: &Arc<Self>,
+    ) -> Result<Arc<Self>, crate::CompileError> {
+        if Arc::ptr_eq(first, second) {
+            return Ok(Arc::clone(first));
+        }
+        let mut origins = BTreeMap::new();
+        for origin in first
+            .origins
+            .origins()
+            .iter()
+            .chain(second.origins.origins())
+        {
+            let key = (origin.kind, origin.path.clone());
+            if let Some(previous) = origins.get(&key) {
+                let previous: &crate::declaration_context::original_inputs::OriginalInputOrigin =
+                    previous;
+                if previous.sha256 != origin.sha256 || previous.bytes != origin.bytes {
+                    return Err(crate::CompileError::ExtractFailed(
+                        "conflicting original input custody seals".into(),
+                    ));
+                }
+            } else {
+                origins.insert(key, origin.clone());
+            }
+        }
+        // Repeated acquisition of the same protected origins can use the
+        // captured originals already owned by this identical certificate.
+        if origins.len() == first.origins.origins().len() {
+            return Ok(Arc::clone(first));
+        }
+        if origins.len() > 4096 {
+            return Err(crate::CompileError::ExtractFailed(
+                "original input custody exceeds origin bound".into(),
+            ));
+        }
+        let mut directories = BTreeMap::new();
+        for directory in first._directories.iter().chain(&second._directories) {
+            directories.insert(directory.path().to_path_buf(), Arc::clone(directory));
+        }
+        Ok(Arc::new(Self {
+            _directories: directories.into_values().collect(),
+            interface: first.interface.clone(),
+            packages: first.packages.clone(),
+            product: first.product.clone(),
+            canonical_root: first.canonical_root.clone(),
+            canonical: first.canonical.clone(),
+            graph: first.graph.clone(),
+            origins: crate::declaration_context::original_inputs::OwnedOriginalInputOrigins::from_authenticated_acquisition(
+                origins.into_values().collect(),
+            )?,
+        }))
+    }
 }
 
 impl DecodedDeploymentRecord {
@@ -956,7 +1013,7 @@ impl DeploymentModulePackage {
             record
                 .artifacts
                 .set(Arc::new(DeploymentArtifactPaths {
-                    _directory: Arc::clone(&directory),
+                    _directories: vec![Arc::clone(&directory)],
                     interface: root.join(interface.path),
                     packages: root.join(packages.path),
                     product: root.join(product.path),
@@ -1421,6 +1478,35 @@ mod tests {
             >,
             shadow: Option<&Path>,
         ) -> Self {
+            Self::with_modules_execution_packages_shadow_and_dependency(
+                names,
+                with_execution,
+                package_witnesses,
+                shadow,
+                false,
+            )
+        }
+
+        fn with_dependency() -> Self {
+            Self::with_modules_execution_packages_shadow_and_dependency(
+                &["A", "B"],
+                false,
+                &std::collections::BTreeMap::new(),
+                None,
+                true,
+            )
+        }
+
+        fn with_modules_execution_packages_shadow_and_dependency(
+            names: &[&str],
+            with_execution: bool,
+            package_witnesses: &std::collections::BTreeMap<
+                (String, String),
+                crate::certified_products::PackageInterfaceWitness,
+            >,
+            shadow: Option<&Path>,
+            dependency: bool,
+        ) -> Self {
             let root = tempfile::tempdir().unwrap();
             let source = root.path().join("sources");
             let output = root.path().join("products");
@@ -1559,13 +1645,21 @@ mod tests {
                         .unwrap(),
                     )
                     .with_source_sha256(super::super::parse_sha(&record.source_sha256).unwrap());
-                let product = crate::certified_products::fixture_finalized_product(
-                    product,
-                    crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                        &producer_identity,
-                    )
-                    .sha256(),
-                );
+                let requirements = (dependency && record.module == "B").then(|| {
+                    std::collections::BTreeMap::from([(
+                        ("u".into(), "A".into()),
+                        super::super::parse_sha(&sha(b"A")).unwrap(),
+                    )])
+                });
+                let product =
+                    crate::certified_products::fixture_finalized_product_with_requirements(
+                        product,
+                        crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                            &producer_identity,
+                        )
+                        .sha256(),
+                        requirements,
+                    );
                 record.original_certification = product.certification_bytes().to_vec();
                 record.module_interface_proof = product.module_interface().cloned();
             }

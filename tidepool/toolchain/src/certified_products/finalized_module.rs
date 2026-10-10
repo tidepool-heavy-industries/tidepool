@@ -529,6 +529,34 @@ impl CertifiedModuleInterface {
         self
     }
 
+    pub(crate) fn merge_catalog_input_custody(
+        &self,
+        other: &Self,
+    ) -> Result<Self, crate::CompileError> {
+        if self != other {
+            return Err(crate::CompileError::ExtractFailed(
+                "catalog custody requires identical certified inputs".into(),
+            ));
+        }
+        let custody = match (&self.input_custody, &other.input_custody) {
+            (Some(first), Some(second)) => Some(
+                crate::module_candidates::deployment::DeploymentArtifactPaths::merge(
+                    first, second,
+                )?,
+            ),
+            (Some(custody), None) | (None, Some(custody)) => Some(Arc::clone(custody)),
+            (None, None) => None,
+        };
+        let mut merged = self.clone();
+        merged.input_custody = custody;
+        Ok(merged)
+    }
+
+    pub(crate) fn without_catalog_input_custody(mut self) -> Self {
+        self.input_custody = None;
+        self
+    }
+
     pub(crate) fn original_input_origins(
         &self,
     ) -> Option<&crate::declaration_context::original_inputs::OwnedOriginalInputOrigins> {

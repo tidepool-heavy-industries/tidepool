@@ -648,3 +648,426 @@ fn cancelled_acquisition_preserves_explicit_owner_and_followup_can_acquire() {
     let fresh = fixture.load().unwrap();
     assert_eq!(fresh.catalog_identity(), package.catalog_identity());
 }
+
+#[test]
+fn identical_canonical_admissions_preserve_new_and_distinct_catalog_custody() {
+    use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory};
+    for acquired_first in [false, true] {
+        let fixture = Fixture::new();
+        let package = Arc::new(fixture.load().unwrap());
+        let selected = borrow_catalog(&package).unwrap();
+        let canonical = selected.by_owner[&("u".into(), "Library".into())]
+            .original_module_interface
+            .clone();
+        let bare = package.records[0]
+            .module_interface_proof
+            .as_ref()
+            .unwrap()
+            .clone();
+        assert_eq!(canonical, bare);
+        let original_path = selected.by_owner[&("u".into(), "Library".into())]
+            .iface_path
+            .clone();
+        let inventory = ArtifactInventory::default();
+        let first = ArtifactEntry::canonical(if acquired_first {
+            canonical.clone()
+        } else {
+            bare.clone()
+        });
+        let id = first.descriptor.id;
+        let view = inventory
+            .admit(&inventory.empty_view(), vec![first])
+            .unwrap();
+        let second = ArtifactEntry::canonical(if acquired_first {
+            bare
+        } else {
+            canonical.clone()
+        });
+        let retained = inventory.admit(&view, vec![second]).unwrap();
+        drop(canonical);
+        assert!(
+            !retained.original_input_origins(id).is_empty(),
+            "semantic equality cannot erase catalog provenance in either admission order"
+        );
+        let moved = fixture._root.path().join("moved-products");
+        fs::rename(&fixture.output, &moved).unwrap();
+        let reacquired = Arc::new(
+            DeploymentModulePackage::load_under(
+                &moved.join("catalog.json"),
+                &fixture.authority,
+                RootPolicy::Fixture,
+            )
+            .unwrap(),
+        );
+        let new_selected = borrow_catalog(&reacquired).unwrap();
+        let other = &new_selected.by_owner[&("u".into(), "Library".into())];
+        let other_path = other.iface_path.clone();
+        let both = inventory
+            .admit(
+                &retained,
+                vec![ArtifactEntry::canonical(
+                    other.original_module_interface.clone(),
+                )],
+            )
+            .unwrap();
+        let origins = both.original_input_origins(id);
+        let paths = origins
+            .iter()
+            .flat_map(|origins| origins.origins())
+            .map(|origin| origin.path.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(paths.iter().any(|path| path.starts_with(&fixture.output)));
+        assert!(paths.iter().any(|path| path.starts_with(&moved)));
+        drop(new_selected);
+        drop(reacquired);
+        drop(selected);
+        drop(package);
+        drop(view);
+        drop(retained);
+        assert!(original_path.exists());
+        assert!(other_path.exists());
+        drop(both);
+        assert!(!original_path.exists());
+        assert!(!other_path.exists());
+    }
+}
+
+#[test]
+fn identical_native_and_same_batch_admissions_preserve_catalog_custody() {
+    use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory};
+    for native in [false, true] {
+        for acquired_first in [false, true] {
+            let fixture = Fixture::new();
+            let package = Arc::new(fixture.load().unwrap());
+            let selected = borrow_catalog(&package).unwrap();
+            let canonical = selected.by_owner[&("u".into(), "Library".into())]
+                .original_module_interface
+                .clone();
+            let bare = package.records[0]
+                .module_interface_proof
+                .as_ref()
+                .unwrap()
+                .clone();
+            let make_entry = |interface: crate::certified_products::CertifiedModuleInterface| {
+                if !native {
+                    return ArtifactEntry::canonical(interface);
+                }
+                let record = &package.records[0];
+                let mut candidate =
+                    super::super::super::CandidateRecord::Deployment(Arc::clone(record));
+                let product =
+                    crate::certified_products::certify_candidate_original_with_validation(
+                        crate::certified_products::OriginalNativeCandidate {
+                            owner: record.original_owner.owner(),
+                            product: candidate.product(Arc::clone(record.product())),
+                            certification_bytes: record.original_certification.clone(),
+                            module_interface: interface,
+                            execution_source: record.execution_source.clone(),
+                        },
+                        &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                    )
+                    .unwrap();
+                ArtifactEntry::original(canonical.producer_sha256(), product).unwrap()
+            };
+            let captured_entry = make_entry(canonical.clone());
+            let id = captured_entry.descriptor.id;
+            let bare_entry = make_entry(bare.clone());
+            let bare_canonical = ArtifactEntry::canonical(bare);
+            let canonical_id = bare_canonical.descriptor.id;
+            let inventory = ArtifactInventory::default();
+            let mut entries = if acquired_first {
+                vec![captured_entry, bare_entry]
+            } else {
+                vec![bare_entry, captured_entry]
+            };
+            if native {
+                entries.push(bare_canonical);
+            }
+            let retained = inventory.admit(&inventory.empty_view(), entries).unwrap();
+            assert!(!retained.original_input_origins(id).is_empty());
+            assert!(!retained.original_input_origins(canonical_id).is_empty());
+            // Repeated acquisition of identical protected origins must retain
+            // the existing captured materialization, without accumulating leases.
+            let reacquired = Arc::new(fixture.load().unwrap());
+            let new_selected = borrow_catalog(&reacquired).unwrap();
+            let incoming = new_selected.by_owner[&("u".into(), "Library".into())]
+                .original_module_interface
+                .clone();
+            let incoming_path = new_selected.by_owner[&("u".into(), "Library".into())]
+                .iface_path
+                .clone();
+            let continued = inventory
+                .admit(&retained, vec![make_entry(incoming)])
+                .unwrap();
+            drop(new_selected);
+            drop(reacquired);
+            assert!(!incoming_path.exists());
+            let origin_facts = |view: &crate::artifact_inventory::ArtifactView| {
+                view.original_input_origins(id)
+                    .iter()
+                    .flat_map(|origins| {
+                        origins.origins().iter().map(|origin| {
+                            (
+                                origin.kind,
+                                origin.path.clone(),
+                                origin.sha256,
+                                origin.bytes,
+                            )
+                        })
+                    })
+                    .collect::<BTreeSet<_>>()
+            };
+            assert_eq!(origin_facts(&continued), origin_facts(&retained));
+        }
+    }
+}
+
+fn origin_paths(
+    view: &crate::artifact_inventory::ArtifactView,
+    id: crate::artifact_inventory::ArtifactId,
+) -> BTreeSet<PathBuf> {
+    view.original_input_origins(id)
+        .iter()
+        .flat_map(|origins| origins.origins().iter().map(|origin| origin.path.clone()))
+        .collect()
+}
+
+#[test]
+fn independent_catalog_views_preserve_cold_and_warm_issuing_custody() {
+    use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory};
+    for warm in [false, true] {
+        let fixture = Fixture::new();
+        let package = Arc::new(fixture.load().unwrap());
+        let selected = borrow_catalog(&package).unwrap();
+        let interface = selected.by_owner[&("u".into(), "Library".into())]
+            .original_module_interface
+            .clone();
+        let expected_a = interface
+            .original_input_origins()
+            .unwrap()
+            .origins()
+            .iter()
+            .map(|origin| origin.path.clone())
+            .collect::<BTreeSet<_>>();
+        let first_path = selected.by_owner[&("u".into(), "Library".into())]
+            .iface_path
+            .clone();
+        let inventory = ArtifactInventory::default();
+        let first_entry = ArtifactEntry::canonical(interface);
+        let id = first_entry.descriptor.id;
+        let a = inventory
+            .admit(&inventory.empty_view(), vec![first_entry])
+            .unwrap();
+        if warm {
+            assert_eq!(origin_paths(&a, id), expected_a);
+        }
+        let moved = fixture._root.path().join("moved-products");
+        fs::rename(&fixture.output, &moved).unwrap();
+        let new_package = Arc::new(
+            DeploymentModulePackage::load_under(
+                &moved.join("catalog.json"),
+                &fixture.authority,
+                RootPolicy::Fixture,
+            )
+            .unwrap(),
+        );
+        let new_selected = borrow_catalog(&new_package).unwrap();
+        let other = &new_selected.by_owner[&("u".into(), "Library".into())];
+        let expected_b = other
+            .original_module_interface
+            .original_input_origins()
+            .unwrap()
+            .origins()
+            .iter()
+            .map(|origin| origin.path.clone())
+            .collect::<BTreeSet<_>>();
+        let second_path = other.iface_path.clone();
+        let b = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![ArtifactEntry::canonical(
+                    other.original_module_interface.clone(),
+                )],
+            )
+            .unwrap();
+        assert_eq!(
+            origin_paths(&a, id),
+            expected_a,
+            "unrelated admission cannot change a cold or warm view"
+        );
+        assert_eq!(
+            origin_paths(&b, id),
+            expected_b,
+            "an independent view cannot inherit another issuer's origins"
+        );
+        let expected_join = expected_a
+            .union(&expected_b)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let ab = a.merge(&b).unwrap();
+        let ba = b.merge(&a).unwrap();
+        assert_eq!(origin_paths(&ab, id), expected_join);
+        assert_eq!(origin_paths(&ba, id), expected_join);
+        let other_inventory = ArtifactInventory::default();
+        let other_b = other_inventory
+            .admit_shared(&other_inventory.empty_view(), b.entries())
+            .unwrap();
+        let cross_ab = a.merge(&other_b).unwrap();
+        let cross_ba = other_b.merge(&a).unwrap();
+        assert_eq!(origin_paths(&cross_ab, id), expected_join);
+        assert_eq!(origin_paths(&cross_ba, id), expected_join);
+        assert_eq!(origin_paths(&other_b, id), expected_b);
+        let detached_b = b.select_roots(vec![id]).unwrap();
+        assert_eq!(origin_paths(&detached_b, id), expected_b);
+        drop(ab);
+        drop(ba);
+        drop(cross_ab);
+        drop(cross_ba);
+        drop(other_b);
+        drop(a);
+        drop(b);
+        drop(selected);
+        drop(package);
+        drop(new_selected);
+        drop(new_package);
+        assert!(
+            !first_path.exists(),
+            "projected B does not retain unrelated A materialization"
+        );
+        assert!(second_path.exists());
+        drop(detached_b);
+        assert!(!second_path.exists());
+    }
+}
+
+#[test]
+fn dependency_only_catalog_closure_preserves_bytes_without_ambient_origin_custody() {
+    use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory, ArtifactPayload};
+    let fixture = Fixture::with_dependency();
+    let package = Arc::new(fixture.load().unwrap());
+    let selected = borrow_catalog(&package).unwrap();
+    let inventory = ArtifactInventory::default();
+    let first_a = ArtifactEntry::canonical(
+        selected.by_owner[&("u".into(), "A".into())]
+            .original_module_interface
+            .clone(),
+    );
+    let id_a = first_a.descriptor.id;
+    let first_b = ArtifactEntry::canonical(
+        selected.by_owner[&("u".into(), "B".into())]
+            .original_module_interface
+            .clone(),
+    );
+    let id_b = first_b.descriptor.id;
+    let old_path = selected.by_owner[&("u".into(), "A".into())]
+        .iface_path
+        .clone();
+    let original_a = selected.by_owner[&("u".into(), "A".into())]
+        .original_module_interface
+        .interface_bytes()
+        .to_vec();
+    let old = inventory
+        .admit(&inventory.empty_view(), vec![first_a, first_b])
+        .unwrap();
+    let moved = fixture._root.path().join("moved-products");
+    fs::rename(&fixture.output, &moved).unwrap();
+    let new_package = Arc::new(
+        DeploymentModulePackage::load_under(
+            &moved.join("catalog.json"),
+            &fixture.authority,
+            RootPolicy::Fixture,
+        )
+        .unwrap(),
+    );
+    let new_selected = borrow_catalog(&new_package).unwrap();
+    let incoming = || {
+        ArtifactEntry::canonical(
+            new_selected.by_owner[&("u".into(), "B".into())]
+                .original_module_interface
+                .clone(),
+        )
+    };
+    let b = inventory
+        .admit(&inventory.empty_view(), vec![incoming()])
+        .unwrap();
+    assert!(
+        origin_paths(&b, id_a).is_empty(),
+        "hidden dependency bytes cannot grant unrelated physical issuer custody"
+    );
+    assert!(origin_paths(&b, id_b)
+        .iter()
+        .all(|path| path.starts_with(&moved)));
+    let old_a = old.select_roots(vec![id_a]).unwrap();
+    let issued_parent = inventory.admit(&old_a, vec![incoming()]).unwrap();
+    assert_eq!(
+        origin_paths(&issued_parent, id_a),
+        origin_paths(&old_a, id_a)
+    );
+    assert_eq!(origin_paths(&issued_parent, id_b), origin_paths(&b, id_b));
+    drop(issued_parent);
+    drop(old_a);
+    drop(old);
+    drop(selected);
+    drop(package);
+    assert!(!old_path.exists());
+    let semantic = b
+        .entries()
+        .into_iter()
+        .find(|entry| entry.descriptor.id == id_a)
+        .unwrap();
+    let ArtifactPayload::Canonical(interface) = &semantic.payload else {
+        panic!("canonical dependency");
+    };
+    assert_eq!(interface.interface_bytes(), original_a);
+    assert!(!interface.certificate_bytes().is_empty());
+    assert!(
+        interface.core_bytes().is_some(),
+        "shared semantic payload retains complete original inputs"
+    );
+}
+
+#[test]
+fn acquired_catalog_append_history_retains_only_new_or_changed_custody_handles() {
+    use crate::artifact_inventory::{ArtifactEntry, ArtifactInventory};
+    let fixture = Fixture::with_modules(&["A", "B"]);
+    let inventory = ArtifactInventory::default();
+    let mut directory = fixture.output.clone();
+    let mut view = inventory.empty_view();
+    let mut expected_handles = 0;
+    let mut census = Vec::new();
+    for generation in 0..4 {
+        if generation > 0 {
+            let moved = fixture._root.path().join(format!("products-{generation}"));
+            fs::rename(&directory, &moved).unwrap();
+            directory = moved;
+        }
+        let package = Arc::new(
+            DeploymentModulePackage::load_under(
+                &directory.join("catalog.json"),
+                &fixture.authority,
+                RootPolicy::Fixture,
+            )
+            .unwrap(),
+        );
+        let selected = borrow_catalog(&package).unwrap();
+        for repeat in 0..16 {
+            let entries = selected
+                .by_owner
+                .values()
+                .map(|original| {
+                    ArtifactEntry::canonical(original.original_module_interface.clone())
+                })
+                .collect();
+            view = inventory.admit(&view, entries).unwrap();
+            if repeat == 0 {
+                expected_handles += selected.by_owner.len();
+            }
+            assert_eq!(view.retained_catalog_custody_handles(), expected_handles,
+                "unchanged offers share ancestor issuing handles; only changed custody adds an override");
+            assert_eq!(view.entries().len(), 2);
+        }
+        census.push(view.retained_catalog_custody_handles());
+    }
+    assert_eq!(census, vec![2, 4, 6, 8]);
+    eprintln!("acquired custody append census: 64 admissions, 4 actual acquisitions, retained handles {census:?}");
+}
