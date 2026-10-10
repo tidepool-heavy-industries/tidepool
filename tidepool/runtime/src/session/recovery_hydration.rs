@@ -110,6 +110,10 @@ fn hydrate_context_roots(
     roots: &BTreeSet<tidepool_toolchain::exact_context::ContextRoot>,
 ) -> Result<(), SessionError> {
     owner.validate_owner()?;
+    graph
+        .store()
+        .ensure_ready()
+        .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
     let cached = owner.contexts.lock();
     let demanded = roots
         .iter()
@@ -260,6 +264,7 @@ impl SessionLib {
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?
             .ok_or(SessionError::WrongPublicManifestTicket)?;
         if snapshot.domain.revision != state.store_revision
+            || snapshot.domain.content_revision != state.graph.content_revision()
             || snapshot.domain.allocation_ceiling != state.allocation_ceiling
             || snapshot.domain.lineage != state.graph.lineage()
             || Some(&snapshot.domain.snapshot_root) != state.graph.domain_root()
@@ -937,7 +942,7 @@ mod lazy_tests {
         else {
             panic!("shadowed public declaration must be accepted");
         };
-        assert_eq!(
+        assert!(matches!(
             producer
                 .publish_staged_public_manifest(
                     accepted.stage().unwrap(),
@@ -945,7 +950,7 @@ mod lazy_tests {
                 )
                 .unwrap(),
             PublicManifestCommit::Durable
-        );
+        ));
         let current_tip = producer.lib().scope_tip(public);
         let current_node = producer
             .lib()
