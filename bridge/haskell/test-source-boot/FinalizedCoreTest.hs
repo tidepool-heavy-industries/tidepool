@@ -292,7 +292,7 @@ finalizedCoreChecks = bracket scratch removeDirectoryRecursive $ \work -> do
       pure path
 
 -- The real interface and executable consumers must use admitted bytes even
--- when producer paths drift. Publication observes those paths separately. The
+-- when old artifact paths change or disappear. The retained body stays authoritative. The
 -- second decode in one NameCache reuses the iface; another NameCache cannot.
 capturedConsumerChecks :: FilePath -> FilePath -> ExactScope -> ExactIfaceArtifact
   -> BS.ByteString -> ModSummary -> CanonicalInterfaceProof -> IO ()
@@ -315,7 +315,7 @@ capturedConsumerChecks libdir work scope artifact coreBytes summary proof = do
                 assert (mi_module attached == ms_mod summary && case mi_extra_decls attached of
                     Just _ -> True; Nothing -> False) "snapshot executable consumer reopened changed Core"
                 terminal <- revalidateExactScope admitted scope
-                assert (either (const True) (const False) terminal) "publication accepted persistent original drift"
+                requireRight terminal
         consume
         consume
   let count marker = length [() | line <- lines diagnostics, marker `isInfixOf` line]
@@ -415,9 +415,7 @@ makeViewChecks libdir work scope artifact bytes summary proof = runGhc (Just lib
     assert (ml_hi_file (ms_location capturedView) /= exactPath artifact)
       "captured executable make view retained its producer path"
     validateCapturedAdmittedCore (ModuleInterfaceAdmission proof)
-    refused <- revalidateExactScope admitted scope
-    assert (either (const True) (const False) refused)
-      "terminal defining Core validation accepted persistent drift"
+    requireRight =<< revalidateExactScope admitted scope
     BS.writeFile corePath bytes
   -- A genuine pipeline original seals its module-scoped retained policy even
   -- when the selected retained set is empty. An ordinary cold GHC session is a
@@ -665,17 +663,12 @@ snapshotExecutableHook = withTiming $ withScratch $ \producer -> withScratch $ \
           assert (observed == ["42"])
             "actual executable hook failed to supply original bytecode before quoter restoration"
           case checked of
-            Right result | restore -> do
-              terminal <- revalidateExactScope (crHscEnv result) scope
-              requireRight terminal
-            Left failure | not restore && (corePath `isInfixOf` show failure
-                || "request original input changed before publication" `isInfixOf` show failure) -> pure ()
-            Left failure -> fail ("snapshot hook failed outside terminal drift refusal: " ++ show failure)
-            Right _ -> fail "terminal checked receipt accepted persistent producer mutation/deletion"
+            Right result -> requireRight =<< revalidateExactScope (crHscEnv result) scope
+            Left failure -> fail ("owned executable capture failed after old path mutation: " ++ show failure)
   forM_ [removeFile, \path' -> BS.writeFile path' (BS.singleton 0)] $ \replace -> do
     consume replace True
     consume replace False
-  putStrLn "snapshot executable hook: deleted/replaced Core consumed through actual post-load bytecode; restored publication and persistent terminal refusals passed"
+  putStrLn "snapshot executable hook: deleted/replaced Core consumed through actual post-load bytecode and terminal publication passed without restoration"
 
 
 -- Metadata proof validation, executable promotion and scope extension form one
@@ -737,8 +730,7 @@ promotionScopeChecks env work scope proof = do
       interfaces <- requireRight =<< readScopedInterfaces env extended [iface]
       assert (map fst interfaces == [iface]) "promoted interface hydration reopened deleted producer metadata"
       terminal <- revalidateExactScope env extended
-      assert (either (const True) (const False) terminal)
-        "scope extension publication accepted deleted producer metadata"
+      requireRight terminal
       smaller <- extend (fullBudget - 1)
       assert (either (const True) (const False) smaller)
         "scope extension ignored receiving aggregate budget"
