@@ -1895,6 +1895,10 @@ impl PersistentSession {
             })
             .transpose()
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let binding_changes = self
+            .bindings
+            .prepare_declaration_binding_changes_in(scope, &captured_values, &replaced_names)
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
         self.public_visibility_epochs
             .try_reserve(1)
             .map_err(|error| SessionError::RecoveryManifest {
@@ -1910,10 +1914,7 @@ impl PersistentSession {
                 if let Some(source_origin) = source_origin {
                     bindings.commit_source_owner_origin(source_origin);
                 }
-                bindings.preserve_observations(&captured_values);
-                for name in &replaced_names {
-                    bindings.remove_current_in(scope, name);
-                }
+                bindings.commit_declaration_binding_changes(binding_changes);
                 epochs.insert(scope, next_epoch);
                 DeclarationPlaneCommit {
                     generation,
@@ -2882,7 +2883,7 @@ impl PersistentSession {
             return Err(SessionError::DeadScope(private_scope));
         }
         self.bindings
-            .prepare_exact_publication_in(
+            .validate_exact_publication_in(
                 &self.scopes,
                 private_scope,
                 public_scope,
@@ -3035,6 +3036,16 @@ impl PersistentSession {
             .as_ref()
             .map(|declaration| declaration.declared_names.clone())
             .unwrap_or_default();
+        let prepared = self
+            .bindings
+            .prepare_binding_publication_removals(prepared, &declared_names)
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        self.public_visibility_epochs
+            .try_reserve(1)
+            .map_err(|error| SessionError::RecoveryManifest {
+                path: self.lib().root.clone(),
+                detail: error.to_string(),
+            })?;
         let public_scope = ticket.public_scope;
         let declaration = ticket
             .declaration
@@ -3058,9 +3069,6 @@ impl PersistentSession {
             .expect("preflight library")
             .publish_staged_public_manifest_unchecked(ticket, declaration, |_| {
                 bindings.commit_exact_binding_promotion(prepared);
-                for name in declared_names {
-                    bindings.remove_current_in(public_scope, &name);
-                }
                 public_visibility_epochs.insert(public_scope, next_epoch);
             });
         match &outcome {

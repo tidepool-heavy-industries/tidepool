@@ -496,18 +496,6 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
             .unwrap(),
         selection.current()
     );
-    session
-        .bindings()
-        .prepare_authored_source_publication_in(
-            session.scope_tree(),
-            private,
-            public,
-            &[],
-            &[],
-            &[authored_owner],
-            &[],
-        )
-        .unwrap();
     let before = session.public_visibility_snapshot_in(private).unwrap();
     tidepool_testing::with_settlement(|settlement| {
         session.retract_in(private, "absent", settlement)

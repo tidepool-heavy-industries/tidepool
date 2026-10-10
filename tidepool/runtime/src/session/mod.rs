@@ -2490,72 +2490,38 @@ impl SessionLib {
                 "authored inventory includes nonlocal export identities",
             ));
         }
-        let (refs, interfaces) = context
-            .materialize_recovery_products_and_interfaces(root)
-            .map_err(|error| invalid(&error.to_string()))?;
-        if refs
-            .iter()
-            .filter(|reference| {
-                reference.unit == own.unit
-                    && reference.module == own.module
-                    && reference.module_version == own.module_version.0
-                    && reference.skinny_iface_sha256 == own.skinny_iface_sha256
-                    && reference.product_sha256 == own.product_sha256
-            })
-            .count()
-            != 1
-        {
-            return Err(invalid(
-                "authored recovery closure lacks its exact declaration owner",
-            ));
-        }
+        let previous = if staged.base_tip.0 > 0 {
+            state
+                .graph
+                .node(staged.base_tip)
+                .map_err(|error| recovery::graph_error(&state.path, error))?
+                .map(|node| node.context_root.clone())
+        } else {
+            None
+        };
+        let artifacts = recovery::materialize_missing_context_artifacts(
+            &state.graph,
+            root,
+            context,
+            previous.as_ref(),
+        )?;
         let exports = certified
             .introduced_exports()
             .iter()
             .map(certified_recovery_export)
             .collect();
-        let mut artifacts = refs
-            .into_iter()
-            .map(recovery::RecoveryArtifactClosure::Home)
-            .collect::<Vec<_>>();
-        artifacts.extend(
-            interfaces
-                .into_iter()
-                .map(recovery::RecoveryArtifactClosure::ModuleInterface),
-        );
-        for interface in context.joined_interfaces() {
-            artifacts.push(recovery::RecoveryArtifactClosure::Join(
-                interface
-                    .materialize(root)
-                    .map_err(|error| invalid(&error.to_string()))?,
-            ));
-        }
-        for interface in context.value_interfaces() {
-            artifacts.push(recovery::RecoveryArtifactClosure::ValueInterface(
-                interface
-                    .materialize(root)
-                    .map_err(|error| invalid(&error.to_string()))?,
-            ));
-        }
         let mut graph = state.graph.candidate();
-
-        let authored_root = artifacts
-            .iter()
-            .find_map(|artifact| match artifact {
-                recovery::RecoveryArtifactClosure::Home(reference)
-                    if reference.unit == own.unit && reference.module == own.module =>
-                {
-                    Some(artifact.artifact_id())
-                }
-                _ => None,
-            })
-            .ok_or_else(|| invalid("authored native root is absent from its artifact closure"))?;
         let certified_root = context.authored_native_root(staged.generation.0)?;
-        if certified_root != authored_root {
+        if !state.graph.contains_artifact(certified_root)
+            && !artifacts
+                .iter()
+                .any(|artifact| artifact.artifact_id() == certified_root)
+        {
             return Err(invalid(
-                "authored native origin differs from the staged original product",
+                "authored native root is absent from its staged exact closure",
             ));
         }
+        let authored_root = certified_root;
         let live_dependencies = certified_native_dependencies(
             context,
             &selected_native_roots(
@@ -2563,15 +2529,6 @@ impl SessionLib {
                 &std::collections::BTreeSet::from([certified_root]),
             ),
         )?;
-        let previous = if staged.base_tip.0 > 0 {
-            state
-                .graph
-                .node(staged.base_tip)
-                .map_err(|e| recovery::graph_error(&state.path, e))?
-                .map(|node| node.context_root.clone())
-        } else {
-            None
-        };
         let context_root = graph
             .insert_context(context, previous.as_ref())
             .map_err(|e| recovery::graph_error(&state.path, e))?;

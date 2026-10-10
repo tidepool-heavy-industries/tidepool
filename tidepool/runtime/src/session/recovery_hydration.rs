@@ -743,32 +743,8 @@ pub(super) fn materialize_public_compiler_context(
         detail,
     };
     let mut candidate = graph.candidate();
-    let (products, interfaces) = context
-        .materialize_recovery_products_and_interfaces(root)
-        .map_err(|error| invalid(error.to_string()))?;
-    let mut artifacts = products
-        .into_iter()
-        .map(recovery::RecoveryArtifactClosure::Home)
-        .collect::<Vec<_>>();
-    artifacts.extend(
-        interfaces
-            .into_iter()
-            .map(recovery::RecoveryArtifactClosure::ModuleInterface),
-    );
-    for interface in context.joined_interfaces() {
-        artifacts.push(recovery::RecoveryArtifactClosure::Join(
-            interface
-                .materialize(root)
-                .map_err(|error| invalid(error.to_string()))?,
-        ));
-    }
-    for interface in context.value_interfaces() {
-        artifacts.push(recovery::RecoveryArtifactClosure::ValueInterface(
-            interface
-                .materialize(root)
-                .map_err(|error| invalid(error.to_string()))?,
-        ));
-    }
+    let artifacts =
+        recovery::materialize_missing_context_artifacts(graph, root, context, previous)?;
     for artifact in artifacts {
         candidate
             .insert_artifact(artifact)

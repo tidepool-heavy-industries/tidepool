@@ -1,5 +1,9 @@
 //! Immutable run recovery snapshots. SQLite selects roots; compiler and
 //! declaration facts live only in authenticated DAG-CBOR blocks and HAMTs.
+use crate::session::recovery_store::{
+    RecoveryDomainId, RecoveryDomainState, RunRecoveryStore, StoreDisposition, StoreError,
+    StoreRevision,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
@@ -8,8 +12,9 @@ use tidepool_repr::Generation;
 use tidepool_toolchain::artifact_inventory::{ArtifactDescriptor, ArtifactId};
 use tidepool_toolchain::declaration_join::ExactModuleIdentity;
 use tidepool_toolchain::exact_context::{ContextRoot, SnapshotError};
-use tidepool_toolchain::recovery_artifacts::{RecoveryArtifactRef, RecoveryJoinRef, RecoveryModuleInterfaceRef, RecoveryValueInterfaceRef};
-use crate::session::recovery_store::{RunRecoveryStore, RecoveryDomainId, RecoveryDomainState, StoreError, StoreRevision, StoreDisposition};
+use tidepool_toolchain::recovery_artifacts::{
+    RecoveryArtifactRef, RecoveryJoinRef, RecoveryModuleInterfaceRef, RecoveryValueInterfaceRef,
+};
 
 #[path = "newrecovery_v2/snapshots.rs"]
 mod snapshots;
@@ -89,7 +94,10 @@ pub(crate) struct RecoveryNode {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RecoveryNodeKind { Authored, Join }
+pub(crate) enum RecoveryNodeKind {
+    Authored,
+    Join,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -307,19 +315,28 @@ pub(crate) struct RecoveryArtifactLoss {
     pub kind: RecoveryArtifactLossKind,
 }
 
-
 impl tidepool_toolchain::exact_context::SnapshotKey for RecoveryPublicSourceInstance {}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RecoveryHead {
-    Available { winner: Generation, export: RecoveryExport },
+    Available {
+        winner: Generation,
+        export: RecoveryExport,
+    },
     Tombstone(RecoveryTombstone),
 }
 #[derive(Clone, Copy, Eq, PartialEq)]
-enum RecoveryAvailability { Interface, Native }
+enum RecoveryAvailability {
+    Interface,
+    Native,
+}
 
 #[derive(Debug)]
-pub(crate) struct RecoveryError { pub path: Option<PathBuf>, pub detail: String, pub kind: RecoveryErrorKind }
+pub(crate) struct RecoveryError {
+    pub path: Option<PathBuf>,
+    pub detail: String,
+    pub kind: RecoveryErrorKind,
+}
 #[derive(Debug)]
 pub(crate) enum RecoveryErrorKind {
     Manifest,
@@ -327,112 +344,300 @@ pub(crate) enum RecoveryErrorKind {
     Store(StoreError),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RecoveryRefusal { UnsupportedOldFormat {version:u64}, UnsupportedFutureFormat {version:u64} }
+pub enum RecoveryRefusal {
+    UnsupportedOldFormat { version: u64 },
+    UnsupportedFutureFormat { version: u64 },
+}
 impl std::fmt::Display for RecoveryError {
-    fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result { write!(f,"{}",self.detail) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.detail)
+    }
 }
 impl std::error::Error for RecoveryError {}
 impl From<SnapshotError> for RecoveryError {
-    fn from(error:SnapshotError)->Self { Self {path:None,detail:error.to_string(),kind:RecoveryErrorKind::Snapshot(error)} }
+    fn from(error: SnapshotError) -> Self {
+        Self {
+            path: None,
+            detail: error.to_string(),
+            kind: RecoveryErrorKind::Snapshot(error),
+        }
+    }
 }
 impl From<StoreError> for RecoveryError {
-    fn from(error:StoreError)->Self { Self {path:Some(error.path.clone()),detail:error.to_string(),kind:RecoveryErrorKind::Store(error)} }
+    fn from(error: StoreError) -> Self {
+        Self {
+            path: Some(error.path.clone()),
+            detail: error.to_string(),
+            kind: RecoveryErrorKind::Store(error),
+        }
+    }
 }
-fn error(detail:impl Into<String>)->RecoveryError { RecoveryError {path:None,detail:detail.into(),kind:RecoveryErrorKind::Manifest} }
-
-pub(crate) fn load_domain_graph(store:Arc<RunRecoveryStore>,domain:RecoveryDomainId)->Result<RecoveryGraph,RecoveryError> {
-    let state=store.read_domain(domain)?.ok_or_else(||error("recovery domain is absent"))?;
-    RecoveryGraph::hydrate_domain(store,domain,&state)
+fn error(detail: impl Into<String>) -> RecoveryError {
+    RecoveryError {
+        path: None,
+        detail: detail.into(),
+        kind: RecoveryErrorKind::Manifest,
+    }
 }
 
-pub(crate) fn load_or_create_domain_graph(store:Arc<RunRecoveryStore>,domain:RecoveryDomainId,source_session:u64,initial_ceiling:Generation)
- ->Result<(RecoveryGraph,RecoveryDomainState,bool),crate::session::SessionError> {
-    let convert=|error| crate::session::recovery::graph_error(store.path(),error);
-    if let Some(state)=store.read_domain(domain).map_err(|e|crate::session::SessionError::RecoveryStore(Box::new(e)))? {
-        if !matches!(domain,RecoveryDomainId::Root) { return Err(convert(error("independent recovery domain already exists"))); }
-        let graph=RecoveryGraph::hydrate_domain(store.clone(),domain,&state).map_err(convert)?;
-        return Ok((graph,state,true));
+pub(crate) fn load_domain_graph(
+    store: Arc<RunRecoveryStore>,
+    domain: RecoveryDomainId,
+) -> Result<RecoveryGraph, RecoveryError> {
+    let state = store
+        .read_domain(domain)?
+        .ok_or_else(|| error("recovery domain is absent"))?;
+    RecoveryGraph::hydrate_domain(store, domain, &state)
+}
+
+/// Resolve only payloads introduced by the actual selected-context successor.
+/// Authenticated retained references remain the run's immutable custody facts.
+pub(crate) fn materialize_missing_context_artifacts(
+    graph: &RecoveryGraph,
+    artifact_root: &Path,
+    context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
+    previous: Option<&ContextRoot>,
+) -> Result<Vec<RecoveryArtifactClosure>, crate::session::SessionError> {
+    let base = previous
+        .map(|root| graph.context(root))
+        .transpose()
+        .map_err(|error| crate::session::recovery::graph_error(graph.store().path(), error))?;
+    let snapshot = context.snapshot();
+    let mut introduced = snapshot
+        .selection()
+        .artifact_ids_introduced(
+            base.as_ref()
+                .map(|base| base.snapshot().selection().as_ref()),
+        )
+        .map_err(|error| crate::session::SessionError::RecoverySnapshot(Box::new(error)))?;
+    introduced.retain(|id| !graph.contains_artifact(*id));
+    let (products, interfaces) = context
+        .materialize_recovery_products_and_interfaces_for_artifacts(artifact_root, &introduced)?;
+    let (joins, values) = context
+        .materialize_joined_and_value_interfaces_for_artifacts(artifact_root, &introduced)?;
+    Ok(products
+        .into_iter()
+        .map(RecoveryArtifactClosure::Home)
+        .chain(
+            interfaces
+                .into_iter()
+                .map(RecoveryArtifactClosure::ModuleInterface),
+        )
+        .chain(joins.into_iter().map(RecoveryArtifactClosure::Join))
+        .chain(
+            values
+                .into_iter()
+                .map(RecoveryArtifactClosure::ValueInterface),
+        )
+        .filter(|artifact| !graph.contains_artifact(artifact.artifact_id()))
+        .collect())
+}
+
+pub(crate) fn load_or_create_domain_graph(
+    store: Arc<RunRecoveryStore>,
+    domain: RecoveryDomainId,
+    source_session: u64,
+    initial_ceiling: Generation,
+) -> Result<(RecoveryGraph, RecoveryDomainState, bool), crate::session::SessionError> {
+    let convert = |error| crate::session::recovery::graph_error(store.path(), error);
+    if let Some(state) = store
+        .read_domain(domain)
+        .map_err(|e| crate::session::SessionError::RecoveryStore(Box::new(e)))?
+    {
+        if !matches!(domain, RecoveryDomainId::Root) {
+            return Err(convert(error("independent recovery domain already exists")));
+        }
+        let graph =
+            RecoveryGraph::hydrate_domain(store.clone(), domain, &state).map_err(convert)?;
+        return Ok((graph, state, true));
     }
     if matches!(domain,RecoveryDomainId::Session(session) if session.0!=source_session) {
-        return Err(convert(error("independent recovery domain differs from issuing session")));
+        return Err(convert(error(
+            "independent recovery domain differs from issuing session",
+        )));
     }
-    let graph=RecoveryGraph::empty(store.clone(),domain,source_session);
-    let (mut graph,root,blocks)=graph.materialize_domain().map_err(convert)?;
-    let state=match store.create_domain(domain,source_session,initial_ceiling,root,blocks) {
-        StoreDisposition::Committed(state)=>state,
-        StoreDisposition::Refused(reason)=>return Err(convert(error(format!("domain creation refused: {reason:?}")))),
-        StoreDisposition::RecoveryRequired(error)=>return Err(crate::session::SessionError::RecoveryStore(Box::new(error))),
+    let graph = RecoveryGraph::empty(store.clone(), domain, source_session);
+    let (mut graph, root, blocks) = graph.materialize_domain().map_err(convert)?;
+    let state = match store.create_domain(domain, source_session, initial_ceiling, root, blocks) {
+        StoreDisposition::Committed(state) => state,
+        StoreDisposition::Refused(reason) => {
+            return Err(convert(error(format!(
+                "domain creation refused: {reason:?}"
+            ))))
+        }
+        StoreDisposition::RecoveryRequired(error) => {
+            return Err(crate::session::SessionError::RecoveryStore(Box::new(error)))
+        }
     };
     graph.install_store_state(&state);
-    Ok((graph,state,false))
+    Ok((graph, state, false))
 }
 
 impl RecoveryGraph {
-    pub(crate) fn public_binding_tombstones(&self,owner:&RecoveryPublicOwner)->Result<Vec<RecoveryLostPublicBinding>,RecoveryError> {
-        let Some(surface)=self.surface(owner)? else {return Ok(Vec::new())};
-        Ok(surface.bindings.iter().map(|(name,winner)|RecoveryLostPublicBinding{name:name.clone(),winner:*winner}).collect())
+    pub(crate) fn public_binding_tombstones(
+        &self,
+        owner: &RecoveryPublicOwner,
+    ) -> Result<Vec<RecoveryLostPublicBinding>, RecoveryError> {
+        let Some(surface) = self.surface(owner)? else {
+            return Ok(Vec::new());
+        };
+        Ok(surface
+            .bindings
+            .iter()
+            .map(|(name, winner)| RecoveryLostPublicBinding {
+                name: name.clone(),
+                winner: *winner,
+            })
+            .collect())
     }
-    pub(crate) fn projection(&self,owner:&RecoveryPublicOwner,losses:&BTreeMap<ArtifactId,Vec<RecoveryArtifactLoss>>)->Result<BTreeMap<RecoverySymbolIdentity,RecoveryHead>,RecoveryError> {
-        self.project_heads(owner,losses,RecoveryAvailability::Native)
+    pub(crate) fn projection(
+        &self,
+        owner: &RecoveryPublicOwner,
+        losses: &BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>,
+    ) -> Result<BTreeMap<RecoverySymbolIdentity, RecoveryHead>, RecoveryError> {
+        self.project_heads(owner, losses, RecoveryAvailability::Native)
     }
-    pub(crate) fn interface_projection(&self,owner:&RecoveryPublicOwner,losses:&BTreeMap<ArtifactId,Vec<RecoveryArtifactLoss>>)->Result<BTreeMap<RecoverySymbolIdentity,RecoveryHead>,RecoveryError> {
-        self.project_heads(owner,losses,RecoveryAvailability::Interface)
+    pub(crate) fn interface_projection(
+        &self,
+        owner: &RecoveryPublicOwner,
+        losses: &BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>,
+    ) -> Result<BTreeMap<RecoverySymbolIdentity, RecoveryHead>, RecoveryError> {
+        self.project_heads(owner, losses, RecoveryAvailability::Interface)
     }
-    fn ancestry(&self,root:Generation)->Result<Vec<Arc<RecoveryNode>>,RecoveryError> {
-        let mut chain=Vec::new(); let mut cursor=Some(root);
-        while let Some(id)=cursor {
-            let node=self.node(id)?.ok_or_else(||error("declaration ancestry is incomplete"))?;
-            if node.parent.is_some_and(|parent|parent>=id) {return Err(error("declaration ancestry is not strictly causal"));}
-            cursor=node.parent; chain.push(node);
+    fn ancestry(&self, root: Generation) -> Result<Vec<Arc<RecoveryNode>>, RecoveryError> {
+        let mut chain = Vec::new();
+        let mut cursor = Some(root);
+        while let Some(id) = cursor {
+            let node = self
+                .node(id)?
+                .ok_or_else(|| error("declaration ancestry is incomplete"))?;
+            if node.parent.is_some_and(|parent| parent >= id) {
+                return Err(error("declaration ancestry is not strictly causal"));
+            }
+            cursor = node.parent;
+            chain.push(node);
         }
-        chain.reverse(); Ok(chain)
+        chain.reverse();
+        Ok(chain)
     }
-    fn project_heads(&self,owner:&RecoveryPublicOwner,losses:&BTreeMap<ArtifactId,Vec<RecoveryArtifactLoss>>,availability:RecoveryAvailability)->Result<BTreeMap<RecoverySymbolIdentity,RecoveryHead>,RecoveryError> {
-        let Some(root)=self.surface(owner)?.and_then(|surface|surface.declaration_root) else {return Ok(BTreeMap::new())};
-        let mut visible=BTreeMap::new(); let mut memo=BTreeMap::new();
+    fn project_heads(
+        &self,
+        owner: &RecoveryPublicOwner,
+        losses: &BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>,
+        availability: RecoveryAvailability,
+    ) -> Result<BTreeMap<RecoverySymbolIdentity, RecoveryHead>, RecoveryError> {
+        let Some(root) = self
+            .surface(owner)?
+            .and_then(|surface| surface.declaration_root)
+        else {
+            return Ok(BTreeMap::new());
+        };
+        let mut visible = BTreeMap::new();
+        let mut memo = BTreeMap::new();
         for node in self.ancestry(root)? {
-            let recoverability=self.node_recoverability(node.id,losses,availability,&mut memo)?;
-            for identity in &node.retracts {visible.remove(identity);}
+            let recoverability =
+                self.node_recoverability(node.id, losses, availability, &mut memo)?;
+            for identity in &node.retracts {
+                visible.remove(identity);
+            }
             for export in &node.exports {
-                let head=match &recoverability {
-                    Ok(())=>RecoveryHead::Available{winner:node.id,export:export.clone()},
-                    Err(reason)=>RecoveryHead::Tombstone(RecoveryTombstone{identity:export.identity.clone(),winner:node.id,reason:reason.clone()}),
+                let head = match &recoverability {
+                    Ok(()) => RecoveryHead::Available {
+                        winner: node.id,
+                        export: export.clone(),
+                    },
+                    Err(reason) => RecoveryHead::Tombstone(RecoveryTombstone {
+                        identity: export.identity.clone(),
+                        winner: node.id,
+                        reason: reason.clone(),
+                    }),
                 };
-                visible.insert(export.identity.clone(),head);
+                visible.insert(export.identity.clone(), head);
             }
         }
         Ok(visible)
     }
-    fn node_recoverability(&self,id:Generation,losses:&BTreeMap<ArtifactId,Vec<RecoveryArtifactLoss>>,availability:RecoveryAvailability,memo:&mut BTreeMap<Generation,Result<(),RecoveryLossReason>>)
-     ->Result<Result<(),RecoveryLossReason>,RecoveryError> {
-        if let Some(result)=memo.get(&id) {return Ok(result.clone())}
-        let Some(node)=self.node(id)? else {return Ok(Err(RecoveryLossReason::MissingArtifactClosure("referenced declaration is absent".into())))};
-        let result=match &node.state {
-            RecoveryNodeState::MissingArtifactClosure{reason}=>Err(RecoveryLossReason::MissingArtifactClosure(reason.clone())),
-            RecoveryNodeState::LiveValueDependency{reason} if availability==RecoveryAvailability::Native=>Err(RecoveryLossReason::LiveValueDependency(reason.clone())),
-            _ if availability==RecoveryAvailability::Native&&!node.live_dependencies.is_empty()=>Err(RecoveryLossReason::LiveValueDependency(format!("{} live dependency records",node.live_dependencies.len()))),
-            _=>{
-                let mut failure=node.artifact_refs.iter().find_map(|id|losses.get(id).and_then(|items|items.first()).cloned().map(RecoveryLossReason::Artifact));
+    fn node_recoverability(
+        &self,
+        id: Generation,
+        losses: &BTreeMap<ArtifactId, Vec<RecoveryArtifactLoss>>,
+        availability: RecoveryAvailability,
+        memo: &mut BTreeMap<Generation, Result<(), RecoveryLossReason>>,
+    ) -> Result<Result<(), RecoveryLossReason>, RecoveryError> {
+        if let Some(result) = memo.get(&id) {
+            return Ok(result.clone());
+        }
+        let Some(node) = self.node(id)? else {
+            return Ok(Err(RecoveryLossReason::MissingArtifactClosure(
+                "referenced declaration is absent".into(),
+            )));
+        };
+        let result = match &node.state {
+            RecoveryNodeState::MissingArtifactClosure { reason } => {
+                Err(RecoveryLossReason::MissingArtifactClosure(reason.clone()))
+            }
+            RecoveryNodeState::LiveValueDependency { reason }
+                if availability == RecoveryAvailability::Native =>
+            {
+                Err(RecoveryLossReason::LiveValueDependency(reason.clone()))
+            }
+            _ if availability == RecoveryAvailability::Native
+                && !node.live_dependencies.is_empty() =>
+            {
+                Err(RecoveryLossReason::LiveValueDependency(format!(
+                    "{} live dependency records",
+                    node.live_dependencies.len()
+                )))
+            }
+            _ => {
+                let mut failure = node.artifact_refs.iter().find_map(|id| {
+                    losses
+                        .get(id)
+                        .and_then(|items| items.first())
+                        .cloned()
+                        .map(RecoveryLossReason::Artifact)
+                });
                 if failure.is_none() {
-                    for dependency in node.parent.into_iter().chain(node.implementation_refs.iter().copied()) {
-                        if dependency>=id {return Err(error("implementation dependency is not strictly causal"));}
-                        if let Err(reason)=self.node_recoverability(dependency,losses,availability,memo)? {
-                            failure=Some(RecoveryLossReason::Dependency{generation:dependency,detail:format!("{reason:?}")}); break;
+                    for dependency in node
+                        .parent
+                        .into_iter()
+                        .chain(node.implementation_refs.iter().copied())
+                    {
+                        if dependency >= id {
+                            return Err(error("implementation dependency is not strictly causal"));
+                        }
+                        if let Err(reason) =
+                            self.node_recoverability(dependency, losses, availability, memo)?
+                        {
+                            failure = Some(RecoveryLossReason::Dependency {
+                                generation: dependency,
+                                detail: format!("{reason:?}"),
+                            });
+                            break;
                         }
                     }
                 }
-                failure.map_or(Ok(()),Err)
+                failure.map_or(Ok(()), Err)
             }
         };
-        memo.insert(id,result.clone()); Ok(result)
+        memo.insert(id, result.clone());
+        Ok(result)
     }
-    pub(crate) fn workbench_imports(&self,root:Generation)->Result<Vec<String>,RecoveryError> {
-        let mut imports=Vec::new();
-        for node in self.ancestry(root)? {for spec in &node.workbench_imports {if !imports.contains(spec){imports.push(spec.clone())}}}
+    pub(crate) fn workbench_imports(&self, root: Generation) -> Result<Vec<String>, RecoveryError> {
+        let mut imports = Vec::new();
+        for node in self.ancestry(root)? {
+            for spec in &node.workbench_imports {
+                if !imports.contains(spec) {
+                    imports.push(spec.clone())
+                }
+            }
+        }
         Ok(imports)
     }
 }
-fn relative(path:&Path)->bool { !path.as_os_str().is_empty()&&path.components().all(|c|matches!(c,Component::Normal(_))) }
+fn relative(path: &Path) -> bool {
+    !path.as_os_str().is_empty() && path.components().all(|c| matches!(c, Component::Normal(_)))
+}
 mod generation_serde {
     use serde::{Deserialize, Deserializer, Serializer};
     use tidepool_repr::Generation;
@@ -480,4 +685,3 @@ mod generation_vec_serde {
             .map(|values| values.into_iter().map(Generation).collect())
     }
 }
-
