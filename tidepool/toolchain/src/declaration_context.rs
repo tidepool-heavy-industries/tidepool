@@ -3202,7 +3202,9 @@ impl ExactCompilationRequest {
         let compiler_projection = context
             .compiler_projection
             .merge(&issued.for_source_owners(&persistent_owners))?;
-        context.inventory = context.inventory.merge(support)?;
+        context.inventory = context
+            .inventory
+            .merge_selected(support, &compiler_projection)?;
         context.compiler_projection = compiler_projection;
         context.normalize()?;
         let context = Arc::new(context);
