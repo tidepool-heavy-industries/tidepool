@@ -848,13 +848,15 @@ pub async fn check_recipe(
     let workspace = resolve_workspace(workspace)?;
     let scratch = tempfile::tempdir()?;
     let selected = workspace::FrozenWorkspace::load(&workspace, scratch.path())?;
-    crate::actor_host::validate_workspace_program(&selected, scratch.path())?;
+    let missing_effects = crate::actor_host::run_compiler_preparation(|settlement| {
+        crate::actor_host::validate_workspace_program(&selected, scratch.path(), settlement)?;
+        crate::actor_host::spec_effect_preflight(&selected, scratch.path(), settlement)
+    })?;
     println!("Workspace definitions compile: {}", selected.identity());
     println!(
         "Modules: {}",
         selected.import_modules().collect::<Vec<_>>().join(", ")
     );
-    let missing_effects = crate::actor_host::spec_effect_preflight(&selected, scratch.path())?;
     if !missing_effects.is_empty() {
         return Err(runtime_error(missing_effects.join("\n")));
     }

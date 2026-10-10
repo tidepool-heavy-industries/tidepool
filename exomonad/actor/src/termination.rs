@@ -273,14 +273,20 @@ impl CompilerWorkTicket {
     ) -> tidepool_runtime::CompilerTransactionOutcome<T> {
         let cancellation = self.cancellation();
         let attempts = Arc::clone(&self.receipt.attempts);
-        tidepool_toolchain::artifacts::with_compiler_transaction_cancellable_for_workload(
-            workload,
-            cancellation,
-            move |close| {
-                self.consume(tidepool_runtime::CompilerTransactionOutcome { action: (), close })
-            },
-            || action(&mut |close| attempts.lock().push(close)),
-        )
+        let receipt = self.receipt.clone();
+        let mut outcome =
+            tidepool_toolchain::artifacts::with_compiler_transaction_cancellable_for_workload(
+                workload,
+                cancellation,
+                move |close| {
+                    self.consume(tidepool_runtime::CompilerTransactionOutcome { action: (), close })
+                },
+                || action(&mut |close| attempts.lock().push(close)),
+            );
+        if let CompilerWorkClose::Settled(close) = receipt.observation() {
+            outcome.close = close;
+        }
+        outcome
     }
 
     pub(crate) fn consume<T>(
@@ -310,6 +316,27 @@ impl Drop for CompilerWorkTicket {
             *self.receipt.close.lock() = CompilerWorkClose::Abandoned;
             self.owner.close_settled();
         }
+    }
+}
+
+/// The current invocation's compiler cleanup authority. Capturing it preserves
+/// the existing lifecycle owner when native work outlives its async waiter.
+#[derive(Clone)]
+pub struct ActorCompilerCloseOwner {
+    owner: crate::resident_workbench::CompilerCloseOwner,
+}
+
+impl ActorCompilerCloseOwner {
+    pub fn current() -> Result<Self, crate::ResidentActorWorkbenchError> {
+        crate::resident_workbench::CompilerCloseOwner::current().map(|owner| Self { owner })
+    }
+
+    pub fn run<T>(
+        &self,
+        action: impl FnOnce(&mut dyn FnMut(tidepool_runtime::CompilerTransactionClose)) -> T,
+    ) -> Result<tidepool_runtime::CompilerTransactionOutcome<T>, crate::ResidentActorWorkbenchError>
+    {
+        Ok(self.owner.register_work()?.run_with_close(action))
     }
 }
 

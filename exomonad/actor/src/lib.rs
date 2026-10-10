@@ -183,9 +183,10 @@ pub use start::{
     WorkerLifetime,
 };
 pub use termination::{
-    ActorExitAlreadyPublished, ActorExitKind, ActorLifecycle, ActorLifecycleConnection,
-    ActorTerminal, CompilerPreparationCleanup, CompilerPreparationCleanupObservation,
-    CompilerPreparationOutcome, CompilerPreparationOwner, CompilerWorkClose, RetainedActorExit,
+    ActorCompilerCloseOwner, ActorExitAlreadyPublished, ActorExitKind, ActorLifecycle,
+    ActorLifecycleConnection, ActorTerminal, CompilerPreparationCleanup,
+    CompilerPreparationCleanupObservation, CompilerPreparationOutcome, CompilerPreparationOwner,
+    CompilerWorkClose, RetainedActorExit,
 };
 pub use tidepool_repr::{ActorPath, ActorPathError, ActorPathSegment};
 pub use typed_request::{RequestSignatureError, ResponseExpectation};

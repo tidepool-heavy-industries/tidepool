@@ -1270,7 +1270,7 @@ impl ExomonadSourceReload {
             }
         }
         let candidate = pending.include_paths(1);
-        if let Err(error) = crate::actor_host::typecheck_candidate_revision(
+        if let Err(error) = crate::actor_host::typecheck_candidate_revision_owned(
             &self.frozen,
             &self.run_root,
             &self.haskell_root,
@@ -1353,7 +1353,7 @@ impl ExomonadSourceReload {
                 new_modules.join(", ")
             )));
         }
-        if let Err(error) = crate::actor_host::typecheck_candidate_revision(
+        if let Err(error) = crate::actor_host::typecheck_candidate_revision_owned(
             &self.frozen,
             &self.run_root,
             &self.haskell_root,

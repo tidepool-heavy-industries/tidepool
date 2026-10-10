@@ -72,10 +72,12 @@ pub(super) fn attach(
     library: &mut SessionLib,
     run_root: &Path,
     lease: Arc<HostIncarnationLease>,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<(), SessionError> {
     library.attach_owned_recovery_graph_v3(
         run_root.join("root-declarations.json"),
         Arc::new(RootDeclarationRunAuthority { lease }),
+        settlement,
     )
 }
 
@@ -85,6 +87,7 @@ pub(super) fn attach_child(
     library: &mut SessionLib,
     host_root: &Path,
     lease: Arc<HostIncarnationLease>,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<(), SessionError> {
     let host_root = host_root
         .canonicalize()
@@ -116,6 +119,7 @@ pub(super) fn attach_child(
             host_root,
             child_root,
         }),
+        settlement,
     )
 }
 
