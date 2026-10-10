@@ -305,6 +305,8 @@ pub enum ArtifactInventoryFailure {
     OwnerConflict { owner: ExactModuleIdentity },
     #[error("owner {owner:?} selects multiple native implementations")]
     NativeOwnerAmbiguity { owner: ExactModuleIdentity },
+    #[error("artifact {artifact:?} has multiple issued dependency bindings")]
+    BindingAmbiguity { artifact: ArtifactId },
     #[error("compiler owner {owner:?} selects original {existing:?} and {incoming:?}")]
     CompilerOriginalOfferConflict {
         owner: ExactModuleIdentity,
@@ -2098,6 +2100,14 @@ impl ArtifactInventory {
                 ));
             }
         }
+        if witnesses.keys().copied().collect::<BTreeSet<_>>()
+            != plan
+                .keys()
+                .map(|key| key.binding().selection)
+                .collect::<BTreeSet<_>>()
+        {
+            return Err(failure("unused or missing selection digest witness"));
+        }
         for (source, edges) in &plan {
             let (_, witness) = witnesses
                 .get(&source.binding().selection)
@@ -3125,7 +3135,9 @@ impl ArtifactView {
             .next()
             .ok_or_else(|| failure("selected artifact is outside retained view"))?;
         if candidates.next().is_some() {
-            return Err(failure("selected artifact has ambiguous issued bindings"));
+            return Err(admission_failure(
+                ArtifactInventoryFailure::BindingAmbiguity { artifact: id },
+            ));
         }
         Ok(binding)
     }
@@ -3166,12 +3178,6 @@ impl ArtifactView {
     pub fn select_roots(&self, roots: Vec<ArtifactId>) -> Result<Self, CompileError> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let owned = &self.read_projection(&state).nodes;
-        if roots
-            .iter()
-            .any(|id| self.resolve_binding(*id, owned).is_err())
-        {
-            return Err(failure("selected artifact is outside retained view"));
-        }
         let ids = roots.iter().copied().collect::<BTreeSet<_>>();
         let mut selected = roots
             .into_iter()
@@ -3347,6 +3353,41 @@ impl ArtifactView {
         }
         Ok(retained)
     }
+    /// Narrow the compiler namespace using already-issued roles while retaining
+    /// every exact historical binding and its physical custody independently.
+    pub(crate) fn with_compiler_projection(
+        &self,
+        projection: &CompilerInputProjection,
+    ) -> Result<Self, CompileError> {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let nodes = &self.read_projection(&state).nodes;
+        let namespace = projection
+            .roles()
+            .into_iter()
+            .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+            .map(|id| self.resolve_binding(id, nodes).map(|binding| (id, binding)))
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        if namespace == self.lease.namespace {
+            return Ok(self.clone());
+        }
+        let entries = namespace
+            .keys()
+            .map(|id| (*id, Arc::clone(&state.payloads[id])))
+            .collect();
+        SelectedOwners::new(&state, &entries, &BTreeSet::new())?;
+        drop(state);
+        Ok(ArtifactView::new(ViewLease {
+            namespace,
+            inventory: self.lease.inventory.clone(),
+            roots: vec![],
+            native_custody: vec![],
+            parents: vec![Arc::clone(&self.lease)],
+            issuing_payloads: BTreeMap::new(),
+            materialization_parents: vec![],
+            materialization: Mutex::new(BTreeMap::new()),
+        }))
+    }
+
     pub(crate) fn merge_selected(
         &self,
         other: &Self,
@@ -3355,12 +3396,13 @@ impl ArtifactView {
         let other = if Arc::ptr_eq(&self.lease.inventory.0, &other.lease.inventory.0) {
             other.clone()
         } else {
-            self.lease.inventory.recover_selection(
+            let imported = self.lease.inventory.recover_selection(
                 &self.lease.inventory.empty_view(),
                 other.entries(),
                 &other.capture_graph_selection(),
                 &other.binding_dependencies(),
-            )?
+            )?;
+            other.retain_projected_materializations(imported)?
         };
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let self_nodes = &self.read_projection(&state).nodes;
@@ -3461,6 +3503,7 @@ impl ArtifactView {
                 &other.capture_graph_selection(),
                 &other.binding_dependencies(),
             )?;
+            let imported = other.retain_projected_materializations(imported)?;
             self.merge(&imported)
         }
     }
@@ -4105,6 +4148,322 @@ mod tests {
                 occurrence,
                 record_parent: None,
             },
+        }
+    }
+
+    #[test]
+    fn inherited_and_foreign_bindings_reclaim_without_orphans() {
+        for foreign in [false, true] {
+            let inventory = ArtifactInventory::default();
+            let empty = inventory.empty_view();
+            let first = inventory.admit(&empty, vec![entry("A", &[])]).unwrap();
+            let first_binding = first.capture_graph_selection().namespace;
+            let joined = if foreign {
+                let other = ArtifactInventory::default();
+                let source = other
+                    .admit(&other.empty_view(), vec![entry("B", &[])])
+                    .unwrap();
+                first.merge(&source).unwrap()
+            } else {
+                inventory.admit(&first, vec![entry("B", &[])]).unwrap()
+            };
+            assert_eq!(
+                joined.artifact_ids().into_iter().collect::<BTreeSet<_>>(),
+                BTreeSet::from([entry("A", &[]).descriptor.id, entry("B", &[]).descriptor.id])
+            );
+            assert!(joined
+                .capture_graph_selection()
+                .namespace
+                .contains(&first_binding[0]));
+            drop(joined);
+            drop(first);
+            drop(empty);
+            assert_eq!(inventory.node_count(), 0, "foreign={foreign}");
+        }
+    }
+
+    #[test]
+    fn certified_namespace_retains_and_reopens_historical_native_custody() {
+        let inventory = ArtifactInventory::default();
+        let old_native =
+            issued_native_groups("Epoch", vec![(7, Vec::new())], &[], &BTreeMap::new());
+        let native_id = old_native.descriptor.id;
+        let ArtifactPayload::Original(product) = &old_native.payload else {
+            unreachable!()
+        };
+        let old_carrier = ArtifactEntry::canonical(product.module_interface().unwrap().clone());
+        let new_carrier = ArtifactEntry::canonical(crate::certified_products::fixture_module_core(
+            product.module_interface().unwrap(),
+            b"fresh Epoch Core".to_vec(),
+        ));
+        let old_id = old_carrier.descriptor.id;
+        let new_id = new_carrier.descriptor.id;
+        assert_ne!(old_id, new_id);
+        let old = inventory
+            .admit(&inventory.empty_view(), vec![old_native])
+            .unwrap();
+        let issuer_inventory = ArtifactInventory::default();
+        let issuer = issuer_inventory
+            .admit(&issuer_inventory.empty_view(), vec![new_carrier.clone()])
+            .unwrap();
+        let projection =
+            CompilerInputProjection::from_issued_entries(&[Arc::new(new_carrier.clone())]).unwrap();
+        let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let issued = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &issuer.metadata_snapshot(),
+            &validation.inventory,
+        )
+        .unwrap();
+        let current = inventory
+            .admit_certified_with_demand(
+                &old,
+                vec![Arc::new(new_carrier)],
+                NativeArtifactDemand::ScopeInterfaces,
+                &issued,
+            )
+            .unwrap();
+        assert_eq!(
+            current
+                .capture_graph_selection()
+                .namespace
+                .iter()
+                .map(|binding| binding.artifact)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([new_id])
+        );
+        assert!(current.artifact_ids().contains(&old_id));
+        assert!(current.artifact_ids().contains(&native_id));
+        assert!(
+            current.merge(&old).is_err(),
+            "ordinary incompatible namespace must still refuse"
+        );
+        let old_body = current.select_roots(vec![native_id]).unwrap();
+        assert!(old_body.artifact_ids().contains(&old_id));
+        assert!(!old_body.artifact_ids().contains(&new_id));
+        old_body
+            .native_requirements_from_roots(&[NativeRequirementRoot::Group {
+                artifact: native_id,
+                original_ordinal: 7,
+            }])
+            .unwrap();
+        let graph = current.capture_graph_selection();
+        let edges = current.binding_dependencies();
+        let restored_inventory = ArtifactInventory::default();
+        let restored = restored_inventory
+            .recover_selection(
+                &restored_inventory.empty_view(),
+                current.entries(),
+                &graph,
+                &edges,
+            )
+            .unwrap();
+        assert_eq!(restored.capture_graph_selection(), graph);
+        let reopened = restored.select_roots(vec![native_id]).unwrap();
+        assert!(reopened.artifact_ids().contains(&old_id));
+        let mut missing = current.entries();
+        missing.retain(|entry| entry.descriptor.id != old_id);
+        let missing_inventory = ArtifactInventory::default();
+        assert!(missing_inventory
+            .recover_selection(&missing_inventory.empty_view(), missing, &graph, &edges)
+            .is_err());
+        assert_eq!(missing_inventory.node_count(), 0);
+        drop(old);
+        drop(current);
+        drop(old_body);
+        assert_eq!(inventory.node_count(), 0);
+        drop(restored);
+        drop(reopened);
+        assert_eq!(restored_inventory.node_count(), 0);
+    }
+
+    #[test]
+    fn shared_native_group_keeps_each_issued_canonical_child_closure() {
+        let inventory = ArtifactInventory::default();
+        let child = entry("Child", &[]);
+        let ArtifactPayload::Canonical(interface) = &child.payload else {
+            unreachable!()
+        };
+        let next = ArtifactEntry::canonical(crate::certified_products::fixture_module_core(
+            interface,
+            b"new child Core".to_vec(),
+        ));
+        let native =
+            issued_native_groups("Root", vec![(7, Vec::new())], &[&child], &BTreeMap::new());
+        let native_id = native.descriptor.id;
+        let old_child_id = child.descriptor.id;
+        let new_child_id = next.descriptor.id;
+        let old = inventory
+            .admit(&inventory.empty_view(), vec![native.clone(), child])
+            .unwrap();
+        let original = old.select_roots(vec![native_id]).unwrap();
+        let facts = ExactArtifactSelection::capture(&original);
+        let new = inventory
+            .admit(&inventory.empty_view(), vec![native, next])
+            .unwrap();
+        assert_eq!(old.selected_native_groups(), new.selected_native_groups());
+        assert_ne!(
+            old.capture_graph_selection().native_groups,
+            new.capture_graph_selection().native_groups
+        );
+        let projection = CompilerInputProjection::from_issued_entries(&new.entries()).unwrap();
+        let grown = original.merge_selected(&new, &projection).unwrap();
+        let reopened = grown.select_issued(vec![native_id], &facts).unwrap();
+        assert!(reopened.artifact_ids().contains(&old_child_id));
+        assert!(!reopened.artifact_ids().contains(&new_child_id));
+        reopened
+            .native_requirements_from_roots(&[NativeRequirementRoot::Group {
+                artifact: native_id,
+                original_ordinal: 7,
+            }])
+            .unwrap();
+        let recovery = ArtifactInventory::default();
+        let restored = recovery
+            .recover_selection(
+                &recovery.empty_view(),
+                grown.entries(),
+                &grown.capture_graph_selection(),
+                &grown.binding_dependencies(),
+            )
+            .unwrap();
+        let restored_old = restored.select_issued(vec![native_id], &facts).unwrap();
+        assert_eq!(
+            restored_old.capture_graph_selection(),
+            reopened.capture_graph_selection()
+        );
+        drop(old);
+        drop(original);
+        drop(new);
+        drop(grown);
+        drop(reopened);
+        assert_eq!(inventory.node_count(), 0);
+        drop(restored);
+        drop(restored_old);
+        assert_eq!(recovery.node_count(), 0);
+    }
+
+    #[test]
+    fn issued_selection_reopens_original_namespace_from_grown_custody() {
+        let inventory = ArtifactInventory::default();
+        let root = entry("Root", &["Child"]);
+        let old_child = entry("Child", &[]);
+        let ArtifactPayload::Canonical(interface) = &old_child.payload else {
+            unreachable!()
+        };
+        let new_child = ArtifactEntry::canonical(crate::certified_products::fixture_module_core(
+            interface,
+            b"new child Core".to_vec(),
+        ));
+        let old = inventory
+            .admit(&inventory.empty_view(), vec![root.clone(), old_child])
+            .unwrap();
+        let original = old.select_roots(vec![root.descriptor.id]).unwrap();
+        let facts = ExactArtifactSelection::capture(&original);
+        let new = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![root.clone(), new_child.clone()],
+            )
+            .unwrap();
+        let projection = CompilerInputProjection::from_issued_entries(&[
+            Arc::new(root.clone()),
+            Arc::new(new_child),
+        ])
+        .unwrap();
+        let grown = original.merge_selected(&new, &projection).unwrap();
+        let reopened = grown
+            .select_issued(vec![root.descriptor.id], &facts)
+            .unwrap();
+        assert_eq!(
+            reopened.capture_graph_selection(),
+            original.capture_graph_selection()
+        );
+        let ambiguous = original
+            .merge_selected(&new, &CompilerInputProjection::default())
+            .unwrap();
+        assert!(
+            matches!(ambiguous.select_roots(vec![root.descriptor.id]), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. }))
+        );
+        assert!(
+            original.merge(&new).is_err(),
+            "two incompatible selected child versions must refuse"
+        );
+        drop(original);
+        drop(old);
+        drop(new);
+        drop(grown);
+        drop(reopened);
+        drop(ambiguous);
+        assert_eq!(inventory.node_count(), 0);
+    }
+
+    #[test]
+    fn binding_recovery_refuses_changed_digest_edges_and_unused_witnesses() {
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![entry("Root", &["Child"]), entry("Child", &[])],
+            )
+            .unwrap();
+        for mutation in 0..3 {
+            let mut graph = view.capture_graph_selection();
+            let mut edges = view.binding_dependencies();
+            match mutation {
+                0 => graph.selections[0].selection = ArtifactSelectionId([0xee; 32]),
+                1 => edges.clear(),
+                _ => {
+                    let extra = ArtifactInventory::default();
+                    let extra = extra
+                        .admit(&extra.empty_view(), vec![entry("Unused", &[])])
+                        .unwrap();
+                    graph
+                        .selections
+                        .extend(extra.capture_graph_selection().selections);
+                }
+            }
+            let recovered = ArtifactInventory::default();
+            assert!(recovered
+                .recover_selection(&recovered.empty_view(), view.entries(), &graph, &edges)
+                .is_err());
+            assert_eq!(recovered.node_count(), 0, "mutation={mutation}");
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(24))]
+        #[test]
+        fn binding_histories_preserve_issued_children_and_release_payloads(
+            choices in proptest::collection::vec(0u8..4, 1..12),
+            warm in proptest::bool::ANY,
+            drop_issuer in proptest::bool::ANY,
+        ) {
+            let inventory = ArtifactInventory::default();
+            let root = entry("Root", &["Child"]); let child = entry("Child", &[]);
+            let ArtifactPayload::Canonical(base) = &child.payload else { unreachable!() };
+            let mut views = Vec::new(); let mut expected = Vec::new();
+            for choice in choices {
+                let next = ArtifactEntry::canonical(crate::certified_products::fixture_module_core(base, format!("child Core {choice}").into_bytes()));
+                let child_id = next.descriptor.id;
+                let issued = inventory.admit(&inventory.empty_view(), vec![root.clone(), next]).unwrap();
+                if warm { proptest::prop_assert!(issued.artifact_ids().contains(&child_id)); }
+                let selected = issued.select_roots(vec![root.descriptor.id]).unwrap();
+                let facts = ExactArtifactSelection::capture(&selected);
+                if drop_issuer { drop(issued); } else { views.push(issued); expected.push(child_id); }
+                let reopened = selected.select_issued(vec![root.descriptor.id], &facts).unwrap();
+                proptest::prop_assert_eq!(reopened.capture_graph_selection().namespace, selected.capture_graph_selection().namespace);
+                views.push(reopened); expected.push(child_id);
+            }
+            for (view, child_id) in views.iter().zip(&expected) {
+                proptest::prop_assert_eq!(view.artifact_ids().into_iter().collect::<BTreeSet<_>>(), BTreeSet::from([root.descriptor.id, *child_id]));
+                proptest::prop_assert_eq!(view.interface_dependencies(), vec![(root.descriptor.id, *child_id, ArtifactDependency::Interface)]);
+                let graph = view.capture_graph_selection();
+                let restored = ArtifactInventory::default();
+                let recovered = restored.recover_selection(&restored.empty_view(), view.entries(), &graph, &view.binding_dependencies()).unwrap();
+                proptest::prop_assert_eq!(recovered.capture_graph_selection(), graph);
+                drop(recovered); proptest::prop_assert_eq!(restored.node_count(), 0);
+            }
+            drop(views); proptest::prop_assert_eq!(inventory.node_count(), 0);
         }
     }
 

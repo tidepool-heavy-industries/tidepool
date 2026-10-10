@@ -28,8 +28,12 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   Published originals retain their issuer's immutable artifact/group selection
   separately from later executable demand. Reopening and recovery validate that
   proof against exact retained custody; a broader inventory cannot recreate it.
-  Recovery records interface edges and executable group demand; native edges
-  derive from original certificates. A completed source-compilation instance
+  Equal immutable artifact payload IDs do not imply equal exact dependency
+  bindings. Each issued graph binding owns its canonical children and native
+  edges; reuse bytes without borrowing another selection's ambient owner map.
+  Recovery records scoped bindings, complete binding digest witnesses, exact
+  interface/native edges and executable group demand, and validates them against
+  the certified payloads before restoring compiler roles. A completed source-compilation instance
   proof remains transaction-owned rather than reconstructed from durable bytes.
 - Pure activation renderers preserve the original instance graph separately from
   native availability. Authored dictionary bodies use retained originals matching
