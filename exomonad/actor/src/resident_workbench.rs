@@ -16778,18 +16778,12 @@ pub(crate) mod request_tests {
     fn assert_published_source_scope_histories(
         selection: Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>,
     ) {
+        use crate::recovery::recovery_test_fixture::RecoveryFixture;
         use proptest::prelude::*;
         use tidepool_runtime::session::{ModuleEnv, PersistentSession, SessionLib};
         let compiler_calls = tidepool_extract_cmd::extract_spawn_count();
-        struct RunOwner(PathBuf);
-        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
-            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
-                Ok(root.canonicalize()? == self.0)
-            }
-        }
         let durable = tempfile::tempdir().unwrap();
-        let manifest = durable.path().join("declarations.json");
-        let authority = Arc::new(RunOwner(durable.path().canonicalize().unwrap()));
+        let recovery = RecoveryFixture::create(durable.path());
         let declaration_root = durable.path().join("session");
         let mut lib = SessionLib::open(
             tidepool_repr::SessionId(7),
@@ -16797,10 +16791,7 @@ pub(crate) mod request_tests {
             ModuleEnv::standalone_default(),
         )
         .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            lib.attach_owned_recovery_graph_v3(&manifest, authority.clone(), settlement)
-        })
-        .unwrap();
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement));
         let mut session = PersistentSession::new(Some(lib), 0);
         let scope = session.mint_isolated_scope();
         let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
@@ -16827,9 +16818,8 @@ pub(crate) mod request_tests {
         )
         .unwrap();
         tidepool_testing::with_settlement(|settlement| {
-            lib.attach_owned_recovery_graph_v3(&manifest, authority, settlement)
-        })
-        .unwrap();
+            recovery.reopen().attach_root(&mut lib, settlement)
+        });
         let mut recovered = PersistentSession::new(Some(lib), 0);
         let scope = recovered.recover_public_scope(&owner).unwrap();
         let view = recovered.compile_view_in(scope).unwrap();
@@ -16916,21 +16906,14 @@ pub(crate) mod request_tests {
 
     async fn quoted_toolset_reuses_completed_original_with_fresh_installations_and_refuses_source_replay_with_compiler_owner(
     ) {
-        struct RunOwner(PathBuf);
-        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
-            fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
-                Ok(root.canonicalize()? == self.0)
-            }
-        }
-        let durable = tempfile::tempdir().unwrap();
-        let manifest = durable.path().join("declarations.json");
-        let authority = Arc::new(RunOwner(durable.path().canonicalize().unwrap()));
+        let mut recovery = None;
         let (session, context, source, session_root) = host_mount_fixture_with_lib(|lib| {
-            tidepool_testing::with_settlement(|settlement| {
-                lib.attach_owned_recovery_graph_v3(&manifest, authority.clone(), settlement)
-            })
-            .unwrap();
+            let fixture =
+                crate::recovery::recovery_test_fixture::RecoveryFixture::create(lib.include_dir());
+            tidepool_testing::with_settlement(|settlement| fixture.attach_root(lib, settlement));
+            recovery = Some(fixture);
         });
+        let recovery = recovery.unwrap();
         let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root/quoted-original").unwrap(),
             context.actor.incarnation.0,
@@ -17043,9 +17026,8 @@ pub(crate) mod request_tests {
             .unwrap()
             .with_validation_include(roots.clone());
             tidepool_testing::with_settlement(|settlement| {
-                lib.attach_owned_recovery_graph_v3(&manifest, authority.clone(), settlement)
-            })
-            .unwrap();
+                recovery.reopen().attach_root(&mut lib, settlement)
+            });
             let mut recovered = tidepool_runtime::session::PersistentSession::new(Some(lib), 0);
             let scope = recovered.recover_public_scope(&owner).unwrap();
             recovered.compile_view_in(scope).unwrap()
@@ -18087,35 +18069,14 @@ pub(crate) mod request_tests {
     }
 
     async fn tool_installation_preserves_durable_child_private_admission_with_compiler_owner() {
-        struct RunOwner {
-            root: PathBuf,
-            _lock: std::fs::File,
-        }
-        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
-            fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
-                Ok(root.canonicalize()? == self.root)
-            }
-        }
-        let durable = tempfile::tempdir().unwrap();
-        let manifest = durable.path().join("declarations.json");
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(durable.path().join("run-owner.lock"))
-            .unwrap();
-        lock.try_lock().unwrap();
-        let authority = Arc::new(RunOwner {
-            root: durable.path().canonicalize().unwrap(),
-            _lock: lock,
-        });
+        let mut recovery = None;
         let (mut session, context, source, _root) = host_mount_fixture_with_lib(|lib| {
-            tidepool_testing::with_settlement(|settlement| {
-                lib.attach_owned_recovery_graph_v3(&manifest, authority, settlement)
-            })
-            .unwrap();
+            let fixture =
+                crate::recovery::recovery_test_fixture::RecoveryFixture::create(lib.include_dir());
+            tidepool_testing::with_settlement(|settlement| fixture.attach_root(lib, settlement));
+            recovery = Some(fixture);
         });
+        let recovery = recovery.unwrap();
         let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root/installer-child").unwrap(),
             context.actor.incarnation.0,
@@ -18142,7 +18103,8 @@ pub(crate) mod request_tests {
             .await
             .expect("public baseline after machine registry admission");
         assert!(before.machine_incarnation.is_none());
-        let manifest_before = std::fs::read(&manifest).unwrap();
+        let manifest_before = recovery.public_owner(&owner).unwrap();
+        let recovery_store = Arc::clone(&recovery.store);
         let tools = workbench
             .prepare_tools(context.clone(), 1, vec![])
             .await
@@ -18164,7 +18126,16 @@ pub(crate) mod request_tests {
                 let mut expected = before;
                 expected.machine_incarnation = after.machine_incarnation;
                 assert_eq!(after, expected);
-                assert_eq!(std::fs::read(&manifest).unwrap(), manifest_before);
+                assert_eq!(
+                    recovery_store
+                        .read_public_owner(
+                            tidepool_runtime::session::RecoveryDomainId::Root,
+                            &owner
+                        )
+                        .unwrap()
+                        .unwrap(),
+                    manifest_before
+                );
                 assert!(session
                     .public_visibility_snapshot_in(installation_scope)
                     .is_some());
@@ -21734,7 +21705,7 @@ pub(crate) mod request_tests {
         receipt: Option<tidepool_runtime::session::CheckoutReceipt>,
         _machines: Arc<ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>>,
         run_root: tempfile::TempDir,
-        _source_root: tempfile::TempDir,
+        recovery: crate::recovery::recovery_test_fixture::RecoveryFixture,
     }
 
     impl ActivationPublicationPhaseFixture {
@@ -21768,7 +21739,6 @@ pub(crate) mod request_tests {
         }
 
         pub(crate) fn make_pending(&self) {
-            use std::os::unix::fs::PermissionsExt;
             let mut held = self.session.lock();
             let session = held.as_mut().unwrap();
             let owner = self.prepared.execution.owner.durable().unwrap();
@@ -21784,31 +21754,20 @@ pub(crate) mod request_tests {
                 panic!("empty native writer has no declaration projection");
             };
             let ticket = base.stage().unwrap();
-            std::fs::set_permissions(self.run_root.path(), std::fs::Permissions::from_mode(0o300))
-                .unwrap();
+            self.recovery.fail_commits();
             let outcome = session.publish_staged_public_manifest(
                 ticket,
                 &tidepool_runtime::session::PublicationDecision::new(),
             );
-            std::fs::set_permissions(self.run_root.path(), std::fs::Permissions::from_mode(0o700))
-                .unwrap();
+            self.recovery.clear_commit_failure();
             assert!(matches!(
                 outcome.unwrap(),
-                tidepool_runtime::session::PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+                tidepool_runtime::session::PublicManifestCommit::RecoveryRequired { .. }
             ));
             assert!(!self.prepared.execution.owner.is_ready());
         }
 
         pub(crate) fn make_ready(&self) {
-            self.session
-                .lock()
-                .as_mut()
-                .unwrap()
-                .confirm_durable_public_scope(
-                    self.prepared.execution.owner.durable().unwrap(),
-                    self.context.placement.lexical_scope,
-                )
-                .unwrap();
             assert!(self.prepared.execution.owner.is_ready());
         }
     }
@@ -21833,39 +21792,18 @@ pub(crate) mod request_tests {
 
     async fn activation_publication_phase_fixture_with_compiler_owner(
     ) -> ActivationPublicationPhaseFixture {
-        struct RunOwner {
-            root: PathBuf,
-            _lock: std::fs::File,
-        }
-        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
-            fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
-                Ok(root.canonicalize()? == self.root)
-            }
-        }
-        let run_root = tempfile::tempdir().unwrap();
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(run_root.path().join("run-owner.lock"))
-            .unwrap();
-        lock.try_lock().unwrap();
-        let authority = Arc::new(RunOwner {
-            root: run_root.path().canonicalize().unwrap(),
-            _lock: lock,
-        });
-        let (mut session, mut context, source, mut inputs, source_root) =
+        let mut recovery = None;
+        let (mut session, mut context, source, mut inputs, run_root) =
             activation_input_fixture(|lib| {
+                let fixture = crate::recovery::recovery_test_fixture::RecoveryFixture::create(
+                    lib.include_dir(),
+                );
                 tidepool_testing::with_settlement(|settlement| {
-                    lib.attach_owned_recovery_graph_v3(
-                        run_root.path().join("declarations.json"),
-                        authority,
-                        settlement,
-                    )
-                })
-                .unwrap();
+                    fixture.attach_root(lib, settlement)
+                });
+                recovery = Some(fixture);
             });
+        let recovery = recovery.unwrap();
         context.placement.lexical_scope = session.mint_scope(ScopeId::ROOT).unwrap();
         let path = tidepool_repr::ActorPath::parse("root/activation-phases").unwrap();
         let durable =
@@ -21929,7 +21867,7 @@ pub(crate) mod request_tests {
             receipt: Some(receipt),
             _machines: machines,
             run_root,
-            _source_root: source_root,
+            recovery,
         }
     }
 
@@ -22001,35 +21939,14 @@ pub(crate) mod request_tests {
 
     async fn activation_inputs_preserve_durable_private_admission_across_replacement_with_compiler_owner(
     ) {
-        struct RunOwner {
-            root: PathBuf,
-            _lock: std::fs::File,
-        }
-        impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
-            fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
-                Ok(root.canonicalize()? == self.root)
-            }
-        }
-        let durable = tempfile::tempdir().unwrap();
-        let manifest = durable.path().join("declarations.json");
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(durable.path().join("run-owner.lock"))
-            .unwrap();
-        lock.try_lock().unwrap();
-        let authority = Arc::new(RunOwner {
-            root: durable.path().canonicalize().unwrap(),
-            _lock: lock,
-        });
+        let mut recovery = None;
         let (mut session, mut context, source, inputs, _root) = activation_input_fixture(|lib| {
-            tidepool_testing::with_settlement(|settlement| {
-                lib.attach_owned_recovery_graph_v3(&manifest, authority, settlement)
-            })
-            .unwrap();
+            let fixture =
+                crate::recovery::recovery_test_fixture::RecoveryFixture::create(lib.include_dir());
+            tidepool_testing::with_settlement(|settlement| fixture.attach_root(lib, settlement));
+            recovery = Some(fixture);
         });
+        let recovery = recovery.unwrap();
         let path = tidepool_repr::ActorPath::parse("root/activation-child").unwrap();
         let durable_owner =
             tidepool_runtime::session::RecoveryPublicOwner::new(&path, context.actor.incarnation.0)
@@ -22061,19 +21978,19 @@ pub(crate) mod request_tests {
         let mut previous = None;
         let mut captured = None;
         for input in inputs {
-            let before_manifest = std::fs::read(&manifest).unwrap();
+            let before_manifest = recovery.public_owner(&durable_owner).unwrap();
             let bootstrap = workbench_runner_for_test(&workbench)
                 .begin_public_bootstrap(context.clone(), owner.clone())
                 .await
                 .unwrap();
             let runner = workbench_runner_for_test(&workbench);
-            assert_eq!(
+            assert!(matches!(
                 runner
                     .publish_public_bootstrap(context.clone(), owner.clone(), bootstrap)
                     .await
                     .unwrap(),
                 tidepool_runtime::session::PublicManifestCommit::Durable
-            );
+            ));
             let execution = Arc::new(
                 runner
                     .begin_private_execution(
@@ -22135,7 +22052,10 @@ pub(crate) mod request_tests {
             ));
             drop(prepared);
             drop(private_workbench);
-            assert_ne!(std::fs::read(&manifest).unwrap(), before_manifest);
+            assert_ne!(
+                recovery.public_owner(&durable_owner).unwrap(),
+                before_manifest
+            );
             assert_ne!(previous, Some(binding));
             let expected = durable_owner.clone();
             let custody = workbench

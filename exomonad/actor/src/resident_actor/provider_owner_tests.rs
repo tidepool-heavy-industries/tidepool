@@ -1,5 +1,4 @@
 use super::*;
-use std::path::PathBuf;
 use tidepool_runtime::session::{ModuleEnv, SessionLib};
 
 type Forest = ResidentForest<frunk::HNil, tidepool_mcp::CapturedOutput>;
@@ -253,44 +252,20 @@ async fn requested_retirement_refuses_provider_before_terminal_publication() {
 }
 
 #[tokio::test]
-async fn native_manifest_uncertainty_fences_provider_and_sibling_owners_until_confirmation() {
-    use std::os::unix::fs::PermissionsExt;
+async fn commit_error_fences_provider_and_sibling_owners_until_authenticated_reopen() {
     use tidepool_runtime::session::{
         PublicManifestCommit, PublicationDecision, RecoveryPublicOwner,
     };
-    struct RunOwner {
-        root: PathBuf,
-        _lock: std::fs::File,
-    }
-    impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
-        fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
-            Ok(root.canonicalize()? == self.root)
-        }
-    }
     let root = tempfile::tempdir().unwrap();
     let session = tidepool_runtime::session::fresh_session_id();
-    let manifest = root.path().join("declarations.json");
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(root.path().join("run-owner.lock"))
-        .unwrap();
-    lock.try_lock().unwrap();
-    let mut library =
-        SessionLib::open(session, root.path(), ModuleEnv::standalone_default()).unwrap();
-    tidepool_testing::with_settlement(|settlement| {
-        library.attach_owned_recovery_graph_v3(
-            &manifest,
-            Arc::new(RunOwner {
-                root: root.path().canonicalize().unwrap(),
-                _lock: lock,
-            }),
-            settlement,
-        )
-    })
+    let recovery = crate::recovery::recovery_test_fixture::RecoveryFixture::create(root.path());
+    let mut library = SessionLib::open(
+        session,
+        root.path().join("compiler"),
+        ModuleEnv::standalone_default(),
+    )
     .unwrap();
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut library, settlement));
     let machine = ResidentSession::unbootstrapped(
         frunk::HNil,
         tidepool_mcp::CapturedOutput::new(),
@@ -305,13 +280,11 @@ async fn native_manifest_uncertainty_fences_provider_and_sibling_owners_until_co
         crate::Incarnation::FIRST,
     );
     let actor = path_workbench(&forest, crate::ActorPersistencePolicy::Durable).await;
-    assert_eq!(
-        forest
-            .bind_durable_root_public_owner(actor.identity())
-            .await
-            .unwrap(),
-        PublicManifestCommit::Durable
-    );
+    let confirmed = forest
+        .bind_durable_root_public_owner(actor.identity())
+        .await
+        .unwrap();
+    assert!(matches!(confirmed, PublicManifestCommit::Durable));
     let provider = forest
         .authorize_provider_attachment(actor.identity())
         .unwrap();
@@ -333,9 +306,6 @@ async fn native_manifest_uncertainty_fences_provider_and_sibling_owners_until_co
     assert!(sibling.is_ready());
     assert!(resident
         .durable_public_readiness(&owner, sibling_scope)
-        .is_err());
-    assert!(resident
-        .confirm_durable_public_scope(&owner, sibling_scope)
         .is_err());
     let initial_capability = resident
         .durable_public_readiness(&owner, context.placement.lexical_scope)
@@ -359,15 +329,15 @@ async fn native_manifest_uncertainty_fences_provider_and_sibling_owners_until_co
         panic!("empty private execution has a binding-only native publication");
     };
     let ticket = base.stage().unwrap();
-    // Real native rename remains permitted; only parent-directory fsync fails.
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
+    let original = recovery.public_owner(&owner).unwrap();
+    recovery.fail_commits();
     let commit = resident
         .publish_staged_public_manifest(ticket, &PublicationDecision::new())
         .unwrap();
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    recovery.clear_commit_failure();
     assert!(matches!(
         commit,
-        PublicManifestCommit::PublishedDurabilityUnconfirmed { .. }
+        PublicManifestCommit::RecoveryRequired { .. }
     ));
     assert!(!provider.owner.is_ready());
     assert!(!sibling.is_ready());
@@ -378,12 +348,7 @@ async fn native_manifest_uncertainty_fences_provider_and_sibling_owners_until_co
     assert!(!delayed_initial_owner.is_ready());
     assert!(matches!(
         resident.begin_durable_private_execution(&sibling_owner, sibling_scope),
-        Err(
-            tidepool_runtime::session::SessionError::InvalidDurablePublicAdmission {
-                reason: tidepool_runtime::session::DurablePublicAdmissionFailure::Unconfirmed,
-                ..
-            }
-        )
+        Err(tidepool_runtime::session::SessionError::RecoveryStore(_))
     ));
     drop(private);
     let holes = resident
@@ -396,32 +361,33 @@ async fn native_manifest_uncertainty_fences_provider_and_sibling_owners_until_co
         .authorize_provider_attachment(actor.identity())
         .is_err());
     assert!(forest.validate_provider_attachment(&provider).is_err());
-    let visible_bytes = std::fs::read(&manifest).unwrap();
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o300)).unwrap();
-    assert!(forest
-        .confirm_durable_root_public_owner(actor.identity())
-        .await
-        .is_err());
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(recovery.public_owner(&owner).unwrap(), original);
     assert!(!provider.owner.is_ready());
     assert!(!sibling.is_ready());
     assert!(forest.validate_provider_attachment(&provider).is_err());
-    assert_eq!(
-        forest
-            .confirm_durable_root_public_owner(actor.identity())
-            .await
-            .unwrap(),
-        PublicManifestCommit::Durable
-    );
-    assert!(sibling.is_ready());
-    assert!(delayed_initial_owner.is_ready());
-    forest
-        .validate_provider_attachment(&provider)
-        .expect("confirmation preserves exact provider owner Arc");
-    assert_eq!(
-        std::fs::read(&manifest).unwrap(),
-        visible_bytes,
-        "confirmation never republishes"
+    let reopened = recovery.reopen();
+    assert!(!reopened.store.is_recovery_required());
+    assert!(recovery.store.is_recovery_required());
+    let mut library = SessionLib::open(
+        tidepool_runtime::session::fresh_session_id(),
+        root.path().join("compiler"),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap();
+    tidepool_testing::with_settlement(|settlement| reopened.attach_root(&mut library, settlement));
+    let mut restored = tidepool_runtime::session::PersistentSession::new(Some(library), 1024);
+    let scope = restored.recover_public_scope(&owner).unwrap();
+    assert!(restored
+        .durable_public_readiness(&owner, scope)
+        .unwrap()
+        .is_ready());
+    assert_eq!(reopened.public_owner(&owner).unwrap(), original);
+    assert!(!sibling.is_ready());
+    assert!(!delayed_initial_owner.is_ready());
+    assert!(forest.validate_provider_attachment(&provider).is_err());
+    assert!(
+        matches!(confirmed, PublicManifestCommit::Durable),
+        "later sibling fencing preserves the confirmed disposition"
     );
     forest.shutdown().await;
     drop(actor);

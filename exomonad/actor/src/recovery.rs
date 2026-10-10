@@ -1264,7 +1264,106 @@ fn parse_row(line: &str) -> Result<Row, Box<dyn std::error::Error + Send + Sync>
 }
 
 #[cfg(test)]
+pub(crate) mod recovery_test_fixture {
+    use super::*;
+    use tidepool_runtime::session::{
+        RecoveryDomainId, RecoveryRunAuthority, RunRecoveryStore, SessionLib,
+    };
+
+    pub(super) struct LockedRun {
+        root: PathBuf,
+        _lock: std::fs::File,
+    }
+    impl RecoveryRunAuthority for LockedRun {
+        fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
+            Ok(root.canonicalize()? == self.root)
+        }
+    }
+
+    #[derive(Clone)]
+    pub(crate) struct RecoveryFixture {
+        pub(crate) store: Arc<RunRecoveryStore>,
+        pub(super) authority: Arc<LockedRun>,
+    }
+    impl RecoveryFixture {
+        pub(crate) fn create(root: &Path) -> Self {
+            let root = root.canonicalize().unwrap();
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(root.join("recovery-owner.lock"))
+                .unwrap();
+            lock.try_lock().unwrap();
+            let authority = Arc::new(LockedRun {
+                root: root.clone(),
+                _lock: lock,
+            });
+            assert!(authority.owns_run(&root).unwrap());
+            Self {
+                store: Arc::new(RunRecoveryStore::create(&root.join("recovery.sqlite")).unwrap()),
+                authority,
+            }
+        }
+        pub(crate) fn reopen(&self) -> Self {
+            assert!(self.authority.owns_run(&self.authority.root).unwrap());
+            Self {
+                store: Arc::new(RunRecoveryStore::open(self.store.path()).unwrap()),
+                authority: Arc::clone(&self.authority),
+            }
+        }
+        pub(crate) fn attach_root(
+            &self,
+            lib: &mut SessionLib,
+            settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
+        ) {
+            lib.attach_owned_recovery_domain(
+                Arc::clone(&self.store),
+                RecoveryDomainId::Root,
+                lib.include_dir().canonicalize().unwrap(),
+                self.authority.clone(),
+                settlement,
+            )
+            .unwrap();
+        }
+        pub(crate) fn fail_commits(&self) {
+            rusqlite::Connection::open(self.store.path()).unwrap().execute_batch(
+                // A deferred constraint succeeds during UPDATE and fails at
+                // COMMIT, so the real store must fence its held run handle.
+                "CREATE TABLE recovery_test_deferred_failure (domain BLOB REFERENCES recovery_domains(domain) DEFERRABLE INITIALLY DEFERRED);
+                 CREATE TRIGGER recovery_test_commit_failure BEFORE UPDATE ON recovery_domains BEGIN INSERT INTO recovery_test_deferred_failure(domain) VALUES(X'FFFFFFFFFFFFFFFFFF'); END;"
+            ).unwrap();
+        }
+        pub(crate) fn refuse_writes(&self) {
+            rusqlite::Connection::open(self.store.path()).unwrap().execute_batch(
+                "CREATE TRIGGER recovery_test_commit_failure BEFORE UPDATE ON recovery_domains BEGIN SELECT RAISE(FAIL, 'injected statement refusal'); END;"
+            ).unwrap();
+        }
+        pub(crate) fn clear_commit_failure(&self) {
+            rusqlite::Connection::open(self.store.path()).unwrap().execute_batch(
+                "DROP TRIGGER IF EXISTS recovery_test_commit_failure; DROP TABLE IF EXISTS recovery_test_deferred_failure;"
+            ).unwrap();
+        }
+        pub(crate) fn public_owner(
+            &self,
+            owner: &tidepool_runtime::session::RecoveryPublicOwner,
+        ) -> Option<tidepool_runtime::session::RecoveryPublicOwnerState> {
+            RunRecoveryStore::read_snapshot_at(
+                self.store.path(),
+                RecoveryDomainId::Root,
+                Some(owner),
+            )
+            .unwrap()
+            .unwrap()
+            .public_owner
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::recovery_test_fixture::{LockedRun, RecoveryFixture};
     use super::*;
     use crate::{ActorExitKind, ActorId, ActorPlacement, Incarnation};
     use tidepool_codegen::scope::ScopeId;
@@ -1656,17 +1755,6 @@ mod tests {
         assert_eq!(journal.records().len(), 0);
     }
 
-    struct LockedRun {
-        root: PathBuf,
-        _lock: std::fs::File,
-    }
-
-    impl tidepool_runtime::session::RecoveryRunAuthority for LockedRun {
-        fn owns_run(&self, root: &Path) -> std::io::Result<bool> {
-            Ok(root.canonicalize()? == self.root)
-        }
-    }
-
     fn recovery_fixture(
         path: &Path,
         owner: &tidepool_runtime::session::RecoveryPublicOwner,
@@ -1679,19 +1767,10 @@ mod tests {
             ModuleEnv, PersistentSession, RecoveryDomainId, RunRecoveryStore, SessionLib,
         };
         let root = path.parent().unwrap().canonicalize().unwrap();
-        let lock = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(root.join("recovery-owner.lock"))
-            .unwrap();
-        lock.try_lock().unwrap();
-        let authority = Arc::new(LockedRun {
-            root: root.clone(),
-            _lock: lock,
-        });
-        let store = Arc::new(RunRecoveryStore::create(path).unwrap());
+        let fixture = RecoveryFixture::create(&root);
+        assert_eq!(fixture.store.path(), path);
+        let authority = Arc::clone(&fixture.authority);
+        let store = Arc::clone(&fixture.store);
         let artifact_root = root.join("haskell-session");
         let mut library = SessionLib::open(
             SessionId(1),

@@ -1,5 +1,4 @@
 use super::*;
-use std::path::PathBuf;
 use tidepool_codegen::scope::ScopeId;
 use tidepool_runtime::session::ResidentError;
 
@@ -53,36 +52,15 @@ async fn interrupt_during_preview(
     durable: bool,
 ) {
     let mut fixture = invocation_work::tests::Fixture::start().await;
-    struct RunOwner {
-        root: PathBuf,
-        _lock: std::fs::File,
-    }
-    impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
-        fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
-            Ok(root.canonicalize()? == self.root)
-        }
-    }
-    let durable_root = tempfile::tempdir().unwrap();
-    let manifest = durable_root.path().join("declarations.json");
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(durable_root.path().join("run-owner.lock"))
-        .unwrap();
-    lock.try_lock().unwrap();
-    let authority = Arc::new(RunOwner {
-        root: durable_root.path().canonicalize().unwrap(),
-        _lock: lock,
-    });
+    let mut recovery = None;
     let (mut resident, mut context, source, mut parked, _root) =
         crate::resident_workbench::request_tests::activation_session_fixture(|lib| {
             if durable {
-                tidepool_testing::with_settlement(|settlement| {
-                    lib.attach_owned_recovery_graph_v3(&manifest, authority, settlement)
-                })
-                .unwrap();
+                let run = crate::recovery::recovery_test_fixture::RecoveryFixture::create(
+                    lib.include_dir(),
+                );
+                tidepool_testing::with_settlement(|settlement| run.attach_root(lib, settlement));
+                recovery = Some(run);
             }
         });
     let (hole, input) = parked.remove(0);
@@ -186,7 +164,6 @@ async fn interrupt_during_preview(
             | ActivationPublicationObservation::RendererWaiting
             | ActivationPublicationObservation::RendererSealed
             | ActivationPublicationObservation::RendererSelected(_)
-            | ActivationPublicationObservation::BeforeConfirmation
             | ActivationPublicationObservation::NativeSettled(_) => return Ok(()),
             ActivationPublicationObservation::ToolsPrepared {
                 tools,
@@ -583,58 +560,36 @@ async fn ephemeral_waiter_drop_settles_native_request_before_join_delivery() {
 }
 
 #[tokio::test]
-async fn durable_before_rename_failure_releases_request_fence_after_waiter_drop() {
-    native_operation_sequence(true, NativeFailure::BeforeRename, true).await;
+async fn durable_statement_refusal_releases_request_fence_after_waiter_drop() {
+    native_operation_sequence(true, NativeFailure::StatementRefusal, true).await;
 }
 
 #[tokio::test]
-async fn durable_unconfirmed_waiter_drop_fences_provider_and_request_until_exact_confirmation() {
-    native_operation_sequence(true, NativeFailure::Confirmation, true).await;
+async fn durable_commit_error_fences_provider_and_request_after_waiter_drop() {
+    native_operation_sequence(true, NativeFailure::CommitError, true).await;
 }
 
 #[derive(Clone, Copy)]
 enum NativeFailure {
     None,
-    BeforeRename,
-    Confirmation,
+    StatementRefusal,
+    CommitError,
 }
 
 async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_waiter: bool) {
     use crate::resident_workbench::ActivationPublicationObservation;
-    use std::os::unix::fs::PermissionsExt;
     use tidepool_runtime::session::PublicManifestCommit;
 
     let mut fixture = invocation_work::tests::Fixture::start().await;
-    struct RunOwner {
-        root: PathBuf,
-        _lock: std::fs::File,
-    }
-    impl tidepool_runtime::session::RecoveryRunAuthority for RunOwner {
-        fn owns_run(&self, root: &std::path::Path) -> std::io::Result<bool> {
-            Ok(root.canonicalize()? == self.root)
-        }
-    }
-    let durable_root = tempfile::tempdir().unwrap();
-    let manifest = durable_root.path().join("declarations.json");
-    let lock = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(durable_root.path().join("run-owner.lock"))
-        .unwrap();
-    lock.try_lock().unwrap();
-    let authority = Arc::new(RunOwner {
-        root: durable_root.path().canonicalize().unwrap(),
-        _lock: lock,
-    });
+    let mut recovery = None;
     let (mut resident, mut context, source, mut parked, _source_root) =
         crate::resident_workbench::request_tests::activation_session_fixture(|lib| {
             if durable {
-                tidepool_testing::with_settlement(|settlement| {
-                    lib.attach_owned_recovery_graph_v3(&manifest, authority, settlement)
-                })
-                .unwrap();
+                let run = crate::recovery::recovery_test_fixture::RecoveryFixture::create(
+                    lib.include_dir(),
+                );
+                tidepool_testing::with_settlement(|settlement| run.attach_root(lib, settlement));
+                recovery = Some(run);
             }
         });
     let (hole, input) = parked.remove(0);
@@ -664,7 +619,9 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
     let original_public = resident
         .public_visibility_snapshot_in(context.placement.lexical_scope)
         .unwrap();
-    let original_manifest = durable.then(|| std::fs::read(&manifest).unwrap());
+    let original_manifest = durable_owner
+        .as_ref()
+        .map(|owner| recovery.as_ref().unwrap().public_owner(owner));
     let readiness = durable_owner.as_ref().map(|owner| {
         resident
             .durable_public_readiness(owner, context.placement.lexical_scope)
@@ -728,7 +685,7 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
     let (native_tx, mut native_rx) = tokio::sync::mpsc::unbounded_channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let release_rx = Mutex::new(release_rx);
-    let root = durable_root.path().to_path_buf();
+    let recovery_observer = recovery.clone();
     behavior.activation_preview_observer = Some(Arc::new(move |observation| {
         match observation {
             ActivationPublicationObservation::NativeClaimed => {
@@ -737,19 +694,20 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
                     .lock()
                     .recv_timeout(std::time::Duration::from_secs(60))
                     .unwrap();
-                let mode = match failure {
-                    NativeFailure::None => None,
-                    NativeFailure::BeforeRename => Some(0o500),
-                    // Rename needs write/execute, while parent-directory sync
-                    // needs a readable directory. Native confirmation fails too.
-                    NativeFailure::Confirmation => Some(0o300),
-                };
-                if let Some(mode) = mode {
-                    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode)).unwrap();
+                match failure {
+                    NativeFailure::None => {}
+                    NativeFailure::StatementRefusal => {
+                        recovery_observer.as_ref().unwrap().refuse_writes()
+                    }
+                    NativeFailure::CommitError => {
+                        recovery_observer.as_ref().unwrap().fail_commits()
+                    }
                 }
             }
             ActivationPublicationObservation::NativeSettled(commit) => {
-                std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+                if !matches!(failure, NativeFailure::None) {
+                    recovery_observer.as_ref().unwrap().clear_commit_failure();
+                }
                 native_tx
                     .send(NativeEvent::Settled(commit.clone()))
                     .unwrap();
@@ -808,24 +766,19 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
     let NativeEvent::Settled(commit) = native_rx.recv().await.unwrap() else {
         panic!("expected native settlement");
     };
-    let visible = !matches!(failure, NativeFailure::BeforeRename);
+    let visible = matches!(failure, NativeFailure::None);
     match failure {
-        NativeFailure::None => assert_eq!(
-            commit,
-            if durable {
-                PublicManifestCommit::Durable
-            } else {
-                PublicManifestCommit::Ephemeral
-            }
-        ),
-        NativeFailure::BeforeRename => {
-            assert!(matches!(commit, PublicManifestCommit::BeforeRename { .. }))
+        NativeFailure::None => assert!(matches!(
+            (&commit, durable),
+            (PublicManifestCommit::Durable, true) | (PublicManifestCommit::Ephemeral, false)
+        )),
+        NativeFailure::StatementRefusal => {
+            assert!(matches!(commit, PublicManifestCommit::Refused { .. }))
         }
-        NativeFailure::Confirmation => {
-            let PublicManifestCommit::PublishedDurabilityUnconfirmed { detail } = &commit else {
-                panic!("expected visible uncertainty: {commit:?}");
+        NativeFailure::CommitError => {
+            let PublicManifestCommit::RecoveryRequired { .. } = &commit else {
+                panic!("expected held run fence: {commit:?}");
             };
-            assert!(detail.contains("confirmation failed:"));
             assert!(!owner.is_ready());
             assert!(fixture.environment.actors.lock()[&context.actor]
                 .public_owner
@@ -840,7 +793,7 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
             );
         }
     }
-    if !matches!(failure, NativeFailure::Confirmation) {
+    if !matches!(failure, NativeFailure::CommitError) {
         fixture
             .environment
             .requests
@@ -854,13 +807,13 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         );
     }
     drop(park);
-    if !matches!(failure, NativeFailure::Confirmation) {
+    if !matches!(failure, NativeFailure::CommitError) {
         fixture
             .environment
             .requests
             .finish_cancellation_acknowledgement(request_id);
     }
-    if matches!(failure, NativeFailure::Confirmation) {
+    if matches!(failure, NativeFailure::CommitError) {
         let error = fixture
             .environment
             .runner
@@ -871,45 +824,41 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
             )
             .await
             .err()
-            .expect("unconfirmed native graph refuses private execution");
+            .expect("fenced native graph refuses private execution");
         assert!(matches!(
             error,
             ResidentActorWorkbenchError::Resident(ResidentError::Session(
-                tidepool_runtime::session::SessionError::InvalidDurablePublicAdmission {
-                    reason: tidepool_runtime::session::DurablePublicAdmissionFailure::Unconfirmed,
-                    ..
-                }
+                tidepool_runtime::session::SessionError::RecoveryStore(_)
             ))
         ));
-        fixture
-            .environment
-            .runner
-            .confirm_durable_public_owner(context.clone(), durable_owner.clone().unwrap())
-            .await
-            .unwrap();
-        assert!(owner.is_ready());
-        fixture
-            .environment
-            .requests
-            .begin_cancellation_acknowledgement(context.actor, request_id)
-            .unwrap();
-        fixture
-            .environment
-            .requests
-            .finish_cancellation_acknowledgement(request_id);
+        assert!(!owner.is_ready());
+        let run = recovery.as_ref().unwrap();
+        assert!(run.store.is_recovery_required());
+        let reopened = run.reopen();
+        assert!(!reopened.store.is_recovery_required());
+        assert_eq!(
+            reopened.public_owner(durable_owner.as_ref().unwrap()),
+            original_manifest.clone().unwrap()
+        );
+        assert!(
+            !owner.is_ready(),
+            "authenticated reopen cannot revive an old admission"
+        );
     }
     // Acquire the actual next native owner entry; waiter delivery was optional.
-    let private = fixture
-        .environment
-        .runner
-        .begin_private_execution(
-            context.clone(),
-            owner.clone(),
-            tidepool_runtime::session::PublicationDecision::new(),
-        )
-        .await
-        .unwrap();
-    drop(private);
+    if !matches!(failure, NativeFailure::CommitError) {
+        let private = fixture
+            .environment
+            .runner
+            .begin_private_execution(
+                context.clone(),
+                owner.clone(),
+                tidepool_runtime::session::PublicationDecision::new(),
+            )
+            .await
+            .unwrap();
+        drop(private);
+    }
     let (mut resident, receipt) = machines
         .checkout_run(context.placement.session)
         .unwrap()
@@ -929,11 +878,23 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
     } else {
         assert_eq!(current, original_public);
     }
-    if let Some(bytes) = original_manifest {
+    if let Some(original) = original_manifest {
         if visible {
-            assert_ne!(std::fs::read(&manifest).unwrap(), bytes);
+            assert_ne!(
+                recovery
+                    .as_ref()
+                    .unwrap()
+                    .public_owner(durable_owner.as_ref().unwrap()),
+                original
+            );
         } else {
-            assert_eq!(std::fs::read(&manifest).unwrap(), bytes);
+            assert_eq!(
+                recovery
+                    .as_ref()
+                    .unwrap()
+                    .public_owner(durable_owner.as_ref().unwrap()),
+                original
+            );
         }
     }
     assert!(fixture.deployments.try_recv().is_err());
