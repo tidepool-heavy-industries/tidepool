@@ -133,6 +133,7 @@ library tidepool-extract-internal
   other-modules:   Tidepool.LocalNativeDeclaration
                    Tidepool.ResumePackage
                    Tidepool.TypedSegment.Types
+                   Tidepool.OwnedInputTransport
                    Tidepool.NativeOriginalCensus
   build-depends:
     base         >= 4.20 && < 5,

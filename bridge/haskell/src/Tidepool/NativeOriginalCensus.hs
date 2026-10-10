@@ -6,7 +6,7 @@ module Tidepool.NativeOriginalCensus
   ( OriginalNativeCensus
   , readOriginalNativeCensus, readOriginalNativeCensusWith
   , nativeCensusOwner
-  , nativeCensusGroups, ExactOriginalGroup(..), nativeCensusExactGroups, selectNativeCensusGroups
+  , ExactOriginalGroup(..), nativeCensusExactGroups, selectNativeCensusGroups
   , nativeCensusRequirements
   , nativeCensusCanonicalCertificate
   ) where
@@ -31,7 +31,6 @@ import Tidepool.ExecutionSchema
 
 data OriginalNativeCensus = OriginalNativeCensus
   { censusOwner :: !(String, String, String, String, String)
-  , censusGroups :: ![(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])]
   , censusExactGroups :: ![ExactOriginalGroup]
   , censusOrdinalIndex :: !(Map.Map Word ExactOriginalGroup)
   , censusRequirements :: !(Map.Map (String, String) String)
@@ -59,9 +58,6 @@ selectNativeCensusGroups census ordinals
 
 nativeCensusOwner :: OriginalNativeCensus -> (String, String, String, String, String)
 nativeCensusOwner = censusOwner
-
-nativeCensusGroups :: OriginalNativeCensus -> [(Word, [SymbolIdentity], [(SymbolIdentity, Bool)])]
-nativeCensusGroups = censusGroups
 
 nativeCensusRequirements :: OriginalNativeCensus -> Map.Map (String, String) String
 nativeCensusRequirements = censusRequirements
@@ -298,17 +294,13 @@ validateGlobal sources packages global = case nativeImportOwner global of
       Nothing -> fail "native package global lacks its owner declaration"
 
 project :: ParsedCensus -> OriginalNativeCensus
-project parsed = let groups =
-      [ExactOriginalGroup ordinal binders
-        [(nativeIdentity global, requiresDefinition global) | global <- globals]
-      | (ordinal, binders, globals) <- parsedGroups parsed]
+project parsed =
+  let groups =
+        [ExactOriginalGroup ordinal binders
+          [(nativeIdentity global, requiresDefinition global) | global <- globals]
+        | (ordinal, binders, globals) <- parsedGroups parsed]
   in OriginalNativeCensus
   { censusOwner = parsedOwner parsed
-  , censusGroups =
-      [ (ordinal, binders,
-          [(nativeIdentity global, requiresDefinition global) | global <- globals])
-      | (ordinal, binders, globals) <- parsedGroups parsed
-      ]
   , censusExactGroups = groups
   , censusOrdinalIndex = Map.fromList [(originalOrdinal group,group) | group <- groups]
   , censusRequirements = Map.fromList (parsedRequirements parsed)

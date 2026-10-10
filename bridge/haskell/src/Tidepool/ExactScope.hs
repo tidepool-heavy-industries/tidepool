@@ -85,6 +85,7 @@ import Tidepool.LocalNativeDeclaration
 import Tidepool.PackageWitness
   ( AdmittedPackageImports, PackageImportEvidence, decodeCapturedPackageImports, emptyAdmittedPackageImports, extendAdmittedPackageImportsWith, extendAdmittedPackageImportsWithFacts
   , revalidateAdmittedPackageImports, validateAdmittedPackageSelection )
+import Tidepool.OwnedInputTransport (OriginalInputKind(..), OriginalInputImage(..), InputAcquisition(..), decodeInputAcquisition)
 import Tidepool.NativeOriginalCensus
   ( OriginalNativeCensus, readOriginalNativeCensusWith, nativeCensusOwner
   , ExactOriginalGroup(..), nativeCensusExactGroups, selectNativeCensusGroups
@@ -371,12 +372,6 @@ memoOriginalFact timing label state key acquire = do
       emitCount timing (label ++ ".misses") 1
       pure fact
 
-data OriginalInputKind = InputInterface | InputPackages | InputCertificate
-  | InputCore | InputNative | InputCensus | InputGraph deriving (Eq,Ord,Show)
-data OriginalInputImage = OriginalInputImage String (String,String) String
-  [(OriginalInputKind,OriginalInputReference)] deriving (Eq,Show)
-data InputAcquisition = FreshFiles | ContinueOwnedOriginals [OriginalInputImage]
-  deriving (Eq,Show)
 
 instance Eq AdmittedScopeInputs where
   AdmittedScopeInputs orderA inputsA rootsA censusA _ == AdmittedScopeInputs orderB inputsB rootsB censusB _ =
@@ -1773,71 +1768,6 @@ data OfferedScope = OfferedScope String String [(ExactIfaceArtifact,FilePath,Str
   [((String,String),[(String,String)])] [ExactProduct] [ExecutionSourceRef]
   ExactScopePurpose (Maybe (RequestHelperRecipe,RequestTypeSignatures))
   [(String,String)]
-
-inputKindTag :: OriginalInputKind -> String
-inputKindTag kind = case kind of
-  InputInterface -> "iface"; InputPackages -> "packages"; InputCertificate -> "certificate"
-  InputCore -> "core"; InputNative -> "native"; InputCensus -> "census"; InputGraph -> "graph"
-
-inputKindBound :: OriginalInputKind -> Int
-inputKindBound kind = case kind of
-  InputPackages -> 4 * 1024 * 1024
-  InputCertificate -> 4 * 1024 * 1024
-  InputGraph -> 64 * 1024 * 1024
-  InputNative -> 64 * 1024 * 1024
-  _ -> 32 * 1024 * 1024
-
-inputImageDigest :: String -> (String,String)
-  -> [(OriginalInputKind,OriginalInputReference)] -> String
-inputImageDigest producer (unit,name) parts = digest $ toStrictByteString $
-  E.encodeListLen 5 <> text "TPORIGINALINPUT1" <> text producer <> text unit <> text name
-    <> E.encodeListLen (fromIntegral (length parts)) <> foldMap part parts
-  where
-    text = E.encodeString . T.pack
-    part (kind,reference) = E.encodeListLen 3 <> text (inputKindTag kind)
-      <> text (originalInputSha256 reference) <> E.encodeWord64 (fromIntegral (originalInputLength reference))
-
-decodeInputAcquisition :: Decoder s InputAcquisition
-decodeInputAcquisition = do
-  fields <- decodeListLen
-  tag <- string
-  case (tag,fields) of
-    ("fresh-files",1) -> pure FreshFiles
-    ("continue-originals",2) -> do
-      images <- bounded 4096 $ do
-        array 5
-        producer <- digestField
-        key <- (,) <$> nonempty <*> nonempty
-        imageSha <- digestField
-        parts <- bounded 4102 $ do
-          array 5
-          kindTag <- string
-          kind <- case kindTag of
-            "iface" -> pure InputInterface; "packages" -> pure InputPackages
-            "certificate" -> pure InputCertificate; "core" -> pure InputCore
-            "native" -> pure InputNative; "census" -> pure InputCensus
-            "graph" -> pure InputGraph
-            _ -> fail "unsupported original input kind"
-          path <- absolute
-          sha <- digestField
-          bytes <- decodeWord64
-          unless (bytes > 0 && bytes <= fromIntegral (inputKindBound kind))
-            (fail "owned original input exceeds its artifact bound")
-          origins <- bounded 4096 absolute
-          unique "original input origins" origins
-          transport <- ownedArenaRange path (toInteger bytes) 0
-          pure (kind,OriginalInputReference path sha (fromIntegral bytes) origins transport)
-        let identities = [(kind,originalInputSha256 reference) | (kind,reference) <- parts]
-        unless (not (null parts) && and (zipWith (<) identities (drop 1 identities))
-          && inputImageDigest producer key parts == imageSha)
-          (fail "original input image differs from its complete content identity")
-        unique "original input image paths" (map (originalInputPath . snd) parts)
-        pure (OriginalInputImage producer key imageSha parts)
-      unique "original input image owners" [key | OriginalInputImage _ key _ _ <- images]
-      unless (sum [length parts | OriginalInputImage _ _ _ parts <- images] <= 65536)
-        (fail "owned original input part inventory exceeds bound")
-      pure (ContinueOwnedOriginals images)
-    _ -> fail "unsupported exact input acquisition"
 
 validateOwnedInputImages :: OfferedScope -> [(String,FilePath)]
   -> [((String,String),ParsedInterfaceEvidence)] -> [OfferedNativeProduct]

@@ -1312,6 +1312,7 @@ pub(crate) struct RetainedArtifactMaterialization {
 #[derive(Clone)]
 struct OwnedExecutionGraphFile {
     path: PathBuf,
+    transport: crate::owned_input_arena::OwnedInputSlice,
     _directory: Arc<tempfile::TempDir>,
 }
 
@@ -1474,6 +1475,7 @@ impl RetainedArtifactMaterialization {
 
 #[derive(Clone)]
 struct RetainedArtifactRow {
+    owned_inputs: BTreeMap<original_inputs::OriginalInputKind, crate::owned_input_arena::OwnedInputSlice>,
     _directory: Arc<tempfile::TempDir>,
     interface: ExactIfaceArtifact,
     interface_evidence: Value,
@@ -1513,12 +1515,14 @@ impl RetainedArtifactRow {
         let mut parts = vec![
             OriginalInputPart {
                 kind: Kind::Interface,
+                transport: self.owned_inputs[&Kind::Interface].clone(),
                 path: self.interface.path.clone(),
                 sha256: self.interface.sha256.clone(),
                 bytes: interface.len() as u64,
             },
             OriginalInputPart {
                 kind: Kind::Packages,
+                transport: self.owned_inputs[&Kind::Packages].clone(),
                 path: self.interface.path.with_extension("hi.packages"),
                 sha256: hex(&entry.descriptor.package_imports_sha256),
                 bytes: packages.len() as u64,
@@ -1528,6 +1532,7 @@ impl RetainedArtifactRow {
             let fields = row(&self.interface_evidence, 5)?;
             parts.push(OriginalInputPart {
                 kind: Kind::Certificate,
+                transport: self.owned_inputs[&Kind::Certificate].clone(),
                 path: PathBuf::from(string(&fields[1])?),
                 sha256: string(&fields[2])?.to_owned(),
                 bytes: canonical.certificate_bytes().len() as u64,
@@ -1535,6 +1540,7 @@ impl RetainedArtifactRow {
             if let Some(core) = canonical.core_bytes() {
                 parts.push(OriginalInputPart {
                     kind: Kind::Core,
+                transport: self.owned_inputs[&Kind::Core].clone(),
                     path: PathBuf::from(string(&fields[3])?),
                     sha256: string(&fields[4])?.to_owned(),
                     bytes: core.len() as u64,
@@ -1552,6 +1558,7 @@ impl RetainedArtifactRow {
         {
             parts.push(OriginalInputPart {
                 kind: Kind::Native,
+                transport: self.owned_inputs[&Kind::Native].clone(),
                 path: product.path.clone(),
                 sha256: hex(&entry
                     .descriptor
@@ -1561,6 +1568,7 @@ impl RetainedArtifactRow {
             });
             parts.push(OriginalInputPart {
                 kind: Kind::Census,
+                transport: self.owned_inputs[&Kind::Census].clone(),
                 path: certification_path.clone(),
                 sha256: hex(certification_sha256),
                 bytes: original.certification_bytes().len() as u64,
@@ -4123,6 +4131,12 @@ fn identity(unit: &str, module: &str) -> ExactModuleIdentity {
     }
 }
 
+enum RequestInputTransport {
+    OwnedArena,
+    #[cfg(test)]
+    DurableFiles,
+}
+
 impl ExactDeclarationContext {
     pub fn new(
         authored: &[Arc<CertifiedAuthoredDeclaration>],
@@ -5488,7 +5502,7 @@ impl ExactDeclarationContext {
                 }
                 result
             })?;
-        self.prepare_compilation_from_metadata(root, producer, None, inputs, &scaffold, None)
+        self.prepare_compilation_from_metadata(root, producer, None, inputs, &scaffold, None, RequestInputTransport::DurableFiles)
     }
 
     pub(crate) fn prepare_compilation_with_authorization(
@@ -5533,6 +5547,7 @@ impl ExactDeclarationContext {
             inputs,
             scaffold,
             private,
+            RequestInputTransport::OwnedArena,
         )
     }
 
@@ -5577,6 +5592,7 @@ impl ExactDeclarationContext {
             inputs,
             scaffold,
             private,
+            RequestInputTransport::OwnedArena,
         )
     }
 
@@ -5601,6 +5617,23 @@ impl ExactDeclarationContext {
             .cloned()
             .collect::<Vec<_>>();
         let mut rows = BTreeMap::new();
+        let mut arena_builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(1024 * 1024 * 1024).map_err(failure)?;
+        let mut pending_inputs = BTreeMap::new();
+        let mut acquired_inputs = BTreeMap::new();
+        for entry in &new_entries {
+            let canonical = match &entry.payload {
+                ArtifactPayload::Canonical(interface) => Some(interface),
+                ArtifactPayload::Original(product) => product.module_interface(),
+                ArtifactPayload::Interface(..) => None,
+            };
+            if let Some(custody) = canonical.and_then(|canonical| canonical.catalog_input_custody()) {
+                acquired_inputs.insert(entry.descriptor.id, custody.owned_inputs.clone());
+                continue;
+            }
+            for (kind, bytes) in original_inputs::entry_payloads(entry) {
+                pending_inputs.insert((entry.descriptor.id, kind), arena_builder.append(bytes).map_err(failure)?);
+            }
+        }
         let mut validation = PackageInterfaceValidation::default();
         let context_bytes = materialization_bytes(&new_entries);
         let start = std::time::Instant::now();
@@ -5635,6 +5668,7 @@ impl ExactDeclarationContext {
             rows.insert(
                 entry.descriptor.id,
                 RetainedArtifactRow {
+                    owned_inputs: acquired_inputs.remove(&entry.descriptor.id).unwrap_or_default(),
                     _directory: Arc::clone(&directory),
                     interface: artifact.interface,
                     interface_evidence,
@@ -5710,6 +5744,21 @@ impl ExactDeclarationContext {
             &mut graph_paths,
             &mut scope_written_bytes,
         )?;
+        let mut pending_graphs = BTreeMap::new();
+        for entry in &entries {
+            if let ArtifactPayload::Original(product) = &entry.payload {
+                if let Some(graph) = product.execution_source() {
+                    if !inherited_graphs.contains(&graph.digest()) && graph_paths.contains_key(&graph.digest()) && !pending_graphs.contains_key(&graph.digest()) {
+                        pending_graphs.insert(graph.digest(), arena_builder.append(graph.bytes()).map_err(failure)?);
+                    }
+                }
+            }
+        }
+        let arena = arena_builder.finish().map_err(failure)?;
+        for ((id, kind), pending) in pending_inputs {
+            rows.get_mut(&id).expect("new materialization row").owned_inputs.insert(kind, arena.issue_slice(pending).map_err(failure)?);
+        }
+        let graph_transports = pending_graphs.into_iter().map(|(digest,pending)| Ok((digest,arena.issue_slice(pending).map_err(failure)?))).collect::<Result<BTreeMap<_,_>,CompileError>>()?;
         let work = validation.work();
         tracing::info!(target: "tidepool_toolchain::artifacts", phase = "exact_immutable_materialization",
             retained_entries = inherited_row_count, new_entries = new_entries.len(),
@@ -5733,6 +5782,7 @@ impl ExactDeclarationContext {
                     (
                         digest,
                         OwnedExecutionGraphFile {
+                            transport: graph_transports[&digest].clone(),
                             path,
                             _directory: Arc::clone(&directory),
                         },
@@ -5752,6 +5802,7 @@ impl ExactDeclarationContext {
         inputs: RequestCompilerInputs,
         scaffold: &ProtectedScaffoldRequirements,
         private: Option<OriginalCompilerInputs>,
+        transport: RequestInputTransport,
     ) -> Result<ExactCompilationRequest, CompileError> {
         let metadata = &inputs.metadata;
         let semantic_sha256 = inputs.declaration_semantic_sha256;
@@ -5927,7 +5978,12 @@ impl ExactDeclarationContext {
             })
             .transpose()?
             .unwrap_or_default();
+        let acquisition = match transport {
+            #[cfg(test)]
+            RequestInputTransport::DurableFiles => Value::Array(vec![text("fresh-files")]),
+            RequestInputTransport::OwnedArena => {
         let image_producer = CanonicalProducerIdentity::from_producer_bytes(producer).hex();
+        let mut arenas = original_inputs::OriginalInputArenaTable::default();
         let images = metadata
             .entries
             .values()
@@ -5941,6 +5997,7 @@ impl ExactDeclarationContext {
                     {
                         parts.push(original_inputs::OriginalInputPart {
                             kind: original_inputs::OriginalInputKind::Graph,
+                            transport: graph_paths[&graph.digest()].transport.clone(),
                             path: graph_paths[&graph.digest()].path.clone(),
                             sha256: hex(&graph.digest()),
                             bytes: graph.bytes().len() as u64,
@@ -5963,15 +6020,19 @@ impl ExactDeclarationContext {
                     &entry.descriptor.owner.module,
                     parts,
                     original_origins,
+                    &mut arenas,
                 )
             })
             .collect::<Result<Vec<_>, CompileError>>()?;
+                arenas.acquisition(images)?
+            }
+        };
         let bytes = encode_scope_manifest_with_published(
             fields,
             execution_scope,
             authorization,
             self.published_scope_value()?,
-            Value::Array(vec![text("continue-originals"), Value::Array(images)]),
+            acquisition,
         )?;
         let manifest = root.join("exact-declaration-scope.cbor");
         use std::io::Write;

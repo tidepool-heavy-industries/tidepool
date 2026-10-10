@@ -1,6 +1,6 @@
 //! Original content custody is independent of a receiving request's roles.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -80,19 +80,61 @@ impl OwnedOriginalInputOrigins {
 
 /// Receiving aliases come from the retained writer. Protected origins come
 /// only from authenticated acquisition; disposable producer scratch is absent.
-pub(super) struct OriginalInputPart {
+pub(crate) struct OriginalInputPart {
     pub kind: OriginalInputKind,
     pub path: PathBuf,
     pub sha256: String,
     pub bytes: u64,
+    pub transport: crate::owned_input_arena::OwnedInputSlice,
 }
 
-pub(super) fn encode_image(
+#[derive(Default)]
+pub(crate) struct OriginalInputArenaTable(BTreeMap<PathBuf, (usize, u64)>);
+
+impl OriginalInputArenaTable {
+    fn location(&mut self, slice: &crate::owned_input_arena::OwnedInputSlice) -> Result<Value, CompileError> {
+        let next = self.0.len();
+        if next >= 4096 { return Err(super::failure("original input arena table exceeds bound")); }
+        let (index, extent) = self.0.entry(slice.endpoint().to_owned()).or_insert((next, slice.arena_len()));
+        if *extent != slice.arena_len() { return Err(super::failure("conflicting original input arena extent")); }
+        Ok(Value::Array(vec![Value::Integer((*index as u64).into()), Value::Integer(slice.offset().into())]))
+    }
+
+    pub(crate) fn acquisition(self, images: Vec<Value>) -> Result<Value, CompileError> {
+        let mut descriptors = vec![Value::Null; self.0.len()];
+        for (endpoint, (index, extent)) in self.0 {
+            descriptors[index] = Value::Array(vec![super::path_value(&endpoint)?, Value::Integer(extent.into())]);
+        }
+        Ok(Value::Array(vec![super::text("continue-originals"), Value::Array(descriptors), Value::Array(images)]))
+    }
+}
+
+pub(crate) fn entry_payloads(entry: &crate::artifact_inventory::ArtifactEntry) -> Vec<(OriginalInputKind, &[u8])> {
+    use crate::artifact_inventory::ArtifactPayload;
+    let (interface, packages, canonical) = match &entry.payload {
+        ArtifactPayload::Original(product) => (product.interface_bytes(), product.package_imports_bytes(), product.module_interface()),
+        ArtifactPayload::Canonical(interface) => (interface.interface_bytes(), interface.package_imports_bytes(), Some(interface)),
+        ArtifactPayload::Interface(interface, _) => (interface.interface_bytes(), interface.package_imports_bytes(), None),
+    };
+    let mut parts = vec![(OriginalInputKind::Interface, interface), (OriginalInputKind::Packages, packages)];
+    if let Some(canonical) = canonical {
+        parts.push((OriginalInputKind::Certificate, canonical.certificate_bytes()));
+        if let Some(core) = canonical.core_bytes() { parts.push((OriginalInputKind::Core, core)); }
+    }
+    if let ArtifactPayload::Original(product) = &entry.payload {
+        parts.push((OriginalInputKind::Native, product.product_bytes()));
+        parts.push((OriginalInputKind::Census, product.certification_bytes()));
+    }
+    parts
+}
+
+pub(crate) fn encode_image(
     producer: &str,
     unit: &str,
     module: &str,
     mut parts: Vec<OriginalInputPart>,
     origins: Option<&OwnedOriginalInputOrigins>,
+    arenas: &mut OriginalInputArenaTable,
 ) -> Result<Value, CompileError> {
     use super::{failure, hex, path_value, sha256, text};
     parts.sort_by(|a, b| (a.kind, &a.sha256).cmp(&(b.kind, &b.sha256)));
@@ -104,7 +146,8 @@ pub(super) fn encode_image(
         return Err(failure("ambiguous original input image parts"));
     }
     for part in &parts {
-        if !part.path.is_absolute() || part.bytes == 0 || part.bytes > part.kind.byte_limit() {
+        if !part.path.is_absolute() || part.bytes == 0 || part.bytes > part.kind.byte_limit()
+            || part.bytes != part.transport.len() || part.sha256 != hex(&part.transport.sha256()) {
             return Err(failure("invalid original input image part"));
         }
     }
@@ -153,6 +196,7 @@ pub(super) fn encode_image(
                         text(part.sha256),
                         Value::Integer(part.bytes.into()),
                         Value::Array(protected),
+                        arenas.location(&part.transport)?,
                     ]))
                 })
                 .collect::<Result<Vec<_>, CompileError>>()?,
@@ -175,28 +219,31 @@ mod tests {
         ) {
             let seal = super::super::sha256(&bytes);
             let producer = "07".repeat(32);
+            let mut builder = crate::owned_input_arena::OwnedInputArenaBuilder::new(1024).unwrap();
+            let pending = builder.append(&bytes).unwrap();
+            let arena = builder.finish().unwrap();
+            let transport = arena.issue_slice(pending).unwrap();
+            let mut arenas = OriginalInputArenaTable::default();
             let part = |path: &str| OriginalInputPart {kind:OriginalInputKind::Interface,
-                path:PathBuf::from(path),sha256:seal.clone(),bytes:bytes.len() as u64};
-            let image = encode_image(&producer,"home",&module,vec![part("/original.hi")],None).unwrap();
-            let relocated = encode_image(&producer,"home",&module,vec![part(&format!("/receiving-{alias}.hi"))],None).unwrap();
+                path:PathBuf::from(path),sha256:seal.clone(),bytes:bytes.len() as u64,transport:transport.clone()};
+            let image = encode_image(&producer,"home",&module,vec![part("/original.hi")],None,&mut arenas).unwrap();
+            let relocated = encode_image(&producer,"home",&module,vec![part(&format!("/receiving-{alias}.hi"))],None,&mut arenas).unwrap();
             let identity = |image: &Value| image.as_array().unwrap()[3].clone();
             prop_assert_eq!(identity(&image),identity(&relocated));
             prop_assert_ne!(&image.as_array().unwrap()[4],&relocated.as_array().unwrap()[4]);
-            let other_owner = encode_image(&producer,"other-home",&module,vec![part("/original.hi")],None).unwrap();
+            let other_owner = encode_image(&producer,"other-home",&module,vec![part("/original.hi")],None,&mut arenas).unwrap();
             prop_assert_ne!(identity(&image),identity(&other_owner));
-            let other_producer = encode_image(&"08".repeat(32),"home",&module,vec![part("/original.hi")],None).unwrap();
+            let other_producer = encode_image(&"08".repeat(32),"home",&module,vec![part("/original.hi")],None,&mut arenas).unwrap();
             prop_assert_ne!(identity(&image),identity(&other_producer));
             let mut changed = part("/original.hi");
             changed.bytes += 1;
-            let other_length = encode_image(&producer,"home",&module,vec![changed],None).unwrap();
-            prop_assert_ne!(identity(&image),identity(&other_length));
+            prop_assert!(encode_image(&producer,"home",&module,vec![changed],None,&mut arenas).is_err());
             let mut changed = part("/original.hi");
             changed.sha256 = "ff".repeat(32);
-            let other_content = encode_image(&producer,"home",&module,vec![changed],None).unwrap();
-            prop_assert_ne!(identity(&image),identity(&other_content));
+            prop_assert!(encode_image(&producer,"home",&module,vec![changed],None,&mut arenas).is_err());
             let mut changed = part("/original.hi");
             changed.kind = OriginalInputKind::Core;
-            let other_kind = encode_image(&producer,"home",&module,vec![changed],None).unwrap();
+            let other_kind = encode_image(&producer,"home",&module,vec![changed],None,&mut arenas).unwrap();
             prop_assert_ne!(identity(&image),identity(&other_kind));
         }
     }

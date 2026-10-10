@@ -304,7 +304,7 @@ fn publish_fixture_candidates(
         "genuine publication omitted a requested owner before candidate selection"
     );
     let selected =
-        select_records_inner(producer, include, delivery, records, None).unwrap_or_else(|| {
+        select_records_inner_with_transport(producer, include, delivery, records, None, CandidateInputTransport::DurableFiles).unwrap_or_else(|| {
             panic!("production candidate delivery refused requested owners {requested:?}")
         });
     assert_eq!(

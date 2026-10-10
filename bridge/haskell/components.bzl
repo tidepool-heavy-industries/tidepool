@@ -179,6 +179,7 @@ def declare_haskell_components():
         "Tidepool/LocalNativeDeclaration.hs": "src/Tidepool/LocalNativeDeclaration.hs",
         "Tidepool/ResumePackage.hs": "src/Tidepool/ResumePackage.hs",
         "Tidepool/TypedSegment/Types.hs": "src/Tidepool/TypedSegment/Types.hs",
+        "Tidepool/OwnedInputTransport.hs": "src/Tidepool/OwnedInputTransport.hs",
         "Tidepool/NativeOriginalCensus.hs": "src/Tidepool/NativeOriginalCensus.hs"
     },
         deps = [],
@@ -316,6 +317,7 @@ def declare_haskell_components():
         "Tidepool/LocalNativeDeclaration.hs": "src/Tidepool/LocalNativeDeclaration.hs",
         "Tidepool/ResumePackage.hs": "src/Tidepool/ResumePackage.hs",
         "Tidepool/TypedSegment/Types.hs": "src/Tidepool/TypedSegment/Types.hs",
+        "Tidepool/OwnedInputTransport.hs": "src/Tidepool/OwnedInputTransport.hs",
         "Tidepool/NativeOriginalCensus.hs": "src/Tidepool/NativeOriginalCensus.hs"
     },
         deps = [],
