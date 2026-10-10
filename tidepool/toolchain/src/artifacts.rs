@@ -8844,6 +8844,80 @@ mod program_support_tests {
     use super::*;
 
     #[test]
+    fn continuation_support_preserves_hidden_exact_dependencies_and_backedges() {
+        use crate::artifact_inventory::{ArtifactBindingNode, ArtifactEntry, ArtifactInventory};
+        use crate::certified_products::fixture_module_interface;
+        let producer = [1; 32];
+        let generated_interface =
+            fixture_module_interface(producer, "fixture", "Generated", BTreeMap::new());
+        let support_interface =
+            fixture_module_interface(producer, "fixture", "Support", BTreeMap::new());
+        for backedge in [false, true] {
+            let generated = ArtifactEntry::canonical(fixture_module_interface(
+                producer,
+                "fixture",
+                "Generated",
+                BTreeMap::from([(
+                    ("fixture".into(), "Support".into()),
+                    support_interface.interface_sha256(),
+                )]),
+            ));
+            let support = ArtifactEntry::canonical(if backedge {
+                fixture_module_interface(
+                    producer,
+                    "fixture",
+                    "Support",
+                    BTreeMap::from([(
+                        ("fixture".into(), "Generated".into()),
+                        generated_interface.interface_sha256(),
+                    )]),
+                )
+            } else {
+                support_interface.clone()
+            });
+            let generated_id = generated.descriptor.id;
+            let support_id = support.descriptor.id;
+            let inventory = ArtifactInventory::default();
+            let all = inventory
+                .admit(&inventory.empty_view(), vec![generated, support])
+                .unwrap();
+            let detached = all.select_roots(vec![generated_id]).unwrap();
+            let graph = detached.capture_graph_selection();
+            assert_eq!(graph.roots.len(), 1);
+            assert!(graph
+                .bindings
+                .iter()
+                .any(|binding| binding.artifact == support_id));
+            assert!(
+                matches!(graph.roots[0], ArtifactBindingNode::Artifact(binding)
+                if binding.artifact == generated_id)
+            );
+            let selected = program_support_artifacts(
+                &detached,
+                &crate::declaration_join::ExactModuleIdentity {
+                    unit: "fixture".into(),
+                    module: "Generated".into(),
+                },
+            );
+            if backedge {
+                assert!(matches!(selected, Err(CompileError::ExtractFailed(message))
+                    if message == "program support depends on its generated scaffold"));
+            } else {
+                let selected = selected.unwrap();
+                assert_eq!(selected.artifact_ids(), vec![support_id]);
+                assert_eq!(
+                    selected.capture_graph_selection().bindings,
+                    graph
+                        .bindings
+                        .into_iter()
+                        .filter(|binding| binding.artifact == support_id)
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn continuation_support_refuses_backedges_to_its_exact_generated_owner() {
         use crate::certified_products::tests::{
             original_groups_fixture_with_interface, recovered_witness_fixtures,

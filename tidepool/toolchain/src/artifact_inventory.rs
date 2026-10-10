@@ -3451,15 +3451,23 @@ impl ArtifactView {
         self.retain_projected_materializations(retained)
     }
 
-    /// Keep the existing exact root handles when extracting program support.
-    /// Historical scopes sharing carrier bytes remain independently selected.
+    /// Preserve exact support nodes even when they were dependencies of the
+    /// generated root. Native byte custody stays separate from source roots.
     pub(crate) fn support_without_owner(
         &self,
         excluded: &ExactModuleIdentity,
     ) -> Result<Self, CompileError> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
-        let roots = self
-            .roots()
+        if !self
+            .read_projection(&state)
+            .nodes
+            .iter()
+            .any(|node| &state.payloads[&node.artifact()].descriptor.owner == excluded)
+        {
+            return Ok(self.clone());
+        }
+        let selected = admitted_closure(&state, self.roots().iter().copied());
+        let roots = selected
             .iter()
             .filter(|root| &state.payloads[&root.artifact()].descriptor.owner != excluded)
             .copied()
@@ -4859,6 +4867,85 @@ mod tests {
         }
     }
 
+    #[test]
+    fn native_group_reuse_compares_equal_payload_children_by_exact_binding() {
+        let inventory = ArtifactInventory::default();
+        let (native, _, _) = native_scope_fixture();
+        let child = entry_in_unit("fixture", "Child", vec![]);
+        let values = entry_in_unit(
+            "fixture",
+            "Values",
+            vec![ExactModuleIdentity {
+                unit: "fixture".into(),
+                module: "Child".into(),
+            }],
+        );
+        let ArtifactPayload::Canonical(interface) = &child.payload else {
+            unreachable!()
+        };
+        let next_child = ArtifactEntry::canonical(crate::certified_products::fixture_module_core(
+            interface,
+            b"next exact Child Core".to_vec(),
+        ));
+        let old = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![native.clone(), values.clone(), child],
+            )
+            .unwrap();
+        let old_group = old.capture_graph_selection().native_groups[0];
+        let projection = CompilerInputProjection::from_issued_entries(&[
+            Arc::new(native.clone()),
+            Arc::new(values),
+            Arc::new(next_child.clone()),
+        ])
+        .unwrap();
+        let new = inventory
+            .admit_projected(&old, vec![Arc::new(next_child)], &projection)
+            .unwrap();
+        let new_group = new
+            .capture_graph_selection()
+            .native_groups
+            .into_iter()
+            .find(|group| *group != old_group)
+            .unwrap();
+        let (old_carrier, old_values) = scoped_group_child(&new, old_group);
+        let (new_carrier, new_values) = scoped_group_child(&new, new_group);
+        assert_eq!(old_carrier, new_carrier);
+        assert_eq!(old_values.artifact, new_values.artifact);
+        assert_ne!(old_values.selection, new_values.selection);
+        let repeated = inventory
+            .admit_shared_with_intent(
+                &new,
+                vec![Arc::new(native.clone())],
+                NativeArtifactDemand::AllGroups,
+                ArtifactRootIntent::Projected(&projection),
+            )
+            .unwrap();
+        assert_eq!(
+            repeated.capture_graph_selection().native_groups,
+            new.capture_graph_selection().native_groups
+        );
+        let selected = repeated
+            .select_admission_roots(vec![native.descriptor.id])
+            .unwrap();
+        assert_eq!(
+            selected.capture_graph_selection().native_groups,
+            vec![new_group]
+        );
+        assert_eq!(scoped_group_child(&selected, new_group).1, new_values);
+        let recovered_inventory = ArtifactInventory::default();
+        let recovered = recovered_inventory
+            .recover_selection(
+                &recovered_inventory.empty_view(),
+                selected.entries(),
+                &selected.capture_graph_selection(),
+                &selected.binding_dependencies(),
+            )
+            .unwrap();
+        assert_eq!(scoped_group_child(&recovered, new_group).1, new_values);
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::test_runner::Config {
             cases: 64,
@@ -4928,6 +5015,16 @@ mod tests {
                     }).unwrap(),
                 };
                 let graph = view.capture_graph_selection();
+                let snapshot = view.selection_snapshot();
+                proptest::prop_assert_eq!(
+                    snapshot.roots.keys().copied().collect::<Vec<_>>(), view.roots().to_vec(),
+                );
+                proptest::prop_assert_eq!(
+                    snapshot.native_custody.keys().copied().collect::<Vec<_>>(), view.native_custody().to_vec(),
+                );
+                proptest::prop_assert_eq!(
+                    snapshot.namespace.values().copied().collect::<Vec<_>>(), graph.namespace.clone(),
+                );
                 let actual_nodes = graph.bindings.iter().copied().map(ArtifactBindingNode::Artifact)
                     .chain(graph.native_groups.iter().copied().map(ArtifactBindingNode::Group))
                     .collect::<BTreeSet<_>>();
