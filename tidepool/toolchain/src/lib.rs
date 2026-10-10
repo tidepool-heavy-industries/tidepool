@@ -29,6 +29,7 @@ pub mod declaration_join;
 pub mod diag;
 pub mod digest;
 mod execution_source;
+pub mod exact_context;
 pub mod failclass;
 pub(crate) mod module_candidates;
 pub(crate) mod owned_input_arena;
