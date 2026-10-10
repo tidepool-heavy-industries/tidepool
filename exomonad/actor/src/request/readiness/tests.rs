@@ -172,6 +172,7 @@ fn delayed_registry_history(
     };
     use crate::{ActorId, ActorRef};
 
+    crate::request::test_support::fresh_history();
     let registry = RequestRegistry::default();
     let owner = ActorRef::first(ActorId(1));
     let targets = [2, 3, 4].map(|id| ActorRef::first(ActorId(id)));

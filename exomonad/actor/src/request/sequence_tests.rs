@@ -409,6 +409,7 @@ fn run_history_with_mutation(
     coverage: &mut Coverage,
     mutation: Option<RootMutation>,
 ) -> Result<(), TestCaseError> {
+    test_support::fresh_history();
     let registry = RequestRegistry::default();
     let owner = ActorRef::first(ActorId(1));
     let targets: Vec<_> = history
