@@ -376,7 +376,7 @@ impl CompilerPreparationOwner {
         };
         let cleanup = self.cleanup();
         let owner =
-            crate::resident_workbench::CompilerCloseOwner::Initialization(self.retained.clone());
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained.clone());
         let action = owner.register_work().map(|ticket| ticket.run(action));
         admission.completed = true;
         drop(admission);
@@ -401,7 +401,7 @@ impl CompilerPreparationOwner {
         };
         let cleanup = self.cleanup();
         let owner =
-            crate::resident_workbench::CompilerCloseOwner::Initialization(self.retained.clone());
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained.clone());
         async move {
             let action = owner.scope(operation).await;
             admission.completed = true;
@@ -1005,7 +1005,7 @@ mod tests {
     fn dropping_unpolled_source_scope_closes_admission_without_fabricated_actor() {
         let mut owner = super::CompilerPreparationOwner::new();
         let captured =
-            crate::resident_workbench::CompilerCloseOwner::Initialization(owner.retained.clone());
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.retained.clone());
         let observation = owner.cleanup();
         let operation = owner.scope(async {
             panic!("unpolled action cannot execute");
@@ -1021,7 +1021,7 @@ mod tests {
     async fn cancelled_source_scope_retains_abandonment_and_closes_late_admission() {
         let mut owner = super::CompilerPreparationOwner::new();
         let captured =
-            crate::resident_workbench::CompilerCloseOwner::Initialization(owner.retained.clone());
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.retained.clone());
         let observation = owner.cleanup();
         let mut operation = Box::pin(owner.scope(async {
             let _ticket = crate::resident_workbench::CompilerCloseOwner::current()
@@ -1112,7 +1112,7 @@ mod tests {
         assert!(owner.register_compiler_work(receipt.clone()));
         CompilerWorkTicket::new(
             receipt,
-            crate::resident_workbench::CompilerCloseOwner::Initialization(owner.clone()),
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.clone()),
         )
     }
 

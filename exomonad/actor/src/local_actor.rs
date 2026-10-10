@@ -639,6 +639,17 @@ impl KernelContext {
         self.terminal.clone()
     }
 
+    /// Autonomous resident turns retain compiler obligations on the recipient's
+    /// existing lifetime, independently of the sender or a completed startup.
+    pub(crate) fn compiler_lifecycle_scope<F: std::future::Future>(
+        &self,
+        operation: F,
+    ) -> impl std::future::Future<Output = F::Output> {
+        let owner =
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained_exit());
+        async move { owner.scope(operation).await }
+    }
+
     pub(crate) fn retain_child_startup_cleanup(&self, outcome: crate::CleanupComponentOutcome) {
         let mut retained = self.forgotten_children.lock();
         *retained = combine_cleanup(retained.clone(), outcome);

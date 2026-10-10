@@ -7426,7 +7426,7 @@ where
         // Input preparation precedes the request's invocation owner. Retain
         // its compiler transaction under the actor's initialization lifetime.
         let mounted =
-            crate::resident_workbench::CompilerCloseOwner::Initialization(kernel.retained_exit())
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(kernel.retained_exit())
                 .scope(workbench.mount_activation_input(
                     compile_context,
                     input,
@@ -7783,7 +7783,7 @@ where
                 .with_compilation_authority(authority),
         );
         let compiler_owner =
-            crate::resident_workbench::CompilerCloseOwner::Initialization(kernel.retained_exit());
+            crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(kernel.retained_exit());
         let compiled_tools = match self.explicit_installer.as_ref() {
             Some(installer) => compiler_owner
                 .scope(application_workbench.prepare_explicit_application(
@@ -7877,7 +7877,7 @@ where
         let guard = workbench
             .actor_initialization_cleanup(context.clone())
             .with_compiler_owner(
-                crate::resident_workbench::CompilerCloseOwner::Initialization(
+                crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
                     kernel.retained_exit(),
                 ),
             );
@@ -10900,11 +10900,11 @@ where
         kernel: &'a KernelContext,
         definition: crate::ActorReplacementDefinition,
     ) -> futures_util::future::BoxFuture<'a, Result<LocalActorRef, KernelBehaviorError>> {
-        Box::pin(async move {
+        Box::pin(kernel.compiler_lifecycle_scope(async move {
             self.prepare_successor(kernel, definition)
                 .await
                 .map_err(Self::workbench_failure)
-        })
+        }))
     }
 
     fn commit_replacement(
@@ -10932,7 +10932,7 @@ where
         kernel: &'a KernelContext,
         delivery: crate::SourceDelivery,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        Box::pin(async move {
+        Box::pin(kernel.compiler_lifecycle_scope(async move {
             let context = self.context(kernel.identity());
             use crate::request::sources::{RequestSourceKind, SourceTarget};
             self.input_origin = match delivery.target {
@@ -10978,7 +10978,7 @@ where
                 .await
                 .map_err(Self::workbench_failure)?;
             Ok(step)
-        })
+        }))
     }
 
     fn accepts_mailbox(&self) -> bool {
@@ -11009,7 +11009,7 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        Box::pin(async move {
+        Box::pin(kernel.compiler_lifecycle_scope(async move {
             let ResidentStanding::Receiving(receiver) =
                 std::mem::replace(&mut self.standing, ResidentStanding::Boot)
             else {
@@ -11034,7 +11034,7 @@ where
             )
             .await
             .map_err(Self::workbench_failure)
-        })
+        }))
     }
 
     fn pause_failed_handler(&mut self, kernel: &KernelContext, detail: &str) -> bool {
@@ -11090,7 +11090,7 @@ where
                 lease.admitted();
             }
         }
-        Box::pin(async move {
+        Box::pin(kernel.compiler_lifecycle_scope(async move {
             placement_transfer.map_err(Self::failure)?;
             let context = self.context(kernel.identity());
             let public_owner = match self.descriptor.persistence_policy() {
@@ -11257,7 +11257,7 @@ where
             self.initialize(kernel, &context, boot)
                 .await
                 .map_err(Self::workbench_failure)
-        })
+        }))
     }
 
     fn reconcile_workbench_boundary<'a>(
@@ -11371,7 +11371,7 @@ where
         sender: ActorRef,
         request: MailboxValue,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        Box::pin(async move {
+        Box::pin(kernel.compiler_lifecycle_scope(async move {
             self.checkpoint_publication = CheckpointPublication::Resident;
             let context = self.context(kernel.identity());
             self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(sender));
@@ -11386,7 +11386,7 @@ where
                 .await
                 .map_err(Self::workbench_failure)?;
             Ok(step)
-        })
+        }))
     }
 
     fn call<'a>(
@@ -11397,7 +11397,7 @@ where
         request: MailboxValue,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<MailboxValue>, KernelBehaviorError>>
     {
-        Box::pin(async move {
+        Box::pin(kernel.compiler_lifecycle_scope(async move {
             self.checkpoint_publication = CheckpointPublication::Resident;
             let context = self.context(kernel.identity());
             self.input_origin = ActorInputOrigin::ActorMessageFrom(actor_address(caller));
@@ -11417,7 +11417,7 @@ where
                     terminal,
                 },
             })
-        })
+        }))
     }
 
     fn dispatch_tool(
@@ -11530,10 +11530,17 @@ where
                 let context = behavior.context(actor);
                 let runner = behavior.environment.runner.clone();
                 let workbench = runner.application_workbench();
-                let guard = workbench.actor_invocation_cleanup(
-                    context.clone(),
-                    "tool invocation abandoned before standing custody".into(),
-                );
+                let guard = workbench
+                    .actor_invocation_cleanup(
+                        context.clone(),
+                        "tool invocation abandoned before standing custody".into(),
+                    )
+                    .with_compiler_owner(
+                        crate::resident_workbench::CompilerCloseOwner::Invocation {
+                            work: work.clone(),
+                            control: Some(control.clone()),
+                        },
+                    );
                 let registration = guard.registration();
                 let mut result = registration
                     .scope(crate::resident_workbench::with_execution_control(
@@ -11856,7 +11863,7 @@ where
         kernel: &'a KernelContext,
         definition: crate::SpecReplacementDefinition,
     ) -> futures_util::future::BoxFuture<'a, Result<(), crate::SpecReplacementError>> {
-        Box::pin(async move {
+        Box::pin(kernel.compiler_lifecycle_scope(async move {
             let target = kernel.identity();
             let authorized =
                 actor_can_control(definition.caller, target, &self.environment.actors.lock());
@@ -11879,7 +11886,7 @@ where
                 self.after_tool.forget_failures();
             }
             outcome
-        })
+        }))
     }
 
     fn allows_independent_workbench_admission(&self) -> bool {
@@ -12196,116 +12203,130 @@ where
                 .workbench_executions
                 .lock()
                 .callback_root(context.actor, reservation_owner.clone());
-            let previous_reservation_owner = self
-                .active_route_reservation_owner
-                .replace(reservation_owner.clone());
-            // Route completion settles only checkpoints captured by this callback.
-            let completion = tidepool_runtime::session::ContextCheckpointBoundary::Route {
-                actor_id: context.actor.id.0,
-                incarnation: context.actor.incarnation.0,
-                watch_id: watch.0,
+            let compiler_owner = crate::resident_workbench::CompilerCloseOwner::Invocation {
+                work: route_work.clone(),
+                control: None,
             };
-            self.checkpoint_publication = CheckpointPublication::Route(completion.clone());
-            let result = async {
-                let mut outcome = self
-                    .environment
-                    .runner
-                    .run_route_entry(context.clone(), entry, watch)
-                    .await?;
-                loop {
-                    let boundary = self
-                        .environment
-                        .runner
-                        .capture_boundary(
-                            context.clone(),
-                            outcome,
-                            context.placement.resource_scope,
-                        )
-                        .await?;
-                    match boundary {
-                        ResidentActorBoundary::Completed => {
-                            return Ok::<_, ResidentActorWorkbenchError>(false);
-                        }
-                        ResidentActorBoundary::ReplyAttempt(attempt) => {
-                            match self
+            compiler_owner
+                .scope(async {
+                    let previous_reservation_owner = self
+                        .active_route_reservation_owner
+                        .replace(reservation_owner.clone());
+                    // Route completion settles only checkpoints captured by this callback.
+                    let completion = tidepool_runtime::session::ContextCheckpointBoundary::Route {
+                        actor_id: context.actor.id.0,
+                        incarnation: context.actor.incarnation.0,
+                        watch_id: watch.0,
+                    };
+                    self.checkpoint_publication = CheckpointPublication::Route(completion.clone());
+                    let result = async {
+                        let mut outcome = self
+                            .environment
+                            .runner
+                            .run_route_entry(context.clone(), entry, watch)
+                            .await?;
+                        loop {
+                            let boundary = self
                                 .environment
-                                .requests
-                                .begin_reply(context.actor, attempt.request)
-                            {
-                                Ok(claim) => {
-                                    let publication_boundary =
-                                        self.checkpoint_publication.boundary().cloned();
-                                    self.stage_request_reply(
-                                        kernel,
-                                        &context,
-                                        claim,
-                                        attempt.result,
-                                        attempt.preview,
-                                        publication_boundary.as_ref(),
-                                        None,
-                                        None,
-                                    )
-                                    .await?;
-                                    return Ok(true);
+                                .runner
+                                .capture_boundary(
+                                    context.clone(),
+                                    outcome,
+                                    context.placement.resource_scope,
+                                )
+                                .await?;
+                            match boundary {
+                                ResidentActorBoundary::Completed => {
+                                    return Ok::<_, ResidentActorWorkbenchError>(false);
                                 }
-                                Err(error) if attempt.recoverable => {
-                                    drop(attempt.result);
-                                    outcome = self
+                                ResidentActorBoundary::ReplyAttempt(attempt) => {
+                                    match self
                                         .environment
-                                        .runner
-                                        .resume_reply_rejection(
-                                            context.clone(),
-                                            attempt.continuation,
-                                            error,
-                                        )
-                                        .await?;
-                                    continue;
+                                        .requests
+                                        .begin_reply(context.actor, attempt.request)
+                                    {
+                                        Ok(claim) => {
+                                            let publication_boundary =
+                                                self.checkpoint_publication.boundary().cloned();
+                                            self.stage_request_reply(
+                                                kernel,
+                                                &context,
+                                                claim,
+                                                attempt.result,
+                                                attempt.preview,
+                                                publication_boundary.as_ref(),
+                                                None,
+                                                None,
+                                            )
+                                            .await?;
+                                            return Ok(true);
+                                        }
+                                        Err(error) if attempt.recoverable => {
+                                            drop(attempt.result);
+                                            outcome = self
+                                                .environment
+                                                .runner
+                                                .resume_reply_rejection(
+                                                    context.clone(),
+                                                    attempt.continuation,
+                                                    error,
+                                                )
+                                                .await?;
+                                            continue;
+                                        }
+                                        Err(error) => {
+                                            return Err(
+                                                ResidentActorWorkbenchError::ActorProtocol(
+                                                    settlement_refusal(
+                                                        "reply",
+                                                        attempt.request,
+                                                        error,
+                                                    ),
+                                                ),
+                                            );
+                                        }
+                                    }
                                 }
-                                Err(error) => {
-                                    return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                        settlement_refusal("reply", attempt.request, error),
-                                    ));
-                                }
+                                _ => {}
                             }
+                            outcome = self
+                                .resolve_effect(
+                                    kernel,
+                                    &context,
+                                    self.actor_effect_owner(context.actor),
+                                    &crate::CallAncestry::begin(context.actor),
+                                    boundary,
+                                )
+                                .await?;
                         }
-                        _ => {}
                     }
-                    outcome = self
-                        .resolve_effect(
-                            kernel,
-                            &context,
-                            self.actor_effect_owner(context.actor),
-                            &crate::CallAncestry::begin(context.actor),
-                            boundary,
-                        )
-                        .await?;
-                }
-            }
-            .await;
-            let resume_reply = matches!(result, Ok(true));
-            let mut result = result.map(|_| ()).map_err(|error| error.to_string());
-            if result.is_ok() {
-                result = self
-                    .tool_completed(kernel, completion)
-                    .await
-                    .map_err(|error| error.to_string());
-            }
-            // Projection and nested scope resources belong to this callback.
-            result = self
-                .finish_callback_resources(kernel, &route_work, result)
-                .await;
-            self.active_route_reservation_owner = previous_reservation_owner;
-            self.checkpoint_publication = CheckpointPublication::Resident;
-            let notification = self
-                .environment
-                .requests
-                .finish_route(context.actor, watch, result);
-            self.publish_watch_notifications(notification).await;
-            Ok(if resume_reply {
-                KernelStep::ContinueLater(())
-            } else {
-                KernelStep::Continue(())
-            })
+                    .await;
+                    let resume_reply = matches!(result, Ok(true));
+                    let mut result = result.map(|_| ()).map_err(|error| error.to_string());
+                    if result.is_ok() {
+                        result = self
+                            .tool_completed(kernel, completion)
+                            .await
+                            .map_err(|error| error.to_string());
+                    }
+                    // Projection and nested scope resources belong to this callback.
+                    result = self
+                        .finish_callback_resources(kernel, &route_work, result)
+                        .await;
+                    self.active_route_reservation_owner = previous_reservation_owner;
+                    self.checkpoint_publication = CheckpointPublication::Resident;
+                    let notification =
+                        self.environment
+                            .requests
+                            .finish_route(context.actor, watch, result);
+                    self.publish_watch_notifications(notification).await;
+                    Ok(if resume_reply {
+                        KernelStep::ContinueLater(())
+                    } else {
+                        KernelStep::Continue(())
+                    })
+                })
+                .await
         })
     }
 
@@ -12395,7 +12416,7 @@ where
         &'a mut self,
         kernel: &'a KernelContext,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
-        Box::pin(async move {
+        Box::pin(kernel.compiler_lifecycle_scope(async move {
             if matches!(self.standing, ResidentStanding::Paused(_)) {
                 return Ok(KernelStep::Continue(()));
             }
@@ -12544,7 +12565,7 @@ where
                     Err(error)
                 }
             }
-        })
+        }))
     }
 
     fn external_application_failed(

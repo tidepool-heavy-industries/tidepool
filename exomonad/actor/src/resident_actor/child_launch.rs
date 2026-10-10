@@ -952,7 +952,7 @@ mod tests {
     #[tokio::test]
     async fn admitted_machine_and_capture_survive_unconfirmed_launch_cleanup_until_actor_retirement(
     ) {
-        crate::resident_workbench::CompilerCloseOwner::Initialization(
+        crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(
             crate::RetainedActorExit::new(),
         )
         .scope(async {

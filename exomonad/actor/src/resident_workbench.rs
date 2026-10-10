@@ -69,7 +69,7 @@ tokio::task_local! {
 
 #[derive(Clone)]
 pub(crate) enum CompilerCloseOwner {
-    Initialization(crate::RetainedActorExit),
+    ActorLifecycle(crate::RetainedActorExit),
     SharedPreparation {
         producer: crate::RetainedActorExit,
         observer: Box<CompilerCloseOwner>,
@@ -84,7 +84,7 @@ pub(crate) enum CompilerCloseOwner {
 impl CompilerCloseOwner {
     pub(crate) fn close_settled(&self) {
         match self {
-            Self::Initialization(owner) => owner.notify_compiler_close(),
+            Self::ActorLifecycle(owner) => owner.notify_compiler_close(),
             Self::SharedPreparation { producer, observer } => {
                 producer.notify_compiler_close();
                 observer.close_settled();
@@ -155,7 +155,7 @@ impl CompilerCloseOwner {
         admission: CompilerWorkAdmission,
     ) -> bool {
         match self {
-            Self::Initialization(owner) => owner.register_compiler_work(receipt),
+            Self::ActorLifecycle(owner) => owner.register_compiler_work(receipt),
             Self::SharedPreparation { producer, observer } => {
                 producer.register_compiler_work(receipt.clone())
                     && observer.register_receipt(receipt.observation_only(), admission)
@@ -12876,7 +12876,7 @@ pub(crate) mod request_tests {
         let retained = crate::RetainedActorExit::new();
         let operation = registration.scope(async { register_compiler_work().unwrap() });
         assert!(retained.compiler_close_observations().is_empty());
-        let guard = guard.with_compiler_owner(CompilerCloseOwner::Initialization(retained.clone()));
+        let guard = guard.with_compiler_owner(CompilerCloseOwner::ActorLifecycle(retained.clone()));
         let ticket = operation.await;
         assert!(CompilerCloseOwner::current().is_err());
         assert!(matches!(
@@ -13069,7 +13069,7 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn compiler_obligation_survives_waiter_loss_and_actor_stop_until_late_close() {
         let retained = crate::RetainedActorExit::new();
-        let owner = CompilerCloseOwner::Initialization(retained.clone());
+        let owner = CompilerCloseOwner::ActorLifecycle(retained.clone());
         let (entered, observed) = std::sync::mpsc::channel();
         let (release, proceed) = std::sync::mpsc::channel();
         let (settled, settled_observation) = std::sync::mpsc::channel();
@@ -13127,7 +13127,7 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn captured_preparation_owner_survives_waiter_loss_and_retirement() {
         let retained = crate::RetainedActorExit::new();
-        let captured = CompilerCloseOwner::Initialization(retained.clone())
+        let captured = CompilerCloseOwner::ActorLifecycle(retained.clone())
             .scope(async { CompilerCloseOwner::current().unwrap() })
             .await;
         // Register before the task exists, using its captured actual owner.
@@ -13200,7 +13200,7 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn captured_preparation_owner_refuses_admission_after_retirement() {
         let retained = crate::RetainedActorExit::new();
-        let captured = CompilerCloseOwner::Initialization(retained.clone())
+        let captured = CompilerCloseOwner::ActorLifecycle(retained.clone())
             .scope(async { CompilerCloseOwner::current().unwrap() })
             .await;
         retained.retain_cleanup(crate::ResidentCleanupOutcome {
@@ -15919,7 +15919,7 @@ pub(crate) mod request_tests {
         let _subscriber = tracing::subscriber::set_default(subscriber);
         let (_, _, source, _session_root) = host_mount_fixture();
         let retained = crate::RetainedActorExit::new();
-        let owner = CompilerCloseOwner::Initialization(retained.clone());
+        let owner = CompilerCloseOwner::ActorLifecycle(retained.clone());
         let source_layer = crate::CheckpointSourceLayer::default();
         let registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
         let entered = Arc::new(tokio::sync::Notify::new());
