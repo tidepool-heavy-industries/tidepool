@@ -194,12 +194,68 @@ def delegated_command(args, timeout, service_slice, record, environment=None, de
         f'--property=RuntimeMaxSec={timeout:g}s', '--slice=' + service_slice,
         '--unit=' + unit, '--working-directory=' + os.getcwd(),
     ]
+    if record.get('compiler_mode') == 'owned-resident':
+        command.append('--property=DelegateSubgroup=compiler-owner')
+        separator = args.index('--')
+        frontend, child = args[0], args[separator + 1:]
+        helper = [sys.executable, str(Path(__file__).resolve()),
+                  '--exec-delegated-child', unit, frontend,
+                  record['child_scope_report'], '--', *child]
+        args = [*args[:separator + 1], *helper]
+        record['child_scope_helper'] = {
+            'interpreter': launch_file_identity(sys.executable),
+            'script': launch_file_identity(Path(__file__).resolve()),
+            'report': record['child_scope_report'],
+        }
     command.extend('--setenv=' + key + '=' + child_environment[key] for key in environment_names)
     command.extend(['--', *args])
     record.update(unit=unit, service_slice=service_slice,
                   environment_names=environment_names, systemd_tools=tools,
                   cleanup_confirmed=False)
     return command, unit
+
+
+def cgroup_membership(pid):
+    entries = [line[3:] for line in Path(f'/proc/{pid}/cgroup').read_text().splitlines()
+               if line.startswith('0::')]
+    if (len(entries) != 1 or not entries[0].startswith('/')
+            or any(part in ('', '.', '..') for part in entries[0].split('/')[1:])):
+        raise ValueError('one absolute cgroup v2 membership is required')
+    return Path(entries[0])
+
+
+def exec_delegated_child(argv):
+    """Join only this child to its fresh delegated leaf, then preserve its PID by exec."""
+    if (len(argv) < 5 or argv[3] != '--'
+            or not re.fullmatch(r'tidepool-libtest-[0-9a-f]{32}\.service', argv[0])):
+        raise ValueError('invalid delegated child invocation')
+    unit, frontend_text, report_text, _, *program = argv
+    frontend, report = Path(frontend_text), Path(report_text)
+    if (not frontend.is_absolute() or not frontend.is_file()
+            or not report.is_absolute() or not report.parent.is_dir()
+            or not Path(program[0]).is_absolute() or not Path(program[0]).is_file()):
+        raise ValueError('delegated child requires explicit executable and report paths')
+    pid, parent_pid = os.getpid(), os.getppid()
+    membership = cgroup_membership('self')
+    if (membership.name != 'compiler-owner' or membership.parent.name != unit
+            or cgroup_membership(parent_pid) != membership
+            or not os.path.samefile(f'/proc/{parent_pid}/exe', frontend)):
+        raise ValueError('delegated child is not attached to its issuing compiler owner')
+    service = Path('/sys/fs/cgroup') / str(membership.parent).lstrip('/')
+    leaf = service / 'test'
+    # systemd starts the owner in its subgroup, leaving the delegated service
+    # root empty. Kernel controller admission refuses any unexpected root process.
+    leaf.mkdir()
+    (service / 'cgroup.subtree_control').write_text('+memory')
+    (leaf / 'cgroup.procs').write_text('0')
+    expected = membership.parent / 'test'
+    if os.getppid() != parent_pid or cgroup_membership('self') != expected:
+        raise ValueError('delegated child placement changed before exec')
+    with report.open('x') as stream:
+        json.dump({'schema': 1, 'unit': unit, 'pid': pid, 'parent_pid': parent_pid,
+                   'compiler_cgroup': str(membership), 'test_cgroup': str(expected)}, stream)
+        stream.write('\n')
+    os.execv(program[0], program)
 
 
 def observe_delegated_admission(unit, record, finished, final=False):
@@ -1164,6 +1220,9 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                   compiler_mode=compiler_mode, trace_profile=trace_profile)
     service_record = {} if service_slice is not None else None
     if service_record is not None:
+        service_record.update(compiler_mode=compiler_mode)
+        if compiler_mode == 'owned-resident':
+            service_record['child_scope_report'] = str(artifact_root / 'delegated-child-cgroup.json')
         record['delegated_service'] = service_record
     launch_inputs = capture_launch_inputs(binary, environment or os.environ, declared_resources)
     record['launch_inputs'] = launch_inputs
@@ -1422,4 +1481,7 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    if sys.argv[1:2] == ['--exec-delegated-child']:
+        exec_delegated_child(sys.argv[2:])
+    else:
+        sys.exit(main())

@@ -102,6 +102,80 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertIn('TIDEPOOL_COMPILE_CACHE_DIR', record['environment_names'])
         self.assertFalse(any('UNDECLARED_CACHE' in word for word in command))
 
+    def test_owned_delegated_compiler_preserves_exact_child_under_same_service(self):
+        record = {'compiler_mode': 'owned-resident',
+                  'child_scope_report': '/artifacts/delegated-child-cgroup.json'}
+        args = ['/frontend', '--owned-daemon-run', '/artifacts/compiler',
+                '--foreground-jobs', '2', '--', str(self.binary), '--exact', 'suite::works']
+        command, unit = runner.delegated_command(args, 10, 'app.slice', record, environment={})
+        self.assertIn('--property=DelegateSubgroup=compiler-owner', command)
+        separator = command.index('--')
+        self.assertEqual(command[separator + 1:], [*args[:6], sys.executable,
+            str(SCRIPT), '--exec-delegated-child', unit, '/frontend',
+            '/artifacts/delegated-child-cgroup.json', '--', *args[6:]])
+        self.assertEqual(record['child_scope_helper']['script']['sha256'],
+                         hashlib.sha256(SCRIPT.read_bytes()).hexdigest())
+        direct, _ = runner.delegated_command(['/libtest'], 10, 'app.slice', {}, environment={})
+        self.assertNotIn('--property=DelegateSubgroup=compiler-owner', direct)
+        self.assertEqual(direct[-2:], ['--', '/libtest'])
+
+    def test_delegated_exec_moves_only_self_before_preserving_child_pid(self):
+        unit = 'tidepool-libtest-' + 'a' * 32 + '.service'
+        before = Path('/user.slice/app.slice') / unit / 'compiler-owner'
+        after = before.parent / 'test'
+        report = Path(self.tmp.name) / 'child-scope.json'
+        argv = [unit, str(self.binary), str(report), '--', str(self.binary), '--exact', 'suite::works']
+        with patch.object(runner, 'cgroup_membership', side_effect=[before, before, after]), \
+             patch.object(runner.os, 'getpid', return_value=101), \
+             patch.object(runner.os, 'getppid', return_value=102), \
+             patch.object(runner.os.path, 'samefile', return_value=True), \
+             patch.object(Path, 'mkdir') as mkdir, \
+             patch.object(Path, 'write_text', autospec=True) as write, \
+             patch.object(runner.os, 'execv') as execute:
+            runner.exec_delegated_child(argv)
+        mkdir.assert_called_once_with()
+        self.assertEqual([(str(call.args[0]), call.args[1]) for call in write.call_args_list], [
+            (str(Path('/sys/fs/cgroup') / str(before.parent).lstrip('/') / 'cgroup.subtree_control'), '+memory'),
+            (str(Path('/sys/fs/cgroup') / str(after).lstrip('/') / 'cgroup.procs'), '0')])
+        execute.assert_called_once_with(str(self.binary), argv[4:])
+        evidence = json.loads(report.read_text())
+        self.assertEqual((evidence['pid'], evidence['parent_pid']), (101, 102))
+        self.assertEqual(evidence['compiler_cgroup'], str(before))
+        self.assertEqual(evidence['test_cgroup'], str(after))
+
+    def test_delegated_exec_refuses_malformed_or_unexpected_owner_before_writes(self):
+        unit = 'tidepool-libtest-' + 'a' * 32 + '.service'
+        before = Path('/user.slice/app.slice') / unit / 'compiler-owner'
+        argv = [unit, str(self.binary), str(Path(self.tmp.name) / 'scope.json'), '--', str(self.binary)]
+        for case in ('bad_unit', 'relative_executable', 'wrong_leaf', 'wrong_service',
+                     'different_parent', 'wrong_executable'):
+            with self.subTest(case=case):
+                request = list(argv)
+                current, parent, same_executable = before, before, True
+                if case == 'bad_unit': request[0] = '../foreign.service'
+                elif case == 'relative_executable': request[4] = 'ambient-program'
+                elif case == 'wrong_leaf': current = before.parent
+                elif case == 'wrong_service': current = Path('/foreign.service/compiler-owner')
+                elif case == 'different_parent': parent = Path('/another.service/compiler-owner')
+                else: same_executable = False
+                with patch.object(runner, 'cgroup_membership', side_effect=[current, parent]), \
+                     patch.object(runner.os.path, 'samefile', return_value=same_executable), \
+                     patch.object(Path, 'mkdir') as mkdir, \
+                     patch.object(Path, 'write_text') as write, \
+                     patch.object(runner.os, 'execv') as execute:
+                    with self.assertRaises(ValueError):
+                        runner.exec_delegated_child(request)
+                mkdir.assert_not_called()
+                write.assert_not_called()
+                execute.assert_not_called()
+
+    def test_delegated_membership_refuses_ambiguous_or_escaping_paths(self):
+        for text in ('0::relative\n', '0::/a/../b\n', '0::/a/./b\n',
+                     '0::/a//b\n', '0::/a\n0::/b\n', '1:memory:/a\n'):
+            with self.subTest(text=text), patch.object(Path, 'read_text', return_value=text):
+                with self.assertRaises(ValueError):
+                    runner.cgroup_membership('self')
+
     def test_missing_case_cache_is_not_reported_as_runner_cleanup(self):
         root = Path(self.tmp.name) / 'missing-cache-artifacts'
         record = {}

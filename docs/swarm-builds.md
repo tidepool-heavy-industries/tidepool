@@ -106,6 +106,16 @@ and its descendants into a separate service in the larger slice. This
 preserves counted execution, per-case deadlines and complete process cleanup.
 Verify the test process cgroup rather than inferring it from its client.
 
+Owned resident compilation in a delegated test service places the frontend and
+its compiler descendants in `compiler-owner`. The declared isolated runner
+execs each libtest in a fresh sibling `test` cgroup after checking its exact
+service, parent process and compiler executable. This keeps the delegated
+service root empty, so a test can create its production local command resource
+owner without adopting a shared external service. The same service deadline
+and control-group cleanup cover both subtrees. The case report retains the
+child placement and the declared helper/interpreter identities. This path
+requires systemd's `DelegateSubgroup` support; failed delegation refuses setup.
+
 Start with three concurrent heavy hosted cases and schedule independent
 lighter native work alongside them. Observed hosted cases have reached about
 18 GiB per process tree; old live hosts also consume the user slice. Retain
