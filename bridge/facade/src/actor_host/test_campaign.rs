@@ -1681,7 +1681,7 @@ mod tests {
             ));
         }
         let mut config = proptest::test_runner::contextualize_config(config);
-        config.source_file = Some(file!());
+        config.source_file = Some("bridge/facade/src/actor_host/test_campaign.rs");
         config.test_name = Some(concat!(
             module_path!(),
             "::hosted_round_selection_histories_preserve_arrival_order_and_exact_reply_custody"

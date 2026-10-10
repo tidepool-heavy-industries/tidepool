@@ -1015,7 +1015,7 @@ mod source_selection_tests {
         let mut config = property_config();
         config.cases = 16;
         let mut config = proptest::test_runner::contextualize_config(config);
-        config.source_file = Some(file!());
+        config.source_file = Some("tidepool/toolchain/src/artifacts/production_entry.rs");
         config.test_name = Some(concat!(
             module_path!(),
             "::linked_entry_reopens_exact_selection_in_new_process_without_source_replay"

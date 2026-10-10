@@ -1328,7 +1328,10 @@ fn authentic_native_entries_refuse_root_and_order_substitution_before_effects() 
             line,
         },
         &ScalePublication::Ephemeral,
-        AuthorityChecks::TypedEntryRefusalBranches,
+        AuthorityChecks::TypedEntryRefusalBranches(concat!(
+            module_path!(),
+            "::authentic_native_entries_refuse_root_and_order_substitution_before_effects"
+        )),
         &SourceImports::new(),
         None,
     )

@@ -2079,7 +2079,7 @@ mod tests {
             config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
         }
         let mut config = contextualize_config(config);
-        config.source_file = Some(file!());
+        config.source_file = Some("tidepool/extract-cmd/src/endpoint.rs");
         config.test_name = Some(test_name);
         config
     }
@@ -2139,8 +2139,17 @@ mod tests {
         };
         let config = property_config(128, NAME);
         let expected_cases = if mode == "defaults" { 128 } else { 1 };
+        let expected_shrink_iters = if matches!(mode.as_str(), "no-shrink" | "replay") {
+            0
+        } else {
+            4
+        };
+        assert_eq!(config.max_shrink_iters, expected_shrink_iters);
         assert_eq!(config.rng_seed, RngSeed::Fixed(123));
-        assert_eq!(config.source_file, Some(file!()));
+        assert_eq!(
+            config.source_file,
+            Some("tidepool/extract-cmd/src/endpoint.rs")
+        );
         assert_eq!(config.test_name, Some(NAME));
         if mode == "disabled" {
             assert!(config.failure_persistence.is_none());
@@ -2180,7 +2189,7 @@ mod tests {
         });
         assert!(failure.is_err());
         let shrinking = shrinking.into_inner();
-        if config.max_shrink_iters == 0 {
+        if expected_shrink_iters == 0 {
             assert_eq!(shrinking.len(), 1);
         } else {
             assert_eq!(config.max_shrink_iters, 4);

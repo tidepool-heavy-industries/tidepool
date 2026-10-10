@@ -948,7 +948,7 @@ where
 enum AuthorityChecks<'a> {
     Configured,
     RefusalBranches,
-    TypedEntryRefusalBranches,
+    TypedEntryRefusalBranches(&'static str),
     FreshTargetWork,
     SegmentWorkCounts(SegmentWorkShape),
     NativeEmissionOwnersAbsent(&'a std::collections::BTreeSet<(String, String)>),
@@ -1491,8 +1491,8 @@ where
                     old_owners,
                 )
             }
-            AuthorityChecks::TypedEntryRefusalBranches => {
-                compile_cell_program_admitted_receipt_controls(admission.clone())
+            AuthorityChecks::TypedEntryRefusalBranches(test_name) => {
+                compile_cell_program_admitted_receipt_controls(admission.clone(), test_name)
             }
             AuthorityChecks::FreshTargetWork => {
                 compile_cell_program_admitted_work_controls(admission.clone(), None)
@@ -1555,7 +1555,10 @@ where
     .map_err(|failure| crate::session::SessionError::Compile(failure.error))?;
     observe(&program);
     assert!(!checked.items.is_empty());
-    if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) {
+    if matches!(
+        authority_checks,
+        AuthorityChecks::TypedEntryRefusalBranches(_)
+    ) {
         assert!(
             checked.pins.is_empty(),
             "PROGRAM4 must not issue legacy pins"
@@ -1652,7 +1655,10 @@ where
         .iter()
         .filter_map(|item| item.native().map(|native| native.target_owned()))
         .collect();
-    if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) {
+    if matches!(
+        authority_checks,
+        AuthorityChecks::TypedEntryRefusalBranches(_)
+    ) {
         let native_items = program
             .items()
             .iter()
@@ -1711,7 +1717,10 @@ where
         .begin_cell_program(admission, program)
         .unwrap()
         .expect("nonempty compiled cell has an ordered prefix");
-    if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) {
+    if matches!(
+        authority_checks,
+        AuthorityChecks::TypedEntryRefusalBranches(_)
+    ) {
         assert!(checked.items.len() >= 2);
         let before = resident.public_visibility_snapshot_in(public).unwrap();
         let wrong = checked.checked_item(1).unwrap();
@@ -1762,7 +1771,10 @@ where
             else {
                 panic!("checked native item did not return its binding recipe")
             };
-            if matches!(authority_checks, AuthorityChecks::TypedEntryRefusalBranches) && index == 1
+            if matches!(
+                authority_checks,
+                AuthorityChecks::TypedEntryRefusalBranches(_)
+            ) && index == 1
             {
                 let proof = compiled
                     .certification

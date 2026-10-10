@@ -2625,6 +2625,7 @@ pub fn compile_cell_program_admitted(
 #[cfg(test)]
 fn compile_cell_program_admitted_receipt_controls(
     admission: Arc<super::RuntimeCellAdmission>,
+    test_name: &'static str,
 ) -> Result<
     (
         CellCheck,
@@ -2632,14 +2633,14 @@ fn compile_cell_program_admitted_receipt_controls(
     ),
     CellCheckFailure,
 > {
-    compile_cell_program_admitted_inner(admission, CellProgramAudit::Receipts)
+    compile_cell_program_admitted_inner(admission, CellProgramAudit::Receipts(test_name))
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
 enum CellProgramAudit<'a> {
     None,
-    Receipts,
+    Receipts(&'static str),
     PublicationRefusal(&'a Path),
     WorkCounts(Option<scaling_tests::SegmentWorkShape>),
     NativeEmissionOwnersAbsent(&'a std::collections::BTreeSet<(String, String)>),
@@ -2875,8 +2876,8 @@ fn compile_cell_program_admitted_inner(
             offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
         })?;
     #[cfg(test)]
-    if matches!(audit, CellProgramAudit::Receipts) {
-        audit_compiler_issued_item_receipts(&offer, scratch.path());
+    if let CellProgramAudit::Receipts(test_name) = audit {
+        audit_compiler_issued_item_receipts(&offer, scratch.path(), test_name);
     }
     #[cfg(test)]
     if let CellProgramAudit::PublicationRefusal(cache) = audit {
@@ -3322,7 +3323,11 @@ fn audit_compiler_publication_refusal(offer: &ModuleCandidateOffer, root: &Path,
 }
 
 #[cfg(test)]
-fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path) {
+fn audit_compiler_issued_item_receipts(
+    offer: &ModuleCandidateOffer,
+    root: &Path,
+    test_name: &'static str,
+) {
     use sha2::{Digest, Sha256};
     use tidepool_toolchain::certified_products::CertificationError;
     struct RestoreReceipt {
@@ -3368,11 +3373,8 @@ fn audit_compiler_issued_item_receipts(offer: &ModuleCandidateOffer, root: &Path
             ));
         }
         let mut config = proptest::test_runner::contextualize_config(config);
-        config.source_file = Some(file!());
-        config.test_name = Some(concat!(
-            module_path!(),
-            "::audit_compiler_issued_item_receipts"
-        ));
+        config.source_file = Some("tidepool/runtime/src/session/turn.rs");
+        config.test_name = Some(test_name);
         let mut runner = proptest::test_runner::TestRunner::new(config);
         runner
             .run(

@@ -601,7 +601,7 @@ async fn generated_driver_receipt_histories_preserve_exact_owner_and_cleanup() {
         ));
     }
     let mut config = proptest::test_runner::contextualize_config(config);
-    config.source_file = Some(file!());
+    config.source_file = Some("bridge/facade/src/actor_host/embedded_shutdown_tests.rs");
     config.test_name = Some(concat!(
         module_path!(),
         "::generated_driver_receipt_histories_preserve_exact_owner_and_cleanup"
