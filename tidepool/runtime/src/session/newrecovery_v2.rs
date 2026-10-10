@@ -5715,6 +5715,9 @@ mod tests {
         let join = RecoveryArtifactClosure::Join(join);
         let join_id = join.artifact_id();
         wire.nodes[0].artifact_refs = vec![home_id];
+        // This byte-verification control retains payload custody without an
+        // executable group selection after discarding the issued graph edges.
+        wire.nodes[0].native_groups.clear();
         install_fixture_canonical_interfaces(&mut wire);
         wire.nodes[1].artifact_refs = vec![join_id];
         wire.nodes[1].compiler_roles = vec![
