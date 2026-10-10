@@ -1907,6 +1907,16 @@ impl PersistentSession {
         let scope = self
             .mint_detached_scope(source)
             .ok_or(SessionError::DeadScope(source))?;
+        self.prepared_lexical_scope_lease(scope)
+    }
+
+    pub(super) fn prepared_lexical_scope_lease(
+        &self,
+        scope: ScopeId,
+    ) -> Result<Arc<RuntimeLexicalScopeLease>, SessionError> {
+        if !self.scope_tree().is_live(scope) {
+            return Err(SessionError::DeadScope(scope));
+        }
         Ok(Arc::new(RuntimeLexicalScopeLease {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),

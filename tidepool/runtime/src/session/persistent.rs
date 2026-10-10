@@ -1858,6 +1858,42 @@ impl PersistentSession {
         &mut self,
         staged: super::StagedDeclaration,
     ) -> Result<DeclarationPlaneCommit, SessionError> {
+        self.adopt_staged_declaration_prepared(staged, |_, _, _, _, _| Ok(|| {}))
+    }
+
+    /// Prepare an exact checked-prefix successor before durable adoption. The
+    /// returned activation owns its snapshot and only installs it after COMMIT.
+    pub(super) fn adopt_staged_declaration_with_activation<A: FnOnce()>(
+        &mut self,
+        staged: super::StagedDeclaration,
+        prepare: impl FnOnce(
+            SessionCompileView,
+            super::PublicVisibilitySnapshot,
+            Arc<super::admission::RuntimeLexicalScopeLease>,
+        ) -> Result<A, SessionError>,
+    ) -> Result<DeclarationPlaneCommit, SessionError> {
+        self.adopt_staged_declaration_prepared(
+            staged,
+            |session, staged, origin, changes, next_epoch| {
+                let origin = origin.ok_or(SessionError::StaleStagedDeclaration)?;
+                let (view, visibility, retained) =
+                    session.prepare_declaration_successor(staged, origin, changes, next_epoch)?;
+                prepare(view, visibility, retained)
+            },
+        )
+    }
+
+    fn adopt_staged_declaration_prepared<A: FnOnce()>(
+        &mut self,
+        staged: super::StagedDeclaration,
+        prepare: impl FnOnce(
+            &mut Self,
+            &super::StagedDeclaration,
+            Option<&tidepool_codegen::binding_table::PreparedSourceOwnerOrigin>,
+            &tidepool_codegen::binding_table::PreparedDeclarationBindingChanges,
+            u64,
+        ) -> Result<A, SessionError>,
+    ) -> Result<DeclarationPlaneCommit, SessionError> {
         let scope = staged.scope();
         if !self.scopes.is_live(scope) {
             return Err(SessionError::DeadScope(scope));
@@ -1905,6 +1941,13 @@ impl PersistentSession {
                 path: self.lib().root.clone(),
                 detail: error.to_string(),
             })?;
+        let activate = prepare(
+            self,
+            &staged,
+            source_origin.as_ref(),
+            &binding_changes,
+            next_epoch,
+        )?;
         let bindings = &mut self.bindings;
         let epochs = &mut self.public_visibility_epochs;
         self.lib
@@ -1916,6 +1959,7 @@ impl PersistentSession {
                 }
                 bindings.commit_declaration_binding_changes(binding_changes);
                 epochs.insert(scope, next_epoch);
+                activate();
                 DeclarationPlaneCommit {
                     generation,
                     module: SessionModule::lib(generation),
@@ -1923,6 +1967,119 @@ impl PersistentSession {
                     evicted_values,
                 }
             })
+    }
+
+    fn prepare_declaration_successor(
+        &mut self,
+        staged: &super::StagedDeclaration,
+        origin: &tidepool_codegen::binding_table::PreparedSourceOwnerOrigin,
+        changes: &tidepool_codegen::binding_table::PreparedDeclarationBindingChanges,
+        next_epoch: u64,
+    ) -> Result<
+        (
+            SessionCompileView,
+            super::PublicVisibilitySnapshot,
+            Arc<super::admission::RuntimeLexicalScopeLease>,
+        ),
+        SessionError,
+    > {
+        let scope = staged.scope();
+        let certificate = staged
+            .certified_authored
+            .as_ref()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let child = self.scopes.mint_isolated();
+        // This lease stays private until the successor snapshot is installed.
+        // Refusal drops it through the same retirement owner as ordinary captures.
+        let retained = self.prepared_lexical_scope_lease(child)?;
+        let capture = self
+            .bindings
+            .prepare_seed_detached_scope_for_declaration(
+                &self.scopes,
+                scope,
+                child,
+                origin,
+                changes,
+            )
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        self.bindings.commit_prepared_detached_scope(capture);
+        let lib = self
+            .lib
+            .as_mut()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        let mut tip = lib
+            .tips
+            .get(&scope)
+            .cloned()
+            .ok_or(SessionError::StaleStagedDeclaration)?;
+        tip.tip = staged.generation;
+        tip.exact_context = Some(certificate.projection.context().clone());
+        lib.tips.insert(child, tip);
+
+        let entries = self
+            .bindings
+            .prepared_iter_current_in(&self.scopes, scope, changes)
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let mut view = self.build_scoped_compile_view(scope, self.lib());
+        let projection = Arc::make_mut(&mut view.projection);
+        projection.library = Some(super::view::CompileLibrary::Certified {
+            original: staged.module,
+            projection: certificate.projection.clone(),
+        });
+        projection.exact_context = Some(certificate.projection.context().clone());
+        projection
+            .persistent_imports
+            .extend(&staged.turn.workbench_imports);
+        projection.visible_values = entries.iter().map(|(_, entry)| entry.module).collect();
+        let mut names = HashMap::<SessionModule, Vec<String>>::new();
+        for (name, entry) in &entries {
+            names.entry(entry.module).or_default().push(name.0.clone());
+        }
+        projection.visible_value_names = names.into_iter().collect();
+        projection.reachable_values = self
+            .bindings
+            .scope_reachable_modules(&self.scopes, child)
+            .filter(|module| !self.is_stub_module(*module))
+            .collect();
+        projection.shadowing = self
+            .lib()
+            .log
+            .current_items_with_turn(staged.base_tip, &staged.turn);
+        projection
+            .shadowing
+            .extend(entries.iter().map(|(name, _)| super::ExportItem::Value {
+                name: name.0.clone(),
+            }));
+        view.injected_values = self
+            .bindings
+            .live_modules()
+            .filter(|module| !self.is_stub_module(*module))
+            .collect();
+        let mut bindings = entries
+            .into_iter()
+            .map(|(name, entry)| (name.0, entry.id))
+            .collect::<Vec<_>>();
+        bindings.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut source_instances = self
+            .bindings
+            .source_instance_keys_in(&self.scopes, scope)
+            .into_iter()
+            .collect::<Vec<_>>();
+        source_instances.sort();
+        let source_selection = self
+            .bindings
+            .prepared_scope_snapshot_in(&self.scopes, scope, Some(origin), Some(changes))
+            .map_err(SessionError::InvalidPublicBindingPromotion)?;
+        let visibility = super::PublicVisibilitySnapshot {
+            scope,
+            epoch: next_epoch,
+            declaration_tip: staged.generation,
+            machine_incarnation: self.machine_incarnation,
+            bindings,
+            source_instances,
+            source_selection,
+        };
+        Ok((view.canonicalize(), visibility, retained))
     }
 
     pub fn discard_staged_declaration(&self, staged: &super::StagedDeclaration) {
