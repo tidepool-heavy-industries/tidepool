@@ -1,4 +1,4 @@
-use super::tests::{owner, owner_with_journal};
+use super::tests::{owner, owner_with_journal, try_owner_with_journal};
 use super::*;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence, TestCaseResult, TestRunner};
@@ -262,7 +262,14 @@ fn check_history(operations: &[Op], observed: &mut Coverage) -> TestCaseResult {
             Op::Poll | Op::Reopen => {
                 if matches!(operation, Op::Reopen) {
                     drop(resources);
-                    resources = owner_with_journal(&root, journal.clone());
+                    let recovered = try_owner_with_journal(&root, journal.clone());
+                    prop_assert!(
+                        recovered.is_ok(),
+                        "recovery failed: {:?}; {}",
+                        recovered.err(),
+                        context
+                    );
+                    resources = recovered.unwrap();
                     observed.recovery += 1;
                 } else {
                     resources.observe();

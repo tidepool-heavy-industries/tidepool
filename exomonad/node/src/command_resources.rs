@@ -1609,17 +1609,22 @@ mod tests {
     }
 
     pub(super) fn owner_with_journal(root: &Path, journal_path: PathBuf) -> CommandResources {
-        std::fs::create_dir_all(root).unwrap();
+        try_owner_with_journal(root, journal_path).unwrap()
+    }
+
+    pub(super) fn try_owner_with_journal(
+        root: &Path,
+        journal_path: PathBuf,
+    ) -> std::io::Result<CommandResources> {
+        std::fs::create_dir_all(root)?;
         let policy = policy();
         let anchor = DirectoryAnchor::open_existing(
             journal_path.parent().expect("test journal has a parent"),
-        )
-        .unwrap();
+        )?;
         let (journal, events) = Journal::open(
             &anchor,
             journal_path.file_name().expect("test journal has a name"),
-        )
-        .unwrap();
+        )?;
         let owner = CommandResources {
             root: root.to_path_buf(),
             actor_slice: root.to_path_buf(),
@@ -1642,8 +1647,8 @@ mod tests {
             fail_next_allocation_cleanup: std::sync::atomic::AtomicBool::new(false),
             fail_next_control_write: Mutex::new(None),
         };
-        owner.reconcile(events).unwrap();
-        owner
+        owner.reconcile(events)?;
+        Ok(owner)
     }
 
     fn policy() -> CommandResourcePolicy {
