@@ -4,7 +4,7 @@ import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredIn
 import Test.Tasty (withResource)
 import SourceBootCases
 import BoundedReadTest (boundedReadChecks)
-import RequestInputsTest (artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse)
+import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
@@ -17,7 +17,8 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "source-boot"
-  [ testCase "artifact byte ownership" artifactByteOwnership
+  [ testCase "owned arena range reads" ownedArenaRangeReads
+  , testCase "artifact byte ownership" artifactByteOwnership
   , testCase "request input custody histories" requestInputHistories
   , testCase "owned scope input reuse" ownedScopeInputReuse
   , testCase "fixture issuer counting histories" fixtureIssuerCountingHistories

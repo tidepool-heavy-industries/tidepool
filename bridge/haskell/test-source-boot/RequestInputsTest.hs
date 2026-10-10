@@ -1,8 +1,9 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ForeignFunctionInterface #-}
 
-module RequestInputsTest (artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse) where
 
-import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, fromException, throwIO, try)
+import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try)
 import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Monad (foldM, forM, forM_, unless, void, when)
 import qualified Data.ByteString as BS
@@ -15,7 +16,12 @@ import qualified Data.Text as T
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.Directory (copyFile, createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getPermissions, listDirectory, makeAbsolute, removeFile, setPermissions, Permissions(..))
 import System.FilePath ((</>), takeDirectory)
-import System.IO (hFlush, hGetLine, hPutStrLn)
+import System.IO (hClose, hFlush, hGetLine, hPutStrLn)
+import Foreign.C.String (CString, withCString)
+import Foreign.C.Types (CInt(..), CUInt(..))
+import System.Posix.Types (Fd(..))
+import System.Posix.IO (fdToHandle, closeFd)
+import System.Posix.Process (getProcessID)
 import System.Process (CreateProcess(..), StdStream(CreatePipe), callProcess, proc, waitForProcess, withCreateProcess)
 import System.Exit (ExitCode(ExitSuccess))
 import GHC.Conc (ThreadStatus(..), threadStatus)
@@ -55,6 +61,65 @@ import Codec.CBOR.Write (toStrictByteString)
 import SourceBootCases (admitCheckedScope, counterValues)
 import CodecFixtureSupport (readCodecTerm)
 import SourceBootFixtureSupport (withScratch, withTiming, digest, capturePreparedFixture, captureDiagnostics)
+
+foreign import ccall unsafe "memfd_create" createArena :: CString -> CUInt -> IO CInt
+foreign import ccall unsafe "fcntl" sealArena :: CInt -> CInt -> CInt -> IO CInt
+
+-- Exercise the production cold reader against real sealed Linux arenas. The
+-- logical artifact path is absent throughout; it never becomes a read source.
+ownedArenaRangeReads :: IO ()
+ownedArenaRangeReads = withScratch $ \work -> do
+  let bytes = BS.pack [10,20,30]
+      backing = BS.pack [90,91] <> bytes <> BS.pack [92,93]
+      acquire seal = do
+        raw <- withCString "tidepool-artifact-byte-test" (\name -> createArena name 3)
+        when (raw < 0) (fail "memfd_create failed")
+        handle <- bracketOnError (pure (Fd raw)) closeFd fdToHandle
+        (do BS.hPut handle backing
+            hFlush handle
+            when seal $ do
+              result <- sealArena raw 1033 15
+              unless (result == 0) (fail "arena sealing failed")) `onException` hClose handle
+        pid <- getProcessID
+        pure (handle,"/proc/" ++ show pid ++ "/fd/" ++ show raw)
+      release (handle,_) = hClose handle
+      reference endpoint path sha count extent offset = do
+        transport <- either fail pure (ownedArenaRange endpoint extent offset)
+        pure (OriginalInputReference path sha count [work </> "missing-producer-origin"] transport)
+      refused action = do
+        result <- try action :: IO (Either IOException RequestOriginalInputs)
+        unless (either (const True) (const False) result) (fail "invalid owned arena input was accepted")
+  bracket (acquire True) release $ \(_,endpoint) -> do
+    selected <- reference endpoint (work </> "missing-logical-artifact") (digest bytes) 3 7 2
+    cold <- continueRequestInputs emptyCapturedOriginalContent [selected]
+    actual <- capturedRequestInput cold (originalInputPath selected) (digest bytes)
+    unless (actual == bytes && requestInputBytes cold == 3) (fail "cold arena range capture differs")
+    retained <- either fail pure (selectedOriginalContent [selected] cold)
+    badSha <- reference endpoint (work </> "bad-sha") (digest (BS.singleton 0)) 3 7 2
+    badLength <- reference endpoint (work </> "bad-length") (digest bytes) 2 7 2
+    badExtent <- reference endpoint (work </> "bad-extent") (digest bytes) 3 8 2
+    badRange <- reference endpoint (work </> "bad-range") (digest bytes) 3 7 6
+    forM_ [badSha,badLength,badExtent,badRange] $ \bad -> refused (continueRequestInputs emptyCapturedOriginalContent [bad])
+    refused (continueRequestInputs retained [badRange])
+    second <- reference endpoint (work </> "another-logical-artifact") (digest bytes) 3 7 2
+    shared <- continueRequestInputs emptyCapturedOriginalContent [selected,second]
+    firstBody <- capturedRequestInputToken shared (originalInputPath selected) (digest bytes)
+    secondBody <- capturedRequestInputToken shared (originalInputPath second) (digest bytes)
+    let (firstOwner,_,_) = BSI.toForeignPtr (artifactBytes firstBody)
+        (secondOwner,_,_) = BSI.toForeignPtr (artifactBytes secondBody)
+    unless (firstOwner == secondOwner && requestInputBytes shared == 6)
+      (fail "equal cold arena ranges copied bodies or lost per-path allowance")
+    withFixtureEnvironment "TIDEPOOL_REQUEST_CAPTURE_BYTES" "3" $
+      refused (continueRequestInputs retained [selected,second])
+    replacement <- continueRequestInputs emptyCapturedOriginalContent [selected]
+    replacementBytes <- capturedRequestInput replacement (originalInputPath selected) (digest bytes)
+    unless (replacementBytes == bytes) (fail "fresh worker owner could not rehydrate a live arena")
+  bracket (acquire False) release $ \(_,endpoint) -> do
+    selected <- reference endpoint (work </> "unsealed") (digest bytes) 3 7 2
+    before <- listDirectory "/proc/self/fd"
+    forM_ [1..20 :: Int] $ \_ -> refused (continueRequestInputs emptyCapturedOriginalContent [selected])
+    after <- listDirectory "/proc/self/fd"
+    unless (length before == length after) (fail "failed arena reads retained file descriptors")
 
 -- The byte primitive has content identity only. Admission and budgets remain
 -- the responsibility of RequestOriginalInputs, including empty bodies.

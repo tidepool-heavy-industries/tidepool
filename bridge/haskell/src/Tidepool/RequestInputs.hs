@@ -1,3 +1,5 @@
+{-# LANGUAGE ForeignFunctionInterface #-}
+
 -- | Immutable custody of the encoded originals admitted by one physical request.
 -- Readers live only during admission; consumers receive a sealed value and never
 -- fall back to a producer path when a captured input is missing.
@@ -10,13 +12,20 @@ module Tidepool.RequestInputs
   , capturedRequestInputToken
   , capturedRequestInput, mergeRequestInputs, aliasRequestInputs, requestInputRetained, retainRequestEncodedBytes, requestInputBytes, requestInputCount, requestInputBodies, transferRequestInputBodies, revalidateRequestInputs, revalidateRequestInputsWith ) where
 
-import Control.Exception (IOException, try, finally)
+import Control.Exception (IOException, try, finally, bracket)
 import Control.Monad (unless, when, forM_, foldM)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Internal as BSI
+import Data.Bits ((.&.))
+import Foreign.C.Types (CInt(..))
+import Foreign.Ptr (plusPtr)
 import Control.Concurrent.MVar (newMVar, modifyMVar, modifyMVar_, readMVar)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import System.IO (withBinaryFile, IOMode(ReadMode), SeekMode(AbsoluteSeek), hSeek, hFileSize)
+import System.IO (SeekMode(AbsoluteSeek))
+import System.Posix.IO (openFd, closeFd, OpenMode(ReadOnly), defaultFileFlags, OpenFileFlags(cloexec), fdSeek, fdReadBuf)
+import System.Posix.Files (getFdStatus, fileSize)
+import System.Posix.Types (Fd(..))
 import System.FilePath (isAbsolute)
 import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
@@ -90,14 +99,26 @@ validateOwnedArenaRange (OwnedArenaRange _ extent offset) count
   | count < 0 || offset + toInteger count > extent = Left "owned input range leaves its arena"
   | otherwise = Right ()
 
+-- Linux F_GET_SEALS and the required immutable memfd seals. The deployment
+-- transport is Linux-specific; fresh file acquisition uses its ordinary reader.
+foreign import ccall unsafe "fcntl" getArenaSeals :: CInt -> CInt -> IO CInt
+
 readOwnedArenaRange :: OwnedArenaRange -> Int -> IO BS.ByteString
-readOwnedArenaRange (OwnedArenaRange endpoint extent offset) count = do
-  either fail pure (validateOwnedArenaRange (OwnedArenaRange endpoint extent offset) count)
-  withBinaryFile endpoint ReadMode $ \handle -> do
-    actualExtent <- hFileSize handle
+readOwnedArenaRange range@(OwnedArenaRange endpoint extent offset) count = do
+  either fail pure (validateOwnedArenaRange range count)
+  bracket (openFd endpoint ReadOnly defaultFileFlags {cloexec=True}) closeFd $ \fd@(Fd raw) -> do
+    seals <- getArenaSeals raw 1034
+    unless (seals >= 0 && seals .&. 15 == 15) (fail "owned arena lacks immutable seals")
+    actualExtent <- toInteger . fileSize <$> getFdStatus fd
     unless (actualExtent == extent) (fail "owned arena extent differs from its descriptor")
-    hSeek handle AbsoluteSeek offset
-    bytes <- BS.hGet handle count
+    _ <- fdSeek fd AbsoluteSeek (fromInteger offset)
+    bytes <- BSI.createAndTrim count $ \buffer ->
+      let fill done
+            | done == count = pure done
+            | otherwise = do
+                received <- fromIntegral <$> fdReadBuf fd (buffer `plusPtr` done) (fromIntegral (count - done))
+                if received == 0 then pure done else fill (done + received)
+      in fill 0
     unless (BS.length bytes == count) (fail "owned arena range is truncated")
     pure bytes
 
