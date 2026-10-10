@@ -501,16 +501,17 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
         let mut pending = VecDeque::new();
         let children_source = tidepool_testing::fixture_source("bridge/facade/src/actor_host/prepared_runtime_children.hs")
             .replace("{prepared-child-count}", &expected_children.to_string());
-        next_hosted_script_round(&mut requests, &mut pending, &root).await
-            .call("prepared-children", &children_source);
+        let parent_round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+        let parent_operation = parent_round.operation("prepared-children");
+        parent_round.call("prepared-children", &children_source);
         let mut children = HashSet::new();
         let mut scopes = HashSet::new();
         let mut rows = Vec::new();
         for ordinal in 1..=expected_children {
             let label = format!("prepared-child-{ordinal}");
-            let round = select_hosted_script_round(
+            let round = host.while_operation_succeeds(&parent_operation, select_hosted_script_round(
                 &mut requests, &mut pending, HostedScriptSelection::OtherThan(&root),
-            ).await;
+            )).await.unwrap_or_else(|error| panic!("prepared parent child launch failed: {error}"));
             let origin = round.origin();
             assert_ne!(origin.actor(), &root, "parent waits for this actual child reply");
             let nodes = host.context.forest.inspect_host_graph();
@@ -571,7 +572,9 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             assert!(installed.tools.iter().any(|tool| matches!(tool,
                 exomonad_tool::HostedTool::Function(tool) if tool.name == "probe" && tool.description == "41")));
             round.function("prepared-native-probe", "probe", serde_json::json!({"topic": label}));
-            let replied = next_hosted_script_round(&mut requests, &mut pending, origin.actor()).await;
+            let replied = host.while_operation_succeeds(&parent_operation,
+                next_hosted_script_round(&mut requests, &mut pending, origin.actor())).await
+                .unwrap_or_else(|error| panic!("prepared parent native child reply failed: {error}"));
             let output = replied.settled_output("prepared-native-probe");
             assert_eq!(output["status"], "replied", "{output}");
             assert_eq!(output["items"].as_array().unwrap().last().unwrap()["terminalTransfer"], "replyAccepted", "{output}");
@@ -602,7 +605,9 @@ async fn prepared_children_execute_original_native_probe(expected_children: usiz
             eprintln!("prepared-runtime-child {row}");
             rows.push(row);
         }
-        let completed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+        let completed = host.while_operation_succeeds(&parent_operation,
+            next_hosted_script_round(&mut requests, &mut pending, &root)).await
+            .unwrap_or_else(|error| panic!("prepared parent result failed: {error}"));
         completed.assert_committed("prepared-children");
         completed.assert_value("prepared-children", "True");
         progress.parent_result_verified = true;

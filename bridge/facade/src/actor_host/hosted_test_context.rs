@@ -197,6 +197,82 @@ impl std::fmt::Display for HostBarrierFailure {
 
 impl std::error::Error for HostBarrierFailure {}
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum OperationBarrierFailure {
+    Host(HostBarrierFailure),
+    Lookup(String),
+    Settlement {
+        operation: harness::model::OperationId,
+        terminal: harness::store::TerminalOutcome,
+    },
+}
+
+impl std::fmt::Display for OperationBarrierFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Host(error) => error.fmt(formatter),
+            Self::Lookup(error) => write!(
+                formatter,
+                "exact operation settlement lookup failed: {error}"
+            ),
+            Self::Settlement {
+                operation,
+                terminal,
+            } => {
+                write!(formatter,
+                "original operation {operation:?} settled before expected progress: {terminal:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for OperationBarrierFailure {}
+
+async fn exact_operation_terminal(
+    store: &harness::store::Store,
+    scheduler: &harness::turn::JobScheduler,
+    operation: &harness::model::OperationId,
+) -> Result<Option<harness::store::TerminalOutcome>, String> {
+    if let Some(recorded) = store
+        .replay_tool_output_operation(operation)
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(Some(recorded.terminal));
+    }
+    match scheduler.output(operation).await {
+        Ok(output) => Ok(output.as_ref().map(harness::store::TerminalOutcome::from)),
+        Err(harness::turn::JobError::UnknownCall) => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+async fn observe_operation_barrier<F: std::future::Future>(
+    store: &harness::store::Store,
+    scheduler: &harness::turn::JobScheduler,
+    operation: &harness::model::OperationId,
+    future: F,
+) -> Result<F::Output, OperationBarrierFailure> {
+    tokio::pin!(future);
+    loop {
+        if let Some(terminal) = exact_operation_terminal(store, scheduler, operation)
+            .await
+            .map_err(OperationBarrierFailure::Lookup)?
+        {
+            if matches!(terminal, harness::store::TerminalOutcome::Success) {
+                return Ok(future.await);
+            }
+            return Err(OperationBarrierFailure::Settlement {
+                operation: operation.clone(),
+                terminal,
+            });
+        }
+        tokio::select! {
+            result = &mut future => return Ok(result),
+            _ = tokio::time::sleep(Duration::from_millis(5)) => {},
+        }
+    }
+}
+
 async fn observe_host_barrier<F: std::future::Future>(
     outcome: HostOutcome,
     readiness: &mut mpsc::UnboundedReceiver<ActorHostReadiness>,
@@ -708,6 +784,24 @@ impl HostedTestRuntime {
             future,
         )
         .await
+    }
+
+    /// Positive progress must still occur; a successful settlement does not
+    /// replace it. An exact failed/cancelled operation preempts its long wait,
+    /// including after the scheduler has released the job to the durable store.
+    pub(super) async fn while_operation_succeeds<F: std::future::Future>(
+        &self,
+        operation: &harness::model::OperationId,
+        future: F,
+    ) -> Result<F::Output, OperationBarrierFailure> {
+        self.while_host_running(observe_operation_barrier(
+            &self.runtime.store(),
+            &self.runtime.scheduler(),
+            operation,
+            future,
+        ))
+        .await
+        .map_err(OperationBarrierFailure::Host)?
     }
 
     /// Settle assertions and the production host independently. The run and
@@ -1446,6 +1540,211 @@ pub(super) fn cell_output_matches(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn operation_claim(
+        store: &harness::store::Store,
+        request: &str,
+        actor: &str,
+    ) -> harness::model::OperationId {
+        let request = harness::model::RequestId(request.into());
+        let call = harness::model::CallId("expected-call".into());
+        store.write_request(&request, None, actor,
+            &[harness::item::Item(json!({"type":"function_call", "call_id":call.0,"name":"probe","arguments":"{}"}))],
+            harness::store::Usage::default()).unwrap();
+        let operation = store.operation_for_request(&request, &call).unwrap();
+        store.claim_operation(&operation, &request).unwrap();
+        operation
+    }
+
+    fn settle_operation(
+        store: &harness::store::Store,
+        operation: &harness::model::OperationId,
+        terminal: harness::store::TerminalOutcome,
+    ) {
+        store.write_output(operation, &harness::item::Item(json!({"type":"function_call_output", "call_id":operation.call.0, "output":"opaque fixture payload"})), terminal).unwrap();
+    }
+
+    #[tokio::test]
+    async fn operation_barrier_prioritizes_retained_failure_over_expired_wait() {
+        use harness::store::TerminalOutcome;
+        let failure = harness::provider::ToolFailure::with_metadata(
+            "native guard",
+            json!({"class":"version-skew"}),
+        );
+        for terminal in [
+            TerminalOutcome::Failure(failure.clone()),
+            TerminalOutcome::Cancelled,
+            TerminalOutcome::CancelledWithReceipt(Err(failure)),
+            TerminalOutcome::CancelledWithReceipt(Ok(json!({}))),
+            TerminalOutcome::Interrupted,
+            TerminalOutcome::CancellationUnconfirmed("retained native owner".into()),
+        ] {
+            let store = harness::store::Store::memory().unwrap();
+            let scheduler = harness::turn::JobScheduler::new(1).unwrap();
+            let operation = operation_claim(&store, "expected", "/root");
+            settle_operation(&store, &operation, terminal.clone());
+            let deadline =
+                tokio::time::timeout(Duration::ZERO, futures_util::future::pending::<()>());
+            assert_eq!(
+                observe_operation_barrier(&store, &scheduler, &operation, deadline).await,
+                Err(OperationBarrierFailure::Settlement {
+                    operation,
+                    terminal
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operation_barrier_pending_and_success_preserve_progress_wait() {
+        for successful in [false, true] {
+            let store = Arc::new(harness::store::Store::memory().unwrap());
+            let scheduler = harness::turn::JobScheduler::new(1).unwrap();
+            let operation = operation_claim(&store, "expected", "/root");
+            if successful {
+                settle_operation(&store, &operation, harness::store::TerminalOutcome::Success);
+            }
+            let (release, progress) = oneshot::channel();
+            let task = tokio::spawn(async move {
+                observe_operation_barrier(&store, &scheduler, &operation, progress).await
+            });
+            tokio::task::yield_now().await;
+            assert!(
+                !task.is_finished(),
+                "success cannot substitute for the requested progress"
+            );
+            release.send(37).unwrap();
+            assert_eq!(task.await.unwrap(), Ok(Ok(37)));
+        }
+    }
+
+    #[tokio::test]
+    async fn operation_barrier_observes_scheduler_failure_before_store_settlement() {
+        struct TerminalProvider(harness::turn::JobOutput);
+        #[async_trait::async_trait]
+        impl harness::provider::Provider for TerminalProvider {
+            fn tools(&self) -> Vec<serde_json::Value> {
+                vec![json!({"type":"function", "name":"probe", "parameters":{"type":"object"}})]
+            }
+            async fn call(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+            ) -> Result<serde_json::Value, harness::provider::ProviderError> {
+                unreachable!("scheduler uses the complete typed invocation")
+            }
+            async fn complete_call(
+                &self,
+                _: &str,
+                _: harness::item::ToolInput,
+                _: harness::provider::CallContext,
+            ) -> harness::provider::ProviderCompletion {
+                harness::provider::ProviderCompletion {
+                    output: self.0.clone(),
+                    full_success: false,
+                    context: harness::provider::ContextDisposition::Unedited,
+                }
+            }
+        }
+        for output in [
+            harness::turn::JobOutput::Completed(Err("scheduler-only failure".to_owned().into())),
+            harness::turn::JobOutput::Cancelled,
+        ] {
+            let store = harness::store::Store::memory().unwrap();
+            let scheduler = harness::turn::JobScheduler::new(1).unwrap();
+            let operation = operation_claim(&store, "expected", "/root");
+            scheduler
+                .start_operation(
+                    Arc::new(TerminalProvider(output.clone())),
+                    operation.clone(),
+                    operation.origin.actor().clone(),
+                    Some(operation.request.clone()),
+                    "probe".into(),
+                    json!({}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(scheduler.wait(&operation).await.unwrap(), output);
+            assert!(store
+                .replay_tool_output_operation(&operation)
+                .unwrap()
+                .is_none());
+            assert_eq!(
+                observe_operation_barrier(
+                    &store,
+                    &scheduler,
+                    &operation,
+                    tokio::time::timeout(Duration::ZERO, futures_util::future::pending::<()>())
+                )
+                .await,
+                Err(OperationBarrierFailure::Settlement {
+                    operation,
+                    terminal: harness::store::TerminalOutcome::from(&output)
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn operation_barrier_ignores_other_original_operations() {
+        let store = harness::store::Store::memory().unwrap();
+        let scheduler = harness::turn::JobScheduler::new(1).unwrap();
+        let expected = operation_claim(&store, "expected", "/root");
+        for (request, actor) in [("other-request", "/root"), ("other-origin", "/child")] {
+            let unrelated = operation_claim(&store, request, actor);
+            settle_operation(
+                &store,
+                &unrelated,
+                harness::store::TerminalOutcome::Failure("unrelated".to_owned().into()),
+            );
+        }
+        assert!(matches!(
+            observe_operation_barrier(
+                &store,
+                &scheduler,
+                &expected,
+                tokio::time::timeout(
+                    Duration::from_millis(15),
+                    futures_util::future::pending::<()>()
+                )
+            )
+            .await,
+            Ok(Err(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn operation_barrier_observes_pending_to_failed_settlement() {
+        let store = Arc::new(harness::store::Store::memory().unwrap());
+        let scheduler = harness::turn::JobScheduler::new(1).unwrap();
+        let operation = operation_claim(&store, "expected", "/root");
+        let observed = operation.clone();
+        let observing = store.clone();
+        let task = tokio::spawn(async move {
+            observe_operation_barrier(
+                &observing,
+                &scheduler,
+                &observed,
+                futures_util::future::pending::<()>(),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!task.is_finished());
+        let terminal =
+            harness::store::TerminalOutcome::Failure("injected settlement".to_owned().into());
+        settle_operation(&store, &operation, terminal.clone());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(OperationBarrierFailure::Settlement {
+                operation,
+                terminal
+            })
+        );
+    }
 
     #[tokio::test]
     #[ignore = "requires matched compiler deployment; one real workspace toolset preparation"]

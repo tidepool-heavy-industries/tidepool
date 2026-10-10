@@ -516,11 +516,12 @@ async fn accepted_reply_resumes_after_parked_notebook_and_provider_completion() 
             let late = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, admitted.recv())
                 .await.expect("second actual notebook is admitted before reply").unwrap();
             assert_eq!(late.request, "deferred-reply-late");
+            let parent_await = root_after.operation("deferred-parent-await");
             root_after.call(
                 "deferred-parent-await",
                 include_str!("fixtures/deferred_reply_await.hs"),
             );
-            tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+            host.while_operation_succeeds(&parent_await, tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
                 loop {
                     let parent = host.context.forest.inspect_host_graph().into_iter()
                         .find(|node| node.actor == host.context.actor.identity()).unwrap();
@@ -530,7 +531,8 @@ async fn accepted_reply_resumes_after_parked_notebook_and_provider_completion() 
                     }
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-            }).await.expect("parent parks on its typed child watch before reply");
+            })).await.unwrap_or_else(|error| panic!("parent typed child watch failed: {error}"))
+                .expect("parent parks on its typed child watch before reply");
             next_hosted_script_round(&mut requests, &mut pending, &child)
                 .await
                 .async_call("deferred-child-reply", "respond (\"first accepted failure\" :: Text)");

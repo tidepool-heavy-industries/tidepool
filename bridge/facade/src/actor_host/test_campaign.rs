@@ -1086,11 +1086,22 @@ pub(super) fn record_phase(path: &std::path::Path, record: Value) {
 /// neither attaches an actor nor constructs a tool installation.
 pub(super) struct HostedScriptRound {
     pub request: harness::transport::ResponsesRequest,
+    request_id: Option<harness::model::RequestId>,
     reply: tokio::sync::oneshot::Sender<harness::transport::ResponsesTurn>,
     request_started_at: std::time::Instant,
 }
 
 impl HostedScriptRound {
+    pub fn operation(&self, call_id: &str) -> harness::model::OperationId {
+        harness::model::OperationId {
+            origin: self.origin(),
+            request: self
+                .request_id
+                .clone()
+                .expect("Engine supplies the exact durable provider request"),
+            call: harness::model::CallId(call_id.into()),
+        }
+    }
     /// Time spent after the scripted transport request began and before this
     /// test supplies its deterministic response. This is harness coordination,
     /// not model-provider latency.
@@ -1286,10 +1297,10 @@ impl HostedScriptRound {
 
 struct HostedScriptProvider(tokio::sync::mpsc::UnboundedSender<HostedScriptRound>);
 
-#[async_trait::async_trait]
-impl harness::engine::ResponsesTransport for HostedScriptProvider {
-    async fn create(
+impl HostedScriptProvider {
+    async fn round(
         &self,
+        request_id: Option<harness::model::RequestId>,
         request: harness::transport::ResponsesRequest,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
         let request_started_at = std::time::Instant::now();
@@ -1297,6 +1308,7 @@ impl harness::engine::ResponsesTransport for HostedScriptProvider {
         self.0
             .send(HostedScriptRound {
                 request,
+                request_id,
                 reply,
                 request_started_at,
             })
@@ -1306,6 +1318,31 @@ impl harness::engine::ResponsesTransport for HostedScriptProvider {
         response.await.map_err(|_| {
             harness::transport::TransportError::Stream("script abandoned the provider reply".into())
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl harness::engine::ResponsesTransport for HostedScriptProvider {
+    async fn create(
+        &self,
+        request: harness::transport::ResponsesRequest,
+    ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+        self.round(None, request).await
+    }
+
+    async fn create_streaming_for_request(
+        &self,
+        request_id: &harness::model::RequestId,
+        request: harness::transport::ResponsesRequest,
+        sink: tokio::sync::mpsc::Sender<harness::transport::sse::StreamEvent>,
+    ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+        let turn = self.round(Some(request_id.clone()), request).await?;
+        for item in &turn.items {
+            let _ = sink
+                .send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
+                .await;
+        }
+        Ok(turn)
     }
 }
 
@@ -1485,9 +1522,12 @@ mod tests {
             })
         );
         assert_eq!(rows[1]["target"], "tidepool_toolchain::module_candidates");
-        assert_eq!(rows[1]["fields"], serde_json::json!({
-            "phase": "configured_package_owner_wait", "elapsed_ms": 7,
-        }));
+        assert_eq!(
+            rows[1]["fields"],
+            serde_json::json!({
+                "phase": "configured_package_owner_wait", "elapsed_ms": 7,
+            })
+        );
         assert_eq!(rows[2]["target"], "tidepool_toolchain::module_candidates");
         assert_eq!(
             rows[2]["fields"],
@@ -1617,6 +1657,7 @@ mod tests {
             HostedScriptRound {
                 request,
                 reply,
+                request_id: None,
                 request_started_at: std::time::Instant::now(),
             },
             response,
@@ -1868,6 +1909,7 @@ mod tests {
         HostedScriptRound {
             request,
             reply,
+            request_id: None,
             request_started_at: std::time::Instant::now(),
         }
         .call("prepared-children", "display True");
@@ -1877,12 +1919,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scripted_provider_retains_engine_issued_original_operation() {
+        let (provider, mut rounds) = hosted_script_provider();
+        let mut request = request();
+        request.session_id = "exact-run:/root:7".into();
+        request.tools = vec![serde_json::json!({"type":"custom", "name":"haskell_sync"})].into();
+        let request_id = harness::model::RequestId("exact-engine-request".into());
+        let issued = request_id.clone();
+        let (sink, mut events) = tokio::sync::mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            provider
+                .create_streaming_for_request(&issued, request, sink)
+                .await
+        });
+        let round = rounds.recv().await.unwrap();
+        assert_eq!(
+            round.operation("expected-call"),
+            harness::model::OperationId {
+                origin: harness::model::ConversationIdentity::Embedded {
+                    run: "exact-run".into(),
+                    actor: harness::model::AgentPath("/root".into()),
+                    incarnation: "7".into(),
+                },
+                request: request_id,
+                call: harness::model::CallId("expected-call".into()),
+            }
+        );
+        round.call("expected-call", "display True");
+        let turn = task.await.unwrap().unwrap();
+        assert!(
+            matches!(events.recv().await, Some(harness::transport::sse::StreamEvent::ItemDone(item)) if item == turn.items[0])
+        );
+    }
+
+    #[tokio::test]
     async fn scripted_cell_refuses_an_unregistered_tool_before_provider_admission() {
         let (reply, response) = tokio::sync::oneshot::channel();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             HostedScriptRound {
                 request: request(),
                 reply,
+                request_id: None,
                 request_started_at: std::time::Instant::now(),
             }
             .call("prepared-children", "display True");
@@ -1902,6 +1979,7 @@ mod tests {
         HostedScriptRound {
             request,
             reply,
+            request_id: None,
             request_started_at: std::time::Instant::now(),
         }
         .async_call("held-capture", "display True");
@@ -1920,6 +1998,7 @@ mod tests {
         HostedScriptRound {
             request: advertised_request,
             reply,
+            request_id: None,
             request_started_at: std::time::Instant::now(),
         }
         .function("held-yield", "yield", serde_json::json!({}));
@@ -1935,6 +2014,7 @@ mod tests {
             HostedScriptRound {
                 request: wrong_kind,
                 reply,
+                request_id: None,
                 request_started_at: std::time::Instant::now(),
             }
             .function("wrong-kind", "yield", serde_json::json!({}));
