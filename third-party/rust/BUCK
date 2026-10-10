@@ -8,7 +8,7 @@ load("@toolchains//:tidepool.bzl", "checked_harness_source")
 git_fetch(
     name = "exomonad-harness-5fdd156badd86236.git",
     repo = "https://github.com/tidepool-heavy-industries/exomonad-harness.git",
-    rev = "34dafb7c157c9fd35f3ccac7481620773000c585",
+    rev = "ccce52dc5d30b29bdfcf6930ffcfc9f810e63263",
     visibility = [],
 )
 
@@ -15440,8 +15440,8 @@ checked_harness_source(
     name = "exomonad-harness-5fdd156badd86236",
     cp = read_root_config("nix", "coreutils") + "/cp",
     python = read_root_config("nix", "python"),
-    revision = "34dafb7c157c9fd35f3ccac7481620773000c585",
-    nar_hash = "sha256-/Pc7VWo8xsJXnSxXd8u5bzxiLs8BrwMaZXlqFq+OTxI=",
+    revision = "ccce52dc5d30b29bdfcf6930ffcfc9f810e63263",
+    nar_hash = "sha256-PwAfOUxZMpjVmi/HOyj+M2C84+punUWMsOwWf8uE3aA=",
     cargo_lock = "root//:workspace_cargo_lock",
     flake_lock = "root//:workspace_flake_lock",
     provenance_script = "root//:embedded_web_provenance_script",
