@@ -41,7 +41,8 @@ mod turn_observations;
 
 pub use artifacts::{
     compile_targets, read_yield_sites, CompiledArtifacts, ConstructorIdentityMismatch, NominalHead,
-    SiteType, TargetArtifact, YieldSite, YieldSiteCollision, YieldSites,
+    RequestInputLayout, RequestInputLayoutError, SiteType, TargetArtifact, YieldSite,
+    YieldSiteCollision, YieldSites,
 };
 pub use failclass::{classify_compile, FailureClass, FailureEnvelope, Phase};
 

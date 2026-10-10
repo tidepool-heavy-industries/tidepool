@@ -511,6 +511,11 @@ impl ProgramProvenance {
     }
 
     #[must_use]
+    pub fn site(&self, site: u64) -> Option<&YieldSite> {
+        self.sites.get(&site)
+    }
+
+    #[must_use]
     pub fn sites(&self) -> Vec<YieldSite> {
         self.sites.values().cloned().collect()
     }
@@ -4464,45 +4469,19 @@ where
             return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
         }
         let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
-        let input_type = metadata
-            .inputs
-            .first()
-            .filter(|_| (2..=3).contains(&metadata.inputs.len()))
-            .ok_or_else(invalid)?
-            .ty
-            .clone();
-        let missing_witness = || ResidentError::MissingActivationInputWitness { site };
-        if metadata.input_type_witnesses.len() != metadata.inputs.len() {
-            return Err(missing_witness());
-        }
-        let input_type_witness = metadata
-            .input_type_witnesses
-            .first()
-            .and_then(Option::as_ref)
-            .ok_or_else(missing_witness)?
-            .clone();
-        let signatures = metadata
-            .request_type_signatures
-            .clone()
-            .ok_or_else(invalid)?;
-        if metadata.inputs.len()
-            != if signatures.progress().is_some() {
-                3
-            } else {
-                2
-            }
-        {
-            return Err(invalid());
-        }
-        let progress_type_witness = match signatures
-            .progress()
-            .and_then(|_| metadata.input_type_witnesses.get(1))
-        {
-            Some(witness) => Some(Arc::new(
-                witness.as_ref().ok_or_else(missing_witness)?.clone(),
-            )),
-            None => None,
-        };
+        let layout = metadata
+            .request_input_layout()
+            .map_err(|error| match error {
+                crate::RequestInputLayoutError::WitnessArity { .. }
+                | crate::RequestInputLayoutError::MissingWitness { .. } => {
+                    ResidentError::MissingActivationInputWitness { site }
+                }
+                _ => invalid(),
+            })?;
+        let input_type_witness = layout.input().clone();
+        let input_type = input_type_witness.signature().presentation().to_owned();
+        let signatures = layout.signatures().clone();
+        let progress_type_witness = layout.progress().map(|witness| Arc::new(witness.clone()));
         let interfaces = provenance
             .authenticated_inputs
             .get(&site)
@@ -4630,19 +4609,8 @@ where
         let invalid = || ResidentError::InvalidActivationInput { site };
         let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
         let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
-        let signatures = metadata
-            .request_type_signatures
-            .as_ref()
-            .ok_or_else(invalid)?;
-        let count = if signatures.progress().is_some() {
-            3
-        } else {
-            2
-        };
-        if metadata.inputs.len() != count {
-            return Err(invalid());
-        }
-        self.parked_canonical_input_witness(hole.cont_id(), site, count - 1)
+        let layout = metadata.request_input_layout().map_err(|_| invalid())?;
+        self.parked_canonical_input_witness(hole.cont_id(), site, layout.response_index())
     }
 
     /// An observer's own parked typed helper issues its expected result type.

@@ -206,7 +206,8 @@ impl ResidentInteractiveSession {
                 }
             };
         let sites = session.parked_program_provenance(&hole).unwrap_or_default();
-        let signature = decode_typed_request_site(site, &sites.sites())?;
+        let metadata = u64::try_from(site).ok().and_then(|site| sites.site(site));
+        let signature = decode_typed_request_site(site, metadata)?;
         let request = u64::try_from(request_id)
             .map(crate::RequestId)
             .map_err(|_| InteractiveSessionCaptureError::InvalidRequestId(request_id))?;

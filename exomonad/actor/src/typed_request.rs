@@ -1,6 +1,6 @@
 //! Shared type metadata for requests presented to external actor applications.
 
-use tidepool_runtime::YieldSite;
+use tidepool_runtime::{RequestInputLayoutError, YieldSite};
 
 /// Model-facing description of one statically typed response obligation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,37 +44,28 @@ pub enum RequestSignatureError {
     InvalidSite(i64),
     #[error("request site {0} is absent from its GHC metadata")]
     MissingSite(u64),
-    #[error("request site {site} describes {actual} live input types, expected an input and optional progress type")]
-    InputArity { site: u64, actual: usize },
+    #[error(transparent)]
+    Layout(#[from] RequestInputLayoutError),
 }
 
 pub(crate) fn decode_typed_request_site(
     site: i64,
-    sites: &[YieldSite],
+    metadata: Option<&YieldSite>,
 ) -> Result<TypedRequestSignature, RequestSignatureError> {
     let site = u64::try_from(site).map_err(|_| RequestSignatureError::InvalidSite(site))?;
-    let metadata = sites
-        .iter()
-        .find(|metadata| metadata.site == site)
+    let metadata = metadata
+        .filter(|metadata| metadata.site == site)
         .ok_or(RequestSignatureError::MissingSite(site))?;
-    let Some(input) = metadata
-        .inputs
-        .first()
-        .filter(|_| metadata.inputs.len() <= 2)
-    else {
-        return Err(RequestSignatureError::InputArity {
-            site,
-            actual: metadata.inputs.len(),
-        });
-    };
-    let mut response = ResponseExpectation::new(metadata.ty.clone());
+    let layout = metadata.request_input_layout()?;
+    let mut response = ResponseExpectation::new(layout.signatures().reply().presentation());
     response.declaration = metadata.reply_declaration.clone();
     response.declaration_modules = metadata.modules.clone();
-    if let Some(progress) = metadata.inputs.get(1) {
-        response.progress_type = Some(progress.ty.clone());
-    }
+    response.progress_type = layout
+        .signatures()
+        .progress()
+        .map(|progress| progress.presentation().to_owned());
     Ok(TypedRequestSignature {
-        input_type: input.ty.clone(),
+        input_type: layout.input().signature().presentation().to_owned(),
         response,
     })
 }

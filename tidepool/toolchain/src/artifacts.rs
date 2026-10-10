@@ -224,7 +224,100 @@ fn deserialize_request_type_signatures<'de, D: serde::Deserializer<'de>>(
     Option::deserialize(deserializer)
 }
 
+/// The compiler-issued request signature selects the ordinary or progress
+/// layout. The final live input is response authority, never authored progress.
+#[derive(Debug)]
+pub struct RequestInputLayout<'a> {
+    site: &'a YieldSite,
+    signatures: &'a crate::checked_cell::RequestTypeSignatures,
+}
+
+impl<'a> RequestInputLayout<'a> {
+    pub fn input(&self) -> &'a crate::checked_cell::CanonicalInputTypeWitness {
+        self.site.input_type_witnesses[0].as_ref().unwrap()
+    }
+
+    pub fn progress(&self) -> Option<&'a crate::checked_cell::CanonicalInputTypeWitness> {
+        self.signatures
+            .progress()
+            .map(|_| self.site.input_type_witnesses[1].as_ref().unwrap())
+    }
+
+    pub fn response_index(&self) -> usize {
+        self.site.inputs.len() - 1
+    }
+
+    pub fn response(&self) -> &'a crate::checked_cell::CanonicalInputTypeWitness {
+        self.site.input_type_witnesses[self.response_index()]
+            .as_ref()
+            .unwrap()
+    }
+
+    pub fn signatures(&self) -> &'a crate::checked_cell::RequestTypeSignatures {
+        self.signatures
+    }
+}
+
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum RequestInputLayoutError {
+    #[error("request site {site} has no compiler-issued request signatures")]
+    MissingSignatures { site: u64 },
+    #[error("request site {site} describes {actual} live input types, expected {expected} from its compiler-issued request signatures")]
+    InputArity {
+        site: u64,
+        actual: usize,
+        expected: usize,
+    },
+    #[error(
+        "request site {site} describes {actual} canonical input witnesses, expected {expected}"
+    )]
+    WitnessArity {
+        site: u64,
+        actual: usize,
+        expected: usize,
+    },
+    #[error("request site {site} has no canonical witness for live input {index}")]
+    MissingWitness { site: u64, index: usize },
+}
+
 impl YieldSite {
+    /// Parse an already issued request's live input layout. Runtime consumers
+    /// still authenticate this metadata against the actual parked original.
+    pub fn request_input_layout(&self) -> Result<RequestInputLayout<'_>, RequestInputLayoutError> {
+        let site = self.site;
+        let signatures = self
+            .request_type_signatures
+            .as_ref()
+            .ok_or(RequestInputLayoutError::MissingSignatures { site })?;
+        let expected = if signatures.progress().is_some() {
+            3
+        } else {
+            2
+        };
+        if self.inputs.len() != expected {
+            return Err(RequestInputLayoutError::InputArity {
+                site,
+                actual: self.inputs.len(),
+                expected,
+            });
+        }
+        if self.input_type_witnesses.len() != expected {
+            return Err(RequestInputLayoutError::WitnessArity {
+                site,
+                actual: self.input_type_witnesses.len(),
+                expected,
+            });
+        }
+        for (index, witness) in self.input_type_witnesses.iter().enumerate() {
+            if witness.is_none() {
+                return Err(RequestInputLayoutError::MissingWitness { site, index });
+            }
+        }
+        Ok(RequestInputLayout {
+            site: self,
+            signatures,
+        })
+    }
     pub fn same_metadata(&self, other: &Self) -> bool {
         self.metadata_digest() == other.metadata_digest()
     }

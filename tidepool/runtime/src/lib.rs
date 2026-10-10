@@ -47,8 +47,8 @@ pub use session::prepared as prepared_execution;
 pub use span_blocking::spawn_blocking_in_span;
 
 pub use artifacts::{
-    compile_targets, CompiledArtifacts, NominalHead, SiteType, TargetArtifact, YieldSite,
-    YieldSiteCollision, YieldSites,
+    compile_targets, CompiledArtifacts, NominalHead, RequestInputLayout, RequestInputLayoutError,
+    SiteType, TargetArtifact, YieldSite, YieldSiteCollision, YieldSites,
 };
 pub use failclass::{
     classify, classify_compile, classify_session, FailureClass, FailureEnvelope, Phase,

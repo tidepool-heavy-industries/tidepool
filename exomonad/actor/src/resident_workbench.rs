@@ -22886,10 +22886,10 @@ pub(crate) mod request_tests {
                 let issued_requests = program
                     .sites()
                     .into_iter()
-                    .filter(|candidate| candidate.inputs.len() == 1)
+                    .filter(|candidate| candidate.request_input_layout().is_ok())
                     .collect::<Vec<_>>();
                 let [request_site] = issued_requests.as_slice() else {
-                    panic!("the genuine request is the sole one-input site; the accessor has three inputs")
+                    panic!("the genuine request is the sole compiler-issued request layout")
                 };
                 assert_ne!(request_site.site, site);
                 let types = session
