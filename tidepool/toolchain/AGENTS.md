@@ -31,10 +31,12 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   Recovery records interface edges and executable group demand; native edges
   derive from original certificates. A completed source-compilation instance
   proof remains transaction-owned rather than reconstructed from durable bytes.
-- Pure activation previews preserve the original instance graph separately from
+- Pure activation renderers preserve the original instance graph separately from
   native availability. Authored dictionary bodies use retained originals matching
   that capture's canonical interfaces; type custody alone cannot replace native
   bytes, and source-original Core recovery must not replay authored declarations.
+  Renderer evidence contains no mounted-value or invocation authority. Fresh
+  child interfaces and runtime admissions remain independent of specialization.
 - Validate compiler completion against the issued request roles, including private
   native availability. Its persistent declaration snapshot retains independent
   lexical and type roles and cannot validate a promoted request artifact closure.

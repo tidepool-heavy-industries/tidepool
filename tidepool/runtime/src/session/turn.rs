@@ -2474,17 +2474,44 @@ pub enum ActivationPreviewCompilation {
     OriginalDisplayEvidenceUnavailable,
 }
 
-/// Compile a pure recipe against the mounted original input's exact interface.
-pub fn compile_activation_preview(
+/// Pair immutable renderer code with one fresh affine mounted-value admission.
+pub fn bind_activation_renderer(
     admission: Arc<super::RuntimeActivationPreviewAdmission>,
+    renderer: &super::SharedActivationRenderer,
+) -> Result<ActivationPreviewCompilation, TurnFailure> {
+    let renderer = match renderer {
+        super::SharedActivationRenderer::Renderable(renderer)
+        | super::SharedActivationRenderer::Opaque(renderer) => renderer.clone(),
+        super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable => {
+            return Ok(ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable)
+        }
+    };
+    if !renderer.proof.matches_input(admission.input_interface())
+        || renderer.proof.original_context_digest() != admission.original_context_digest()
+    {
+        return Err(CompileError::ExtractFailed(
+            "renderer differs from the mounted original input".into(),
+        )
+        .into());
+    }
+    Ok(ActivationPreviewCompilation::Ready(
+        super::CompiledActivationPreview {
+            admission,
+            renderer,
+        },
+    ))
+}
+
+/// Specialize immutable pure renderer code against the original compiler context.
+pub fn compile_activation_renderer(
+    admission: &super::RuntimeActivationPreviewAdmission,
     template_source: &str,
     budget: u64,
     includes: &[PathBuf],
-) -> Result<ActivationPreviewCompilation, TurnFailure> {
+) -> Result<super::SharedActivationRenderer, TurnFailure> {
     use tidepool_toolchain::activation_preview::{
         ActivationPreviewSelection, ActivationPreviewSpecification,
     };
-    let view = admission.view();
     let context = admission.exact_context().clone();
     let temp = compiler_scratch_directory()?;
     let input_path = temp.path().join("ActivationPreviewTemplate.hs");
@@ -2495,26 +2522,22 @@ pub fn compile_activation_preview(
         .activation_preview()
         .turn_out(temp.path().join("turn.cbor"))
         .output_dir(temp.path())
-        .includes(includes)
-        .session_root(view.session_root())
-        .session_incarnation(view.session().0.to_string())
-        .bind_gen(admission.generation().0);
+        .includes(includes);
     let endpoint = bind_extract_cmd(&cmd)?;
     let selection = ModuleCandidateOffer::select_activation_preview(
         &endpoint,
         includes,
         temp.path(),
         context,
-        admission.input_interface().clone(),
+        admission.input_interface().prototype().clone(),
         ActivationPreviewSpecification {
-            admission_digest: admission.digest(),
-            generation: admission.generation().0,
+            original_context_digest: admission.original_context_digest(),
             budget,
             template_source: template_source.into(),
         },
     )?;
     let ActivationPreviewSelection::Ready(offer) = selection else {
-        return Ok(ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable);
+        return Ok(super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable);
     };
     if let Some(root) = offer.checked_value_root() {
         cmd.session_root(root);
@@ -2538,7 +2561,7 @@ pub fn compile_activation_preview(
         .activation_preview_unavailable(temp.path())
         .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?
     {
-        return Ok(ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable);
+        return Ok(super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable);
     }
     let result = decode_turn_output_dir(temp.path(), &offer, None)
         .map_err(|error| offer.retain_failure(temp.path(), &cmd, &run.output.stderr, error))?;
@@ -2556,9 +2579,8 @@ pub fn compile_activation_preview(
             CompileError::ExtractFailed("activation preview lacks its sealed native proof".into())
         })?
         .clone();
-    if proof.admission_digest() != admission.digest()
-        || proof.generation() != admission.generation().0
-        || !Arc::ptr_eq(proof.input_interface(), admission.input_interface())
+    if proof.original_context_digest() != admission.original_context_digest()
+        || !proof.matches_input(admission.input_interface())
         || !proof.matches_target(&compiled.prepared)
     {
         return Err(CompileError::ExtractFailed(
@@ -2568,13 +2590,16 @@ pub fn compile_activation_preview(
     }
     proof.validate_table(&compiled.table)?;
     proof.validate_yield_sites(&compiled.asks)?;
-    Ok(ActivationPreviewCompilation::Ready(
-        super::CompiledActivationPreview {
-            admission,
-            compiled,
-            proof,
-        },
-    ))
+    let disposition = proof.disposition();
+    let renderer = Arc::new(super::CompiledActivationRenderer { compiled, proof });
+    Ok(match disposition {
+        tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Rendered => {
+            super::SharedActivationRenderer::Renderable(renderer)
+        }
+        tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Opaque => {
+            super::SharedActivationRenderer::Opaque(renderer)
+        }
+    })
 }
 
 /// Prepare every authored item before the caller can execute the

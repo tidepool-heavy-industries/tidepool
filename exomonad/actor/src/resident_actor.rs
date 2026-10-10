@@ -7262,16 +7262,24 @@ where
             workbench.activation_preview_observer = self.activation_preview_observer.clone();
             workbench
         };
-        let mounted = workbench
-            .mount_activation_input(
-                compile_context,
-                input,
-                presentation.origin.as_ref(),
-                request.response.expected_type().to_owned(),
-                request.response.declaration.clone(),
-                request.response.declaration_modules.clone(),
-            )
-            .await;
+        // Input preparation precedes the request's invocation owner. Retain
+        // its compiler transaction under the actor's initialization lifetime.
+        let mounted =
+            crate::resident_workbench::CompilerCloseOwner::Initialization(kernel.retained_exit())
+                .scope(workbench.mount_activation_input(
+                    compile_context,
+                    input,
+                    presentation.origin.as_ref(),
+                    request.response.expected_type().to_owned(),
+                    request.response.declaration.clone(),
+                    request.response.declaration_modules.clone(),
+                ))
+                .await;
+        if let Some(terminal) = kernel.requested_shutdown() {
+            return Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(
+                terminal,
+            ));
+        }
         let mut input = mounted?;
         let input_binding = input.binding;
         let input_preview = std::mem::take(&mut input.input_preview);

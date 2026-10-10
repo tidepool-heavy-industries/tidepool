@@ -276,36 +276,34 @@ against the receipt; home Names must already exist in the admitted environment.
 The canonical activation witness remains a separate semantic equality contract:
 GHC binary bytes are not a canonical type fingerprint.
 
-Pure activation previews use the thirteen-field `host-activation-preview3`
-authorization. It seals the admission, preview generation and budget, protected
-template digest, mounted input generation and complete binder metadata, original
-native signature and canonical witness, mounted value interface/package seals,
-complete original instance interface graph, its original target owner, and ordered include roots. Protected
-target/fingerprint edges expose that graph only to the preview's instance
-traversal; they grant no authored imports or lexical names. The target's canonical
-interface alone supplies its original orphan visibility census, including its
-own orphan identity. A scoped renamer callback restores that census before the
-preview's declarations are typechecked. The worker compiles only
+Pure activation renderers use the nine-field `host-activation-renderer1`
+authorization. It seals the original execution-context identity, budget,
+protected template digest, original native signature and canonical witness,
+complete original instance interface graph, its original target owner, and
+ordered include roots. It contains no mounted value interface, binder or child
+generation. Protected target/fingerprint edges expose that graph only to the
+renderer instance traversal; they grant no authored imports or lexical names.
+The target's canonical interface supplies its original orphan visibility census,
+including its own orphan identity. A scoped renamer callback restores that census
+before typechecking. The worker compiles only
 `Input -> Eff '[] (Text, Bool)`: its single `TidepoolActivationInput` slot is
-replaced with the original native type before renaming. An opaque probe solves
-the exact `WorkbenchDisplay` constraint; a missing instance permits opaque
-output. Missing code for a selected display dependency has a separate unavailable
-result. The final input argument must match the original canonical witness.
+replaced with the original native type before renaming. The probe solves the
+exact `WorkbenchDisplay` constraint; a missing instance permits opaque output.
+Missing code for a selected dependency remains unavailable. The final input
+argument must match the original canonical witness.
 
-Successful preview compilation emits an expression turn and the eight-field
-`TPEXACTACTIVATIONPREVIEW1` receipt. If projection of the selected preview finds
-`UnavailableOriginalHomeDependencies`, the worker instead emits only the
-seven-field `TPEXACTACTIVATIONPREVIEWUNAVAILABLE1` result. It binds the original
-request, admission, generation, template digest and exact input witness bytes;
-no turn or executable packet is emitted. Other projection, source-loading,
-authority, and infrastructure failures remain ordinary failures. Neither
-preview result creates an input value, value interface, or authored checked
-completion. The retired `host-input-check1` and
-`host-activation-input2` purposes and activation-input receipts are rejected.
+Successful compilation emits an expression turn and the seven-field
+`TPEXACTACTIVATIONRENDERER1` receipt. Missing selected original home dependencies
+instead emit the six-field `TPEXACTACTIVATIONRENDERERUNAVAILABLE1` result with no
+turn or executable packet. Both bind the issuer's original context and input
+witness. Other source, authority and infrastructure failures remain failures.
+Renderer evidence is retained by the runtime's original program owner; each
+child receives its own fresh value interface, mount and affine invocation
+admission. No rendered value is cached. Earlier child-bound preview purposes and
+receipts are rejected by this matched worker/frontend migration.
+
 Qualified imports from a protected template retain their exact alias and
 interface graph; changing or duplicating an import cannot inherit that authority.
-The prior `host-activation-preview1` and `host-activation-preview2` authorizations are rejected; deploy the
-matched frontend and worker together.
 
 This is a strict internal migration. Old three-field printed signatures are
 rejected. Deploy the Rust consumer and Haskell worker together and regenerate

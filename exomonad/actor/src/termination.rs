@@ -237,7 +237,14 @@ impl CompilerWorkTicket {
     }
 
     pub(crate) fn run<T>(self, action: impl FnOnce() -> T) -> T {
-        self.run_for_workload(
+        self.run_with_close(action).action
+    }
+
+    pub(crate) fn run_with_close<T>(
+        self,
+        action: impl FnOnce() -> T,
+    ) -> tidepool_runtime::CompilerTransactionOutcome<T> {
+        self.run_for_workload_with_close(
             tidepool_toolchain::artifacts::CompileWorkload::Foreground,
             action,
         )
@@ -250,6 +257,14 @@ impl CompilerWorkTicket {
         workload: tidepool_toolchain::artifacts::CompileWorkload,
         action: impl FnOnce() -> T,
     ) -> T {
+        self.run_for_workload_with_close(workload, action).action
+    }
+
+    fn run_for_workload_with_close<T>(
+        self,
+        workload: tidepool_toolchain::artifacts::CompileWorkload,
+        action: impl FnOnce() -> T,
+    ) -> tidepool_runtime::CompilerTransactionOutcome<T> {
         let cancellation = self.cancellation();
         tidepool_toolchain::artifacts::with_compiler_transaction_cancellable_for_workload(
             workload,
@@ -259,7 +274,6 @@ impl CompilerWorkTicket {
             },
             action,
         )
-        .action
     }
 
     pub(crate) fn consume<T>(

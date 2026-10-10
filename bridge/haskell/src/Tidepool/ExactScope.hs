@@ -4,7 +4,7 @@ module Tidepool.ExactScope
   ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeProducts, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence
   , extendExactScopeInputs, extendExactScopeGeneration, extendCheckedValueScope, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..)
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
-  , ActivationPreviewAdmission(..), ActivationPreviewInputMetadata(..), scopeActivationPreview
+  , ActivationPreviewAdmission(..), scopeActivationPreview
   , PlannedCellAdmission(..), PlannedCellSlot(..)
   , ExactInterfaceEvidence(..), CanonicalOrigin(..), CanonicalInterfaceProof, CanonicalCoreArtifact
   , CanonicalInterfaceAdmission(ModuleInterfaceAdmission, LocalInterfaceAdmission), scopeCanonicalInterfaces, scopeSourceOriginalInterfaces, scopeModuleInterfaceProofs
@@ -162,31 +162,16 @@ data ExactScopePurpose
   | ExactActivationPreviewPurpose ActivationPreviewAdmission [FilePath]
   deriving (Eq, Show)
 
--- A preview consumes the original live input's native type and mounted interface.
--- It grants no authored item, value export, or declaration completion authority.
-data ActivationPreviewInputMetadata = ActivationPreviewInputMetadata
-  { previewInputName :: String
-  , previewInputVarId :: Word64
-  , previewInputModule :: String
-  , previewInputTier :: String
-  , previewInputTypeDisplay :: String
-  , previewInputRootHead :: Maybe (T.Text,T.Text,T.Text)
-  , previewInputHostAuthority :: Maybe String
-  } deriving (Eq, Show)
-
+-- Renderer issuance retains the original type and instance environment. It
+-- grants no mounted-value, authored completion or invocation authority.
 data ActivationPreviewAdmission = ActivationPreviewAdmission
-  { previewAdmissionDigest :: String
-  , previewGeneration :: Word64
+  { previewOriginalContextDigest :: String
   , previewBudget :: Word64
   , previewTemplateSha256 :: String
-  , previewInputGeneration :: Word64
-  , previewInputMetadata :: ActivationPreviewInputMetadata
   , previewInputSignature :: CheckedSignature
   , previewInputWitness :: BS.ByteString
-  , previewInputInterface :: ExactIfaceArtifact
   , previewOriginalInterfaces :: [CheckedTemplateInterface]
   , previewOriginalTarget :: (String,String)
-  , previewInputPackagesSha256 :: String
   } deriving (Eq, Show)
 
 scopeActivationPreview :: ExactScope -> Maybe ActivationPreviewAdmission
@@ -1113,7 +1098,7 @@ scopeValueInterfaces scope = case scopePurpose scope of
   ExactItemPurpose admission _ -> itemValueInterfaces admission
   ExactInspectionPurpose values _ -> values
   ExactReloadInspectionPurpose values _ -> values
-  ExactActivationPreviewPurpose admission _ -> [previewInputInterface admission]
+  ExactActivationPreviewPurpose _ _ -> []
 
 -- The exact scope separates the bounded metadata envelope from the independently
 -- bounded original graph bytes. The request hash seals each path and digest.
@@ -1199,9 +1184,6 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
        forM_ (scopeValueInterfaces scope) $ \iface -> do
          _ <- readVerified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
          pure ()
-       forM_ (scopeActivationPreview scope) $ \admission -> do
-         payload <- readInput (exactPath (previewInputInterface admission) ++ ".packages") (4 * 1024 * 1024)
-         unless (digest payload == previewInputPackagesSha256 admission) (fail "activation preview input package interface changed")
        validateInputClosure producer inputs products
        forM_ published $ \owner -> case Map.lookup owner evidence of
          Just (ModuleInterfaceEvidence proof) | isSourceOriginal (canonicalOrigin proof) -> pure ()
@@ -1674,10 +1656,7 @@ revalidateExactScopes env scopes = do
       emitCount timing ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 scope)
         (fromIntegral (observedByteCount manifest))
       mapM_ (checkProduct observations) (scopeProducts scope)
-      mapM_ (checkValue observations) (scopeValueInterfaces scope)
-      forM_ (scopeActivationPreview scope) $ \admission ->
-        observeSeal observations (exactPath (previewInputInterface admission) ++ ".packages") Nothing
-          (previewInputPackagesSha256 admission) "activation preview input package interface changed")
+      mapM_ (checkValue observations) (scopeValueInterfaces scope))
       :: IO (Either IOException ())
     pure $ either (Left . show) Right result
   where
@@ -2025,45 +2004,30 @@ decodeScope = do
     checkedPurpose requestTypes published, descriptors, interfaceEvidence, nativeProducts,acquisition)
   where
     decodePurpose authCount purpose = case purpose of
-      "host-activation-preview3" -> do
-        unless (authCount == 13) (fail "invalid activation preview admission")
-        admissionDigest <- digestField
-        generation <- decodeWord64
+      "host-activation-renderer1" -> do
+        unless (authCount == 9) (fail "invalid activation renderer admission")
+        originalDigest <- digestField
         budget <- decodeWord64
         templateSha <- digestField
-        inputGeneration <- decodeWord64
-        array 7
-        binder <- ActivationPreviewInputMetadata <$> nonempty <*> decodeWord64 <*> nonempty
-          <*> (nonempty >>= \tier -> if tier `elem` ["ForceData","RetainOpaque"] then pure tier else fail "invalid activation input tier")
-          <*> string <*> nullable (array 3 >> (,,) <$> decodeString <*> decodeString <*> decodeString)
-          <*> nullable (nonempty >>= \authority -> if authority `elem` ["JsonValue","Text","CommandJob"]
-            then pure authority else fail "invalid activation input host authority")
         native <- signature
         witness <- decodeBytes
         unless (not (BS.null witness) && BS.length witness <= 4 * 1024 * 1024)
           (fail "activation input witness exceeds bound")
         either fail pure (validateCheckedTypeWitnessBytes witness)
-        array 4
-        owner <- nonempty
-        interface <- ExactIfaceArtifact "main" owner <$> absolute <*> digestField <*> pure []
-        packagesSha <- digestField
-        unless (generation > 0 && inputGeneration > 0 && generation /= inputGeneration && budget <= fromIntegral (maxBound :: Int)
-            && admissionDigest /= replicate 64 '0' && signatureKey native == "activation-input"
-            && previewInputName binder == "sessionInput"
-            && previewInputModule binder == owner
-            && parseSessionModule owner == Just (SessionModule ValMod (Generation inputGeneration)))
-          (fail "invalid activation preview input identity")
+        unless (budget <= fromIntegral (maxBound :: Int)
+            && originalDigest /= replicate 64 '0' && signatureKey native == "activation-input")
+          (fail "invalid activation renderer input identity")
         originalInputs <- templateInterfaces
         unless (all ((== "main") . templateInterfaceUnit) originalInputs)
-          (fail "activation preview original graph belongs to another home unit")
+          (fail "activation renderer original graph belongs to another home unit")
         array 2
         originalTarget <- (,) <$> nonempty <*> nonempty
         unless (originalTarget `elem` [(templateInterfaceUnit input,templateInterfaceModule input)
             | input <- originalInputs])
-          (fail "activation preview original target leaves its sealed graph")
+          (fail "activation renderer original target leaves its sealed graph")
         paths <- includePaths
-        pure (ExactActivationPreviewPurpose (ActivationPreviewAdmission admissionDigest generation budget
-          templateSha inputGeneration binder native witness interface originalInputs originalTarget packagesSha) paths)
+        pure (ExactActivationPreviewPurpose (ActivationPreviewAdmission originalDigest budget
+          templateSha native witness originalInputs originalTarget) paths)
       "inspection1" -> do
         unless (authCount == 4) (fail "invalid inspection admission")
         injected <- bounded 4096 nonempty

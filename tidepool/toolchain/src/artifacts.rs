@@ -567,7 +567,7 @@ impl CheckedPurpose {
             Self::ReloadInspection => "reload-inspection1",
             Self::Cell => "cell-check4",
             Self::Item => "checked-item5",
-            Self::ActivationPreview => "host-activation-preview3",
+            Self::ActivationPreview => "host-activation-renderer1",
             Self::Program => "cell-program3",
         }
     }
@@ -1555,51 +1555,33 @@ impl ModuleCandidateOffer {
         include: &[PathBuf],
         scratch: &Path,
         context: Arc<crate::declaration_context::ExactCompileContext>,
-        input: Arc<crate::checked_cell::ExactHostBindingInterface>,
+        prototype: Arc<crate::checked_cell::ExactHostBindingPrototype>,
         specification: crate::activation_preview::ActivationPreviewSpecification,
     ) -> Result<crate::activation_preview::ActivationPreviewSelection, CompileError> {
         use crate::activation_preview::{ActivationPreviewOffer, ActivationPreviewSelection};
         let producer = endpoint.identity().producer_bytes();
         if crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
             .sha256()
-            != input.prototype().producer()
+            != prototype.producer()
         {
             return Err(CompileError::ExtractFailed(
                 "activation preview worker differs from the original producer".into(),
             ));
         }
         if !crate::activation_preview::validate_original_display_context(
-            &input,
+            &prototype,
             context.declarations(),
         )? {
             return Ok(ActivationPreviewSelection::OriginalDisplayEvidenceUnavailable);
         }
-        let certificate = input.value_interface_certificate();
-        let values = crate::checked_cell::CheckedValueInputs::capture_checked(
-            vec![(certificate.owner(), certificate.bytes_owned().clone())],
-            std::slice::from_ref(&certificate),
-        )?;
-        let baseline = values.baseline_authorization();
-        let baseline = crate::checked_cell::row(&baseline, 1)?;
-        let copied = crate::checked_cell::row(&baseline[0], 4)?;
-        let packages = certificate
-            .certified_interface()
-            .interface()
-            .package_imports_bytes();
-        std::fs::write(
-            format!("{}.packages", crate::checked_cell::string(&copied[2])?),
-            packages,
-        )?;
         let declarations = Arc::new(
             (**context.declarations())
                 .clone()
-                .extend_interface_context(input.prototype().context())?
-                .extend_retained_value_artifacts(&values.certified_artifacts())?,
+                .extend_interface_context(prototype.context())?,
         );
         let offer = ActivationPreviewOffer {
             specification,
-            input,
-            values: values.clone(),
+            prototype,
             original_execution: context.declarations().clone(),
         };
         let original_interfaces = Value::Array(
@@ -1642,8 +1624,7 @@ impl ModuleCandidateOffer {
                 Some(authorization),
                 private,
             )?
-            .with_source_search_context(include)
-            .with_checked_value_imports(values.import_authority());
+            .with_source_search_context(include);
         Ok(ActivationPreviewSelection::Ready(Self {
             selected: None,
             producer: producer.to_vec(),
@@ -1651,7 +1632,7 @@ impl ModuleCandidateOffer {
             exact: Some(exact),
             checked_cell: None,
             planned_cell: None,
-            checked_values: Some(values),
+            checked_values: None,
             checked_projections: Vec::new(),
             checked: Some(NativeCheckedOffer::ActivationPreview(offer)),
             selected_session_values: Default::default(),
@@ -1686,7 +1667,7 @@ impl ModuleCandidateOffer {
             .map(|inputs| inputs.root())
             .or_else(|| match self.checked.as_ref()? {
                 NativeCheckedOffer::Item(offer) => Some(offer.item.value_input_root()),
-                NativeCheckedOffer::ActivationPreview(offer) => Some(offer.values.root()),
+                NativeCheckedOffer::ActivationPreview(_) => None,
             })
     }
 
@@ -1722,9 +1703,7 @@ impl ModuleCandidateOffer {
                 Some(NativeCheckedOffer::Item(offer)) => offer
                     .item
                     .retain_input_diagnostics(&offer.prefix, destination),
-                Some(NativeCheckedOffer::ActivationPreview(offer)) => {
-                    offer.values.retain_diagnostics(None, destination)
-                }
+                Some(NativeCheckedOffer::ActivationPreview(_)) => Ok(()),
                 None => Ok(()),
             }
         }

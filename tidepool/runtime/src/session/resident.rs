@@ -102,6 +102,7 @@ enum OriginalExecutionContexts {
 struct OriginalExecutionContext {
     identity: [u8; 32],
     context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    renderers: Mutex<BTreeMap<ActivationRendererKey, Arc<RendererSlot<SharedActivationRenderer>>>>,
 }
 
 impl OriginalExecutionContext {
@@ -111,6 +112,7 @@ impl OriginalExecutionContext {
         Arc::new(Self {
             identity: context.semantic_sha256(),
             context,
+            renderers: Mutex::new(BTreeMap::new()),
         })
     }
 }
@@ -153,13 +155,9 @@ impl OriginalExecutionContexts {
         }
     }
 
-    fn require_unique(
-        &self,
-        site: u64,
-    ) -> Result<Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>, ResidentError>
-    {
+    fn require_unique(&self, site: u64) -> Result<Arc<OriginalExecutionContext>, ResidentError> {
         match self {
-            Self::Unique(context) => Ok(Arc::clone(&context.context)),
+            Self::Unique(context) => Ok(Arc::clone(context)),
             Self::Ambiguous(contexts) => {
                 Err(ResidentError::AmbiguousActivationInputOriginalContext {
                     site,
@@ -926,6 +924,7 @@ pub struct RuntimeActivationInput {
     input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
     prototype: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
     original_execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    renderer_owner: Arc<OriginalExecutionContext>,
     progress_type_witness: Option<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>>,
 }
 
@@ -988,6 +987,7 @@ static_assertions::assert_not_impl_any!(RuntimeActivationInputAdmission: Clone, 
 pub struct MountedActivationInput {
     interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
     original_execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    renderer_owner: Arc<OriginalExecutionContext>,
     binding: SessionVarId,
     scope: ScopeId,
     handle: PreparedHandle,
@@ -1041,22 +1041,203 @@ impl RuntimeActivationPreviewAdmission {
     }
 }
 
-/// One protected executable prepared for the original committed input.
-pub struct CompiledActivationPreview {
-    pub(super) admission: Arc<RuntimeActivationPreviewAdmission>,
+/// Immutable renderer code and its compiler proof, independent of a child mount.
+#[derive(Debug)]
+pub struct CompiledActivationRenderer {
     pub(super) compiled: super::turn::CompiledTurn,
     pub(super) proof: Arc<tidepool_toolchain::activation_preview::ExactCompiledActivationPreview>,
+}
+
+#[derive(Debug)]
+pub enum SharedActivationRenderer {
+    Renderable(Arc<CompiledActivationRenderer>),
+    Opaque(Arc<CompiledActivationRenderer>),
+    OriginalDisplayEvidenceUnavailable,
+}
+
+/// Fresh affine permission to apply retained renderer code to one mounted value.
+pub struct CompiledActivationPreview {
+    pub(super) admission: Arc<RuntimeActivationPreviewAdmission>,
+    pub(super) renderer: Arc<CompiledActivationRenderer>,
 }
 
 impl CompiledActivationPreview {
     pub fn proof(
         &self,
     ) -> &Arc<tidepool_toolchain::activation_preview::ExactCompiledActivationPreview> {
-        &self.proof
+        &self.renderer.proof
     }
 }
 
 static_assertions::assert_not_impl_any!(CompiledActivationPreview: Clone, Copy);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ActivationRendererKey {
+    witness: [u8; 32],
+    payload: [u8; 32],
+    recipe: [u8; 32],
+    budget: u64,
+}
+
+#[derive(Debug)]
+struct RendererSlot<T> {
+    state: Mutex<RendererSlotState<T>>,
+    changed: tokio::sync::watch::Sender<()>,
+}
+
+#[derive(Debug)]
+enum RendererSlotState<T> {
+    Empty,
+    Compiling,
+    Ready(Arc<T>),
+    CloseUnconfirmed,
+}
+
+impl<T> RendererSlot<T> {
+    fn new() -> Arc<Self> {
+        let (changed, _) = tokio::sync::watch::channel(());
+        Arc::new(Self {
+            state: Mutex::new(RendererSlotState::Empty),
+            changed,
+        })
+    }
+
+    fn acquire(self: &Arc<Self>) -> RendererAccess<T> {
+        let mut state = self.state.lock();
+        match &*state {
+            RendererSlotState::Ready(value) => RendererAccess::Ready(value.clone()),
+            RendererSlotState::CloseUnconfirmed => RendererAccess::CloseUnconfirmed,
+            RendererSlotState::Compiling => RendererAccess::Wait(RendererWaiter {
+                slot: self.clone(),
+                changed: self.changed.subscribe(),
+            }),
+            RendererSlotState::Empty => {
+                *state = RendererSlotState::Compiling;
+                RendererAccess::Produce(RendererProduction {
+                    slot: Some(self.clone()),
+                    native_started: false,
+                })
+            }
+        }
+    }
+}
+
+pub enum RendererAccess<T> {
+    Ready(Arc<T>),
+    Produce(RendererProduction<T>),
+    Wait(RendererWaiter<T>),
+    CloseUnconfirmed,
+}
+
+pub enum RendererProductionFailure<E> {
+    Compile(E),
+    CloseUnconfirmed(crate::CompilerTransactionClose),
+}
+
+/// Move this affine lease into the compiler's blocking owner. Publish or drop
+/// it only after that owner's native transaction has closed.
+pub struct RendererProduction<T> {
+    slot: Option<Arc<RendererSlot<T>>>,
+    native_started: bool,
+}
+
+impl<T> RendererProduction<T> {
+    pub fn begin_native(&mut self) {
+        self.native_started = true;
+    }
+
+    pub fn settle_native<E>(
+        mut self,
+        outcome: crate::CompilerTransactionOutcome<Result<T, E>>,
+    ) -> Result<Arc<T>, RendererProductionFailure<E>> {
+        match outcome.close {
+            crate::CompilerTransactionClose::Clean
+            | crate::CompilerTransactionClose::NotStarted => {
+                self.native_started = false;
+                outcome
+                    .action
+                    .map(|value| self.publish(value))
+                    .map_err(RendererProductionFailure::Compile)
+            }
+            close @ crate::CompilerTransactionClose::Unconfirmed(_) => {
+                self.native_started = true;
+                Err(RendererProductionFailure::CloseUnconfirmed(close))
+            }
+        }
+    }
+
+    fn publish(mut self, value: T) -> Arc<T> {
+        let value = Arc::new(value);
+        let slot = self.slot.take().expect("one renderer producer");
+        *slot.state.lock() = RendererSlotState::Ready(value.clone());
+        slot.changed.send_replace(());
+        value
+    }
+}
+
+impl<T> Drop for RendererProduction<T> {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            *slot.state.lock() = if self.native_started {
+                RendererSlotState::CloseUnconfirmed
+            } else {
+                RendererSlotState::Empty
+            };
+            slot.changed.send_replace(());
+        }
+    }
+}
+
+pub struct RendererWaiter<T> {
+    slot: Arc<RendererSlot<T>>,
+    changed: tokio::sync::watch::Receiver<()>,
+}
+
+impl<T> RendererWaiter<T> {
+    pub async fn wait(mut self) -> RendererAccess<T> {
+        self.changed
+            .changed()
+            .await
+            .expect("renderer slot owns notification sender");
+        self.slot.acquire()
+    }
+}
+
+impl RuntimeActivationPreviewAdmission {
+    pub fn acquire_renderer(
+        &self,
+        template_source: &str,
+        budget: u64,
+    ) -> Result<RendererAccess<SharedActivationRenderer>, ResidentError> {
+        let witness = self
+            .mounted
+            .interface
+            .original_input_type()
+            .expect("mounted original input");
+        let key = ActivationRendererKey {
+            witness: witness.commitment(),
+            payload: witness.metadata_digest(),
+            recipe: *blake3::hash(template_source.as_bytes()).as_bytes(),
+            budget,
+        };
+        let mut renderers = self.mounted.renderer_owner.renderers.lock();
+        if renderers.len() >= 4096 && !renderers.contains_key(&key) {
+            return Err(ResidentError::ActivationPreviewRefused {
+                binding: self.mounted.binding,
+            });
+        }
+        let slot = renderers
+            .entry(key)
+            .or_insert_with(RendererSlot::new)
+            .clone();
+        drop(renderers);
+        Ok(slot.acquire())
+    }
+
+    pub fn original_context_digest(&self) -> [u8; 32] {
+        self.mounted.renderer_owner.identity
+    }
+}
 
 impl RootCustody {
     /// Wrap a handle minted by the resident session.
@@ -4023,7 +4204,8 @@ where
             .authenticated_inputs
             .get(&site)
             .ok_or_else(invalid)?;
-        let original_execution = interfaces.execution.require_unique(site)?;
+        let renderer_owner = interfaces.execution.require_unique(site)?;
+        let original_execution = renderer_owner.context.clone();
         let type_evidence = self
             .request_site_type_evidence(site)
             .ok_or_else(invalid)?
@@ -4046,6 +4228,7 @@ where
             input_type_witness: Arc::new(input_type_witness),
             prototype,
             original_execution,
+            renderer_owner,
             progress_type_witness,
         })
     }
@@ -4487,6 +4670,7 @@ where
         Ok(MountedActivationInput {
             interface,
             original_execution: owner.input.original_execution,
+            renderer_owner: owner.input.renderer_owner,
             binding,
             scope,
             handle,
@@ -5859,6 +6043,30 @@ where
         }))
     }
 
+    /// Revalidate the fresh mount after compiler work or waiting without a
+    /// checkout. Retained renderer identity never substitutes for this fence.
+    pub fn validate_activation_preview_admission(
+        &mut self,
+        admission: &RuntimeActivationPreviewAdmission,
+    ) -> Result<(), ResidentError> {
+        self.settle_dropped_custody();
+        self.validate_mounted_activation_input(&admission.mounted)?;
+        if !Arc::ptr_eq(&admission.owner, self.state.admission_owner())
+            || admission.owner_epoch != self.state.admission_owner().epoch()
+            || self.state.compile_view_digest_in(admission.mounted.scope)
+                != Some(admission.view_digest)
+            || admission.consumed.load(Ordering::Acquire)
+        {
+            return Err(ResidentError::ActivationPreviewRefused {
+                binding: admission.mounted.binding,
+            });
+        }
+        if self.state.mount_cancelled(self.run_context.resource_scope) {
+            return Err(PreparedRuntimeError::Cancelled.into());
+        }
+        Ok(())
+    }
+
     /// Run only a sealed pure preview of this exact original committed root.
     pub fn run_activation_preview(
         &mut self,
@@ -5871,18 +6079,21 @@ where
         if !Arc::ptr_eq(&admission.owner, self.state.admission_owner())
             || admission.owner_epoch != self.state.admission_owner().epoch()
             || self.state.compile_view_digest_in(mounted.scope) != Some(admission.view_digest)
-            || compiled.proof.admission_digest() != admission.digest
-            || compiled.proof.generation() != admission.generation.0
-            || !Arc::ptr_eq(compiled.proof.input_interface(), &mounted.interface)
-            || !compiled.proof.matches_target(&compiled.compiled.prepared)
+            || compiled.renderer.proof.original_context_digest() != mounted.renderer_owner.identity
+            || !compiled.renderer.proof.matches_input(&mounted.interface)
+            || !compiled
+                .renderer
+                .proof
+                .matches_target(&compiled.renderer.compiled.prepared)
             || compiled
+                .renderer
                 .compiled
                 .certification
                 .as_ref()
                 .is_none_or(|certification| {
                     certification
                         .checked_activation_preview()
-                        .is_none_or(|proof| !Arc::ptr_eq(proof, &compiled.proof))
+                        .is_none_or(|proof| !Arc::ptr_eq(proof, &compiled.renderer.proof))
                 })
         {
             return Err(ResidentError::ActivationPreviewRefused {
@@ -5890,12 +6101,14 @@ where
             });
         }
         compiled
+            .renderer
             .proof
-            .validate_table(&compiled.compiled.table)
+            .validate_table(&compiled.renderer.compiled.table)
             .map_err(SessionError::Compile)?;
         compiled
+            .renderer
             .proof
-            .validate_yield_sites(&compiled.compiled.asks)
+            .validate_yield_sites(&compiled.renderer.compiled.asks)
             .map_err(SessionError::Compile)?;
         if self.state.mount_cancelled(self.run_context.resource_scope) {
             return Err(PreparedRuntimeError::Cancelled.into());
@@ -5906,9 +6119,9 @@ where
             .map_err(|_| ResidentError::ActivationPreviewRefused {
                 binding: mounted.binding,
             })?;
-        let provenance = self.provenance_for(&compiled.compiled.code())?;
+        let provenance = self.provenance_for(&compiled.renderer.compiled.code())?;
         self.run_prepared_for_purpose(
-            compiled.compiled.into_code(),
+            compiled.renderer.compiled.code(),
             PreparedTurnMode::Value,
             Some(mounted.handle),
             PreparedExecutionPurpose::HostActivationPreview(admission.scope_lease.clone()),
@@ -10455,5 +10668,152 @@ mod preview_budget_tests {
             }
         }
         assert_eq!(truncate_preview_at_line("λ".into(), 1), "~");
+    }
+}
+
+#[cfg(test)]
+mod renderer_slot_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+        #[test]
+        fn renderer_slot_matches_single_producer_model(operations in prop::collection::vec(0u8..6, 1..100)) {
+            let slot = RendererSlot::<usize>::new();
+            let mut producer = None;
+            let mut ready = None;
+            let mut waiters = Vec::new();
+            for (step, operation) in operations.into_iter().enumerate() {
+                match operation {
+                    0 | 5 => {
+                        let borrowed = slot.clone();
+                        match borrowed.acquire() {
+                            RendererAccess::Produce(lease) => {
+                                prop_assert!(producer.is_none() && ready.is_none());
+                                producer = Some(lease);
+                            }
+                            RendererAccess::Wait(waiter) => {
+                                prop_assert!(producer.is_some() && ready.is_none());
+                                waiters.push(waiter);
+                            }
+                            RendererAccess::Ready(value) => prop_assert_eq!(Some(*value), ready),
+                            RendererAccess::CloseUnconfirmed => prop_assert!(false, "model never starts native work"),
+                        }
+                    }
+                    1 => { drop(producer.take()); }
+                    2 => if let Some(lease) = producer.take() {
+                        let published = lease.publish(step);
+                        ready = Some(step);
+                        prop_assert_eq!(*published, step);
+                    },
+                    3 => { waiters.pop(); }
+                    4 => {
+                        let state = slot.state.lock();
+                        match &*state {
+                            RendererSlotState::Empty => prop_assert!(producer.is_none() && ready.is_none()),
+                            RendererSlotState::Compiling => prop_assert!(producer.is_some() && ready.is_none()),
+                            RendererSlotState::Ready(value) => prop_assert_eq!(Some(**value), ready),
+                            RendererSlotState::CloseUnconfirmed => prop_assert!(false, "model never starts native work"),
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn renderer_waiter_loss_retry_and_ready_release() {
+        let slot = RendererSlot::<usize>::new();
+        let RendererAccess::Produce(mut first) = slot.acquire() else {
+            panic!("first producer")
+        };
+        let RendererAccess::Wait(abandoned) = slot.acquire() else {
+            panic!("observer")
+        };
+        drop(abandoned);
+        let RendererAccess::Wait(waiter) = slot.acquire() else {
+            panic!("remaining observer")
+        };
+        first.begin_native();
+        assert!(matches!(
+            first.settle_native(crate::CompilerTransactionOutcome {
+                action: Err::<usize, _>("failed specialization"),
+                close: crate::CompilerTransactionClose::Clean,
+            }),
+            Err(RendererProductionFailure::Compile("failed specialization"))
+        ));
+        let RendererAccess::Produce(second) = waiter.wait().await else {
+            panic!("retry producer")
+        };
+        let RendererAccess::Wait(waiter) = slot.acquire() else {
+            panic!("second observer")
+        };
+        let published = second.publish(42);
+        let RendererAccess::Ready(observed) = waiter.wait().await else {
+            panic!("sealed result")
+        };
+        assert!(Arc::ptr_eq(&published, &observed));
+        let weak_slot = Arc::downgrade(&slot);
+        let weak_result = Arc::downgrade(&published);
+        drop(slot);
+        assert!(weak_slot.upgrade().is_none());
+        drop(published);
+        assert!(weak_result.upgrade().is_some());
+        drop(observed);
+        assert!(weak_result.upgrade().is_none());
+    }
+
+    #[tokio::test]
+    async fn renderer_unconfirmed_native_settlement_never_retries() {
+        let slot = RendererSlot::<usize>::new();
+        let RendererAccess::Produce(mut producer) = slot.acquire() else {
+            panic!("first producer")
+        };
+        let RendererAccess::Wait(waiter) = slot.acquire() else {
+            panic!("waiter")
+        };
+        producer.begin_native();
+        let outcome = crate::CompilerTransactionOutcome {
+            action: Err::<usize, _>("native failure"),
+            close: crate::CompilerTransactionClose::Unconfirmed(
+                tidepool_extract_cmd::CompilerTransactionCloseEvidence {
+                    reason: tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest,
+                    retirement:
+                        tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
+                            disconnect: None,
+                        },
+                    earlier: Vec::new(),
+                },
+            ),
+        };
+        assert!(matches!(
+            producer.settle_native(outcome),
+            Err(RendererProductionFailure::CloseUnconfirmed(_))
+        ));
+        assert!(matches!(
+            waiter.wait().await,
+            RendererAccess::CloseUnconfirmed
+        ));
+        assert!(matches!(slot.acquire(), RendererAccess::CloseUnconfirmed));
+    }
+
+    #[tokio::test]
+    async fn renderer_native_panic_cannot_publish_retry() {
+        let slot = RendererSlot::<usize>::new();
+        let RendererAccess::Produce(mut producer) = slot.acquire() else {
+            panic!("first producer")
+        };
+        let RendererAccess::Wait(waiter) = slot.acquire() else {
+            panic!("waiter")
+        };
+        producer.begin_native();
+        drop(producer);
+        assert!(matches!(
+            waiter.wait().await,
+            RendererAccess::CloseUnconfirmed
+        ));
+        assert!(matches!(slot.acquire(), RendererAccess::CloseUnconfirmed));
     }
 }

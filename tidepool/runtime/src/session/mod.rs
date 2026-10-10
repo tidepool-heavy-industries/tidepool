@@ -40,6 +40,9 @@ pub use recovery_hydration::{RecoveryRunAuthority, RecoverySuccessorAuthority};
 pub mod registry;
 pub mod render;
 pub mod resident;
+pub use resident::{
+    CompiledActivationRenderer, RendererAccess, RendererProductionFailure, SharedActivationRenderer,
+};
 pub mod turn;
 pub mod view;
 pub mod workbench;

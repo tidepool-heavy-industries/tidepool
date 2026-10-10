@@ -32,3 +32,12 @@ inferring that a missing binding means nothing happened. Exact transport
 retries return retained receipts, while newly submitted source is new intent.
 Keep workbench observation formatting separate from execution and authority;
 retain full results and expose expansion without rerunning effects.
+
+Original program provenance owns lazy activation renderer specialization. Its
+slots key issued canonical witness and protected recipe/budget; original context
+facts stay with one retained owner. Renderer compilation and asynchronous waiting
+hold no machine checkout. Reacquisition validates the mounted input and fresh
+affine admission before invocation. Only `Clean` or `NotStarted` compiler
+settlement permits publication or retry; successful code survives its first
+consumer's exit. Unconfirmed closure and producer panic wake waiters with terminal
+refusal without admitting another producer. Slots retain code, never rendered values.

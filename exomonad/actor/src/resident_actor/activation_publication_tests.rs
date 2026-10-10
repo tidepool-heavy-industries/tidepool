@@ -180,6 +180,8 @@ async fn interrupt_during_preview(
         let mounted = match observation {
             ActivationPublicationObservation::InputMounted(mounted) => mounted,
             ActivationPublicationObservation::NativeClaimed
+            | ActivationPublicationObservation::RendererProducer
+            | ActivationPublicationObservation::RendererWaiting
             | ActivationPublicationObservation::BeforeConfirmation
             | ActivationPublicationObservation::NativeSettled(_) => return Ok(()),
             ActivationPublicationObservation::ToolsPrepared {

@@ -316,6 +316,7 @@
     "exomonad/examples/workspace/.exomonad/checks/background-command-example.hs",
     "exomonad/examples/workspace/.exomonad/checks/workspace-quantities.hs",
     "tidepool/runtime/src/session/fixtures/activation-input-function.hs",
-    "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs"
+    "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
+    "tidepool/runtime/src/session/fixtures/activation-input-twenty-renderers.hs"
   ]
 }

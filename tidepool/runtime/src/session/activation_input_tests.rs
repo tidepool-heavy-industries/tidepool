@@ -1309,6 +1309,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
             .execution
             .require_unique(site)
             .unwrap()
+            .context
             .toolchain_identity_sha256(),
         producer
     );
@@ -1317,6 +1318,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
             .execution
             .require_unique(site)
             .unwrap()
+            .context
             .artifact_view()
             .descriptors()
             .is_empty(),
@@ -2061,6 +2063,7 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
             .execution
             .require_unique(site)
             .unwrap()
+            .context
             .semantic_sha256()
     );
     drop(input);
@@ -2637,10 +2640,9 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
         &fixture.recipe.include,
         scratch.path(),
         admission.exact_context().clone(),
-        admission.input_interface().clone(),
+        admission.input_interface().prototype().clone(),
         ActivationPreviewSpecification {
-            admission_digest: admission.digest(),
-            generation: admission.generation().0,
+            original_context_digest: admission.original_context_digest(),
             budget: 512,
             template_source: template.clone(),
         },
@@ -2689,7 +2691,7 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
     let handles = resident.value_handle_count();
     let visibility = resident.public_visibility_snapshot_in(ScopeId::ROOT);
     let compiled =
-        match turn::compile_activation_preview(admission, &template, 512, &fixture.recipe.include)
+        match compile_activation_preview(admission, &template, 512, &fixture.recipe.include)
             .expect("pure preview must not transport unrelated original prefix generations")
         {
             turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
@@ -2757,7 +2759,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         .public_visibility_snapshot_in(ScopeId::ROOT)
         .unwrap();
     let template = turn::assemble_activation_preview_module(512);
-    let compiled = match turn::compile_activation_preview(admission, &template, 512, &includes)
+    let compiled = match compile_activation_preview(admission, &template, 512, &includes)
         .expect("prepare a pure display from the original ordinary compiler evidence")
     {
         turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
@@ -2949,15 +2951,14 @@ fn execute_mounted_input_preview(
         .public_visibility_snapshot_in(ScopeId::ROOT)
         .unwrap();
     let template = turn::assemble_activation_preview_module(512);
-    let compiled =
-        match turn::compile_activation_preview(admission, &template, 512, &recipe.include)
-            .expect("prepare preview against actual original compiler authority")
-        {
-            turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
-            turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => {
-                panic!("complete original display environment must remain available")
-            }
-        };
+    let compiled = match compile_activation_preview(admission, &template, 512, &recipe.include)
+        .expect("prepare preview against actual original compiler authority")
+    {
+        turn::ActivationPreviewCompilation::Ready(compiled) => compiled,
+        turn::ActivationPreviewCompilation::OriginalDisplayEvidenceUnavailable => {
+            panic!("complete original display environment must remain available")
+        }
+    };
     assert_eq!(
         compiled.proof().disposition(),
         tidepool_toolchain::activation_preview::ActivationPreviewDisposition::Rendered,
@@ -3041,7 +3042,7 @@ fn activation_preview_selected_original_dictionary_without_native_body_is_unavai
         .public_visibility_snapshot_in(ScopeId::ROOT)
         .unwrap();
     let submissions = tidepool_extract_cmd::extract_spawn_count();
-    let selected = turn::compile_activation_preview(
+    let selected = compile_activation_preview(
         admission,
         &turn::assemble_activation_preview_module(512),
         512,
@@ -3109,10 +3110,9 @@ fn activation_preview_type_only_original_context_is_unavailable_before_instance_
         &fixture.recipe.include,
         scratch.path(),
         Arc::new(ExactCompileContext::new(type_only)),
-        admission.input_interface().clone(),
+        admission.input_interface().prototype().clone(),
         ActivationPreviewSpecification {
-            admission_digest: admission.digest(),
-            generation: admission.generation().0,
+            original_context_digest: admission.original_context_digest(),
             budget: 512,
             template_source: turn::assemble_activation_preview_module(512),
         },
@@ -4079,4 +4079,28 @@ fn checked_binding_survives_export_and_executes_in_later_cell() {
     drop(parcel);
     drop(interface);
     drop(resident);
+}
+
+fn compile_activation_preview(
+    admission: Arc<RuntimeActivationPreviewAdmission>,
+    template: &str,
+    budget: u64,
+    includes: &[std::path::PathBuf],
+) -> Result<turn::ActivationPreviewCompilation, turn::TurnFailure> {
+    let renderer = match admission
+        .acquire_renderer(template, budget)
+        .expect("admitted renderer slot")
+    {
+        RendererAccess::Ready(renderer) => renderer,
+        RendererAccess::Produce(producer) => producer.publish(turn::compile_activation_renderer(
+            &admission, template, budget, includes,
+        )?),
+        RendererAccess::Wait(_) => {
+            panic!("synchronous semantic fixture has no concurrent producer")
+        }
+        RendererAccess::CloseUnconfirmed => {
+            panic!("semantic fixture has no unconfirmed native close")
+        }
+    };
+    turn::bind_activation_renderer(admission, &renderer)
 }

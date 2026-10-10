@@ -404,8 +404,7 @@ runActivationPreviewMode parserFlags compiler caches request args path = do
         render body = do
           source <- replaceRecipeMarker "{{ACTIVATION_PREVIEW}}" body original
           let owner = generatedScaffoldModuleName
-                ["activation-preview-scaffold-v1", scopeSemanticSha256 exact
-                , previewAdmissionDigest admission, source]
+                ["activation-renderer-scaffold-v1", previewOriginalContextDigest admission, source]
           protected <- either fail pure (renameScaffoldModuleHeader owner original)
           named <- replaceRecipeMarker "{{ACTIVATION_PREVIEW}}" body protected
           (_, moduleName', modulePath) <- writeSplicedModule outDir lastAttempt named
@@ -447,9 +446,9 @@ runActivationPreviewMode parserFlags compiler caches request args path = do
     let text = encodeString . T.pack
     case projection of
       Left _ -> BS.writeFile (outDir </> "activation-preview-unavailable.cbor") $ toStrictByteString
-        (encodeListLen 7 <> text "TPEXACTACTIVATIONPREVIEWUNAVAILABLE1" <> text "1"
-          <> text (scopeRequestSha256 exact) <> text (previewAdmissionDigest admission)
-          <> encodeWord64 (previewGeneration admission) <> text (previewTemplateSha256 admission)
+        (encodeListLen 6 <> text "TPEXACTACTIVATIONRENDERERUNAVAILABLE1" <> text "1"
+          <> text (scopeRequestSha256 exact) <> text (previewOriginalContextDigest admission)
+          <> text (previewTemplateSha256 admission)
           <> encodeBytes (previewInputWitness admission))
       Right (artifacts, productContext) -> do
         unless (all (null . paYieldSites) artifacts) (fail "pure activation preview emitted suspension sites")
@@ -460,9 +459,9 @@ runActivationPreviewMode parserFlags compiler caches request args path = do
         outFile <- requireArg "--turn-out" (requestTurnOut args)
         BS.writeFile outFile (encodeTurnOut (TExpr 0 (concatMap paYieldSites artifacts) (T.pack source)))
         BS.writeFile (outDir </> "activation-preview.cbor") $ toStrictByteString
-          (encodeListLen 8 <> text "TPEXACTACTIVATIONPREVIEW1" <> text "1"
-            <> text (scopeRequestSha256 exact) <> text (previewAdmissionDigest admission)
-            <> encodeWord64 (previewGeneration admission) <> text (shaHex (TE.encodeUtf8 (T.pack source)))
+          (encodeListLen 7 <> text "TPEXACTACTIVATIONRENDERER1" <> text "1"
+            <> text (scopeRequestSha256 exact) <> text (previewOriginalContextDigest admission)
+            <> text (shaHex (TE.encodeUtf8 (T.pack source)))
             <> encodeBytes witnessBytes <> text (if rendered then "rendered" else "opaque"))
   case result of
     Left _ -> readIORef lastAttempt >>= mapM_ (\(output, source) -> do

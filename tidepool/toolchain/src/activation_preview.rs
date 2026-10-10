@@ -1,5 +1,5 @@
-//! Pure observation of an already mounted original input. The compiler proof
-//! certifies a preview target, never a binding or an authored cell completion.
+//! Immutable pure renderers specialized against original compiler type and
+//! instance evidence. Concrete mounted-value authority belongs to the runtime.
 use std::path::Path;
 use std::sync::Arc;
 
@@ -9,15 +9,14 @@ use tidepool_repr::DataConTable;
 
 use crate::checked_cell::{
     array, decode, encode_signature, hash, hex, read, read_table, row, string, text,
-    CanonicalInputTypeWitness, CheckedValueInputs, ExactHostBindingInterface,
+    CanonicalInputTypeWitness, ExactHostBindingInterface, ExactHostBindingPrototype,
 };
 use crate::declaration_context::ExactDeclarationContext;
 use crate::CompileError;
 
 #[derive(Clone, Debug)]
 pub struct ActivationPreviewSpecification {
-    pub admission_digest: [u8; 32],
-    pub generation: u64,
+    pub original_context_digest: [u8; 32],
     pub budget: u64,
     pub template_source: String,
 }
@@ -36,17 +35,14 @@ pub enum ActivationPreviewDisposition {
 
 pub(crate) struct ActivationPreviewOffer {
     pub(crate) specification: ActivationPreviewSpecification,
-    pub(crate) input: Arc<ExactHostBindingInterface>,
-    pub(crate) values: Arc<CheckedValueInputs>,
+    pub(crate) prototype: Arc<ExactHostBindingPrototype>,
     pub(crate) original_execution: Arc<ExactDeclarationContext>,
 }
 
 impl ActivationPreviewOffer {
     pub(crate) fn validate(&self) -> Result<(), CompileError> {
         let spec = &self.specification;
-        if spec.admission_digest == [0; 32]
-            || spec.generation == 0
-            || spec.generation == self.input.generation()
+        if spec.original_context_digest == [0; 32]
             || spec.template_source.len() > 32 << 20
             || spec
                 .template_source
@@ -60,8 +56,8 @@ impl ActivationPreviewOffer {
                 != 1
             || spec.template_source.contains("{{TURN_STMT}}")
             || spec.template_source.contains("{{BINDERS}}")
-            || self.input.prototype().original_input_type().is_none()
-            || string(&row(self.input.binder(), 7)?[0])? != "sessionInput"
+            || self.prototype.original_input_type().is_none()
+            || spec.original_context_digest != self.original_execution.semantic_sha256()
         {
             return Err(failure(
                 "pure activation preview has another input or recipe",
@@ -73,37 +69,16 @@ impl ActivationPreviewOffer {
     pub(crate) fn authorization(&self, original_interfaces: Value) -> Result<Value, CompileError> {
         self.validate()?;
         let witness = self
-            .input
-            .prototype()
+            .prototype
             .original_input_type()
-            .expect("validated live input");
-        let baseline = self.values.baseline_authorization();
-        let baseline = row(&baseline, 1)?;
+            .expect("validated input");
         Ok(array([
             text(crate::artifacts::CheckedPurpose::ActivationPreview.wire_tag()),
-            text(hex(&self.specification.admission_digest)),
-            Value::Integer(self.specification.generation.into()),
+            text(hex(&self.specification.original_context_digest)),
             Value::Integer(self.specification.budget.into()),
             text(hash(self.specification.template_source.as_bytes())),
-            Value::Integer(self.input.generation().into()),
-            self.input.binder().clone(),
             encode_signature(witness.signature()),
             Value::Bytes(witness.original_bytes().to_vec()),
-            {
-                let fields = row(&baseline[0], 4)?;
-                let certificate = self.input.value_interface_certificate();
-                array([
-                    fields[1].clone(),
-                    fields[2].clone(),
-                    fields[3].clone(),
-                    text(hash(
-                        certificate
-                            .certified_interface()
-                            .interface()
-                            .package_imports_bytes(),
-                    )),
-                ])
-            },
             original_interfaces,
             {
                 let target = self.original_execution.original_instance_target()?;
@@ -121,19 +96,17 @@ impl ActivationPreviewOffer {
         }
         self.validate()?;
         let receipt = decode(&read(&path, 4 << 20)?)?;
-        let fields = row(&receipt, 7)?;
+        let fields = row(&receipt, 6)?;
         let witness = self
-            .input
-            .prototype()
+            .prototype
             .original_input_type()
             .expect("validated input");
-        if string(&fields[0])? != "TPEXACTACTIVATIONPREVIEWUNAVAILABLE1"
+        if string(&fields[0])? != "TPEXACTACTIVATIONRENDERERUNAVAILABLE1"
             || string(&fields[1])? != "1"
             || string(&fields[2])? != request
-            || string(&fields[3])? != hex(&self.specification.admission_digest)
-            || fields[4] != Value::Integer(self.specification.generation.into())
-            || string(&fields[5])? != hash(self.specification.template_source.as_bytes())
-            || fields[6] != Value::Bytes(witness.original_bytes().to_vec())
+            || string(&fields[3])? != hex(&self.specification.original_context_digest)
+            || string(&fields[4])? != hash(self.specification.template_source.as_bytes())
+            || fields[5] != Value::Bytes(witness.original_bytes().to_vec())
             || root.join("turn.cbor").exists()
         {
             return Err(failure(
@@ -153,27 +126,25 @@ impl ActivationPreviewOffer {
     ) -> Result<Arc<ExactCompiledActivationPreview>, CompileError> {
         self.validate()?;
         let receipt = decode(&read(root.join("activation-preview.cbor"), 4 << 20)?)?;
-        let fields = row(&receipt, 8)?;
-        if string(&fields[0])? != "TPEXACTACTIVATIONPREVIEW1"
+        let fields = row(&receipt, 7)?;
+        if string(&fields[0])? != "TPEXACTACTIVATIONRENDERER1"
             || string(&fields[1])? != "1"
             || string(&fields[2])? != request
-            || string(&fields[3])? != hex(&self.specification.admission_digest)
-            || fields[4] != Value::Integer(self.specification.generation.into())
-            || string(&fields[5])? != hash(source.as_bytes())
+            || string(&fields[3])? != hex(&self.specification.original_context_digest)
+            || string(&fields[4])? != hash(source.as_bytes())
         {
             return Err(failure(
                 "activation preview receipt differs from its protected offer",
             ));
         }
-        let Value::Bytes(bytes) = &fields[6] else {
+        let Value::Bytes(bytes) = &fields[5] else {
             return Err(failure(
                 "activation preview canonical input witness is absent",
             ));
         };
         let witness = CanonicalInputTypeWitness::from_bytes(bytes)?;
         let original = self
-            .input
-            .prototype()
+            .prototype
             .original_input_type()
             .expect("validated live input");
         if &witness != original || witness.signature().names() != original.signature().names() {
@@ -181,7 +152,7 @@ impl ActivationPreviewOffer {
                 "activation preview changed the original input type",
             ));
         }
-        let disposition = decode_disposition(&fields[7])?;
+        let disposition = decode_disposition(&fields[6])?;
         let turn = decode(&read(root.join("turn.cbor"), 32 << 20)?)?;
         let turn = row(&turn, 2)?;
         let expression = row(&turn[1], 3)?;
@@ -194,9 +165,9 @@ impl ActivationPreviewOffer {
         if !sites.is_empty() {
             return Err(failure("pure activation preview emitted suspension sites"));
         }
-        let producer = self.input.prototype().producer();
+        let producer = self.prototype.producer();
         Ok(Arc::new(ExactCompiledActivationPreview {
-            input: self.input.clone(),
+            prototype: self.prototype.clone(),
             specification: self.specification.clone(),
             target: target.clone(),
             table: read_table(root)?,
@@ -215,10 +186,9 @@ impl ActivationPreviewOffer {
 /// environment. Native execution is demanded later by the selected preview;
 /// a nominal input type does not require its owner's native code by itself.
 pub(crate) fn validate_original_display_context(
-    input: &ExactHostBindingInterface,
+    prototype: &ExactHostBindingPrototype,
     context: &ExactDeclarationContext,
 ) -> Result<bool, CompileError> {
-    let prototype = input.prototype();
     if prototype.producer() != context.toolchain_identity_sha256() {
         return Err(failure(
             "activation preview has another original compiler producer",
@@ -288,7 +258,7 @@ pub(crate) fn original_native_declaration_inputs(
 
 #[derive(Debug)]
 pub struct ExactCompiledActivationPreview {
-    input: Arc<ExactHostBindingInterface>,
+    prototype: Arc<ExactHostBindingPrototype>,
     specification: ActivationPreviewSpecification,
     target: Arc<PreparedProgram>,
     table: DataConTable,
@@ -299,14 +269,27 @@ pub struct ExactCompiledActivationPreview {
 }
 
 impl ExactCompiledActivationPreview {
-    pub fn input_interface(&self) -> &Arc<ExactHostBindingInterface> {
-        &self.input
+    pub fn matches_input(&self, input: &ExactHostBindingInterface) -> bool {
+        match (
+            self.prototype.original_input_type(),
+            input.original_input_type(),
+        ) {
+            (Some(original), Some(mounted)) => {
+                original == mounted
+                    && original.metadata_digest() == mounted.metadata_digest()
+                    && self.prototype.producer() == input.prototype().producer()
+            }
+            _ => false,
+        }
     }
-    pub fn admission_digest(&self) -> [u8; 32] {
-        self.specification.admission_digest
+    pub fn original_context_digest(&self) -> [u8; 32] {
+        self.specification.original_context_digest
     }
-    pub fn generation(&self) -> u64 {
-        self.specification.generation
+    pub fn template_source(&self) -> &str {
+        &self.specification.template_source
+    }
+    pub fn budget(&self) -> u64 {
+        self.specification.budget
     }
     pub fn disposition(&self) -> ActivationPreviewDisposition {
         self.disposition
