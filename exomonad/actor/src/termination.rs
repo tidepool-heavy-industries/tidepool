@@ -180,7 +180,7 @@ pub(crate) struct CompilerWorkReceipt {
     purpose: CompilerWorkPurpose,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CompilerWorkPurpose {
     Active,
     Finalization,
@@ -641,14 +641,25 @@ impl RetainedActorExit {
     }
 
     pub(crate) fn retain_cleanup(&self, outcome: crate::ResidentCleanupOutcome) {
-        self.state.cleanup.lock().outcome.get_or_insert(outcome);
-        self.close_compiler_finalization();
+        let receipts = {
+            let mut state = self.state.cleanup.lock();
+            state.outcome.get_or_insert(outcome);
+            state.compiler_admission = CompilerAdmission::Closed;
+            state.compilers.clone()
+        };
+        for receipt in receipts {
+            receipt.request_cancellation();
+        }
+        self.notify_compiler_close();
     }
 
     pub(crate) fn register_compiler_work(&self, receipt: CompilerWorkReceipt) -> bool {
         let shutdown = self.state.requested_shutdown.lock();
         let mut state = self.state.cleanup.lock();
-        if state.compiler_admission != CompilerAdmission::Active || shutdown.is_some() {
+        if state.compiler_admission != CompilerAdmission::Active
+            || shutdown.is_some()
+            || state.outcome.is_some()
+        {
             return false;
         }
         state.compilers.push(receipt);
@@ -710,9 +721,7 @@ impl RetainedActorExit {
             state.compilers.clone()
         };
         for receipt in receipts {
-            if receipt.purpose == CompilerWorkPurpose::Finalization {
-                receipt.request_cancellation();
-            }
+            receipt.request_cancellation();
         }
         self.notify_compiler_close();
     }

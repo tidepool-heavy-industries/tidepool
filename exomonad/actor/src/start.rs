@@ -11,9 +11,7 @@ use tidepool_bridge::{BridgeError, FromHaskell};
 use tidepool_codegen::suspension::RealmId;
 use tidepool_effect::dispatch::DispatchEffect;
 use tidepool_repr::{DataConTable, Generation};
-use tidepool_runtime::session::{
-    MaterializedFacade, OutputSink, ResidentHole, ResidentSession, RootCustody,
-};
+use tidepool_runtime::session::{MaterializedFacade, OutputSink, ResidentHole, ResidentSession};
 
 use crate::generated::actor::ActorReq;
 use crate::ActorDescriptor;
