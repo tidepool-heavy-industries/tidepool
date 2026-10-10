@@ -1419,8 +1419,8 @@ fn provider_envelope(
                 "annotations": [], "logprobs": []}],
         })),
     ];
-    for item in &mut turn.items {
-        item.0["id"] = serde_json::json!(format!("item-{}", turn.response_id));
+    for (index, item) in turn.items.iter_mut().enumerate() {
+        item.0["id"] = serde_json::json!(format!("item-{}-{index}", turn.response_id));
         item.0["status"] = serde_json::json!("completed");
     }
     items.extend(turn.items);
@@ -1637,17 +1637,19 @@ mod tests {
             "type": "custom_tool_call", "name": "haskell", "call_id": "native-envelope",
             "input": "display True", "async": true,
         }));
+        let mut second = source.clone();
+        second.0["call_id"] = serde_json::json!("native-envelope-second");
         let turn = provider_envelope(
             "gpt-6.1-sol",
             harness::transport::ResponsesTurn {
                 response_id: "native-envelope-response".into(),
-                items: vec![source],
+                items: vec![source, second],
                 usage: Default::default(),
             },
         )
         .unwrap();
         assert_eq!(turn.response_id, "native-envelope-response");
-        assert_eq!(turn.items.len(), 3);
+        assert_eq!(turn.items.len(), 4);
         assert_eq!(turn.items[0].0["type"], "reasoning");
         assert_eq!(turn.items[0].0["content"], serde_json::json!([]));
         assert_eq!(turn.items[0].0["summary"], serde_json::json!([]));
@@ -1661,6 +1663,17 @@ mod tests {
         );
         assert_eq!(turn.items[1].0["phase"], "commentary");
         assert_eq!(turn.items[2].0["status"], "completed");
+        let ids = turn
+            .items
+            .iter()
+            .map(|item| item.0["id"].as_str().unwrap())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            ids.len(),
+            turn.items.len(),
+            "every provider item has its own identity"
+        );
+        assert_eq!(turn.items[3].0["call_id"], "native-envelope-second");
         assert_eq!(
             turn.items[2].tool_call().unwrap().unwrap().execution,
             harness::item::ToolExecution::Asynchronous
