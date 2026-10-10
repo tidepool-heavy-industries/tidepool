@@ -560,6 +560,7 @@ async fn native_mailbox_casts_retain_recipient_compiler_close_after_caller_retir
     let surface = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[
         tidepool_mcp::actor_local_decl(),
         tidepool_mcp::actor_kernel_decl(),
+        tidepool_mcp::console_decl(),
     ])
     .unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -567,13 +568,17 @@ async fn native_mailbox_casts_retain_recipient_compiler_close_after_caller_retir
     let lib = SessionLib::open(session_id, root.path(), ModuleEnv::standalone_default())
         .unwrap()
         .with_validation_include(surface.include_paths().to_vec());
-    let mut persistent = PersistentSession::new(Some(lib), tidepool_runtime::DEFAULT_NURSERY_SIZE);
+    let persistent = PersistentSession::new(Some(lib), tidepool_runtime::DEFAULT_NURSERY_SIZE);
     let view = persistent.compile_view_in(ScopeId::ROOT).unwrap();
     let preamble = insert_preamble_imports(
         surface.preamble(),
-        "qualified Tidepool.Actor as Actor\nqualified Tidepool.Effects.Core as Core",
+        "qualified Tidepool.Actor as Actor\nqualified Tidepool.Effects.Core as Core\nqualified Data.Text as Text",
     );
-    let templates = resident_workbench_templates(&preamble, "'[Core.ActorLocal Maybe]", "");
+    let templates = resident_workbench_templates(
+        &preamble,
+        "'[Core.ActorKernel, Core.ActorLocal Maybe, Core.Console]",
+        "",
+    );
     let include = view.include_paths(surface.include_paths());
     let paths = include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
     let compile = |source: &str, gen| {
@@ -608,99 +613,175 @@ async fn native_mailbox_casts_retain_recipient_compiler_close_after_caller_retir
     else {
         panic!("native mailbox payload bindings")
     };
-    let TurnResult::Expr { compiled: receiver, .. } = compile(
-        "Actor.serve @() @Maybe () (\\() request -> case request of Just value -> pure (value, ()); Nothing -> error \"unused mailbox request\") :: Eff '[Core.ActorLocal Maybe] ()",
+    let TurnResult::Expr {
+        compiled: receiver, ..
+    } = compile(
+        r#"(do
+  send (Core.ActorInstallShutdownWith 0 (\reason -> send (Core.Print (Text.pack (show (reason :: Int))))))
+  Actor.serve @() @Maybe () (\() request -> case request of Just value -> pure (value, ()); Nothing -> error "unused mailbox request")
+  ) :: Eff '[Core.ActorKernel, Core.ActorLocal Maybe, Core.Console] ()"#,
         2,
-    ) else {
-        panic!("native receiver loop")
-    };
-    let mut session = ResidentSession::unbootstrapped(
-        frunk::HNil,
-        tidepool_mcp::CapturedOutput::new(),
-        tidepool_runtime::DEFAULT_NURSERY_SIZE,
-        persistent.take_lib(),
-    );
-    tidepool_testing::with_settlement(|settlement| {
-        session.run_projected_bind_with_sites(
-            "native-mailbox-values",
-            values.code(),
-            &bound,
-            tidepool_repr::Generation(1),
-            settlement,
-        )
-    })
-    .unwrap();
-    let placement = crate::ActorPlacement {
-        session: session_id,
-        resource_scope: RealmId::fresh(),
-        lexical_scope: session.mint_isolated_scope(),
-    };
-    session
-        .set_actor_execution(
-            SessionRunContext {
-                lexical_scope: placement.lexical_scope,
-                resource_scope: placement.resource_scope,
-                ..SessionRunContext::ROOT
-            },
-            tidepool_effect::EffectRunPolicy::HandleOrSuspend,
-            tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-        )
-        .unwrap();
-    let prepared = tidepool_testing::with_settlement(|settlement| {
-        session.run_with_sites("native-mailbox-receiver", receiver.code(), settlement)
-    })
-    .unwrap();
-    let (forest, _deployments) = Forest::new(
-        ActorWorkbenchSource::new(preamble, include),
-        session_id,
-        session,
-        None,
-        crate::Incarnation::FIRST,
-    );
-    let (recipient, recipient_task) = forest
-        .admit_root(
-            ActorDescriptor::new("native-mailbox-recipient", placement),
-            prepared,
-        )
-        .await
-        .unwrap();
-    let caller_placement = forest
-        .environment
-        .runner
-        .provision_root_scope(session_id)
-        .await
-        .unwrap();
-    let (caller, caller_task) = crate::local_actor::spawn_local_actor_in_directory(
-        None,
-        Behavior::with_boot(
-            ActorDescriptor::new("completed-mailbox-caller", caller_placement),
-            forest.environment.clone(),
-            ResidentBoot::Workbench,
-            Vec::new(),
-        ),
-        forest.incarnation,
-        forest.directory.clone(),
     )
-    .await
-    .unwrap();
-    caller
-        .shutdown(ActorTerminal::new(
-            ActorExitKind::Completed,
-            "caller finished",
-        ))
-        .await
+    else {
+        panic!("native receiver loop and shutdown hook")
+    };
+    for (kind, reason_code) in [
+        (ActorExitKind::Completed, "0"),
+        (ActorExitKind::Failed, "1"),
+        (ActorExitKind::Cancelled, "2"),
+    ] {
+        let machine_root = tempfile::tempdir().unwrap();
+        let session_id = tidepool_runtime::session::fresh_session_id();
+        let lib = SessionLib::open(
+            session_id,
+            machine_root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(include.clone());
+        let hook_calls = Arc::new(Mutex::new(Vec::new()));
+        let target = Arc::new(Mutex::new(None));
+        let mut session = ResidentSession::unbootstrapped(
+            NativeShutdownProbe {
+                target: target.clone(),
+                calls: hook_calls.clone(),
+            },
+            tidepool_mcp::CapturedOutput::new(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(lib),
+        );
+        tidepool_testing::with_settlement(|settlement| {
+            session.run_projected_bind_with_sites(
+                "native-mailbox-values",
+                values.code(),
+                &bound,
+                tidepool_repr::Generation(1),
+                settlement,
+            )
+        })
         .unwrap();
-    caller_task.await.unwrap();
-    let caller_closes = caller.terminal().compiler_close_observations();
-    assert!(CompilerCloseOwner::current().is_err());
-    let machines = forest.environment.runner.machines_for_test();
-    let payload = |name: &str| {
-        let mut checkout = machines.checkout_run(session_id).unwrap();
-        let custody = checkout
-            .machine()
-            .retain_binding_custody(name)
+        let casts = (0..3)
+            .map(|_| {
+                session
+                    .retain_binding_custody("mailboxCast")
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let query = session
+            .retain_binding_custody("mailboxQuery")
             .unwrap()
             .unwrap();
+        let placement = crate::ActorPlacement {
+            session: session_id,
+            resource_scope: RealmId::fresh(),
+            lexical_scope: session.mint_isolated_scope(),
+        };
+        session
+            .set_actor_execution(
+                SessionRunContext {
+                    lexical_scope: placement.lexical_scope,
+                    resource_scope: placement.resource_scope,
+                    ..SessionRunContext::ROOT
+                },
+                tidepool_effect::EffectRunPolicy::HandleOrSuspend,
+                tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .unwrap();
+        let prepared = tidepool_testing::with_settlement(|settlement| {
+            session.run_with_sites("native-mailbox-receiver", receiver.code(), settlement)
+        })
+        .unwrap();
+        let (forest, _deployments) = ResidentForest::new(
+            ActorWorkbenchSource::new(preamble.clone(), include.clone()),
+            session_id,
+            session,
+            None,
+            crate::Incarnation::FIRST,
+        );
+        let (recipient, recipient_task) = forest
+            .admit_root(
+                ActorDescriptor::new("native-mailbox-recipient", placement),
+                prepared,
+            )
+            .await
+            .unwrap();
+        *target.lock() = Some(recipient.terminal().clone());
+        let caller_placement = forest
+            .environment
+            .runner
+            .provision_root_scope(session_id)
+            .await
+            .unwrap();
+        let (caller, caller_task) = crate::local_actor::spawn_local_actor_in_directory(
+            None,
+            ResidentKernelBehavior::with_boot(
+                ActorDescriptor::new("completed-mailbox-caller", caller_placement),
+                forest.environment.clone(),
+                ResidentBoot::Workbench,
+                Vec::new(),
+            ),
+            forest.incarnation,
+            forest.directory.clone(),
+        )
+        .await
+        .unwrap();
+        caller
+            .shutdown(ActorTerminal::new(
+                ActorExitKind::Completed,
+                "caller finished",
+            ))
+            .await
+            .unwrap();
+        caller_task.await.unwrap();
+        let caller_closes = caller.terminal().compiler_close_observations();
+        assert!(CompilerCloseOwner::current().is_err());
+        let machines = forest.environment.runner.machines_for_test();
+        let mut observed = recipient.terminal().compiler_close_observations().len();
+        for custody in casts {
+            recipient
+                .cast(caller.identity(), MailboxValue::new(session_id, custody))
+                .unwrap();
+            recipient
+                .address()
+                .call(
+                    |reply| KernelMessage::SealHostedWork { reply },
+                    Some(Duration::from_secs(30)),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            let closes = recipient.terminal().compiler_close_observations();
+            assert!(
+                closes.len() > observed,
+                "each native cast issues recipient-owned compiler work"
+            );
+            assert!(
+                closes
+                    .iter()
+                    .all(crate::termination::CompilerWorkClose::is_confirmed),
+                "{closes:?}"
+            );
+            observed = closes.len();
+            assert!(CompilerCloseOwner::current().is_err());
+        }
+        let reply = tokio::time::timeout(
+            Duration::from_secs(30),
+            recipient.call(
+                caller.identity(),
+                crate::CallAncestry::begin(caller.identity()),
+                MailboxValue::new(session_id, query),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut checkout = machines.checkout_run(session_id).unwrap();
+        assert!(checkout
+            .machine()
+            .render_retained_preview(&reply.into_custody(), 64)
+            .unwrap()
+            .contains("42"));
         let holes = checkout
             .machine()
             .parked_holes()
@@ -708,79 +789,81 @@ async fn native_mailbox_casts_retain_recipient_compiler_close_after_caller_retir
             .map(str::to_owned)
             .collect();
         checkout.restore_suspended(holes);
-        MailboxValue::new(session_id, custody)
-    };
-    let mut observed = recipient.terminal().compiler_close_observations().len();
-    for _ in 0..3 {
+        assert_eq!(
+            caller.terminal().compiler_close_observations(),
+            caller_closes
+        );
+        let before_shutdown = recipient.terminal().compiler_close_observations().len();
+        assert!(hook_calls.lock().is_empty());
         recipient
-            .cast(caller.identity(), payload("mailboxCast"))
-            .unwrap();
-        recipient
-            .address()
-            .call(
-                |reply| KernelMessage::SealHostedWork { reply },
-                Some(Duration::from_secs(30)),
-            )
+            .shutdown(ActorTerminal::new(kind, "native mailbox checked"))
             .await
-            .unwrap()
             .unwrap();
+        recipient_task.await.unwrap();
         let closes = recipient.terminal().compiler_close_observations();
         assert!(
-            closes.len() > observed,
-            "each native cast issues recipient-owned compiler work"
+            closes.len() > before_shutdown,
+            "native hook owns an additional finalization receipt"
         );
+        assert_eq!(
+            hook_calls.lock().as_slice(),
+            &[(kind, reason_code.to_owned())]
+        );
+        assert!(recipient.terminal().cleanup().unwrap().is_confirmed());
         assert!(
             closes
                 .iter()
                 .all(crate::termination::CompilerWorkClose::is_confirmed),
             "{closes:?}"
         );
-        observed = closes.len();
         assert!(CompilerCloseOwner::current().is_err());
     }
-    let reply = tokio::time::timeout(
-        Duration::from_secs(30),
-        recipient.call(
-            caller.identity(),
-            crate::CallAncestry::begin(caller.identity()),
-            payload("mailboxQuery"),
-        ),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let mut checkout = machines.checkout_run(session_id).unwrap();
-    assert!(checkout
-        .machine()
-        .render_retained_preview(&reply.into_custody(), 64)
-        .unwrap()
-        .contains("42"));
-    let holes = checkout
-        .machine()
-        .parked_holes()
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-    checkout.restore_suspended(holes);
-    assert_eq!(
-        caller.terminal().compiler_close_observations(),
-        caller_closes
-    );
-    recipient
-        .shutdown(ActorTerminal::new(
-            ActorExitKind::Cancelled,
-            "native mailbox checked",
-        ))
-        .await
-        .unwrap();
-    recipient_task.await.unwrap();
-    let closes = recipient.terminal().compiler_close_observations();
-    assert!(!closes.is_empty());
-    assert!(
-        closes
-            .iter()
-            .all(crate::termination::CompilerWorkClose::is_confirmed),
-        "{closes:?}"
-    );
-    assert!(CompilerCloseOwner::current().is_err());
+}
+
+#[derive(tidepool_bridge_derive::FromHaskell)]
+enum NativeShutdownPrint {
+    Print(String),
+}
+
+struct NativeShutdownProbe {
+    target: Arc<Mutex<Option<crate::RetainedActorExit>>>,
+    calls: Arc<Mutex<Vec<(ActorExitKind, String)>>>,
+}
+
+impl tidepool_effect::dispatch::DispatchEffect<tidepool_mcp::CapturedOutput>
+    for NativeShutdownProbe
+{
+    fn dispatch(
+        &mut self,
+        request: &tidepool_bridge::HaskellValue,
+        context: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+    ) -> Result<Option<tidepool_effect::Response>, tidepool_effect::EffectError> {
+        use tidepool_bridge::FromHaskell;
+        let Ok(NativeShutdownPrint::Print(reason)) =
+            NativeShutdownPrint::from_value(request, context.table())
+        else {
+            return Ok(None);
+        };
+        let target = self
+            .target
+            .lock()
+            .clone()
+            .expect("installed hook belongs to admitted recipient");
+        let requested = target
+            .requested_shutdown()
+            .expect("native hook runs after stop was requested");
+        self.calls.lock().push((requested.kind, reason));
+        Ok(Some(context.respond(())?))
+    }
+
+    fn prepare_dispatch(
+        &mut self,
+        request: &tidepool_bridge::HaskellValue,
+        context: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+    ) -> Result<tidepool_effect::dispatch::EffectDispatch, tidepool_effect::EffectError> {
+        Ok(match self.dispatch(request, context)? {
+            Some(response) => tidepool_effect::dispatch::EffectDispatch::Immediate(response),
+            None => tidepool_effect::dispatch::EffectDispatch::Unhandled,
+        })
+    }
 }
