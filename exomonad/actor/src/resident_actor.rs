@@ -1665,9 +1665,9 @@ fn settle_public_owner_record(
     record: &mut ResidentActorRecord,
     context: &ActorSessionContext,
     expected_owner: &tidepool_runtime::session::RecoveryPublicOwner,
-    outcome: &tidepool_runtime::session::PublicManifestCommit,
-    readiness: Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
-) -> Result<(), ResidentActorWorkbenchError> {
+    publication: tidepool_runtime::session::DurablePublicOwnerPublication,
+) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
+    use tidepool_runtime::session::{DurablePublicOwnerPublication, PublicManifestCommit};
     if record.terminal.is_some()
         || record.descriptor.placement() != context.placement
         || !(matches!(&record.public_owner,
@@ -1680,11 +1680,11 @@ fn settle_public_owner_record(
             "public settlement requires its original pending owner".into(),
         ));
     }
-    match outcome {
-        tidepool_runtime::session::PublicManifestCommit::Durable => {
+    match publication {
+        DurablePublicOwnerPublication::Committed(readiness) => {
             if let ActorPublicOwnerPlane::DurableReady(owner) = &record.public_owner {
                 return if owner.is_current() {
-                    Ok(())
+                    Ok(PublicManifestCommit::Durable)
                 } else {
                     Err(ResidentActorWorkbenchError::ActorProtocol(
                         "original native owner was revoked before publication settlement".into(),
@@ -1692,14 +1692,19 @@ fn settle_public_owner_record(
                 };
             }
             record.public_owner = ActorPublicOwnerPlane::DurableReady(
-                WorkbenchPublicOwner::issue(context, &record.descriptor, readiness).map_err(
+                WorkbenchPublicOwner::issue(context, &record.descriptor, Some(readiness)).map_err(
                     |error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
                 )?,
             );
+            Ok(PublicManifestCommit::Durable)
         }
-        _ => {}
+        DurablePublicOwnerPublication::Refused { error } => {
+            Ok(PublicManifestCommit::Refused { error })
+        }
+        DurablePublicOwnerPublication::RecoveryRequired { error } => {
+            Ok(PublicManifestCommit::RecoveryRequired { error })
+        }
     }
-    Ok(())
 }
 
 #[derive(Clone)]
@@ -11187,21 +11192,20 @@ where
                         }
                     }
                 };
-                let (outcome, readiness) = self
+                let publication = self
                     .environment
                     .runner
                     .initialize_durable_public_owner(context.clone(), owner.clone())
                     .await
-                    .map_err(Self::workbench_failure)?
-                    .into_parts();
-                {
+                    .map_err(Self::workbench_failure)?;
+                let outcome = {
                     let mut records = self.environment.actors.lock();
                     let record = records.get_mut(&context.actor).ok_or_else(|| {
                         Self::failure("durable actor allocation retired before publication")
                     })?;
-                    settle_public_owner_record(record, &context, &owner, &outcome, readiness)
-                        .map_err(Self::workbench_failure)?;
-                }
+                    settle_public_owner_record(record, &context, &owner, publication)
+                        .map_err(Self::workbench_failure)?
+                };
                 match outcome {
                     tidepool_runtime::session::PublicManifestCommit::Durable => {}
                     tidepool_runtime::session::PublicManifestCommit::Refused { error }
@@ -13177,9 +13181,8 @@ where
     fn settle_root_public_owner(
         &self,
         placement: &crate::RootRecoveryPlacement,
-        outcome: &tidepool_runtime::session::PublicManifestCommit,
-        readiness: Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
-    ) -> Result<(), ResidentActorWorkbenchError> {
+        publication: tidepool_runtime::session::DurablePublicOwnerPublication,
+    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
         let context = self.root_recovery_context(placement)?;
         let mut records = self.environment.actors.lock();
         let record = records.get_mut(&placement.actor()).ok_or_else(|| {
@@ -13187,7 +13190,7 @@ where
                 "root public allocation retired before publication settlement".into(),
             )
         })?;
-        settle_public_owner_record(record, &context, placement.owner(), outcome, readiness)
+        settle_public_owner_record(record, &context, placement.owner(), publication)
     }
 
     /// Persist the admitted root's initial empty surface.
@@ -13204,14 +13207,12 @@ where
             RootPublicOwnerPosture::Pending => {}
         }
         let context = self.root_recovery_context(&placement)?;
-        let (outcome, readiness) = self
+        let publication = self
             .environment
             .runner
             .initialize_durable_public_owner(context, placement.owner().clone())
-            .await?
-            .into_parts();
-        self.settle_root_public_owner(&placement, &outcome, readiness)?;
-        Ok(outcome)
+            .await?;
+        self.settle_root_public_owner(&placement, publication)
     }
 
     /// Transfer under the exact journal proof. Repeated calls retain the
@@ -13231,7 +13232,7 @@ where
             RootPublicOwnerPosture::Pending => {}
         }
         let context = self.root_recovery_context(&placement)?;
-        let (outcome, readiness) = self
+        let publication = self
             .environment
             .runner
             .transfer_recovered_root_public_owner(
@@ -13240,10 +13241,8 @@ where
                 placement.owner().clone(),
                 authority,
             )
-            .await?
-            .into_parts();
-        self.settle_root_public_owner(&placement, &outcome, readiness)?;
-        Ok(outcome)
+            .await?;
+        self.settle_root_public_owner(&placement, publication)
     }
 
     /// Request compiled display detail through its owning mailbox. Provider
