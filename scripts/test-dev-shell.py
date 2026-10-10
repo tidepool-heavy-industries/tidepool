@@ -41,14 +41,10 @@ class DevShellTests(unittest.TestCase):
         return subprocess.run(["bash", str(SCRIPT), *args], cwd=self.repo, env=self.env, text=True, capture_output=True)
 
     def synthetic_default_revision(self):
-        """Recompute the default shell's toolchain-input pin the same way dev-shell.sh does."""
-        entries = subprocess.check_output(
-            ["git", "-C", str(self.repo), "ls-tree", "HEAD", "--",
-             "flake.nix", "flake.lock", "rust-toolchain.toml", "nix"],
-            text=True,
-        )
+        """Use the source owner's tree for the synthetic default-shell selection."""
         tree = subprocess.run(
-            ["git", "-C", str(self.repo), "mktree"], input=entries, text=True,
+            ["bash", "-e", "-c", "source scripts/toolchain-inputs.sh; toolchain_input_tree"],
+            cwd=self.repo, text=True,
             capture_output=True, check=True,
         ).stdout.strip()
         env = dict(os.environ, GIT_AUTHOR_DATE="@0 +0000", GIT_COMMITTER_DATE="@0 +0000",
@@ -82,6 +78,31 @@ class DevShellTests(unittest.TestCase):
         selection2 = json.loads(result2.stdout)
         self.assertEqual(selection["args"][:2], selection2["args"][:2])
         self.assertEqual(self.git("rev-parse", f"refs/tidepool/dev-shell/{revision}"), revision)
+
+    def test_default_shell_retains_owned_nested_inputs_and_excludes_siblings(self):
+        resume = self.repo / "bridge/haskell/resume/Resume.hs"
+        resume.parent.mkdir(parents=True)
+        resume.write_text("owned nested input\n")
+        sibling = resume.parent.parent / "Unselected.hs"
+        sibling.write_text("unrelated source\n")
+        self.git("add", "bridge")
+        self.git("commit", "-qm", "nested source inputs")
+        revision = self.synthetic_default_revision()
+        result = self.run_shell("true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["args"][:2],
+                         ["develop", f"git+file://{self.repo}?rev={revision}#default"])
+        self.assertEqual(self.git("show", revision + ":bridge/haskell/resume/Resume.hs"),
+                         "owned nested input")
+        self.assertNotIn("Unselected.hs", self.git("ls-tree", "-r", "--name-only", revision))
+        sibling.write_text("changed unrelated source\n")
+        self.git("add", "bridge/haskell/Unselected.hs")
+        self.git("commit", "-qm", "unrelated source change")
+        self.assertEqual(self.synthetic_default_revision(), revision)
+        result = self.run_shell("true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["args"][:2],
+                         ["develop", f"git+file://{self.repo}?rev={revision}#default"])
 
     def test_test_shell_uses_the_same_toolchain_source_with_explicit_selection(self):
         result = self.run_shell("--tests", "ghc", "--version")
