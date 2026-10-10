@@ -3,7 +3,8 @@
 use super::*;
 use crate::certified_products::{
     tests::{
-        original_groups_fixture, original_groups_fixture_in_unit_with_sites, recovered_witness_fixtures,
+        original_groups_fixture, original_groups_fixture_in_unit_with_sites,
+        recovered_witness_fixtures,
     },
     PendingImportOwner,
 };
@@ -11,8 +12,8 @@ use crate::declaration_context::ExactDeclarationContext;
 use crate::declaration_join::ExactLexicalNode;
 use proptest::prelude::*;
 use proptest::test_runner::{contextualize_config, Config, FileFailurePersistence, TestRunner};
-use std::cell::RefCell;
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use tidepool_repr::execution_schema::{CachedHomeOwner, SymbolIdentity};
 
 const MODULES: usize = 3;
@@ -146,15 +147,13 @@ impl Catalog {
             .enumerate()
             .map(|(index, product)| {
                 let module = index % MODULES;
-                let requirements = (module < MODULES - 1)
-                    .then(|| {
-                        (
-                            (owner(module + 1).unit, owner(module + 1).module),
-                            Sha256::digest(interface_bytes(module + 1)).into(),
-                        )
-                    })
-                    .into_iter()
-                    .collect();
+                let required = if module < MODULES - 1 { module + 1 } else { 1 };
+                // Native source dependencies must also be admitted home units
+                // in the canonical fixture; distinct units expose this premise.
+                let requirements = BTreeMap::from([(
+                    (owner(required).unit, owner(required).module),
+                    Sha256::digest(interface_bytes(required)).into(),
+                )]);
                 crate::certified_products::fixture_finalized_product_with_requirements(
                     product,
                     producer,
@@ -189,7 +188,11 @@ impl Catalog {
         assert_eq!(owner(0).module, owner(2).module);
         assert_ne!(owner(0).unit, owner(2).unit);
         assert_eq!(
-            originals.iter().map(|entry| entry.descriptor.id).collect::<BTreeSet<_>>().len(),
+            originals
+                .iter()
+                .map(|entry| entry.descriptor.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
             originals.len(),
             "logical unit/version identities require distinct issued originals"
         );
@@ -785,7 +788,10 @@ fn same_view_a_b_a_materialization_reuses_only_the_exact_projection() {
             .filter_map(|artifact| {
                 artifact.product.as_ref().map(|product| {
                     (
-                        (artifact.interface.unit.clone(), artifact.interface.module.clone()),
+                        (
+                            artifact.interface.unit.clone(),
+                            artifact.interface.module.clone(),
+                        ),
                         std::fs::read(&product.path).unwrap(),
                     )
                 })
@@ -797,8 +803,14 @@ fn same_view_a_b_a_materialization_reuses_only_the_exact_projection() {
             ArtifactPayload::Original(product) => product.product_bytes().to_vec(),
             _ => unreachable!(),
         };
-        assert_eq!(snapshots(&first)[&(owner(module).unit, owner(module).module)], bytes(0));
-        assert_eq!(snapshots(&second)[&(owner(module).unit, owner(module).module)], bytes(1));
+        assert_eq!(
+            snapshots(&first)[&(owner(module).unit, owner(module).module)],
+            bytes(0)
+        );
+        assert_eq!(
+            snapshots(&second)[&(owner(module).unit, owner(module).module)],
+            bytes(1)
+        );
     }
     let again = a
         .prepare_compilation(&scratch.path().join("a2"), PRODUCER)
@@ -1293,56 +1305,159 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
 #[test]
 fn compiler_domains_and_target_roots_match_independent_variant_histories() {
     let mut config = Config::default();
-    if std::env::var_os("PROPTEST_CASES").is_none() { config.cases = 64; }
-    if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() { config.max_shrink_iters = 4096; }
+    if std::env::var_os("PROPTEST_CASES").is_none() {
+        config.cases = 64;
+    }
+    if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() {
+        config.max_shrink_iters = 4096;
+    }
     if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
         config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
     }
     let mut config = contextualize_config(config);
     config.source_file = Some(file!());
-    config.test_name = Some(concat!(module_path!(), "::compiler_domains_and_target_roots_match_independent_variant_histories"));
+    config.test_name = Some(concat!(
+        module_path!(),
+        "::compiler_domains_and_target_roots_match_independent_variant_histories"
+    ));
     let configured_cases = config.cases;
     let callbacks = RefCell::new(0usize);
     let completed = RefCell::new(0usize);
     let observed = RefCell::new([[0usize; 13]; 3]);
-    let strategy = (any::<bool>(), prop::array::uniform6(1u64..1000), prop::collection::vec(operation(), 12..48));
+    let strategy = (
+        any::<bool>(),
+        prop::array::uniform6(1u64..1000),
+        prop::collection::vec(operation(), 12..48),
+    );
     let result = TestRunner::new(config).run(&strategy, |(cross_version, generations, tail)| {
         *callbacks.borrow_mut() += 1;
         let catalog = Catalog::new(cross_version, generations);
         let mut operations = vec![
             Op::PublishPrefix { domain: 0 },
-            Op::Demand { domain: 0, module: 0, version: 0, ordinal: 3, whole: false },
-            Op::RecoverDemand { domain: 0, mutation: 1 },
+            Op::Demand {
+                domain: 0,
+                module: 0,
+                version: 0,
+                ordinal: 3,
+                whole: false,
+            },
+            Op::RecoverDemand {
+                domain: 0,
+                mutation: 1,
+            },
             Op::ReleaseSegment { domain: 0 },
-            Op::DeclarationOriginal { domain: 0, module: 0, version: 0 },
-            Op::Offer { domain: 0, module: 0, version: 0 },
-            Op::Offer { domain: 0, module: 0, version: 1 },
-            Op::Offer { domain: 1, module: 0, version: 1 },
-            Op::Merge { target: 0, source: 1 },
-            Op::Clone { target: 2, source: 0 },
+            Op::DeclarationOriginal {
+                domain: 0,
+                module: 0,
+                version: 0,
+            },
+            Op::Offer {
+                domain: 0,
+                module: 0,
+                version: 0,
+            },
+            Op::Offer {
+                domain: 0,
+                module: 0,
+                version: 1,
+            },
+            Op::Offer {
+                domain: 1,
+                module: 0,
+                version: 1,
+            },
+            Op::Merge {
+                target: 0,
+                source: 1,
+            },
+            Op::Clone {
+                target: 2,
+                source: 0,
+            },
             Op::Restore { domain: 2 },
-            Op::Offer { domain: 1, module: 2, version: 0 },
-            Op::Merge { target: 2, source: 1 },
-            Op::Target { domain: 2, module: 2, version: 0, ordinal: 3 },
-            Op::Target { domain: 0, module: 0, version: 1, ordinal: 11 },
-            Op::SourceSurface { domain: 2, owners: 6 },
+            Op::Offer {
+                domain: 1,
+                module: 2,
+                version: 0,
+            },
+            Op::Merge {
+                target: 2,
+                source: 1,
+            },
+            Op::Target {
+                domain: 2,
+                module: 2,
+                version: 0,
+                ordinal: 3,
+            },
+            Op::Target {
+                domain: 0,
+                module: 0,
+                version: 1,
+                ordinal: 11,
+            },
+            Op::SourceSurface {
+                domain: 2,
+                owners: 6,
+            },
             Op::Demote { domain: 1 },
-            Op::Merge { target: 1, source: 0 },
+            Op::Merge {
+                target: 1,
+                source: 0,
+            },
             Op::IssueSegment { domain: 3 },
-            Op::DeclarationOriginal { domain: 3, module: 0, version: 0 },
-            Op::Demand { domain: 3, module: 0, version: 0, ordinal: 3, whole: false },
-            Op::Demand { domain: 3, module: 0, version: 0, ordinal: 11, whole: true },
-            Op::RecoverDemand { domain: 3, mutation: 1 },
+            Op::DeclarationOriginal {
+                domain: 3,
+                module: 0,
+                version: 0,
+            },
+            Op::Demand {
+                domain: 3,
+                module: 0,
+                version: 0,
+                ordinal: 3,
+                whole: false,
+            },
+            Op::Demand {
+                domain: 3,
+                module: 0,
+                version: 0,
+                ordinal: 11,
+                whole: true,
+            },
+            Op::RecoverDemand {
+                domain: 3,
+                mutation: 1,
+            },
             Op::PublishPrefix { domain: 3 },
-            Op::DeclarationOriginal { domain: 3, module: 0, version: 1 },
-            Op::Demand { domain: 3, module: 0, version: 0, ordinal: 11, whole: false },
-            Op::RecoverDemand { domain: 3, mutation: 2 },
+            Op::DeclarationOriginal {
+                domain: 3,
+                module: 0,
+                version: 1,
+            },
+            Op::Demand {
+                domain: 3,
+                module: 0,
+                version: 0,
+                ordinal: 11,
+                whole: false,
+            },
+            Op::RecoverDemand {
+                domain: 3,
+                mutation: 2,
+            },
             Op::ReleaseSegment { domain: 3 },
         ];
         operations.extend(tail);
         let outcomes = replay(&catalog, &operations);
-        for (totals, values) in observed.borrow_mut().iter_mut().zip([outcomes.0, outcomes.1, outcomes.2]) {
-            for (total,value) in totals.iter_mut().zip(values) { *total += value; }
+        for (totals, values) in observed
+            .borrow_mut()
+            .iter_mut()
+            .zip([outcomes.0, outcomes.1, outcomes.2])
+        {
+            for (total, value) in totals.iter_mut().zip(values) {
+                *total += value;
+            }
         }
         *completed.borrow_mut() += 1;
         Ok(())
