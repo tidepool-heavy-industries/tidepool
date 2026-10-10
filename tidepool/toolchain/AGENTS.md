@@ -31,6 +31,10 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   Equal immutable artifact payload IDs do not imply equal exact dependency
   bindings. Each issued graph binding owns its canonical children and native
   edges; reuse bytes without borrowing another selection's ambient owner map.
+  Native group nodes have their own issuing scope. Their explicit carrier edge
+  may target an artifact binding from an earlier selection; never manufacture
+  an artifact node from a group's scope. Validate typed artifact/group node
+  membership, and follow the recorded carrier edge when selecting group demand.
   Recovery records scoped bindings, complete binding digest witnesses, exact
   interface/native edges and executable group demand, and validates them against
   the certified payloads before restoring compiler roles. A completed source-compilation instance

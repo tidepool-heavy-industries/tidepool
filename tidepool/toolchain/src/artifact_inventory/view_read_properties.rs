@@ -424,7 +424,7 @@ fn exhaustive_oracle(view: &ArtifactView) -> Oracle {
                 return None;
             }
             // The group-to-carrier edge only represents graph custody.
-            if matches!(source, InventoryNodeKey::Group(group) if target == InventoryNodeKey::Artifact(group.binding))
+            if matches!((source, target), (InventoryNodeKey::Group(group), InventoryNodeKey::Artifact(carrier)) if carrier.artifact == group.binding.artifact)
                 && matches!(&edge, ArtifactDependency::Interface)
             {
                 None
