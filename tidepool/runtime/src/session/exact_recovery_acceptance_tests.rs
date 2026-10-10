@@ -536,8 +536,24 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         "this acceptance gate requires fresh compiler processes"
     );
     let effects = TestEffectSurface::minimal(&[]).unwrap();
-    let durable = tempfile::tempdir().unwrap();
-    let recovery = RecoveryFixture::create(durable.path());
+    let (durable_root, _durable_guard) = match std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT") {
+        Some(parent) => {
+            let parent = PathBuf::from(parent);
+            assert!(parent.is_absolute());
+            let root = tempfile::Builder::new()
+                .prefix("exact-recovery-run-")
+                .tempdir_in(parent)
+                .unwrap()
+                .keep();
+            eprintln!("exact-recovery run retained={}", root.display());
+            (root, None)
+        }
+        None => {
+            let root = tempfile::tempdir().unwrap();
+            (root.path().to_path_buf(), Some(root))
+        }
+    };
+    let recovery = RecoveryFixture::create(&durable_root);
     let mut producer = PersistentSession::new(
         Some(library(4402, &recovery, effects.include_paths())),
         1024 * 1024,
@@ -647,12 +663,12 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
     );
     drop(admission);
     drop(producer);
-    let removed_source = durable.path().join("compiler/Tidepool/Session");
+    let removed_source = durable_root.join("compiler/Tidepool/Session");
     assert!(
         removed_source.is_dir(),
         "the issuer actually wrote authored source modules"
     );
-    assert!(durable.path().join("compiler/artifacts").is_dir());
+    assert!(durable_root.join("compiler/artifacts").is_dir());
     std::fs::remove_dir_all(&removed_source).unwrap();
     assert!(
         !removed_source.exists(),
@@ -666,7 +682,7 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         dependent: dependent.0,
         epoch: expected.epoch,
         declaration_tip: expected.declaration_tip.0,
-        result_file: durable.path().join("fresh-worker-result.json"),
+        result_file: durable_root.join("fresh-worker-result.json"),
     };
     drop(recovery);
     let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -699,7 +715,7 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
         std::process::id(),
         "recovery must execute in a distinct Rust process"
     );
-    let reopened = RecoveryFixture::reopen(run_owner(durable.path()));
+    let reopened = RecoveryFixture::reopen(run_owner(&durable_root));
     let successor = reopened
         .store
         .read_public_owner(super::recovery_store::RecoveryDomainId::Root, &owner(2))
