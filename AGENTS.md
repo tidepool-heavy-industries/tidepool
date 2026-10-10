@@ -125,6 +125,15 @@ related producers, consumers and implementations of the same invariant. Follow
 [property testing](docs/property-testing.md#expand-from-a-finding) for the bounded
 search and evidence; a code smell is a lead, not a confirmed defect.
 
+When a finding exposes a reusable failure category, delegate a bounded independent
+search while its owner repairs the instance. Include related producers, consumers
+and test paths, and revisit earlier one-off repairs for missed analogues. Give the
+searcher the violated invariant, known counterexample and current owners so work
+does not collide. Seek a shared typed boundary, owner-derived generation or
+executable property that prevents or detects the category; another reminder or a
+clean text search is not such a guarantee. Record confirmed findings, intentional
+exceptions and untested boundaries separately, and compile and test each repair.
+
 Learn from each mistake, including mistakes in tests, tooling and our own
 reasoning. Ask both why it happened and why the existing checks missed it;
 repair the mechanism and the detection gap. Prefer an enforced invariant or
