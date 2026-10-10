@@ -48,6 +48,10 @@ enum ResidentResumeInput {
         constructor: tidepool_repr::DataConId,
         prefix: Vec<HaskellValue>,
     },
+    NestedHandle {
+        handle: ValueHandle,
+        constructors: Vec<DataConId>,
+    },
     FramedHandleSources {
         handle: ValueHandle,
         constructor: tidepool_repr::DataConId,
@@ -978,8 +982,12 @@ pub struct RuntimeResultPublication {
 static_assertions::assert_not_impl_any!(RuntimeResultPublication: Clone, Copy);
 
 impl RuntimeResultPublication {
-    pub fn custody(&self) -> &RootCustody { &self.custody }
-    pub fn type_witness(&self) -> &Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness> {
+    pub fn custody(&self) -> &RootCustody {
+        &self.custody
+    }
+    pub fn type_witness(
+        &self,
+    ) -> &Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness> {
         &self.type_witness
     }
     /// The destination lease and incorporated root must share their issuer.
@@ -4244,11 +4252,23 @@ where
             .and_then(Option::as_ref)
             .ok_or_else(missing_witness)?
             .clone();
-        let signatures = metadata.request_type_signatures.clone().ok_or_else(invalid)?;
-        if metadata.inputs.len() != if signatures.progress().is_some() { 3 } else { 2 } {
+        let signatures = metadata
+            .request_type_signatures
+            .clone()
+            .ok_or_else(invalid)?;
+        if metadata.inputs.len()
+            != if signatures.progress().is_some() {
+                3
+            } else {
+                2
+            }
+        {
             return Err(invalid());
         }
-        let progress_type_witness = match signatures.progress().and_then(|_| metadata.input_type_witnesses.get(1)) {
+        let progress_type_witness = match signatures
+            .progress()
+            .and_then(|_| metadata.input_type_witnesses.get(1))
+        {
             Some(witness) => Some(Arc::new(
                 witness.as_ref().ok_or_else(missing_witness)?.clone(),
             )),
@@ -4339,18 +4359,33 @@ where
         continuation: &str,
         site: u64,
         input: usize,
-    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError> {
+    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
+    {
         let invalid = || ResidentError::InvalidActivationInput { site };
-        let entry = self.parked.iter().find(|entry| entry.name == continuation).ok_or_else(invalid)?;
-        if self.state.prepared_mut().and_then(|engine| engine.parked_site(entry.id)) != Some(site) {
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == continuation)
+            .ok_or_else(invalid)?;
+        if self
+            .state
+            .prepared_mut()
+            .and_then(|engine| engine.parked_site(entry.id))
+            != Some(site)
+        {
             return Err(invalid());
         }
         if !entry.provenance.authenticated_inputs.contains_key(&site) {
             return Err(ResidentError::UnauthenticatedActivationInputWitness { site });
         }
         let metadata = entry.provenance.sites.get(&site).ok_or_else(invalid)?;
-        if metadata.input_type_witnesses.len() != metadata.inputs.len() { return Err(invalid()); }
-        let witness = metadata.input_type_witnesses.get(input).and_then(Option::as_ref)
+        if metadata.input_type_witnesses.len() != metadata.inputs.len() {
+            return Err(invalid());
+        }
+        let witness = metadata
+            .input_type_witnesses
+            .get(input)
+            .and_then(Option::as_ref)
             .ok_or(ResidentError::MissingActivationInputWitness { site })?;
         Ok(Arc::new(witness.clone()))
     }
@@ -4361,13 +4396,23 @@ where
         &mut self,
         site: u64,
         hole: &ResidentHole,
-    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError> {
+    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
+    {
         let invalid = || ResidentError::InvalidActivationInput { site };
         let provenance = self.parked_program_provenance(hole).ok_or_else(invalid)?;
         let metadata = provenance.sites.get(&site).ok_or_else(invalid)?;
-        let signatures = metadata.request_type_signatures.as_ref().ok_or_else(invalid)?;
-        let count = if signatures.progress().is_some() { 3 } else { 2 };
-        if metadata.inputs.len() != count { return Err(invalid()); }
+        let signatures = metadata
+            .request_type_signatures
+            .as_ref()
+            .ok_or_else(invalid)?;
+        let count = if signatures.progress().is_some() {
+            3
+        } else {
+            2
+        };
+        if metadata.inputs.len() != count {
+            return Err(invalid());
+        }
         self.parked_canonical_input_witness(hole.cont_id(), site, count - 1)
     }
 
@@ -4375,7 +4420,8 @@ where
     pub fn result_type_witness(
         &mut self,
         continuation: &str,
-    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError> {
+    ) -> Result<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>, ResidentError>
+    {
         self.progress_type_witness(continuation)
     }
 
@@ -4386,35 +4432,60 @@ where
         realm: RealmId,
     ) -> Result<RuntimeResultPublication, ResidentError> {
         let invalid = || ResidentError::InvalidActivationInput { site };
-        if realm != RealmId::ROOT { return Err(invalid()); }
-        let entry = self.parked.iter().find(|entry| entry.name == hole.cont_id()).ok_or_else(invalid)?;
-        let (actual, input) = self.state.prepared_mut()
-            .and_then(|engine| engine.parked_capture_site(entry.id)).ok_or_else(invalid)?;
-        if actual != site { return Err(invalid()); }
+        if realm != RealmId::ROOT {
+            return Err(invalid());
+        }
+        let entry = self
+            .parked
+            .iter()
+            .find(|entry| entry.name == hole.cont_id())
+            .ok_or_else(invalid)?;
+        let (actual, input) = self
+            .state
+            .prepared_mut()
+            .and_then(|engine| engine.parked_capture_site(entry.id))
+            .ok_or_else(invalid)?;
+        if actual != site {
+            return Err(invalid());
+        }
         let type_witness = self.parked_canonical_input_witness(hole.cont_id(), site, input)?;
-        let custody = self.live_payload_handle_owned_by(hole.cont_id(), RealmId::ROOT)?.ok_or_else(invalid)?;
-        Ok(RuntimeResultPublication { custody, type_witness })
+        let custody = self
+            .live_payload_handle_owned_by(hole.cont_id(), RealmId::ROOT)?
+            .ok_or_else(invalid)?;
+        Ok(RuntimeResultPublication {
+            custody,
+            type_witness,
+        })
     }
 
     pub fn export_result(
         &mut self,
         publication: RuntimeResultPublication,
     ) -> Result<RuntimeResultParcel, ResidentError> {
-        Ok(RuntimeResultParcel { parcel: self.export_custody(publication.custody)?, type_witness: publication.type_witness })
+        Ok(RuntimeResultParcel {
+            parcel: self.export_custody(publication.custody)?,
+            type_witness: publication.type_witness,
+        })
     }
 
     pub fn export_result_shared(
         &mut self,
         publication: &RuntimeResultPublication,
     ) -> Result<RuntimeResultParcel, ResidentError> {
-        Ok(RuntimeResultParcel { parcel: self.export_shared(&publication.custody)?, type_witness: publication.type_witness.clone() })
+        Ok(RuntimeResultParcel {
+            parcel: self.export_shared(&publication.custody)?,
+            type_witness: publication.type_witness.clone(),
+        })
     }
 
     pub fn import_result(
         &mut self,
         parcel: RuntimeResultParcel,
     ) -> Result<RuntimeResultPublication, ResidentError> {
-        Ok(RuntimeResultPublication { custody: self.import_parcel(parcel.parcel, RealmId::ROOT)?, type_witness: parcel.type_witness })
+        Ok(RuntimeResultPublication {
+            custody: self.import_parcel(parcel.parcel, RealmId::ROOT)?,
+            type_witness: parcel.type_witness,
+        })
     }
 
     /// Transfer a rooted value to another runtime resource scope.
@@ -5615,6 +5686,33 @@ where
         )
     }
 
+    /// Borrow the result under single-field constructors, inner to outer.
+    /// Every wrapper is checked against the parked reply's compiler graph.
+    pub fn resume_nested_custody_classified(
+        &mut self,
+        hole: ResidentHole,
+        custody: &RootCustody,
+        constructors: Vec<DataConId>,
+    ) -> Result<ResidentOutcome, ResidentResumeError> {
+        if !Arc::ptr_eq(&custody.cleanup.0, &self.custody_cleanup) {
+            return Err(ResidentResumeError::Rejected(ResidentError::ForeignCustody));
+        }
+        let Some(handle) = custody.handle else {
+            unreachable!("live custody contains its handle")
+        };
+        let seed = hole.seed();
+        let cont_id = hole.cont_id().to_owned();
+        self.reenter(
+            &cont_id,
+            ResidentResumeInput::NestedHandle {
+                handle,
+                constructors,
+            },
+            seed,
+            Some(&custody.provenance),
+        )
+    }
+
     /// Whether the resident machine has been bootstrapped yet. `false` from
     /// [`Self::unbootstrapped`] until the session's first real turn brings the
     /// machine up (`run_with_sites`/`run_bind_with_sites`/`run_child`/
@@ -5978,8 +6076,12 @@ where
                     && site.input_type_witnesses.iter().any(Option::is_some)
             }) {
                 let mut roots = std::collections::BTreeSet::new();
-                for name in site.request_type_signatures.iter().flat_map(|signatures|
-                    std::iter::once(signatures.reply()).chain(signatures.progress()))
+                for name in site
+                    .request_type_signatures
+                    .iter()
+                    .flat_map(|signatures| {
+                        std::iter::once(signatures.reply()).chain(signatures.progress())
+                    })
                     .flat_map(|signature| signature.names())
                 {
                     if home_units.contains(name.unit()) {
@@ -7848,6 +7950,10 @@ where
                     constructor,
                     prefix,
                 } => engine.resume_with_framed_handle(frame_id, handle, constructor, prefix, table),
+                ResidentResumeInput::NestedHandle {
+                    handle,
+                    constructors,
+                } => engine.resume_with_nested_handle(frame_id, handle, &constructors),
                 ResidentResumeInput::FramedHandleSources {
                     handle,
                     constructor,

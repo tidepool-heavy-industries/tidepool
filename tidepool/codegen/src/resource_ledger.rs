@@ -63,8 +63,9 @@ impl PreparedReplyEvidence {
 
     pub fn owner(self) -> ProgramId {
         match self {
-            Self::Static { owner, .. } | Self::StaticWithSite { owner, .. }
-                | Self::AtSite { owner, .. } => owner,
+            Self::Static { owner, .. }
+            | Self::StaticWithSite { owner, .. }
+            | Self::AtSite { owner, .. } => owner,
         }
     }
 }

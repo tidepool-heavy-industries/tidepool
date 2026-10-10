@@ -96,7 +96,7 @@ import GHC.Types.ForeignCall qualified as Foreign
 import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (fieldOcc_maybe, isDataOcc, occNameString)
 import GHC.Types.RepType
-  (PrimRep(..), typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
+  (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
 import GHC.Types.Unique.Set (UniqSet, addListToUniqSet, addOneToUniqSet, elementOfUniqSet, emptyUniqSet, mkUniqSet, nonDetEltsUniqSet)
 import GHC.Types.Unique (Unique, getKey)
 import GHC.Types.Unique.FM
@@ -1749,7 +1749,7 @@ lowerConstructorReplies carriers base = do
         , Just (carrier, [inputs, _]) <- [splitTyConApp_maybe original]
         , carrier `elem` carriers, eqType (unwrapType representation) intTy
         , let payload = if ordinal + 1 < length originals then ordinal + 1 else ordinal - 1
-        , typePrimRep_maybe (runtime !! payload) == Just [LiftedRep] ] of
+        , typePrimRep_maybe (runtime !! payload) == Just [GHC.BoxedRep (Just GHC.Lifted)] ] of
           [evidence] -> Just evidence
           _ -> Nothing
     where
