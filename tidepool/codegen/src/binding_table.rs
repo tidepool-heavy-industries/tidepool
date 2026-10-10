@@ -2106,6 +2106,20 @@ impl BindingTable {
         self.prepare_promotion_install(plan, &[])
     }
 
+    /// Read-only admission preflight. The publisher prepares reserved install
+    /// slots separately while holding the final exclusive checkout.
+    pub fn validate_exact_publication_in(
+        &self,
+        tree: &ScopeTree,
+        source: ScopeId,
+        target: ScopeId,
+        ids: &[SessionVarId],
+        instances: &[SourceLeaseKey],
+    ) -> Result<(), BindingPromotionError> {
+        self.exact_publication_plan(tree, source, target, ids, instances)
+            .map(|_| ())
+    }
+
     pub fn prepare_exact_publication_in(
         &mut self,
         tree: &ScopeTree,
@@ -3130,6 +3144,18 @@ impl BindingTable {
             };
         }
         let projected = self.capturable_membership.get(&parent);
+        if let Some(projected) = projected.filter(|projected| {
+            changes.observations.is_empty()
+                && self.membership_dependencies_current(parent, projected)
+        }) {
+            return CaptureMembership {
+                retained: projected.retained.clone(),
+                source_instances: projected.source_instances.clone(),
+                append_epoch: (projected.append_epoch != 0).then_some(projected.append_epoch),
+                added_bindings: projected.added_bindings.clone(),
+                added_sources: projected.added_sources.clone(),
+            };
+        }
         let tip = self.tips.get(&parent);
         let own = self.owned.get(&parent);
         let promoted = self.promoted.get(&parent);
