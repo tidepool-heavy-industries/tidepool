@@ -559,12 +559,12 @@ mod tests {
         .unwrap();
         let mut first = PersistentSession::new(Some(first_library), 1024);
         let public = first.mint_isolated_scope();
-        assert_eq!(
+        assert!(matches!(
             first
                 .initialize_durable_public_scope(first_owner.clone(), public)
                 .unwrap(),
             PublicManifestCommit::Durable,
-        );
+        ));
         let private = first.begin_private_execution(public).unwrap();
         let intent = first
             .freeze_execution_intent(&private, vec![], vec![])
