@@ -59,11 +59,11 @@ pub(crate) async fn run(
 /// (a Jit/Prepared failure once compilation succeeded) keeps its own
 /// `Display`; diagnostics only exist on the compile path.
 fn render_recipe_compile_error(
-    error: &tidepool_runtime::RuntimeError,
+    error: tidepool_runtime::RuntimeError,
     source: &str,
     entry: &str,
 ) -> Box<dyn std::error::Error> {
-    match error {
+    let detail = match &error {
         tidepool_runtime::RuntimeError::Compile(compile_error) => {
             let detail = tidepool_runtime::session::render_turn_compile_error(
                 compile_error,
@@ -71,11 +71,26 @@ fn render_recipe_compile_error(
                 entry,
                 entry,
             );
-            runtime_error(format!(
-                "recipe {entry} compilation failed: {error}\n{detail}"
-            ))
+            format!("recipe {entry} compilation failed: {error}\n{detail}")
         }
-        other => runtime_error(other.to_string()),
+        other => other.to_string(),
+    };
+    Box::new(RecipeCompilationFailure { error, detail })
+}
+
+#[derive(Debug)]
+struct RecipeCompilationFailure {
+    error: tidepool_runtime::RuntimeError,
+    detail: String,
+}
+impl std::fmt::Display for RecipeCompilationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+impl std::error::Error for RecipeCompilationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
     }
 }
 
@@ -275,9 +290,11 @@ impl Driver {
             tidepool_runtime::session::ExpressionLift::Effectful,
         );
         tokio::task::block_in_place(|| {
-            tidepool_runtime::compile_and_run(&source, "result", &refs, self, &())
-        })
-        .map_err(|error| render_recipe_compile_error(&error, &source, entry))?;
+            super::run_compiler_preparation(|settlement| {
+                tidepool_runtime::compile_and_run(&source, "result", &refs, self, &(), settlement)
+                    .map_err(|error| render_recipe_compile_error(error, &source, entry))
+            })
+        })?;
         Ok(())
     }
 

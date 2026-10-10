@@ -263,6 +263,7 @@ impl ResidentActorStart {
         table: &DataConTable,
         session_id: tidepool_repr::SessionId,
         parent_actor: crate::ActorRef,
+        settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
     ) -> Result<Self, ActorStartCaptureError>
     where
         H: DispatchEffect<O> + Send,
@@ -283,6 +284,7 @@ impl ResidentActorStart {
                 session_id,
                 parent_actor,
             },
+            settlement,
         )
     }
 
@@ -300,6 +302,7 @@ impl ResidentActorStart {
         limits: Option<(i64, i64)>,
         session_id: tidepool_repr::SessionId,
         parent_actor: crate::ActorRef,
+        settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
     ) -> Result<Self, ActorStartCaptureError>
     where
         H: DispatchEffect<O> + Send,
@@ -316,7 +319,7 @@ impl ResidentActorStart {
             .ok_or(ActorStartCaptureError::MissingEntry)?;
         // Only the explicit installer closure's exact dependencies cross a
         // fresh context boundary; ambient parent lexical bindings do not.
-        let facade = materialize_entry_facade(session, entry.provenance())?;
+        let facade = materialize_entry_facade(session, entry.provenance(), settlement)?;
         if facade.is_some() && session.declaration_generation_high_water().is_none() {
             return Err(ActorStartCaptureError::NoCompileView);
         }
@@ -377,6 +380,7 @@ impl ResidentActorStart {
         session: &mut ResidentSession<H, O>,
         parent_hole: ResidentHole,
         request: ActorStartRequest,
+        settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
     ) -> Result<Self, ActorStartCaptureError>
     where
         H: DispatchEffect<O> + Send,
@@ -399,7 +403,7 @@ impl ResidentActorStart {
         let entry = session
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)?
             .ok_or(ActorStartCaptureError::MissingEntry)?;
-        let facade = materialize_entry_facade(session, entry.provenance())?;
+        let facade = materialize_entry_facade(session, entry.provenance(), settlement)?;
         if facade.is_some() && session.declaration_generation_high_water().is_none() {
             return Err(ActorStartCaptureError::NoCompileView);
         }
@@ -450,6 +454,7 @@ impl ResidentActorStart {
 fn materialize_entry_facade<H, O>(
     session: &ResidentSession<H, O>,
     provenance: &tidepool_runtime::session::ProgramProvenance,
+    settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<Option<MaterializedFacade>, ActorStartCaptureError>
 where
     H: DispatchEffect<O> + Send,
@@ -472,7 +477,7 @@ where
     let view = session
         .compile_view_in(scope)
         .ok_or(ActorStartCaptureError::NoCompileView)?;
-    Ok(Some(surface.materialize(&view)?))
+    Ok(Some(surface.materialize(&view, settlement)?))
 }
 
 fn validate_head_incarnations(

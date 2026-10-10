@@ -446,7 +446,7 @@ pub(crate) fn execute(
     live_modules: &[String],
     workspace_modules: &[String],
     usage: crate::UsagePointerTable,
-    inspect: impl Fn(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
+    mut inspect: impl FnMut(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
 ) -> LookupBatch {
     let mut batch = LookupBatch {
         results: vec![],
@@ -486,7 +486,7 @@ pub(crate) fn execute(
             unavailable: None,
         }
     } else {
-        match inspect_checked(&plan.queries, &inspect) {
+        match inspect_checked(&plan.queries, &mut inspect) {
             Ok(results) => InspectionAnswers {
                 results,
                 unavailable: None,
@@ -495,7 +495,7 @@ pub(crate) fn execute(
                 &prepared,
                 imports,
                 &plan.queries[plan.primary_len..],
-                &inspect,
+                &mut inspect,
                 &diagnostic,
             ),
             Err(InspectionFailure::Unavailable(diagnostic)) => InspectionAnswers {
@@ -713,7 +713,7 @@ pub(crate) fn execute(
                 named_count.min(discovery_queries.len()),
                 InspectionQuery::ScopeBrowse,
             );
-            match inspect_checked(&discovery_queries, &inspect) {
+            match inspect_checked(&discovery_queries, &mut inspect) {
                 Ok(results) => results,
                 Err(error) => {
                     batch.issue = Some(bound_diagnostic(
@@ -993,7 +993,7 @@ fn rejected(count: usize, diagnostic: &str) -> Vec<InspectionResult> {
 
 fn inspect_checked(
     queries: &[InspectionQuery],
-    inspect: &impl Fn(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
+    inspect: &mut impl FnMut(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
 ) -> Result<Vec<InspectionResult>, InspectionFailure> {
     match inspect(queries) {
         Ok(values) if values.len() == queries.len() => Ok(values),
@@ -1022,7 +1022,7 @@ fn isolate(
     prepared: &[lookup_tool::PreparedLookup],
     imports: &str,
     supplemental: &[InspectionQuery],
-    inspect: &impl Fn(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
+    inspect: &mut impl FnMut(&[InspectionQuery]) -> Result<Vec<InspectionResult>, LookupInspectionError>,
     original_diagnostic: &str,
 ) -> InspectionAnswers {
     let parts = prepared
