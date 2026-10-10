@@ -324,15 +324,95 @@ fn certified_target_source_groups(
     Ok(groups)
 }
 
-/// A published compiler original carries its issuer's exact native selection
-/// through planning and completed compiler receipts. Availability cannot issue it.
-#[derive(Clone, Debug)]
-pub(crate) struct PublishedOriginalRequirement {
+/// An original offer carries its issuer's exact selected native rows independently
+/// of compiler namespace policy and completed compiler receipts.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeOriginalRequirement {
     pub(crate) original: ArtifactId,
     pub(crate) selection: ExactArtifactSelection,
 }
 
-impl PublishedOriginalRequirement {
+impl NativeOriginalRequirement {
+    /// Capture only group handles already selected by this issuer. Byte custody
+    /// and an available ordinal census cannot manufacture a group choice.
+    pub(crate) fn from_selected_view(
+        original: ArtifactId,
+        view: &ArtifactView,
+    ) -> Result<Option<Self>, CompileError> {
+        let state = view.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &view.read_projection(&state).nodes;
+        if !owned.iter().any(|node| node.artifact() == original)
+            || !matches!(
+                state.payloads[&original].payload,
+                ArtifactPayload::Original(_)
+            )
+        {
+            return Err(failure(
+                "native original requirement is outside issuer custody",
+            ));
+        }
+        let roots = owned
+            .iter()
+            .filter(|node| {
+                matches!(node,
+                InventoryNodeKey::Group(group) if group.binding.artifact == original)
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        if roots.is_empty() {
+            return Ok(None);
+        }
+        drop(state);
+        let selected = view.retain_projected_materializations(view.inventory().retain(
+            roots,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ))?;
+        Ok(Some(Self {
+            original,
+            selection: ExactArtifactSelection::capture(&selected),
+        }))
+    }
+
+    /// Preserve every distinct supplied choice. A published role owns its
+    /// explicit selection; ordinary roles use their pre-merge source issuer.
+    pub(crate) fn for_projection(
+        projection: &CompilerInputProjection,
+        view: &ArtifactView,
+        preferred: &[Self],
+    ) -> Result<Vec<Self>, CompileError> {
+        projection.validate(view)?;
+        let mut requirements = Vec::new();
+        for role in projection.roles() {
+            let Some(original) = role.original() else {
+                continue;
+            };
+            let choices = if let Some(issued) = Self::from_role(role) {
+                vec![issued]
+            } else {
+                let selected = preferred
+                    .iter()
+                    .filter(|fact| fact.original == original)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if selected.is_empty() {
+                    Self::from_selected_view(original, view)?
+                        .into_iter()
+                        .collect()
+                } else {
+                    selected
+                }
+            };
+            for choice in choices {
+                if !requirements.contains(&choice) {
+                    requirements.push(choice);
+                }
+            }
+        }
+        Ok(requirements)
+    }
+
     pub(crate) fn from_role(role: CompilerInputRole) -> Option<Self> {
         match role {
             CompilerInputRole::PublishedSourceOriginal {
@@ -355,17 +435,16 @@ enum ArtifactRootIntent<'a> {
 }
 
 impl ArtifactRootIntent<'_> {
-    fn published_original_requirements(&self) -> Vec<PublishedOriginalRequirement> {
+    fn native_original_requirements(&self) -> Vec<NativeOriginalRequirement> {
         match self {
             Self::SuppliedArtifacts => Vec::new(),
-            Self::Certified(selection) => selection
-                .published_original_requirements()
-                .cloned()
-                .collect(),
+            Self::Certified(selection) => {
+                selection.native_original_requirements().cloned().collect()
+            }
             Self::Projected(projection) => projection
                 .roles()
                 .into_iter()
-                .filter_map(PublishedOriginalRequirement::from_role)
+                .filter_map(NativeOriginalRequirement::from_role)
                 .collect(),
         }
     }
@@ -489,8 +568,10 @@ pub enum ArtifactInventoryFailure {
     NativeOwnerAmbiguity { owner: ExactModuleIdentity },
     #[error("artifact {artifact:?} has multiple issued dependency bindings")]
     BindingAmbiguity { artifact: ArtifactId },
-    #[error("published original {artifact:?} group {original_ordinal} differs from its issued selection")]
-    PublishedGroupSelectionConflict {
+    #[error(
+        "issued original {artifact:?} group {original_ordinal} differs from its issued selection"
+    )]
+    NativeGroupSelectionConflict {
         artifact: ArtifactId,
         original_ordinal: u32,
     },
@@ -2007,14 +2088,14 @@ impl ArtifactInventory {
             }
             ArtifactRootIntent::SuppliedArtifacts => None,
         };
-        let mut published_groups = BTreeMap::<LogicalNodeKey, BTreeSet<InventoryNodeKey>>::new();
-        let mut published_artifact_targets =
+        let mut required_groups = BTreeMap::<LogicalNodeKey, BTreeSet<InventoryNodeKey>>::new();
+        let mut required_artifact_targets =
             BTreeMap::<ArtifactId, BTreeSet<InventoryNodeKey>>::new();
-        let mut published_native_carriers = BTreeSet::new();
-        for PublishedOriginalRequirement {
+        let mut required_native_carriers = BTreeSet::new();
+        for NativeOriginalRequirement {
             original,
             selection,
-        } in root_intent.published_original_requirements()
+        } in root_intent.native_original_requirements()
         {
             let graph = selection.graph_selection();
             validate_issued_selection(&state, parent_nodes, graph)?;
@@ -2030,7 +2111,7 @@ impl ArtifactInventory {
             // A published native closure can select dependency originals
             // without offering them to the compiler as reusable modules.
             // Their retained payloads still own the certified native rows.
-            published_native_carriers.extend(graph.bindings.iter().filter_map(|binding| {
+            required_native_carriers.extend(graph.bindings.iter().filter_map(|binding| {
                 parent_entries
                     .get(&binding.artifact)
                     .filter(|entry| matches!(entry.payload, ArtifactPayload::Original(_)))
@@ -2038,7 +2119,7 @@ impl ArtifactInventory {
             }));
             for group in &graph.native_groups {
                 let node = InventoryNodeKey::Group(*group);
-                published_groups
+                required_groups
                     .entry(node.logical())
                     .or_default()
                     .insert(node);
@@ -2055,7 +2136,7 @@ impl ArtifactInventory {
                     .map(InventoryNodeKey::Group),
             ) {
                 if let InventoryNodeKey::Artifact(binding) = node {
-                    published_artifact_targets
+                    required_artifact_targets
                         .entry(binding.artifact)
                         .or_default()
                         .insert(node);
@@ -2065,7 +2146,7 @@ impl ArtifactInventory {
         if let Some(ids) = &namespace_ids {
             selected.retain(|id, entry| {
                 ids.contains(id)
-                    || published_native_carriers.contains(id)
+                    || required_native_carriers.contains(id)
                     || match &entry.payload {
                         ArtifactPayload::Original(product) => {
                             !parent_ids.contains(id)
@@ -2097,67 +2178,13 @@ impl ArtifactInventory {
         if namespace_ids.is_some() {
             selected_groups.retain(|group| selected.contains_key(&group.artifact));
         }
-        if std::env::var_os("TIDEPOOL_NATIVE_SELECTION_TRACE").is_some() {
-            let required_native = selected_groups
-                .iter()
-                .flat_map(|group| {
-                    selected[&group.artifact]
-                        .native_requirements_for(group.original_ordinal)
-                        .into_iter()
-                        .filter_map(|(owner, dependency)| {
-                            let ArtifactDependency::NativeGroup { required_ordinal, .. } = dependency else {
-                                return None;
-                            };
-                            let source = &selected[&group.artifact];
-                            let native_owner = source.native_owners.get(owner);
-                            let matching = parent_entries.iter().filter_map(|(id, entry)| {
-                                let ArtifactPayload::Original(product) = &entry.payload else {
-                                    return None;
-                                };
-                                (Some(&NativeOwnerKey::from_owner(product.owner())) == native_owner)
-                                    .then_some(serde_json::json!({
-                                        "artifact": id,
-                                        "selected_for_planning": selected.contains_key(id),
-                                        "namespace": namespace_ids.as_ref().is_none_or(|ids| ids.contains(id)),
-                                        "owned_groups": parent_nodes.iter().filter(|node| matches!(node,
-                                            InventoryNodeKey::Group(binding) if binding.binding.artifact == *id
-                                        )).count(),
-                                    }))
-                            }).collect::<Vec<_>>();
-                            Some(serde_json::json!({
-                                "source": source.descriptor.owner,
-                                "artifact": group.artifact,
-                                "ordinal": group.original_ordinal,
-                                "required": owner,
-                                "required_ordinal": required_ordinal,
-                                "matches": matching,
-                            }))
-                        })
-                })
-                .collect::<Vec<_>>();
-            eprintln!(
-                "TIDEPOOL_NATIVE_SELECTION_TRACE {}",
-                serde_json::json!({
-                    "entry_point": match root_intent {
-                        ArtifactRootIntent::SuppliedArtifacts => "supplied",
-                        ArtifactRootIntent::Certified(_) => "certified",
-                        ArtifactRootIntent::Projected(_) => "projected",
-                    },
-                    "published_originals": root_intent.published_original_requirements().iter().map(|requirement| requirement.original).collect::<Vec<_>>(),
-                    "requested_groups": groups,
-                    "selected_groups": selected_groups,
-                    "parent_groups": native_groups(parent_nodes).len(),
-                    "native_requirements": required_native,
-                })
-            );
-        }
         let (planned, closed_groups) = owners.planned_edges(&state, &selected, &selected_groups)?;
         if exact && closed_groups != selected_groups {
             return Err(failure(
                 "recovered native group closure differs from certified demand",
             ));
         }
-        published_groups.retain(|key, _| planned.contains_key(key));
+        required_groups.retain(|key, _| planned.contains_key(key));
         // Reuse inherited bindings only while their entire qualified outgoing
         // edge set matches the newly issued namespace. Changes propagate through
         // parents; unrelated inherited vertices are never rebound or orphaned.
@@ -2175,14 +2202,14 @@ impl ArtifactInventory {
             let Some(matching) = candidates.get_mut(&key) else {
                 continue;
             };
-            if published_groups
+            if required_groups
                 .get(&key)
                 .is_some_and(|issued| !issued.contains(candidate))
             {
                 continue;
             }
             if let InventoryNodeKey::Artifact(binding) = candidate {
-                match published_artifact_targets.get(&binding.artifact) {
+                match required_artifact_targets.get(&binding.artifact) {
                     Some(issued) if !issued.contains(candidate) => continue,
                     Some(_) => {}
                     None => {
@@ -2219,14 +2246,14 @@ impl ArtifactInventory {
                 }
             }
             if invalid.is_empty() {
-                for key in published_groups.keys() {
+                for key in required_groups.keys() {
                     let LogicalNodeKey::Group(group) = key else {
                         unreachable!("published constraints are typed group handles")
                     };
                     match candidates[key].len() {
                         0 => {
                             return Err(admission_failure(
-                                ArtifactInventoryFailure::PublishedGroupSelectionConflict {
+                                ArtifactInventoryFailure::NativeGroupSelectionConflict {
                                     artifact: group.artifact,
                                     original_ordinal: group.original_ordinal,
                                 },
@@ -5367,7 +5394,7 @@ mod tests {
                 assert!(matches!(
                     inventory.admit_projected(&admitted, vec![Arc::new(next_values.clone())], &conflicting),
                     Err(CompileError::ArtifactInventory(error))
-                        if error.failure == ArtifactInventoryFailure::PublishedGroupSelectionConflict {
+                        if error.failure == ArtifactInventoryFailure::NativeGroupSelectionConflict {
                             artifact: native.descriptor.id,
                             original_ordinal: group.original_ordinal,
                         }
@@ -5595,6 +5622,159 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn private_original_requirement_survives_receipt_with_interface_only_children() {
+        let inventory = ArtifactInventory::default();
+        let child = issued_native_groups("PrivateChild", vec![(7, vec![])], &[], &BTreeMap::new());
+        let root = issued_native_groups(
+            "PrivateRoot",
+            vec![(12, vec![issued_source(&child, 7)])],
+            &[&child],
+            &BTreeMap::new(),
+        );
+        let unrelated = issued_native_groups(
+            "PrivateUnrelated",
+            vec![(19, vec![])],
+            &[],
+            &BTreeMap::new(),
+        );
+        let carriers = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![Arc::new(root.clone()), Arc::new(child.clone())],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let issuer = inventory
+            .admit_shared_with_demand(
+                &carriers,
+                vec![Arc::new(root.clone())],
+                NativeArtifactDemand::AllGroups,
+            )
+            .unwrap();
+        let sibling = inventory
+            .admit_shared_with_demand(
+                &carriers,
+                vec![Arc::new(child.clone()), Arc::new(unrelated.clone())],
+                NativeArtifactDemand::AllGroups,
+            )
+            .unwrap();
+        let expected = issuer.capture_graph_selection().native_groups;
+        let ordinary = CompilerInputProjection::from_issued_entries(&[
+            Arc::new(root.clone()),
+            Arc::new(child.clone()),
+        ])
+        .unwrap();
+        let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        for projection in [
+            ordinary.clone(),
+            ordinary.for_source_owners(&BTreeSet::from([root.descriptor.owner.clone()])),
+        ] {
+            assert!(!projection
+                .roles()
+                .iter()
+                .any(CompilerInputRole::is_published_source_original));
+            let child_reusable = projection
+                .roles()
+                .iter()
+                .any(|role| role.original() == Some(child.descriptor.id));
+            let facts =
+                NativeOriginalRequirement::for_projection(&projection, &issuer, &[]).unwrap();
+            let mut receipt =
+                crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    &projection,
+                    &issuer.metadata_snapshot(),
+                    &validation.inventory,
+                )
+                .unwrap();
+            receipt
+                .with_native_original_requirements(&issuer.metadata_snapshot(), &facts)
+                .unwrap();
+            for joined in [
+                issuer.merge(&sibling).unwrap(),
+                sibling.merge(&issuer).unwrap(),
+            ] {
+                let scopes_before = inventory.0.lock().unwrap().selection_plans.len();
+                let closed = inventory
+                    .admit_certified_with_demand(
+                        &joined,
+                        vec![Arc::new(root.clone())],
+                        NativeArtifactDemand::ScopeInterfaces,
+                        &receipt,
+                    )
+                    .unwrap()
+                    .select_admission_roots(vec![root.descriptor.id])
+                    .unwrap();
+                assert_eq!(closed.capture_graph_selection().native_groups, expected);
+                assert_eq!(
+                    closed.namespace().contains_key(&child.descriptor.id),
+                    child_reusable
+                );
+                assert!(!closed.artifact_ids().contains(&unrelated.descriptor.id));
+                assert_eq!(
+                    inventory.0.lock().unwrap().selection_plans.len(),
+                    scopes_before
+                );
+                let cold = ArtifactInventory::default();
+                let reopened = cold
+                    .recover_selection(
+                        &cold.empty_view(),
+                        joined.entries(),
+                        &joined.capture_graph_selection(),
+                        &joined.binding_dependencies(),
+                    )
+                    .unwrap();
+                let repeated = cold
+                    .admit_certified_with_demand(
+                        &reopened,
+                        vec![Arc::new(root.clone())],
+                        NativeArtifactDemand::ScopeInterfaces,
+                        &receipt,
+                    )
+                    .unwrap()
+                    .select_admission_roots(vec![root.descriptor.id])
+                    .unwrap();
+                assert_eq!(repeated.capture_graph_selection().native_groups, expected);
+            }
+        }
+        assert!(
+            NativeOriginalRequirement::from_selected_view(root.descriptor.id, &carriers)
+                .unwrap()
+                .is_none()
+        );
+        let projection =
+            ordinary.for_source_owners(&BTreeSet::from([root.descriptor.owner.clone()]));
+        let mut facts =
+            NativeOriginalRequirement::for_projection(&projection, &issuer, &[]).unwrap();
+        let alternate = inventory
+            .admit_shared_with_demand(
+                &carriers,
+                vec![Arc::new(root.clone()), Arc::new(unrelated.clone())],
+                NativeArtifactDemand::AllGroups,
+            )
+            .unwrap();
+        facts.extend(
+            NativeOriginalRequirement::for_projection(&projection, &alternate, &[]).unwrap(),
+        );
+        let joined = issuer.merge(&alternate).unwrap();
+        let preserved =
+            NativeOriginalRequirement::for_projection(&projection, &joined, &facts).unwrap();
+        assert_eq!(preserved.len(), 2);
+        let mut ambiguous =
+            crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                &projection,
+                &joined.metadata_snapshot(),
+                &validation.inventory,
+            )
+            .unwrap();
+        ambiguous
+            .with_native_original_requirements(&joined.metadata_snapshot(), &preserved)
+            .unwrap();
+        assert!(matches!(inventory.admit_certified_with_demand(
+            &joined, vec![Arc::new(root.clone())], NativeArtifactDemand::ScopeInterfaces, &ambiguous,
+        ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })));
     }
 
     #[test]
