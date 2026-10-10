@@ -456,8 +456,6 @@ filegroup(
         "tidepool/runtime/src/session/fixtures/activation-input-function.hs": "//tidepool/runtime:haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f61637469766174696f6e2d696e7075742d66756e6374696f6e2e6873",
         "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs": "//tidepool/runtime:haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f61637469766174696f6e2d696e7075742d72656365697665722e6873",
         "tidepool/runtime/src/session/fixtures/activation-input-twenty-renderers.hs": "//tidepool/runtime:haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f61637469766174696f6e2d696e7075742d7477656e74792d72656e6465726572732e6873",
-        "tidepool/runtime/src/session/fixtures/owned-result-callable.hs": "//tidepool/runtime:haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f6f776e65642d726573756c742d63616c6c61626c652e6873",
-        "tidepool/runtime/src/session/fixtures/owned-result-receiver.hs": "//tidepool/runtime:haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f6f776e65642d726573756c742d72656365697665722e6873",
     },
     visibility = ["PUBLIC"],
 )

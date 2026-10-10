@@ -327,8 +327,6 @@
     "exomonad/examples/workspace/.exomonad/checks/workspace-quantities.hs",
     "tidepool/runtime/src/session/fixtures/activation-input-function.hs",
     "tidepool/runtime/src/session/fixtures/activation-input-receiver.hs",
-    "tidepool/runtime/src/session/fixtures/activation-input-twenty-renderers.hs",
-    "tidepool/runtime/src/session/fixtures/owned-result-callable.hs",
-    "tidepool/runtime/src/session/fixtures/owned-result-receiver.hs"
+    "tidepool/runtime/src/session/fixtures/activation-input-twenty-renderers.hs"
   ]
 }
