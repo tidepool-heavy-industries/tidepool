@@ -53,7 +53,9 @@ TEST_ONLY_MODULES = {
     'exomonad-actor': frozenset({
         'exomonad/actor/src/local_actor/reply_settlement_history.rs',
         'exomonad/actor/src/request/readiness/tests.rs',
+        'exomonad/actor/src/request/result_tests.rs',
         'exomonad/actor/src/request/sequence_tests.rs',
+        'exomonad/actor/src/request/test_support.rs',
         'exomonad/actor/src/resident_actor/capture_workspace_tests.rs',
         'exomonad/actor/src/resident_actor/forest_shutdown_tests.rs',
         'exomonad/actor/src/resident_actor/green_runtime_tests.rs',
@@ -93,6 +95,10 @@ TEST_ONLY_MODULES = {
 }
 
 TEST_ONLY_FIXTURES = {
+    'exomonad-actor': frozenset({
+        'exomonad/actor/src/request/fixtures/result-receiver.hs',
+        'exomonad/actor/src/request/fixtures/result-request.hs',
+    }),
     'tidepool-extract-cmd': frozenset({
         'tidepool/extract-cmd/src/fixtures/build_products_worker.rs',
     }),
