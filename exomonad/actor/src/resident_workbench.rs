@@ -4252,7 +4252,7 @@ fn activation_compile_diagnostic(
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
-    #[error("compiler work requires an invocation or initialization cleanup owner")]
+    #[error("compiler work requires an invocation or actor lifecycle cleanup owner")]
     CompilerCleanupOwnerUnavailable,
     #[error("compiler cleanup owner has closed native work admission")]
     CompilerCleanupAdmissionClosed,

@@ -7424,7 +7424,7 @@ where
             workbench
         };
         // Input preparation precedes the request's invocation owner. Retain
-        // its compiler transaction under the actor's initialization lifetime.
+        // its compiler transaction under the recipient actor's retained lifetime.
         let mounted =
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(kernel.retained_exit())
                 .scope(workbench.mount_activation_input(
