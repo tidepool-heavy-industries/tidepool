@@ -11,7 +11,7 @@ use imbl::OrdMap;
 use parking_lot::Mutex;
 use tidepool_toolchain::exact_context::{
     hydrate_context, hydrate_map, read_value, MaterializedContext, MaterializedMap, Materializer,
-    SnapshotMapRoot,
+    SnapshotMapRoot, StagedBlocks,
 };
 
 const VERSION: u32 = 1;
@@ -102,8 +102,8 @@ impl RecoveryPublicSurface {
 
 #[derive(Default, Debug)]
 struct Acquired {
-    nodes: BTreeMap<Generation, Arc<RecoveryNode>>,
-    artifacts: BTreeMap<ArtifactId, Arc<RecoveryArtifactClosure>>,
+    nodes: BTreeMap<(Generation, Cid), Arc<RecoveryNode>>,
+    artifacts: BTreeMap<(ArtifactId, Cid), Arc<RecoveryArtifactClosure>>,
     surfaces: BTreeMap<(RecoveryPublicOwner, u64, Cid), Arc<RecoveryPublicSurface>>,
     contexts: BTreeMap<ContextRoot, Arc<MaterializedContext>>,
 }
@@ -126,6 +126,7 @@ pub(crate) struct RecoveryGraph {
     /// Only newly prepared immutable bytes, retained until transaction settlement.
     pending: OrdMap<Cid, Arc<[u8]>>,
     public_changes: Vec<PreparedPublicOwnerChange>,
+    work: crate::session::RecoveryPublicationWork,
     acquired: Arc<Mutex<Acquired>>,
 }
 impl std::fmt::Debug for RecoveryGraph {
@@ -172,6 +173,7 @@ impl RecoveryGraph {
             owner_roots: OrdMap::new(),
             pending: OrdMap::new(),
             public_changes: Vec::new(),
+            work: Default::default(),
             acquired: Arc::new(Mutex::new(Acquired::default())),
         }
     }
@@ -207,6 +209,7 @@ impl RecoveryGraph {
             domain,
             pending: OrdMap::new(),
             public_changes: Vec::new(),
+            work: Default::default(),
             acquired: Arc::new(Mutex::new(Acquired::default())),
         };
         graph.load_public_surfaces()?;
@@ -277,7 +280,7 @@ impl RecoveryGraph {
         let Some(cid) = self.nodes.get(&id.0) else {
             return Ok(None);
         };
-        if let Some(node) = self.acquired.lock().nodes.get(&id).cloned() {
+        if let Some(node) = self.acquired.lock().nodes.get(&(id, *cid)).cloned() {
             return Ok(Some(node));
         }
         let node: RecoveryNode = read_value(self, cid)?;
@@ -293,7 +296,7 @@ impl RecoveryGraph {
             ));
         }
         let node = Arc::new(node);
-        self.acquired.lock().nodes.insert(id, node.clone());
+        self.acquired.lock().nodes.insert((id, *cid), node.clone());
         Ok(Some(node))
     }
     pub(crate) fn artifact(
@@ -304,7 +307,7 @@ impl RecoveryGraph {
         let Some(cid) = self.artifacts.get(&id) else {
             return Ok(None);
         };
-        if let Some(artifact) = self.acquired.lock().artifacts.get(&id).cloned() {
+        if let Some(artifact) = self.acquired.lock().artifacts.get(&(id, *cid)).cloned() {
             return Ok(Some(artifact));
         }
         let artifact: RecoveryArtifactClosure = read_value(self, cid)?;
@@ -318,7 +321,10 @@ impl RecoveryGraph {
             return Err(error("artifact block identity or custody path is invalid"));
         }
         let artifact = Arc::new(artifact);
-        self.acquired.lock().artifacts.insert(id, artifact.clone());
+        self.acquired
+            .lock()
+            .artifacts
+            .insert((id, *cid), artifact.clone());
         Ok(Some(artifact))
     }
     pub(crate) fn context(
@@ -470,9 +476,7 @@ impl RecoveryGraph {
         let packet = materializer.finish()?;
         self.node_receipt = Some(nodes);
         self.artifact_receipt = Some(artifacts);
-        for (cid, bytes) in packet.into_blocks() {
-            self.pending.insert(cid, bytes);
-        }
+        self.stage_packet(packet);
         let blocks = self
             .pending
             .iter()
@@ -488,6 +492,18 @@ impl RecoveryGraph {
         self.root = Some(state.snapshot_root.clone());
         self.pending.clear();
         self.public_changes.clear();
+        self.work = Default::default();
+    }
+
+    fn stage_packet(&mut self, packet: StagedBlocks) {
+        let metrics = packet.metrics();
+        self.work.changed_entries += metrics.changed_entries;
+        self.work.offered_bytes += metrics.offered_bytes;
+        self.work.serialized_bytes += metrics.serialized_bytes;
+        self.work.cid_validation_bytes += metrics.cid_validation_bytes;
+        for (cid, bytes) in packet.into_blocks() {
+            self.pending.insert(cid, bytes);
+        }
     }
 }
 
@@ -499,9 +515,7 @@ impl RecoveryGraphCandidate {
         let mut materializer = Materializer::new(&self.graph);
         let cid = materializer.materialize_value(value)?;
         let packet = materializer.finish()?;
-        for (cid, bytes) in packet.into_blocks() {
-            self.graph.pending.insert(cid, bytes);
-        }
+        self.graph.stage_packet(packet);
         Ok(cid)
     }
     pub(crate) fn insert_node(&mut self, node: RecoveryNode) -> Result<(), RecoveryError> {
@@ -525,7 +539,7 @@ impl RecoveryGraphCandidate {
             .acquired
             .lock()
             .nodes
-            .insert(node.id, Arc::new(node));
+            .insert((node.id, cid), Arc::new(node));
         Ok(())
     }
     pub(crate) fn insert_artifact(
@@ -557,7 +571,7 @@ impl RecoveryGraphCandidate {
             .acquired
             .lock()
             .artifacts
-            .insert(id, Arc::new(artifact));
+            .insert((id, cid), Arc::new(artifact));
         Ok(())
     }
     pub(crate) fn insert_context(
@@ -570,9 +584,7 @@ impl RecoveryGraphCandidate {
         let context =
             Arc::new(materializer.materialize_context(base.as_deref(), &context.snapshot())?);
         let packet = materializer.finish()?;
-        for (cid, bytes) in packet.into_blocks() {
-            self.graph.pending.insert(cid, bytes);
-        }
+        self.graph.stage_packet(packet);
         let root = context.root().clone();
         self.graph.remember_context(context)?;
         Ok(root)
@@ -597,9 +609,7 @@ impl RecoveryGraphCandidate {
         let packet = materializer.finish()?;
         surface.binding_receipt = Some(bindings);
         surface.source_receipt = Some(sources);
-        for (cid, bytes) in packet.into_blocks() {
-            self.graph.pending.insert(cid, bytes);
-        }
+        self.graph.stage_packet(packet);
         let next = RecoveryPublicOwnerState {
             owner: surface.owner.clone(),
             epoch: surface.epoch,
@@ -635,8 +645,9 @@ impl RecoveryGraphCandidate {
     ) -> Result<StagedRecoveryManifest, RecoveryError> {
         let (graph, root, blocks) = self.graph.materialize_domain()?;
         let work = crate::session::RecoveryPublicationWork {
-            manifest_write_bytes: blocks.iter().map(|(_, bytes)| bytes.len() as u64).sum(),
-            ..Default::default()
+            staged_blocks: blocks.len() as u64,
+            staged_bytes: blocks.iter().map(|(_, bytes)| bytes.len() as u64).sum(),
+            ..graph.work
         };
         let prepared = PreparedRecoveryWrite {
             domain_id: graph.domain,
@@ -674,5 +685,338 @@ impl StagedRecoveryManifest {
             graph.install_store_state(&state);
             install(graph, state)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::{recovery_store::StoreFault, SessionId};
+    use proptest::prelude::*;
+
+    fn owner(incarnation: u64) -> RecoveryPublicOwner {
+        RecoveryPublicOwner::new(
+            &tidepool_repr::ActorPath::parse("root").unwrap(),
+            incarnation,
+        )
+        .unwrap()
+    }
+    fn fixture() -> (tempfile::TempDir, RecoveryGraph) {
+        let directory = tempfile::tempdir().unwrap();
+        let store =
+            Arc::new(RunRecoveryStore::create(&directory.path().join("recovery.sqlite")).unwrap());
+        let (graph, _, _) =
+            load_or_create_domain_graph(store, RecoveryDomainId::Root, 7, Generation(u64::MAX))
+                .unwrap();
+        (directory, graph)
+    }
+    fn context(candidate: &mut RecoveryGraphCandidate) -> ContextRoot {
+        let context =
+            tidepool_toolchain::declaration_join::ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap();
+        candidate.insert_context(&context, None).unwrap()
+    }
+    fn node(id: u64, parent: Option<u64>, context_root: ContextRoot, label: &str) -> RecoveryNode {
+        RecoveryNode {
+            id: Generation(id),
+            parent: parent.map(Generation),
+            kind: RecoveryNodeKind::Authored,
+            implementation_refs: vec![],
+            context_root,
+            lexical_roots: vec![],
+            artifact_refs: vec![],
+            exports: vec![],
+            retracts: vec![],
+            workbench_imports: vec![label.into()],
+            instances: RecoveryInstanceInventory::default(),
+            live_dependencies: vec![],
+            state: RecoveryNodeState::ExactArtifactClosure,
+        }
+    }
+    fn publish(candidate: RecoveryGraphCandidate, base: &RecoveryGraph) -> RecoveryGraph {
+        match candidate
+            .prepare(base.store_revision(), base.high_water())
+            .unwrap()
+            .publish_and_install(|graph, _| graph)
+        {
+            StoreDisposition::Committed(graph) => graph,
+            other => panic!("publication refused: {other:?}"),
+        }
+    }
+    fn reopened(graph: &RecoveryGraph) -> RecoveryGraph {
+        let store = Arc::new(RunRecoveryStore::open(graph.store().path()).unwrap());
+        let state = store.read_domain(graph.domain_id()).unwrap().unwrap();
+        RecoveryGraph::hydrate_domain(store, graph.domain_id(), &state).unwrap()
+    }
+
+    #[test]
+    fn conflicting_preparations_keep_decoded_caches_bound_to_exact_cids() {
+        let (_directory, base) = fixture();
+        let mut first = base.candidate();
+        let root = context(&mut first);
+        first
+            .insert_node(node(1, None, root.clone(), "first"))
+            .unwrap();
+        let first = first
+            .prepare(base.store_revision(), base.high_water())
+            .unwrap();
+        let mut conflicting = base.candidate();
+        context(&mut conflicting);
+        conflicting
+            .insert_node(node(1, None, root, "cancelled-other-facts"))
+            .unwrap();
+        let conflicting = conflicting
+            .prepare(base.store_revision(), base.high_water())
+            .unwrap();
+        let committed = match first.publish_and_install(|graph, _| graph) {
+            StoreDisposition::Committed(graph) => graph,
+            other => panic!("first: {other:?}"),
+        };
+        assert_eq!(
+            committed
+                .node(Generation(1))
+                .unwrap()
+                .unwrap()
+                .workbench_imports,
+            ["first"]
+        );
+        let installed = std::cell::Cell::new(false);
+        assert!(matches!(
+            conflicting.publish_and_install(|_, _| installed.set(true)),
+            StoreDisposition::Refused(crate::session::recovery_store::StoreRefusal::StaleRevision)
+        ));
+        assert!(!installed.get());
+        assert_eq!(
+            reopened(&committed)
+                .node(Generation(1))
+                .unwrap()
+                .unwrap()
+                .workbench_imports,
+            ["first"]
+        );
+    }
+
+    #[test]
+    fn binding_tombstones_and_source_removal_preserve_sibling_roots_and_u64() {
+        let (_directory, mut graph) = fixture();
+        let sibling_domain = RecoveryDomainId::Session(SessionId(u64::MAX));
+        let (_, sibling, _) = load_or_create_domain_graph(
+            graph.store().clone(),
+            sibling_domain,
+            u64::MAX,
+            Generation(u64::MAX),
+        )
+        .unwrap();
+        let mut candidate = graph.candidate();
+        let a = owner(1);
+        let b = owner(2);
+        let original = RecoveryBindingId {
+            session: u64::MAX,
+            variable: u64::MAX,
+        };
+        let source = RecoveryPublicSourceInstance {
+            machine_incarnation: u64::MAX,
+            instance: u32::MAX,
+            module_version: [255; 32],
+            binder: RecoverySourceIdentity {
+                unit: "main".into(),
+                module: "Own".into(),
+                namespace: "value".into(),
+                occurrence: "entry".into(),
+                record_parent: None,
+            },
+        };
+        for owning in [&a, &b] {
+            let mut surface = RecoveryPublicSurface::empty(owning.clone());
+            surface.epoch = 1;
+            surface.bindings.insert("winner".into(), original);
+            surface.source_instances.insert(source.clone(), ());
+            candidate.replace_surface(surface).unwrap();
+        }
+        graph = publish(candidate, &graph);
+        let root = graph.domain_root().unwrap().clone();
+        let sibling_root = graph.public_surface_root(&b).unwrap().clone();
+        let mut candidate = graph.candidate();
+        let mut surface = (*graph.surface(&a).unwrap().unwrap()).clone();
+        surface.epoch += 1;
+        surface.bindings.remove("winner");
+        surface.source_instances.remove(&source);
+        candidate.replace_surface(surface).unwrap();
+        let prepared = candidate
+            .prepare(graph.store_revision(), graph.high_water())
+            .unwrap();
+        assert_eq!(prepared.work.changed_entries, 2);
+        graph = match prepared.publish_and_install(|graph, _| graph) {
+            StoreDisposition::Committed(graph) => graph,
+            other => panic!("remove: {other:?}"),
+        };
+        assert_eq!(graph.domain_root(), Some(&root));
+        assert_eq!(graph.public_surface_root(&b), Some(&sibling_root));
+        assert_eq!(
+            graph.store().read_domain(sibling_domain).unwrap(),
+            Some(sibling)
+        );
+        let cold = reopened(&graph);
+        assert!(cold.surface(&a).unwrap().unwrap().bindings.is_empty());
+        assert!(cold
+            .surface(&a)
+            .unwrap()
+            .unwrap()
+            .source_instances
+            .is_empty());
+        assert_eq!(
+            cold.surface(&b).unwrap().unwrap().bindings["winner"],
+            original
+        );
+        assert!(cold
+            .surface(&b)
+            .unwrap()
+            .unwrap()
+            .source_instances
+            .contains_key(&source));
+        assert_eq!(cold.high_water(), Generation(u64::MAX));
+    }
+
+    #[test]
+    fn one_node_edit_has_bounded_metadata_work_after_retained_history() {
+        let (_directory, mut graph) = fixture();
+        let mut candidate = graph.candidate();
+        let root = context(&mut candidate);
+        for id in 1..=512 {
+            candidate
+                .insert_node(node(
+                    id,
+                    (id > 1).then_some(id - 1),
+                    root.clone(),
+                    "history",
+                ))
+                .unwrap();
+        }
+        graph = publish(candidate, &graph);
+        let mut candidate = graph.candidate();
+        candidate
+            .insert_node(node(513, Some(512), root, "new"))
+            .unwrap();
+        let staged = candidate
+            .prepare(graph.store_revision(), graph.high_water())
+            .unwrap();
+        let work = staged.work;
+        assert_eq!(work.changed_entries, 1);
+        assert!(work.staged_blocks <= 8, "{work:?}");
+        assert!(work.staged_bytes < 16_384, "{work:?}");
+        assert!(work.offered_bytes < 16_384, "{work:?}");
+        assert!(work.serialized_bytes < 2_048, "{work:?}");
+        assert!(work.cid_validation_bytes < 65_536, "{work:?}");
+        let before = graph.store().work();
+        graph = match staged.publish_and_install(|graph, _| graph) {
+            StoreDisposition::Committed(graph) => graph,
+            other => panic!("delta: {other:?}"),
+        };
+        let after = graph.store().work();
+        assert_eq!(after.transactions - before.transactions, 1);
+        assert!(after.block_writes - before.block_writes <= work.staged_blocks);
+        assert_eq!(graph.node_ids().count(), 513);
+        eprintln!(
+            "incremental-recovery-work {}",
+            serde_json::to_string(&work).unwrap()
+        );
+    }
+
+    #[test]
+    fn cold_domain_does_not_decode_unselected_historical_node_blocks() {
+        let (_directory, graph) = fixture();
+        let mut candidate = graph.candidate();
+        let root = context(&mut candidate);
+        candidate
+            .insert_node(node(1, None, root, "historical"))
+            .unwrap();
+        let graph = publish(candidate, &graph);
+        let cid = graph.nodes[&1];
+        let connection = rusqlite::Connection::open(graph.store().path()).unwrap();
+        assert_eq!(
+            connection
+                .execute("DELETE FROM blocks WHERE cid=?1", [cid.to_bytes()])
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        let cold = reopened(&graph);
+        assert!(cold.acquired.lock().nodes.is_empty());
+        assert!(
+            matches!(cold.node(Generation(1)).unwrap_err().kind, RecoveryErrorKind::Snapshot(SnapshotError::MissingBlock(missing)) if missing==cid)
+        );
+    }
+
+    #[derive(Clone, Default)]
+    struct Model {
+        nodes: BTreeMap<u64, Option<u64>>,
+        owners: BTreeMap<u64, (u64, BTreeMap<String, RecoveryBindingId>)>,
+        revision: u64,
+    }
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
+        #[test]
+        fn persistent_graph_histories_match_independent_maps(operations in prop::collection::vec((0u8..10, 0u8..4, any::<u64>()), 1..64)) {
+            let (_directory, mut graph) = fixture();
+            let (_, sibling, _) = load_or_create_domain_graph(graph.store().clone(), RecoveryDomainId::Session(SessionId(99)), 99, Generation(64)).unwrap();
+            let mut model = Model::default();
+            for (operation, selector, variable) in operations {
+                if operation == 5 { graph = reopened(&graph); }
+                else {
+                    let mut next = model.clone();
+                    let mut candidate = graph.candidate();
+                    if operation == 0 {
+                        let id = next.nodes.len() as u64 + 1;
+                        let parent = (id>1).then_some(id-1);
+                        let root = context(&mut candidate);
+                        candidate.insert_node(node(id, parent, root, "issued")).unwrap();
+                        next.nodes.insert(id, parent);
+                    } else {
+                        let incarnation = u64::from(selector)+1;
+                        let owning = owner(incarnation);
+                        let mut surface = graph.surface(&owning).unwrap().map(|surface| (*surface).clone()).unwrap_or_else(|| RecoveryPublicSurface::empty(owning));
+                        let entry = next.owners.entry(incarnation).or_default();
+                        entry.0 += 1;
+                        surface.epoch = entry.0;
+                        let name = format!("name{}", variable%4);
+                        if operation == 2 {
+                            entry.1.remove(&name); surface.bindings.remove(&name);
+                        } else {
+                            let binding = RecoveryBindingId {session:u64::MAX,variable};
+                            entry.1.insert(name.clone(), binding); surface.bindings.insert(name,binding);
+                        }
+                        candidate.replace_surface(surface).unwrap();
+                    }
+                    let staged = candidate.prepare(graph.store_revision(), graph.high_water()).unwrap();
+                    if operation != 6 {
+                        let fault = match operation {7=>Some(StoreFault::BeforeCommit),8=>Some(StoreFault::CommitError),9=>Some(StoreFault::RollbackError),_=>None};
+                        if let Some(fault)=fault { graph.store().inject_fault(fault); }
+                        let installed = std::cell::Cell::new(false);
+                        let outcome = staged.publish_and_install(|graph,_| {installed.set(true);graph});
+                        if matches!(operation,7|9) {} else {next.revision+=1;model=next;}
+                        match outcome {
+                            StoreDisposition::Committed(committed)=>{prop_assert!(installed.get());graph=committed;},
+                            StoreDisposition::Refused(_)=>{prop_assert_eq!(operation,7);prop_assert!(!installed.get());},
+                            StoreDisposition::RecoveryRequired(_)=>{
+                                prop_assert!(matches!(operation,8|9));prop_assert!(!installed.get());
+                                let old=graph.store().clone();graph=reopened(&graph);prop_assert!(old.is_recovery_required());
+                            }
+                        }
+                    }
+                }
+                prop_assert_eq!(graph.store_revision(),StoreRevision(model.revision));
+                prop_assert_eq!(graph.content_revision(),StoreRevision(model.revision));
+                prop_assert_eq!(graph.high_water(),Generation(u64::MAX));
+                prop_assert_eq!(graph.node_ids().map(|id|id.0).collect::<Vec<_>>(),model.nodes.keys().copied().collect::<Vec<_>>());
+                for (&id,&parent) in &model.nodes {prop_assert_eq!(graph.node(Generation(id)).unwrap().unwrap().parent.map(|id|id.0),parent);}
+                prop_assert_eq!(graph.public_owners().count(),model.owners.len());
+                for (&incarnation,(epoch,bindings)) in &model.owners {
+                    let surface=graph.surface(&owner(incarnation)).unwrap().unwrap();
+                    prop_assert_eq!(surface.epoch,*epoch);
+                    prop_assert_eq!(surface.bindings.iter().map(|(name,binding)|(name.clone(),*binding)).collect::<BTreeMap<_,_>>(),bindings.clone());
+                }
+                prop_assert_eq!(graph.store().read_domain(RecoveryDomainId::Session(SessionId(99))).unwrap(),Some(sibling.clone()));
+            }
+        }
     }
 }

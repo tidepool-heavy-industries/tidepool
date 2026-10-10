@@ -209,6 +209,7 @@ pub struct RunStoreAdmissionGuard<'a> {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RecoveryStoreWork {
     pub transactions: u64,
+    /// Actual SQL INSERT rows, including work later rolled back or fenced.
     pub block_writes: u64,
     pub block_bytes: u64,
 }
@@ -492,7 +493,7 @@ impl RunRecoveryStore {
     ) -> StoreDisposition<RecoveryDomainState> {
         self.transact(|transaction| {
             if read_domain(transaction, domain).map_err(sql_refusal)?.is_some() { return Err(StoreRefusal::DomainExists); }
-            insert_blocks(transaction, &blocks).map_err(sql_refusal)?;
+            insert_blocks(transaction, &blocks, &self.block_writes, &self.block_bytes).map_err(sql_refusal)?;
             transaction.execute("INSERT INTO recovery_domains(domain,lineage,revision,content_revision,ceiling,snapshot_root) VALUES(?1,?2,?3,?3,?4,?5)",
                 params![domain.bytes().as_slice(), lineage.to_be_bytes().as_slice(), 0u64.to_be_bytes().as_slice(), ceiling.0.to_be_bytes().as_slice(), root.cid().to_bytes()]).map_err(sql_refusal)?;
             Ok(RecoveryDomainState { lineage, revision: StoreRevision(0), content_revision: StoreRevision(0), allocation_ceiling: ceiling, snapshot_root: root })
@@ -538,7 +539,7 @@ impl RunRecoveryStore {
             let revision = increment(current.revision)?;
             let content_revision = increment(current.content_revision)?;
             if prepared.allocation_ceiling < current.allocation_ceiling { return Err(StoreRefusal::CeilingDecrease); }
-            insert_blocks(transaction, &prepared.blocks).map_err(sql_refusal)?;
+            insert_blocks(transaction, &prepared.blocks, &self.block_writes, &self.block_bytes).map_err(sql_refusal)?;
             for change in &prepared.public_changes { apply_owner_change(transaction, prepared.domain_id, change)?; }
             let updated = transaction.execute("UPDATE recovery_domains SET revision=?1,content_revision=?2,ceiling=?3,snapshot_root=?4 WHERE domain=?5 AND revision=?6 AND ceiling<=?3", params![
                 revision.0.to_be_bytes().as_slice(), content_revision.0.to_be_bytes().as_slice(), prepared.allocation_ceiling.0.to_be_bytes().as_slice(), prepared.snapshot_root.cid().to_bytes(), prepared.domain_id.bytes().as_slice(), prepared.expected_revision.0.to_be_bytes().as_slice()]).map_err(sql_refusal)?;
@@ -670,15 +671,7 @@ impl RunRecoveryStore {
             fault,
         );
         match result {
-            TransactionResult::Committed(value) => {
-                self.block_writes
-                    .fetch_add(blocks.len() as u64, Ordering::Relaxed);
-                self.block_bytes.fetch_add(
-                    blocks.iter().map(|(_, bytes)| bytes.len() as u64).sum(),
-                    Ordering::Relaxed,
-                );
-                StoreDisposition::Committed(install(value))
-            }
+            TransactionResult::Committed(value) => StoreDisposition::Committed(install(value)),
             TransactionResult::Refused(refusal) => StoreDisposition::Refused(refusal),
             TransactionResult::RecoveryRequired(detail) => {
                 let error = store_error(self.path(), StoreErrorKind::RecoveryRequired, detail);
@@ -788,6 +781,8 @@ fn sql_refusal(error: rusqlite::Error) -> StoreRefusal {
 fn insert_blocks(
     transaction: &Transaction<'_>,
     blocks: &[(Cid, Arc<[u8]>)],
+    writes: &AtomicU64,
+    written_bytes: &AtomicU64,
 ) -> rusqlite::Result<()> {
     let mut insert = transaction.prepare_cached(
         "INSERT INTO blocks(cid,bytes) VALUES(?1,?2) ON CONFLICT(cid) DO NOTHING",
@@ -800,6 +795,9 @@ fn insert_blocks(
             if held.as_slice() != bytes.as_ref() {
                 return Err(rusqlite::Error::InvalidQuery);
             }
+        } else {
+            writes.fetch_add(1, Ordering::Relaxed);
+            written_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
         }
     }
     Ok(())

@@ -2099,7 +2099,7 @@ where
         eprintln!(
             "durable-performance {}",
             serde_json::json!({
-                "schema": 1, "composition": "durable-publication", "cell": label,
+                "schema": 2, "composition": "durable-publication", "cell": label,
                 "prefix": scenario.0, "baseline": scenario.1, "completed": true,
                 "elapsed_ns": elapsed.as_nanos(), "certification_ns": certification_ns,
                 "metadata_stage_blocks_ns": stage_ns,
@@ -2109,10 +2109,13 @@ where
                 "domain_revision": state.revision.0,
                 "domain_content_revision": state.content_revision.0,
                 "allocation_ceiling": state.allocation_ceiling.0,
-                "checksum_encode_bytes": recovery_work.checksum_encode_bytes,
-                "recovery_validation_hash_bytes": recovery_work.recovery_validation_hash_bytes,
-                "recovery_materialization_hash_bytes": recovery_work.recovery_materialization_hash_bytes,
-                "manifest_write_bytes": recovery_work.manifest_write_bytes,
+                "changed_entries": recovery_work.changed_entries,
+                "staged_blocks": recovery_work.staged_blocks,
+                "staged_bytes": recovery_work.staged_bytes,
+                "offered_bytes": recovery_work.offered_bytes,
+                "serialized_value_bytes": recovery_work.serialized_bytes,
+                "cid_validation_bytes": recovery_work.cid_validation_bytes,
+                "counter_scope": "immutable-metadata-materializers",
                 "artifact_inventory": inventory,
                 "inventory_counter_scope": "shared-artifact-inventory-owner",
             })

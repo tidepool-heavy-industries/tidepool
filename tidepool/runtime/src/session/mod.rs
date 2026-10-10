@@ -532,14 +532,17 @@ enum StagedPublicationTarget {
     Ephemeral,
 }
 
-/// Actual completed recovery work for one staged publication ticket.
-/// Hash phases are disjoint; descriptor hashing and compiler work are excluded.
+/// Work performed by the immutable metadata block materializers for this
+/// publication. Compiler work and raw artifact materialization are separate.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
 pub struct RecoveryPublicationWork {
-    pub checksum_encode_bytes: u64,
-    pub recovery_validation_hash_bytes: u64,
-    pub recovery_materialization_hash_bytes: u64,
-    pub manifest_write_bytes: u64,
+    pub changed_entries: u64,
+    pub staged_blocks: u64,
+    pub staged_bytes: u64,
+    pub offered_bytes: u64,
+    /// `materialize_value` output; upstream HAMT/key encoding is excluded.
+    pub serialized_bytes: u64,
+    pub cid_validation_bytes: u64,
 }
 
 /// A fully written, fsynced manifest candidate. Only the owning session may

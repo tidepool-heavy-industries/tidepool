@@ -1121,7 +1121,6 @@ impl AcceptedDeclarationPublication {
     }
     pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
         let Self { mut base, receipt } = self;
-        let work = super::RecoveryPublicationWork::default();
         let context = if let Some(projection) = receipt.projection() {
             projection.context().clone()
         } else {
@@ -1388,11 +1387,6 @@ impl AcceptedDeclarationPublication {
             .final_bindings
             .retain(|(name, _)| !declaration.declared_names.contains(name));
         let mut ticket = base.public.stage()?;
-        if let super::StagedPublicationTarget::Durable { staged, .. } = &mut ticket.target {
-            staged.work.checksum_encode_bytes += work.checksum_encode_bytes;
-            staged.work.recovery_materialization_hash_bytes +=
-                work.recovery_materialization_hash_bytes;
-        }
         ticket.declaration = Some(declaration);
         Ok(ticket)
     }
