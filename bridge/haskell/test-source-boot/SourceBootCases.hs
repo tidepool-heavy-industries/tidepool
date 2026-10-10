@@ -126,7 +126,8 @@ import Tidepool.CompilerProducts
   , preparedCurrentOriginalInventory, currentOriginalBinders, currentOriginalBindingsExcept
   , preparedProductInventory
   , writeCertifiedProductsKeepingWithOriginals, certifiedOriginalProducts
-  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, publishStagedOriginalProducts )
+  , writeCertifiedSegmentProducts, writeCertifiedSegmentItemProducts, publishStagedOriginalProducts
+  , retainStagedProgramProducts )
 import Tidepool.CertifiedProducts (encodeCertifiedProducts, resolvePackageGlobal)
 import Tidepool.FinalizedModuleArtifacts
   ( captureFinalizedModuleArtifacts, emptyFinalizedModuleArtifacts, finalizedLocalAdmissions, localFinalizedInterface
@@ -258,6 +259,32 @@ exactCompilationCacheSafety :: FilePath -> FilePath -> IO (Maybe Bool)
 exactCompilationCacheSafety expectedSource receipt = do
   facts <- readReceiptCodecFacts (takeDirectory receipt) receipt
   pure (if codecReceiptSource facts == expectedSource then Just (codecReceiptCacheSafe facts) else Nothing)
+
+-- Native readiness comes from the issued product inventory, independently of
+-- the source compilation's earlier interface-only evidence.
+withOriginalProductReceipt :: FilePath -> PreparedPipelineResult -> (a -> CertifiedOriginalProducts) -> IO a -> IO a
+withOriginalProductReceipt work prepared certifiedResult action = do
+  let directory = work </> ".exact-compilations"
+      receipts = doesDirectoryExist directory >>= \exists ->
+        if exists then listDirectory directory else pure []
+  before <- receipts
+  result <- action
+  let certified = certifiedResult result
+  after <- receipts
+  case preparedExactCompilation prepared of
+    Nothing -> pure ()
+    Just _ -> do
+      let added = Set.toList (Set.fromList after `Set.difference` Set.fromList before)
+          expected = Set.fromList [(T.unpack unit,T.unpack name)
+            | product' <- certifiedOriginalProducts certified
+            , let (unit,name,_,_) = moduleProductInput product']
+      path <- case added of
+        [name] -> pure (directory </> name </> "receipt.cbor")
+        _ -> fail "product publication did not issue one physical source receipt"
+      facts <- readReceiptCodecFacts work path
+      unless (expected `Set.isSubsetOf` Set.fromList (codecReceiptNativeReady facts))
+        (fail "physical source receipt lost its certified native readiness")
+  pure result
 
 -- One immutable capture supplies SOURCE SCC candidates and a separate ordinary
 -- native dependency pair. SOURCE imports cannot issue execution source recipes.
@@ -955,7 +982,20 @@ canonicalCurrentSource = withTiming $ withScratch $ \work -> do
       _ -> fail ("checked-cell stage emitted an unexpected canonical certificate count: " ++ show canonicalPaths)
     assertStageRefuses canonicalPath "canonical certificate"
     assertStageRefuses graphPath "execution-source graph"
-    _ <- publishStagedOriginalProducts captured staged
+    stagedPublished <- withOriginalProductReceipt work captured id $
+      publishStagedOriginalProducts captured staged
+    when (null (certifiedOriginalProducts stagedPublished))
+      (fail "staged readiness control lacks actual native originals")
+    stagedRetentionDirectory <- pure (work </> "checked-local-staged-retention")
+    createDirectory stagedRetentionDirectory
+    _ <- withOriginalProductReceipt work captured (const stagedPublished) $
+      retainStagedProgramProducts stagedRetentionDirectory captured staged
+        "CanonicalLocalConsumer" admitted
+    plainRetentionDirectory <- pure (work </> "checked-local-plain-retention")
+    createDirectory plainRetentionDirectory
+    _ <- withOriginalProductReceipt work captured (const stagedPublished) $
+      retainProgramProducts plainRetentionDirectory captured stagedPublished
+        "CanonicalLocalConsumer" admitted
     inherited <- either fail pure (extendSourceSelectedOriginals
       (compilationSourceSelection localCompilation) admitted)
     -- Fresh rows are in the completed capture rather than its input scope.
@@ -1156,7 +1196,8 @@ completedProgramSourceImportsWithCandidates reuseCandidate = withTiming $ withSc
       unless (copied == candidateIfaceBytes)
         (fail "retention did not publish the captured candidate interface bytes")
     (retained,retentionDiagnostics) <- captureDiagnostics $
-      retainProgramProducts directory completed certified "CompletedOriginalConsumer" admitted
+      withOriginalProductReceipt work completed (const certified) $
+        retainProgramProducts directory completed certified "CompletedOriginalConsumer" admitted
     let finalProofs = length [() | line <- lines retentionDiagnostics
           , "tidepool-timing-detail parent=exact_scope phase=revalidate " `isPrefixOf` line]
     unless (finalProofs == 1) (fail ("retention final proof count: " ++ show finalProofs))

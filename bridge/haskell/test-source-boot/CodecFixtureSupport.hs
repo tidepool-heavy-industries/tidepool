@@ -139,14 +139,16 @@ data ReceiptCodecFacts = ReceiptCodecFacts
   { codecReceiptSource :: FilePath
   , codecReceiptCacheSafe :: Bool
   , codecReceiptSourceSelected :: [(String,String)]
+  , codecReceiptNativeReady :: [(String,String)]
   } deriving (Eq,Show)
 
 readReceiptCodecFacts :: FilePath -> FilePath -> IO ReceiptCodecFacts
 readReceiptCodecFacts work path = readFacts work "receipt_facts" [text path] $ \term -> do
-  fields <- closedMap ["source_path","cache_safe","source_selected"] term
+  fields <- closedMap ["source_path","cache_safe","source_selected","native_ready"] term
   ReceiptCodecFacts <$> field fields "source_path" string
     <*> field fields "cache_safe" boolean
     <*> field fields "source_selected" (array owner)
+    <*> field fields "native_ready" (array owner)
 
 data CodecImportOwner
   = CodecSourceOwner String String (Maybe String) Word32 SymbolIdentity

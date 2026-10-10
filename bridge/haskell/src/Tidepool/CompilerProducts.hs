@@ -200,6 +200,9 @@ data CertifiedOriginalProducts = CertifiedOriginalProducts
   , certifiedRetainedOriginals :: Map.Map (String,String) CanonicalInterfaceProof
   , certifiedRetainedNativeVersions :: Map.Map (String,String) String
   , certifiedTargetContext :: Maybe TargetCertificationContext
+  -- Final output readiness belongs to this certification, not the earlier
+  -- interface-only prepared capture. Every publication issues these same facts.
+  , certifiedFreshDependencies :: DependencyEvidence
   }
 
 -- Segment facts remain in memory until the segment's terminal proof succeeds.
@@ -665,7 +668,7 @@ publishStagedOriginalProducts prepared (StagedOriginalProducts certified path by
       revalidateExactScopesAtWithOutputs RetainedProductsPublication env [] outputs >>= either fail pure
       BS.writeFile path bytes
     Just compilation -> writeCheckedExactCompilationWithOutputsAndPublication env compilation
-      (preparedFreshDependencies prepared) outputs (PublishCertificate path bytes)
+      (certifiedFreshDependencies certified) outputs (PublishCertificate path bytes)
   pure certified
 
 writeCertifiedProducts
@@ -773,7 +776,7 @@ writeCertifiedProducts kind stageCertificate includes originalInterfaces outDir 
         Nothing -> do
           revalidateExactScopesAtWithOutputs RetainedProductsPublication hscEnv [] outputSeals >>= either fail pure
           publishCertificate
-    pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe retainedProofs retainedVersions targetContext, certificateBytes, outputSeals)
+    pure (CertifiedOriginalProducts freshProducts sourceOriginals finalized sourceRecipe retainedProofs retainedVersions targetContext freshDependencies, certificateBytes, outputSeals)
 
 
 -- An immutable original product needs captured finalized Core as well as its
@@ -1052,9 +1055,9 @@ retainProgramProductsWithPublication stagedCertificate directory prepared certif
       publishStaged
     Just compilation -> case stagedCertificate of
       Nothing -> writeRetainedExactCompilationWithOutputsAndPublication env retained compilation
-        (preparedFreshDependencies prepared) outputSeals ReceiptOnly
+        (certifiedFreshDependencies certified) outputSeals ReceiptOnly
       Just (path,bytes,_) -> writeRetainedExactCompilationWithOutputsAndPublication env retained compilation
-        (preparedFreshDependencies prepared) outputSeals (PublishCertificate path bytes)
+        (certifiedFreshDependencies certified) outputSeals (PublishCertificate path bytes)
   pure retained
   where
     localInterfaces = Map.filterWithKey (\(_,owner) _ -> owner /= target)

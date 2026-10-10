@@ -387,6 +387,7 @@ struct ReceiptFacts {
     source_path: PathBuf,
     cache_safe: bool,
     source_selected: Vec<OwnerFact>,
+    native_ready: Vec<OwnerFact>,
 }
 fn receipt_facts(root: &Path, path: &Path) {
     let receipt = crate::declaration_context::read_exact_compilation_receipt(path)
@@ -397,6 +398,16 @@ fn receipt_facts(root: &Path, path: &Path) {
         &ReceiptFacts {
             source_path: receipt.source_path,
             cache_safe: receipt.evidence.cache_safe,
+            native_ready: receipt
+                .evidence
+                .modules
+                .iter()
+                .filter(|module| module.product.has_native_product())
+                .map(|module| OwnerFact {
+                    unit: module.unit.clone(),
+                    module: module.module.clone(),
+                })
+                .collect(),
             source_selected: receipt
                 .claims
                 .into_iter()

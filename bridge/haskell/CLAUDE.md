@@ -143,6 +143,11 @@ Retention and checked receipt publication capture source evidence before one
 terminal proof over their required scopes. That proof shares current scope,
 package/import and newly materialized output observations; no observations
 survive into publication, cancellation recovery or further compiler work.
+`CertifiedOriginalProducts` retains the final fresh dependency evidence after
+native output readiness is established. Ordinary, staged and retained publication
+issue that evidence directly; the earlier prepared interface inventory cannot
+reconstruct the completed product facts. Source selection remains an independent
+proof and does not itself establish native readiness.
 
 Execution parcels retain `[SHA, absolute graph-file path]` descriptors and exact
 original references. Exact-scope graph paths come from the retained immutable

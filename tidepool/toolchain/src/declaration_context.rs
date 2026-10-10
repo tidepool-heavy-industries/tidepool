@@ -2164,14 +2164,14 @@ impl ExactProgramSegmentAdmission {
         let matched = self
             .admissions
             .iter()
-            .filter(|admission| {
-                admission.witness.matches_source(path, source)
-                    && admission.validate_ineligible_evidence(evidence).is_ok()
-            })
+            .filter(|admission| admission.witness.matches_source(path, source))
             .collect::<Vec<_>>();
         let first = matched
             .first()
             .ok_or_else(|| failure("projected item lacks its physical segment source receipt"))?;
+        for admission in &matched {
+            admission.validate_ineligible_evidence(evidence)?;
+        }
         // Repeated projected receipt rows are equal authority, not new source
         // compilation; retain every validated row for final conflict checks.
         if matched.iter().any(|admission| {
@@ -3341,25 +3341,25 @@ impl ExactCompilationRequest {
     ) -> Result<ExactSourceAdmission, CompileError> {
         use sha2::Digest;
         let expected: [u8; 32] = sha2::Sha256::digest(source.as_bytes()).into();
-        self.validate_outputs_selected_with_validation(
-            source_path
-                .parent()
-                .ok_or_else(|| failure("source has no directory"))?,
-            None,
-            self.context(),
-            validation,
-        )?
-        .into_iter()
-        .find(|admitted| {
-            admitted.witness.source_path() == source_path
-                && admitted.witness.source_sha256() == &expected
-                && admitted
-                    .validate_ineligible_evidence(fresh_evidence)
-                    .is_ok()
-        })
-        .ok_or_else(|| {
-            failure("source and final product evidence lack their exact consumed receipt")
-        })
+        let admitted = self
+            .validate_outputs_selected_with_validation(
+                source_path
+                    .parent()
+                    .ok_or_else(|| failure("source has no directory"))?,
+                None,
+                self.context(),
+                validation,
+            )?
+            .into_iter()
+            .find(|admitted| {
+                admitted.witness.source_path() == source_path
+                    && admitted.witness.source_sha256() == &expected
+            })
+            .ok_or_else(|| {
+                failure("source and final product evidence lack their exact consumed receipt")
+            })?;
+        admitted.validate_ineligible_evidence(fresh_evidence)?;
+        Ok(admitted)
     }
     pub(crate) fn validate_outputs(
         &self,
@@ -11681,6 +11681,29 @@ mod tests {
         assert!(segment
             .product_admission(&projected, &source_path, source, b"{}")
             .is_err());
+        for changed in 0..4 {
+            let mut altered: crate::cache::DependencyEvidence =
+                serde_json::from_slice(&evidence).unwrap();
+            match changed {
+                0 => altered.modules[0].unit = "foreign".into(),
+                1 => altered.modules[0].module = "Different".into(),
+                2 => altered.modules[0].product = crate::cache::ProductAvailability::InterfaceOnly,
+                _ => altered.sources[0].sha256 = sha256(b"different source"),
+            }
+            let refusal = segment
+                .product_admission(
+                    &projected,
+                    &source_path,
+                    source,
+                    &serde_json::to_vec(&altered).unwrap(),
+                )
+                .err()
+                .expect("matching source must retain its exact final evidence");
+            assert_context_refusal(
+                &refusal,
+                "source-cache-ineligible evidence differs from exact fresh proof",
+            );
+        }
         for changed in 0..3 {
             let mut foreign = projected.clone();
             match changed {
