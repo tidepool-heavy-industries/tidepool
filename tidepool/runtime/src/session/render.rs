@@ -1505,7 +1505,10 @@ mod tests {
         let revision = log.publication_revision();
         let mut next = turn("", vec![val("shared"), ty("shared", &["New"])]);
         next.parent = Some(parent);
-        next.retracts = vec![DeclarationRetraction::Value("gone".into())];
+        next.retracts = vec![DeclarationRetraction::Head {
+            namespace: tidepool_toolchain::declaration_join::ExportNamespace::Value,
+            occurrence: "gone".into(),
+        }];
         assert_eq!(
             log.current_items_with_turn(parent, &next),
             vec![val("shared"), ty("shared", &["New"])]
