@@ -1323,6 +1323,7 @@ fn compiler_domains_and_target_roots_match_independent_variant_histories() {
     let configured_cases = config.cases;
     let callbacks = RefCell::new(0usize);
     let completed = RefCell::new(0usize);
+    let initial_failure = RefCell::new(None);
     let observed = RefCell::new([[0usize; 13]; 3]);
     let strategy = (
         any::<bool>(),
@@ -1331,137 +1332,158 @@ fn compiler_domains_and_target_roots_match_independent_variant_histories() {
     );
     let result = TestRunner::new(config).run(&strategy, |(cross_version, generations, tail)| {
         *callbacks.borrow_mut() += 1;
-        let catalog = Catalog::new(cross_version, generations);
-        let mut operations = vec![
-            Op::PublishPrefix { domain: 0 },
-            Op::Demand {
-                domain: 0,
-                module: 0,
-                version: 0,
-                ordinal: 3,
-                whole: false,
-            },
-            Op::RecoverDemand {
-                domain: 0,
-                mutation: 1,
-            },
-            Op::ReleaseSegment { domain: 0 },
-            Op::DeclarationOriginal {
-                domain: 0,
-                module: 0,
-                version: 0,
-            },
-            Op::Offer {
-                domain: 0,
-                module: 0,
-                version: 0,
-            },
-            Op::Offer {
-                domain: 0,
-                module: 0,
-                version: 1,
-            },
-            Op::Offer {
-                domain: 1,
-                module: 0,
-                version: 1,
-            },
-            Op::Merge {
-                target: 0,
-                source: 1,
-            },
-            Op::Clone {
-                target: 2,
-                source: 0,
-            },
-            Op::Restore { domain: 2 },
-            Op::Offer {
-                domain: 1,
-                module: 2,
-                version: 0,
-            },
-            Op::Merge {
-                target: 2,
-                source: 1,
-            },
-            Op::Target {
-                domain: 2,
-                module: 2,
-                version: 0,
-                ordinal: 3,
-            },
-            Op::Target {
-                domain: 0,
-                module: 0,
-                version: 1,
-                ordinal: 11,
-            },
-            Op::SourceSurface {
-                domain: 2,
-                owners: 6,
-            },
-            Op::Demote { domain: 1 },
-            Op::Merge {
-                target: 1,
-                source: 0,
-            },
-            Op::IssueSegment { domain: 3 },
-            Op::DeclarationOriginal {
-                domain: 3,
-                module: 0,
-                version: 0,
-            },
-            Op::Demand {
-                domain: 3,
-                module: 0,
-                version: 0,
-                ordinal: 3,
-                whole: false,
-            },
-            Op::Demand {
-                domain: 3,
-                module: 0,
-                version: 0,
-                ordinal: 11,
-                whole: true,
-            },
-            Op::RecoverDemand {
-                domain: 3,
-                mutation: 1,
-            },
-            Op::PublishPrefix { domain: 3 },
-            Op::DeclarationOriginal {
-                domain: 3,
-                module: 0,
-                version: 1,
-            },
-            Op::Demand {
-                domain: 3,
-                module: 0,
-                version: 0,
-                ordinal: 11,
-                whole: false,
-            },
-            Op::RecoverDemand {
-                domain: 3,
-                mutation: 2,
-            },
-            Op::ReleaseSegment { domain: 3 },
-        ];
-        operations.extend(tail);
-        let outcomes = replay(&catalog, &operations);
-        for (totals, values) in observed
-            .borrow_mut()
-            .iter_mut()
-            .zip([outcomes.0, outcomes.1, outcomes.2])
-        {
-            for (total, value) in totals.iter_mut().zip(values) {
-                *total += value;
+        let input = (cross_version, generations, tail.clone());
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let catalog = Catalog::new(cross_version, generations);
+            let mut operations = vec![
+                Op::PublishPrefix { domain: 0 },
+                Op::Demand {
+                    domain: 0,
+                    module: 0,
+                    version: 0,
+                    ordinal: 3,
+                    whole: false,
+                },
+                Op::RecoverDemand {
+                    domain: 0,
+                    mutation: 1,
+                },
+                Op::ReleaseSegment { domain: 0 },
+                Op::DeclarationOriginal {
+                    domain: 0,
+                    module: 0,
+                    version: 0,
+                },
+                Op::Offer {
+                    domain: 0,
+                    module: 0,
+                    version: 0,
+                },
+                Op::Offer {
+                    domain: 0,
+                    module: 0,
+                    version: 1,
+                },
+                Op::Offer {
+                    domain: 1,
+                    module: 0,
+                    version: 1,
+                },
+                Op::Merge {
+                    target: 0,
+                    source: 1,
+                },
+                Op::Clone {
+                    target: 2,
+                    source: 0,
+                },
+                Op::Restore { domain: 2 },
+                Op::Offer {
+                    domain: 1,
+                    module: 2,
+                    version: 0,
+                },
+                Op::Merge {
+                    target: 2,
+                    source: 1,
+                },
+                Op::Target {
+                    domain: 2,
+                    module: 2,
+                    version: 0,
+                    ordinal: 3,
+                },
+                Op::Target {
+                    domain: 0,
+                    module: 0,
+                    version: 1,
+                    ordinal: 11,
+                },
+                Op::SourceSurface {
+                    domain: 2,
+                    owners: 6,
+                },
+                Op::Demote { domain: 1 },
+                Op::Merge {
+                    target: 1,
+                    source: 0,
+                },
+                Op::IssueSegment { domain: 3 },
+                Op::DeclarationOriginal {
+                    domain: 3,
+                    module: 0,
+                    version: 0,
+                },
+                Op::Demand {
+                    domain: 3,
+                    module: 0,
+                    version: 0,
+                    ordinal: 3,
+                    whole: false,
+                },
+                Op::Demand {
+                    domain: 3,
+                    module: 0,
+                    version: 0,
+                    ordinal: 11,
+                    whole: true,
+                },
+                Op::RecoverDemand {
+                    domain: 3,
+                    mutation: 1,
+                },
+                Op::PublishPrefix { domain: 3 },
+                Op::DeclarationOriginal {
+                    domain: 3,
+                    module: 0,
+                    version: 1,
+                },
+                Op::Demand {
+                    domain: 3,
+                    module: 0,
+                    version: 0,
+                    ordinal: 11,
+                    whole: false,
+                },
+                Op::RecoverDemand {
+                    domain: 3,
+                    mutation: 2,
+                },
+                Op::ReleaseSegment { domain: 3 },
+            ];
+            operations.extend(tail);
+            let outcomes = replay(&catalog, &operations);
+            for (totals, values) in observed
+                .borrow_mut()
+                .iter_mut()
+                .zip([outcomes.0, outcomes.1, outcomes.2])
+            {
+                for (total, value) in totals.iter_mut().zip(values) {
+                    *total += value;
+                }
+            }
+            *completed.borrow_mut() += 1;
+        }));
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(panic) => {
+                if initial_failure.borrow().is_none() {
+                    *initial_failure.borrow_mut() = Some(input);
+                }
+                let message = panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                    .unwrap_or_else(|| "projection history panicked".to_owned());
+                Err(proptest::test_runner::TestCaseError::fail(message))
             }
         }
-        *completed.borrow_mut() += 1;
-        Ok(())
     });
     eprintln!("compiler_projection_campaign configured_cases={configured_cases} actual_callbacks={} completed_histories={} observed_success_refusal_absent={:?}", callbacks.borrow(), completed.borrow(), observed.borrow());
+    eprintln!(
+        "compiler_projection_initial_failure={:?} minimized={:?}",
+        initial_failure.borrow(),
+        result
+    );
     result.unwrap();
 }
