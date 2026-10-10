@@ -1683,7 +1683,7 @@ mod tests {
         let turn = provider_envelope(
             "gpt-6-luna",
             harness::transport::ResponsesTurn {
-                response_id: "before-call-envelope".into(),
+                response_id: format!("script-{call_id}"),
                 items: vec![call],
                 usage: Default::default(),
             },
