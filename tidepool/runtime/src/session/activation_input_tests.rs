@@ -1344,10 +1344,6 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
     );
     let realm = destination.parked_realm(&activation).unwrap();
     let retained_context = &original.authenticated_inputs[&site].types;
-    assert!(
-        retained_context.artifact_view().descriptors().is_empty(),
-        "Int -> Int input and Unit reply have no home type interfaces"
-    );
     let certification = fixture.producer.certification.as_ref().unwrap();
     let compiler_context = certification
         .original_compile_input
@@ -1362,6 +1358,58 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
             &fixture.producer.asks,
         )
         .unwrap();
+    let site_metadata = &original.sites[&site];
+    assert_eq!(site_metadata.inputs.len(), 2);
+    let input_witness = site_metadata.input_type_witnesses[0].as_ref().unwrap();
+    let result_witness = site_metadata.input_type_witnesses[1].as_ref().unwrap();
+    assert!(result_witness.signature().names().iter().any(|name| {
+        name.module() == "Tidepool.Agent.Reply.Internal" && name.occurrence() == "ResponseResult"
+    }));
+    let original_descriptors = compiler_context.artifact_view().descriptors();
+    let home_roots = |witness: &tidepool_toolchain::checked_cell::CanonicalInputTypeWitness| {
+        witness
+            .interface_seals()
+            .filter_map(|(unit, module, seal)| {
+                original_descriptors
+                    .iter()
+                    .find(|descriptor| {
+                        descriptor.owner.unit == unit && descriptor.owner.module == module
+                    })
+                    .map(|descriptor| {
+                        let original_seal = descriptor
+                            .interface_sha256
+                            .iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>();
+                        assert_eq!(
+                            seal, original_seal,
+                            "original interface seal for {unit}:{module}"
+                        );
+                        descriptor.id
+                    })
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        home_roots(input_witness).is_empty(),
+        "Int -> Int requires only package interfaces"
+    );
+    let result_roots = home_roots(result_witness);
+    assert!(
+        !result_roots.is_empty(),
+        "ResponseResult () retains its original home interface"
+    );
+    let expected_types = compiler_context
+        .select_interface_roots(result_roots)
+        .unwrap();
+    let expected_descriptors = expected_types.artifact_view().descriptors();
+    assert_eq!(
+        retained_context.artifact_view().descriptors(),
+        expected_descriptors,
+        "the joint request projection retains exactly the sealed response interface closure"
+    );
+    assert!(retained_context.recovery_products().is_empty());
+    assert!(retained_context.lexical_graph().is_empty());
     let producer = compiler_context.toolchain_identity_sha256();
     assert_ne!(producer, [0; 32]);
     assert_eq!(retained_context.toolchain_identity_sha256(), producer);
@@ -1383,7 +1431,7 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
             .artifact_view()
             .descriptors()
             .is_empty(),
-        "native execution authority survives the package-only type projection"
+        "native execution authority survives the type-only projection"
     );
     let mut repeated_provenance = (*original).clone();
     repeated_provenance.merge(&original).unwrap();
@@ -1441,11 +1489,10 @@ fn resident_parcel_preserves_original_authenticated_request_across_sessions() {
         request_context.declarations().toolchain_identity_sha256(),
         producer
     );
-    assert!(request_context
-        .declarations()
-        .artifact_view()
-        .descriptors()
-        .is_empty());
+    assert_eq!(
+        request_context.declarations().artifact_view().descriptors(),
+        expected_descriptors
+    );
     let compile_context = input
         .type_evidence()
         .compile_context(Some(&compiler_context))
