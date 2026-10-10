@@ -802,6 +802,7 @@ class NativeQualificationTests(unittest.TestCase):
 
                 def execute(command, **kwargs):
                     self.assertIn('--retain-artifacts', command)
+                    self.assertEqual(command[command.index('--trace-profile') + 1], 'minimal')
                     self.assertIn('--ignored', command)
                     self.assertEqual(command[command.index('--compiler-mode') + 1], 'owned-resident')
                     self.assertEqual([command[index + 1] for index, value in enumerate(command)
@@ -830,13 +831,14 @@ class NativeQualificationTests(unittest.TestCase):
                      patch.object(qualification.subprocess, 'run', side_effect=execute), \
                      patch.object(qualification, 'analyze_harness_performance', side_effect=measurement) as analyze:
                     code = qualification.main(['run', str(path), '--cohort', 'harness-performance',
-                                               '--output', str(output)])
+                                               '--output', str(output), '--trace-profile', 'minimal'])
                 self.assertEqual(code, expected)
                 report = json.loads((output / 'report.json').read_text())
                 self.assertEqual(report['behavioral_completed'], count == 1)
                 self.assertFalse(report['measurement']['completed'])
                 self.assertEqual(report['measurement']['status'], 'partial')
                 self.assertEqual(report['measurement']['reporter'], qualification.HARNESS_PERFORMANCE_REPORTER)
+                self.assertEqual(report['scheduling']['trace_profile'], 'minimal')
                 if count:
                     analyze.assert_called_once()
                     self.assertEqual(report['measurement']['runner_record'], str(output / 'tests/case.json'))
@@ -1201,6 +1203,7 @@ class NativeQualificationTests(unittest.TestCase):
             self.assertEqual(report['scheduling'], {
                 'jobs': 4, 'effective_jobs': 4, 'delegated_service': True,
                 'service_slice': 'tidepool-completion-build.slice', 'compiler_mode': 'owned-resident',
+                'trace_profile': None,
                 'compiler_allowances': {'requested_foreground_jobs': foreground_jobs,
                                         'requested_preparation_jobs': preparation_jobs, 'worker_processes': 1},
                 'timeout_seconds': 600,

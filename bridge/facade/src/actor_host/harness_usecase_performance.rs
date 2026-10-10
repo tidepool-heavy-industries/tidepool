@@ -85,6 +85,7 @@ async fn production_harness_notebook_usecase_phases() {
             "schema": 1,
             "phase": "environment",
             "workload_cohort": "harness-eight-phase",
+            "campaign_trace_profile": super::super::test_campaign::campaign_trace_profile(),
             "workload_roster": [
                 "first-arithmetic", "publish-retained", "lookup-retained", "reuse-retained",
                 "repeat-retained", "async-yield-result", "reuse-async-action", "repeat-arithmetic",

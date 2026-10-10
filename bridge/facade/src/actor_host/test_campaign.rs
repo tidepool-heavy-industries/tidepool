@@ -819,17 +819,37 @@ impl TestCampaign {
     }
 }
 
+pub(super) fn campaign_trace_profile() -> &'static str {
+    match std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").as_deref() {
+        Ok("minimal") => "minimal",
+        Ok("full") | Err(_) => "full",
+        Ok(other) => panic!("unsupported TIDEPOOL_TEST_TRACE_PROFILE {other:?}"),
+    }
+}
+
 fn campaign_trace_filter() -> tracing_subscriber::EnvFilter {
-    tracing_subscriber::EnvFilter::new(
-        "warn,tidepool::actor_host::startup=info,tidepool_runtime::compile=info,\
-         tidepool_runtime::compile::modules=debug,tidepool_runtime::session::turn=info,\
-         exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,\
-         tidepool_codegen::prepared_compile=info,tidepool_extract_cmd::endpoint=debug,\
-         exomonad_actor::request=info,tidepool_toolchain::module_candidates=info,\
-         tidepool_toolchain::artifacts=info,exomonad_actor::workbench_phase=info,\
-         exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,\
-         exomonad_actor::resident_tools=info,exomonad::content=off,harness::runtime_cost=debug",
-    )
+    campaign_trace_filter_for(campaign_trace_profile())
+}
+
+fn campaign_trace_filter_for(profile: &str) -> tracing_subscriber::EnvFilter {
+    let directives = match profile {
+        "minimal" => {
+            "warn,tidepool::actor_host::startup=info,exomonad_harness::timing=debug,\
+                      exomonad_actor::request=info,exomonad_actor::workbench_phase=info,\
+                      exomonad::content=off"
+        }
+        _ => {
+            "warn,tidepool::actor_host::startup=info,tidepool_runtime::compile=info,\
+             tidepool_runtime::compile::modules=debug,tidepool_runtime::session::turn=info,\
+             exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,\
+             tidepool_codegen::prepared_compile=info,tidepool_extract_cmd::endpoint=debug,\
+             exomonad_actor::request=info,tidepool_toolchain::module_candidates=info,\
+             tidepool_toolchain::artifacts=info,exomonad_actor::workbench_phase=info,\
+             exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,\
+             exomonad_actor::resident_tools=info,exomonad::content=off,harness::runtime_cost=debug"
+        }
+    };
+    tracing_subscriber::EnvFilter::new(directives)
 }
 
 /// Retain phase and compile observations across the host's executor threads.
@@ -842,10 +862,12 @@ pub(super) fn install_tracing() {
         .with_ansi(false)
         .with_thread_names(true)
         .with_env_filter(campaign_trace_filter())
-        .with_span_events(
+        .with_span_events(if campaign_trace_profile() == "full" {
             tracing_subscriber::fmt::format::FmtSpan::NEW
-                | tracing_subscriber::fmt::format::FmtSpan::CLOSE,
-        )
+                | tracing_subscriber::fmt::format::FmtSpan::CLOSE
+        } else {
+            tracing_subscriber::fmt::format::FmtSpan::NONE
+        })
         .with_test_writer();
     if let Some(path) = std::env::var_os("TIDEPOOL_TEST_TRACE") {
         let file = std::fs::OpenOptions::new()
@@ -1045,6 +1067,7 @@ pub(super) fn prepare_performance_traces() -> (
         "owned daemon created its JSONL trace"
     );
     std::env::set_var("TIDEPOOL_TEST_TRACE", &host_trace);
+    std::env::set_var("TIDEPOOL_TEST_TRACE_PROFILE", campaign_trace_profile());
     std::env::set_var("TIDEPOOL_PERFORMANCE_COMPILER_TRACE", &compiler_trace);
     (host_trace, compiler_trace, phase_trace, lifecycle)
 }
@@ -1480,6 +1503,39 @@ mod tests {
                 "recovery_read_bytes": 4096,
             })
         );
+        assert!(!captured.contains("private-content"));
+    }
+
+    #[test]
+    fn minimal_campaign_trace_excludes_detailed_events_but_keeps_coarse_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("minimal.jsonl");
+        let file = std::fs::File::create(&path).unwrap();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .with_env_filter(campaign_trace_filter_for("minimal"))
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
+            .with_writer(std::sync::Mutex::new(file))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "exomonad_actor::request", request = 7u64,
+                "request activation origin issued");
+            tracing::debug!(target: "exomonad_harness::timing", phase = "reply_to_successor",
+                wall_ns = 12u64, "coarse workload timing");
+            tracing::info!(target: "tidepool_toolchain::module_candidates",
+                phase = "candidate_selection", offered = 2u64);
+            tracing::info!(target: "tidepool_toolchain::artifacts",
+                phase = "exact_immutable_materialization", retained_entries = 2u64);
+            tracing::info!(target: "tidepool_runtime::compile", "compiler compilation event");
+            tracing::info!(target: crate::exomonad::CONTENT_TARGET, source = "private-content");
+        });
+        let captured = std::fs::read_to_string(path).unwrap();
+        assert!(captured.contains("request activation origin issued"));
+        assert!(captured.contains("coarse workload timing"));
+        assert!(!captured.contains("candidate_selection"));
+        assert!(!captured.contains("exact_immutable_materialization"));
+        assert!(!captured.contains("compiler compilation event"));
         assert!(!captured.contains("private-content"));
     }
 

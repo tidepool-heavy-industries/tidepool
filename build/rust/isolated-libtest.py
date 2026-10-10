@@ -138,6 +138,7 @@ DELEGATED_ENVIRONMENT = (
     'TIDEPOOL_TEST_ARTIFACT_ROOT', 'TIDEPOOL_TEST_DIAGNOSTIC_SCOPE',
     'TIDEPOOL_COMPILE_CACHE_DIR',
     'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS', 'TIDEPOOL_TIMING', 'TIDEPOOL_MEMO_TRACE',
+    'TIDEPOOL_TEST_TRACE_PROFILE',
     'TIDEPOOL_ASYNC_LAYOUT_DIAGNOSTICS',
     'TIDEPOOL_TEST_BASH', 'TIDEPOOL_TEST_SLEEP', 'TIDEPOOL_BROWSER_NODE',
     'TIDEPOOL_TEST_SYSTEMD_RUN', 'TIDEPOOL_TEST_SYSTEMCTL',
@@ -429,6 +430,8 @@ def parse_args(argv):
                         help='preserve per-case artifact roots after passing tests')
     parser.add_argument('--compiler-mode', choices=('direct', 'owned-resident'), default='direct',
                         help='select an explicitly owned compiler for each isolated test')
+    parser.add_argument('--trace-profile', choices=('full', 'minimal'),
+                        help='campaign trace detail profile for a retained performance case')
     options = parser.parse_args(argv)
     if options.compiler_mode == 'owned-resident' and options.output_dir is None:
         parser.error('--compiler-mode owned-resident requires --output-dir')
@@ -441,6 +444,8 @@ def parse_args(argv):
                 parser.error('compiler job allowances require --compiler-mode owned-resident')
     if options.retain_artifacts and options.output_dir is None:
         parser.error('--retain-artifacts requires --output-dir')
+    if options.trace_profile is not None and (options.output_dir is None or not options.retain_artifacts):
+        parser.error('--trace-profile requires --output-dir and --retain-artifacts')
     if (len(options.resource_env) != len(set(options.resource_env))
             or any(not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', name)
                    for name in options.resource_env)):
@@ -1088,7 +1093,8 @@ def case_artifact_evidence(artifact_root, compiler_mode, record):
 
 def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             artifact_root=None, compiler_mode='direct', declared_resources=(),
-            retain_artifacts=False, foreground_jobs=None, preparation_jobs=None):
+            retain_artifacts=False, foreground_jobs=None, preparation_jobs=None,
+            trace_profile=None):
     if record is None:
         record = {}
     for key in ('artifact_disposition', 'artifacts_removed_after_success',
@@ -1121,10 +1127,14 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         environment = dict(os.environ)
         environment.update(TIDEPOOL_TEST_ARTIFACT_ROOT=str(artifact_root),
                            TIDEPOOL_TEST_DIAGNOSTIC_SCOPE='1')
+        if trace_profile is not None:
+            environment['TIDEPOOL_TEST_TRACE_PROFILE'] = trace_profile
+            environment['TIDEPOOL_TIMING'] = '0' if trace_profile == 'minimal' else '1'
         (artifact_root / 'case.json').write_text(json.dumps({
             'schema': 1, 'test': name, 'scenario': 'running', 'process_cleanup_status': 'not_started',
             'hosted_cleanup_status': 'not_observed', 'compiler_cleanup_status': 'not_observed',
             'compiler_mode': compiler_mode, 'compiler_allowances': record['compiler_allowances'],
+            'trace_profile': trace_profile,
         }, indent=2) + '\n')
     if compiler_mode == 'owned-resident':
         frontend = (environment or os.environ).get('TIDEPOOL_EXTRACT')
@@ -1150,7 +1160,7 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
                   executed_test_count=None, passed_test_count=None,
                   failed_test_count=None, process_execution_count=0)
     record.update(artifact_root=str(artifact_root) if artifact_root is not None else None,
-                  compiler_mode=compiler_mode)
+                  compiler_mode=compiler_mode, trace_profile=trace_profile)
     service_record = {} if service_slice is not None else None
     if service_record is not None:
         record['delegated_service'] = service_record
@@ -1321,6 +1331,7 @@ def main(argv=None):
                 options.service_slice if options.delegated_service else None,
                 artifact_root, options.compiler_mode, options.resource_env,
                 options.retain_artifacts, options.foreground_jobs, options.preparation_jobs,
+                options.trace_profile,
             )
             return name, outcome, record
 

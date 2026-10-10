@@ -387,6 +387,11 @@ def analyze(record_path):
     environment = next((row for row in phases if row["phase"] == "environment"), None)
     if environment is None:
         raise ValueError("retained output has no environment phase")
+    trace_profile = environment.get("campaign_trace_profile", "full")
+    if trace_profile not in ("full", "minimal"):
+        raise ValueError(f"unknown campaign trace profile: {trace_profile!r}")
+    if execution.get("trace_profile", "full") != trace_profile:
+        raise ValueError("runner and workload phase trace profiles do not match")
     phase_value = environment.get("phase_trace")
     if not isinstance(phase_value, str) or not phase_value:
         raise ValueError("environment phase has no phase_trace path")
@@ -743,8 +748,13 @@ def analyze(record_path):
         "compiler_trace": {"bytes": daemon_path.stat().st_size, "sha256": sha256_file(daemon_path)},
     }
 
-    return {
+    report = {
         "schema": 1,
+        "trace_profile": {
+            "name": trace_profile,
+            "fine_joins_and_attribution": "collected; see completeness fields" if trace_profile == "full"
+                else "incomplete_by_design; absent evidence is unknown, not zero",
+        },
         "runner": {
             "test": record.get("test"), "passed": record.get("passed"),
             "executed_test_count": execution.get("executed_test_count"),
@@ -874,6 +884,58 @@ def analyze(record_path):
         "unmatched_daemon_service_records": orphan_services,
         "phases": output_phases,
     }
+    if trace_profile == "minimal":
+        # Minimal capture is an overhead control: phase timings and scripted
+        # outcomes remain measured, while event-level joins are unavailable.
+        report["harness_runtime_cost_trace"] = {
+            "status": "not_collected_by_design", "event_count": None,
+            "phase_attributed_event_count": None, "unattributed_event_count": None,
+            "ambiguous_event_count": None, "events": None, "coverage": None,
+        }
+        report["queue_trace_status"] = "not_collected_by_design"
+        report["queue_evidence"] = {
+            "status": "unknown_by_trace_profile", "expected_admission_count_from_exact_requests": None,
+            "observed_admission_count": None, "missing_admissions": None,
+            "unexpected_admissions": None, "admissions_with_non_single_queue_timing": None,
+            "unidentified_queue_event_count": None,
+        }
+        report["workload_request_service_joins"] = {
+            "status": "unknown_by_trace_profile",
+            "logical_request_count": report["workload_request_service_joins"]["logical_request_count"],
+            "exact_phase_request_join_count": None,
+        }
+        report["whole_physical_stream_reconciliation"] = {
+            "status": "incomplete_by_trace_profile", "raw_host_submission_count": None,
+            "raw_physical_service_count": None, "host_identity_count": None,
+            "duplicate_host_identity_count": None, "duplicate_service_identity_count": None,
+            "unmatched_physical_service_count": None, "host_submissions_missing_identity": None,
+            "physical_service_outcome_status": "unknown_by_trace_profile",
+            "physical_service_failed_or_incomplete_count": None, "raw_jsonl_scan": "not_collected_by_design",
+            "raw_event_capture_status": "not_collected_by_design", "raw_trace_files": None,
+            "runner_raw_scan": None, "detailed_compiler_sample_status": "not_collected_by_design",
+            "detailed_compiler_sample_records_truncated": None,
+            "runner_diagnostic_sample_status": "not_collected_by_design",
+        }
+        report["activation_input_origins"] = None
+        report["startup_scope"] = {
+            "owner_status": "unknown_by_trace_profile", "unowned_host_submission_count": None,
+            "ambiguous_owner_submission_count": None, "unknown_owner_submission_count": None,
+            "explicit_activation_owner_request_count": None,
+            "explicit_startup_span_owner_request_count": None,
+            "recognized_startup_owner_spans": None, "explicit_startup_span_requests": None,
+            "requests": None, "ambiguous_startup_span_requests": None,
+            "ambiguous_requests": None, "unknown_owner_requests": None,
+            "assignment_policy": "not evaluated because fine traces were omitted",
+        }
+        report["compiler_job_grants"] = {
+            "status": "unknown_by_trace_profile", "admissions": None, "observed_jobs": None,
+            "observed_capabilities": None,
+            "interpretation": "Fine queue/admission tracing was omitted by the selected profile.",
+        }
+        report["queue_observations"] = None
+        report["unattributed_compiler_submissions"] = None
+        report["unmatched_daemon_service_records"] = None
+    return report
 
 
 def main(argv=None):

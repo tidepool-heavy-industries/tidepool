@@ -27,7 +27,8 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
-    def make_case(self, *, queue=True, submissions=True, service_records=1, cell_span=True):
+    def make_case(self, *, queue=True, submissions=True, service_records=1, cell_span=True,
+                  trace_profile=None):
         artifact_root = self.root / "artifacts"
         host_path = artifact_root / "host.jsonl"
         compiler_path = artifact_root / "compiler/compiler.jsonl"
@@ -46,6 +47,8 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
              "logical_compiler_requests": 1, "invocation_execution": "synchronous",
              "completed": True, "source": "value <- perfAction\n_ <- display value"},
         ]
+        if trace_profile is not None:
+            phase_records[0]["campaign_trace_profile"] = trace_profile
         stdout = self.root / "case.stdout.log"
         stdout.write_text("running 1 test\ntest actor_host::perf ...\n")
         self.write_jsonl(phase_path, phase_records)
@@ -84,6 +87,7 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
             "passed": True,
             "streams": {"stdout": {"path": stdout.name, "truncated": False}},
             "execution": {"artifact_root": str(artifact_root), "compiler_mode": "owned-resident",
+                          "trace_profile": trace_profile or "full",
                           "executed_test_count": 1, "diagnostic_evidence_complete": True,
                           "artifacts_retained_after_success": True,
                           "diagnostic_summaries": {
@@ -182,8 +186,8 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         self.assertEqual(report['compiler_job_grants']['status'], 'partial_or_unknown')
         self.assertIsNone(report['compiler_job_grants']['admissions'][0]['jobs'])
 
-    def make_complete_case(self, cohort="harness-eight-phase"):
-        record = self.make_case()
+    def make_complete_case(self, cohort="harness-eight-phase", trace_profile=None):
+        record = self.make_case(trace_profile=trace_profile)
         phase_path = self.root / "artifacts/phases.jsonl"
         rows = reporter.read_jsonl(phase_path)
         environment, activation = rows[:2]
@@ -618,6 +622,21 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
                 self.assertEqual(result["queue_evidence"]["status"], "partial_or_unknown")
                 self.assertEqual(result["queue_observations"][0]["queue_event_count"], 2)
                 self.assertEqual(result["queue_observations"][0]["invalid_timing_record_count"], 1)
+
+    def test_minimal_trace_profile_keeps_phase_measurements_and_marks_fine_evidence_unknown(self):
+        record = self.make_complete_case(trace_profile="minimal")
+        report = reporter.analyze(record)
+        self.assertEqual(report["trace_profile"]["name"], "minimal")
+        self.assertEqual(report["phase_measurements"]["status"], "complete")
+        self.assertTrue(report["phase_coverage"]["complete"])
+        self.assertEqual(report["workload_request_service_joins"]["status"], "unknown_by_trace_profile")
+        self.assertIsNone(report["workload_request_service_joins"]["exact_phase_request_join_count"])
+        self.assertEqual(report["whole_physical_stream_reconciliation"]["status"], "incomplete_by_trace_profile")
+        self.assertIsNone(report["whole_physical_stream_reconciliation"]["raw_host_submission_count"])
+        self.assertEqual(report["queue_evidence"]["status"], "unknown_by_trace_profile")
+        self.assertIsNone(report["queue_evidence"]["observed_admission_count"])
+        self.assertEqual(report["startup_scope"]["owner_status"], "unknown_by_trace_profile")
+        self.assertIsNone(report["activation_input_origins"])
 
     def test_phase_measurements_require_nonnegative_json_integers(self):
         record = self.make_complete_case()

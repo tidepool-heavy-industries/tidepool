@@ -300,12 +300,25 @@ where
         pane_writer,
         trace_writer,
         detailed_filter,
-        compiler_trace_filter(std::env::var("RUST_LOG").ok().as_deref()),
+        compiler_trace_filter(
+            std::env::var("RUST_LOG").ok().as_deref(),
+            std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").ok().as_deref(),
+        ),
     )
 }
 
-fn compiler_trace_filter(raw_filter: Option<&str>) -> tracing_subscriber::EnvFilter {
+fn compiler_trace_filter(
+    raw_filter: Option<&str>,
+    trace_profile: Option<&str>,
+) -> tracing_subscriber::EnvFilter {
     let mut filter = tracing_subscriber::EnvFilter::new("info,tidepool_extract_cmd=debug");
+    if trace_profile == Some("minimal") {
+        filter = filter.add_directive(
+            format!("{RAW_COMPILER_DETAIL_TARGET}=off")
+                .parse()
+                .expect("static compiler detail target directive"),
+        );
+    }
     // The structured trace intentionally has its own stable defaults. Honor
     // only the standard RUST_LOG directive for this one high-volume target so
     // a matched A/B can disable raw compiler detail without losing request,
@@ -4737,7 +4750,7 @@ mod tests {
             CapturedWriter::default(),
             trace.clone(),
             tracing_subscriber::EnvFilter::new("debug"),
-            compiler_trace_filter(None),
+            compiler_trace_filter(None, None),
         );
 
         tracing::subscriber::with_default(subscriber, || {
@@ -4813,7 +4826,7 @@ tidepool-reuse-error: witness failed\n";
             CapturedWriter::default(),
             trace.clone(),
             tracing_subscriber::EnvFilter::new(raw_filter),
-            compiler_trace_filter(Some(raw_filter)),
+            compiler_trace_filter(Some(raw_filter), None),
         );
 
         tracing::subscriber::with_default(subscriber, || {
@@ -4869,6 +4882,28 @@ tidepool-reuse-error: witness failed\n";
         assert!(!detailed_text.contains("tidepool-timing-detail"));
         assert!(!detailed_text.contains("tidepool-timing-module-detail"));
         assert!(!detailed_text.contains("tidepool-count"));
+    }
+
+    #[test]
+    fn minimal_compiler_profile_keeps_request_summary_and_excludes_raw_detail() {
+        let trace = CapturedWriter::default();
+        let subscriber = tracing_subscriber_with_trace_filter(
+            CapturedWriter::default(),
+            CapturedWriter::default(),
+            trace.clone(),
+            tracing_subscriber::EnvFilter::new("off"),
+            compiler_trace_filter(None, Some("minimal")),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "tidepool_extract_cmd::daemon", run_id = "minimal",
+                "compiler request started");
+            tracing::debug!(target: RAW_COMPILER_DETAIL_TARGET, detail = "large payload",
+                "worker timing detail");
+        });
+        let output = trace.text();
+        assert!(output.contains("compiler request started"));
+        assert!(!output.contains("worker timing detail"));
+        assert!(!output.contains("large payload"));
     }
 
     #[test]

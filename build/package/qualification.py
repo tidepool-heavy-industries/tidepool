@@ -1450,6 +1450,11 @@ def run_cohort(args) -> int:
     descriptor = verify(args.descriptor.absolute())
     tools = Path(descriptor["external_inputs"]["runtime_tools"]["path"])
     cohort = descriptor["cohorts"][args.cohort]
+    requested_trace_profile = getattr(args, "trace_profile", None)
+    performance_cohort = "measurement_reporter" in cohort
+    if requested_trace_profile is not None and not performance_cohort:
+        raise ValueError("--trace-profile is only supported by retained Harness performance cohorts")
+    trace_profile = (requested_trace_profile or "full") if performance_cohort else None
     required_compiler_mode = cohort.get("compiler_mode")
     if required_compiler_mode not in ("direct", "owned-resident"):
         raise ValueError(f"{args.cohort} requires an explicit sealed compiler mode")
@@ -1473,6 +1478,8 @@ def run_cohort(args) -> int:
     command = [str(tools / "bin/python3"), descriptor["programs"]["runner"], descriptor["programs"]["libtest"],
                "--expected-count", str(cohort["expected_count"]), "--jobs", str(args.jobs), "--timeout", str(cohort["timeout"]),
                "--output-dir", str(output / "tests"), "--compiler-mode", compiler_mode]
+    if trace_profile is not None:
+        command.extend(["--trace-profile", trace_profile])
     for name, value in allowances.items():
         if value is not None:
             command.extend(["--" + name.replace("_", "-"), str(value)])
@@ -1519,7 +1526,7 @@ def run_cohort(args) -> int:
               "command": command, "exit_code": code, "runner_exit_code": result.returncode,
               "scheduling": {"jobs": args.jobs, "effective_jobs": min(args.jobs, cohort["expected_count"]),
                              "delegated_service": args.delegated_service, "service_slice": service_slice,
-                             "compiler_mode": compiler_mode,
+                             "compiler_mode": compiler_mode, "trace_profile": trace_profile,
                              "compiler_allowances": {"requested_foreground_jobs": allowances["foreground_jobs"],
                                                      "requested_preparation_jobs": allowances["preparation_jobs"],
                                                      "worker_processes": 1 if compiler_mode == "owned-resident" else None},
@@ -1746,6 +1753,8 @@ def main(argv=None) -> int:
                          help="positive per-request compiler allowance; independent of --jobs")
     run.add_argument("--compiler-mode", choices=("direct", "owned-resident"),
                      help="isolated per-case compiler lifecycle (default: cohort selection)")
+    run.add_argument("--trace-profile", choices=("full", "minimal"),
+                     help="select full attribution or minimal overhead-control capture")
     run.add_argument("--delegated-service", action="store_true",
                      help="run each test in the isolated runner's delegated user service")
     run.add_argument("--service-slice",

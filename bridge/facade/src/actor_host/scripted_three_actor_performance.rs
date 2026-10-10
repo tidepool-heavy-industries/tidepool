@@ -241,6 +241,7 @@ async fn production_harness_three_actor_capture_phases() {
         &phase_trace,
         json!({
             "schema": 1, "phase": "environment", "workload_cohort": WORKLOAD_COHORT,
+            "campaign_trace_profile": super::test_campaign::campaign_trace_profile(),
             "workload_roster": WORKLOAD_ROSTER, "prepared_root_entry_supplied": true,
             "host_trace": host_trace, "compiler_trace": compiler_trace, "phase_trace": phase_trace,
             "owned_compiler_lifecycle": lifecycle, "deployment": deployment,
