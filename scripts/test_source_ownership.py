@@ -57,6 +57,7 @@ TEST_ONLY_MODULES = {
         'exomonad/actor/src/request/sequence_tests.rs',
         'exomonad/actor/src/request/test_support.rs',
         'exomonad/actor/src/resident_actor/capture_workspace_tests.rs',
+        'exomonad/actor/src/resident_actor/checkpoint_shutdown_tests.rs',
         'exomonad/actor/src/resident_actor/forest_shutdown_tests.rs',
         'exomonad/actor/src/resident_actor/green_runtime_tests.rs',
         'exomonad/actor/src/resident_actor/green_tests.rs',

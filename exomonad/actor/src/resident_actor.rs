@@ -13,6 +13,8 @@ mod after_tool_wait;
 mod agent_retention;
 #[cfg(test)]
 mod capture_workspace_tests;
+#[cfg(test)]
+mod checkpoint_shutdown_tests;
 pub(crate) mod child_launch;
 mod clock_wait;
 mod command_presentation;
