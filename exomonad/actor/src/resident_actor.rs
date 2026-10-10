@@ -3815,7 +3815,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                             .map(|key| key.haskell_name())
                             .collect::<Vec<_>>()
                             .join(", "),
-                    ),
+                    )
+                    .into(),
                     exomonad_tool::ToolImplementation::ResidentHandler => installed_tools
                         .as_ref()
                         .and_then(|lease| lease.tools())

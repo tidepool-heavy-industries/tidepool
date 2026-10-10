@@ -2898,7 +2898,13 @@ pub(crate) fn spec_effect_preflight(
         let installation =
             exomonad_actor::agent_spec::installation_expression(entry, capabilities.effect_keys());
         let dispatcher_effects = installation.dispatcher_effect_row();
-        let templates = resident_workbench_templates(&preamble, &dispatcher_effects, "");
+        let templates = resident_workbench_templates(
+            &preamble,
+            dispatcher_effects.expression(),
+            &dispatcher_effects
+                .source_imports(&tidepool_runtime::session::SourceImports::default())
+                .template_text(),
+        );
         let template = templates
             .iter()
             .find(|template| {

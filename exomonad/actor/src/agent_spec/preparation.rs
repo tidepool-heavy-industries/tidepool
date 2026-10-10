@@ -1115,8 +1115,15 @@ fn compile_installer(
     }
     let installation = super::installation_expression(&recipe.entry, &recipe.effects);
     let dispatcher_effects = installation.dispatcher_effect_row();
-    let templates =
-        resident_workbench_templates(&recipe.preamble, &dispatcher_effects, &recipe.imports);
+    let templates = resident_workbench_templates(
+        &recipe.preamble,
+        dispatcher_effects.expression(),
+        &dispatcher_effects
+            .source_imports(&tidepool_runtime::session::SourceImports::from_specs([
+                &recipe.imports,
+            ]))
+            .template_text(),
+    );
     let (compiled, acquisition) = if let Some(storage) = source.prepared_entries() {
         let template = templates
             .iter()

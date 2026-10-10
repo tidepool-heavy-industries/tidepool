@@ -872,8 +872,9 @@ impl ActorWorkbenchSource {
         }
         imports.extend_text("qualified Tidepool.Agent.Contract");
         imports.extend_text("qualified Tidepool.Effects.Core");
-        imports.extend_text("qualified Tidepool.Agent.Reply.Internal");
-        imports.extend_text("qualified Tidepool.Agent.Watch.Internal");
+        imports = crate::agent_spec::installation_expression(&entry, &effects)
+            .effect_row
+            .source_imports(&imports);
         Ok((
             crate::agent_spec::preparation::InstallerRecipe {
                 builtin: None,
@@ -1038,7 +1039,7 @@ pub(crate) struct ResidentWorkbenchTools {
     _source_original: Option<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
     code: InstalledToolCode,
     /// Exact installer row retained with its rooted dispatcher.
-    pub(crate) dispatcher_effects: String,
+    pub(crate) dispatcher_effects: tidepool_runtime::session::HaskellTypeSource,
     /// Which slots the installed record fills, by name, as the same compile
     /// declared them.
     pub(crate) slots: Vec<String>,
@@ -2314,7 +2315,7 @@ impl ActorWorkbenchSource {
             self.request_helper_recipe =
                 tidepool_toolchain::declaration_join::RequestHelperRecipe::ActorReply;
             self.preamble = self
-                .request_preamble(scope.request, &context.haskell_effects_alias)
+                .request_preamble(scope.request, context.haskell_effects_alias.expression())
                 .into();
         }
         self.preamble = actor_preamble(&self.preamble, context).into();
@@ -6001,7 +6002,7 @@ where
                 let effects = if pure_host_carrier {
                     "'[]"
                 } else {
-                    &context.haskell_effects_alias
+                    context.haskell_effects_alias.expression()
                 };
                 let prepared = source.prepare(&snapshot.view);
                 #[cfg(test)]
@@ -10811,7 +10812,7 @@ where
     let (binder, compiled) = compile_host_binding_off_checkout(
         &view,
         source,
-        &context.haskell_effects_alias,
+        context.haskell_effects_alias.expression(),
         generation,
         binding,
         type_name,
@@ -11245,7 +11246,7 @@ fn inspect_compile_view(
     inputs: &tidepool_runtime::session::AdmittedInspectionInputs,
     source: &ActorWorkbenchSource,
     queries: &[InspectionQuery],
-    effects: &str,
+    effects: &tidepool_runtime::session::HaskellTypeSource,
 ) -> Result<
     Vec<Result<tidepool_runtime::session::InspectionResult, String>>,
     ResidentActorWorkbenchError,
@@ -11339,7 +11340,7 @@ fn inspect_lookup_queries(
     imports: &str,
     include: &[PathBuf],
     injected: &[String],
-    effects: &str,
+    effects: &tidepool_runtime::session::HaskellTypeSource,
     queries: &[InspectionQuery],
     timing: Option<&crate::call_timing::CallTimingRegistration>,
 ) -> Result<Vec<tidepool_runtime::session::InspectionResult>, crate::lookup::LookupInspectionError>
@@ -11641,7 +11642,7 @@ pub(crate) mod request_tests {
             crate::agent_spec::installation_expression(&recipe.entry, &recipe.effects);
         let templates = resident_workbench_templates(
             &recipe.preamble,
-            &installation.dispatcher_effect_row(),
+            installation.dispatcher_effect_row().expression(),
             &recipe.imports,
         );
         let template = templates
@@ -12096,7 +12097,7 @@ pub(crate) mod request_tests {
         let (binder, compiled) = compile_host_binding_off_checkout(
             &view,
             &source,
-            &context.haskell_effects_alias,
+            context.haskell_effects_alias.expression(),
             generation,
             "text_binding",
             TEXT_BINDING_TYPE_NAME,
@@ -12145,7 +12146,7 @@ pub(crate) mod request_tests {
         let (binder, compiled) = compile_host_binding_off_checkout(
             &view,
             &source,
-            &context.haskell_effects_alias,
+            context.haskell_effects_alias.expression(),
             generation,
             "text_binding",
             TEXT_BINDING_TYPE_NAME,
@@ -12191,7 +12192,7 @@ pub(crate) mod request_tests {
         let (retry_binder, retry_compiled) = compile_host_binding_off_checkout(
             &retry_view,
             &source,
-            &context.haskell_effects_alias,
+            context.haskell_effects_alias.expression(),
             retry_generation,
             "text_binding2",
             TEXT_BINDING_TYPE_NAME,
@@ -12620,8 +12621,9 @@ pub(crate) mod request_tests {
         let mut dispatcher_context = context.clone();
         dispatcher_context.haskell_effects_alias = format!(
             "(Tidepool.Effects.Core.AgentTools ': Tidepool.Effects.Core.ContextReadWrite ': {})",
-            context.haskell_effects_alias
-        );
+            context.haskell_effects_alias.expression()
+        )
+        .into();
         assert!(!workbench
             .access
             .source
@@ -14201,6 +14203,100 @@ pub(crate) mod request_tests {
         >::new());
         machines.insert_idle(session_id, Box::new(session));
         (machines, context, source, root)
+    }
+
+    #[tokio::test]
+    async fn installed_effect_imports_reach_lookup_and_batched_type_queries() {
+        with_test_compiler_owner(async {
+            let (machines, mut context, source, _root) = actor_lookup_registry_fixture();
+            let installation = crate::agent_spec::installation_expression("Fixture.agentSpec", &[
+                crate::ActorEffectKey::Watches, crate::ActorEffectKey::Replies,
+                crate::ActorEffectKey::AgentLaunch,
+            ]);
+            context.haskell_effects_alias = installation.dispatcher_effect_row();
+            let preamble = format!(
+                "{}\nmodule Expr where\nimport Prelude\nimport qualified Tidepool.Agent.Watch as PublicWatch\nimport qualified Tidepool.Agent.Reply as PublicReply\nimport Tidepool.Actors.Spawn (checkpoint, spawnSubagent)\n{}",
+                tidepool_runtime::session::EVAL_PRAGMAS,
+                tidepool_runtime::session::PREAMBLE_IMPORT_MARKER,
+            );
+            assert!(!preamble.contains("import qualified Tidepool.Agent.Watch.Internal"));
+            assert!(!preamble.contains("import qualified Tidepool.Agent.Reply.Internal"));
+            let source = ActorWorkbenchSource::new(preamble.clone(), source.base_include.to_vec());
+            let workbench = ResidentActorWorkbench::new(machines, source.clone(), None);
+            let (view, inputs, prepared) = workbench.access.with_machine(context.clone(), move |session, context, _| {
+                let view = actor_compile_view(session, context, &source)?;
+                let inputs = session.capture_inspection_inputs(view.session_view())
+                    .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?;
+                let prepared = source.prepare(&view);
+                Ok((view, inputs, prepared))
+            }).await.unwrap();
+            let names = ["checkpoint", "spawnSubagent"];
+            let structured_query = |name: &str| tidepool_runtime::session::NameQuery {
+                scope: tidepool_runtime::session::NameScope::Current,
+                namespace: tidepool_runtime::session::NameNamespace::Value,
+                name: name.into(),
+            };
+            let provenance = tidepool_runtime::session::ScopeProvenance {
+                scope: tidepool_runtime::session::NameScope::Current,
+                generation: 1,
+                fingerprint: "installed-effect-row-test".into(),
+            };
+            for queries in [
+                names.map(|name| InspectionQuery::Info(name.into())).to_vec(),
+                names.map(|name| InspectionQuery::TypeOf(name.into())).to_vec(),
+                names.map(|name| InspectionQuery::StructuredInfo {
+                    query: structured_query(name), provenance: provenance.clone(),
+                }).to_vec(),
+                names.map(|name| InspectionQuery::StructuredType {
+                    query: structured_query(name), provenance: provenance.clone(),
+                }).to_vec(),
+            ] {
+                let answers = inspect_lookup_queries(&view, Some(&inputs), &prepared.preamble,
+                    &prepared.imports, &prepared.include, &prepared.injected,
+                    &context.haskell_effects_alias, &queries, None).unwrap();
+                assert_eq!(answers.len(), 2);
+                assert!(answers.iter().all(|answer| matches!(answer,
+                    tidepool_runtime::session::InspectionResult::Info { .. }
+                    | tidepool_runtime::session::InspectionResult::Type { .. }
+                    | tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(_))
+                    | tidepool_runtime::session::InspectionResult::StructuredType(Ok(_)))), "{answers:#?}");
+                for (answer, name) in answers.iter().zip(names) {
+                    match answer {
+                        tidepool_runtime::session::InspectionResult::StructuredInfo(Ok(info)) => {
+                            assert_eq!(info.identifier.name, name);
+                            assert_eq!(info.provenance, provenance);
+                        }
+                        tidepool_runtime::session::InspectionResult::StructuredType(Ok(info)) => {
+                            assert_eq!(info.identifier.name, name);
+                            assert_eq!(info.provenance, provenance);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Drop only the issued import component, matching the old boundary.
+            // The receiving compiler must reject these unresolved nominal names.
+            let uncoupled = tidepool_runtime::session::HaskellTypeSource::from(
+                context.haskell_effects_alias.expression());
+            let include = prepared.include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+            let rejected = run_inspections(InspectionRequest {
+                exact_context: None, preamble: &preamble, imports: "", include: &include,
+                session_root: view.session_root(), inject_modules: &[],
+                queries: &[InspectionQuery::Info("checkpoint".into())], effects: Some(&uncoupled),
+            }).unwrap();
+            assert!(matches!(&rejected[..], [tidepool_runtime::session::InspectionResult::Rejected { .. }]));
+            if let tidepool_runtime::session::InspectionResult::Rejected { diagnostic } = &rejected[0] {
+                assert!(diagnostic.contains("Tidepool.Agent.Watch.Internal.Watches"));
+                assert!(diagnostic.contains("Tidepool.Agent.Reply.Internal.Replies"));
+            }
+            // Standalone inspection carries no actor row and remains legitimate.
+            let standalone = run_inspections(InspectionRequest {
+                exact_context: None, preamble: &preamble, imports: "", include: &include,
+                session_root: view.session_root(), inject_modules: &[],
+                queries: &[InspectionQuery::Info("checkpoint".into())], effects: None,
+            }).unwrap();
+            assert!(matches!(&standalone[..], [tidepool_runtime::session::InspectionResult::Info { .. }]));
+        }).await;
     }
 
     #[tokio::test]
@@ -16877,7 +16973,7 @@ pub(crate) mod request_tests {
             include_roots.push(authored.path().to_path_buf());
             source.base_include = include_roots.into();
             let preamble = insert_preamble_imports(&source.preamble, "qualified CapturedSpecInstaller");
-            let templates = resident_workbench_templates(&preamble, &context.haskell_effects_alias, "");
+            let templates = resident_workbench_templates(&preamble, context.haskell_effects_alias.expression(), "");
             let include = source.base_include.iter().map(PathBuf::as_path).collect::<Vec<_>>();
             let turn = run_turn(TurnRequest {
                 exact_context: None, session_id: Some(context.placement.session),
@@ -20461,7 +20557,7 @@ pub(crate) mod request_tests {
         let prepared = source.prepare(&view);
         let templates = resident_workbench_templates(
             &prepared.preamble,
-            &context.haskell_effects_alias,
+            context.haskell_effects_alias.expression(),
             &prepared.imports,
         );
         let include = prepared
@@ -20522,12 +20618,12 @@ pub(crate) mod request_tests {
                 .unwrap();
         let template = resident_cell_check_template(
             &preamble,
-            &private_context.haskell_effects_alias,
+            private_context.haskell_effects_alias.expression(),
             &prepared.imports,
         );
         let templates = resident_workbench_templates(
             &prepared.preamble,
-            &private_context.haskell_effects_alias,
+            private_context.haskell_effects_alias.expression(),
             &prepared.imports,
         );
         let receiver_text = tidepool_testing::fixture_source(
@@ -20941,7 +21037,7 @@ pub(crate) mod request_tests {
         let prepared = source.prepare(&private_context.compile_view(view.clone()).unwrap());
         let template = resident_cell_check_template(
             &prepared.preamble,
-            &context.haskell_effects_alias,
+            context.haskell_effects_alias.expression(),
             &prepared.imports,
         );
         let specification = Arc::new(tidepool_toolchain::checked_cell::CheckedCellSpecification {
@@ -23325,12 +23421,12 @@ pub(crate) mod request_tests {
         );
         let template = resident_cell_check_template(
             &prepared.preamble,
-            &context.haskell_effects_alias,
+            context.haskell_effects_alias.expression(),
             &prepared.imports,
         );
         let templates = resident_workbench_templates(
             &prepared.preamble,
-            &context.haskell_effects_alias,
+            context.haskell_effects_alias.expression(),
             &prepared.imports,
         );
         for text in [

@@ -19,6 +19,10 @@ session rather than opening parallel contexts for one actor. Worker lifecycle,
 wake correlation, collection, and acknowledgement remain Rust interpreter
 state.
 
+Installation-issued effect rows carry their exact nominal imports through
+templates, actor compile views, and inspection. Keep that source fragment coupled;
+authored type text does not issue imports or additional effect authority.
+
 Compiler work receives its stop relationship with the affine `CompilerWorkTicket`
 issued by the execution or preparation owner. The ticket opens and settles the
 entire native scope; callers must not create an unrelated cancellation token.

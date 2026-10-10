@@ -195,17 +195,22 @@ pub(crate) fn layer_revision(layer: &[PathBuf]) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallationExpression {
     /// The authored effects used as the `installSpec` type application.
-    pub effect_row: String,
+    pub effect_row: tidepool_runtime::session::HaskellTypeSource,
     /// The exact workbench statement that installs the selected spec.
     pub expression: String,
 }
 
 impl InstallationExpression {
     #[must_use]
-    pub fn dispatcher_effect_row(&self) -> String {
-        format!(
-            "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
-            self.effect_row,
+    pub fn dispatcher_effect_row(&self) -> tidepool_runtime::session::HaskellTypeSource {
+        let mut imports = self.effect_row.required_imports().clone();
+        imports.extend_text("qualified Tidepool.Effects.Core\nqualified Tidepool.Agent.Contract");
+        tidepool_runtime::session::HaskellTypeSource::new(
+            format!(
+                "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects {})",
+                self.effect_row.expression(),
+            ),
+            imports,
         )
     }
 }
@@ -219,25 +224,26 @@ pub fn installation_expression(
     entry: &str,
     effects: &[crate::ActorEffectKey],
 ) -> InstallationExpression {
+    let mut imports = tidepool_runtime::session::SourceImports::default();
     let effect_row = format!(
         "'[{}]",
         effects
             .iter()
-            .map(|effect| match effect {
-                // Name the original effect modules without importing the
-                // notebook's actor facade into a fixed installer.
-                crate::ActorEffectKey::Replies =>
-                    "Tidepool.Agent.Reply.Internal.Replies".to_owned(),
-                crate::ActorEffectKey::Watches =>
-                    "Tidepool.Agent.Watch.Internal.Watches".to_owned(),
-                effect => format!("Tidepool.Effects.Core.{}", effect.haskell_name()),
+            .map(|effect| {
+                let module = match effect {
+                    crate::ActorEffectKey::Replies => "Tidepool.Agent.Reply.Internal",
+                    crate::ActorEffectKey::Watches => "Tidepool.Agent.Watch.Internal",
+                    _ => "Tidepool.Effects.Core",
+                };
+                imports.extend_text(&format!("qualified {module}"));
+                format!("{module}.{}", effect.haskell_name())
             })
             .collect::<Vec<_>>()
             .join(", ")
     );
     InstallationExpression {
         expression: format!("_ <- Tidepool.Agent.Contract.installSpec @({effect_row}) {entry}"),
-        effect_row,
+        effect_row: tidepool_runtime::session::HaskellTypeSource::new(effect_row, imports),
     }
 }
 
@@ -255,7 +261,7 @@ mod tests {
             ],
         );
         assert_eq!(
-            installation.effect_row,
+            installation.effect_row.expression(),
             "'[Tidepool.Effects.Core.Commands, Tidepool.Effects.Core.Journal]"
         );
         assert_eq!(
@@ -263,7 +269,7 @@ mod tests {
             "_ <- Tidepool.Agent.Contract.installSpec @('[Tidepool.Effects.Core.Commands, Tidepool.Effects.Core.Journal]) AgentSpec.agentSpec"
         );
         assert_eq!(
-            installation.dispatcher_effect_row(),
+            installation.dispatcher_effect_row().expression(),
             "(Tidepool.Effects.Core.AgentTools ': Tidepool.Agent.Contract.SyncEffects '[Tidepool.Effects.Core.Commands, Tidepool.Effects.Core.Journal])"
         );
     }
@@ -379,6 +385,49 @@ mod tests {
         );
     }
 
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config {
+            cases: 96,
+            ..proptest::test_runner::Config::default()
+        })]
+        #[test]
+        fn nominal_effect_names_and_imports_stay_coupled(indices in proptest::collection::vec(0usize..5, 0..16)) {
+            // Independent nominal oracle: preserve row order and duplicates;
+            // imports form an exact set, including defining modules of reexports.
+            let oracle = [
+                (crate::ActorEffectKey::Replies, "Tidepool.Agent.Reply.Internal", "Replies"),
+                (crate::ActorEffectKey::Watches, "Tidepool.Agent.Watch.Internal", "Watches"),
+                (crate::ActorEffectKey::Commands, "Tidepool.Effects.Core", "Commands"),
+                (crate::ActorEffectKey::Journal, "Tidepool.Effects.Core", "Journal"),
+                (crate::ActorEffectKey::AgentLaunch, "Tidepool.Effects.Core", "AgentLaunch"),
+            ];
+            let keys = indices.iter().map(|index| oracle[*index].0).collect::<Vec<_>>();
+            let expected = format!("'[{}]", indices.iter().map(|index| {
+                let (_, module, name) = oracle[*index]; format!("{module}.{name}")
+            }).collect::<Vec<_>>().join(", "));
+            let imports = indices.iter().map(|index| format!("qualified {}", oracle[*index].1))
+                .collect::<std::collections::BTreeSet<_>>();
+            let installation = installation_expression("Fixture.agentSpec", &keys);
+            proptest::prop_assert_eq!(installation.effect_row.expression(), expected.as_str());
+            proptest::prop_assert_eq!(installation.effect_row.required_imports().specs().iter().cloned()
+                .collect::<std::collections::BTreeSet<_>>(), imports.clone());
+            let dispatcher = installation.dispatcher_effect_row();
+            let mut expected_imports = imports;
+            expected_imports.extend(["qualified Tidepool.Effects.Core".into(), "qualified Tidepool.Agent.Contract".into()]);
+            proptest::prop_assert_eq!(dispatcher.required_imports().specs().iter().cloned()
+                .collect::<std::collections::BTreeSet<_>>(), expected_imports);
+            let authored = tidepool_runtime::session::SourceImports::from_specs([
+                "qualified Tidepool.Agent.Watch.Internal as PublicWatch",
+                "qualified Tidepool.Agent.Reply.Internal as PublicReply",
+            ]);
+            let combined = dispatcher.source_imports(&authored);
+            proptest::prop_assert_eq!(dispatcher.source_imports(&combined), combined);
+            // A plain authored expression never acquires guessed imports.
+            proptest::prop_assert!(tidepool_runtime::session::HaskellTypeSource::from(expected)
+                .required_imports().specs().is_empty());
+        }
+    }
+
     #[test]
     fn installer_effect_order_is_part_of_the_source_specialization() {
         let forward = installation_expression(
@@ -398,6 +447,7 @@ mod tests {
         assert_ne!(forward, reversed);
         assert!(forward
             .effect_row
+            .expression()
             .contains("Tidepool.Agent.Reply.Internal.Replies"));
     }
 }

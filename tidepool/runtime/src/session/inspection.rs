@@ -386,7 +386,7 @@ pub struct InspectionRequest<'a> {
     pub inject_modules: &'a [String],
     pub queries: &'a [InspectionQuery],
     /// The actor's GHC effects type alias. Standalone inspections leave it absent.
-    pub effects: Option<&'a str>,
+    pub effects: Option<&'a super::HaskellTypeSource>,
 }
 
 /// Inspect an ordered batch without evaluating it or mutating the resident
@@ -454,10 +454,15 @@ fn run_inspections_with_policy(
     if strict {
         command.inspection_strict();
     }
+    let issued_imports = request.effects.map(|effects| {
+        effects
+            .source_imports(&super::SourceImports::from_specs([request.imports]))
+            .template_text()
+    });
     let imports = match request.effects {
         Some(_) => format!(
             "{}\nqualified Data.Proxy\nqualified Tidepool.Effects.Core\nqualified Tidepool.Agent.Contract\n",
-            request.imports
+            issued_imports.as_deref().expect("effects imports assembled")
         ),
         None => request.imports.to_owned(),
     };
@@ -510,7 +515,7 @@ fn run_inspections_with_policy(
         let mut source = assemble_inspection_module(request.preamble, &imports, expressions);
         if let Some(effects) = request.effects {
             source.push_str("\n__tidepool_lookup_row :: Data.Proxy.Proxy (");
-            source.push_str(effects);
+            source.push_str(effects.expression());
             source.push_str(")\n__tidepool_lookup_row = Data.Proxy.Proxy\n");
         }
         if let InspectionQuery::TypeSearch(query) = query {
@@ -554,7 +559,7 @@ fn run_inspections_with_policy(
         let mut source = assemble_inspection_module(request.preamble, &imports, &expressions);
         if let Some(effects) = request.effects {
             source.push_str("\n__tidepool_lookup_row :: Data.Proxy.Proxy (");
-            source.push_str(effects);
+            source.push_str(effects.expression());
             source.push_str(")\n__tidepool_lookup_row = Data.Proxy.Proxy\n");
         }
         std::fs::write(&batch_path, &source)?;
@@ -1945,11 +1950,11 @@ mod tests {
                 session_root: session.path(),
                 inject_modules: &[],
                 queries,
-                effects: Some(
+                effects: Some(&super::super::HaskellTypeSource::from(
                     "Tidepool.Effects.Core.AgentTools ': \
                  Tidepool.Agent.Contract.SyncEffects \
                  (Tidepool.Effects.Core.AgentLaunch ': '[])",
-                ),
+                )),
             })
             .unwrap()
         };

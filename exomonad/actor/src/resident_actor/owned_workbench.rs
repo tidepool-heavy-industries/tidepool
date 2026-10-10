@@ -67,11 +67,16 @@ impl WorkbenchCompilationAuthority {
             digest.update(&(bytes.len() as u64).to_le_bytes());
             digest.update(bytes);
         };
-        frame(b"exomonad-workbench-compilation-authority-v1");
+        frame(b"exomonad-workbench-compilation-authority-v2");
         frame(&actor.id.0.to_le_bytes());
         frame(&actor.incarnation.0.to_le_bytes());
         frame(&source.semantic_digest());
-        frame(context.haskell_effects_alias.as_bytes());
+        frame(context.haskell_effects_alias.expression().as_bytes());
+        let type_imports = context.haskell_effects_alias.required_imports().specs();
+        frame(&(type_imports.len() as u64).to_le_bytes());
+        for import in type_imports {
+            frame(import.as_bytes());
+        }
         match &installed_tools {
             Some(lease) => {
                 frame(b"issued-tool-lease");
@@ -3042,7 +3047,7 @@ mod authority_tests {
             effect_policy: Default::default(),
             live_payload: Default::default(),
             source_imports: Default::default(),
-            haskell_effects_alias: String::new(),
+            haskell_effects_alias: String::new().into(),
             source_layer: Arc::from([PathBuf::from("original-root")]),
         }
     }
@@ -3064,6 +3069,32 @@ mod authority_tests {
             asynchronous.authority_digest(),
             synchronous.authority_digest()
         );
+    }
+
+    #[test]
+    fn effect_type_imports_are_part_of_exact_compilation_authority() {
+        let source = crate::CheckpointSourceLayer::default();
+        let mut original = context();
+        original.source_layer = Arc::from([]);
+        let digests = [
+            None,
+            Some("qualified Tidepool.Agent.Reply as Reply"),
+            Some("qualified Tidepool.Agent.Reply.Internal as Reply"),
+        ]
+        .map(|import| {
+            let mut context = original.clone();
+            context.haskell_effects_alias = tidepool_runtime::session::HaskellTypeSource::new(
+                "'[Reply.Replies]",
+                tidepool_runtime::session::SourceImports::from_specs(import),
+            );
+            WorkbenchCompilationAuthority::admit(context, source.clone(), None, None)
+                .unwrap()
+                .1
+                .authority_digest()
+        });
+        assert_ne!(digests[0], digests[1]);
+        assert_ne!(digests[0], digests[2]);
+        assert_ne!(digests[1], digests[2]);
     }
 
     #[test]

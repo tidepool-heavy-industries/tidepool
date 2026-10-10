@@ -780,7 +780,7 @@ pub struct ActorSessionContext {
     pub effect_policy: EffectRunPolicy,
     pub live_payload: LivePayloadPolicy,
     pub source_imports: ActorSourceImports,
-    pub haskell_effects_alias: String,
+    pub haskell_effects_alias: tidepool_runtime::session::HaskellTypeSource,
     /// Helper include roots this actor alone compiles against, ahead of every
     /// shared root. Fixed
     /// when the actor is constructed; there is no setter, because an actor's
@@ -845,7 +845,9 @@ impl ActorSessionContext {
         let session = session.with_compile_inputs(&inputs)?;
         Ok(ActorCompileView {
             session,
-            external: self.source_imports.imports.clone(),
+            external: self
+                .haskell_effects_alias
+                .source_imports(&self.source_imports.imports),
             source_layer: self.source_layer.clone(),
             compile_inputs: inputs,
         })

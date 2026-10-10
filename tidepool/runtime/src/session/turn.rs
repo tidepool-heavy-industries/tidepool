@@ -7687,7 +7687,7 @@ mod tests {
             session_root: view.session_root(),
             inject_modules: &injected,
             queries: &hidden_queries,
-            effects: Some(effects.row()),
+            effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
         });
         match hidden {
             Err(_) => {}
@@ -7715,7 +7715,7 @@ mod tests {
             session_root: view.session_root(),
             inject_modules: &injected,
             queries: &mixed_queries,
-            effects: Some(effects.row()),
+            effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
         })
         .unwrap();
         assert!(matches!(&mixed[0], InspectionResult::Info { entries, .. } if !entries.is_empty()));
@@ -7740,7 +7740,7 @@ mod tests {
             session_root: view.session_root(),
             inject_modules: &injected,
             queries: &batch_queries,
-            effects: Some(effects.row()),
+            effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
         })
         .unwrap();
         assert!(batch

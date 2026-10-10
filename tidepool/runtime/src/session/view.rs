@@ -47,6 +47,57 @@ pub struct SourceImports {
     specs: Vec<String>,
 }
 
+/// A source type expression and the imports issued with its nominal names.
+/// This supplies compiler source, not effect or resource authority. Authored
+/// expressions may have no issued imports and must resolve in their source scope.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HaskellTypeSource {
+    expression: String,
+    required_imports: SourceImports,
+}
+
+impl HaskellTypeSource {
+    pub fn new(expression: impl Into<String>, required_imports: SourceImports) -> Self {
+        Self {
+            expression: expression.into(),
+            required_imports,
+        }
+    }
+
+    pub fn expression(&self) -> &str {
+        &self.expression
+    }
+
+    pub fn required_imports(&self) -> &SourceImports {
+        &self.required_imports
+    }
+
+    /// Assemble issued type imports with the consuming source's imports once.
+    pub fn source_imports(&self, imports: &SourceImports) -> SourceImports {
+        let mut imports = imports.clone();
+        imports.extend(&self.required_imports);
+        imports
+    }
+}
+
+impl From<String> for HaskellTypeSource {
+    fn from(expression: String) -> Self {
+        Self::new(expression, SourceImports::default())
+    }
+}
+
+impl From<&str> for HaskellTypeSource {
+    fn from(expression: &str) -> Self {
+        expression.to_owned().into()
+    }
+}
+
+impl std::fmt::Display for HaskellTypeSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.expression())
+    }
+}
+
 impl SourceImports {
     #[must_use]
     pub fn new() -> Self {

@@ -392,7 +392,7 @@ fn public_scoped_declarations_reuse_selected_originals_without_lexical_names() {
         session_root: view.session_root(),
         inject_modules: &injected,
         queries: &queries,
-        effects: Some(effects.row()),
+        effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
     })
     .unwrap();
     assert!(matches!(&inspected[0], InspectionResult::Type { display, .. } if display == "Int"));
@@ -961,7 +961,7 @@ fn execute_recovery_child(spec: RecoveryChildSpec) {
         session_root: view.session_root(),
         inject_modules: &injected,
         queries: &queries,
-        effects: Some(effects.row()),
+        effects: Some(&crate::session::HaskellTypeSource::from(effects.row())),
     })
     .unwrap();
     assert!(matches!(&inspected[0], InspectionResult::Type { display, .. } if display == "Int"));
