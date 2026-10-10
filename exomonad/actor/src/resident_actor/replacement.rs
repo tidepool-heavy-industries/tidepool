@@ -1,5 +1,27 @@
 use super::*;
 
+struct ReplacementCandidate {
+    placement: child_launch::ChildPlacementCustody,
+    startup: Option<crate::WorkbenchAbandonGuard>,
+    session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
+}
+
+impl ReplacementCandidate {
+    fn new(placement: crate::ActorPlacement, predecessor: tidepool_repr::SessionId) -> Self {
+        let placement = if placement.session == predecessor {
+            child_launch::ChildPlacementCustody::new(placement)
+        } else {
+            child_launch::ChildPlacementCustody::reserved(placement)
+        };
+        let startup = Some(placement.startup_guard());
+        Self {
+            placement,
+            startup,
+            session_startup: None,
+        }
+    }
+}
+
 /// Staging owns only the new code's roots. The running actor still owns its
 /// state, queued inputs, source connections and supervised resources.
 struct StagedHandler {
@@ -10,6 +32,8 @@ struct StagedHandler {
     sources: Vec<crate::request::sources::SourceBinding>,
     dynamic_sources: Vec<crate::request::sources::SourceBinding>,
     session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
+    placement_custody: child_launch::ChildPlacementCustody,
+    _placement_startup: Mutex<crate::WorkbenchAbandonGuard>,
     exit_destination: Option<Arc<crate::owned_result::RequestResultDestination>>,
 }
 
@@ -51,7 +75,7 @@ where
         let mut staged = self
             .stage_replacement(kernel.identity(), definition)
             .await?;
-        let placement = staged.descriptor.placement();
+        let placement_custody = staged.placement_custody.clone();
         let session_startup_custody = staged.session_startup.clone();
         let root_admission = self
             .environment
@@ -61,9 +85,11 @@ where
             .await;
         if *root_admission {
             drop(staged);
-            self.environment
-                .runner
-                .retire_root_placement(placement)
+            placement_custody
+                .cleanup(
+                    &self.environment.runner,
+                    self.descriptor.placement().session,
+                )
                 .await?;
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "swarm admission is closed".into(),
@@ -83,6 +109,7 @@ where
             self.launch_worktrees.clone(),
         );
         behavior.child_session_startup = session_startup;
+        behavior.child_placement_custody = Some(placement_custody.clone());
         behavior.exit_destination = exit_destination;
         let (successor, parent_admission) = match kernel.spawn_successor(behavior).await {
             Ok(successor) => successor,
@@ -94,9 +121,11 @@ where
                         )));
                     }
                 } else {
-                    self.environment
-                        .runner
-                        .retire_root_placement(placement)
+                    placement_custody
+                        .cleanup(
+                            &self.environment.runner,
+                            self.descriptor.placement().session,
+                        )
                         .await?;
                 }
                 return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -256,27 +285,36 @@ where
         actor: ActorRef,
         definition: crate::ActorReplacementDefinition,
     ) -> Result<StagedHandler, ResidentActorWorkbenchError> {
-        let mut placement = definition.child.descriptor.placement();
-        let session_startup = (placement.session != self.descriptor.placement().session
-            && self.environment.runner.supports_child_sessions())
-        .then(|| {
-            self.environment
-                .runner
-                .child_session_startup_lease(placement.session)
-        });
-        let result = self
-            .stage_replacement_inner(actor, definition, session_startup.clone(), &mut placement)
-            .await;
+        let mut candidate = ReplacementCandidate::new(
+            definition.child.descriptor.placement(),
+            self.descriptor.placement().session,
+        );
+        let placement_custody = candidate.placement.clone();
+        let context = self.context(actor);
+        let work = self.workbench_executions.lock().actor_scope_root(actor);
+        let result = match work.retain_launch_placement(&context, placement_custody.clone()) {
+            Ok(()) => {
+                self.stage_replacement_inner(actor, definition, &mut candidate)
+                    .await
+            }
+            Err(detail) => {
+                drop(definition);
+                Err(ResidentActorWorkbenchError::ActorProtocol(detail))
+            }
+        };
+        // Drop provisional roots and the dedicated lease before reclamation.
+        // A dropped future leaves the same placement with the retained actor owner.
+        drop(candidate);
         if let Err(error) = &result {
-            // Temporary roots drop before retiring this isolated scope.
-            if let Err(cleanup) = self
-                .environment
-                .runner
-                .retire_root_placement(placement)
+            if let Err(cleanup) = placement_custody
+                .cleanup(
+                    &self.environment.runner,
+                    self.descriptor.placement().session,
+                )
                 .await
             {
                 return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                    "{error}; replacement candidate cleanup failed at {placement:?}: {cleanup}"
+                    "{error}; replacement candidate cleanup failed: {cleanup}"
                 )));
             }
         }
@@ -287,8 +325,7 @@ where
         &self,
         actor: ActorRef,
         definition: crate::ActorReplacementDefinition,
-        session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
-        placement: &mut crate::ActorPlacement,
+        candidate: &mut ReplacementCandidate,
     ) -> Result<StagedHandler, ResidentActorWorkbenchError> {
         let reject = |detail: &str| ResidentActorWorkbenchError::ActorProtocol(detail.into());
         let checkpoint = match &self.standing {
@@ -331,7 +368,7 @@ where
             descriptor = descriptor
                 .with_session(self.descriptor.placement().session)
                 .with_lexical_scope(lexical_scope);
-            *placement = descriptor.placement();
+            candidate.placement.provisioned(descriptor.placement());
         } else if descriptor.placement().session != self.descriptor.placement().session {
             let lexical_scope = self
                 .environment
@@ -345,7 +382,14 @@ where
                 .await
                 .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
             descriptor = descriptor.with_lexical_scope(lexical_scope);
-            *placement = descriptor.placement();
+            // Provisioning publishes synchronously after its final await. Only
+            // that successful publication issues authority to discard the machine.
+            candidate.session_startup = Some(
+                self.environment
+                    .runner
+                    .child_session_startup_lease(descriptor.placement().session),
+            );
+            candidate.placement.provisioned(descriptor.placement());
         }
         let context = descriptor.session_context(actor);
         let (entry, request_value) = self
@@ -463,7 +507,14 @@ where
             shutdown_hook,
             sources,
             dynamic_sources,
-            session_startup,
+            session_startup: candidate.session_startup.take(),
+            placement_custody: candidate.placement.clone(),
+            _placement_startup: Mutex::new(
+                candidate
+                    .startup
+                    .take()
+                    .expect("candidate owns startup admission"),
+            ),
         })
     }
 }

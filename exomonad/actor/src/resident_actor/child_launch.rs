@@ -4,6 +4,7 @@ use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ChildPlacementPhase {
+    Reserved(crate::ActorPlacement),
     Prepared(crate::ActorPlacement),
     ActorOwned(ActorRef),
     ActorCleanup(crate::ResidentCleanupOutcome),
@@ -21,6 +22,13 @@ pub(super) struct ChildPlacementCustody(
 );
 
 impl ChildPlacementCustody {
+    pub(super) fn reserved(placement: crate::ActorPlacement) -> Self {
+        Self(
+            Arc::new(Mutex::new(ChildPlacementPhase::Reserved(placement))),
+            Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        )
+    }
+
     pub(super) fn new(placement: crate::ActorPlacement) -> Self {
         Self(
             Arc::new(Mutex::new(ChildPlacementPhase::Prepared(placement))),
@@ -80,6 +88,15 @@ impl ChildPlacementCustody {
         }
     }
 
+    pub(super) fn provisioned(&self, placement: crate::ActorPlacement) {
+        let mut phase = self.0.lock();
+        assert!(
+            matches!(*phase, ChildPlacementPhase::Reserved(_)),
+            "only a reserved placement may acquire native startup custody"
+        );
+        *phase = ChildPlacementPhase::Prepared(placement);
+    }
+
     fn update(&self, placement: crate::ActorPlacement) {
         let mut phase = self.0.lock();
         assert!(
@@ -119,6 +136,10 @@ impl ChildPlacementCustody {
     fn take_unadmitted(&self) -> Option<crate::ActorPlacement> {
         let mut phase = self.0.lock();
         match *phase {
+            ChildPlacementPhase::Reserved(_) => {
+                *phase = ChildPlacementPhase::Released;
+                None
+            }
             ChildPlacementPhase::Prepared(placement)
             | ChildPlacementPhase::CleanupRetained(placement) => {
                 *phase = ChildPlacementPhase::Reclaiming(placement);
