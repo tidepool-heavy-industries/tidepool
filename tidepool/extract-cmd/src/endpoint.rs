@@ -1,8 +1,10 @@
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
+use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
@@ -168,7 +170,52 @@ pub struct CompilerTransactionCloseEvidence {
     pub reason: CompilerTransactionCloseReason,
     pub retirement: CompilerTransactionRetirement,
     pub earlier: Vec<CompilerTransactionCloseEvidence>,
+    input_files: CompilerInputFiles,
 }
+
+impl CompilerTransactionCloseEvidence {
+    pub fn new(
+        reason: CompilerTransactionCloseReason,
+        retirement: CompilerTransactionRetirement,
+    ) -> Self {
+        Self {
+            reason,
+            retirement,
+            earlier: Vec::new(),
+            input_files: CompilerInputFiles::default(),
+        }
+    }
+}
+
+/// Physical input custody only; artifact selection and validation belong to the
+/// caller. Keeping the original descriptor preserves its published /proc path.
+#[derive(Clone, Debug, Default)]
+struct CompilerInputFiles(BTreeMap<RawFd, Arc<File>>);
+
+impl CompilerInputFiles {
+    fn insert(&mut self, file: Arc<File>) {
+        self.0.entry(file.as_raw_fd()).or_insert(file);
+    }
+
+    fn extend(&mut self, files: Self) {
+        for file in files.0.into_values() {
+            self.insert(file);
+        }
+    }
+}
+
+impl PartialEq for CompilerInputFiles {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self.0.iter().all(|(fd, file)| {
+                other
+                    .0
+                    .get(fd)
+                    .is_some_and(|other| Arc::ptr_eq(file, other))
+            })
+    }
+}
+impl Eq for CompilerInputFiles {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CompilerTransactionCloseReason {
@@ -896,6 +943,7 @@ impl Drop for DirectEndpoint {
                             ),
                             retirement: CompilerTransactionRetirement::Direct(retirement.clone()),
                             earlier: Vec::new(),
+                            input_files: CompilerInputFiles::default(),
                         });
                 }
             }
@@ -1165,6 +1213,7 @@ impl CompilerEndpoint {
                                                 disconnect: None,
                                             },
                                         earlier: Vec::new(),
+                                        input_files: CompilerInputFiles::default(),
                                     });
                             }
                         });
@@ -1347,10 +1396,30 @@ struct TransactionScope {
     compiler: ScopedCompiler,
     cancellation: Option<CompilerTransactionCancellation>,
     admission_close: Vec<CompilerTransactionCloseEvidence>,
+    input_files: CompilerInputFiles,
 }
 
 thread_local! {
     static TRANSACTION_SCOPE: RefCell<Option<TransactionScope>> = const { RefCell::new(None) };
+}
+
+/// Retain an input descriptor through the enclosing compiler transaction's END
+/// acknowledgement. An unconfirmed close carries it with the close evidence.
+/// This grants no artifact authority and never duplicates the descriptor.
+///
+/// Returns false outside a scoped transaction, without acquiring custody. An
+/// explicit transaction's caller must retain inputs through `finish`; an
+/// indeterminate one-shot failure is not proof that the worker has stopped.
+#[must_use]
+pub fn retain_compiler_input_file(file: Arc<File>) -> bool {
+    TRANSACTION_SCOPE.with(|scope| {
+        let mut scope = scope.borrow_mut();
+        let Some(scope) = scope.as_mut() else {
+            return false;
+        };
+        scope.input_files.insert(file);
+        true
+    })
 }
 
 /// Check cooperative host work against its enclosing compiler cancellation owner.
@@ -1597,7 +1666,11 @@ fn finish_scope(abandoned: bool) -> CompilerTransactionClose {
             CompilerTransactionClose::NotStarted
         }
     };
-    retain_earlier_close(close, scope.admission_close)
+    let mut close = retain_earlier_close(close, scope.admission_close);
+    if let CompilerTransactionClose::Unconfirmed(evidence) = &mut close {
+        evidence.input_files.extend(scope.input_files);
+    }
+    close
 }
 
 impl<C: FnOnce(CompilerTransactionClose)> TransactionScopeGuard<C> {
@@ -1689,6 +1762,7 @@ fn with_compiler_transaction_inner<T>(
             compiler: ScopedCompiler::Unbound,
             cancellation,
             admission_close: Vec::new(),
+            input_files: CompilerInputFiles::default(),
         });
     });
     let guard = TransactionScopeGuard {
@@ -1829,6 +1903,7 @@ impl CompilerTransaction {
                         reason,
                         retirement: CompilerTransactionRetirement::Direct(endpoint.abort()),
                         earlier: Vec::new(),
+                        input_files: CompilerInputFiles::default(),
                     })
                 } else {
                     let end = endpoint
@@ -1899,6 +1974,7 @@ impl CompilerTransaction {
                             reason,
                             retirement: CompilerTransactionRetirement::Direct(retirement),
                             earlier: Vec::new(),
+                            input_files: CompilerInputFiles::default(),
                         })
                     }
                 }
@@ -1924,6 +2000,7 @@ impl CompilerTransaction {
                             disconnect: Some(disconnect),
                         },
                         earlier: Vec::new(),
+                        input_files: CompilerInputFiles::default(),
                     })
                 } else {
                     match daemon::end_transaction(&mut transaction) {
@@ -1949,6 +2026,7 @@ impl CompilerTransaction {
                                     ),
                                 },
                                 earlier: Vec::new(),
+                                input_files: CompilerInputFiles::default(),
                             },
                         ),
                     }
@@ -2201,6 +2279,14 @@ mod tests {
         primary_failure: bool,
     ) -> CompilerTransactionOutcome<Result<Vec<u8>, &'static str>> {
         let spec = direct_handshake_fixture(directory, phase);
+        scoped_transport_fixture_after_response(spec, primary_failure, || {})
+    }
+
+    fn scoped_transport_fixture_after_response(
+        spec: LaunchSpec,
+        primary_failure: bool,
+        action: impl FnOnce(),
+    ) -> CompilerTransactionOutcome<Result<Vec<u8>, &'static str>> {
         observed_scope(|| {
             let endpoint = CompilerEndpoint::bind_launch(spec).unwrap();
             let identity = endpoint.identity.clone();
@@ -2224,12 +2310,191 @@ mod tests {
             }
             .execute(&command)
             .unwrap();
+            action();
             if primary_failure {
                 Err("primary action refusal")
             } else {
                 Ok(response.output.stdout)
             }
         })
+    }
+
+    fn compiler_input_file(bytes: &[u8]) -> Arc<File> {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(bytes).unwrap();
+        Arc::new(file)
+    }
+
+    fn compiler_input_path(file: &File) -> String {
+        format!("/proc/{}/fd/{}", std::process::id(), file.as_raw_fd())
+    }
+
+    #[test]
+    fn compiler_input_files_survive_action_return_until_real_end() {
+        for primary_failure in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let spec = direct_handshake_fixture(directory.path(), 5);
+            let mut weak = std::sync::Weak::new();
+            let outcome = scoped_transport_fixture_after_response(spec, primary_failure, || {
+                let file = compiler_input_file(b"retained through actual END");
+                std::fs::write(
+                    directory.path().join("input-at-end"),
+                    compiler_input_path(&file),
+                )
+                .unwrap();
+                weak = Arc::downgrade(&file);
+                assert!(retain_compiler_input_file(Arc::clone(&file)));
+                assert!(retain_compiler_input_file(Arc::clone(&file)));
+                assert_eq!(
+                    Arc::strong_count(&file),
+                    2,
+                    "one lease per original descriptor"
+                );
+                // Returning drops the final action-local owner before the real
+                // transport fixture reads the input while processing END.
+            });
+            assert_eq!(outcome.close, CompilerTransactionClose::Clean);
+            assert_eq!(outcome.action.is_err(), primary_failure);
+            assert_eq!(
+                std::fs::read(directory.path().join("observed-input")).unwrap(),
+                b"retained through actual END"
+            );
+            assert!(
+                weak.upgrade().is_none(),
+                "clean END releases physical custody"
+            );
+        }
+    }
+
+    #[test]
+    fn compiler_input_files_follow_last_uncertain_close_observer() {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = direct_handshake_fixture(directory.path(), 6);
+        let mut weak = std::sync::Weak::new();
+        let outcome = scoped_transport_fixture_after_response(spec, false, || {
+            let file = compiler_input_file(b"uncertain settlement");
+            std::fs::write(
+                directory.path().join("input-at-end"),
+                compiler_input_path(&file),
+            )
+            .unwrap();
+            weak = Arc::downgrade(&file);
+            assert!(retain_compiler_input_file(file));
+        });
+        assert!(matches!(
+            outcome.close,
+            CompilerTransactionClose::Unconfirmed(_)
+        ));
+        assert_eq!(outcome.action, Ok(b"1".to_vec()));
+        assert_eq!(
+            std::fs::read(directory.path().join("observed-input")).unwrap(),
+            b"uncertain settlement"
+        );
+        let observer = outcome.close.clone();
+        drop(outcome);
+        assert!(
+            weak.upgrade().is_some(),
+            "observed uncertainty still owns its inputs"
+        );
+        drop(observer);
+        assert!(
+            weak.upgrade().is_none(),
+            "the final observation releases the file"
+        );
+    }
+
+    #[test]
+    fn compiler_input_files_have_no_unscoped_or_unstarted_owner() {
+        let file = compiler_input_file(b"not submitted");
+        let weak = Arc::downgrade(&file);
+        assert!(!retain_compiler_input_file(Arc::clone(&file)));
+        assert_eq!(Arc::strong_count(&file), 1);
+        let outcome = observed_scope(|| {
+            assert!(retain_compiler_input_file(file));
+            assert!(weak.upgrade().is_some());
+        });
+        assert_eq!(outcome.close, CompilerTransactionClose::NotStarted);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn compiler_input_file_histories_preserve_physical_custody() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, TestRunner};
+        let mut config = Config {
+            cases: 128,
+            ..Config::default()
+        };
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let spec = direct_handshake_fixture(directory.path(), 6);
+        let program = spec.program;
+        TestRunner::new(config)
+            .run(
+                &(
+                    proptest::collection::vec((0u8..3, 0usize..4), 0..64),
+                    0usize..8,
+                ),
+                |(history, observations)| {
+                    let mut owners: Vec<_> =
+                        (0..4).map(|i| Some(compiler_input_file(&[i]))).collect();
+                    let weak: Vec<_> = owners
+                        .iter()
+                        .map(|file| Arc::downgrade(file.as_ref().unwrap()))
+                        .collect();
+                    let mut retained = [false; 4];
+                    let outcome = scoped_transport_fixture_after_response(
+                        LaunchSpec::direct(program.clone()),
+                        false,
+                        || {
+                            // Always reach repeated retention and dropping a local
+                            // owner, then diversify surrounding observations/history.
+                            for (operation, index) in
+                                [(0, 0), (0, 0), (1, 0)].into_iter().chain(history)
+                            {
+                                match operation {
+                                    0 => {
+                                        if let Some(file) = &owners[index] {
+                                            assert!(retain_compiler_input_file(Arc::clone(file)));
+                                            retained[index] = true;
+                                        }
+                                    }
+                                    1 => owners[index] = None,
+                                    _ => {}
+                                }
+                                for index in 0..4 {
+                                    assert_eq!(
+                                        weak[index].strong_count(),
+                                        usize::from(owners[index].is_some())
+                                            + usize::from(retained[index])
+                                    );
+                                }
+                            }
+                        },
+                    );
+                    prop_assert!(matches!(
+                        outcome.close,
+                        CompilerTransactionClose::Unconfirmed(_)
+                    ));
+                    let mut observers: Vec<_> =
+                        (0..observations).map(|_| outcome.close.clone()).collect();
+                    drop(owners);
+                    drop(outcome);
+                    while !observers.is_empty() {
+                        for index in 0..4 {
+                            prop_assert_eq!(weak[index].upgrade().is_some(), retained[index]);
+                        }
+                        observers.pop();
+                    }
+                    prop_assert!(weak.iter().all(|file| file.upgrade().is_none()));
+                    Ok(())
+                },
+            )
+            .unwrap();
     }
 
     #[test]
@@ -2555,10 +2820,14 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let spec = direct_handshake_fixture(directory.path(), 5);
         let retained = RefCell::new(None);
+        let mut input = std::sync::Weak::new();
         let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             with_compiler_transaction(
                 |close| *retained.borrow_mut() = Some(close),
                 || {
+                    let file = compiler_input_file(b"input surviving unwind");
+                    input = Arc::downgrade(&file);
+                    assert!(retain_compiler_input_file(file));
                     let endpoint = CompilerEndpoint::bind_launch(spec).unwrap();
                     let mut transaction = endpoint.transaction().unwrap();
                     let Some(TransactionTransport::Direct(endpoint)) =
@@ -2584,6 +2853,10 @@ mod tests {
         let Some(CompilerTransactionClose::Unconfirmed(evidence)) = retained.into_inner() else {
             panic!("owning sink must survive unwind");
         };
+        assert!(
+            input.upgrade().is_some(),
+            "unwind sink retains input custody"
+        );
         assert_eq!(evidence.reason, CompilerTransactionCloseReason::Abandoned);
         let CompilerTransactionRetirement::Direct(retirement) = evidence.retirement else {
             panic!("exact process custody required");
@@ -2599,6 +2872,8 @@ mod tests {
             "same owner can subsequently observe actual reap"
         );
         assert!(actual._retained_child.is_none());
+        drop(evidence.input_files);
+        assert!(input.upgrade().is_none());
     }
 
     #[test]

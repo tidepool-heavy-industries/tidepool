@@ -40,6 +40,10 @@ An ordinary one-shot response is delivered only after the worker acknowledges
 transaction cleanup, so a client closing after receiving it preserves the warm
 worker. Explicit transactions stream request responses and acknowledge cleanup
 separately when the client closes the transaction.
+Request-owned input descriptors stay alive through that acknowledgement. Scoped
+callers register the original descriptor with the transaction owner; uncertain
+settlement carries physical custody in the retained close evidence. A request
+response, cancelled waiter or missing scope does not establish input release.
 Every request against the pinned worker (plain and transaction-pinned alike),
 and each worker transaction begin/close acknowledgement, is bounded independently
 by the configured request deadline (`--request-deadline-secs`,
