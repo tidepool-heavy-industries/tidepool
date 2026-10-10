@@ -196,9 +196,17 @@ impl CompilerCloseOwner {
 /// Direct fixtures supply the existing lifecycle owner explicitly.
 #[cfg(test)]
 async fn with_test_compiler_owner<T>(operation: impl std::future::Future<Output = T>) -> T {
-    CompilerCloseOwner::Initialization(crate::RetainedActorExit::new())
-        .scope(operation)
-        .await
+    let mut owner = crate::CompilerPreparationOwner::new();
+    let outcome = owner.scope(operation).await;
+    let observation = outcome
+        .cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await;
+    assert!(
+        observation.is_confirmed(),
+        "compiler cleanup: {observation:?}"
+    );
+    outcome.action
 }
 
 pub(crate) fn with_invocation_cancellation<T>(
@@ -7149,30 +7157,15 @@ mod declaration_receipt_tests {
     #[test]
     fn import_and_pragma_only_cells_have_truthful_receipts() {
         assert_eq!(
-            tidepool_testing::with_settlement(|settlement| declaration_receipt(
-                &[],
-                true,
-                7,
-                settlement
-            )),
+            declaration_receipt(&[], true, 7),
             "accepted cell prologue at generation 7"
         );
         assert_eq!(
-            tidepool_testing::with_settlement(|settlement| declaration_receipt(
-                &[],
-                false,
-                7,
-                settlement
-            )),
+            declaration_receipt(&[], false, 7),
             "committed declaration at generation 7"
         );
         assert_eq!(
-            tidepool_testing::with_settlement(|settlement| declaration_receipt(
-                &["watchdogProbe".to_owned()],
-                false,
-                7,
-                settlement
-            )),
+            declaration_receipt(&["watchdogProbe".to_owned()], false, 7),
             "defined watchdogProbe at generation 7"
         );
     }
@@ -15082,7 +15075,7 @@ pub(crate) mod request_tests {
             let requests_before = compiler_trace_started_ids(&trace_path);
             let task_workbench = Arc::clone(&workbench);
             let task_context = context.clone();
-            let task = tokio::spawn(with_test_compiler_owner(async move {
+            let task = tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
                 task_workbench
                     .resume_lookup(
                         task_context,
@@ -15459,7 +15452,7 @@ pub(crate) mod request_tests {
         let task_continuation_id = continuation_id.clone();
         let task_workbench = Arc::clone(&workbench);
         let task_context = context.clone();
-        let task = tokio::spawn(with_test_compiler_owner(async move {
+        let task = tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
             let guard = ParkedHoleAbortGuard::new(
                 &task_workbench.access,
                 task_context.clone(),
@@ -21989,34 +21982,36 @@ pub(crate) mod request_tests {
             let second_input = inputs.remove(0);
             let abandoned_input = inputs.remove(0);
             drop(inputs);
-            let first_task = tokio::spawn(with_test_compiler_owner(async move {
-                first
-                    .mount_activation_input(
-                        first_context,
-                        first_input,
-                        None,
-                        "()".into(),
-                        None,
-                        Vec::new(),
-                    )
-                    .await
-            }));
+            let first_task =
+                tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
+                    first
+                        .mount_activation_input(
+                            first_context,
+                            first_input,
+                            None,
+                            "()".into(),
+                            None,
+                            Vec::new(),
+                        )
+                        .await
+                }));
             tokio::time::timeout(Duration::from_secs(30), producer_seen)
                 .await
                 .unwrap()
                 .unwrap();
-            let second_task = tokio::spawn(with_test_compiler_owner(async move {
-                second
-                    .mount_activation_input(
-                        second_context,
-                        second_input,
-                        None,
-                        "()".into(),
-                        None,
-                        Vec::new(),
-                    )
-                    .await
-            }));
+            let second_task =
+                tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
+                    second
+                        .mount_activation_input(
+                            second_context,
+                            second_input,
+                            None,
+                            "()".into(),
+                            None,
+                            Vec::new(),
+                        )
+                        .await
+                }));
             tokio::time::timeout(Duration::from_secs(30), waiter_seen)
                 .await
                 .unwrap()
@@ -22033,18 +22028,19 @@ pub(crate) mod request_tests {
                 .map(str::to_owned)
                 .collect();
             machines.settle_suspended(receipt, session, holes);
-            let abandoned_task = tokio::spawn(with_test_compiler_owner(async move {
-                abandoned
-                    .mount_activation_input(
-                        abandoned_context,
-                        abandoned_input,
-                        None,
-                        "()".into(),
-                        None,
-                        Vec::new(),
-                    )
-                    .await
-            }));
+            let abandoned_task =
+                tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
+                    abandoned
+                        .mount_activation_input(
+                            abandoned_context,
+                            abandoned_input,
+                            None,
+                            "()".into(),
+                            None,
+                            Vec::new(),
+                        )
+                        .await
+                }));
             tokio::time::timeout(Duration::from_secs(30), abandoned_seen)
                 .await
                 .unwrap()
@@ -22092,18 +22088,19 @@ pub(crate) mod request_tests {
             let second_input = inputs.remove(0);
             drop(inputs);
             let submissions = tidepool_extract_cmd::extract_spawn_count();
-            let first_task = tokio::spawn(with_test_compiler_owner(async move {
-                first
-                    .mount_activation_input(
-                        first_context,
-                        first_input,
-                        None,
-                        "()".into(),
-                        None,
-                        Vec::new(),
-                    )
-                    .await
-            }));
+            let first_task =
+                tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
+                    first
+                        .mount_activation_input(
+                            first_context,
+                            first_input,
+                            None,
+                            "()".into(),
+                            None,
+                            Vec::new(),
+                        )
+                        .await
+                }));
             tokio::time::timeout(Duration::from_secs(60), sealed_seen)
                 .await
                 .unwrap()
@@ -22178,36 +22175,38 @@ pub(crate) mod request_tests {
             let first_input = inputs.remove(0);
             let second_input = inputs.remove(0);
             drop(inputs);
-            let first_task = tokio::spawn(with_test_compiler_owner(async move {
-                first
-                    .mount_activation_input(
-                        first_context,
-                        first_input,
-                        None,
-                        "()".into(),
-                        None,
-                        Vec::new(),
-                    )
-                    .await
-            }));
+            let first_task =
+                tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
+                    first
+                        .mount_activation_input(
+                            first_context,
+                            first_input,
+                            None,
+                            "()".into(),
+                            None,
+                            Vec::new(),
+                        )
+                        .await
+                }));
             tokio::time::timeout(Duration::from_secs(60), started_seen)
                 .await
                 .unwrap()
                 .unwrap();
             first_task.abort();
             assert!(matches!(first_task.await, Err(error) if error.is_cancelled()));
-            let second_task = tokio::spawn(with_test_compiler_owner(async move {
-                second
-                    .mount_activation_input(
-                        second_context,
-                        second_input,
-                        None,
-                        "()".into(),
-                        None,
-                        Vec::new(),
-                    )
-                    .await
-            }));
+            let second_task =
+                tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
+                    second
+                        .mount_activation_input(
+                            second_context,
+                            second_input,
+                            None,
+                            "()".into(),
+                            None,
+                            Vec::new(),
+                        )
+                        .await
+                }));
             tokio::time::timeout(Duration::from_secs(60), waiting_seen)
                 .await
                 .unwrap()
@@ -24024,7 +24023,7 @@ pub(crate) mod request_tests {
         let task_workbench = Arc::clone(&workbench);
         let slot_workbench = Arc::clone(&workbench);
         let task_context = context.clone();
-        let task = tokio::spawn(with_test_compiler_owner(async move {
+        let task = tokio::spawn(CompilerCloseOwner::current().unwrap().scope(async move {
             task_workbench
                 .with_exact_continuation_cleanup(
                     task_context.clone(),

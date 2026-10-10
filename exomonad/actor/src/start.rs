@@ -554,10 +554,13 @@ mod tests {
     #[test]
     fn empty_provenance_requires_no_child_facade() {
         let (session, root) = facade_selection_fixture();
-        let facade = super::materialize_entry_facade(
-            &session,
-            &tidepool_runtime::session::ProgramProvenance::default(),
-        )
+        let facade = tidepool_testing::with_settlement(|settlement| {
+            super::materialize_entry_facade(
+                &session,
+                &tidepool_runtime::session::ProgramProvenance::default(),
+                settlement,
+            )
+        })
         .unwrap();
         assert!(facade.is_none());
         assert_eq!(
@@ -612,7 +615,7 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            matches!(super::materialize_entry_facade(&session, &provenance),
+            matches!(tidepool_testing::with_settlement(|settlement| super::materialize_entry_facade(&session, &provenance, settlement)),
             Err(super::ActorStartCaptureError::ExactExports(
                 tidepool_runtime::session::ExactExportError::UnknownExport { name, .. },
             )) if name == "Missing")

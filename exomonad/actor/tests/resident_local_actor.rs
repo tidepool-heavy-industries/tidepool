@@ -497,18 +497,23 @@ fn compile_notebook_entry(
         .collect::<Vec<_>>();
     let retained = machine.prepared_retained();
     let source = include_str!("resident_local_actor/notebook_policy.hs");
-    match run_turn(HaskellTurnRequest {
-        exact_context: None,
-        session_id: None,
-        turn_text: source,
-        templates: &templates,
-        include: &include_refs,
-        session_root: root,
-        inject_modules: &[],
-        gen: 1,
-        verdict: None,
-        target: None,
-        retained_imports: &retained,
+    match tidepool_testing::with_settlement(|settlement| {
+        run_turn(
+            HaskellTurnRequest {
+                exact_context: None,
+                session_id: None,
+                turn_text: source,
+                templates: &templates,
+                include: &include_refs,
+                session_root: root,
+                inject_modules: &[],
+                gen: 1,
+                verdict: None,
+                target: None,
+                retained_imports: &retained,
+            },
+            settlement,
+        )
     })
     .expect("compile selected notebook installation")
     {
@@ -1221,7 +1226,8 @@ async fn resident_await_watch_case(case: WatchCase) {
                         ]
                     },
                 ),
-                std::sync::Arc::new(notebook.expect("primary notebook installation")),            )
+                std::sync::Arc::new(notebook.expect("primary notebook installation")),
+            )
             .await
             .expect("spawn primary workbench");
         let LocalResidentDeployment::PolicyInstalled(installation) = deployments

@@ -2580,8 +2580,10 @@ async fn composition_root_child_session_factory_runs_a_cell() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let child_session_id = tidepool_runtime::session::fresh_session_id();
-                let mut child_machine = (campaign.child_session_factory)(child_session_id, &[])
-                    .expect("the composition root's factory builds a fresh session");
+                let mut child_machine = tidepool_testing::with_settlement(|settlement| {
+                    (campaign.child_session_factory)(child_session_id, &[], settlement)
+                })
+                .expect("the composition root's factory builds a fresh session");
 
                 child_machine.set_effect_execution(
                     EffectRunPolicy::HandleOrSuspend,

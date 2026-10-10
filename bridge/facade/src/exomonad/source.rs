@@ -2472,6 +2472,28 @@ mod publication_fault_tests;
 
 #[cfg(test)]
 mod tests {
+    fn with_compiler_owner<T>(action: impl FnOnce() -> T) -> T {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut owner = exomonad_actor::CompilerPreparationOwner::new();
+        let cleanup = owner.cleanup();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(owner.scope(async { action() })).action
+        }));
+        let observation =
+            runtime.block_on(cleanup.wait_for_settlement(std::time::Duration::from_secs(5)));
+        assert!(
+            observation.is_confirmed(),
+            "compiler cleanup: {observation:?}"
+        );
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -3206,7 +3228,7 @@ mod tests {
             crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
         );
 
-        let outcome = reload.reload_helper_branch("run", &[], None);
+        let outcome = with_compiler_owner(|| reload.reload_helper_branch("run", &[], None));
         assert!(matches!(
             outcome,
             exomonad_actor::SourceLayerReload::Rejected { .. }
@@ -3245,7 +3267,7 @@ mod tests {
         let helper = reload.ensure_helper_active("run").unwrap();
         std::fs::write(reload.layer.active_record(), b"corrupt source record").unwrap();
 
-        let outcome = reload.reload_helper_branch("run", &[], None);
+        let outcome = with_compiler_owner(|| reload.reload_helper_branch("run", &[], None));
 
         assert!(matches!(
             outcome,
@@ -3522,14 +3544,12 @@ mod tests {
             "module Project.Work where\nwork = 2\n",
         )
         .unwrap();
-        let first = reload
-            .clone()
-            .stage_spec_reload(PrincipalId::SYSTEM, &[])
-            .unwrap_or_else(|outcome| panic!("stage refused: {outcome:?}"));
-        let second = reload
-            .clone()
-            .stage_spec_reload(PrincipalId::SYSTEM, &[])
-            .unwrap_or_else(|outcome| panic!("stage refused: {outcome:?}"));
+        let first =
+            with_compiler_owner(|| reload.clone().stage_spec_reload(PrincipalId::SYSTEM, &[]))
+                .unwrap_or_else(|outcome| panic!("stage refused: {outcome:?}"));
+        let second =
+            with_compiler_owner(|| reload.clone().stage_spec_reload(PrincipalId::SYSTEM, &[]))
+                .unwrap_or_else(|outcome| panic!("stage refused: {outcome:?}"));
         assert_eq!(
             reload.layer.read_active().unwrap(),
             Some(active.clone()),
@@ -3854,9 +3874,10 @@ mod tests {
             "module Project.Work where\nfreshWork :: Int\nfreshWork = 2\n",
         )
         .unwrap();
-        let updated =
+        let updated = with_compiler_owner(|| {
             tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[], None)
-                .unwrap();
+        })
+        .unwrap();
         assert!(
             matches!(
                 updated,
@@ -3870,8 +3891,9 @@ mod tests {
         )
         .unwrap();
 
-        let published =
-            exomonad_actor::ActorSourceLayers::reload_helpers(&reload, helper_actor, &[]);
+        let published = with_compiler_owner(|| {
+            exomonad_actor::ActorSourceLayers::reload_helpers(&reload, helper_actor, &[])
+        });
         let exomonad_actor::SourceLayerReload::Published { revision, .. } = published else {
             panic!("valid helper source should publish: {published:?}");
         };
@@ -3883,8 +3905,9 @@ mod tests {
             "module SessionHelpers where\nvalue = (\n",
         )
         .unwrap();
-        let rejected =
-            exomonad_actor::ActorSourceLayers::reload_helpers(&reload, helper_actor, &[]);
+        let rejected = with_compiler_owner(|| {
+            exomonad_actor::ActorSourceLayers::reload_helpers(&reload, helper_actor, &[])
+        });
         assert!(matches!(
             rejected,
             exomonad_actor::SourceLayerReload::Rejected { .. }
@@ -3933,12 +3956,14 @@ mod tests {
         ] {
             std::fs::write(&extra, valid_extra).unwrap();
             std::fs::write(path, source).unwrap();
-            let outcome = tidepool_handlers::SourceReloadService::reload(
-                &reload,
-                PrincipalId::SYSTEM,
-                &also_check,
-                None,
-            )
+            let outcome = with_compiler_owner(|| {
+                tidepool_handlers::SourceReloadService::reload(
+                    &reload,
+                    PrincipalId::SYSTEM,
+                    &also_check,
+                    None,
+                )
+            })
             .unwrap();
             let tidepool_bridge_effects::SrReloadOutcome::ReloadRejected(_, _, diagnostics) =
                 outcome
@@ -4373,9 +4398,10 @@ mod tests {
 
         write_types(project.path(), "evidenceAmount");
         write_work(project.path(), "evidenceAmount");
-        let outcome =
+        let outcome = with_compiler_owner(|| {
             tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[], None)
-                .unwrap();
+        })
+        .unwrap();
         let tidepool_bridge_effects::SrReloadOutcome::ReloadPublished(
             previous,
             published,
@@ -4434,12 +4460,14 @@ mod tests {
         write_types(project.path(), "evidenceAmount");
         write_work(project.path(), "evidenceAmount");
 
-        let outcome = tidepool_handlers::SourceReloadService::reload(
-            &reload,
-            PrincipalId::SYSTEM,
-            &[],
-            Some("Add evidence amount accessor"),
-        )
+        let outcome = with_compiler_owner(|| {
+            tidepool_handlers::SourceReloadService::reload(
+                &reload,
+                PrincipalId::SYSTEM,
+                &[],
+                Some("Add evidence amount accessor"),
+            )
+        })
         .unwrap();
         assert!(
             matches!(
@@ -4487,12 +4515,14 @@ mod tests {
                 None,
                 _,
             ),
-        )) = tidepool_handlers::SourceReloadService::reload(
-            &reload,
-            PrincipalId::SYSTEM,
-            &[],
-            Some("first line\nsecond line"),
-        )
+        )) = with_compiler_owner(|| {
+            tidepool_handlers::SourceReloadService::reload(
+                &reload,
+                PrincipalId::SYSTEM,
+                &[],
+                Some("first line\nsecond line"),
+            )
+        })
         else {
             panic!("bad intent must be a typed workspace failure after publication");
         };
@@ -4558,9 +4588,10 @@ mod tests {
             .revision()
             .identity
             .clone();
-        let outcome =
+        let outcome = with_compiler_owner(|| {
             tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[], None)
-                .unwrap();
+        })
+        .unwrap();
         let tidepool_bridge_effects::SrReloadOutcome::ReloadRejected(active, rejected, diagnostics) =
             outcome
         else {
@@ -4618,9 +4649,10 @@ mod tests {
     fn an_unedited_workspace_reloads_to_the_same_revision() {
         let (project, run, reload) = cooperating_pair();
         let active = reload.layer.ensure_active(&reload.frozen).unwrap();
-        let outcome =
+        let outcome = with_compiler_owner(|| {
             tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[], None)
-                .unwrap();
+        })
+        .unwrap();
         let tidepool_bridge_effects::SrReloadOutcome::ReloadUnchanged(revision) = outcome else {
             panic!("an unedited workspace must not republish: {outcome:?}");
         };
@@ -4664,9 +4696,10 @@ mod tests {
         let (project, _run, reload) = cooperating_pair();
         let active = reload.layer.ensure_active(&reload.frozen).unwrap();
         std::fs::remove_file(project.path().join(".exomonad/workspace/Project/Types.hs")).unwrap();
-        let outcome =
+        let outcome = with_compiler_owner(|| {
             tidepool_handlers::SourceReloadService::reload(&reload, PrincipalId::SYSTEM, &[], None)
-                .unwrap();
+        })
+        .unwrap();
         let tidepool_bridge_effects::SrReloadOutcome::ReloadRejected(previous, _, diagnostics) =
             outcome
         else {
