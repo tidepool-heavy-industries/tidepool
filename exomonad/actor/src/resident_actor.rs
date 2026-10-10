@@ -12670,18 +12670,21 @@ where
             // or terminal machine still fails fast (checkout errors, not a
             // wait).
             let hook = if let Some(hook) = self.shutdown_hook.take() {
-                match self
-                    .environment
-                    .runner
-                    .run_shutdown(
-                        context.clone(),
-                        hook,
-                        context.placement.resource_scope,
-                        terminal.kind,
-                        deadline.saturating_duration_since(tokio::time::Instant::now()),
-                    )
-                    .await
-                {
+                let result = match kernel.retained_exit().begin_compiler_finalization() {
+                    Ok(finalization) => {
+                        finalization
+                            .scope(self.environment.runner.run_shutdown(
+                                context.clone(),
+                                hook,
+                                context.placement.resource_scope,
+                                terminal.kind,
+                                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                            ))
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
+                match result {
                     Ok(()) => Confirmed,
                     Err(error) => Unconfirmed(error.to_string()),
                 }

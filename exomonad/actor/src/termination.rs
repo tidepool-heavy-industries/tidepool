@@ -177,6 +177,13 @@ pub(crate) struct CompilerWorkReceipt {
     close: Arc<Mutex<CompilerWorkClose>>,
     attempts: Arc<Mutex<Vec<tidepool_runtime::CompilerTransactionClose>>>,
     cancellation: Option<tidepool_runtime::CompilerTransactionCancellation>,
+    purpose: CompilerWorkPurpose,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CompilerWorkPurpose {
+    Active,
+    Finalization,
 }
 
 impl CompilerWorkReceipt {
@@ -185,6 +192,7 @@ impl CompilerWorkReceipt {
             close: Arc::new(Mutex::new(CompilerWorkClose::Pending)),
             attempts: Arc::new(Mutex::new(Vec::new())),
             cancellation: Some(tidepool_runtime::CompilerTransactionCancellation::new()),
+            purpose: CompilerWorkPurpose::Active,
         }
     }
     pub(crate) fn observation(&self) -> CompilerWorkClose {
@@ -197,6 +205,7 @@ impl CompilerWorkReceipt {
             close: Arc::clone(&self.close),
             attempts: Arc::clone(&self.attempts),
             cancellation: None,
+            purpose: self.purpose,
         }
     }
 
@@ -430,6 +439,29 @@ pub struct CompilerPreparationOutcome<T> {
     pub cleanup: CompilerPreparationCleanup,
 }
 
+/// Finalization uses the same retained actor receipts while active admission
+/// stays closed. Dropping the guard fences and interrupts unfinished cleanup.
+pub(crate) struct CompilerFinalizationGuard {
+    retained: RetainedActorExit,
+}
+
+impl CompilerFinalizationGuard {
+    pub(crate) fn scope<F: std::future::Future>(
+        &self,
+        operation: F,
+    ) -> impl std::future::Future<Output = F::Output> {
+        let owner =
+            crate::resident_workbench::CompilerCloseOwner::ActorFinalization(self.retained.clone());
+        async move { owner.scope(operation).await }
+    }
+}
+
+impl Drop for CompilerFinalizationGuard {
+    fn drop(&mut self) {
+        self.retained.close_compiler_finalization();
+    }
+}
+
 /// Repeatable observation retaining the same receipts and native child custody.
 #[derive(Clone)]
 pub struct CompilerPreparationCleanup {
@@ -470,7 +502,7 @@ impl CompilerPreparationCleanup {
     pub fn observation(&self) -> CompilerPreparationCleanupObservation {
         let state = self.retained.state.cleanup.lock();
         CompilerPreparationCleanupObservation {
-            admission_closed: state.compiler_admission_closed,
+            admission_closed: state.compiler_admission == CompilerAdmission::Closed,
             work: state
                 .compilers
                 .iter()
@@ -504,9 +536,17 @@ impl CompilerPreparationCleanup {
     }
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum CompilerAdmission {
+    #[default]
+    Active,
+    Finalizing,
+    Closed,
+}
+
 #[derive(Default)]
 struct RetainedCleanupState {
-    compiler_admission_closed: bool,
+    compiler_admission: CompilerAdmission,
     outcome: Option<crate::ResidentCleanupOutcome>,
     compilers: Vec<CompilerWorkReceipt>,
 }
@@ -601,15 +641,14 @@ impl RetainedActorExit {
     }
 
     pub(crate) fn retain_cleanup(&self, outcome: crate::ResidentCleanupOutcome) {
-        let mut state = self.state.cleanup.lock();
-        state.compiler_admission_closed = true;
-        state.outcome.get_or_insert(outcome);
+        self.state.cleanup.lock().outcome.get_or_insert(outcome);
+        self.close_compiler_finalization();
     }
 
     pub(crate) fn register_compiler_work(&self, receipt: CompilerWorkReceipt) -> bool {
         let shutdown = self.state.requested_shutdown.lock();
         let mut state = self.state.cleanup.lock();
-        if state.compiler_admission_closed || shutdown.is_some() {
+        if state.compiler_admission != CompilerAdmission::Active || shutdown.is_some() {
             return false;
         }
         state.compilers.push(receipt);
@@ -618,8 +657,8 @@ impl RetainedActorExit {
 
     fn close_compiler_admission(&self) {
         let mut state = self.state.cleanup.lock();
-        let changed = !state.compiler_admission_closed;
-        state.compiler_admission_closed = true;
+        let changed = state.compiler_admission != CompilerAdmission::Closed;
+        state.compiler_admission = CompilerAdmission::Closed;
         drop(state);
         if changed {
             self.notify_compiler_close();
@@ -629,8 +668,53 @@ impl RetainedActorExit {
     fn cancel_compiler_work(&self) {
         let receipts = self.state.cleanup.lock().compilers.clone();
         for receipt in receipts {
-            receipt.request_cancellation();
+            if receipt.purpose == CompilerWorkPurpose::Active {
+                receipt.request_cancellation();
+            }
         }
+    }
+
+    pub(crate) fn begin_compiler_finalization(
+        &self,
+    ) -> Result<CompilerFinalizationGuard, crate::ResidentActorWorkbenchError> {
+        let mut state = self.state.cleanup.lock();
+        if state.compiler_admission != CompilerAdmission::Active || state.outcome.is_some() {
+            return Err(crate::ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed);
+        }
+        state.compiler_admission = CompilerAdmission::Finalizing;
+        drop(state);
+        self.cancel_compiler_work();
+        self.notify_compiler_close();
+        Ok(CompilerFinalizationGuard {
+            retained: self.clone(),
+        })
+    }
+
+    pub(crate) fn register_compiler_finalization_work(
+        &self,
+        mut receipt: CompilerWorkReceipt,
+    ) -> bool {
+        let mut state = self.state.cleanup.lock();
+        if state.compiler_admission != CompilerAdmission::Finalizing || state.outcome.is_some() {
+            return false;
+        }
+        receipt.purpose = CompilerWorkPurpose::Finalization;
+        state.compilers.push(receipt);
+        true
+    }
+
+    fn close_compiler_finalization(&self) {
+        let receipts = {
+            let mut state = self.state.cleanup.lock();
+            state.compiler_admission = CompilerAdmission::Closed;
+            state.compilers.clone()
+        };
+        for receipt in receipts {
+            if receipt.purpose == CompilerWorkPurpose::Finalization {
+                receipt.request_cancellation();
+            }
+        }
+        self.notify_compiler_close();
     }
 
     pub(crate) fn notify_compiler_close(&self) {

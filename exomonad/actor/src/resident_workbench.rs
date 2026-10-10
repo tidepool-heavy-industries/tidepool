@@ -70,6 +70,7 @@ tokio::task_local! {
 #[derive(Clone)]
 pub(crate) enum CompilerCloseOwner {
     ActorLifecycle(crate::RetainedActorExit),
+    ActorFinalization(crate::RetainedActorExit),
     SharedPreparation {
         producer: crate::RetainedActorExit,
         observer: Box<CompilerCloseOwner>,
@@ -84,7 +85,9 @@ pub(crate) enum CompilerCloseOwner {
 impl CompilerCloseOwner {
     pub(crate) fn close_settled(&self) {
         match self {
-            Self::ActorLifecycle(owner) => owner.notify_compiler_close(),
+            Self::ActorLifecycle(owner) | Self::ActorFinalization(owner) => {
+                owner.notify_compiler_close()
+            }
             Self::SharedPreparation { producer, observer } => {
                 producer.notify_compiler_close();
                 observer.close_settled();
@@ -156,6 +159,7 @@ impl CompilerCloseOwner {
     ) -> bool {
         match self {
             Self::ActorLifecycle(owner) => owner.register_compiler_work(receipt),
+            Self::ActorFinalization(owner) => owner.register_compiler_finalization_work(receipt),
             Self::SharedPreparation { producer, observer } => {
                 producer.register_compiler_work(receipt.clone())
                     && observer.register_receipt(receipt.observation_only(), admission)
