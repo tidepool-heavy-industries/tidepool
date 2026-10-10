@@ -711,6 +711,7 @@ fn run_history(
     initially_pending: bool,
     coverage: &mut Coverage,
 ) -> Result<(), TestCaseError> {
+    crate::request::test_support::fresh_history();
     // Reset actual native confirmation state for each replay/shrink. Compilation
     // and authentic input admission happened once at family setup, not here.
     fixture.make_ready();
@@ -731,7 +732,7 @@ fn run_history(
         std::array::from_fn(|_| crate::RetainedActorExit::new());
     let mut shutdown = [false; 4];
     let ids = targets.map(|target| {
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         request

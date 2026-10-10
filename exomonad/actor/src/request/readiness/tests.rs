@@ -172,11 +172,12 @@ fn delayed_registry_history(
     };
     use crate::{ActorId, ActorRef};
 
+    crate::request::test_support::fresh_history();
     let registry = RequestRegistry::default();
     let owner = ActorRef::first(ActorId(1));
     let targets = [2, 3, 4].map(|id| ActorRef::first(ActorId(id)));
     let requests = targets.map(|target| {
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         request

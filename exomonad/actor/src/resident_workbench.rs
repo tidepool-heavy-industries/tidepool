@@ -19396,7 +19396,7 @@ pub(crate) mod request_tests {
         let owner = crate::ActorRef::first(crate::ActorId(0xCA01));
         let target = crate::ActorRef::first(crate::ActorId(0xCA02));
         let registry = Arc::new(RequestRegistry::default());
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         assert_eq!(
             request.0, 1,
             "fixture names the first exact registry request"

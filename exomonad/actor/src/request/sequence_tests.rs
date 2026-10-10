@@ -358,6 +358,9 @@ struct WatchModel {
 
 #[derive(Default, Debug)]
 struct Coverage {
+    native_response_forces: usize,
+    native_watch_forces: usize,
+    native_forces_after_forget: usize,
     operations: BTreeMap<String, usize>,
     changes_by_operation: BTreeMap<String, usize>,
     refusals_by_operation: BTreeMap<String, usize>,
@@ -406,6 +409,7 @@ fn run_history_with_mutation(
     coverage: &mut Coverage,
     mutation: Option<RootMutation>,
 ) -> Result<(), TestCaseError> {
+    test_support::fresh_history();
     let registry = RequestRegistry::default();
     let owner = ActorRef::first(ActorId(1));
     let targets: Vec<_> = history
@@ -415,7 +419,7 @@ fn run_history_with_mutation(
         .collect();
     let ids: Vec<_> = targets
         .iter()
-        .map(|target| registry.reserve(owner, *target))
+        .map(|target| registry.reserve_native(owner, *target))
         .collect();
     let mut requests = vec![RequestModel::default(); targets.len()];
     let mut reply_claims: Vec<Option<RequestReplyClaim>> =
@@ -863,6 +867,7 @@ fn run_history_with_mutation(
                         TestCaseError::fail(format!("successful request has no root: {error:?}"))
                     })?;
                 prop_assert_eq!(test_support::force(&root), 41);
+                coverage.native_response_forces += 1;
             }
         }
 
@@ -956,6 +961,10 @@ fn run_history_with_mutation(
                                 ))
                             })?;
                         prop_assert_eq!(test_support::force(&root), 41);
+                        coverage.native_watch_forces += 1;
+                        let index = if node == 0 { 0 } else { (node + 1) / 2 };
+                        coverage.native_forces_after_forget +=
+                            usize::from(requests[watch.dependencies[index]].released);
                     }
                 }
             }
@@ -1276,6 +1285,8 @@ fn generated_request_lifecycle_matches_observable_model() {
     assert!(cohort.foreign_terminal_observations > 0 && cohort.accepted_replies > 0);
     assert!(cohort.completed_acknowledgements > 0 && cohort.acknowledgement_retries > 0);
     assert!(cohort.released_responses > 0 && cohort.terminal_owner_with_active_target > 0);
+    assert!(cohort.native_response_forces > 0 && cohort.native_watch_forces > 0);
+    assert!(cohort.native_forces_after_forget > 0);
     eprintln!("request deterministic cohort coverage: {cohort:#?}");
     let coverage = RefCell::new(Coverage::default());
     let result = runner.run(&histories(), |history| {

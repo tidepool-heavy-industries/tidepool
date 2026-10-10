@@ -278,7 +278,7 @@ impl ResidentActorStart {
             _ => return Err(ActorStartCaptureError::UnexpectedRequest),
         };
         let site = u64::try_from(site).map_err(|_| ActorStartCaptureError::UnexpectedRequest)?;
-        let witness = session.request_result_type_witness(site, &parent_hole)?;
+        let witness = session.original_result_type_witness(site, &parent_hole)?;
         let destination = std::sync::Arc::new(crate::owned_result::RequestResultDestination::new(
             parent_actor,
             session_id,

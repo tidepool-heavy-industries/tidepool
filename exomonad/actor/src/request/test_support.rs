@@ -9,14 +9,15 @@ use std::{
 
 use tidepool_bridge::{FromHaskell, HaskellValue};
 use tidepool_codegen::{scope::ScopeId, suspension::RealmId};
-use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+use tidepool_effect::{EffectError, EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::{Generation, SessionId};
 use tidepool_runtime::session::{
     insert_preamble_imports, resident_workbench_templates,
-    turn::{run_turn, CompiledTurn, TurnRequest, TurnResult},
-    ModuleEnv, OutputSink, PersistentSession, ResidentHole, ResidentOutcome, ResidentSession,
-    RuntimeResultPublication, SessionLib,
+    turn::{run_turn, BoundBinder, CompiledTurn, TurnRequest, TurnResult},
+    ModuleEnv, OutputSink, PersistentSession, ResidentError, ResidentHole, ResidentOutcome,
+    ResidentSession, RuntimeResultPublication, SessionLib,
 };
+use tidepool_runtime::RuntimeError;
 use tidepool_testing::effect_surface::TestEffectSurface;
 
 use super::{RequestId, RequestRegistry, RequestReplyClaim, WatchNotification};
@@ -41,8 +42,12 @@ type Machine = ResidentSession<frunk::HNil, NoOutput>;
 const FIXTURE_SESSION: SessionId = SessionId(0xCA71);
 
 struct Fixture {
-    _root: tempfile::TempDir,
+    _compile_root: tempfile::TempDir,
+    _machine_root: tempfile::TempDir,
     resident: Machine,
+    receiver: CompiledTurn,
+    bound: Vec<BoundBinder>,
+    include: Vec<PathBuf>,
     producer: CompiledTurn,
 }
 
@@ -134,13 +139,31 @@ impl Fixture {
             TurnResult::Bind { compiled, .. } | TurnResult::Expr { compiled, .. } => compiled,
             TurnResult::Decl(_) => panic!("request fixture must execute"),
         };
+        let (machine_root, resident) = Self::machine(&receiver, &bound, &include);
+        Self {
+            _compile_root: root,
+            _machine_root: machine_root,
+            resident,
+            receiver,
+            bound,
+            include,
+            producer,
+        }
+    }
+
+    fn machine(
+        receiver: &CompiledTurn,
+        bound: &[BoundBinder],
+        include: &[PathBuf],
+    ) -> (tempfile::TempDir, Machine) {
+        let root = tempfile::tempdir().unwrap();
         let library = SessionLib::open(
             FIXTURE_SESSION,
             root.path(),
             ModuleEnv::standalone_default(),
         )
         .unwrap()
-        .with_validation_include(include);
+        .with_validation_include(include.to_vec());
         let mut resident = Machine::unbootstrapped(
             frunk::HNil,
             NoOutput,
@@ -155,18 +178,25 @@ impl Fixture {
             tidepool_testing::with_settlement(|settlement| resident.run_projected_bind_with_sites(
                 "result-fixture-native-bindings",
                 receiver.code(),
-                &bound,
+                bound,
                 Generation(1),
                 settlement
             ))
             .unwrap(),
             ResidentOutcome::BindingsCommitted { .. }
         ));
-        Self {
-            _root: root,
-            resident,
-            producer,
-        }
+        (root, resident)
+    }
+
+    fn reset(&mut self) {
+        assert_eq!(
+            self.resident.outstanding_custody(),
+            0,
+            "a completed generated history must release all native custody"
+        );
+        let (root, resident) = Self::machine(&self.receiver, &self.bound, &self.include);
+        self.resident = resident;
+        self._machine_root = root;
     }
 
     fn submission(&mut self, request: RequestId) -> (ResidentHole, HaskellValue, u64) {
@@ -204,9 +234,7 @@ impl Fixture {
             .resident
             .request_result_type_witness(site, &hole)
             .unwrap();
-        self.resident
-            .abort(hole.cont_id(), "fixture destination admitted".into())
-            .unwrap();
+        self.abort_submission(&hole, "fixture destination admitted");
         RequestResultDestination::new(
             owner,
             FIXTURE_SESSION,
@@ -222,9 +250,7 @@ impl Fixture {
             .live_payload_handle_owned_by(submission.cont_id(), RealmId::ROOT)
             .unwrap()
             .expect("submission owns original RunRequest");
-        self.resident
-            .abort(submission.cont_id(), "fixture payload transferred".into())
-            .unwrap();
+        self.abort_submission(&submission, "fixture payload transferred");
         let receiver = self
             .resident
             .retain_binding_custody("resultRegistryReceiver")
@@ -270,6 +296,17 @@ impl Fixture {
         captured
     }
 
+    fn abort_submission(&mut self, hole: &ResidentHole, reason: &str) {
+        let parked = self.resident.parked_count();
+        assert!(matches!(
+            self.resident.abort(hole.cont_id(), reason.to_owned()),
+            Err(ResidentError::Run(RuntimeError::Jit(EffectError::Handler(detail))))
+                if detail == format!("ask aborted by caller: {reason}")
+        ));
+        assert_eq!(self.resident.parked_count(), parked - 1);
+        assert!(!self.resident.parked_holes().contains(&hole.cont_id()));
+    }
+
     fn force(&mut self, snapshot: &OwnedResultSnapshot) -> i64 {
         let verifier = self
             .resident
@@ -301,6 +338,12 @@ impl Fixture {
 fn fixture() -> &'static parking_lot::Mutex<Fixture> {
     static FIXTURE: OnceLock<parking_lot::Mutex<Fixture>> = OnceLock::new();
     FIXTURE.get_or_init(|| parking_lot::Mutex::new(Fixture::new()))
+}
+
+/// Reuse authentic immutable compiler products with a fresh mutable machine
+/// and session library for each generated history and shrink replay.
+pub(crate) fn fresh_history() {
+    fixture().lock().reset();
 }
 
 pub(crate) fn admit_destination(registry: &RequestRegistry, owner: ActorRef, request: RequestId) {

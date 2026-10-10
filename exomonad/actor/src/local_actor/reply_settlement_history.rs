@@ -349,6 +349,7 @@ fn check_observation(
 }
 
 async fn run_history(history: &History, coverage: &mut Coverage) {
+    crate::request::test_support::fresh_history();
     coverage.replay_callbacks += 1;
     let registry = Arc::new(RequestRegistry::default());
     let request_slot = Arc::new(parking_lot::Mutex::new(None));
@@ -379,7 +380,7 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
     .unwrap();
     let owner = ActorRef::first(crate::ActorId(u64::MAX - 1));
     assert_ne!(owner, actor.identity());
-    let request = registry.reserve(owner, actor.identity());
+    let request = registry.reserve_native(owner, actor.identity());
     *request_slot.lock() = Some(request);
     registry
         .mark_queued(owner, actor.identity(), request)
@@ -730,7 +731,7 @@ fn singleton_reply_watches_distinguish_required_success_from_allowed_failure() {
         let registry = RequestRegistry::default();
         let owner = ActorRef::first(crate::ActorId(101));
         let target = ActorRef::first(crate::ActorId(102));
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (required, _) = registry.register_watch(owner, vec![request]).unwrap();

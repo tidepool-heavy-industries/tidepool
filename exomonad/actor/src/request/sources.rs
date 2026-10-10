@@ -435,7 +435,7 @@ mod tests {
         let (send, mut events) = mpsc::unbounded_channel();
         let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
         let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
-        let request = registry.reserve(actor(100), actor(101));
+        let request = registry.reserve_native(actor(100), actor(101));
         registry
             .mark_queued(actor(100), actor(101), request)
             .unwrap();
@@ -483,7 +483,7 @@ mod tests {
         let owner = actor(100);
         let target = actor(101);
         let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let _sources = registry
@@ -567,7 +567,7 @@ mod tests {
             SourceEvent::Settled(Err(ResponseFailure::Released))
         ));
 
-        let completed = registry.reserve(owner, target);
+        let completed = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, completed).unwrap();
         registry.present(target, completed).unwrap();
         let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
@@ -601,7 +601,7 @@ mod tests {
         let successor = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
         let predecessor = actor(100);
         let target = actor(101);
-        let request = registry.reserve(predecessor, target);
+        let request = registry.reserve_native(predecessor, target);
         registry.mark_queued(predecessor, target, request).unwrap();
         registry.present(target, request).unwrap();
         let (watch, _) = registry.register_watch(predecessor, vec![request]).unwrap();
@@ -647,7 +647,7 @@ mod tests {
         let successor = LocalActorRef::new(new_address.clone(), crate::RetainedActorExit::new());
         let requests = (0..3)
             .map(|_| {
-                let request = registry.reserve(actor(100), actor(101));
+                let request = registry.reserve_native(actor(100), actor(101));
                 registry
                     .mark_queued(actor(100), actor(101), request)
                     .unwrap();
@@ -719,7 +719,7 @@ mod tests {
         let (send, mut events) = mpsc::unbounded_channel();
         let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
         let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
-        let own = registry.reserve(actor(100), actor(101));
+        let own = registry.reserve_native(actor(100), actor(101));
         registry.mark_queued(actor(100), actor(101), own).unwrap();
         registry.present(actor(101), own).unwrap();
         let mut reply_claim_own = Some(registry.begin_reply(actor(101), own).unwrap());
@@ -771,7 +771,7 @@ mod tests {
         let owner = actor(100);
         let target = actor(101);
         let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
-        let settled = registry.reserve(owner, target);
+        let settled = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, settled).unwrap();
         registry.present(target, settled).unwrap();
         let mut reply_claim_settled = Some(registry.begin_reply(target, settled).unwrap());
@@ -830,7 +830,7 @@ mod tests {
         let owner = actor(100);
         let target = actor(101);
         let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
-        let request = registry.reserve(owner, target);
+        let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let mut sources = registry
@@ -884,8 +884,8 @@ mod tests {
         let successor = LocalActorRef::new(new_address.clone(), crate::RetainedActorExit::new());
         let owner = actor(100);
         let target = actor(101);
-        let before = registry.reserve(owner, target);
-        let after = registry.reserve(owner, target);
+        let before = registry.reserve_native(owner, target);
+        let after = registry.reserve_native(owner, target);
         for request in [before, after] {
             registry.mark_queued(owner, target, request).unwrap();
             registry.present(target, request).unwrap();

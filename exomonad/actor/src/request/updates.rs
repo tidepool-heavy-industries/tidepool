@@ -464,10 +464,24 @@ mod tests {
     use crate::{ActorId, Incarnation};
 
     fn active() -> (Arc<RequestRegistry>, ActorRef, ActorRef, RequestId) {
+        active_with_native_destination(false)
+    }
+
+    fn active_native() -> (Arc<RequestRegistry>, ActorRef, ActorRef, RequestId) {
+        active_with_native_destination(true)
+    }
+
+    fn active_with_native_destination(
+        native: bool,
+    ) -> (Arc<RequestRegistry>, ActorRef, ActorRef, RequestId) {
         let registry = Arc::new(RequestRegistry::default());
         let owner = ActorRef::first(ActorId(1));
         let target = ActorRef::first(ActorId(2));
-        let request = registry.reserve(owner, target);
+        let request = if native {
+            registry.reserve_native(owner, target)
+        } else {
+            registry.reserve(owner, target)
+        };
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         (registry, owner, target, request)
@@ -513,7 +527,7 @@ mod tests {
 
     #[test]
     fn presentation_is_single_claim_and_preserves_the_original_response() {
-        let (registry, owner, target, request) = active();
+        let (registry, owner, target, request) = active_native();
         let (update, delivery) = registry
             .update_request(owner, request, "clickable tabs".into())
             .unwrap();
@@ -555,7 +569,7 @@ mod tests {
 
     #[test]
     fn reply_winning_before_claim_makes_update_too_late() {
-        let (registry, owner, target, request) = active();
+        let (registry, owner, target, request) = active_native();
         let (update, delivery) = registry
             .update_request(owner, request, "tabs".into())
             .unwrap();
@@ -584,7 +598,7 @@ mod tests {
         // The exact situation a live lead hit: a child had already replied, the
         // lead sent a correction naming that child, and the send reported
         // success. It reached nobody, and only a separate observation said so.
-        let (registry, owner, target, request) = active();
+        let (registry, owner, target, request) = active_native();
         let mut reply_claim_request = Some(registry.begin_reply(target, request).unwrap());
         crate::request::test_support::complete_optional_reply(
             &registry,
@@ -694,7 +708,7 @@ mod tests {
 
     #[test]
     fn failure_before_submission_releases_the_fence() {
-        let (registry, owner, target, request) = active();
+        let (registry, owner, target, request) = active_native();
         let (update, delivery) = registry
             .update_request(owner, request, "tabs".into())
             .unwrap();
@@ -735,7 +749,7 @@ mod tests {
     #[test]
     fn racing_claim_and_reply_have_one_winner() {
         for _ in 0..32 {
-            let (registry, owner, target, request) = active();
+            let (registry, owner, target, request) = active_native();
             let (update, delivery) = registry
                 .update_request(owner, request, "tabs".into())
                 .unwrap();
@@ -765,7 +779,7 @@ mod tests {
 
     #[test]
     fn late_evidence_reconciles_only_the_exact_durable_operation() {
-        let (registry, owner, target, request) = active();
+        let (registry, owner, target, request) = active_native();
         let (update, delivery) = registry
             .update_request(owner, request, "tabs".into())
             .unwrap();
@@ -813,7 +827,7 @@ mod tests {
 
     #[test]
     fn authoritative_presentation_survives_a_late_lease_drop() {
-        let (registry, owner, target, request) = active();
+        let (registry, owner, target, request) = active_native();
         let (update, delivery) = registry
             .update_request(owner, request, "tabs".into())
             .unwrap();
@@ -863,7 +877,7 @@ mod tests {
 
     #[test]
     fn repeated_unconfirmed_evidence_keeps_the_fence_until_a_terminal_outcome() {
-        let (registry, owner, target, request) = active();
+        let (registry, owner, target, request) = active_native();
         let (update, delivery) = registry
             .update_request(owner, request, "tabs".into())
             .unwrap();

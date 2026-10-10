@@ -94,7 +94,7 @@ impl InputFixture {
         ));
         let mut preamble = effects.preamble().to_owned();
         for import in [
-            "Tidepool.Agent.Reply (Replies)",
+            "Tidepool.Agent.Reply (Replies, ResponseResult(..))",
             "Tidepool.Agent.Ref.Internal (AgentProtocol(..))",
             "qualified Tidepool.Agent.Ref.Internal as Ref",
             "qualified Tidepool.Actors.Internal.Agent as Agents",
@@ -263,10 +263,21 @@ impl InputFixture {
             .retain_binding_custody("activationUnitReply")
             .expect("retain the genuine native Unit reply")
             .expect("compiled Unit reply binding is installed");
-        tidepool_testing::with_settlement(|settlement| {
-            resident.resume_handle(hole, reply, settlement)
+        let publication = suspended(
+            tidepool_testing::with_settlement(|settlement| {
+                resident.resume_handle(hole, reply, settlement)
+            })
+            .expect("deliver native reply custody into the original request"),
+        );
+        let captured = resident
+            .capture_result_publication(&publication, site, RealmId::ROOT)
+            .expect("the protected helper publishes the original typed native result");
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            resident.resume(publication, (), settlement)
         })
-        .expect("deliver native reply custody into the original request")
+        .expect("settle owned result publication");
+        assert!(resident.discard_custody(captured.custody));
+        outcome
     }
 
     fn start(&self, resident: &mut TestSession) -> ResidentHole {
@@ -289,7 +300,7 @@ impl InputFixture {
         request: i64,
     ) -> (ResidentHole, ResidentHole) {
         let submission = settle_request_reservation(resident, reservation, request);
-        // SubmitRequestWith carries request id at field0 and protocol payload at field1.
+        // The compiler attests the original site at field1 and protocol payload at field2.
         let payload = resident
             .live_payload_handle(submission.cont_id())
             .unwrap()
@@ -4307,4 +4318,169 @@ fn compile_activation_preview(
         }
     };
     turn::bind_activation_renderer(admission, &renderer).map_err(Into::into)
+}
+
+#[test]
+fn owned_callable_result_authenticates_joint_capture_and_survives_source_retirement() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/owned-result-callable.hs"),
+        false,
+        SessionId(1750),
+    );
+    let mut source = InputFixture::fresh_with_receiver(
+        SessionLib::open(
+            fixture.session,
+            fixture.root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(fixture.recipe.include.clone()),
+        &fixture.recipe,
+        include_str!("fixtures/owned-result-receiver.hs"),
+        4,
+    );
+    let reservation = fixture.start(&mut source);
+    let (submission, activation) = fixture.deliver(&mut source, reservation, 41);
+    let site = parked_site(&mut source, &submission);
+    let expected = source
+        .request_result_type_witness(site, &submission)
+        .unwrap();
+    assert!(matches!(
+        source.original_result_type_witness(site, &submission),
+        Err(ResidentError::InvalidActivationInput { .. })
+    ));
+    assert!(matches!(
+        source.original_result_type_witness(site ^ 1, &submission),
+        Err(ResidentError::InvalidActivationInput { .. })
+    ));
+    let reply = source
+        .retain_binding_custody("activationFunctionReply")
+        .unwrap()
+        .unwrap();
+    let publication = suspended(
+        tidepool_testing::with_settlement(|settlement| {
+            source.resume_handle(activation, reply, settlement)
+        })
+        .unwrap(),
+    );
+    let baseline = source.outstanding_custody();
+    let native_roots = source.value_handle_count();
+    assert!(matches!(
+        source.capture_result_publication(&publication, site ^ 1, RealmId::ROOT),
+        Err(ResidentError::InvalidActivationInput { .. })
+    ));
+    assert!(matches!(
+        source.capture_result_publication(&publication, site, RealmId::fresh()),
+        Err(ResidentError::InvalidActivationInput { .. })
+    ));
+    let row = source
+        .parked
+        .iter()
+        .position(|entry| entry.name == publication.cont_id())
+        .unwrap();
+    let genuine = source.parked[row].provenance.clone();
+    let mut withdrawn = (*genuine).clone();
+    withdrawn.authenticated_inputs.remove(&site);
+    source.parked[row].provenance = Arc::new(withdrawn);
+    assert!(matches!(
+        source.capture_result_publication(&publication, site, RealmId::ROOT),
+        Err(ResidentError::UnauthenticatedActivationInputWitness { .. })
+    ));
+    let mut missing = (*genuine).clone();
+    missing.sites.remove(&site);
+    source.parked[row].provenance = Arc::new(missing);
+    assert!(matches!(
+        source.capture_result_publication(&publication, site, RealmId::ROOT),
+        Err(ResidentError::InvalidActivationInput { .. })
+    ));
+    source.parked[row].provenance = genuine;
+    assert_eq!(
+        source.outstanding_custody(),
+        baseline,
+        "refusals allocate no result root"
+    );
+    assert_eq!(source.value_handle_count(), native_roots);
+    let captured = source
+        .capture_result_publication(&publication, site, RealmId::ROOT)
+        .unwrap();
+    assert_eq!(&expected, captured.type_witness());
+    assert_eq!(source.outstanding_custody(), baseline + 1);
+    assert_eq!(source.value_handle_count(), native_roots + 1);
+    let source_lease = source.lease_bindings(&[]);
+    assert!(captured.belongs_to_bindings(&source_lease));
+    let parcel = source.export_result_shared(&captured).unwrap();
+    assert!(matches!(
+        tidepool_testing::with_settlement(|settlement| {
+            source.resume(publication, (), settlement)
+        })
+        .unwrap(),
+        ResidentOutcome::Completed { .. }
+    ));
+    assert!(matches!(
+        settle_request_submission(&mut source, submission),
+        ResidentOutcome::Completed { .. }
+    ));
+    drop(source_lease);
+    let before_release = source.value_handle_count();
+    drop(captured);
+    source.settle_dropped_custody();
+    assert_eq!(
+        source.value_handle_count(),
+        before_release - 1,
+        "the capture root is physical: dropping custody releases its native root"
+    );
+    assert_eq!(
+        source.outstanding_custody(),
+        0,
+        "source result root releases before machine retirement"
+    );
+    drop(source);
+    let destination_root = tempfile::tempdir().unwrap();
+    let mut destination = InputFixture::fresh_with_receiver(
+        SessionLib::open(
+            SessionId(1751),
+            destination_root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(fixture.recipe.include.clone()),
+        &fixture.recipe,
+        include_str!("fixtures/owned-result-receiver.hs"),
+        4,
+    );
+    let imported = destination.import_result(parcel).unwrap();
+    let destination_lease = destination.lease_bindings(&[]);
+    assert!(imported.belongs_to_bindings(&destination_lease));
+    assert_eq!(&expected, imported.type_witness());
+    destination
+        .state
+        .require_prepared()
+        .unwrap()
+        .quiesce_and_collect_now()
+        .unwrap();
+    let probe = destination
+        .retain_binding_custody("ownedResultProbe")
+        .unwrap()
+        .unwrap();
+    let ResidentOutcome::Completed { result, .. } =
+        tidepool_testing::with_settlement(|settlement| {
+            destination.run_rooted_application(
+                "forceRetiredCallableResult",
+                &probe,
+                imported.custody(),
+                RealmId::ROOT,
+                None,
+                settlement,
+            )
+        })
+        .unwrap()
+    else {
+        panic!("native callable result probe must complete")
+    };
+    assert_eq!(result.to_json(), serde_json::json!(42));
+    drop(probe);
+    drop(imported);
+    drop(destination_lease);
+    destination.settle_dropped_custody();
+    assert_eq!(destination.outstanding_custody(), 0);
 }

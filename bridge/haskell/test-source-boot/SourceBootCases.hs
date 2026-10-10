@@ -3835,7 +3835,7 @@ candidateRequestSitedSiblingsAt work = do
       , getOccString binder == "requestAlternativeSited"] of
     [binder] -> pure binder
     _ -> fail "full original cache control lacks its compiled alternate typed helper"
-  let siblingsB = Map.insert "request" alternative siblingsA
+  let siblingsB = Map.insert "Tidepool.Actors.Internal.Agent.request" alternative siblingsA
   (coldHit,coldIdentity,cold) <- acquireFull fullBodies siblingsA
   (warmHit,warmIdentity,_) <- acquireFull fullBodies siblingsA
   (changedHit,changedIdentity,changed) <- acquireFull fullBodies siblingsB
@@ -5635,10 +5635,16 @@ hydratedSiteSiblings = withScratch $ \work -> do
             symbolModule identity /= "Tidepool.Internal.RequestSite"
               || symbolOccurrence identity /= "RequestSite") (programGlobals program)) $
           fail "post-tidy site issuance retained a newtype constructor worker"
+        case programSites program of
+          [row] -> case IntMap.lookup (case siteWire row of TypeNodeId index -> fromIntegral index)
+              (typeGraphNodes (programTypes program)) of
+            Just (TypeRoot _ _ "Bool") -> pure ()
+            actual -> fail ("raw request reply became a response wrapper: " ++ show actual)
+          rows -> fail ("raw request lost its exact selected wire graph: " ++ show rows)
         case pmYieldSites target' of
           [site] | ysOrigin site == "HydratedSiteExpr.__result"
             , stType (ysAnswer site) == "Bool"
-            , map stType (ysInputs site) == ["Char"]
+            , map stType (ysInputs site) == ["Char", "ResponseResult Bool"]
             , isJust (ysRequestTypeSignatures site) -> pure site
           actual -> fail ("hydrated sibling changed the lexical site/root/input arity: " ++ show actual)
   createDirectoryIfMissing True (work </> "Tidepool/Actors/Internal")
@@ -5719,7 +5725,7 @@ hydratedSiteSiblings = withScratch $ \work -> do
   case classifySiteOccurrence siblings spec foreignSurface arguments of
     Left MismatchedSiblingUnit -> pure ()
     _ -> fail "a foreign-unit request surface acquired the valid home sibling"
-  forM_ [(siblings,unnamedSurface),(Map.insert "request" unnamedSibling siblings,surface)] $ \(available,verb) ->
+  forM_ [(siblings,unnamedSurface),(Map.insert "Tidepool.Actors.Internal.Agent.request" unnamedSibling siblings,surface)] $ \(available,verb) ->
     case classifySiteOccurrence available spec verb arguments of
       Left MissingSiteOwner -> pure ()
       _ -> fail "a site pair without a defining module acquired sibling authority"
@@ -5729,7 +5735,7 @@ hydratedSiteSiblings = withScratch $ \work -> do
   missing <- compile (PreparedProducts Nothing) Nothing >>= targetModule
   unless (any (isInfixOf "missing generated site-aware sibling" . srMessage) (pmSiteRejections missing)) $
     fail "missing typed sibling did not remain a source rejection"
-  writeFile requestPath (T.unpack (T.replace "RequestSite '[input] result" "Bool" (T.pack source)))
+  writeFile requestPath (T.unpack (T.replace "RequestSite '[input, ResponseResult result] result" "Bool" (T.pack source)))
   incompatible <- compile (PreparedProducts Nothing) Nothing >>= targetModule
   unless (any (isInfixOf "RequestSite input or reply index" . srMessage) (pmSiteRejections incompatible)) $
     fail "incompatible typed sibling did not remain a source rejection"
