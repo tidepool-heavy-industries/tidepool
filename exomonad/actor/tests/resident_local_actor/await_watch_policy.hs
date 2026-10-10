@@ -6,9 +6,9 @@ serveToolsWith 0 $ \_ ->
             (Cmd.withArguments
               [tshow request.delay]
               (Cmd.bashCommand (pack "sleep \"$1\"")))
-          let label = either (error . tshow) id (Watch.watchLabel (pack "command-finished"))
+          let label = Just (pack "command-finished")
           ready <- Watch.watch label (Cmd.awaitFinished job)
-          result <- Watch.awaitWatch ready
+          result <- Watch.await (Watch.observed ready)
           case result of
             Left failure -> error (tshow failure)
             Right _ -> pure (WaitOutput True)

@@ -62,12 +62,12 @@ where
                 .current()
                 .filter(|lease| lease.tools().is_some())
             else {
-                return Self::finish_owned_task(
-                    owned,
-                    reload_result(
-                        "this actor installed no agent spec, so there is nothing to reload.".into(),
-                    ),
-                );
+                let detail = match self.installed_tools.observe() {
+                    crate::resident_workbench::InstalledToolsObservation::SourceUnavailable(_) =>
+                        "the source installation is unavailable; repair it with reload_helpers before reloading the agent spec.",
+                    _ => "this actor installed no agent spec, so there is nothing to reload.",
+                };
+                return Self::finish_owned_task(owned, reload_result(detail.into()));
             };
             let active = expected.tools().expect("selected installed spec");
             receipt.push(format!("spec: {}", active.origin.describe()));
@@ -148,7 +148,7 @@ where
                         .installed_tools
                         .publish_source(owned.state.effects.context.actor, source),
                     Some(Err(error)) => {
-                        behavior.installed_tools.clear();
+                        behavior.installed_tools.invalidate_source();
                         receipt.push(format!("source: {error}"));
                         let result = match failure {
                             Some(failure) => Err(workbench_failure(

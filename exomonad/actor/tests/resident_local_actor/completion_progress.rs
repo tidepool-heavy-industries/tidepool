@@ -1,10 +1,10 @@
 //! The production hosted result acknowledgement is scoped to its own execution.
 
 use super::*;
-use tidepool_runtime::session::WorkbenchForkBoundary;
+use tidepool_runtime::session::ContextCheckpointBoundary;
 
-fn boundary(key: &str) -> WorkbenchForkBoundary {
-    WorkbenchForkBoundary::external("concurrent-publication".into(), key.into(), key.into())
+fn boundary(key: &str) -> ContextCheckpointBoundary {
+    ContextCheckpointBoundary::external("concurrent-publication".into(), key.into(), key.into())
 }
 
 async fn submit_ack(fixture: &ConcurrentResident, key: &str) -> ResidentCellCall {
@@ -38,12 +38,11 @@ async fn parked_cell_does_not_block_another_calls_acknowledgement_or_control() {
     let a_execution = fixture.wait_started(markers[0], &mut a).await;
     let own_ack = submit_ack(&fixture, markers[0]).await;
     let b = fixture
-        .read("completion-B", "b <- pure (42 :: Int)\nb")
+        .read(
+            "completion-B",
+            "b <- pure (42 :: Int)\nif b == 42 then pure () else error \"B binding changed\"",
+        )
         .await;
-    assert_eq!(
-        b["items"].as_array().unwrap().last().unwrap()["output"],
-        "42"
-    );
     let before_ack = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         fixture
@@ -84,8 +83,9 @@ async fn parked_cell_does_not_block_another_calls_acknowledgement_or_control() {
         .expect("B acknowledgement task")
         .expect("B acknowledgement accepted");
     assert!(acknowledgement.is_null());
-    let c = fixture.read("completion-C", "b + (1 :: Int)").await;
-    assert_eq!(c["items"][0]["output"], "43");
+    fixture
+        .check_value("completion-C", "b + (1 :: Int) == 43")
+        .await;
     let status = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         fixture.policy.dispatch_json_boxed(ToolInvocation {

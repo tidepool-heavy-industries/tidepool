@@ -1194,15 +1194,53 @@ impl InstalledToolLease {
 /// The actor's single current installation. Requests clone an immutable lease;
 /// spec reload replaces the paired source and handlers at source visibility.
 #[derive(Default)]
-pub(crate) struct InstalledToolsState(Mutex<Option<InstalledToolLease>>);
+pub(crate) struct InstalledToolsState(Mutex<InstalledToolsAvailability>);
+
+#[derive(Default)]
+enum InstalledToolsAvailability {
+    #[default]
+    Empty,
+    Available(InstalledToolLease),
+    SourceUnavailable {
+        actor: crate::ActorRef,
+        tools: Option<Arc<ResidentWorkbenchTools>>,
+    },
+}
+
+pub(crate) enum InstalledToolsObservation {
+    Empty,
+    Available(Option<Arc<ResidentWorkbenchTools>>),
+    SourceUnavailable(Option<Arc<ResidentWorkbenchTools>>),
+}
+
+impl InstalledToolsAvailability {
+    fn available(&self) -> Option<&InstalledToolLease> {
+        match self {
+            Self::Available(lease) => Some(lease),
+            Self::Empty | Self::SourceUnavailable { .. } => None,
+        }
+    }
+}
 
 impl InstalledToolsState {
+    pub(crate) fn observe(&self) -> InstalledToolsObservation {
+        match &*self.0.lock() {
+            InstalledToolsAvailability::Empty => InstalledToolsObservation::Empty,
+            InstalledToolsAvailability::Available(lease) => {
+                InstalledToolsObservation::Available(lease.tools_arc())
+            }
+            InstalledToolsAvailability::SourceUnavailable { tools, .. } => {
+                InstalledToolsObservation::SourceUnavailable(tools.clone())
+            }
+        }
+    }
+
     pub(crate) fn current(&self) -> Option<InstalledToolLease> {
-        self.0.lock().clone()
+        self.0.lock().available().cloned()
     }
 
     pub(crate) fn publish(&self, lease: InstalledToolLease) {
-        *self.0.lock() = Some(lease);
+        *self.0.lock() = InstalledToolsAvailability::Available(lease);
     }
 
     pub(crate) fn current_tools(&self) -> Option<Arc<ResidentWorkbenchTools>> {
@@ -1215,8 +1253,9 @@ impl InstalledToolsState {
         source: crate::CheckpointSourceLayer,
     ) {
         let mut current = self.0.lock();
-        *current = Some(match current.as_ref() {
-            Some(lease) => {
+        let previous = std::mem::take(&mut *current);
+        *current = InstalledToolsAvailability::Available(match previous {
+            InstalledToolsAvailability::Available(lease) => {
                 assert_eq!(
                     lease.actor(),
                     actor,
@@ -1224,7 +1263,17 @@ impl InstalledToolsState {
                 );
                 lease.with_source(source)
             }
-            None => InstalledToolLease::new(actor, source, None),
+            InstalledToolsAvailability::SourceUnavailable {
+                actor: owner,
+                tools,
+            } => {
+                assert_eq!(
+                    owner, actor,
+                    "source recovery belongs to the installed actor"
+                );
+                InstalledToolLease::new(actor, source, tools)
+            }
+            InstalledToolsAvailability::Empty => InstalledToolLease::new(actor, source, None),
         });
     }
 
@@ -1240,7 +1289,7 @@ impl InstalledToolsState {
         let replacement =
             InstalledToolLease::new(expected.actor(), staged.source().clone(), Some(tools));
         let mut current = self.0.lock();
-        let matches = current.as_ref().is_some_and(|current| {
+        let matches = current.available().is_some_and(|current| {
             current.actor() == expected.actor()
                 && current.source().semantic_digest() == expected.source().semantic_digest()
                 && current
@@ -1255,7 +1304,10 @@ impl InstalledToolsState {
                 "the active source or installed handlers changed during preparation".into(),
             );
         }
-        staged.commit(publication, Box::new(|| *current = Some(replacement)))
+        staged.commit(
+            publication,
+            Box::new(|| *current = InstalledToolsAvailability::Available(replacement)),
+        )
     }
 
     /// Publish against the exact admitted implementation. Accepted calls retain
@@ -1266,7 +1318,9 @@ impl InstalledToolsState {
         tools: Arc<ResidentWorkbenchTools>,
     ) -> Result<(), SpecReplacementError> {
         let mut current = self.0.lock();
-        let active = current.as_ref().ok_or(SpecReplacementError::Unavailable)?;
+        let active = current
+            .available()
+            .ok_or(SpecReplacementError::Unavailable)?;
         if active.actor() != expected.actor()
             || active.source().semantic_digest() != expected.source().semantic_digest()
             || !active
@@ -1282,7 +1336,7 @@ impl InstalledToolsState {
         {
             return Err(SpecReplacementError::SurfaceChanged);
         }
-        *current = Some(InstalledToolLease::new(
+        *current = InstalledToolsAvailability::Available(InstalledToolLease::new(
             expected.actor(),
             expected.source().clone(),
             Some(tools),
@@ -1290,8 +1344,23 @@ impl InstalledToolsState {
         Ok(())
     }
 
+    /// Refuse new source/tool snapshots while retaining the unchanged handlers
+    /// for a later helper-source recovery. Retirement releases this custody.
+    pub(crate) fn invalidate_source(&self) {
+        let mut current = self.0.lock();
+        *current = match std::mem::take(&mut *current) {
+            InstalledToolsAvailability::Available(lease) => {
+                InstalledToolsAvailability::SourceUnavailable {
+                    actor: lease.actor(),
+                    tools: lease.tools_arc(),
+                }
+            }
+            unavailable => unavailable,
+        };
+    }
+
     pub(crate) fn clear(&self) {
-        *self.0.lock() = None;
+        *self.0.lock() = InstalledToolsAvailability::Empty;
     }
 }
 
@@ -17414,6 +17483,31 @@ pub(crate) mod request_tests {
             1,
             "old accepted lease remains valid"
         );
+        state.invalidate_source();
+        assert!(
+            state.current().is_none(),
+            "failed source cannot issue a snapshot"
+        );
+        assert!(
+            state.current_tools().is_none(),
+            "retained handlers are unavailable"
+        );
+        assert!(matches!(
+            state.commit_spec_reload(
+                &expected,
+                second.clone(),
+                Box::new(NeverCommitted(source.clone())),
+                &decision
+            ),
+            crate::SourceLayerReload::Unavailable(_)
+        ));
+        state.invalidate_source();
+        state.publish_source(context.actor, source.clone());
+        assert!(
+            Arc::ptr_eq(&state.current_tools().unwrap(), &second),
+            "helper-source recovery restores the same installed handlers"
+        );
+        state.invalidate_source();
         state.clear();
         assert!(matches!(
             state.commit_spec_reload(

@@ -482,6 +482,41 @@ struct ConcurrentResident {
     _root: tempfile::TempDir,
 }
 
+fn compile_notebook_entry(
+    machine: &ResidentSession<NoHandlers, TestSink>,
+    preamble: &str,
+    include: &[std::path::PathBuf],
+    root: &std::path::Path,
+) -> tidepool_runtime::session::CompiledTurn {
+    let preamble = insert_preamble_imports(preamble, "Tidepool.Agent.Session (attachAgent)");
+    let preamble = insert_preamble_imports(&preamble, "Tidepool.Actor (receive)");
+    let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
+    let include_refs = include
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .collect::<Vec<_>>();
+    let retained = machine.prepared_retained();
+    let source = include_str!("resident_local_actor/notebook_policy.hs");
+    match run_turn(HaskellTurnRequest {
+        exact_context: None,
+        session_id: None,
+        turn_text: source,
+        templates: &templates,
+        include: &include_refs,
+        session_root: root,
+        inject_modules: &[],
+        gen: 1,
+        verdict: None,
+        target: None,
+        retained_imports: &retained,
+    })
+    .expect("compile selected notebook installation")
+    {
+        TurnResult::Expr { compiled, .. } => compiled,
+        other => panic!("notebook installation should be an expression, got {other:?}"),
+    }
+}
+
 impl ConcurrentResident {
     async fn new(bucket: u32, markers: &[&str]) -> Self {
         Self::new_with_source(bucket, markers, None).await
@@ -495,6 +530,8 @@ impl ConcurrentResident {
         eval_harness::require_extract();
         let declarations = [
             tidepool_mcp::agent_tools_decl(),
+            tidepool_mcp::context_read_write_decl(),
+            tidepool_mcp::agent_session_decl(),
             tidepool_mcp::actor_decl(),
             tidepool_mcp::actor_kernel_decl(),
             tidepool_mcp::actor_local_decl(),
@@ -513,7 +550,7 @@ impl ConcurrentResident {
             insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch as Watch");
         let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
         let preamble = format!(
-            "{preamble}\ntype ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches, Sleep]\n"
+            "{preamble}\ntype ActorEffects = '[AgentSession, ActorLocal Maybe, Commands, Watch.Watches]\n"
         );
         let session = support::process_unique_session(bucket);
         let root = tempfile::tempdir().expect("concurrent actor session root");
@@ -522,8 +559,15 @@ impl ConcurrentResident {
             .with_validation_include(include.clone());
         let machine =
             ResidentSession::unbootstrapped(NoHandlers, TestSink, DEFAULT_NURSERY_SIZE, Some(lib));
+        let compiled = compile_notebook_entry(&machine, &preamble, &include, root.path());
         let (mut forest, mut deployments) = ResidentForest::new(
-            ActorWorkbenchSource::new(preamble, include),
+            ActorWorkbenchSource::new(preamble, include)
+                .with_spec("Tidepool.Agent.Contract.defaultWorkbenchSpec")
+                .with_installed_effect_support([
+                    exomonad_tool::ToolEffectKey::ContextReadWrite,
+                    exomonad_tool::ToolEffectKey::Actor(exomonad_actor::ActorEffectKey::Commands),
+                    exomonad_tool::ToolEffectKey::Actor(exomonad_actor::ActorEffectKey::Watches),
+                ]),
             session,
             machine,
             None,
@@ -532,19 +576,31 @@ impl ConcurrentResident {
         if let Some(layers) = layers {
             forest.set_source_layers(layers);
         }
-        let actor = forest
-            .new_workbench(
+        let (actor, _task) = forest
+            .new_program_root(
                 "concurrent-publication".into(),
                 exomonad_actor::ActorCapabilities::default().with_effect_keys(vec![
                     exomonad_actor::ActorEffectKey::Commands,
                     exomonad_actor::ActorEffectKey::Watches,
                 ]),
+                std::sync::Arc::new(compiled),
             )
             .await
             .expect("concurrent workbench");
-        let policy = std::sync::Arc::new(exomonad_actor::ResidentInteractivePolicy::local(
-            actor.clone(),
-        ));
+        let deployment =
+            tokio::time::timeout(std::time::Duration::from_secs(600), deployments.recv())
+                .await
+                .expect("selected notebook installation progresses")
+                .expect("selected notebook policy installation");
+        let installation = match deployment {
+            LocalResidentDeployment::PolicyInstalled(installation) => installation,
+            LocalResidentDeployment::Retired { terminal, .. } => {
+                panic!("notebook retired before policy installation: {terminal:?}")
+            }
+            other => panic!("notebook installation received {}", other.kind()),
+        };
+        assert_eq!(installation.actor.identity(), actor.identity());
+        let policy = installation.policy;
         let (entered, started) = tokio::sync::mpsc::unbounded_channel();
         let backend = std::sync::Arc::new(DelayedCommandBackend {
             keyed: Some(KeyedCommandGates {
@@ -668,6 +724,14 @@ impl ConcurrentResident {
         reply
     }
 
+    async fn check_value(&self, key: &str, condition: &str) -> serde_json::Value {
+        self.read(
+            key,
+            &format!("if ({condition}) then pure () else error \"fixture value changed\""),
+        )
+        .await
+    }
+
     async fn shutdown(self, markers: &[&str]) {
         self.forest.shutdown().await;
         assert_eq!(
@@ -778,8 +842,9 @@ async fn resident_same_name_shadowing_follows_completion_order() {
         );
         let b_execution = fixture.wait_started(markers[round * 2 + 1], &mut b).await;
         assert!(!a.is_finished() && !b.is_finished());
-        let seed = fixture.read(&format!("parked-read-{round}"), "x").await;
-        assert_eq!(seed["items"][0]["output"], "0");
+        fixture
+            .check_value(&format!("parked-read-{round}"), "x == 0")
+            .await;
         let (
             first,
             last,
@@ -818,23 +883,24 @@ async fn resident_same_name_shadowing_follows_completion_order() {
             .expect("first publication");
         assert_eq!(committed_execution(&first), first_execution);
         assert!(!last.is_finished(), "other cell remains parked");
-        let current = fixture.read(&format!("first-read-{round}"), "x").await;
-        assert_eq!(current["items"][0]["output"], first_value);
+        fixture
+            .check_value(
+                &format!("first-read-{round}"),
+                &format!("x == {first_value}"),
+            )
+            .await;
         fixture.release(markers[last_index]);
         let last = ConcurrentResident::settle(last)
             .await
             .expect("last publication");
         assert_eq!(committed_execution(&last), last_execution);
         assert_ne!(committed_execution(&first), committed_execution(&last));
-        let current = fixture.read(&format!("last-read-{round}"), "x").await;
-        assert_eq!(current["items"][0]["output"], last_value);
-        let captures = fixture
-            .read(&format!("captured-read-{round}"), "oldA == 0 && oldB == 0")
+        fixture
+            .check_value(&format!("last-read-{round}"), &format!("x == {last_value}"))
             .await;
-        assert_eq!(
-            captures["items"][0]["output"], "True",
-            "both admitted values retain their old meaning"
-        );
+        fixture
+            .check_value(&format!("captured-read-{round}"), "oldA == 0 && oldB == 0")
+            .await;
     }
     fixture.shutdown(&markers).await;
 }
@@ -913,17 +979,18 @@ async fn resident_invalid_concurrent_declaration_join_publishes_nothing_from_los
             tidepool_runtime::session::WorkbenchOperationDisposition::Committed
         );
     }
-    let public = fixture
-        .read("join-winner-read", "joinValue False + onlyB + joinedB")
-        .await;
-    assert_eq!(public["items"][0]["output"], "66");
-    let constructor = fixture
-        .read(
-            "join-winner-constructor",
-            "case OnlyB of OnlyB -> (22 :: Int)",
+    fixture
+        .check_value(
+            "join-winner-read",
+            "joinValue False + onlyB + joinedB == 66",
         )
         .await;
-    assert_eq!(constructor["items"][0]["output"], "22");
+    fixture
+        .check_value(
+            "join-winner-constructor",
+            "case OnlyB of OnlyB -> (22 :: Int) == 22",
+        )
+        .await;
     for (key, source) in [
         ("join-no-loser-early-native", "onlyA"),
         ("join-no-loser-late-native", "joinedA"),
@@ -1007,8 +1074,12 @@ async fn resident_await_watch_case(case: WatchCase) {
     } else {
         181
     });
-    let declarations = if direct_binding_cell {
-        vec![tidepool_mcp::commands_decl()]
+    let mut declarations = if direct_binding_cell {
+        vec![
+            tidepool_mcp::agent_tools_decl(),
+            tidepool_mcp::actor_local_decl(),
+            tidepool_mcp::commands_decl(),
+        ]
     } else {
         vec![
             tidepool_mcp::agent_tools_decl(),
@@ -1020,20 +1091,30 @@ async fn resident_await_watch_case(case: WatchCase) {
             tidepool_mcp::sleep_decl(),
         ]
     };
+    if primary {
+        declarations.push(tidepool_mcp::context_read_write_decl());
+        declarations.push(tidepool_mcp::agent_session_decl());
+    }
     let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
     let preamble = tidepool_mcp::build_preamble(&declarations, false);
     let preamble = if direct_binding_cell {
-        format!("{preamble}type ActorEffects = '[Commands]\n")
+        let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Contract");
+        format!("{preamble}type ActorEffects = '[AgentSession, ActorLocal Maybe, Commands]\n")
     } else {
         let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Contract");
         let preamble =
             insert_preamble_imports(&preamble, "qualified Tidepool.Agent.Watch as Watch");
         let preamble = insert_preamble_imports(&preamble, "Tidepool.Agent.Watch (Watches)");
+        let dispatcher_effects = if primary {
+            "'[AgentSession, ActorLocal Maybe, Commands, Watch.Watches, Sleep]"
+        } else {
+            "'[AgentTools, Actor, Commands, Watch.Watches, Sleep]"
+        };
         format!(
             "{preamble}\
-             type ActorEffects = '[AgentTools, Actor, Commands, Watch.Watches, Sleep]\n\
+             type ActorEffects = {dispatcher_effects}\n\
              data WaitInput = WaitInput {{ delay :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
              data WaitOutput = WaitOutput {{ settled :: Bool }} deriving (Generic, ToJSON, JsonSchema)\n\
              data ResidentTools mode = ResidentTools {{ waitForCommand :: mode :- Call WaitInput WaitOutput }} deriving (Generic)\n"
@@ -1051,6 +1132,8 @@ async fn resident_await_watch_case(case: WatchCase) {
     .with_validation_include(include.clone());
     let mut machine =
         ResidentSession::unbootstrapped(NoHandlers, TestSink, DEFAULT_NURSERY_SIZE, Some(lib));
+    let notebook =
+        primary.then(|| compile_notebook_entry(&machine, &preamble, &include, session_root.path()));
     let outcome = if primary {
         None
     } else {
@@ -1095,8 +1178,19 @@ async fn resident_await_watch_case(case: WatchCase) {
             lexical_scope: ScopeId::ROOT,
         },
     );
+    let mut source = ActorWorkbenchSource::new(preamble, include);
+    if primary {
+        source = source
+            .with_spec("Tidepool.Agent.Contract.defaultWorkbenchSpec")
+            .with_installed_effect_support([
+                exomonad_tool::ToolEffectKey::ContextReadWrite,
+                exomonad_tool::ToolEffectKey::Actor(exomonad_actor::ActorEffectKey::Commands),
+                exomonad_tool::ToolEffectKey::Actor(exomonad_actor::ActorEffectKey::Watches),
+                exomonad_tool::ToolEffectKey::Actor(exomonad_actor::ActorEffectKey::Sleep),
+            ]);
+    }
     let (forest, mut deployments) = ResidentForest::new(
-        ActorWorkbenchSource::new(preamble, include),
+        source,
         session,
         machine,
         None,
@@ -1107,25 +1201,33 @@ async fn resident_await_watch_case(case: WatchCase) {
         _,
         std::sync::Arc<dyn exomonad_actor::ResidentToolEndpoint>,
     ) = if primary {
-        let actor = forest
-            .new_workbench(
+        let (actor, task) = forest
+            .new_program_root(
                 "resident-await-watch".into(),
-                exomonad_actor::ActorCapabilities::default().with_effect_keys(if direct_binding_cell {
-                    vec![exomonad_actor::ActorEffectKey::Commands]
-                } else {
-                    vec![
-                        exomonad_actor::ActorEffectKey::Commands,
-                        exomonad_actor::ActorEffectKey::Watches,
-                        exomonad_actor::ActorEffectKey::Sleep,
-                    ]
-                }),
+                exomonad_actor::ActorCapabilities::default().with_effect_keys(
+                    if direct_binding_cell {
+                        vec![exomonad_actor::ActorEffectKey::Commands]
+                    } else {
+                        vec![
+                            exomonad_actor::ActorEffectKey::Commands,
+                            exomonad_actor::ActorEffectKey::Watches,
+                            exomonad_actor::ActorEffectKey::Sleep,
+                        ]
+                    },
+                ),
+                std::sync::Arc::new(notebook.expect("primary notebook installation")),
             )
             .await
             .expect("spawn primary workbench");
-        let policy = std::sync::Arc::new(exomonad_actor::ResidentInteractivePolicy::local(
-            actor.clone(),
-        ));
-        (actor, None, policy)
+        let LocalResidentDeployment::PolicyInstalled(installation) = deployments
+            .recv()
+            .await
+            .expect("primary notebook policy installation")
+        else {
+            panic!("primary notebook retired before installation");
+        };
+        assert_eq!(installation.actor.identity(), actor.identity());
+        (actor, Some(task), installation.policy)
     } else {
         let (actor, task) = forest
             .admit_root(descriptor, outcome.expect("structured policy boundary"))
@@ -1251,8 +1353,8 @@ async fn resident_await_watch_case(case: WatchCase) {
             .await
             .expect("ready watch resumes promptly into the same cell");
         }
-        // A primary cell renders its deferred observation through GHC after the
-        // watch resumes; the structured tool already owns its JSON result.
+        // A primary cell retains its result binding after the watch resumes;
+        // the structured tool owns its JSON result.
         let settled = tokio::time::timeout(
             std::time::Duration::from_secs(if primary { 600 } else { 5 }),
             settled_call,
@@ -1371,14 +1473,16 @@ async fn resident_await_watch_case(case: WatchCase) {
                     .dispatch_boxed(ToolInvocation {
                         context: Some(read_context),
                         name: exomonad_actor::HASKELL_TOOL.into(),
-                        arguments: ToolArguments::Raw("a + b".into()),
+                        arguments: ToolArguments::Raw(
+                            "if a + b == 42 then pure () else error \"joined binding changed\""
+                                .into(),
+                        ),
                     })
                     .await
                     .expect("read joined values")
                     .into_json()
                     .expect("serialize joined values");
                 assert_eq!(joined["status"], "committed", "{joined:?}");
-                assert_eq!(joined["items"][0]["output"], "42", "{joined:?}");
                 forest.shutdown().await;
                 return;
             }
@@ -1439,13 +1543,27 @@ async fn resident_await_watch_case(case: WatchCase) {
             let operations = settled["items"][0]["operations"]
                 .as_array()
                 .expect("operation receipts");
-            assert_eq!(operations.len(), 4, "{settled:?}");
+            assert_eq!(
+                operations
+                    .iter()
+                    .map(|operation| operation["effect"].as_str().unwrap())
+                    .collect::<Vec<_>>(),
+                [
+                    "command job",
+                    "watch",
+                    "watch",
+                    "awaitWatch",
+                    "observed decision",
+                    "pollWatch command",
+                    "forgetWatch"
+                ],
+                "{settled:?}",
+            );
             for (ordinal, operation) in operations.iter().enumerate() {
                 assert_eq!(operation["id"]["effectOrdinal"], ordinal, "{settled:?}");
                 assert_eq!(operation["id"]["inputUnitIndex"], 0, "{settled:?}");
                 assert_eq!(operation["disposition"], "committed", "{settled:?}");
             }
-            assert_eq!(operations[2]["effect"], "awaitWatch", "{settled:?}");
         } else {
             assert_eq!(settled, serde_json::json!({"settled": true}));
             forest.shutdown().await;
@@ -1574,6 +1692,32 @@ async fn resident_await_watch_case(case: WatchCase) {
         }
     }
 
+    if primary {
+        if let Some(settled) = &settled {
+            let observation = settled["items"][0]["installedBindings"]
+                .as_array()
+                .and_then(|bindings| bindings.first())
+                .and_then(serde_json::Value::as_str)
+                .expect("the completed cell installs its result observation");
+            let verified = policy
+                .dispatch_json_boxed(ToolInvocation {
+                    context: Some(ToolInvocationContext::external(
+                        "await-watch-test".into(),
+                        "turn-verified".into(),
+                        "verify-observation".into(),
+                        Some("verify-observation".into()),
+                        None,
+                    )),
+                    name: exomonad_actor::HASKELL_TOOL.into(),
+                    arguments: ToolArguments::Raw(format!(
+                        "if {observation} () then pure () else error \"watch result changed\""
+                    )),
+                })
+                .await
+                .expect("evaluate the completed watch result");
+            assert_eq!(verified["status"], "committed", "{verified:?}");
+        }
+    }
     forest.shutdown().await;
     assert_eq!(
         actor.terminal().wait().await.kind,
@@ -1602,8 +1746,10 @@ async fn resident_await_watch_case(case: WatchCase) {
             other => panic!("unexpected final deployment: {}", other.kind()),
         }
     }
-    if let Some(settled) = settled {
-        assert_eq!(settled["items"][0]["output"], "True", "{settled:?}");
+    if !primary {
+        if let Some(settled) = settled {
+            assert_eq!(settled["items"][0]["output"], "True", "{settled:?}");
+        }
     }
 }
 

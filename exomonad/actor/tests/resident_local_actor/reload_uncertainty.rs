@@ -30,10 +30,10 @@ impl exomonad_actor::ActorSourceLayers for UnconfirmedSource {
         ))
     }
 
-    fn layer_include(&self, _: &[String]) -> Result<Vec<std::path::PathBuf>, String> {
+    fn layer_include_for(&self, _: &str) -> Result<Vec<std::path::PathBuf>, String> {
         Ok(Vec::new())
     }
-    fn bind(&self, _: tidepool_repr::PrincipalId, _: &[String]) {}
+    fn bind_for(&self, _: tidepool_repr::PrincipalId, _: &str) {}
 
     fn freeze_checkpoint_layer(
         &self,
@@ -113,11 +113,24 @@ async fn visible_reload_uncertainty_and_failed_freeze_preserve_failure() {
         1,
         "workbench boot issues its initial retained source lease"
     );
-    assert_eq!(
-        fixture
-            .read("initial-workbench-source", "(42 :: Int)")
-            .await["items"][0]["output"],
-        "42"
+    fixture
+        .check_value("initial-workbench-source", "(42 :: Int) == 42")
+        .await;
+    let failed_value = ConcurrentResident::settle(fixture.spawn_cell(
+        "false-value-control",
+        "if (42 :: Int) == 43 then pure () else error \"fixture value changed\"".into(),
+    ))
+    .await
+    .expect_err("an incorrect value is evaluated and fails");
+    let exomonad_actor::ResidentToolError::Invocation(
+        exomonad_actor::KernelInvocationFailure::Workbench(failure),
+    ) = failed_value
+    else {
+        panic!("expected a workbench evaluation failure: {failed_value:?}");
+    };
+    assert!(
+        failure.detail.contains("fixture value changed"),
+        "{failure:?}"
     );
     assert_eq!(
         layers.freezes.load(Ordering::Acquire),
@@ -164,21 +177,43 @@ async fn visible_reload_uncertainty_and_failed_freeze_preserve_failure() {
     .await
     .expect("uncertainty inspection progresses")
     .expect("original control inspected");
-    assert!(
-        matches!(
-            reconciled,
-            exomonad_actor::WorkbenchCancellationOutcome::Unconfirmed { .. }
-        ),
-        "visible uncertainty must not authorize replay: {reconciled:?}"
+    let exomonad_actor::WorkbenchCancellationOutcome::PublicationSettled {
+        reply: Err(retained),
+        ..
+    } = reconciled
+    else {
+        panic!("completed cleanup retains the source publication failure: {reconciled:?}");
+    };
+    let exomonad_actor::ResidentToolError::Invocation(original) = reply else {
+        panic!("source publication failure must retain its native invocation: {reply:?}");
+    };
+    assert_eq!(
+        retained, original,
+        "visible uncertainty must not authorize replay"
     );
+    assert!(matches!(
+        decision.phase(),
+        tidepool_runtime::session::PublicationPhase::CommitClaimed { .. }
+    ));
     let refused = ConcurrentResident::settle(
         fixture.spawn_cell("reload-after-uncertain", "(42 :: Int)".into()),
     )
     .await
     .expect_err("failed source refresh closes exact source admission");
-    assert!(refused
-        .to_string()
-        .contains("cannot admit exact source layer"));
+    let exomonad_actor::ResidentToolError::Invocation(
+        exomonad_actor::KernelInvocationFailure::Rejected {
+            actor, receipts, ..
+        },
+    ) = refused
+    else {
+        panic!("unavailable installation must refuse authored admission: {refused:?}");
+    };
+    assert_eq!(actor, fixture.actor.identity());
+    assert!(receipts.is_empty(), "no authored effects were admitted");
+    assert!(matches!(
+        fixture.policy.snapshot_for_request(),
+        Err(exomonad_actor::ResidentToolError::Unavailable(_))
+    ));
     let status = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         fixture.policy.dispatch_json_boxed(ToolInvocation {
@@ -190,13 +225,18 @@ async fn visible_reload_uncertainty_and_failed_freeze_preserve_failure() {
                 None,
             )),
             name: "status".into(),
-            arguments: ToolArguments::Structured(serde_json::json!({"view": "summary"})),
+            arguments: ToolArguments::Structured(serde_json::json!({"view": "detailed"})),
         }),
     )
     .await
     .expect("status does not depend on unavailable source refresh")
     .expect("status admission stays available");
     assert_eq!(status["status"], "committed", "{status:?}");
+    let projection = status["items"][0]["output"]
+        .as_str()
+        .expect("status projection");
+    assert!(projection.contains("source unavailable"), "{status:?}");
+    assert!(!projection.contains("none installed"), "{status:?}");
     assert!(
         layers.refresh_failed.load(Ordering::Acquire),
         "status does not repair or re-freeze source"
@@ -227,9 +267,16 @@ async fn visible_reload_uncertainty_and_failed_freeze_preserve_failure() {
     .await
     .expect("authored admission does not synchronously wait on the source gate")
     .expect_err("source-invalid authored input is refused until exact recovery publishes");
-    assert!(refused_during_recovery
-        .to_string()
-        .contains("source installation is unavailable"));
+    let exomonad_actor::ResidentToolError::Invocation(
+        exomonad_actor::KernelInvocationFailure::Rejected {
+            actor, receipts, ..
+        },
+    ) = refused_during_recovery
+    else {
+        panic!("recovery must retain authored admission refusal: {refused_during_recovery:?}");
+    };
+    assert_eq!(actor, fixture.actor.identity());
+    assert!(receipts.is_empty(), "recovery admitted no authored effects");
     let status_during_recovery = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         fixture.policy.dispatch_json_boxed(ToolInvocation {
@@ -264,10 +311,9 @@ async fn visible_reload_uncertainty_and_failed_freeze_preserve_failure() {
         .unwrap()
         .contains("recovered-revision"));
     assert_eq!(layers.reloads.load(Ordering::Acquire), 2);
-    assert_eq!(
-        fixture.read("reload-recovered-read", "(42 :: Int)").await["items"][0]["output"],
-        "42"
-    );
+    fixture
+        .check_value("reload-recovered-read", "(42 :: Int) == 42")
+        .await;
     assert_eq!(
         layers.freezes.load(Ordering::Acquire),
         3,

@@ -1016,6 +1016,26 @@ def actor_observation_test_cases(binary):
     return "\n".join(rules)
 
 
+def actor_notebook_contract_test_cases(binary, env, resources, worker):
+    """Exercise installed notebook policy, settlement, reload refusal and cleanup."""
+    tests = ["resident_local_actor::" + name for name in (
+        "completion_progress::parked_cell_does_not_block_another_calls_acknowledgement_or_control",
+        "reload_progress::cancelled_and_rejected_reload_release_the_administrative_owner",
+        "reload_progress::two_parked_cells_reload_and_control_progress_independently",
+        "reload_uncertainty::visible_reload_uncertainty_and_failed_freeze_preserve_failure",
+    )]
+    return "\n".join([
+        "tidepool_rust_test_cases(",
+        '    name = "actor_notebook_contract_tests",',
+        f"    binary = {json.dumps(':' + binary)},",
+        "    exact_tests = [", render_strings(tests, 8), "    ],",
+        f"    expected_count = {len(tests)},", "    jobs = 1,", "    timeout = 600,",
+        f"    test_rule_timeout_ms = {(len(tests) * 600 + 60) * 1000},",
+        runtime_arguments(env, resources, worker),
+        '    visibility = ["PUBLIC"],', ")", "",
+    ])
+
+
 def runtime_test_cases(binary):
     """Admission checks use native machines but do not start a compiler worker."""
     tests = ["session::admission::tests::" + name for name in (
@@ -1483,6 +1503,8 @@ tidepool_buildscript_run(
             )
         )
         NATIVE_TARGETS[package_name]["integration"][target["name"]] = {"test_build": "//" + CURRENT_DIR + ":" + target["name"] + "_binary", "test": "//" + CURRENT_DIR + ":" + target["name"]}
+        if package_name == "exomonad-actor" and target["name"] == "actor":
+            rules.append(actor_notebook_contract_test_cases(target["name"] + "_binary", env, resources, worker))
     if package_name == "tidepool-handlers":
         rules.append('''export_file(
     name = "handler_library_source",
