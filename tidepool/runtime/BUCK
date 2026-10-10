@@ -41,6 +41,8 @@ rust_filegroup(
         "src/session/fixtures/activation-selected-site-segment.hs": "tidepool/runtime/src/session/fixtures/activation-selected-site-segment.hs",
         "src/session/fixtures/checked-expression-history.hs": "tidepool/runtime/src/session/fixtures/checked-expression-history.hs",
         "src/session/fixtures/checked-prior-declaration.hs": "tidepool/runtime/src/session/fixtures/checked-prior-declaration.hs",
+        "src/session/fixtures/owned-result-callable.hs": "tidepool/runtime/src/session/fixtures/owned-result-callable.hs",
+        "src/session/fixtures/owned-result-receiver.hs": "tidepool/runtime/src/session/fixtures/owned-result-receiver.hs",
         "src/session/fixtures/recovery-group-selection.hs": "tidepool/runtime/src/session/fixtures/recovery-group-selection.hs",
         "src/session/inspection.rs": "tidepool/runtime/src/session/inspection.rs",
         "src/session/kernel.rs": "tidepool/runtime/src/session/kernel.rs",
@@ -140,6 +142,8 @@ rust_filegroup(
         "src/session/fixtures/activation-selected-site-segment.hs": "tidepool/runtime/src/session/fixtures/activation-selected-site-segment.hs",
         "src/session/fixtures/checked-expression-history.hs": "tidepool/runtime/src/session/fixtures/checked-expression-history.hs",
         "src/session/fixtures/checked-prior-declaration.hs": "tidepool/runtime/src/session/fixtures/checked-prior-declaration.hs",
+        "src/session/fixtures/owned-result-callable.hs": "tidepool/runtime/src/session/fixtures/owned-result-callable.hs",
+        "src/session/fixtures/owned-result-receiver.hs": "tidepool/runtime/src/session/fixtures/owned-result-receiver.hs",
         "src/session/fixtures/recovery-group-selection.hs": "tidepool/runtime/src/session/fixtures/recovery-group-selection.hs",
         "src/session/inspection.rs": "tidepool/runtime/src/session/inspection.rs",
         "src/session/kernel.rs": "tidepool/runtime/src/session/kernel.rs",
@@ -268,6 +272,8 @@ rust_filegroup(
         "src/session/fixtures/constraint-tuple-G1.hs": "tidepool/runtime/src/session/fixtures/constraint-tuple-G1.hs",
         "src/session/fixtures/exact-join-original.hs": "tidepool/runtime/src/session/fixtures/exact-join-original.hs",
         "src/session/fixtures/guarded-integer-capture.hs": "tidepool/runtime/src/session/fixtures/guarded-integer-capture.hs",
+        "src/session/fixtures/owned-result-callable.hs": "tidepool/runtime/src/session/fixtures/owned-result-callable.hs",
+        "src/session/fixtures/owned-result-receiver.hs": "tidepool/runtime/src/session/fixtures/owned-result-receiver.hs",
         "src/session/fixtures/paired-instance-only.hs": "tidepool/runtime/src/session/fixtures/paired-instance-only.hs",
         "src/session/fixtures/paired-late-operator.hs": "tidepool/runtime/src/session/fixtures/paired-late-operator.hs",
         "src/session/fixtures/paired-public-value-only.hs": "tidepool/runtime/src/session/fixtures/paired-public-value-only.hs",
@@ -473,6 +479,8 @@ rust_filegroup(
         "src/session/fixtures/constraint-tuple-G1.hs": "tidepool/runtime/src/session/fixtures/constraint-tuple-G1.hs",
         "src/session/fixtures/exact-join-original.hs": "tidepool/runtime/src/session/fixtures/exact-join-original.hs",
         "src/session/fixtures/guarded-integer-capture.hs": "tidepool/runtime/src/session/fixtures/guarded-integer-capture.hs",
+        "src/session/fixtures/owned-result-callable.hs": "tidepool/runtime/src/session/fixtures/owned-result-callable.hs",
+        "src/session/fixtures/owned-result-receiver.hs": "tidepool/runtime/src/session/fixtures/owned-result-receiver.hs",
         "src/session/fixtures/paired-instance-only.hs": "tidepool/runtime/src/session/fixtures/paired-instance-only.hs",
         "src/session/fixtures/paired-late-operator.hs": "tidepool/runtime/src/session/fixtures/paired-late-operator.hs",
         "src/session/fixtures/paired-public-value-only.hs": "tidepool/runtime/src/session/fixtures/paired-public-value-only.hs",
@@ -1214,6 +1222,8 @@ filegroup(
         "tidepool/runtime/src/session/fixtures/constraint-tuple-G1.hs": "src/session/fixtures/constraint-tuple-G1.hs",
         "tidepool/runtime/src/session/fixtures/exact-join-original.hs": "src/session/fixtures/exact-join-original.hs",
         "tidepool/runtime/src/session/fixtures/guarded-integer-capture.hs": "src/session/fixtures/guarded-integer-capture.hs",
+        "tidepool/runtime/src/session/fixtures/owned-result-callable.hs": "src/session/fixtures/owned-result-callable.hs",
+        "tidepool/runtime/src/session/fixtures/owned-result-receiver.hs": "src/session/fixtures/owned-result-receiver.hs",
         "tidepool/runtime/src/session/fixtures/paired-instance-only.hs": "src/session/fixtures/paired-instance-only.hs",
         "tidepool/runtime/src/session/fixtures/paired-late-operator.hs": "src/session/fixtures/paired-late-operator.hs",
         "tidepool/runtime/src/session/fixtures/paired-public-value-only.hs": "src/session/fixtures/paired-public-value-only.hs",
@@ -1331,5 +1341,19 @@ export_file(
     name = "haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f61637469766174696f6e2d696e7075742d7477656e74792d72656e6465726572732e6873",
     src = "src/session/fixtures/activation-input-twenty-renderers.hs",
     out = "activation-input-twenty-renderers.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f6f776e65642d726573756c742d63616c6c61626c652e6873",
+    src = "src/session/fixtures/owned-result-callable.hs",
+    out = "owned-result-callable.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f73657373696f6e2f66697874757265732f6f776e65642d726573756c742d72656365697665722e6873",
+    src = "src/session/fixtures/owned-result-receiver.hs",
+    out = "owned-result-receiver.hs",
     visibility = ["PUBLIC"],
 )
