@@ -7,7 +7,8 @@ module ExactScopeV9Test (exactScopeChecks, nativeOriginChecks, candidateCanonica
 import CodecFixtureSupport
   ( PurposeCodecCase(..), readPurposeCodecFixture, readExpressionItemCodecFixture
   , ScopeCodecFixture, ScopeCodecField(..), ScopeCodecAcquisition(..), readScopeCodecFixture
-  , scopeCodecField, scopeCodecAcquisition, replaceScopeCodecField, scopeCodecTerm )
+  , scopeCodecField, scopeCodecAcquisition, replaceScopeCodecField
+  , replaceScopeCodecAcquisition, scopeCodecTerm )
 import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Term (Term(..), decodeTerm, encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
@@ -89,8 +90,9 @@ exactScopeChecksFor kind manifest = do
   certificateBytes <- BS.readFile (canonicalCertificatePath proof)
   certificateTerm <- decode certificateBytes
   certificateFields <- row 13 certificateTerm
-  let replaced value = scopeCodecTerm (replaceScopeCodecField ScopeCodecInterfaces
-        (TList (map (replaceOwner key value) interfaces)) fixture)
+  let replaced value = scopeCodecTerm (replaceScopeCodecAcquisition FreshCodecInputs
+        (replaceScopeCodecField ScopeCodecInterfaces
+          (TList (map (replaceOwner key value) interfaces)) fixture))
       evidence value = replaced (TList (replace 7 value selectedFields))
       badCertificate expected value = withTemporary (takeDirectory manifest) "exact-scope-cert.cbor" $ \path -> do
         let bytes = encode value
@@ -121,7 +123,7 @@ exactScopeChecksFor kind manifest = do
       unless (null (scopeProducts scope)) (fail "type-only declaration fixture acquired native products")
   refuse manifest "" (evidence (TList (replace 3 TNull role)))
   refuse manifest "" (evidence (TList (replace 4 TNull role)))
-  refuse manifest "canonical module certificate changed"
+  refuse manifest "exact input differs from its selected seal"
     (evidence (TList (replace 2 differentSHA role)))
   forM_ [(0,TString "TPFINALMODULE_OLD","unsupported canonical module certificate")
         ,(1,TInt 2,"unsupported canonical module certificate")
@@ -176,7 +178,7 @@ exactScopeChecksFor kind manifest = do
   forM_ [(2,"canonical interface"),(5,"canonical package imports")] $ \(index,name) ->
     withTemporary (takeDirectory manifest) name $ \path -> do
       BS.writeFile path "substituted payload"
-      refuse manifest "canonical module interface or package imports changed"
+      refuse manifest "exact input differs from its selected seal"
         (replaced (TList (replace index (TString (T.pack path)) selectedFields)))
   -- Raw proof validation and metadata promotion do not demand Core. A fresh
   -- exact request snapshots every promised companion, and executable promotion
@@ -198,7 +200,7 @@ exactScopeChecksFor kind manifest = do
         Left failure -> fail ("executable Core refusal came from another boundary: " ++ show failure)
         Right _ -> fail "executable proof promotion admitted unavailable Core"
       let alteredRole = TList (replace 3 (TString (T.pack path)) role)
-      refuse manifest (if missing then path else "admitted defining Core changed during capture")
+      refuse manifest (if missing then path else "exact input differs from its selected seal")
         (evidence alteredRole)
   -- The already admitted request keeps its captured bytes after disk drift;
   -- a fresh acquisition sees the changed input and refuses it.
@@ -206,7 +208,7 @@ exactScopeChecksFor kind manifest = do
       retained <- canonicalProofOriginalBytes proof (canonicalCorePath core) (canonicalCoreSha256 core)
       unless (retained == coreBytes) (fail "admitted scope reopened original Core after disk drift")
       readExactScope manifest >>= \case
-        Left reason | "admitted defining Core changed during capture" `isInfixOf` reason -> pure ()
+        Left reason | "owned original materialization differs from its admitted bytes" `isInfixOf` reason -> pure ()
         Left reason -> fail ("fresh snapshot refusal came from another boundary: " ++ reason)
         Right _ -> fail "fresh exact scope admitted changed original Core")
     `finally` BS.writeFile (canonicalCorePath core) coreBytes
@@ -296,8 +298,9 @@ originRoleCases manifest scope fixture interfaces = do
       (fail "genuine scope role differs from canonical origin")
     let changed = TList (replace 7 (TList (replace 0 (TString contradictory) role)) selectedFields)
     refuse manifest "canonical module origin differs from its exact interface role"
-      (scopeCodecTerm (replaceScopeCodecField ScopeCodecInterfaces
-        (TList (map (replaceOwner key changed) interfaces)) fixture))
+      (scopeCodecTerm (replaceScopeCodecAcquisition FreshCodecInputs
+        (replaceScopeCodecField ScopeCodecInterfaces
+          (TList (map (replaceOwner key changed) interfaces)) fixture)))
     case canonicalOrigin proof of
       SourceOriginal _ -> pure ()
       NativeAuthoredDeclaration (Generation generation) -> do
@@ -308,8 +311,9 @@ originRoleCases manifest scope fixture interfaces = do
                     (replace 1 (TString (T.pack path)) role))
                   alteredRow = TList (replace 7 alteredRole selectedFields)
               BS.writeFile path bytes
-              refuse manifest expected (scopeCodecTerm (replaceScopeCodecField ScopeCodecInterfaces
-                (TList (map (replaceOwner key alteredRow) interfaces)) fixture))
+              refuse manifest expected (scopeCodecTerm (replaceScopeCodecAcquisition FreshCodecInputs
+                (replaceScopeCodecField ScopeCodecInterfaces
+                  (TList (map (replaceOwner key alteredRow) interfaces)) fixture)))
             otherGeneration = if generation == 1 then TInt 2 else TInt 1
         changedOrigin "canonical module origin differs from its exact interface role"
           (TList [TString "source-original",TList []])
@@ -381,7 +385,8 @@ refuse manifest expected term = do
   result <- readCandidate manifest term
   case result of
     Left message | expected `isInfixOf` message -> pure ()
-                 | otherwise -> fail ("exact-scope schema refusal came from another boundary: " ++ message)
+                 | otherwise -> fail ("expected exact-scope refusal containing " ++ show expected
+                     ++ ", got: " ++ message)
     Right _ -> fail "exact-scope schema admitted substituted evidence"
 
 readCandidate :: FilePath -> Term -> IO (Either String ExactScope)

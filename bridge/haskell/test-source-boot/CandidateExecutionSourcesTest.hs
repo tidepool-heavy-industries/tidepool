@@ -142,6 +142,12 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
     Nothing helperSource [work] Nothing
   differentFixture <- capturePreparedFixture work differentOriginal
   mismatchedScopePath <- writeExecutionScope work differentFixture [helperName]
+  unofferedFixture <- bracket (BS.readFile helperSource) (BS.writeFile helperSource) $ \_ -> do
+    copyFile "test-source-boot/fixtures/MetadataQuoteSupportChanged.hs" helperSource
+    cold <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty
+      CertifyHomeProductsCompile Nothing source [work] Nothing
+    capturePreparedFixture work cold
+  unofferedScopePath <- writeExecutionScope work unofferedFixture ["ExecutionReexportFacade"]
   mismatched <- crossover mismatchedScopePath
   unless (null (pprAcceptedCandidates mismatched) && "MetadataQuoter" `elem` preparedNames mismatched) $
     fail "cached importer admitted a different current exact dependency tuple"
@@ -306,12 +312,22 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   -- Negative wire controls mutate a current genuine offer and preserve its
   -- canonical owner evidence. A descriptor promises its exact file bytes.
   originalTerm <- readTerm sourceScopePath
-  parcel <- case offerTerm of
-    TList [_,_,_,_,_,value,_] -> pure value
-    _ -> fail "production candidate offer has another current envelope"
   allOriginals <- case originalTerm of
     TList fields -> pure (fields !! 7)
     _ -> fail "production original scope has another current envelope"
+  parcel <- case offerTerm of
+    TList [_,_,_,_,_,value,_] -> pure value
+    _ -> fail "production candidate offer has another current envelope"
+  (_,unofferedScopeFixture) <- readScopeCodecFixture unofferedScopePath
+  unofferedOriginals <- case scopeCodecField ScopeCodecExecution unofferedScopeFixture of
+    value@(TList [_,TList references]) -> do
+      candidateReferences <- case parcel of
+        TList [_,TList offeredReferences] -> pure offeredReferences
+        _ -> fail "production candidate parcel has another current shape"
+      unless (any (`notElem` candidateReferences) references) $
+        fail "negative control lacks a genuine original reference outside the candidate offer"
+      pure value
+    _ -> fail "production unoffered original scope has another current envelope"
   let envelope value = case offerTerm of
         TList fields -> TList (take 5 fields ++ [value] ++ drop 6 fields)
         _ -> offerTerm
@@ -331,7 +347,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
         TList [_,refs] -> TList [TList [],refs]
         _ -> parcel
   forM_ [("wrong original version",corrupt),("graph digest",wrongDigest)
-      ,("duplicate owner",duplicateRef),("unoffered original owner",allOriginals)] $ \(label,invalid) -> do
+      ,("duplicate owner",duplicateRef),("unoffered original owner",unofferedOriginals)] $ \(label,invalid) -> do
     writeTerm candidatePath (envelope invalid)
     forM_ [readModuleCandidates candidatePath,
         readModuleCandidatesWithGraphs (scopeExecutionGraphs originalScope) candidatePath] $ \readOffer ->
