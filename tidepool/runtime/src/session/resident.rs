@@ -3372,6 +3372,15 @@ where
         self.state.initialize_durable_public_scope(owner, scope)
     }
 
+    pub fn initialize_durable_public_scope_with_readiness(
+        &mut self,
+        owner: super::RecoveryPublicOwner,
+        scope: ScopeId,
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        self.state
+            .initialize_durable_public_scope_with_readiness(owner, scope)
+    }
+
     pub fn begin_durable_public_bootstrap(
         &mut self,
         owner: super::RecoveryPublicOwner,
@@ -3405,6 +3414,21 @@ where
     ) -> Result<super::PublicManifestCommit, SessionError> {
         self.state
             .transfer_recovered_public_owner(predecessor, successor, scope, authority)
+    }
+
+    pub fn transfer_recovered_public_owner_with_readiness(
+        &mut self,
+        predecessor: &super::RecoveryPublicOwner,
+        successor: super::RecoveryPublicOwner,
+        scope: ScopeId,
+        authority: Arc<dyn super::RecoverySuccessorAuthority>,
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        self.state.transfer_recovered_public_owner_with_readiness(
+            predecessor,
+            successor,
+            scope,
+            authority,
+        )
     }
 
     pub fn seal_recovery_initialization_scope(

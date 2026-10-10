@@ -113,6 +113,11 @@ async fn embedded_notification_handoff_retries_by_operation_and_waits_for_store_
                 };
                 let embedded = runtime
                     .attach(
+                        provider_attachment::ProviderAttachment::admit(
+                            campaign.forest.clone(),
+                            actor,
+                        )
+                        .unwrap(),
                         identity,
                         campaign.actor.clone(),
                         Arc::new(
