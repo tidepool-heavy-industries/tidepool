@@ -707,6 +707,23 @@ impl CompiledProgram {
         Self::compile_target_literals(prepared, &literals, registry)
     }
 
+    /// Select the same exact literal key as compilation, without compiling or
+    /// waiting for another producer. Mutable installation authority stays fresh.
+    pub fn lookup_prepared_with_source_literals(
+        prepared: &PreparedProgram,
+        owners: &[tidepool_repr::execution_schema::ImportOwner],
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
+        registry: &ImageRegistry,
+    ) -> Result<Option<Arc<Self>>, CompileError> {
+        let literals = package_literals::GroupPackageLiterals::select_definitions(
+            &prepared.definitions(),
+            owners,
+            &BTreeMap::new(),
+            sources,
+        )?;
+        Ok(registry.lookup_literal_prepared(prepared, &literals))
+    }
+
     fn compile_target_literals(
         prepared: &PreparedProgram,
         literals: &package_literals::GroupPackageLiterals,

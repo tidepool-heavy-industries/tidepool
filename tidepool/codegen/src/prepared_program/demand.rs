@@ -322,6 +322,8 @@ impl SourceInstanceLease {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DemandError {
+    #[error("exact prepared native image is unavailable")]
+    MissingPreparedNativeImage,
     #[error("source module {unit}:{module} at {version:?} has conflicting product owners")]
     ConflictingOwner {
         unit: String,
@@ -673,6 +675,43 @@ impl DemandedImage {
         packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
         sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
     ) -> Result<Self, DemandError> {
+        let literals = Self::select_literals(&group, packages, sources)?;
+        let image =
+            registry.get_or_compile_literal_group(&group.code_identity(), &literals, || {
+                CompiledProgram::compile_certified_group_with_literals(&group, &literals)
+                    .map(Arc::new)
+            })?;
+        Ok(Self {
+            group,
+            image,
+            demand: None,
+        })
+    }
+
+    /// Resolve an already prepared image with the ordinary literal selector.
+    /// An unavailable exact key is refused without joining or creating a flight.
+    pub fn lookup_with_literals(
+        group: CertifiedGroup,
+        registry: &ImageRegistry,
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+    ) -> Result<Self, DemandError> {
+        let literals = Self::select_literals(&group, packages, sources)?;
+        let image = registry
+            .lookup_literal_group(&group.code_identity(), &literals)
+            .ok_or(DemandError::MissingPreparedNativeImage)?;
+        Ok(Self {
+            group,
+            image,
+            demand: None,
+        })
+    }
+
+    fn select_literals(
+        group: &CertifiedGroup,
+        packages: &BTreeMap<SymbolIdentity, super::PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, super::SourceLiteral>,
+    ) -> Result<super::package_literals::GroupPackageLiterals, CompileError> {
         let literals =
             super::package_literals::GroupPackageLiterals::select(&group, packages, sources)
                 .map_err(|mut error| {
@@ -684,16 +723,7 @@ impl DemandedImage {
                     }
                     error
                 })?;
-        let image =
-            registry.get_or_compile_literal_group(&group.code_identity(), &literals, || {
-                CompiledProgram::compile_certified_group_with_literals(&group, &literals)
-                    .map(Arc::new)
-            })?;
-        Ok(Self {
-            group,
-            image,
-            demand: None,
-        })
+        Ok(literals)
     }
 
     pub fn domain(&self) -> SourceInstanceDomain {

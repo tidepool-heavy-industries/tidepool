@@ -626,6 +626,17 @@ fn source_literal_original_group_executes_without_a_managed_address_handle() {
             consumer.image().authenticated_source_literal(GlobalId(0)),
             Some(&key)
         );
+        let before = CompiledProgram::successful_image_compilations();
+        let looked_up = DemandedImage::lookup_with_literals(
+            consumer.group().clone(),
+            &registry,
+            &BTreeMap::new(),
+            &supplied,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(consumer.image(), looked_up.image()));
+        assert_eq!(CompiledProgram::successful_image_compilations(), before);
+        let consumer = looked_up;
         let mut machine = machine();
         let ids = install_source_literal(&mut machine, &consumer, &producer).unwrap();
         machine.pin(ids[0]).unwrap();
@@ -963,6 +974,19 @@ fn source_literal_target_registry_keys_keep_exact_producer_ordinal_version_and_b
     let producer = source_literal_producer(literal_owner(), 1, BYTES, &registry);
     let first = compile(&producer);
     assert!(Arc::ptr_eq(&first, &compile(&producer)));
+    let lookup = |producer: &DemandedImage| {
+        CompiledProgram::lookup_prepared_with_source_literals(
+            &prepared,
+            &[ImportOwner::Source {
+                version: producer.group().owner().module_version.clone(),
+                binder: source_literal_identity(),
+            }],
+            &producer.source_literals(),
+            &registry,
+        )
+        .unwrap()
+    };
+    assert!(Arc::ptr_eq(&first, &lookup(&producer).unwrap()));
     for difference in 0..5 {
         let mut owner = literal_owner();
         let mut ordinal = 1;
@@ -975,6 +999,12 @@ fn source_literal_target_registry_keys_keep_exact_producer_ordinal_version_and_b
             _ => bytes = b"False",
         }
         let different = source_literal_producer(owner, ordinal, bytes, &registry);
+        let before = CompiledProgram::successful_image_compilations();
+        assert!(
+            lookup(&different).is_none(),
+            "lookup uses exact owner/version/ordinal/bytes identity"
+        );
+        assert_eq!(CompiledProgram::successful_image_compilations(), before);
         assert!(!Arc::ptr_eq(&first, &compile(&different)));
     }
     // A target with no literal imports retains the ordinary shared key.

@@ -2786,7 +2786,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations();
     let repeated = super::super::prepared::NativeImageBundle::prepare_activation_renderer(
         &compiled.renderer.compiled,
-        &bundle.registry,
+        &resident.state.certified_image_registry(),
     )
     .unwrap();
     assert_eq!(
@@ -2798,6 +2798,36 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         assert!(Arc::ptr_eq(first, next));
     }
     drop(repeated);
+    let before_fault = resident.residency();
+    {
+        let incomplete = bundle.omitting_image(0);
+        let refused = resident.install_turn_program_in_with_images(
+            compiled.admission.scope_lease.scope(),
+            compiled.renderer.compiled.prepared.as_ref().clone(),
+            compiled.renderer.compiled.certification.as_ref(),
+            Some(&incomplete),
+            Some(&compiled.renderer.compiled.table),
+        );
+        assert!(
+            matches!(
+                refused,
+                Err(ResidentError::Prepared(
+                    PreparedRuntimeError::MissingPreparedNativeImage
+                ))
+            ),
+            "a registry hit outside complete Ready custody is refused"
+        );
+        assert_eq!(
+            resident.residency(),
+            before_fault,
+            "no native program or mutable instance publishes on lookup refusal"
+        );
+        assert_eq!(
+            before,
+            tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations(),
+            "lookup refusal never compiles"
+        );
+    }
     let ResidentOutcome::Completed { result, .. } = resident
         .run_activation_preview(compiled)
         .expect("execute the original custom dictionary against the original mounted heap input")

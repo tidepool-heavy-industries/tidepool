@@ -9496,7 +9496,7 @@ mod compiler_packet_replay {
     //! Source and recipe hashes are diagnostic inputs. The parser, runtime admission,
     //! compiler endpoint and product issuers create every new authority below.
 
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::Arc;
 
     use serde::Deserialize;

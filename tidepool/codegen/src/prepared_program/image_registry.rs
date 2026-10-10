@@ -41,7 +41,7 @@ pub struct ImageRegistry {
     entries: Mutex<Entries>,
     /// Lifetime lookups that found an existing image. Never decremented.
     hits: AtomicU64,
-    /// Lifetime lookups or admissions that elected a compiler. Never decremented.
+    /// Lifetime unavailable lookups or admissions that elected a compiler. Never decremented.
     misses: AtomicU64,
 }
 
@@ -67,6 +67,30 @@ enum ImageKey {
         CertifiedGroupCode,
         super::package_literals::GroupPackageLiterals,
     ),
+}
+
+impl ImageKey {
+    fn prepared(
+        prepared: &PreparedProgram,
+        literals: &super::package_literals::GroupPackageLiterals,
+    ) -> Self {
+        if literals.iter().next().is_none() {
+            Self::Program(prepared.clone())
+        } else {
+            Self::LiteralProgram(prepared.clone(), literals.clone())
+        }
+    }
+
+    fn group(
+        group: &CertifiedGroupCode,
+        literals: &super::package_literals::GroupPackageLiterals,
+    ) -> Self {
+        if literals.iter().next().is_none() {
+            Self::Group(group.clone())
+        } else {
+            Self::LiteralGroup(group.clone(), literals.clone())
+        }
+    }
 }
 
 enum Entry {
@@ -339,7 +363,28 @@ impl ImageRegistry {
     /// An existing live image compiled for exactly `key`'s content and target.
     #[must_use]
     pub fn lookup(&self, key: &LinkedProgram) -> Option<Arc<CompiledProgram>> {
-        let key = ImageKey::Program(key.prepared().clone());
+        self.lookup_key(ImageKey::Program(key.prepared().clone()))
+    }
+
+    pub(super) fn lookup_literal_prepared(
+        &self,
+        prepared: &PreparedProgram,
+        literals: &super::package_literals::GroupPackageLiterals,
+    ) -> Option<Arc<CompiledProgram>> {
+        self.lookup_key(ImageKey::prepared(prepared, literals))
+    }
+
+    pub(super) fn lookup_literal_group(
+        &self,
+        group: &CertifiedGroupCode,
+        literals: &super::package_literals::GroupPackageLiterals,
+    ) -> Option<Arc<CompiledProgram>> {
+        self.lookup_key(ImageKey::group(group, literals))
+    }
+
+    /// Never elect a compiler or join a flight. The registry lock protects only
+    /// the weak image lookup; a missing, expired or in-flight key is unavailable.
+    fn lookup_key(&self, key: ImageKey) -> Option<Arc<CompiledProgram>> {
         let mut observation = Observation::new(self, "lookup", &key);
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         let found = match entries.images.get(&key) {
@@ -448,13 +493,7 @@ impl ImageRegistry {
         literals: &super::package_literals::GroupPackageLiterals,
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
-        if literals.iter().next().is_none() {
-            return self.get_or_compile_prepared(prepared, compile);
-        }
-        self.get_or_compile_key(
-            ImageKey::LiteralProgram(prepared.clone(), literals.clone()),
-            compile,
-        )
+        self.get_or_compile_key(ImageKey::prepared(prepared, literals), compile)
     }
 
     /// Share an exact worker-certified source group across concurrent native
@@ -481,13 +520,7 @@ impl ImageRegistry {
         literals: &super::package_literals::GroupPackageLiterals,
         compile: impl FnOnce() -> Result<Arc<CompiledProgram>, E>,
     ) -> Result<Arc<CompiledProgram>, E> {
-        if literals.iter().next().is_none() {
-            return self.get_or_compile_group_code(group, compile);
-        }
-        self.get_or_compile_key(
-            ImageKey::LiteralGroup(group.clone(), literals.clone()),
-            compile,
-        )
+        self.get_or_compile_key(ImageKey::group(group, literals), compile)
     }
 
     fn get_or_compile_key<E>(
@@ -600,7 +633,7 @@ impl ImageRegistry {
         self.hits.load(Ordering::Relaxed)
     }
 
-    /// Lifetime lookups that found nothing and required a compile.
+    /// Lifetime unavailable lookups or admissions that elected a compiler.
     #[must_use]
     pub fn misses(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
@@ -742,6 +775,50 @@ mod tests {
             );
             std::thread::yield_now();
         }
+    }
+
+    #[test]
+    fn lookup_refuses_absent_expired_and_inflight_without_compiling_or_waiting() {
+        let registry = Arc::new(ImageRegistry::new());
+        let key = program();
+        assert!(registry.lookup(&key).is_none());
+        let image = registry.insert(key.clone(), compiled());
+        assert!(Arc::ptr_eq(&image, &registry.lookup(&key).unwrap()));
+        drop(image);
+        assert!(
+            registry.lookup(&key).is_none(),
+            "weak-only expired image is unavailable"
+        );
+        let (started, observe) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let producer_registry = registry.clone();
+        let producer_key = key.clone();
+        let producer = std::thread::spawn(move || {
+            producer_registry
+                .get_or_compile(&producer_key, || {
+                    started.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok::<_, ()>(compiled())
+                })
+                .unwrap()
+        });
+        observe.recv_timeout(Duration::from_secs(2)).unwrap();
+        let before = CompiledProgram::successful_image_compilations();
+        let (looked_up, observed) = mpsc::channel();
+        let lookup_registry = registry.clone();
+        let lookup = std::thread::spawn(move || {
+            looked_up
+                .send(lookup_registry.lookup(&key).is_none())
+                .unwrap();
+        });
+        assert!(observed
+            .recv_timeout(Duration::from_secs(2))
+            .expect("lookup must refuse before producer is released"));
+        assert_eq!(CompiledProgram::successful_image_compilations(), before);
+        release.send(()).unwrap();
+        lookup.join().unwrap();
+        let image = producer.join().unwrap();
+        assert!(Arc::ptr_eq(&image, &registry.lookup(&program()).unwrap()));
     }
 
     #[test]

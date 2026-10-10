@@ -238,7 +238,9 @@ pub enum PreparedRuntimeError {
     #[error("prepared installation failed: {0}")]
     Install(ExecutionError),
     #[error(transparent)]
-    Demand(#[from] DemandError),
+    Demand(DemandError),
+    #[error("Ready renderer lacks the exact prepared native image")]
+    MissingPreparedNativeImage,
     #[error("prepared type evidence refused: {0}")]
     TypeEvidence(#[from] TypeGraphError),
     #[error("request access site {site} type evidence refused: {source}")]
@@ -444,6 +446,15 @@ pub enum PreparedRuntimeError {
     },
 }
 
+impl From<DemandError> for PreparedRuntimeError {
+    fn from(error: DemandError) -> Self {
+        match error {
+            DemandError::MissingPreparedNativeImage => Self::MissingPreparedNativeImage,
+            error => Self::Demand(error),
+        }
+    }
+}
+
 impl PreparedRuntimeError {
     #[must_use]
     pub fn stage(&self) -> PreparedFailureStage {
@@ -453,6 +464,7 @@ impl PreparedRuntimeError {
             | Self::Compile(_)
             | Self::Install(_)
             | Self::Demand(_)
+            | Self::MissingPreparedNativeImage
             | Self::TypeEvidence(_)
             | Self::MissingCertifiedOwner(_)
             | Self::CertifiedPackageOwnerUnavailable { .. }
@@ -552,6 +564,7 @@ impl PreparedRuntimeError {
                 }
                 _ => PreparedFailureKind::Integrity,
             },
+            Self::MissingPreparedNativeImage => PreparedFailureKind::Integrity,
             Self::Cancelled => PreparedFailureKind::Cancelled,
             Self::Compile(_) => PreparedFailureKind::Rejected,
             // A handler fault is this turn's own failure, so the machine stays reusable.
@@ -680,7 +693,7 @@ pub(crate) struct CertifiedTargetImage {
 
 /// Strong custody of native code and its literal storage, with no installed state.
 pub(crate) struct NativeImageBundle {
-    pub(super) registry: Arc<ImageRegistry>,
+    registry: Arc<ImageRegistry>,
     images: Vec<Arc<CompiledProgram>>,
 }
 
@@ -693,6 +706,10 @@ impl std::fmt::Debug for NativeImageBundle {
 }
 
 impl NativeImageBundle {
+    fn holds(&self, image: &Arc<CompiledProgram>) -> bool {
+        self.images.iter().any(|held| Arc::ptr_eq(held, image))
+    }
+
     pub(crate) fn prepare_activation_renderer(
         compiled: &super::turn::CompiledTurn,
         registry: &Arc<ImageRegistry>,
@@ -865,6 +882,20 @@ impl NativeImageBundle {
             registry: registry.clone(),
             images,
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn omitting_image(&self, index: usize) -> Self {
+        Self {
+            registry: self.registry.clone(),
+            images: self
+                .images
+                .iter()
+                .enumerate()
+                .filter(|(position, _)| *position != index)
+                .map(|(_, image)| image.clone())
+                .collect(),
+        }
     }
 
     #[cfg(test)]
@@ -1047,6 +1078,67 @@ fn target_owners_match(prepared: &PreparedProgram, owners: &[ImportOwner]) -> bo
             })
 }
 
+/// Ready installation can only consume the bundle's prepared custody. Ordinary
+/// compilation retains its existing producer route through the same selectors.
+#[derive(Clone, Copy)]
+enum NativeImageAcquisition<'a> {
+    Compile(&'a ImageRegistry),
+    Ready(&'a NativeImageBundle),
+}
+
+impl NativeImageAcquisition<'_> {
+    fn group(
+        self,
+        group: CertifiedGroup,
+        packages: &BTreeMap<SymbolIdentity, PackageLiteral>,
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
+    ) -> Result<DemandedImage, DemandError> {
+        match self {
+            Self::Compile(registry) => {
+                DemandedImage::compile_with_literals(group, registry, packages, sources)
+            }
+            Self::Ready(bundle) => {
+                let image = DemandedImage::lookup_with_literals(
+                    group,
+                    &bundle.registry,
+                    packages,
+                    sources,
+                )?;
+                if !bundle.holds(image.image()) {
+                    return Err(DemandError::MissingPreparedNativeImage);
+                }
+                Ok(image)
+            }
+        }
+    }
+
+    fn target(
+        self,
+        prepared: &PreparedProgram,
+        owners: &[ImportOwner],
+        sources: &BTreeMap<SourceBinder, SourceLiteral>,
+    ) -> Result<Arc<CompiledProgram>, PreparedRuntimeError> {
+        match self {
+            Self::Compile(registry) => CompiledProgram::compile_prepared_with_source_literals(
+                prepared, owners, sources, registry,
+            )
+            .map_err(PreparedRuntimeError::Compile),
+            Self::Ready(bundle) => {
+                let image = CompiledProgram::lookup_prepared_with_source_literals(
+                    prepared,
+                    owners,
+                    sources,
+                    &bundle.registry,
+                )
+                .map_err(PreparedRuntimeError::Compile)?
+                .filter(|image| bundle.holds(image))
+                .ok_or(PreparedRuntimeError::MissingPreparedNativeImage)?;
+                Ok(image)
+            }
+        }
+    }
+}
+
 impl CertifiedTargetImage {
     #[cfg(test)]
     pub(crate) fn compile(
@@ -1088,15 +1180,35 @@ impl CertifiedTargetImage {
         resolved: &super::persistent::ResolvedCertifiedTurn,
         registry: &ImageRegistry,
     ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
+        Self::acquire_scoped(
+            prepared,
+            resolved,
+            NativeImageAcquisition::Compile(registry),
+        )
+    }
+
+    pub(crate) fn lookup_scoped(
+        prepared: PreparedProgram,
+        resolved: &super::persistent::ResolvedCertifiedTurn,
+        bundle: &NativeImageBundle,
+    ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
+        Self::acquire_scoped(prepared, resolved, NativeImageAcquisition::Ready(bundle))
+    }
+
+    fn acquire_scoped(
+        prepared: PreparedProgram,
+        resolved: &super::persistent::ResolvedCertifiedTurn,
+        images: NativeImageAcquisition<'_>,
+    ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
         let groups = resolved
             .groups
             .iter()
             .map(|group| group.original().clone())
             .collect();
-        let (target, compiled) = Self::compile_originals(
+        let (target, compiled) = Self::acquire_originals(
             prepared,
             &resolved.target_owners,
-            registry,
+            images,
             resolved.package_interfaces.clone(),
             groups,
         )?;
@@ -1113,6 +1225,7 @@ impl CertifiedTargetImage {
         ))
     }
 
+    #[cfg(test)]
     fn compile_originals(
         prepared: PreparedProgram,
         owners: &[ImportOwner],
@@ -1120,17 +1233,27 @@ impl CertifiedTargetImage {
         package_interfaces: CertifiedTargetPackageInterfaces,
         groups: Vec<CertifiedGroup>,
     ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
+        Self::acquire_originals(
+            prepared,
+            owners,
+            NativeImageAcquisition::Compile(registry),
+            package_interfaces,
+            groups,
+        )
+    }
+
+    fn acquire_originals(
+        prepared: PreparedProgram,
+        owners: &[ImportOwner],
+        images: NativeImageAcquisition<'_>,
+        package_interfaces: CertifiedTargetPackageInterfaces,
+        groups: Vec<CertifiedGroup>,
+    ) -> Result<(Self, Vec<DemandedImage>), PreparedRuntimeError> {
         if !target_owners_match(&prepared, owners) {
             return Err(PreparedRuntimeError::CertifiedTargetOwners);
         }
-        let (compiled, source_literals) = Self::compile_literal_producers(&groups, registry)?;
-        let image = CompiledProgram::compile_prepared_with_source_literals(
-            &prepared,
-            owners,
-            &source_literals,
-            registry,
-        )
-        .map_err(PreparedRuntimeError::Compile)?;
+        let (compiled, source_literals) = Self::compile_literal_producers(&groups, images)?;
+        let image = images.target(&prepared, owners, &source_literals)?;
         let package_literals = if package_interfaces.matches_target(&prepared) {
             image.package_literals(|unit, module| package_interfaces.interface_digest(unit, module))
         } else {
@@ -1143,13 +1266,13 @@ impl CertifiedTargetImage {
             package_literals,
             source_plan: None,
         };
-        let demanded = target.finish_demanded(groups, compiled, &source_literals, registry)?;
+        let demanded = target.finish_demanded(groups, compiled, &source_literals, images)?;
         Ok((target, demanded))
     }
 
     fn compile_literal_producers(
         groups: &[CertifiedGroup],
-        registry: &ImageRegistry,
+        images: NativeImageAcquisition<'_>,
     ) -> Result<
         (
             Vec<Option<DemandedImage>>,
@@ -1171,7 +1294,7 @@ impl CertifiedTargetImage {
             if !matches!(top.binding.rhs, HeapRhs::Bytes(_)) {
                 continue;
             }
-            let image = DemandedImage::compile(group.clone(), registry)?;
+            let image = images.group(group.clone(), &BTreeMap::new(), &BTreeMap::new())?;
             for (binder, literal) in image.source_literals() {
                 if let Some(previous) = source_literals.get(&binder) {
                     if previous != &literal {
@@ -1191,19 +1314,14 @@ impl CertifiedTargetImage {
         groups: Vec<CertifiedGroup>,
         compiled: Vec<Option<DemandedImage>>,
         source_literals: &BTreeMap<SourceBinder, SourceLiteral>,
-        registry: &ImageRegistry,
+        images: NativeImageAcquisition<'_>,
     ) -> Result<Vec<DemandedImage>, DemandError> {
         groups
             .into_iter()
             .zip(compiled)
             .map(|(group, compiled)| match compiled {
                 Some(image) => Ok(image),
-                None => DemandedImage::compile_with_literals(
-                    group,
-                    registry,
-                    &self.package_literals,
-                    source_literals,
-                ),
+                None => images.group(group, &self.package_literals, source_literals),
             })
             .collect()
     }
@@ -1216,8 +1334,14 @@ impl CertifiedTargetImage {
     ) -> Result<Vec<DemandedImage>, DemandError> {
         let groups = groups.into_iter().collect::<Vec<_>>();
         tidepool_codegen::prepared_program::GroupInventory::new(&groups)?;
-        let (compiled, literals) = Self::compile_literal_producers(&groups, registry)?;
-        self.finish_demanded(groups, compiled, &literals, registry)
+        let (compiled, literals) =
+            Self::compile_literal_producers(&groups, NativeImageAcquisition::Compile(registry))?;
+        self.finish_demanded(
+            groups,
+            compiled,
+            &literals,
+            NativeImageAcquisition::Compile(registry),
+        )
     }
 
     pub(crate) fn with_source_plan(
@@ -1254,8 +1378,14 @@ impl CertifiedTargetImage {
             .iter()
             .map(|group| group.original().clone())
             .collect::<Vec<_>>();
-        let (compiled, literals) = Self::compile_literal_producers(&originals, registry)?;
-        let compiled = self.finish_demanded(originals, compiled, &literals, registry)?;
+        let (compiled, literals) =
+            Self::compile_literal_producers(&originals, NativeImageAcquisition::Compile(registry))?;
+        let compiled = self.finish_demanded(
+            originals,
+            compiled,
+            &literals,
+            NativeImageAcquisition::Compile(registry),
+        )?;
         compiled
             .into_iter()
             .zip(groups)
@@ -6363,7 +6493,7 @@ pub(super) mod tests {
             let weak = Arc::downgrade(&image);
             for id in ids {
                 let scoped = CertifiedGroup::admit(owner.clone(), group.clone(), vec![ImportOwner::Retained { id: SessionVarId::from_extract(id), generation }]).unwrap();
-                let selected = DemandedImage::compile(scoped, &registry).unwrap();
+                let selected = DemandedImage::lookup_with_literals(scoped, &registry, &BTreeMap::new(), &BTreeMap::new()).unwrap();
                 proptest::prop_assert!(Arc::ptr_eq(&image, selected.image()));
             }
             drop(image);
@@ -6489,6 +6619,94 @@ pub(super) mod tests {
         .unwrap();
         // Sealed group order need not put literal producers before importers.
         [reader, producer]
+    }
+
+    #[test]
+    fn ready_source_and_target_lookup_refuses_incomplete_custody_without_compilation() {
+        let groups = certified_source_literal_groups();
+        let reader = SourceBinder {
+            version: groups[0].owner().module_version.clone(),
+            binder: testing::identity("Fixture", "reader"),
+        };
+        let owners = vec![ImportOwner::Source {
+            version: reader.version.clone(),
+            binder: reader.binder.clone(),
+        }];
+        let mut wire = testing::wire_program();
+        wire.globals.push(GlobalDecl {
+            identity: reader.binder.clone(),
+            rep: RuntimeRep::LiftedRef,
+            entry_signature: None,
+            required_evaluated: false,
+            required_generation: None,
+        });
+        let prepared = testing::prepare(wire).unwrap();
+        let registry = Arc::new(ImageRegistry::new());
+        let mut scopes = tidepool_codegen::scope::ScopeTree::new();
+        let scope = scopes.mint_isolated();
+        let bindings = BindingTable::new();
+        let selection = bindings.source_domain_selection_in(&scopes, scope).unwrap();
+        let snapshot = bindings.scope_snapshot(&scopes, scope).unwrap();
+        let (selected, inherited, roots) =
+            tidepool_codegen::prepared_program::GroupInventory::new(&groups)
+                .unwrap()
+                .seal_in_domains([reader], &selection)
+                .unwrap();
+        assert!(inherited.is_empty());
+        let resolved = super::super::persistent::ResolvedCertifiedTurn {
+            groups: selected,
+            target_owners: owners,
+            package_interfaces: CertifiedTargetPackageInterfaces::default(),
+            source_evidence: certified_source_evidence(&groups),
+            inherited_needed: vec![],
+            source_plan: super::super::persistent::ResolvedSourceDomainPlan::fixture(
+                roots, selection, snapshot,
+            ),
+        };
+        let absent = NativeImageBundle {
+            registry: registry.clone(),
+            images: vec![],
+        };
+        let before = CompiledProgram::successful_image_compilations();
+        assert!(matches!(
+            CertifiedTargetImage::lookup_scoped(prepared.clone(), &resolved, &absent),
+            Err(PreparedRuntimeError::MissingPreparedNativeImage)
+        ));
+        assert_eq!(CompiledProgram::successful_image_compilations(), before);
+        let (target, demanded) =
+            CertifiedTargetImage::compile_scoped(prepared.clone(), &resolved, &registry).unwrap();
+        let complete = NativeImageBundle {
+            registry: registry.clone(),
+            images: std::iter::once(target.image.clone())
+                .chain(demanded.iter().map(|image| image.image().clone()))
+                .collect(),
+        };
+        let before = CompiledProgram::successful_image_compilations();
+        for index in 0..complete.images.len() {
+            let incomplete = complete.omitting_image(index);
+            assert!(matches!(
+                CertifiedTargetImage::lookup_scoped(prepared.clone(), &resolved, &incomplete),
+                Err(PreparedRuntimeError::MissingPreparedNativeImage)
+            ));
+            assert_eq!(CompiledProgram::successful_image_compilations(), before);
+        }
+        let (looked_up, groups) =
+            CertifiedTargetImage::lookup_scoped(prepared.clone(), &resolved, &complete).unwrap();
+        assert!(Arc::ptr_eq(&looked_up.image, &target.image));
+        assert!(groups
+            .iter()
+            .zip(&demanded)
+            .all(|(a, b)| Arc::ptr_eq(a.image(), b.image())));
+        assert_eq!(CompiledProgram::successful_image_compilations(), before);
+        drop((target, demanded, looked_up, groups, complete));
+        assert!(
+            matches!(
+                CertifiedTargetImage::lookup_scoped(prepared, &resolved, &absent),
+                Err(PreparedRuntimeError::MissingPreparedNativeImage)
+            ),
+            "expired keys cannot create a new image"
+        );
+        assert_eq!(CompiledProgram::successful_image_compilations(), before);
     }
 
     #[test]

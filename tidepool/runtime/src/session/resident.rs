@@ -2048,11 +2048,11 @@ struct PreparedCheckedTurn {
     execution: Arc<tidepool_toolchain::checked_cell::ExactCompiledItem>,
 }
 
-enum PreparedExecutionPurpose {
+enum PreparedExecutionPurpose<'a> {
     Authored(Option<Arc<CheckedTurnCompletion>>),
     HostActivationPreview {
         lease: Arc<super::RuntimeLexicalScopeLease>,
-        registry: Arc<ImageRegistry>,
+        images: &'a super::prepared::NativeImageBundle,
     },
 }
 
@@ -6156,7 +6156,7 @@ where
             Some(mounted.handle),
             PreparedExecutionPurpose::HostActivationPreview {
                 lease: admission.scope_lease.clone(),
-                registry: images.registry.clone(),
+                images,
             },
             provenance,
         )
@@ -6214,24 +6214,26 @@ where
         code: TurnCode<'_>,
         mode: PreparedTurnMode<'_>,
         argument: Option<PreparedHandle>,
-        purpose: PreparedExecutionPurpose,
+        purpose: PreparedExecutionPurpose<'_>,
         provenance: Arc<ProgramProvenance>,
     ) -> Result<ResidentOutcome, ResidentError> {
-        let (checked, lexical_scope, _execution_scope_lease, image_registry) = match purpose {
+        let (checked, lexical_scope, _execution_scope_lease, retained_images) = match purpose {
             PreparedExecutionPurpose::Authored(checked) => {
                 (checked, self.run_context.lexical_scope, None, None)
             }
-            PreparedExecutionPurpose::HostActivationPreview { lease, registry } => {
+            PreparedExecutionPurpose::HostActivationPreview { lease, images } => {
                 self.state
                     .validate_lexical_scope_lease(lease.scope(), &lease)?;
                 let scope = lease.scope();
-                (None, scope, Some(lease), Some(registry))
+                (None, scope, Some(lease), Some(images))
             }
         };
         let prepared = code.prepared.into_owned();
-        self.state
-            .merge_table(&code.table)
-            .map_err(ResidentError::TableCollision)?;
+        if retained_images.is_none() {
+            self.state
+                .merge_table(&code.table)
+                .map_err(ResidentError::TableCollision)?;
+        }
         if let PreparedTurnMode::Binding { generation, .. }
         | PreparedTurnMode::Projected { generation, .. } = &mode
         {
@@ -6241,11 +6243,12 @@ where
         // Preview source instances belong to its detached authority, so dropping
         // that lease releases them without changing the public source plane.
         let install_prepared_started = std::time::Instant::now();
-        let (program, source_keys) = self.install_turn_program_in_with_registry(
+        let (program, source_keys) = self.install_turn_program_in_with_images(
             lexical_scope,
             prepared,
             code.certification.as_ref().as_ref(),
-            image_registry.as_deref(),
+            retained_images,
+            retained_images.map(|_| &code.table),
         )?;
         timing::record_stage(
             timing::NO_NODE,
@@ -6308,15 +6311,16 @@ where
         ),
         ResidentError,
     > {
-        self.install_turn_program_in_with_registry(lexical_scope, prepared, certification, None)
+        self.install_turn_program_in_with_images(lexical_scope, prepared, certification, None, None)
     }
 
-    fn install_turn_program_in_with_registry(
+    fn install_turn_program_in_with_images(
         &mut self,
         lexical_scope: ScopeId,
         prepared: PreparedProgram,
         certification: Option<&super::turn::TurnCertification>,
-        retained_registry: Option<&ImageRegistry>,
+        retained_images: Option<&super::prepared::NativeImageBundle>,
+        table: Option<&DataConTable>,
     ) -> Result<
         (
             ProgramId,
@@ -6328,12 +6332,22 @@ where
             let resolved =
                 self.state
                     .resolve_certification_in(lexical_scope, &prepared, certification)?;
-            let registry = self.state.certified_image_registry();
-            let (target, demanded) = super::prepared::CertifiedTargetImage::compile_scoped(
-                prepared,
-                &resolved,
-                retained_registry.unwrap_or(&registry),
-            )?;
+            let (target, demanded) = match retained_images {
+                Some(images) => super::prepared::CertifiedTargetImage::lookup_scoped(
+                    prepared, &resolved, images,
+                )?,
+                None => {
+                    let registry = self.state.certified_image_registry();
+                    super::prepared::CertifiedTargetImage::compile_scoped(
+                        prepared, &resolved, &registry,
+                    )?
+                }
+            };
+            if let Some(table) = table {
+                self.state
+                    .merge_table(table)
+                    .map_err(ResidentError::TableCollision)?;
+            }
             self.install_certified_turn_in(
                 lexical_scope,
                 target,
@@ -6344,6 +6358,14 @@ where
             )
             .map_err(Into::into)
         } else {
+            if retained_images.is_some() {
+                return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
+            }
+            if let Some(table) = table {
+                self.state
+                    .merge_table(table)
+                    .map_err(ResidentError::TableCollision)?;
+            }
             Ok((self.state.install_prepared(prepared)?, Default::default()))
         }
     }
