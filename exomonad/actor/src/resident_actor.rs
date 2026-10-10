@@ -12696,6 +12696,54 @@ where
             let mut retained_errors = invocation_cleanup.into_iter().flatten().collect::<Vec<_>>();
             retained_errors.extend(provider_cleanup_errors);
             self.pending_program.take();
+            // Checkpoint retirement contributes to the same retained cleanup
+            // outcome and deadline as the actor's other machine resources.
+            // Published captures remain independently owned by their holders.
+            self.environment
+                .actor_admissions
+                .fail_issuer_checkpoints(context.actor);
+            let session = context.placement.session;
+            let pending_releases = self
+                .environment
+                .actor_admissions
+                .pending_release_scopes(session);
+            let checkpoint_scopes = self
+                .environment
+                .actor_admissions
+                .failed_checkpoint_scopes(context.actor)
+                .into_iter()
+                .filter_map(|(owner, scope)| (owner == session).then_some(scope))
+                .chain(pending_releases.iter().map(|(_, scope)| *scope))
+                .collect::<Vec<_>>();
+            if !checkpoint_scopes.is_empty() {
+                match tokio::time::timeout_at(
+                    deadline,
+                    self.environment
+                        .runner
+                        .retire_checkpoint_scopes(session, checkpoint_scopes),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {
+                        for (token, scope) in pending_releases {
+                            if let Err(error) = self
+                                .environment
+                                .actor_admissions
+                                .confirm_checkpoint_release(&token, session, scope)
+                            {
+                                retained_errors.push(format!(
+                                    "checkpoint release confirmation failed: {error:?}"
+                                ));
+                            }
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        retained_errors.push(format!("checkpoint cleanup: {error}"));
+                    }
+                    Err(_) => retained_errors
+                        .push("checkpoint cleanup remains pending at actor retirement".into()),
+                }
+            }
             if let Some(suspended) = self.suspended_cast.take() {
                 if let Err(error) = self
                     .environment
@@ -12777,54 +12825,6 @@ where
             self.publish_watch_notifications(notifications).await;
             self.publish_retired(kernel.identity(), terminal.clone());
             let session = self.descriptor.placement().session;
-            let failed_scopes = self
-                .environment
-                .actor_admissions
-                .failed_checkpoint_scopes(kernel.identity());
-            if let Err(error) = self
-                .environment
-                .runner
-                .retire_checkpoint_scopes(
-                    session,
-                    failed_scopes
-                        .into_iter()
-                        .filter_map(|(owner, scope)| (owner == session).then_some(scope))
-                        .collect(),
-                )
-                .await
-            {
-                tracing::warn!(actor = ?kernel.identity(), %error, "failed checkpoint scope cleanup was retained");
-            }
-            let pending_releases = self
-                .environment
-                .actor_admissions
-                .pending_release_scopes(session);
-            if !pending_releases.is_empty() {
-                match self
-                    .environment
-                    .runner
-                    .retire_checkpoint_scopes(
-                        session,
-                        pending_releases.iter().map(|(_, scope)| *scope).collect(),
-                    )
-                    .await
-                {
-                    Ok(()) => {
-                        for (token, scope) in pending_releases {
-                            if let Err(error) = self
-                                .environment
-                                .actor_admissions
-                                .confirm_checkpoint_release(&token, session, scope)
-                            {
-                                tracing::warn!(actor = ?kernel.identity(), ?error, "checkpoint release confirmation failed");
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(actor = ?kernel.identity(), %error, "checkpoint release cleanup was retained");
-                    }
-                }
-            }
             self.release_session_state();
             // A live actor or published checkpoint keeps the issuing machine
             // available after this actor's terminal record is written.
