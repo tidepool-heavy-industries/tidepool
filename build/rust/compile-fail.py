@@ -46,10 +46,19 @@ def check_refusal(result, expected):
         raise ValueError("type refusal has no matching primary source span")
 
 
+def compiler_command(inputs):
+    command = inputs.get("rustc_command")
+    if (not isinstance(command, list) or not command
+            or any(not isinstance(argument, str) or not argument for argument in command)):
+        raise ValueError("declared rustc command must be a non-empty argument vector")
+    return command
+
+
 def run_action(args):
     output = args.output
     output.mkdir(parents=True, exist_ok=False)
     inputs = json.loads(args.inputs.read_text())
+    rustc = compiler_command(inputs)
     with tempfile.TemporaryDirectory(prefix="metadata-", dir=output) as scratch:
         metadata = Path(scratch)
         for index, item in enumerate(inputs["transitive"]):
@@ -59,7 +68,7 @@ def run_action(args):
                 raise ValueError(f"invalid declared crate identity {crate!r}")
             artifact = Path(item["artifact"]).resolve(strict=True)
             (metadata / f"lib{crate}-{index}{artifact.suffix}").symlink_to(artifact)
-        common = [args.rustc, "--edition", args.edition, "--emit=metadata",
+        common = [*rustc, "--edition", args.edition, "--emit=metadata",
                   "--error-format=json", "-L", f"dependency={metadata}"]
         for alias, artifact in inputs["direct"].items():
             common.extend(["--extern", f"{alias}={artifact}"])
@@ -96,7 +105,6 @@ def verify(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--verify", type=Path)
-    parser.add_argument("--rustc")
     for name in ("inputs", "control", "source", "expected", "output"):
         parser.add_argument("--" + name, type=Path)
     parser.add_argument("--edition", default="2021")
@@ -104,9 +112,9 @@ def main():
     if args.verify:
         verify(args.verify)
     else:
-        if not args.rustc or any(getattr(args, name) is None for name in
+        if any(getattr(args, name) is None for name in
             ("inputs", "control", "source", "expected", "output")):
-            parser.error("compile action requires rustc, declared inputs, control, source, expected and output")
+            parser.error("compile action requires declared compiler inputs, control, source, expected and output")
         run_action(args)
 
 
