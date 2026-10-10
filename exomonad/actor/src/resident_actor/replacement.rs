@@ -361,15 +361,18 @@ where
         if descriptor.placement().session != self.descriptor.placement().session
             && !self.environment.runner.supports_child_sessions()
         {
-            let lexical_scope = self
+            let placement = self
                 .environment
                 .runner
-                .mint_lexical_scope(self.descriptor.placement().session)
+                .provision_fallback_scope(
+                    descriptor.placement(),
+                    self.descriptor.placement().session,
+                    candidate.placement.clone(),
+                )
                 .await?;
             descriptor = descriptor
-                .with_session(self.descriptor.placement().session)
-                .with_lexical_scope(lexical_scope);
-            candidate.placement.provisioned(descriptor.placement());
+                .with_session(placement.session)
+                .with_lexical_scope(placement.lexical_scope);
         } else if descriptor.placement().session != self.descriptor.placement().session {
             let lexical_scope = self
                 .environment

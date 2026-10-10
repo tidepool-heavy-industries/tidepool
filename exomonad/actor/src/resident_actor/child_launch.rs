@@ -16,7 +16,7 @@ enum ChildPlacementPhase {
 /// Exactly one owner may reclaim a launch placement. Startup transfers it
 /// before native actor initialization; terminal observation cannot take it back.
 #[derive(Clone)]
-pub(super) struct ChildPlacementCustody(
+pub(crate) struct ChildPlacementCustody(
     Arc<Mutex<ChildPlacementPhase>>,
     Arc<std::sync::atomic::AtomicBool>,
 );
@@ -95,6 +95,34 @@ impl ChildPlacementCustody {
             "only a reserved placement may acquire native startup custody"
         );
         *phase = ChildPlacementPhase::Prepared(placement);
+    }
+
+    pub(crate) fn provision_fallback_with(
+        &self,
+        expected: crate::ActorPlacement,
+        session: tidepool_repr::SessionId,
+        mint: impl FnOnce() -> tidepool_codegen::scope::ScopeId,
+    ) -> Result<crate::ActorPlacement, String> {
+        let mut phase = self.0.lock();
+        let matches_placeholder = matches!(
+            *phase,
+            ChildPlacementPhase::Reserved(placement) | ChildPlacementPhase::Prepared(placement)
+                if placement == expected
+        ) && expected.session != session
+            && expected.lexical_scope == tidepool_codegen::scope::ScopeId::ROOT;
+        if !matches_placeholder || !self.1.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("fallback placement is no longer owned by startup admission".into());
+        }
+        // Cancellation may close admission while minting. Reclamation takes
+        // this same lock and therefore observes the actual scope before it can
+        // release the reservation. Dropping the native result cannot lose it.
+        let placement = crate::ActorPlacement {
+            session,
+            lexical_scope: mint(),
+            ..expected
+        };
+        *phase = ChildPlacementPhase::Prepared(placement);
+        Ok(placement)
     }
 
     fn update(&self, placement: crate::ActorPlacement) {
@@ -454,23 +482,17 @@ where
         if descriptor.placement().session != context.placement.session
             && !environment.runner.supports_child_sessions()
         {
-            // Eligible, but this host never installed a child-session
-            // factory/bootstrap program (`ResidentActorRunner::supports_child_sessions`)
-            // — fall back to the launching session, rather than failing an
-            // otherwise-ordinary fork over a capability nothing asked for.
-            // `capture_decoded` minted no real lexical scope for this
-            // (eligible) launch, only a placeholder; mint the actual one
-            // here, on the session this actor is actually falling back to.
-            let lexical_scope = environment
+            let placement = environment
                 .runner
-                .mint_lexical_scope(context.placement.session)
+                .provision_fallback_scope(
+                    descriptor.placement(),
+                    context.placement.session,
+                    continuation.placement_custody.clone(),
+                )
                 .await?;
             descriptor = descriptor
-                .with_session(context.placement.session)
-                .with_lexical_scope(lexical_scope);
-            continuation
-                .placement_custody
-                .update(descriptor.placement());
+                .with_session(placement.session)
+                .with_lexical_scope(placement.lexical_scope);
         } else if descriptor.placement().session != context.placement.session {
             let child_session = descriptor.placement().session;
             let lexical_scope = environment

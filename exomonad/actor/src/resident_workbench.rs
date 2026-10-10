@@ -10820,21 +10820,27 @@ where
             .await
     }
 
-    /// Mint a fresh, isolated lexical scope on `session_id`'s own scope
-    /// forest, alone — for a launch `child_session_eligibility` marked
-    /// eligible (so `capture_decoded` minted it no real scope, only a
-    /// placeholder) but whose host offers no dedicated-machine primitive
-    /// (`Self::supports_child_sessions` false): it falls back to running on
-    /// the launching session, which still needs an actual scope of its own,
-    /// same as any other launch there.
-    pub(crate) async fn mint_lexical_scope(
+    /// Materialize a shared fallback and publish its cleanup custody in the
+    /// same native checkout. The awaiting launch need not survive publication.
+    pub(crate) async fn provision_fallback_scope(
         &self,
+        expected: crate::ActorPlacement,
         session_id: tidepool_repr::SessionId,
-    ) -> Result<tidepool_codegen::scope::ScopeId, ResidentActorWorkbenchError> {
+        custody: crate::resident_actor::child_launch::ChildPlacementCustody,
+    ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
         self.access
-            .with_host_machine("mint-lexical-scope", session_id, None, move |session, _| {
-                Ok(session.mint_isolated_scope())
-            })
+            .with_host_machine(
+                "provision-fallback-scope",
+                session_id,
+                None,
+                move |session, _| {
+                    custody
+                        .provision_fallback_with(expected, session_id, || {
+                            session.mint_isolated_scope()
+                        })
+                        .map_err(ResidentActorWorkbenchError::ActorProtocol)
+                },
+            )
             .await
     }
 
