@@ -58,3 +58,8 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   runtime candidate publication. Schema 4 keeps original source paths and
   proofs unchanged; product references resolve under the opened catalog's
   canonical parent. Source retention remains the qualification owner's job.
+- Runtime retained entries may borrow only the admitted deployment catalog.
+  Persist dependencies from the certified borrowed-original roles and exact
+  native/group selection. Identity-equal freshly produced bytes remain owned
+  by the entry. Reopening authenticates that selection against its retained
+  catalog; available inventory cannot choose dependencies or replay source.
