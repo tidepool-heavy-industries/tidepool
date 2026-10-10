@@ -4885,8 +4885,7 @@ mod tests {
         Arc,
     };
 
-    #[test]
-    fn captured_value_reattachment_preserves_custody_without_selecting_unused_epoch() {
+    fn check_captured_value_epoch_reattachment(demands_epoch: bool) {
         use super::*;
         let producer = [2; 32];
         let epoch = |version| {
@@ -4928,7 +4927,12 @@ mod tests {
         ciborium::ser::into_writer(&packages, &mut encoded).unwrap();
         std::fs::write(path.with_extension("hi.packages"), encoded).unwrap();
         let mut encoded = vec![];
-        ciborium::ser::into_writer(&array([]), &mut encoded).unwrap();
+        let requirements = if demands_epoch {
+            array([array([text("fixture"), text("Epoch")])])
+        } else {
+            array([])
+        };
+        ciborium::ser::into_writer(&requirements, &mut encoded).unwrap();
         std::fs::write(path.with_extension("hi.requirements"), encoded).unwrap();
         let cell = ExactCheckedCell {
             specification: CheckedCellSpecification {
@@ -4964,22 +4968,35 @@ mod tests {
         let attached = child
             .as_ref()
             .clone()
-            .extend_retained_value_artifacts(std::slice::from_ref(&captured))
-            .unwrap();
-        assert!(attached
-            .artifact_view()
-            .descriptors()
-            .iter()
-            .any(|row| row.owner.module == owner.module_name()));
-        assert!(captured
-            .compiler_input_projection()
-            .roles()
-            .iter()
-            .all(|role| !epoch_ids.contains(&role.interface())));
+            .extend_retained_value_artifacts(std::slice::from_ref(&captured));
+        if demands_epoch {
+            assert!(
+                matches!(attached, Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, crate::artifact_inventory::ArtifactInventoryFailure::OwnerConflict { .. }))
+            );
+        } else {
+            let attached = attached.unwrap();
+            assert!(attached
+                .artifact_view()
+                .descriptors()
+                .iter()
+                .any(|row| row.owner.module == owner.module_name()));
+            assert!(captured
+                .compiler_input_projection()
+                .roles()
+                .iter()
+                .all(|role| !epoch_ids.contains(&role.interface())));
+        }
         let custody = captured.artifact_view().artifact_ids();
         drop(cell);
         drop(original);
         assert_eq!(captured.artifact_view().artifact_ids(), custody);
+    }
+
+    #[test]
+    fn captured_value_reattachment_preserves_custody_without_selecting_unused_epoch() {
+        check_captured_value_epoch_reattachment(false);
+        check_captured_value_epoch_reattachment(true);
     }
 
     fn signature_codec_fixture() -> ciborium::Value {
