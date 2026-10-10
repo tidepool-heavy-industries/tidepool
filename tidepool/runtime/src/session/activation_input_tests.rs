@@ -2808,8 +2808,10 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
             compiled.admission.scope_lease.scope(),
             compiled.renderer.compiled.prepared.as_ref().clone(),
             compiled.renderer.compiled.certification.as_ref(),
-            Some(&incomplete),
-            Some(&compiled.renderer.compiled.table),
+            TurnImageAcquisition::Ready {
+                bundle: &incomplete,
+                table: &compiled.renderer.compiled.table,
+            },
         );
         assert!(
             matches!(

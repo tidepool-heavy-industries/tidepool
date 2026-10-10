@@ -2056,6 +2056,14 @@ enum PreparedExecutionPurpose<'a> {
     },
 }
 
+enum TurnImageAcquisition<'a> {
+    Compile,
+    Ready {
+        bundle: &'a super::prepared::NativeImageBundle,
+        table: &'a DataConTable,
+    },
+}
+
 fn checked_turn_plan(
     certification: &Option<super::turn::TurnCertification>,
     prepared: &PreparedProgram,
@@ -6247,8 +6255,13 @@ where
             lexical_scope,
             prepared,
             code.certification.as_ref().as_ref(),
-            retained_images,
-            retained_images.map(|_| code.table.as_ref()),
+            match retained_images {
+                Some(bundle) => TurnImageAcquisition::Ready {
+                    bundle,
+                    table: code.table.as_ref(),
+                },
+                None => TurnImageAcquisition::Compile,
+            },
         )?;
         timing::record_stage(
             timing::NO_NODE,
@@ -6311,7 +6324,12 @@ where
         ),
         ResidentError,
     > {
-        self.install_turn_program_in_with_images(lexical_scope, prepared, certification, None, None)
+        self.install_turn_program_in_with_images(
+            lexical_scope,
+            prepared,
+            certification,
+            TurnImageAcquisition::Compile,
+        )
     }
 
     fn install_turn_program_in_with_images(
@@ -6319,8 +6337,7 @@ where
         lexical_scope: ScopeId,
         prepared: PreparedProgram,
         certification: Option<&super::turn::TurnCertification>,
-        retained_images: Option<&super::prepared::NativeImageBundle>,
-        table: Option<&DataConTable>,
+        images: TurnImageAcquisition<'_>,
     ) -> Result<
         (
             ProgramId,
@@ -6332,18 +6349,20 @@ where
             let resolved =
                 self.state
                     .resolve_certification_in(lexical_scope, &prepared, certification)?;
-            let (target, demanded) = match retained_images {
-                Some(images) => super::prepared::CertifiedTargetImage::lookup_scoped(
-                    prepared, &resolved, images,
-                )?,
-                None => {
+            let (target, demanded) = match &images {
+                TurnImageAcquisition::Ready { bundle, .. } => {
+                    super::prepared::CertifiedTargetImage::lookup_scoped(
+                        prepared, &resolved, bundle,
+                    )?
+                }
+                TurnImageAcquisition::Compile => {
                     let registry = self.state.certified_image_registry();
                     super::prepared::CertifiedTargetImage::compile_scoped(
                         prepared, &resolved, &registry,
                     )?
                 }
             };
-            if let Some(table) = table {
+            if let TurnImageAcquisition::Ready { table, .. } = images {
                 self.state
                     .merge_table(table)
                     .map_err(ResidentError::TableCollision)?;
@@ -6358,13 +6377,8 @@ where
             )
             .map_err(Into::into)
         } else {
-            if retained_images.is_some() {
+            if matches!(images, TurnImageAcquisition::Ready { .. }) {
                 return Err(PreparedRuntimeError::CertifiedTargetOwners.into());
-            }
-            if let Some(table) = table {
-                self.state
-                    .merge_table(table)
-                    .map_err(ResidentError::TableCollision)?;
             }
             Ok((self.state.install_prepared(prepared)?, Default::default()))
         }
