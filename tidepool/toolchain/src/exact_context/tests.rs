@@ -75,6 +75,47 @@ fn unchanged_snapshot_stages_no_blocks_or_entries() {
 }
 
 #[test]
+fn materialization_metrics_account_for_existing_cid_reuse_and_validation() {
+    let store = MemoryBlockstore::new();
+    let value = (42u64, "immutable leaf");
+    let encoded = fvm_ipld_encoding::to_vec(&value).unwrap();
+    let bytes = encoded.len() as u64;
+    let mut materializer = Materializer::new(&store);
+    let cid = materializer.materialize_value(&value).unwrap();
+    let packet = materializer.finish().unwrap();
+    assert_eq!(
+        packet.metrics(),
+        MaterializationMetrics {
+            blocks: 1,
+            staged_bytes: bytes,
+            offered_bytes: bytes,
+            serialized_bytes: bytes,
+            cid_validation_bytes: bytes,
+            changed_entries: 0,
+        }
+    );
+    install(&store, packet);
+
+    let mut materializer = Materializer::new(&store);
+    assert_eq!(materializer.materialize_value(&value).unwrap(), cid);
+    assert_eq!(materializer.get(&cid).unwrap().unwrap(), encoded);
+    // An already encoded immutable leaf is offered separately; it does not
+    // increment the value serializer's counter.
+    materializer.put_keyed(&cid, &encoded).unwrap();
+    assert_eq!(
+        materializer.finish().unwrap().metrics(),
+        MaterializationMetrics {
+            blocks: 0,
+            staged_bytes: 0,
+            offered_bytes: 2 * bytes,
+            serialized_bytes: bytes,
+            cid_validation_bytes: 5 * bytes,
+            changed_entries: 0,
+        }
+    );
+}
+
+#[test]
 fn small_edit_does_not_encode_history_and_tampering_is_refused() {
     let store = MemoryBlockstore::new();
     let base: OrdMap<u64, u64> = (0u64..4096).map(|key| (key, key)).collect();
@@ -82,6 +123,7 @@ fn small_edit_does_not_encode_history_and_tampering_is_refused() {
     let root = materializer.materialize_map(None, &base).unwrap();
     let baseline = materializer.finish().unwrap();
     let baseline_bytes = baseline.metrics().staged_bytes;
+    let baseline_offered = baseline.metrics().offered_bytes;
     install(&store, baseline);
     let mut next = base.clone();
     next.insert(2000u64, 9999u64);
@@ -90,6 +132,7 @@ fn small_edit_does_not_encode_history_and_tampering_is_refused() {
     let packet = materializer.finish().unwrap();
     assert_eq!(packet.metrics().changed_entries, 1);
     assert!(packet.metrics().staged_bytes < baseline_bytes / 8);
+    assert!(packet.metrics().offered_bytes < baseline_offered / 8);
     assert!(packet.metrics().blocks < 12);
     eprintln!(
         "4096 facts: baseline_bytes={baseline_bytes}, edit={:?}",

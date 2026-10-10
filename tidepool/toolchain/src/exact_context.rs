@@ -1,7 +1,7 @@
 //! Immutable exact snapshots. Resident maps retain structural sharing; the
 //! operation-local materializer applies their library diff to FVM HAMTs.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -148,6 +148,15 @@ pub fn read_value<T: DeserializeOwned, BS: Blockstore>(
 pub struct MaterializationMetrics {
     pub blocks: u64,
     pub staged_bytes: u64,
+    /// All bytes offered to this materializer's block writer, including
+    /// previously encoded leaves and blocks whose CID already exists.
+    pub offered_bytes: u64,
+    /// Output bytes encoded by `materialize_value`. Library HAMT/key encoding
+    /// and immutable leaf encoders execute outside this counter.
+    pub serialized_bytes: u64,
+    /// Bytes authenticated by this materializer, including existing block
+    /// reads and reuse checks. CID construction is a separate hash operation.
+    pub cid_validation_bytes: u64,
     pub changed_entries: u64,
 }
 
@@ -178,6 +187,9 @@ pub struct Materializer<'a, BS: Blockstore> {
     base: &'a BS,
     pending: MemoryBlockstore,
     changed_entries: u64,
+    offered_bytes: Cell<u64>,
+    serialized_bytes: Cell<u64>,
+    cid_validation_bytes: Cell<u64>,
     selection_base: Option<MaterializedSelection>,
 }
 
@@ -187,12 +199,16 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
             base,
             pending: MemoryBlockstore::new(),
             changed_entries: 0,
+            offered_bytes: Cell::new(0),
+            serialized_bytes: Cell::new(0),
+            cid_validation_bytes: Cell::new(0),
             selection_base: None,
         }
     }
 
     pub fn materialize_value<T: Serialize>(&mut self, value: &T) -> Result<Cid, SnapshotError> {
         let bytes = fvm_ipld_encoding::to_vec(value).map_err(malformed)?;
+        add_bytes(&self.serialized_bytes, bytes.len());
         let cid = Cid::new_v1(DAG_CBOR, Code::Blake2b256.digest(&bytes));
         self.put_keyed(&cid, &bytes).map_err(storage_error)?;
         Ok(cid)
@@ -285,6 +301,9 @@ impl<'a, BS: Blockstore> Materializer<'a, BS> {
         let metrics = MaterializationMetrics {
             blocks: blocks.len() as u64,
             staged_bytes: blocks.iter().map(|(_, bytes)| bytes.len() as u64).sum(),
+            offered_bytes: self.offered_bytes.get(),
+            serialized_bytes: self.serialized_bytes.get(),
+            cid_validation_bytes: self.cid_validation_bytes.get(),
             changed_entries: self.changed_entries,
         };
         Ok(StagedBlocks { blocks, metrics })
@@ -295,19 +314,35 @@ impl<BS: Blockstore> Blockstore for Materializer<'_, BS> {
     fn get(&self, cid: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
         match self.pending.get(cid)? {
             Some(bytes) => Ok(Some(bytes)),
-            None => CheckedStore(self.base).get(cid),
+            None => {
+                let bytes = self
+                    .base
+                    .get(cid)
+                    .map_err(storage_error)?
+                    .ok_or(SnapshotError::MissingBlock(*cid))?;
+                add_bytes(&self.cid_validation_bytes, bytes.len());
+                verify_block(cid, &bytes)?;
+                Ok(Some(bytes))
+            }
         }
     }
 
     fn put_keyed(&self, cid: &Cid, bytes: &[u8]) -> anyhow::Result<()> {
+        add_bytes(&self.offered_bytes, bytes.len());
+        add_bytes(&self.cid_validation_bytes, bytes.len());
         verify_block(cid, bytes)?;
         if let Some(existing) = self.base.get(cid).map_err(storage_error)? {
+            add_bytes(&self.cid_validation_bytes, existing.len());
             verify_block(cid, &existing)?;
             return Ok(());
         }
         self.pending.put_keyed(cid, bytes).map_err(storage_error)?;
         Ok(())
     }
+}
+
+fn add_bytes(counter: &Cell<u64>, bytes: usize) {
+    counter.set(counter.get().saturating_add(bytes as u64));
 }
 
 /// A structurally authenticated root and its actual immutable resident facts.
