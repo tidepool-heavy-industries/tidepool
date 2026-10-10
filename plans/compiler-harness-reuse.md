@@ -1,109 +1,120 @@
-# Compiler and harness reuse delivery
+# Retained originals through the harness
 
-## Contract
+## Accepted contract
 
-Implement the accepted architectural performance wave from main `5214926046`.
-The successful M3 reference is source `543284694b`: 244.18 seconds, 145.817
-seconds of physical compiler service, no recorded queue wait, fast-dev profile.
-Evidence: `/srv/swarm/evidence/inanna/unified-hardening-20261008/m3-recursive-543284/`.
-These timings are not production-profile results or additive phase budgets.
+Implement from `581db1bc1158f8e306b6cc9dfc26c74709a85ac1`. Its exact fast-dev
+bundle passed M1 1/1, M2 9/9, recursive M3 2/2 and prepared-child 2/2. Acceptance
+is specific to its descriptor and executed reports; new source requires a new
+matched bundle. Preserve the existing human-driven server throughout this wave.
 
-Requests compile against captured admitted original bytes. Current-source
-selection and terminal publication retain fresh drift checks. Exact nominal
-identities, selected versus available artifacts, executable ABI validation,
-cancellation settlement and independent captures remain mandatory.
+Captured originals are reusable across cells until their owner releases them or
+reload selects a new owner. New acquisition authenticates files. Current source
+selection, ordered imports, negative witnesses, package selection and terminal
+publication checks remain fresh. Reuse grants no new lexical, instance or
+executable authority. Worker replacement rehydrates from captured originals,
+never substitutes current source or replays an uncertain compilation.
 
-## Parcels and interfaces
+## Implementation ownership
 
-1. **Captured request inputs.** Opaque input owner retains bounded bytes,
-   certificates, native census, dependency graphs and exact indexes. Capture
-   once, decode on demand, authenticate additions through typed immutable scope
-   extension. Hide unrestricted ExactScope construction. Default aggregate
-   captured-byte allowance is 4 GiB, configurable and accounted separately
-   from decoded memory. Reuse withCapturedIface for GHC path readers; keep
-   disposable make inputs separate. Decode Core from captured bytes. Never
-   cache request scratch paths. Fresh environment package selection and terminal
-   source/input/negative-resolution checks remain; intermediate stages consume
-   the admitted snapshot rather than reopening originals.
-2. **Component recovery.** Retain an exact defining-context handle with each
-   prepared unit instead of repeatedly merging complete entry maps. Bind it to
-   original version, interface, retained context and preparation dependencies.
-   Then implement one completion pump on the existing bounded executor, with
-   explicit queued/running/completed/failed component states. Integrate pure
-   facts once. Constructor workers have one exact arena. Site-batch replacement
-   advances an epoch and recomputes reachability; do not union stale facts.
-   Component-backed projection feeds actual original-package demand into the
-   same worklist. Flatten only after closure stabilizes. Preserve final ABI and
-   duplicate checks, CorePrep-introduced references and cancellation teardown.
-3. **Built-in startup.** Separate notebook imports from installer selection.
-   Package the two existing built-in policies for the standard ordered effect
-   row through the existing bundle/catalog/entry producer. Typed selection is
-   packaged built-in versus workspace original; explicit live specs remain
-   separate. Authored overrides and unmatched rows retain their normal path.
-   Return validated ProductionEntryOutput after successful rename and fsync;
-   uncertain publication never recompiles. Immediate prepare/start carries
-   immutable PreparedSourceEntry/images, never machine/dispatcher state.
-4. **Declaration checks.** One exact-name-indexed inventory per context and
-   class-bucket consistency checking; retain current overlap, fundep, family
-   and associated-axiom semantics. Independent exhaustive oracle stays in tests.
-5. **Publication.** Explicit ReusedProjection/NewJoin evidence. Reuse requires
-   complete PublicVisibilitySnapshot, final private projection, exact exports,
-   instances, families and native owners to match. Preserve nominal projection
-   identity, publish a detached durable summary at the logical generation, and
-   retain existing atomic commit/cancellation/stale-generation arbitration.
-   Binding overlays not represented in the projection use NewJoin. Carry live
-   public-state facts through the owning session; rerecover on attach/reopen/
-   transfer/graph replacement, retaining manifest and artifact observations.
-6. **Acceptance correctness.** Join observer Console fix, repair the checkpoint
-   fixture's contradictory stopped/live premise, and reconcile hosted owner
-   liveness through one shutdown completion owner. Actual cleanup must remain
-   independently confirmed. Current component passes do not certify frozen M2.
-7. **Measurement.** Same production HTTP/Harness/actor/compiler route with only
-   provider responses scripted. Compare first preparation, immediate launch,
-   fresh-process durable launch, and first/repeated notebook calls. Repair
-   diagnostic/request correlation. Count unique bytes, component work, assembly,
-   declaration checks, ready width and coordinator time; account for diagnostic
-   overhead separately. Matched profiles/producers and three final repetitions.
+1. **Acquired catalog.** Retain the acquired `DeploymentModulePackage` in
+   `FrozenWorkspace`, session compiler configuration and admissions. Remove the
+   global acquisition mutex. Offers borrow typed static records and original
+   bytes while checking current selection. Materialize compiler files once
+   through existing artifact owners; carry leases into detached captures,
+   child results and transaction closure. Standalone invocation acquires afresh
+   unless supplied an explicit retained owner. Build-action producers remain
+   isolated. Keep deployment ownership outside request-specific annotations.
+2. **Worker inputs.** Split path-free captured content from each receiving
+   request's selection, byte allowance and observation obligations. Add explicit
+   fresh acquisition versus continuation input modes. Host input images project
+   existing certified payloads and stable materializations, not another byte
+   store. Extend the compiler universe's original-version owner with shared
+   content and decoded facts separately from contextual completed variants.
+   Name-bearing decoding stays scoped to its actual NameCache owner; HscEnv,
+   instance selection and interpreter epochs remain contextual. Discard old
+   request envelope/scratch observations, retaining required original and
+   current alias observations. Bound inactive retention, pin live inputs, charge
+   receiving budgets on hits, and measure encoded/decoded residency and rotation.
+3. **Linked workspace entries.** Remove the blanket catalog-candidate ban for
+   runtime workspace preparation through an explicit catalog-only retained-entry
+   policy. Whole-result replay and ordinary runtime candidates remain excluded.
+   Schema 3 entries persist an exact dependency descriptor issued from
+   `SelectedOriginalClosure`/`CertifiedSourceSelection`, matched catalog identity
+   and original native/group dependencies. Fresh outputs remain entry-owned;
+   unchanged originals remain linked to the retained bundle/catalog. Reopening
+   authenticates that exact selection, never reconstructs it from inventories
+   or recompiles source. Preserve exclusive reservation, uncertain-publication
+   recovery, original source identities and one-time quotation execution.
+4. **Activation renderers.** Retain lazy specialization in
+   `OriginalExecutionContext`, propagated through capture and mount. Key by the
+   issued canonical witness and protected recipe/budget; context facts have one
+   owner. Split immutable renderer evidence from fresh affine invocation
+   admission. Mount under machine checkout, compile or wait outside checkout,
+   reacquire and validate to invoke. One producer settles native closure before
+   retry; sealed results survive consumer/parent failure. Preserve renderable,
+   opaque and unavailable-original-evidence distinctions. Never cache rendered
+   values. The first specialization may retain its existing two frontend phases.
+5. **Evidence and measurement.** Share dependency-evidence blobs through existing
+   schema-4 FileRefs. Authenticate once per exact path, rejecting conflicting
+   metadata; independently authenticate distinct paths. Integrate request
+   subscriber repair `bc57212c606cb68b184f595880e626badf46ebb3` and enable existing
+   candidate/artifact metadata events in the common campaign subscriber. Keep
+   content excluded. Extend the existing reporter only for residual gaps.
 
-## Delivery
-
-Each owner uses an isolated checkout, compiles affected production and test
-consumers early, and executes focused counted checks. No root-only build gate:
-coordinate actual shared checkout/output ownership and measured resource limits.
-Root owns integration and shared contracts. Use Sol 6.1 implementers and Luna
-for bounded inventories, documentation and generator audits. Preserve unrelated
-work, especially main's untracked test-source-boot/ and vendor/.
-
-The bounded context/handoff/index changes precede recovery/projection migration.
-Remove obsolete implementations and representation-only tests as consumers move.
-Do not retain a parallel compile frontend, cache owner or scheduler.
-
-Workspace selection migrates to v8, qualification descriptor to v3, and named
-source-entry snapshot metadata to v2. Rebuild/refreeze/reprepare; preserve old
-bundles with matching readers. Pointer v2, native catalog v4 and production-entry
-v2 remain unchanged where their contracts are unchanged.
+Root owns cross-language contracts and integration. Sol owners implement the
+catalog, worker, linked-entry and renderer changes in provisioned checkouts;
+Luna owns bounded evidence/telemetry changes and test inventories. Catalog and
+worker agree on image issuance before changing the wire; linked entries depend
+on the issued selection contract. Each owner compiles production and affected
+test consumers early and runs counted focused checks. Independent builds use
+measured peaks and host/cgroup headroom; there is no root-only build gate.
 
 ## Acceptance
 
-Rust proptest and Haskell QuickCheck histories use independent recomputation,
-shrinking and mutation calibration. Cover snapshot drift/extension, conflicting
-contexts, completion reordering, cycles, site replacement, cancellation and late
-completion, shadowing/retractions/concurrent publication, persistence faults,
-durable reopening, installer precedence and fresh mutable installations.
-Use current production constructors, not forged/version-pinned test packets.
+Extend maintained Rust proptest and Haskell QuickCheck component/cluster suites
+with independent models and real production issuance. Histories cover
+acquire/continue, growth/contraction, alias conflicts, same-length corruption,
+source and package shadowing, cancellation, eviction, rotation, reload, detached
+child survival and final release. Deleted previous-offer scratch must not
+poison a later request; deletion of a required current origin/alias must refuse.
+Fresh acquisition refuses changed files; continuation consumes captured bytes;
+persistent drift blocks publication. Test transient drift restored before
+publication under the explicit continuation contract.
 
-Structural gates: zero physical startup compilation for packaged installer/root;
-no repeated immutable input reconstruction per scope generation; no repeated
-unchanged pure preparation; no aggregate assembly on every recovery expansion;
-no duplicate join for an exactly reusable projection.
+Linked entries reopen in a fresh process through their exact catalog selection
+without source replay. Test missing or mismatched catalog/native dependencies,
+changed source and compiler identity, publication uncertainty and quotation
+execution exactly once. Keep cold preparation acceptance distinct from warm
+scenarios that reuse an immutable prepared fixture.
 
-After joined focused checks, freeze one matched bundle. Run M2 and M3 in parallel
-with separate owned services, workspaces and evidence directories; start with two
-M2 processes and one M3 process, subject to measured memory headroom. Independent
-corpus and performance gates need not delay that trial, but all required gates
-must pass before final release acceptance. Run M1, catalogue and cold/warm
-performance qualification from the same bundle. Compare 2/8/16
-compiler worker allowances using ready width, throughput and memory. Keep authored
-cells O0; report fast-dev and production separately. Publish source/artifact
-identities, counted evidence and durable Git acceptance annotation. Tenfold
-speedup is an ambition; only matched measurements establish the achieved result.
+Twenty distinguishable child values share one successful renderer specialization
+and retain twenty fresh mounts/admissions/replies. A waiting activation holds no
+machine checkout. Cover producer cancellation, parent failure, stale authority,
+nominal shadowing, changed instance environment, opaque/unavailable inputs and
+last-reference release. Semantic GHC cases complement synthetic lifecycle models.
+
+Restore complete request/service joins in actual scripted-provider harness
+workloads. Measure first preparation, activation, first usable call, repeats and
+child settlement separately; inclusive intervals are not additive. Compare
+matched fast-dev and production bundles, authored cells remaining O0, with three
+repetitions per compared profile and a trace-overhead control. Missing counters
+remain unknown, not zero. No worker-width sweep precedes evidence of contention.
+
+Structural gates: no catalog reacquisition per borrowed offer; no repeated input
+admission decoding for unchanged original content within a worker epoch; no
+unchanged compatible catalog-module rebuilding during entry preparation; and no
+renderer recompilation after completed specialization. Retained memory and
+cleanup remain bounded and observable.
+
+Freeze joined source and run M1, M2, recursive M3, prepared-child, catalog and
+affected corpus gates. Publish exact artifacts, descriptor/report hashes, counts
+and cleanup evidence with a durable Git acceptance annotation. Existing frozen
+bundles keep matching readers; new internal formats migrate together without
+silent compatibility fallbacks.
+
+## Follow-ups after cost decomposition
+
+Measure repeated instance-pair checks and clone/extend/discard context validation
+before broadening this wave. Retain their findings, but do not delay the three
+large ownership changes for an unmeasured redesign. More workers, SQLite tuning
+and generic output caching are not primary remedies for the observed serial cost.
