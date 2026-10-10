@@ -1286,8 +1286,7 @@ impl RecoveredArtifactInventory {
             inventory: restored,
             lexical,
         };
-        context.normalize()?;
-        Ok(context)
+        context.finish()
     }
 }
 
@@ -3206,8 +3205,7 @@ impl ExactCompilationRequest {
             .inventory
             .merge_selected(support, &compiler_projection)?;
         context.compiler_projection = compiler_projection;
-        context.normalize()?;
-        let context = Arc::new(context);
+        let context = Arc::new(context.finish()?);
         crate::timing::record_stage(
             crate::timing::NO_NODE,
             crate::timing::NO_ROUND,
@@ -4324,8 +4322,7 @@ impl ExactDeclarationContext {
         self.compiler_projection = self.compiler_projection.merge(&issued)?;
         self.lexical = lexical;
         self.original_instance_environment = OriginalInstanceEnvironment::Unknown;
-        self.normalize()?;
-        Ok(self)
+        self.finish()
     }
 
     /// Add issued joins and their selected lexical nodes without duplicating
@@ -4402,8 +4399,7 @@ impl ExactDeclarationContext {
             .admit_shared(&self.inventory, entries)?;
         let types = CompilerInputProjection::from_interface_view(&self.inventory)?;
         self.compiler_projection = self.compiler_projection.merge(&types)?.merge(&issued)?;
-        self.normalize()?;
-        Ok(self)
+        self.finish()
     }
 
     pub fn toolchain_identity_sha256(&self) -> [u8; 32] {
@@ -4437,8 +4433,7 @@ impl ExactDeclarationContext {
     ) -> Result<Self, CompileError> {
         projection.validate(&self.inventory)?;
         self.compiler_projection = projection;
-        self.normalize()?;
-        Ok(self)
+        self.finish()
     }
     pub(crate) fn compiler_metadata_snapshot(
         &self,
@@ -4464,8 +4459,7 @@ impl ExactDeclarationContext {
         self.compiler_projection = self
             .compiler_projection
             .merge(&CompilerInputProjection::from_interface_view(&interfaces)?)?;
-        self.normalize()?;
-        Ok(self)
+        self.finish()
     }
 
     /// Retain the interface evidence admitted by an original compiler proof.
@@ -4491,8 +4485,7 @@ impl ExactDeclarationContext {
         }
         context.inventory = interfaces;
         context.compiler_projection = projection;
-        context.normalize()?;
-        Ok(context)
+        context.finish()
     }
 
     /// Retain already authenticated original code owners and their original
@@ -4560,13 +4553,12 @@ impl ExactDeclarationContext {
         for node in &mut context.lexical {
             node.imports.retain(|owner| retained.contains(owner));
         }
-        context.normalize()?;
         context.original_instance_environment = if !missing.is_empty() {
             OriginalInstanceEnvironment::MissingOriginalOwners(missing)
         } else {
             OriginalInstanceEnvironment::Complete { target }
         };
-        Ok(context)
+        context.finish()
     }
 
     pub(crate) fn original_instance_environment(&self) -> &OriginalInstanceEnvironment {
@@ -4920,8 +4912,7 @@ impl ExactDeclarationContext {
         self.compiler_projection = self.compiler_projection.merge(&issued)?;
         self.lexical = lexical;
         self.original_instance_environment = OriginalInstanceEnvironment::Unknown;
-        self.normalize()?;
-        Ok(self)
+        self.finish()
     }
 
     pub(crate) fn extend_retained_value_artifacts(
@@ -4947,8 +4938,7 @@ impl ExactDeclarationContext {
         }
         self.lexical = compose_lexical_nodes(&lexical)?;
         self.original_instance_environment = OriginalInstanceEnvironment::Unknown;
-        self.normalize()?;
-        Ok(self)
+        self.finish()
     }
 
     pub(crate) fn retain_value_source_surface(
@@ -5292,6 +5282,16 @@ impl ExactDeclarationContext {
         }
         self.producer = producer;
         Ok(())
+    }
+
+    /// Finalize a context at its issuing boundary. Historical custody remains
+    /// complete; the compiler namespace contains exactly the issued roles.
+    fn finish(mut self) -> Result<Self, CompileError> {
+        self.inventory = self
+            .inventory
+            .with_compiler_projection(&self.compiler_projection)?;
+        self.normalize()?;
+        Ok(self)
     }
 
     fn normalize(&self) -> Result<(), CompileError> {
@@ -7556,6 +7556,19 @@ mod tests {
             .unwrap();
             assert_eq!(context.compiler_input_roles(), projection.roles());
             assert_eq!(context.artifact_view().artifact_ids(), view.artifact_ids());
+            assert_eq!(
+                context
+                    .artifact_view()
+                    .capture_graph_selection()
+                    .namespace
+                    .into_iter()
+                    .map(|binding| binding.artifact)
+                    .collect::<BTreeSet<_>>(),
+                issued_entries
+                    .iter()
+                    .map(|entry| entry.descriptor.id)
+                    .collect(),
+            );
             let missing = dependencies
                 .iter()
                 .enumerate()

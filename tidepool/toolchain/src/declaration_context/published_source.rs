@@ -271,7 +271,7 @@ impl ExactDeclarationContext {
                 }
             })
             .collect::<Vec<_>>();
-        Ok(Self {
+        Self {
             producer: self.producer,
             compiler_projection: CompilerInputProjection::restore(&inventory, &roles)?,
             inventory,
@@ -280,7 +280,8 @@ impl ExactDeclarationContext {
             // Checked values retain their own template custody in the caller's
             // context. A source publication carries its selected source graph.
             template_imports: None,
-        })
+        }
+        .finish()
     }
 
     pub(crate) fn issue_published_source_original(
@@ -333,9 +334,8 @@ impl ExactDeclarationContext {
             *selection_sha256 = digest;
         }
         context.compiler_projection.admit_role(root.clone(), role)?;
-        context.normalize()?;
         Ok(Arc::new(PublishedSourceOriginalSelection {
-            context: Arc::new(context),
+            context: Arc::new(context.finish()?),
             revision: revision.into(),
             public_root: root.clone(),
         }))
@@ -355,8 +355,7 @@ impl ExactDeclarationContext {
             .merge(&incoming.compiler_projection)?;
         self.inventory = self.inventory.merge(&incoming.inventory)?;
         self.lexical = lexical;
-        self.normalize()?;
-        Ok(self)
+        self.finish()
     }
 
     pub(super) fn published_scope_value(&self) -> Result<Value, CompileError> {
