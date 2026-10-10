@@ -641,6 +641,31 @@ impl TestCampaign {
         .await
     }
 
+    /// Drive setup concurrently with the native admission it must acknowledge.
+    /// Neither future outlives the campaign if the named operation times out.
+    pub async fn dispatch_native_spawn_setup(
+        &mut self,
+        what: &str,
+        script: &str,
+        limit: Duration,
+    ) -> (serde_json::Value, exomonad_actor::LocalResidentInstallation) {
+        let policy = self.root_installation.policy.clone();
+        tokio::time::timeout(limit, async {
+            tokio::join!(dispatch_haskell_script(policy.as_ref(), script), async {
+                let child = self
+                    .next_deployment(what, limit, |event| match event {
+                        LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                        other => Err(other),
+                    })
+                    .await;
+                self.acknowledge_native_spawn(&child);
+                child
+            })
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out after {limit:?} during {what}"))
+    }
+
     /// This campaign has no provider process. Acknowledge the exact spawn
     /// after its native policy and workspace attachment are installed.
     pub fn acknowledge_native_spawn(
@@ -943,6 +968,18 @@ pub(super) async fn dispatch_haskell_script(
     dispatch_haskell_script_result(endpoint, script)
         .await
         .unwrap_or_else(|error| panic!("Haskell script failed:\n{script}\n\n{error}"))
+}
+
+/// Bound a concrete script operation so campaign cleanup can report its failure.
+pub(super) async fn dispatch_haskell_script_with_deadline(
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    script: &str,
+    what: &str,
+    limit: Duration,
+) -> serde_json::Value {
+    tokio::time::timeout(limit, dispatch_haskell_script(endpoint, script))
+        .await
+        .unwrap_or_else(|_| panic!("timed out after {limit:?} during {what}"))
 }
 
 pub(super) async fn dispatch_haskell_script_result(

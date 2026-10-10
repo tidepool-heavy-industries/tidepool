@@ -1,5 +1,8 @@
 use super::display_output;
-use super::test_campaign::{committed_display_text, dispatch_haskell_script, TestCampaign};
+use super::test_campaign::{
+    committed_display_text, dispatch_haskell_script, dispatch_haskell_script_with_deadline,
+    TestCampaign, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+};
 use exomonad_actor::{ActorExitKind, ActorTerminal, LocalResidentDeployment};
 use std::time::Duration;
 
@@ -51,31 +54,35 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
         let root = campaign.root_installation.policy.clone();
         let root_id = campaign.actor.identity();
         let root_session = campaign.forest.actor_session(root_id).unwrap();
-        let setup = dispatch_haskell_script(root.as_ref(),
-            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/source_setup.hs")).await;
+        let (setup, producer) = campaign.dispatch_native_spawn_setup(
+            "source producer setup and native acknowledgement",
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/source_setup.hs"),
+            COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+        ).await;
         assert_eq!(setup["status"], "committed", "{setup}");
-        let producer = campaign.next_deployment("source producer admission", Duration::from_secs(120),
+        campaign.next_deployment("source producer typed activation", Duration::from_secs(120),
             |event| match event {
-                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == producer.actor.identity() => Ok(activation),
                 other => Err(other),
             }).await;
         assert_eq!(campaign.forest.actor_session(producer.actor.identity()), Some(root_session),
             "captured-context producer retains its issuing machine");
-        let first = dispatch_haskell_script(producer.policy.as_ref(),
-            "reportProgress (ProgressNote 1 (+ sessionInput))").await;
+        let first = dispatch_haskell_script_with_deadline(producer.policy.as_ref(),
+            "reportProgress (ProgressNote 1 (+ sessionInput))", "source first progress", COLD_DEBUG_CELL_SETTLEMENT_BUDGET).await;
         assert_eq!(first["status"], "committed", "{first}");
-        let installed = dispatch_haskell_script(root.as_ref(),
-            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/fresh_result_source_actor.hs")).await;
+        let installed = dispatch_haskell_script_with_deadline(root.as_ref(),
+            &tidepool_testing::fixture_source("bridge/facade/src/actor_host/fresh_result_source_actor.hs"), "source collector installation", COLD_DEBUG_CELL_SETTLEMENT_BUDGET).await;
         assert_eq!(installed["status"], "committed", "{installed}");
         let collector = campaign.forest.inspect_host_graph().into_iter()
             .find(|node| node.label == "ordered-source-collector").unwrap();
         let collector_session = campaign.forest.actor_session(collector.actor).unwrap();
         assert_ne!(collector_session, root_session, "source observation crosses actual machines");
-        let published = dispatch_haskell_script(producer.policy.as_ref(),
-            "reportProgress (ProgressNote 2 (* sessionInput))\nreportProgress (ProgressNote 3 (subtract sessionInput))\nrespond (42 :: Int)").await;
+        let published = dispatch_haskell_script_with_deadline(producer.policy.as_ref(),
+            "reportProgress (ProgressNote 2 (* sessionInput))\nreportProgress (ProgressNote 3 (subtract sessionInput))\nrespond (42 :: Int)", "source remaining progress and result", COLD_DEBUG_CELL_SETTLEMENT_BUDGET).await;
         assert_eq!(published["status"], "replied", "{published}");
-        let settled = dispatch_haskell_script(root.as_ref(),
-            "settled <- watch (Just \"fresh-source-result\") (result answer)").await;
+        let settled = dispatch_haskell_script_with_deadline(root.as_ref(),
+            "settled <- watch (Just \"fresh-source-result\") (result answer)", "source settlement watch", COLD_DEBUG_CELL_SETTLEMENT_BUDGET).await;
         assert_eq!(settled["status"], "committed", "{settled}");
         campaign.next_deployment("source settlement is ready", Duration::from_secs(120),
             |event| match event {
@@ -85,7 +92,7 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
                 }
                 other => Err(other),
             }).await;
-        let drained = dispatch_haskell_script(root.as_ref(), "drainActor collector").await;
+        let drained = dispatch_haskell_script_with_deadline(root.as_ref(), "drainActor collector", "source collector drain", COLD_DEBUG_CELL_SETTLEMENT_BUDGET).await;
         assert_eq!(drained["status"], "committed", "{drained}");
         campaign.next_deployment("source collector retirement", Duration::from_secs(120),
             |event| match event {
@@ -95,8 +102,8 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
         assert_eq!(campaign.forest.session_state_of(collector_session),
             tidepool_runtime::session::ResidentSessionState::Gone);
         let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
-        let collected = campaign.drive_actor_output(&store, dispatch_haskell_script(root.as_ref(),
-            "collected <- awaitExit collector\ndisplay (case collected of { Completed values -> reverse values == [13, 30, -7, -1, 42]; _ -> False })")).await;
+        let collected = campaign.drive_actor_output(&store, dispatch_haskell_script_with_deadline(root.as_ref(),
+            "collected <- awaitExit collector\ndisplay (case collected of { Completed values -> reverse values == [13, 30, -7, -1, 42]; _ -> False })", "source callable values after collector Gone", COLD_DEBUG_CELL_SETTLEMENT_BUDGET)).await;
         assert_eq!(committed_display_text(&collected), "True", "{collected}");
     })).await;
 }
@@ -129,24 +136,13 @@ async fn callable_reply_scenario(reply_source: &'static str, expected: bool) {
                     .forest
                     .actor_session(campaign.actor.identity())
                     .unwrap();
-                let setup_policy = root.clone();
-                let setup = tokio::spawn(async move {
-                    dispatch_haskell_script(
-                        setup_policy.as_ref(),
+                let (setup, child) = campaign
+                    .dispatch_native_spawn_setup(
+                        "callable child setup and native acknowledgement",
                         &tidepool_testing::fixture_source(
                             "bridge/facade/src/actor_host/fresh_callable_result_setup.hs",
                         ),
-                    )
-                    .await
-                });
-                let child = campaign
-                    .next_deployment(
-                        "callable child policy installation",
-                        Duration::from_secs(120),
-                        |event| match event {
-                            LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
-                            other => Err(other),
-                        },
+                        COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
                     )
                     .await;
                 let child_id = child.actor.identity();
@@ -155,8 +151,6 @@ async fn callable_reply_scenario(reply_source: &'static str, expected: bool) {
                     child_session, root_session,
                     "callable response crosses actual machines"
                 );
-                campaign.acknowledge_native_spawn(&child);
-                let setup = setup.await.unwrap();
                 assert_eq!(setup["status"], "committed", "{setup}");
                 let root_id = campaign.actor.identity();
                 campaign
