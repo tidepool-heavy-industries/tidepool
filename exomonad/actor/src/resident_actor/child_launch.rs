@@ -890,12 +890,147 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use tidepool_codegen::scope::ScopeId;
     use tidepool_repr::{DataConTable, SessionId};
     use tidepool_runtime::session::{ModuleEnv, RuntimeLexicalScopeLease, SessionLib, SlotKind};
 
     type Machines = ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>;
     type Runner = ResidentActorRunner<frunk::HNil, tidepool_mcp::CapturedOutput>;
+
+    #[tokio::test]
+    async fn fallback_cancelled_before_checkout_cannot_mint_after_cleanup() {
+        for reserved in [false, true] {
+            let (runner, machines, parent, _captured, _root) = shared_fixture();
+            let placeholder = crate::ActorPlacement {
+                session: SessionId(978),
+                lexical_scope: ScopeId::ROOT,
+                ..parent
+            };
+            let custody = if reserved {
+                ChildPlacementCustody::reserved(placeholder)
+            } else {
+                ChildPlacementCustody::new(placeholder)
+            };
+            let startup = custody.startup_guard();
+            let checkout = machines.checkout_run(parent.session).unwrap();
+            let mut provisioning = Box::pin(runner.provision_fallback_scope(
+                placeholder,
+                parent.session,
+                custody.clone(),
+            ));
+            assert!(futures_util::poll!(&mut provisioning).is_pending());
+            drop(startup);
+            custody.cleanup(&runner, parent.session).await.unwrap();
+            assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
+            drop(checkout);
+            assert!(provisioning.await.is_err());
+            assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
+            assert!(machines.kind(placeholder.session).is_none());
+            let mut checkout = machines.checkout_run(parent.session).unwrap();
+            assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
+            checkout.restore_suspended(Vec::new());
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_cancelled_after_native_publication_keeps_actual_scope_custody() {
+        for reserved in [false, true] {
+            let (runner, machines, parent, _captured, _root) = shared_fixture();
+            let placeholder = crate::ActorPlacement {
+                session: SessionId(979),
+                lexical_scope: ScopeId::ROOT,
+                ..parent
+            };
+            let custody = if reserved {
+                ChildPlacementCustody::reserved(placeholder)
+            } else {
+                ChildPlacementCustody::new(placeholder)
+            };
+            let startup = custody.startup_guard();
+            let task_runner = runner.clone();
+            let task_custody = custody.clone();
+            let (published, observe) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let placement = task_runner
+                    .provision_fallback_scope(placeholder, parent.session, task_custody)
+                    .await
+                    .unwrap();
+                published.send(placement).unwrap();
+                std::future::pending::<()>().await;
+            });
+            let actual = observe.await.unwrap();
+            assert_eq!(*custody.0.lock(), ChildPlacementPhase::Prepared(actual));
+            assert_eq!(actual.session, parent.session);
+            assert_ne!(actual.lexical_scope, ScopeId::ROOT);
+            drop(startup);
+            task.abort();
+            assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+            custody.cleanup(&runner, parent.session).await.unwrap();
+            custody.cleanup(&runner, parent.session).await.unwrap();
+            let mut checkout = machines.checkout_run(parent.session).unwrap();
+            assert!(checkout
+                .machine()
+                .compile_view_in(actual.lexical_scope)
+                .is_none());
+            assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
+            checkout.restore_suspended(Vec::new());
+            assert!(machines.kind(placeholder.session).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn fallback_cancelled_during_native_mint_publishes_before_reclamation() {
+        for reserved in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let parent = SessionId(980);
+            let placeholder = crate::ActorPlacement {
+                session: SessionId(981),
+                resource_scope: RealmId::fresh(),
+                lexical_scope: ScopeId::ROOT,
+            };
+            let custody = if reserved {
+                ChildPlacementCustody::reserved(placeholder)
+            } else {
+                ChildPlacementCustody::new(placeholder)
+            };
+            let startup = custody.startup_guard();
+            let native_custody = custody.clone();
+            let mut machine = session(parent, root.path());
+            let (started, observe) = tokio::sync::oneshot::channel();
+            let (release, wait) = std::sync::mpsc::channel();
+            let native = tokio::task::spawn_blocking(move || {
+                let placement = native_custody
+                    .provision_fallback_with(placeholder, parent, || {
+                        started.send(()).unwrap();
+                        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                        machine.mint_isolated_scope()
+                    })
+                    .unwrap();
+                (machine, placement)
+            });
+            observe.await.unwrap();
+            drop(startup);
+            assert!(
+                custody.0.try_lock().is_none(),
+                "mint and publication retain the owner lock"
+            );
+            release.send(()).unwrap();
+            let (machine, actual) = native.await.unwrap();
+            assert_eq!(*custody.0.lock(), ChildPlacementPhase::Prepared(actual));
+            let machines = Arc::new(Machines::new());
+            machines.insert_idle(parent, Box::new(machine));
+            let runner = Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
+            custody.cleanup(&runner, parent).await.unwrap();
+            let mut checkout = machines.checkout_run(parent).unwrap();
+            assert!(checkout
+                .machine()
+                .compile_view_in(actual.lexical_scope)
+                .is_none());
+            assert!(checkout.machine().compile_view_in(ScopeId::ROOT).is_some());
+            checkout.restore_suspended(Vec::new());
+        }
+    }
 
     #[tokio::test]
     async fn scheduler_refusal_waits_for_original_placement_cleanup() {

@@ -843,6 +843,10 @@ pub(in crate::resident_actor) struct Fixture {
 }
 
 impl Fixture {
+    pub(in crate::resident_actor) fn seal_membership(&self) {
+        self.directory.seal();
+    }
+
     pub(in crate::resident_actor) async fn start() -> Self {
         let (send, receive) = tokio::sync::oneshot::channel();
         let directory = crate::LocalActorDirectory::default();

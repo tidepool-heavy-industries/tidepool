@@ -62,6 +62,7 @@ TEST_ONLY_MODULES = {
         'exomonad/actor/src/resident_actor/green_tests.rs',
         'exomonad/actor/src/resident_actor/jev_form_runtime_tests.rs',
         'exomonad/actor/src/resident_actor/owned_workbench/model_tests.rs',
+        'exomonad/actor/src/resident_actor/replacement/refusal_tests.rs',
         'exomonad/actor/src/resident_actor/scope_runtime_tests.rs',
         'exomonad/actor/src/resident_workbench/display_callback_tests.rs',
         'exomonad/actor/src/resident_workbench/replacement_input_tests.rs',
@@ -100,6 +101,7 @@ TEST_ONLY_FIXTURES = {
         'exomonad/actor/src/request/fixtures/result-receiver.hs',
         'exomonad/actor/src/request/fixtures/result-request.hs',
         'exomonad/actor/src/resident_workbench/replacement_inputs.hs',
+        'exomonad/actor/src/resident_actor/replacement_staging_inputs.hs',
     }),
     'tidepool-extract-cmd': frozenset({
         'tidepool/extract-cmd/src/fixtures/build_products_worker.rs',

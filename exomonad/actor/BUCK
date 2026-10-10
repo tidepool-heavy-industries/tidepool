@@ -333,6 +333,8 @@ rust_filegroup(
         "src/resident_actor/owned_workbench/reload.rs": "exomonad/actor/src/resident_actor/owned_workbench/reload.rs",
         "src/resident_actor/provider_owner_tests.rs": "exomonad/actor/src/resident_actor/provider_owner_tests.rs",
         "src/resident_actor/replacement.rs": "exomonad/actor/src/resident_actor/replacement.rs",
+        "src/resident_actor/replacement/refusal_tests.rs": "exomonad/actor/src/resident_actor/replacement/refusal_tests.rs",
+        "src/resident_actor/replacement_staging_inputs.hs": "exomonad/actor/src/resident_actor/replacement_staging_inputs.hs",
         "src/resident_actor/request_wait.rs": "exomonad/actor/src/resident_actor/request_wait.rs",
         "src/resident_actor/request_wait_tests.rs": "exomonad/actor/src/resident_actor/request_wait_tests.rs",
         "src/resident_actor/scope_runtime_cancel.hs": "exomonad/actor/src/resident_actor/scope_runtime_cancel.hs",
@@ -440,6 +442,7 @@ tidepool_rust_binary(
         "exomonad/actor/src/resident_actor/green_tests.rs",
         "exomonad/actor/src/resident_actor/jev_form_runtime_tests.rs",
         "exomonad/actor/src/resident_actor/owned_workbench/model_tests.rs",
+        "exomonad/actor/src/resident_actor/replacement/refusal_tests.rs",
         "exomonad/actor/src/resident_actor/scope_runtime_tests.rs",
         "exomonad/actor/src/resident_workbench/display_callback_tests.rs",
         "exomonad/actor/src/resident_workbench/replacement_input_tests.rs",
@@ -870,6 +873,8 @@ filegroup(
         "exomonad/actor/src/resident_actor/owned_workbench/reload.rs": "src/resident_actor/owned_workbench/reload.rs",
         "exomonad/actor/src/resident_actor/provider_owner_tests.rs": "src/resident_actor/provider_owner_tests.rs",
         "exomonad/actor/src/resident_actor/replacement.rs": "src/resident_actor/replacement.rs",
+        "exomonad/actor/src/resident_actor/replacement/refusal_tests.rs": "src/resident_actor/replacement/refusal_tests.rs",
+        "exomonad/actor/src/resident_actor/replacement_staging_inputs.hs": "src/resident_actor/replacement_staging_inputs.hs",
         "exomonad/actor/src/resident_actor/request_wait.rs": "src/resident_actor/request_wait.rs",
         "exomonad/actor/src/resident_actor/request_wait_tests.rs": "src/resident_actor/request_wait_tests.rs",
         "exomonad/actor/src/resident_actor/scope_runtime_cancel.hs": "src/resident_actor/scope_runtime_cancel.hs",
@@ -1196,6 +1201,13 @@ export_file(
     name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f6a65765f726573706f6e73655f73656d616e746963732e6873",
     src = "src/resident_actor/jev_response_semantics.hs",
     out = "jev_response_semantics.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f7265706c6163656d656e745f73746167696e675f696e707574732e6873",
+    src = "src/resident_actor/replacement_staging_inputs.hs",
+    out = "replacement_staging_inputs.hs",
     visibility = ["PUBLIC"],
 )
 

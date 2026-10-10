@@ -18600,9 +18600,10 @@ pub(crate) mod request_tests {
             Ok(machine)
         }));
         let task_runner = runner.clone();
+        let task_owner = CompilerCloseOwner::current().unwrap();
         let task = tokio::spawn(async move {
-            task_runner
-                .provision_child_session(id, RealmId::ROOT, None, &[])
+            task_owner
+                .scope(task_runner.provision_child_session(id, RealmId::ROOT, None, &[]))
                 .await
         });
         let lifetime = observe.await.unwrap();
@@ -18667,6 +18668,75 @@ pub(crate) mod request_tests {
             .unwrap();
         assert!(machines.kind(id).is_none());
         assert!(!runner.access.child_sessions.lock().unwrap().contains(&id));
+    }
+
+    #[tokio::test]
+    async fn child_publication_issues_drop_custody_without_claiming_collision_peers() {
+        with_test_compiler_owner(async {
+            let id = tidepool_repr::SessionId(812);
+            let root = tempfile::tempdir().unwrap();
+            let root_path = root.path().to_path_buf();
+            let machines = Arc::new(ActorMachineRegistry::<frunk::HNil, ChildOutput>::new());
+            let dropped = Arc::new(tokio::sync::Notify::new());
+            let factory_dropped = dropped.clone();
+            let runner = ResidentActorRunner::new(
+                machines.clone(),
+                ActorWorkbenchSource::new("", Vec::new()),
+            )
+            .with_child_bootstrap_program(child_bootstrap_fixture())
+            .with_child_session_factory(Arc::new(move |id, _, _settlement| {
+                Ok(child_preparation_fixture(
+                    id,
+                    root_path.clone(),
+                    ChildOutput(Arc::new(ChildOutputLifetime(factory_dropped.clone()))),
+                ))
+            }));
+            let original = runner
+                .provision_child_session(id, RealmId::fresh(), None, &[])
+                .await
+                .unwrap();
+            match runner
+                .provision_child_session(id, RealmId::fresh(), None, &[])
+                .await
+            {
+                Err(error) => assert!(error.contains("already had a live entry")),
+                Ok(_) => panic!("collision must refuse without acquiring discard custody"),
+            }
+            let mut checkout = machines
+                .checkout_run(id)
+                .expect("collision preserves original machine");
+            assert!(checkout
+                .machine()
+                .compile_view_in(original.lexical_scope)
+                .is_some());
+            checkout.restore_suspended(Vec::new());
+            assert!(runner.access.child_sessions.lock().unwrap().contains(&id));
+            drop(original);
+            assert!(machines.kind(id).is_none());
+            assert!(!runner.access.child_sessions.lock().unwrap().contains(&id));
+
+            let task_runner = runner.clone();
+            let task_owner = CompilerCloseOwner::current().unwrap();
+            let (published, observe) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let _owned = task_owner
+                    .scope(task_runner.provision_child_session(id, RealmId::fresh(), None, &[]))
+                    .await
+                    .unwrap();
+                published.send(()).unwrap();
+                std::future::pending::<()>().await;
+            });
+            observe.await.unwrap();
+            assert!(machines.kind(id).is_some());
+            task.abort();
+            assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+            assert!(
+                machines.kind(id).is_none(),
+                "discard custody survives publication before consumer cancellation"
+            );
+            assert!(!runner.access.child_sessions.lock().unwrap().contains(&id));
+        })
+        .await;
     }
 
     #[test]

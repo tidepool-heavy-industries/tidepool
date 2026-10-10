@@ -6,6 +6,10 @@ struct ReplacementCandidate {
     session_startup: Option<crate::resident_workbench::ChildSessionStartupLease>,
 }
 
+#[cfg(test)]
+#[path = "replacement/refusal_tests.rs"]
+mod tests;
+
 impl ReplacementCandidate {
     fn new(placement: crate::ActorPlacement, predecessor: tidepool_repr::SessionId) -> Self {
         let placement = if placement.session == predecessor {

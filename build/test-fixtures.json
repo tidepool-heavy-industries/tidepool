@@ -293,6 +293,7 @@
     "exomonad/actor/src/resident_actor/jev_form_runtime_failure.hs",
     "exomonad/actor/src/resident_actor/jev_form_runtime_success.hs",
     "exomonad/actor/src/resident_actor/jev_response_semantics.hs",
+    "exomonad/actor/src/resident_actor/replacement_staging_inputs.hs",
     "exomonad/actor/src/resident_actor/scope_runtime_cancel.hs",
     "exomonad/actor/src/resident_actor/scope_runtime_declarations.hs",
     "exomonad/actor/src/resident_actor/scope_runtime_failure.hs",
