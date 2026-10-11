@@ -1,5 +1,5 @@
 response <- do
-  admitted <- Agents.request @Int nativeAgent () Agents.defaultRequestOptions
+  admitted <- request @Int nativeAgent () defaultRequestOptions
   pending <- case admitted of
     Left _ -> error "original request admission refused"
     Right request -> pure request

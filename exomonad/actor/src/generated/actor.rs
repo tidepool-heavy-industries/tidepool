@@ -23,12 +23,13 @@ use tidepool_bridge_derive::FromHaskell;
 pub enum ActorReq {
     ActorStartWith(
         String,
+        i64,
         tidepool_bridge::HaskellValue,
         crate::ActorEffectProfileWire,
         Option<tidepool_bridge_effects::WtWorkspaceHandle>,
     ),
-    ActorWaitWith((i64, i64)),
-    ActorPollWith((i64, i64)),
+    ActorWaitWith(i64, (i64, i64)),
+    ActorPollWith(i64, (i64, i64)),
     ActorCallWith((i64, i64), tidepool_bridge::HaskellValue),
     ActorTryCallWith((i64, i64), tidepool_bridge::HaskellValue),
     ActorCastWith((i64, i64), tidepool_bridge::HaskellValue),
@@ -36,6 +37,7 @@ pub enum ActorReq {
     ActorDrainWith((i64, i64)),
     ActorReplaceWith(
         (i64, i64),
+        i64,
         tidepool_bridge::HaskellValue,
         String,
         crate::ActorEffectProfileWire,

@@ -70,16 +70,6 @@ pub fn actor() -> Effect {
                 shape: TypeShape::Sum {
                     variants: vec![
                         SumVariant {
-                            ctor: "ActorReadWriteProfile",
-                            fields: positional_fields![],
-                            doc: &[],
-                        },
-                        SumVariant {
-                            ctor: "ActorReadOnlyProfile",
-                            fields: positional_fields![],
-                            doc: &[],
-                        },
-                        SumVariant {
                             ctor: "ActorSelectedProfile",
                             fields: positional_fields![HsType::List(Box::new(HsType::Named(
                                 "ActorEffectKey"

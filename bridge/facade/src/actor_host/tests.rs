@@ -934,22 +934,15 @@ async fn actor_sources_capture_current_then_deliver_every_publication_and_settle
     let campaign = test_campaign::TestCampaign::start().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(
-        root.as_ref(),
+    let (setup, child) = campaign.dispatch_native_spawn_setup(
+        "source child admission",
         &tidepool_testing::fixture_source("bridge/facade/src/actor_host/source_setup.hs"),
-    )
-    .await;
+        Duration::from_secs(240),
+    ).await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
-    let child = campaign
-        .next_deployment(
-            "source child admission",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
-                other => Err(other),
-            },
-        )
-        .await;
+    campaign.await_native_activation(
+        child.actor.identity(), "source child request activation", Duration::from_secs(240),
+    ).await;
     let first = dispatch_haskell_script(
         child.policy.as_ref(),
         "reportProgress (ProgressNote 1 (+ sessionInput))",
@@ -990,13 +983,14 @@ async fn actor_sources_capture_current_then_deliver_every_publication_and_settle
     let settled = dispatch_haskell_script(root.as_ref(), "settled <- watch Nothing (result answer)").await;
     assert_eq!(settled["status"], "committed", "{settled:?}");
     campaign.await_watch_ready().await;
-    let collected = dispatch_haskell_script(
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let collected = campaign.drive_actor_output(&store, dispatch_haskell_script(
         root.as_ref(),
-        "drainActor collector2\nresult <- awaitExit collector2\ncase result of { Completed values -> reverse values == [13, 30, -7, -1, 42]; _ -> False }",
+        "drainActor collector2\nresult <- awaitExit collector2\ndisplay (case result of { Completed values -> reverse values == [13, 30, -7, -1, 42]; _ -> False })",
     )
-    .await;
+    ).await;
     assert_eq!(collected["status"], "committed", "{collected:?}");
-    assert!(collected.to_string().contains("True"), "{collected:?}");
+    assert_eq!(test_campaign::committed_display_text(&collected), "True");
 })).await;
 }
 
@@ -2325,8 +2319,8 @@ async fn record_actor_explains_invalid_state_shapes() {
                 .await;
                 assert_eq!(setup["status"], "committed", "{setup:?}");
                 for source in [
-        "invalid <- R.start (R.definition \"no-state\" Actor.ReadOnly (NoState (\\() -> pure ())))",
-        "invalid <- R.start (R.definition \"two-states\" Actor.ReadOnly (TwoStates 0 False))",
+        "invalid <- R.start (R.definition \"no-state\" (Actor.Selected (knownEffects @'[])) (NoState (\\() -> pure ())))",
+        "invalid <- R.start (R.definition \"two-states\" (Actor.Selected (knownEffects @'[])) (TwoStates 0 False))",
     ] {
         let result = dispatch_haskell_script_result(root.as_ref(), source).await;
         let diagnostic = match result {
@@ -2349,22 +2343,25 @@ async fn stateful_actor_drains_accepted_messages_into_its_retained_exit() {
     campaign
         .run_scenario(|campaign| {
             Box::pin(async move {
-                let result = dispatch_haskell_script(
-                    campaign.root_installation.policy.as_ref(),
-                    &tidepool_testing::fixture_source(
-                        "bridge/facade/src/actor_host/stateful_drain.hs",
-                    ),
-                )
-                .await;
+                let policy = campaign.root_installation.policy.clone();
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let result = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_haskell_script(
+                            policy.as_ref(),
+                            &tidepool_testing::fixture_source(
+                                "bridge/facade/src/actor_host/stateful_drain.hs",
+                            ),
+                        ),
+                    )
+                    .await;
                 assert_eq!(result["status"], "committed", "{result:?}");
                 for item in result["items"].as_array().unwrap() {
                     assert_eq!(item["status"], "committed", "{result:?}");
                 }
-                assert!(result.to_string().contains("True"), "{result:?}");
-                assert!(
-                    !result.to_string().contains("preview unavailable"),
-                    "{result:?}"
-                );
+                assert_eq!(test_campaign::committed_display_text(&result), "True");
             })
         })
         .await;
@@ -2375,23 +2372,20 @@ async fn stateful_handler_failure_after_effect_pauses_without_replay_or_closing_
     let campaign = test_campaign::TestCampaign::start().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
-    let setup = dispatch_haskell_script(
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let setup = campaign.drive_actor_output(&store, dispatch_haskell_script(
         root.as_ref(),
         &tidepool_testing::fixture_source("bridge/facade/src/actor_host/stateful_failure.hs"),
     )
-    .await;
+    ).await;
     assert_eq!(setup["status"], "committed", "{setup:?}");
     for item in setup["items"].as_array().unwrap() {
         assert_eq!(item["status"], "committed", "{setup:?}");
     }
-    assert!(setup.to_string().contains("True"), "{setup:?}");
+    assert_eq!(test_campaign::committed_display_text(&setup), "True");
     let failed =
         dispatch_haskell_script(root.as_ref(), "cast server (Counter (-1) (const ()))").await;
     assert_eq!(failed["status"], "committed", "{failed:?}");
-    assert!(
-        !failed.to_string().contains("preview unavailable"),
-        "{failed:?}"
-    );
     let notice = campaign
         .next_deployment(
             "stateful-handler failure notice",
@@ -2417,27 +2411,23 @@ async fn stateful_handler_failure_after_effect_pauses_without_replay_or_closing_
             .contains("replace a failed handler first"),
         "{rejected:?}"
     );
-    let queued = dispatch_haskell_script(root.as_ref(), "cast server (Counter 5 (const ()))\npaused <- pollExit server\neffects <- call sink (Counter 0 id)\ncase paused of { Nothing -> effects == 1; _ -> False }").await;
+    let queued = campaign.drive_actor_output(&store, dispatch_haskell_script(root.as_ref(), "cast server (Counter 5 (const ()))\npaused <- pollExit server\neffects <- call sink (Counter 0 id)\ndisplay (case paused of { Nothing -> effects == 1; _ -> False })")).await;
     assert_eq!(queued["status"], "committed", "{queued:?}");
     for item in queued["items"].as_array().unwrap() {
         assert_eq!(item["status"], "committed", "{queued:?}");
     }
-    assert!(queued.to_string().contains("True"), "{queued:?}");
-    assert!(
-        !queued.to_string().contains("preview unavailable"),
-        "{queued:?}"
-    );
+    assert_eq!(test_campaign::committed_display_text(&queued), "True");
     campaign.assert_no_deployment("duplicate failure notice", |_| true);
-    let repaired = dispatch_haskell_script(
+    let repaired = campaign.drive_actor_output(&store, dispatch_haskell_script(
         root.as_ref(),
         &tidepool_testing::fixture_source("bridge/facade/src/actor_host/stateful_replacement.hs"),
     )
-    .await;
+    ).await;
     assert_eq!(repaired["status"], "committed", "{repaired:?}");
     for item in repaired["items"].as_array().unwrap() {
         assert_eq!(item["status"], "committed", "{repaired:?}");
     }
-    assert!(!repaired.to_string().contains("False"), "{repaired:?}");
+    assert_eq!(test_campaign::committed_display_text(&repaired), "True");
 })).await;
 }
 
@@ -2447,6 +2437,9 @@ async fn lifecycle_sources_follow_replacement_and_capture_retained_exit() {
     campaign
         .run_scenario(|campaign| {
             Box::pin(async move {
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let mut displayed_stages = 0;
                 for (stage, source) in tidepool_testing::fixture_source(
                     "bridge/facade/src/actor_host/lifecycle_source.hs",
                 )
@@ -2455,35 +2448,25 @@ async fn lifecycle_sources_follow_replacement_and_capture_retained_exit() {
                 {
                     eprintln!("lifecycle fixture stage {stage} starting");
                     let root = campaign.root_installation.policy.clone();
-                    let run = dispatch_haskell_script(root.as_ref(), source);
-                    tokio::pin!(run);
-                    let result = tokio::time::timeout(Duration::from_secs(180), async {
-            tokio::select! {
-                result = &mut run => result,
-                command = campaign.next_deployment(
-                    "lifecycle notification",
-                    Duration::from_secs(180),
-                    |event| match event {
-                        LocalResidentDeployment::NotificationSend(command) => Ok(command),
-                        other => Err(other),
-                    },
-                ) => {
-                    panic!("stage {stage}: {}", command.message());
-                }
-            }
-        })
-        .await
-        .expect("lifecycle fixture stage did not settle");
+                    let run = campaign
+                        .drive_actor_output(&store, dispatch_haskell_script(root.as_ref(), source));
+                    let result = tokio::time::timeout(Duration::from_secs(180), run)
+                        .await
+                        .expect("lifecycle fixture stage did not settle");
                     assert_eq!(result["status"], "committed", "stage {stage}: {result:?}");
                     for item in result["items"].as_array().unwrap() {
                         assert_eq!(item["status"], "committed", "stage {stage}: {result:?}");
                     }
-                    assert!(
-                        !result.to_string().contains("False"),
-                        "stage {stage}: {result:?}"
-                    );
+                    if matches!(stage, 2 | 4 | 5) {
+                        assert_eq!(test_campaign::committed_display_text(&result), "True");
+                        displayed_stages += 1;
+                    }
+                    campaign.assert_no_deployment("lifecycle handler failure", |event| {
+                        matches!(event, LocalResidentDeployment::NotificationSend(_))
+                    });
                     eprintln!("lifecycle fixture stage {stage} completed");
                 }
+                assert_eq!(displayed_stages, 3);
             })
         })
         .await;
@@ -2499,11 +2482,11 @@ async fn stateful_replacement_rejects_changed_state_and_protocol_types() {
     assert_eq!(imports["status"], "committed", "{imports:?}");
     for (script, expected_types) in [
         (
-            "invalidReplacement <- replaceActor (undefined :: ActorRef ((,) Int) Int) (stateful \"wrong-state\" ReadOnly (\\state (_, reply) -> pure (reply, state)) :: ActorDefinition Bool ((,) Int) Bool)",
+            "invalidReplacement <- replaceActor (undefined :: ActorRef ((,) Int) Int) (stateful \"wrong-state\" (Selected (knownEffects @'[])) (\\state (_, reply) -> pure (reply, state)) :: ActorDefinition Bool ((,) Int) Bool)",
             ["Int", "Bool"],
         ),
         (
-            "invalidReplacement <- replaceActor (undefined :: ActorRef ((,) Int) Int) (stateful \"wrong-protocol\" ReadOnly (\\state (_, reply) -> pure (reply, state)) :: ActorDefinition Int ((,) Bool) Int)",
+            "invalidReplacement <- replaceActor (undefined :: ActorRef ((,) Int) Int) (stateful \"wrong-protocol\" (Selected (knownEffects @'[])) (\\state (_, reply) -> pure (reply, state)) :: ActorDefinition Int ((,) Bool) Int)",
             ["Int", "Bool"],
         ),
     ] {
@@ -2530,23 +2513,25 @@ async fn stateful_replacement_preserves_owned_children() {
     campaign
         .run_scenario(|campaign| {
             Box::pin(async move {
-                let root = campaign.root_installation.policy.clone();
-                let ownership = dispatch_haskell_script(
-                    root.as_ref(),
-                    &tidepool_testing::fixture_source(
-                        "bridge/facade/src/actor_host/stateful_replacement_tree.hs",
-                    ),
-                )
-                .await;
+                let policy = campaign.root_installation.policy.clone();
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let ownership = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_haskell_script(
+                            policy.as_ref(),
+                            &tidepool_testing::fixture_source(
+                                "bridge/facade/src/actor_host/stateful_replacement_tree.hs",
+                            ),
+                        ),
+                    )
+                    .await;
                 assert_eq!(ownership["status"], "committed", "{ownership:?}");
                 for item in ownership["items"].as_array().unwrap() {
                     assert_eq!(item["status"], "committed", "{ownership:?}");
                 }
-                assert!(
-                    ownership.to_string().contains("True")
-                        && !ownership.to_string().contains("False"),
-                    "{ownership:?}"
-                );
+                assert_eq!(test_campaign::committed_display_text(&ownership), "True");
             })
         })
         .await;
@@ -2558,18 +2543,25 @@ async fn haskell_mailbox_preserves_state_and_opaque_replies_across_calls() {
     campaign
         .run_scenario(|campaign| {
             Box::pin(async move {
-                let result = dispatch_haskell_script(
-                    campaign.root_installation.policy.as_ref(),
-                    &tidepool_testing::fixture_source(
-                        "bridge/facade/src/actor_host/mailbox_state.hs",
-                    ),
-                )
-                .await;
+                let policy = campaign.root_installation.policy.clone();
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let result = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_haskell_script(
+                            policy.as_ref(),
+                            &tidepool_testing::fixture_source(
+                                "bridge/facade/src/actor_host/mailbox_state.hs",
+                            ),
+                        ),
+                    )
+                    .await;
                 assert_eq!(result["status"], "committed", "{result:?}");
                 for item in result["items"].as_array().unwrap() {
                     assert_eq!(item["status"], "committed", "{result:?}");
                 }
-                assert!(result.to_string().contains("True"), "{result:?}");
+                assert_eq!(test_campaign::committed_display_text(&result), "True");
             })
         })
         .await;

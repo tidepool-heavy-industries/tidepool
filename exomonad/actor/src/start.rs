@@ -111,17 +111,13 @@ pub(crate) struct ActorStartRequest {
 
 #[derive(tidepool_bridge_derive::FromHaskell)]
 pub enum ActorEffectProfileWire {
-    ActorReadWriteProfile,
-    ActorReadOnlyProfile,
     ActorSelectedProfile(Vec<ActorEffectKeyWire>),
 }
 
 impl ActorEffectProfileWire {
-    fn resolve(self) -> (crate::ActorEffectProfile, Option<Vec<ActorEffectKeyWire>>) {
+    fn resolve(self) -> (crate::ActorEffectProfile, Vec<ActorEffectKeyWire>) {
         match self {
-            Self::ActorSelectedProfile(keys) => (crate::ActorEffectProfile::ReadOnly, Some(keys)),
-            Self::ActorReadOnlyProfile => (crate::ActorEffectProfile::ReadOnly, None),
-            Self::ActorReadWriteProfile => (crate::ActorEffectProfile::ReadWrite, None),
+            Self::ActorSelectedProfile(keys) => (crate::ActorEffectProfile::ReadOnly, keys),
         }
     }
 }
@@ -409,11 +405,8 @@ impl ResidentActorStart {
             parent_actor,
         } = request;
         let (profile, effects) = profile.resolve();
-        let capabilities = match effects {
-            Some(keys) => crate::ActorCapabilities::default()
-                .with_effect_keys(keys.into_iter().map(Into::into).collect()),
-            None => crate::ActorCapabilities::default(),
-        };
+        let capabilities = crate::ActorCapabilities::default()
+            .with_effect_keys(effects.into_iter().map(Into::into).collect());
         let declaration_high_water = session.declaration_generation_high_water()?;
         let child_realm = RealmId::fresh();
         let entry = session
@@ -567,6 +560,38 @@ fn facade_heads(provenance: &tidepool_runtime::session::ProgramProvenance) -> BT
 
 #[cfg(test)]
 mod tests {
+
+    proptest::proptest! {
+        #[test]
+        fn selected_profiles_preserve_exact_keys_and_parent_refusal(
+            selected in proptest::collection::vec(0usize..5, 0..9),
+            allowed in proptest::prelude::any::<u8>(),
+        ) {
+            use super::ActorEffectKeyWire as Wire;
+            use crate::ActorEffectKey as Key;
+            let keys = [Key::Actor, Key::Commands, Key::Jev, Key::ModelCall, Key::Reflect];
+            let expected = selected.iter().map(|index| keys[*index]).collect::<Vec<_>>();
+            let wire = selected.iter().map(|index| match index {
+                0 => Wire::EffectActor,
+                1 => Wire::EffectCommands,
+                2 => Wire::EffectJev,
+                3 => Wire::EffectModelCall,
+                _ => Wire::EffectReflect,
+            }).collect();
+            let (_, actual) = super::ActorEffectProfileWire::ActorSelectedProfile(wire).resolve();
+            let actual = actual.into_iter().map(Key::from).collect::<Vec<_>>();
+            proptest::prop_assert_eq!(&actual, &expected);
+            let permitted = keys.into_iter().enumerate()
+                .filter(|(index, _)| allowed & (1 << index) != 0)
+                .map(|(_, key)| key).collect::<Vec<_>>();
+            let parent = crate::ActorCapabilities::default().with_effect_keys(permitted.clone());
+            let child = crate::ActorCapabilities::default().with_effect_keys(actual);
+            let unique = expected.iter().copied().collect::<std::collections::HashSet<_>>().len()
+                == expected.len();
+            let admitted = unique && expected.iter().all(|key| permitted.contains(key));
+            proptest::prop_assert_eq!(parent.preview_child(child, None).is_ok(), admitted);
+        }
+    }
 
     #[test]
     fn empty_provenance_requires_no_child_facade() {

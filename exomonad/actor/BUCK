@@ -615,7 +615,8 @@ rust_filegroup(
         "tests/exact_source_membrane.rs": "exomonad/actor/tests/exact_source_membrane.rs",
         "tests/prepared_render_probe.rs": "exomonad/actor/tests/prepared_render_probe.rs",
         "tests/profile_compile_failures.rs": "exomonad/actor/tests/profile_compile_failures.rs",
-        "tests/profile_compile_failures/read_only_fs_write.hs": "exomonad/actor/tests/profile_compile_failures/read_only_fs_write.hs",
+        "tests/profile_compile_failures/selected_fs_write.hs": "exomonad/actor/tests/profile_compile_failures/selected_fs_write.hs",
+        "tests/profile_compile_failures/selected_valid.hs": "exomonad/actor/tests/profile_compile_failures/selected_valid.hs",
         "tests/ractor_substrate.rs": "exomonad/actor/tests/ractor_substrate.rs",
         "tests/record_dynamic_sources.rs": "exomonad/actor/tests/record_dynamic_sources.rs",
         "tests/record_dynamic_sources/compile.hs": "exomonad/actor/tests/record_dynamic_sources/compile.hs",
@@ -924,7 +925,8 @@ filegroup(
         "exomonad/actor/tests/exact_source_membrane.rs": "tests/exact_source_membrane.rs",
         "exomonad/actor/tests/prepared_render_probe.rs": "tests/prepared_render_probe.rs",
         "exomonad/actor/tests/profile_compile_failures.rs": "tests/profile_compile_failures.rs",
-        "exomonad/actor/tests/profile_compile_failures/read_only_fs_write.hs": "tests/profile_compile_failures/read_only_fs_write.hs",
+        "exomonad/actor/tests/profile_compile_failures/selected_fs_write.hs": "tests/profile_compile_failures/selected_fs_write.hs",
+        "exomonad/actor/tests/profile_compile_failures/selected_valid.hs": "tests/profile_compile_failures/selected_valid.hs",
         "exomonad/actor/tests/ractor_substrate.rs": "tests/ractor_substrate.rs",
         "exomonad/actor/tests/record_dynamic_sources.rs": "tests/record_dynamic_sources.rs",
         "exomonad/actor/tests/record_dynamic_sources/compile.hs": "tests/record_dynamic_sources/compile.hs",
@@ -1299,9 +1301,16 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_74657374732f70726f66696c655f636f6d70696c655f6661696c757265732f726561645f6f6e6c795f66735f77726974652e6873",
-    src = "tests/profile_compile_failures/read_only_fs_write.hs",
-    out = "read_only_fs_write.hs",
+    name = "haskell_test_fixture_74657374732f70726f66696c655f636f6d70696c655f6661696c757265732f73656c65637465645f66735f77726974652e6873",
+    src = "tests/profile_compile_failures/selected_fs_write.hs",
+    out = "selected_fs_write.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f70726f66696c655f636f6d70696c655f6661696c757265732f73656c65637465645f76616c69642e6873",
+    src = "tests/profile_compile_failures/selected_valid.hs",
+    out = "selected_valid.hs",
     visibility = ["PUBLIC"],
 )
 

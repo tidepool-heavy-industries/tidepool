@@ -2,7 +2,7 @@ import Tidepool.Actor hiding (Source)
 let owner = me
 let messenger = (ActorDefinition
       { label = "message-handler"
-      , effectProfile = ReadOnly
+      , effectProfile = (Selected (knownEffects @'[Notifications]))
       , initialization = pure
       , behavior = \_ (recipient, payload) -> sendMessage recipient payload
       , onShutdown = const (pure ())
