@@ -15991,7 +15991,45 @@ pub(crate) mod request_tests {
 
     #[tokio::test]
     async fn cancelled_lookup_interrupts_its_started_compiler_request_and_recovers() {
-        with_test_compiler_owner(cancelled_lookup_interrupts_its_started_compiler_request_and_recovers_with_compiler_owner()).await;
+        let mut owner = crate::CompilerPreparationOwner::new();
+        let cleanup = owner.cleanup();
+        owner
+            .scope(cancelled_lookup_interrupts_its_started_compiler_request_and_recovers_with_compiler_owner())
+            .await;
+        let observation = cleanup.wait_for_settlement(Duration::from_secs(5)).await;
+        assert!(observation.admission_closed, "{observation:?}");
+        assert!(
+            !observation.is_confirmed(),
+            "disconnect cannot acknowledge END"
+        );
+        let mut cancelled_receipts = 0;
+        for receipt in &observation.work {
+            match receipt {
+                crate::termination::CompilerWorkClose::Settled(
+                    tidepool_runtime::CompilerTransactionClose::Unconfirmed(evidence),
+                ) => {
+                    assert_eq!(
+                        evidence.reason,
+                        tidepool_extract_cmd::CompilerTransactionCloseReason::FailedRequest,
+                    );
+                    assert_eq!(
+                        evidence.retirement,
+                        tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
+                            disconnect: Some(Ok(())),
+                        },
+                    );
+                    assert!(evidence.earlier.is_empty(), "{evidence:?}");
+                    cancelled_receipts += 1;
+                }
+                other => assert!(other.is_confirmed(), "{other:?}"),
+            }
+        }
+        assert_eq!(cancelled_receipts, 1, "{observation:?}");
+        assert_eq!(
+            cleanup.observation(),
+            observation,
+            "successful recovery cannot confirm the earlier disconnected request"
+        );
     }
 
     async fn cancelled_lookup_interrupts_its_started_compiler_request_and_recovers_with_compiler_owner(
