@@ -1201,6 +1201,7 @@ dependencies = [
  "tidepool-effect",
  "tidepool-extract-cmd",
  "tidepool-mcp",
+ "tidepool-protocol",
  "tidepool-repr",
  "tidepool-runtime",
  "tidepool-test-data",

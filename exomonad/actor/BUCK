@@ -402,6 +402,7 @@ tidepool_rust_binary(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//bridge/mcp:tidepool_mcp",
+        "//bridge/protocol:tidepool_protocol",
         "//bridge/test-data:tidepool_test_data",
         "//bridge/testing:tidepool_testing",
         "//exomonad/model:exomonad_model",
@@ -656,6 +657,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//bridge/mcp:tidepool_mcp",
+        "//bridge/protocol:tidepool_protocol",
         "//bridge/test-data:tidepool_test_data",
         "//bridge/testing:tidepool_testing",
         "//exomonad/model:exomonad_model",

@@ -14026,40 +14026,48 @@ pub(crate) mod request_tests {
         .await;
     }
 
-    fn introspection_error_table() -> DataConTable {
+    fn schema_constructor_table(effect: tidepool_protocol::schema::Effect) -> DataConTable {
+        use tidepool_protocol::types::TypeShape;
         use tidepool_repr::{DataCon, DataConId};
         let mut table = tidepool_test_data::standard_datacon_table();
-        for (id, name, arity) in [
-            (100, "Left", 1),
-            (101, "CurrentScope", 0),
-            (102, "ScopeProvenance", 3),
-            (103, "CompilerUnavailable", 1),
-            (104, "ScopeChanged", 2),
-        ] {
-            table
-                .insert_checked(DataCon {
-                    identity: tidepool_repr::execution_schema::SymbolIdentity {
-                        unit: "fixture".into(),
-                        module: "Fixture".into(),
-                        namespace: "constructor".into(),
-                        occurrence: name.to_owned(),
-                        record_parent: None,
-                    },
-                    id: DataConId(id),
-                    name: name.into(),
-                    tag: 1,
-                    rep_arity: arity,
-                    field_bangs: Vec::new(),
-                    qualified_name: Some(if name == "Left" {
-                        "Data.Either.Left".into()
-                    } else {
-                        format!("Tidepool.Effects.Core.{name}")
-                    }),
-                    type_name: String::new(),
-                })
-                .expect("valid fixture metadata");
+        let mut next_id = 100;
+        for definition in effect.type_defs {
+            let constructors: Vec<_> = match definition.shape {
+                TypeShape::Record { fields } => vec![(definition.name, fields.len())],
+                TypeShape::Sum { variants } => variants
+                    .iter()
+                    .map(|variant| (variant.ctor, variant.fields.types().len()))
+                    .collect(),
+                _ => continue,
+            };
+            for (index, (name, arity)) in constructors.into_iter().enumerate() {
+                let module = definition.haskell_module.unwrap_or("Tidepool.Effects.Core");
+                table
+                    .insert_checked(DataCon {
+                        identity: tidepool_repr::execution_schema::SymbolIdentity {
+                            unit: "fixture".into(),
+                            module: module.into(),
+                            namespace: "constructor".into(),
+                            occurrence: name.into(),
+                            record_parent: None,
+                        },
+                        id: DataConId(next_id),
+                        name: name.into(),
+                        tag: index as u32 + 1,
+                        rep_arity: arity as u32,
+                        field_bangs: vec![tidepool_repr::datacon::SrcBang::NoSrcBang; arity],
+                        qualified_name: Some(format!("{module}.{name}")),
+                        type_name: definition.name.into(),
+                    })
+                    .expect("valid schema fixture metadata");
+                next_id += 1;
+            }
         }
         table
+    }
+
+    fn introspection_error_table() -> DataConTable {
+        schema_constructor_table(tidepool_protocol::effects::introspection::introspection())
     }
 
     fn current_provenance(
@@ -14237,42 +14245,29 @@ pub(crate) mod request_tests {
     fn actor_context_projection_emits_the_schema_field_count() {
         use tidepool_codegen::scope::ScopeId;
         use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
-        use tidepool_repr::{DataCon, DataConId, SessionId};
+        use tidepool_repr::SessionId;
 
-        let mut table = tidepool_test_data::standard_datacon_table();
-        for (id, name, arity) in [
-            (140, "ActorContextInfo", 23),
-            (141, "ContextCoding", 0),
-            (142, "NativeCoding", 0),
-            (143, "WorkspaceWritableBound", 0),
-            (144, "ActivationRootStarted", 0),
-        ] {
-            table
-                .insert_checked(DataCon {
-                    identity: tidepool_repr::execution_schema::SymbolIdentity {
-                        unit: "fixture".into(),
-                        module: "Fixture".into(),
-                        namespace: "constructor".into(),
-                        occurrence: name.to_owned(),
-                        record_parent: None,
-                    },
-                    id: DataConId(id),
-                    name: name.into(),
-                    tag: 1,
-                    rep_arity: arity,
-                    field_bangs: Vec::new(),
-                    qualified_name: Some(format!("Tidepool.Effects.Core.{name}")),
-                    type_name: String::new(),
-                })
-                .expect("valid fixture metadata");
-        }
+        let schema = tidepool_protocol::effects::actor_context::actor_context();
+        let definition = schema
+            .type_defs
+            .iter()
+            .find(|definition| definition.name == "ActorContextInfo")
+            .unwrap();
+        let tidepool_protocol::types::TypeShape::Record {
+            fields: schema_fields,
+        } = &definition.shape
+        else {
+            panic!("ActorContextInfo must remain a schema record");
+        };
+        let schema_fields = schema_fields.clone();
+        let table = schema_constructor_table(schema);
         let placement = crate::ActorPlacement {
             session: SessionId(1),
             resource_scope: RealmId::ROOT,
-            lexical_scope: ScopeId(1),
+            lexical_scope: ScopeId(13),
         };
         let context = crate::ActorSessionContext {
-            actor: crate::ActorRef::first(crate::ActorId(1)),
+            actor: crate::ActorRef::first(crate::ActorId(7)),
             placement,
             effect_policy: EffectRunPolicy::HandleOrSuspend,
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
@@ -14287,34 +14282,42 @@ pub(crate) mod request_tests {
             runtime: crate::ActorRuntimeObservation::default(),
         };
         let value = projection.to_value(&table).unwrap();
-        assert!(matches!(
-            value,
-            HaskellValue::Con(DataConId(140), ref fields) if fields.len() == 23
-        ));
+        let HaskellValue::Con(constructor, ref fields) = value else {
+            panic!("context must be a record");
+        };
+        assert_eq!(
+            Some(constructor),
+            tidepool_bridge::get_qualified(
+                &table,
+                "Tidepool.Effects.Core.ActorContextInfo",
+                schema_fields.len() as u32
+            )
+        );
+        assert_eq!(fields.len(), schema_fields.len());
+        let field = |name| {
+            &fields[schema_fields
+                .iter()
+                .position(|field| field.hs_name == name)
+                .unwrap()]
+        };
+        assert_eq!(i64::from_value(field("contextActorId"), &table).unwrap(), 7);
+        assert_eq!(
+            i64::from_value(field("contextHaskellScope"), &table).unwrap(),
+            13
+        );
+        assert_eq!(
+            String::from_value(field("contextActorPath"), &table).unwrap(),
+            "root"
+        );
+        assert_eq!(
+            Option::<String>::from_value(field("contextBoundWorktree"), &table).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn collected_introspection_projection_rejects_missing_nominal_constructor() {
-        use tidepool_repr::{DataCon, DataConId};
-        let mut table = tidepool_test_data::standard_datacon_table();
-        table
-            .insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Data.Either".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "Left".into(),
-                    record_parent: None,
-                },
-                id: DataConId(100),
-                name: "Left".into(),
-                tag: 1,
-                rep_arity: 1,
-                field_bangs: Vec::new(),
-                qualified_name: Some("Data.Either.Left".into()),
-                type_name: String::new(),
-            })
-            .expect("valid fixture metadata");
+        let table = tidepool_test_data::standard_datacon_table();
         let provenance = current_provenance(1, "same");
         let error = structured_introspection_answer(
             StructuredInspectionKind::Info,
@@ -14333,7 +14336,6 @@ pub(crate) mod request_tests {
 
     #[test]
     fn structured_introspection_compiler_failure_is_a_typed_left() {
-        use tidepool_repr::DataConId;
         let table = introspection_error_table();
         let provenance = current_provenance(7, "same");
         let answer = structured_introspection_answer(
@@ -14346,14 +14348,14 @@ pub(crate) mod request_tests {
         .unwrap();
         assert!(matches!(
             answer,
-            HaskellValue::Con(DataConId(100), ref fields)
-                if matches!(fields.as_slice(), [HaskellValue::Con(DataConId(103), detail)] if detail.len() == 1)
+            HaskellValue::Con(left, ref fields)
+                if Some(left) == tidepool_bridge::get_qualified(&table, "Data.Either.Left", 1)
+                && matches!(fields.as_slice(), [HaskellValue::Con(error, detail)] if Some(*error) == tidepool_bridge::get_qualified(&table, "Tidepool.Effects.Core.CompilerUnavailable", 1) && detail.len() == 1)
         ));
     }
 
     #[test]
     fn structured_introspection_generation_change_is_a_typed_left() {
-        use tidepool_repr::DataConId;
         let table = introspection_error_table();
         let before = current_provenance(7, "before");
         let after = current_provenance(8, "after");
@@ -14367,8 +14369,9 @@ pub(crate) mod request_tests {
         .unwrap();
         assert!(matches!(
             answer,
-            HaskellValue::Con(DataConId(100), ref fields)
-                if matches!(fields.as_slice(), [HaskellValue::Con(DataConId(104), changed)] if changed.len() == 2)
+            HaskellValue::Con(left, ref fields)
+                if Some(left) == tidepool_bridge::get_qualified(&table, "Data.Either.Left", 1)
+                && matches!(fields.as_slice(), [HaskellValue::Con(error, changed)] if Some(*error) == tidepool_bridge::get_qualified(&table, "Tidepool.Effects.Core.ScopeChanged", 2) && changed.len() == 2)
         ));
     }
     #[test]
@@ -14388,29 +14391,45 @@ pub(crate) mod request_tests {
                 id: submit,
                 name: "SubmitRequestWith".into(),
                 tag: 1,
-                rep_arity: 4,
+                rep_arity: 5,
                 field_bangs: Vec::new(),
                 qualified_name: Some("Tidepool.Agent.Reply.Internal.SubmitRequestWith".into()),
                 type_name: "Replies".into(),
             })
             .expect("valid fixture metadata");
-        let request = HaskellValue::Con(
+        let mut request = HaskellValue::Con(
             submit,
             vec![
                 1_i64.to_value(&table).unwrap(),
+                7_i64.to_value(&table).unwrap(),
                 HaskellValue::Con(DataConId(999), vec![]),
                 (2_i64, 1_i64).to_value(&table).unwrap(),
-                Some(HaskellValue::Con(DataConId(998), vec![]))
-                    .to_value(&table)
-                    .unwrap(),
+                Option::<HaskellValue>::None.to_value(&table).unwrap(),
             ],
         );
         assert!(matches!(
             ResidentRequest::decode(&request, &table),
+            Ok(ResidentRequest::Replies(RepliesReq::SubmitRequestWith(
+                1,
+                7,
+                _,
+                (2, 1),
+                None
+            )))
+        ));
+        let HaskellValue::Con(_, fields) = &mut request else {
+            unreachable!()
+        };
+        let deadline_index = fields.len() - 1;
+        fields[deadline_index] = Some(HaskellValue::Con(DataConId(998), vec![]))
+            .to_value(&table)
+            .unwrap();
+        assert!(matches!(
+            ResidentRequest::decode(&request, &table),
             Err(ResidentActorWorkbenchError::RequestDecode {
-                source: BridgeError::FieldDecode { field: 4, .. },
+                source: BridgeError::FieldDecode { field, .. },
                 ..
-            })
+            }) if field == deadline_index + 1
         ));
     }
 

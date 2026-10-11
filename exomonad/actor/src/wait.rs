@@ -102,7 +102,7 @@ mod tests {
             .insert_checked(DataCon {
                 identity: tidepool_repr::execution_schema::SymbolIdentity {
                     unit: "fixture".into(),
-                    module: "Fixture".into(),
+                    module: qualified_name.rsplit_once('.').unwrap().0.into(),
                     namespace: "constructor".into(),
                     occurrence: "ActorCompletedStatus".into(),
                     record_parent: None,

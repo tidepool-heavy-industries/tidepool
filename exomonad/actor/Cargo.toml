@@ -38,6 +38,7 @@ uuid.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
+tidepool-protocol.workspace = true
 rusqlite.workspace = true
 proptest.workspace = true
 frunk.workspace = true
