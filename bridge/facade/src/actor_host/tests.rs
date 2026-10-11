@@ -966,11 +966,21 @@ async fn actor_sources_capture_current_then_deliver_every_publication_and_settle
     )
     .await
     .expect_err("replacement cannot change the source graph");
+    let exomonad_actor::ResidentToolError::Invocation(
+        exomonad_actor::KernelInvocationFailure::Workbench(failure),
+    ) = rejected else {
+        panic!("replacement refusal must retain admitted runtime receipts: {rejected:?}");
+    };
+    assert!(failure.diagnostic.as_ref().is_none_or(|diagnostic| {
+        diagnostic.phase == tidepool_toolchain::failclass::Phase::Run
+    }), "{failure:?}");
+    assert!(failure.receipts.iter().any(|receipt| {
+        receipt.status == tidepool_runtime::session::WorkbenchItemStatus::Rejected
+            && receipt.operations.iter().any(|operation| operation.effect == "replaceActor")
+    }), "runtime replacement dispatch must precede refusal: {failure:?}");
     assert!(
-        rejected
-            .to_string()
-            .contains("replacement removed a startup source"),
-        "{rejected:?}"
+        failure.detail.contains("removed a startup source"),
+        "{failure:?}"
     );
     let replaced = dispatch_haskell_script(
         root.as_ref(),
