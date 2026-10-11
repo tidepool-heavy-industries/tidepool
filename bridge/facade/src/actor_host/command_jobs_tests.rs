@@ -1,5 +1,5 @@
 use super::command_test_support::TestCommands;
-use super::test_campaign::{COLD_DEBUG_CELL_SETTLEMENT_BUDGET, TestCampaign, original_tool_call};
+use super::test_campaign::{original_tool_call, TestCampaign, COLD_DEBUG_CELL_SETTLEMENT_BUDGET};
 use super::tests::{dispatch_haskell_script, dispatch_lookup};
 use super::*;
 use exomonad_actor::command_jobs::{CommandBackendPurpose, CommandControl};
@@ -1313,12 +1313,18 @@ async fn bound_command_result_is_summarized_and_remains_readable() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let policy = campaign.root_installation.policy.clone();
-                let launched = tokio::spawn(async move {
+                let mut launched = tokio::spawn(async move {
                     dispatch_haskell_script(policy.as_ref(), "paged <- Cmd.run [bash|printf Q|]")
                         .await
                 });
                 let backend = TestCommands::completed(&"Q".repeat(10000));
-                backend_request(campaign).await.supply(Ok(backend.clone()));
+                backend_request_while_live(
+                    campaign,
+                    &mut launched,
+                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                )
+                .await
+                .supply(Ok(backend.clone()));
                 let run = launched.await.unwrap();
                 assert_eq!(run["status"], "committed", "{run}");
                 assert_eq!(backend.specs.lock().len(), 1);
@@ -1524,13 +1530,11 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
                         .is_err(),
                     "a cancelled job requested a command backend after its late source probe"
                 );
-                assert!(
-                    backend
-                        .specs
-                        .lock()
-                        .iter()
-                        .all(|spec| spec.argv[4].contains("git rev-parse"))
-                );
+                assert!(backend
+                    .specs
+                    .lock()
+                    .iter()
+                    .all(|spec| spec.argv[4].contains("git rev-parse")));
             })
         })
         .await;
@@ -2795,14 +2799,14 @@ async fn structured_bash_explicit_yield_retains_owned_job_without_completion_not
                 );
                 assert!(
                     campaign
-                        .next_deployment_opt(Duration::from_millis(100), |event| match event {
+                        .observe_deployment(Duration::from_millis(100), |event| match event {
                             LocalResidentDeployment::SettlementChanged { notification }
                                 if notification.command_job.is_some() =>
                                 Ok(notification),
                             other => Err(other),
                         })
                         .await
-                        .is_none(),
+                        .is_deadline(),
                     "an explicit yield armed a completion notice"
                 );
             })
@@ -2864,14 +2868,14 @@ async fn structured_bash_default_waits_until_terminal_without_completion_notice(
                 assert_eq!(backend.executions(), 1);
                 assert!(
                     campaign
-                        .next_deployment_opt(Duration::from_millis(100), |event| match event {
+                        .observe_deployment(Duration::from_millis(100), |event| match event {
                             LocalResidentDeployment::SettlementChanged { notification }
                                 if notification.command_job.is_some() =>
                                 Ok(notification),
                             other => Err(other),
                         })
                         .await
-                        .is_none(),
+                        .is_deadline(),
                     "default bash armed a completion notice"
                 );
             })
@@ -3119,13 +3123,13 @@ case report of
                 assert_eq!(result["status"], "committed", "{result}");
                 assert!(
                     campaign
-                        .next_deployment_opt(Duration::from_millis(100), |event| match event {
+                        .observe_deployment(Duration::from_millis(100), |event| match event {
                             LocalResidentDeployment::WatchChanged { notification } =>
                                 Ok(notification),
                             other => Err(other),
                         })
                         .await
-                        .is_none(),
+                        .is_deadline(),
                     "a direct wait emitted a named-watch notice"
                 );
                 assert_eq!(backend.executions(), 1);
@@ -3181,12 +3185,12 @@ async fn watched_command_jobs_wake_once_with_a_typed_report() {
         .await;
     // The owner's watch took the settlement wake over: no second notice.
     assert!(campaign
-        .next_deployment_opt(Duration::from_millis(500), |event| match event {
+        .observe_deployment(Duration::from_millis(500), |event| match event {
             LocalResidentDeployment::SettlementChanged { notification } => Ok(notification),
             other => Err(other),
         })
         .await
-        .is_none());
+        .is_deadline());
     let source = format!(
         "WatchReady (report, foreground) <- pollWatch checked\nif Cmd.commandOutcome (Cmd.reportResult report) == Cmd.CommandExited 101 && fmap Cmd.sourceCommit (Cmd.reportSource report) == Just (Just \"{commit}\") && Cmd.reportOutputComplete report && fmap Cmd.sourceCommit (Cmd.reportSource foreground) == Just (Just \"{commit}\") then pure () else error \"watch report lost its outcome, source, or output completeness\""
     );
@@ -3199,7 +3203,7 @@ async fn watched_command_jobs_wake_once_with_a_typed_report() {
 async fn a_job_finished_before_its_watch_registers_wakes_exactly_once() {
     let campaign = TestCampaign::start().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
-    let running = tokio::spawn({
+    let mut running = tokio::spawn({
         let policy = campaign.root_installation.policy.clone();
         async move {
             dispatch_haskell_script(
@@ -3209,7 +3213,7 @@ async fn a_job_finished_before_its_watch_registers_wakes_exactly_once() {
             .await
         }
     });
-    backend_request(campaign)
+    backend_request_while_live(campaign, &mut running, COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
         .await
         .supply(Ok(TestCommands::completed("")));
     assert_eq!(running.await.unwrap()["status"], "committed");
@@ -3217,7 +3221,7 @@ async fn a_job_finished_before_its_watch_registers_wakes_exactly_once() {
     for label in ["late-one", "late-two"] {
         committed(
             campaign,
-            &format!("w <- watch \"{label}\" (Cmd.awaitFinished done)\nWatchReady r <- pollWatch w\nCmd.commandOutcome (Cmd.reportResult r)"),
+            &format!("w <- watch (Just \"{label}\") (Cmd.awaitFinished done)\nWatchReady r <- pollWatch w\nCmd.commandOutcome (Cmd.reportResult r)"),
         )
         .await;
         campaign
@@ -3232,14 +3236,14 @@ async fn a_job_finished_before_its_watch_registers_wakes_exactly_once() {
             .await;
     }
     assert!(campaign
-        .next_deployment_opt(Duration::from_millis(500), |event| match event {
+        .observe_deployment(Duration::from_millis(500), |event| match event {
             LocalResidentDeployment::WatchChanged { notification } => Ok(notification),
             LocalResidentDeployment::SettlementChanged { notification } =>
                 Err(LocalResidentDeployment::SettlementChanged { notification }),
             other => Err(other),
         })
         .await
-        .is_none());
+        .is_deadline());
     campaign.assert_no_deployment("no settlement notice for a watched job", |event| {
         matches!(event, LocalResidentDeployment::SettlementChanged { .. })
     });

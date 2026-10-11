@@ -1652,32 +1652,17 @@ async fn watchdog_probe(policy: &dyn exomonad_actor::ResidentToolEndpoint, topic
         .to_string()
 }
 
-/// A child's own admission and turn-activation traffic (`SessionReady`,
-/// `ChildExited`, …) shares this campaign's one deployment channel with a
-/// watchdog's `NotificationSend`, and the two interleave in whatever order
-/// the resident host happens to schedule them. Waits up to `budget` for the
-/// next `NotificationSend` specifically; any other event seen along the way
-/// is parked on the campaign, not dropped, so a later wait can still find
-/// it. `None` means no `NotificationSend` arrived inside the budget (used to
-/// assert silence).
+/// Unrelated deployments remain pending for their original consumers.
 async fn next_notification_send(
     campaign: &mut TestCampaign,
     budget: Duration,
-) -> Result<Arc<exomonad_actor::NotificationSend>, String> {
+) -> super::test_campaign::DeploymentObservation<Arc<exomonad_actor::NotificationSend>> {
     campaign
-        .next_deployment_opt(budget, |event| match event {
+        .observe_deployment(budget, |event| match event {
             LocalResidentDeployment::NotificationSend(command) => Ok(command),
             other => Err(other),
         })
         .await
-        .ok_or_else(|| {
-            let pending = campaign.pending_kinds();
-            if pending.is_empty() {
-                "no event at all within the budget".to_string()
-            } else {
-                format!("no NotificationSend within the budget; still pending: {pending:?}")
-            }
-        })
 }
 
 #[tokio::test]
@@ -1755,7 +1740,7 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
                 });
                 let command = next_notification_send(campaign, Duration::from_secs(120))
                     .await
-                    .expect("the watchdog's escalation reaches the deployment channel");
+                    .expect_observed("the watchdog's escalation reaches the deployment channel");
                 assert_eq!(command.owner(), escalate_child.actor.identity());
                 assert_eq!(command.target(), root_identity);
                 assert!(
@@ -1834,7 +1819,7 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
                 assert!(
                     next_notification_send(campaign, Duration::from_millis(500))
                         .await
-                        .is_err(),
+                        .is_deadline(),
                     "a nudge alone must never reach the parent"
                 );
 
@@ -1851,7 +1836,7 @@ async fn a_childs_watchdog_slot_escalates_to_its_parent() {
                 assert!(
                     next_notification_send(campaign, Duration::from_millis(500))
                         .await
-                        .is_err(),
+                        .is_deadline(),
                     "the root must never message a parent it does not have"
                 );
             })
