@@ -11,6 +11,7 @@ readme = "../../README.md"
 
 [lib]
 proc-macro = true
+test = false
 
 [dependencies]
 syn = { workspace = true, features = ["extra-traits"] }

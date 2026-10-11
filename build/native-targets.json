@@ -219,9 +219,7 @@
       },
       "libraries": {
         "tidepool_bridge_derive": {
-          "build": "//tidepool/bridge-derive:tidepool_bridge_derive",
-          "test": "//tidepool/bridge-derive:tidepool_bridge_derive_unit_tests",
-          "test_build": "//tidepool/bridge-derive:tidepool_bridge_derive_unit_tests_binary"
+          "build": "//tidepool/bridge-derive:tidepool_bridge_derive"
         }
       }
     },

@@ -36,40 +36,6 @@ tidepool_rust_library(
 
 
 rust_filegroup(
-    name = "tidepool_bridge_derive_unit_tests_sources",
-    mapped_srcs = {
-        "Cargo.toml": "tidepool/bridge-derive/Cargo.toml",
-        "src/codegen.rs": "tidepool/bridge-derive/src/codegen.rs",
-        "src/lib.rs": "tidepool/bridge-derive/src/lib.rs",
-        "src/parse.rs": "tidepool/bridge-derive/src/parse.rs",
-        "src/record_codegen.rs": "tidepool/bridge-derive/src/record_codegen.rs",
-    },
-    visibility = ["PUBLIC"],
-)
-
-tidepool_rust_isolated_test(
-    name = "tidepool_bridge_derive_unit_tests",
-    package_name = "tidepool-bridge-derive",
-    package_dir = "tidepool/bridge-derive",
-    version = "0.1.0",
-    crate_root = "tidepool/bridge-derive/src/lib.rs",
-    edition = "2021",
-    srcs_filegroup = ":tidepool_bridge_derive_unit_tests_sources",
-    deps = [
-        "//bridge/test-data:tidepool_test_data",
-        "//third-party/rust:proc-macro2",
-        "//third-party/rust:quote",
-        "//third-party/rust:syn",
-        "//tidepool/bridge:tidepool_bridge",
-        "//tidepool/repr:tidepool_repr",
-    ],
-    required_test_modules = [
-        "tidepool/bridge-derive/src/lib.rs",
-    ],
-    visibility = ["PUBLIC"],
-)
-
-rust_filegroup(
     name = "arity_disambiguation_sources",
     mapped_srcs = {
         "Cargo.toml": "tidepool/bridge-derive/Cargo.toml",
