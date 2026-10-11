@@ -890,6 +890,25 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(group["resource_env"]["EXOMONAD_NIX_BIN"],
                          "$(location toolchains//:exomonad_runtime_tools)/bin/nix")
 
+    def test_workspace_check_declares_the_compiler_used_by_its_child_cli(self):
+        metadata = json.loads(self.metadata.read_text())
+        facade = next(package for package in metadata["packages"] if package["name"] == "tidepool")
+        facade["targets"].append({
+            "name": "exomonad_workspace_check", "kind": ["test"], "edition": "2021",
+            "src_path": str(self.root / "bridge/facade/tests/exomonad_workspace_check.rs"),
+        })
+        self.metadata.write_text(json.dumps(metadata))
+        self.write("bridge/facade/tests/exomonad_workspace_check.rs", "#[test] fn check() {}\n")
+        result = self.generate("--package", "tidepool", "--no-default-features", "tidepool")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        group = self.rule("bridge/facade", "exomonad_workspace_check", "tidepool_rust_isolated_test")
+        for name, value in {
+            "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+            "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+            "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        }.items():
+            self.assertEqual(group["resource_env"][name], value)
+
     def test_actor_skill_discovery_consumes_the_recorded_workspace_bundle(self):
         actor = self.package('exomonad-actor', 'exomonad/actor', [
             ('exomonad_actor', 'lib', 'src/lib.rs'),
