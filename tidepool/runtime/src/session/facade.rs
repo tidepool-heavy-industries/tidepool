@@ -285,6 +285,233 @@ mod tests {
     use crate::session::SourceImports;
     use tidepool_codegen::scope::ScopeId;
     use tidepool_repr::Generation;
+
+    #[test]
+    fn inherited_certified_facade_subset_preserves_original_owners_and_default_visibility() {
+        use crate::session::{ModuleEnv, PersistentSession, SessionLib};
+        use tidepool_toolchain::artifacts::{compile_invocation_in_context, CompileInvocation};
+        use tidepool_toolchain::declaration_join::ExactModuleIdentity;
+
+        let root = tempfile::tempdir().unwrap();
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let mut env = ModuleEnv::standalone_default();
+        env.pragmas.push_str("\n{-# LANGUAGE TypeFamilies #-}");
+        let mut lib = SessionLib::open(SessionId(9917), root.path(), env)
+            .unwrap()
+            .with_validation_include(effects.include_paths().to_vec());
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+            .unwrap();
+        let mut session = PersistentSession::new(Some(lib), crate::DEFAULT_NURSERY_SIZE);
+        let declarations = include_str!("fixtures/inherited-facade-subset.hs")
+            .trim()
+            .split("\n\n")
+            .collect::<Vec<_>>();
+        let generation = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_in(ScopeId::ROOT, &declarations, settlement)
+        })
+        .unwrap();
+        let full_surface = session
+            .exact_exports_in(
+                ScopeId::ROOT,
+                &[
+                    "Kept",
+                    "KeptClass",
+                    "KeptPayload",
+                    "Hidden",
+                    "HiddenClass",
+                    "HiddenPayload",
+                ],
+            )
+            .unwrap();
+        let view = session.compile_view_in(ScopeId::ROOT).unwrap();
+        let facade = tidepool_testing::with_settlement(|settlement| {
+            full_surface.materialize(&view, settlement)
+        })
+        .unwrap();
+        let inherited = facade.projection().unwrap();
+        for class in ["KeptClass", "HiddenClass"] {
+            assert!(inherited
+                .receipt()
+                .instances()
+                .classes
+                .iter()
+                .any(|instance| {
+                    instance.class.occurrence == class
+                        && instance.class.module == SessionModule::lib(generation).module_name()
+                }));
+        }
+        assert!(inherited.receipt().instances().families.len() >= 2);
+        let reused = facade.clone();
+        assert!(Arc::ptr_eq(inherited, reused.projection().unwrap()));
+        let selected = full_surface
+            .declarations()
+            .unwrap()
+            .iter()
+            .filter(|export| {
+                matches!(
+                    export.head.occurrence.as_str(),
+                    "Kept" | "KeptClass" | "KeptPayload"
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), 3);
+        assert!(selected.iter().all(|export| {
+            export.head.unit == "main"
+                && export.head.module == SessionModule::lib(generation).module_name()
+        }));
+        let inherited_owner = ExactModuleIdentity {
+            unit: inherited.receipt().reserved().unit.clone(),
+            module: inherited.module_name().to_owned(),
+        };
+        let surface = super::super::render::AdmittedDeclarationSurface {
+            roots: vec![inherited_owner.clone()],
+            lexical: inherited.context().lexical_graph().to_vec(),
+        };
+        let include = view.include_paths(effects.include_paths());
+        let narrowed = tidepool_testing::with_settlement(|settlement| {
+            issue_projection(
+                inherited.context(),
+                &inherited_owner,
+                &surface,
+                &selected,
+                inherited.receipt().instances(),
+                inherited.receipt().family_closure(),
+                &include,
+                root.path(),
+                settlement,
+            )
+        })
+        .unwrap();
+        assert_eq!(narrowed.receipt().exports(), selected);
+        assert_eq!(
+            narrowed.receipt().instances(),
+            inherited.receipt().instances()
+        );
+        assert_eq!(
+            narrowed.receipt().family_closure(),
+            inherited.receipt().family_closure()
+        );
+        assert_ne!(narrowed.module_name(), inherited.module_name());
+        let nested_root = narrowed
+            .context()
+            .lexical_graph()
+            .iter()
+            .find(|node| node.owner.module == narrowed.module_name())
+            .unwrap();
+        assert_eq!(nested_root.imports, vec![inherited_owner]);
+
+        let preamble =
+            crate::session::insert_preamble_imports(effects.preamble(), narrowed.module_name());
+        let source = crate::session::assemble_expression_module(
+            &preamble,
+            "entry",
+            "'[]",
+            "pure (keptNumber (Kept (41 :: KeptPayload Bool)))",
+            crate::session::ExpressionLift::Effectful,
+        );
+        let invocation = CompileInvocation {
+            source: &source,
+            targets: &[crate::session::PREPARED_SCAFFOLD_TARGET],
+            include: &include,
+            fallback_module_name: "InheritedFacadeConsumer",
+        };
+        let compiled = tidepool_testing::with_settlement(|settlement| {
+            compile_invocation_in_context(
+                &invocation,
+                Arc::clone(narrowed.context()),
+                |_, _, _| {},
+                settlement,
+            )
+        })
+        .unwrap();
+        let value = crate::run_compiled_target(
+            &compiled,
+            crate::session::PREPARED_SCAFFOLD_TARGET,
+            crate::DEFAULT_NURSERY_SIZE,
+            &mut frunk::HNil,
+            &(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            crate::value_to_json(&value, &compiled.table, 0),
+            serde_json::json!(42)
+        );
+
+        let refused_source = source.replace(
+            "keptNumber (Kept (41 :: KeptPayload Bool))",
+            "hiddenNumber (Hidden (41 :: HiddenPayload Bool))",
+        );
+        let refused = tidepool_testing::with_settlement(|settlement| {
+            compile_invocation_in_context(
+                &CompileInvocation {
+                    source: &refused_source,
+                    ..invocation
+                },
+                Arc::clone(narrowed.context()),
+                |_, _, _| {},
+                settlement,
+            )
+        });
+        assert!(
+            matches!(&refused, Err(crate::CompileError::Diagnostics(_))),
+            "{:?}",
+            refused.err()
+        );
+        // Selection controls the default surface. Explicit access to an already
+        // captured interface remains valid in the trusted source environment.
+        let explicit_source =
+            refused_source.replace(narrowed.module_name(), inherited.module_name());
+        let explicit = tidepool_testing::with_settlement(|settlement| {
+            compile_invocation_in_context(
+                &CompileInvocation {
+                    source: &explicit_source,
+                    ..invocation
+                },
+                Arc::clone(narrowed.context()),
+                |_, _, _| {},
+                settlement,
+            )
+        })
+        .unwrap();
+        let value = crate::run_compiled_target(
+            &explicit,
+            crate::session::PREPARED_SCAFFOLD_TARGET,
+            crate::DEFAULT_NURSERY_SIZE,
+            &mut frunk::HNil,
+            &(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(
+            crate::value_to_json(&value, &explicit.table, 0),
+            serde_json::json!(141)
+        );
+
+        let original_source = refused_source.replace(
+            narrowed.module_name(),
+            &SessionModule::lib(generation).module_name(),
+        );
+        let refused = tidepool_testing::with_settlement(|settlement| {
+            compile_invocation_in_context(
+                &CompileInvocation {
+                    source: &original_source,
+                    ..invocation
+                },
+                Arc::clone(narrowed.context()),
+                |_, _, _| {},
+                settlement,
+            )
+        });
+        assert!(
+            matches!(&refused, Err(crate::CompileError::InputRejected(_))),
+            "{:?}",
+            refused.err()
+        );
+    }
+
     #[test]
     fn materialized_facade_reexports_only_selected_exact_items() {
         let dir = tempfile::tempdir().expect("tempdir");
