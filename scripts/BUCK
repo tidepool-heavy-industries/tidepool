@@ -27,6 +27,8 @@ native_source_snapshot(
         ("toolchains//:qualification_inputs", ""),
         ("//:operator_test_sources", ""),
         ("//bridge/haskell:main_acceptance_script_tree", ""),
+        ("//bridge/haskell:qualification_compiler_inputs", ""),
+        ("//exomonad/examples/workspace:qualification_inputs", ""),
         ("//build/rust:qualification_inputs", ""),
         ("//build/package:qualification_inputs", ""),
         ("//bridge/facade:native_qualification_inputs", ""),

@@ -93,6 +93,9 @@ class ComponentProjectionTests(unittest.TestCase):
             "load": lambda *args: None,
             "export_file": lambda **rule: exports.append(rule),
             "filegroup": lambda **rule: None,
+            "native_source_snapshot": lambda **rule: None,
+            "sh_test": lambda **rule: None,
+            "read_root_config": lambda *args: "",
             "glob": lambda patterns: sorted({
                 path.relative_to(workspace_package).as_posix()
                 for pattern in patterns for path in workspace_package.glob(pattern)
