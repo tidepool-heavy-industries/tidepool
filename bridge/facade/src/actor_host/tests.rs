@@ -2822,28 +2822,36 @@ async fn forest_operator_survives_model_root_recovery() {
                     bound.status,
                     tidepool_runtime::session::WorkbenchRunStatus::Committed
                 );
-                let requested = submit(
-                    &operator,
-                    &tidepool_testing::fixture_source(
-                        "bridge/facade/src/actor_host/operator_request.hs",
+                let source = tidepool_testing::fixture_source(
+                    "bridge/facade/src/actor_host/operator_request.hs",
+                );
+                let requested = submit(&operator, &source);
+                tokio::pin!(requested);
+                let child = tokio::select! {
+                    receipt = &mut requested => panic!(
+                        "operator request settled before child installation: {receipt:?}"
                     ),
+                    child = campaign.next_deployment(
+                        "operator child admission",
+                        test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                        |event| match event {
+                            LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
+                            other => Err(other),
+                        },
+                    ) => child,
+                };
+                campaign.acknowledge_native_spawn(&child);
+                let requested = tokio::time::timeout(
+                    test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                    requested,
                 )
-                .await;
+                .await
+                .expect("operator request settles after native child admission");
                 assert_eq!(
                     requested.status,
                     tidepool_runtime::session::WorkbenchRunStatus::Committed,
                     "{requested:?}"
                 );
-                let child = campaign
-                    .next_deployment(
-                        "operator child admission",
-                        Duration::from_secs(30),
-                        |event| match event {
-                            LocalResidentDeployment::PolicyInstalled(child) => Ok(child),
-                            other => Err(other),
-                        },
-                    )
-                    .await;
                 assert_eq!(child.supervisor_parent, Some(operator.identity()));
                 assert_eq!(child.context_parent, None);
                 assert_eq!(
