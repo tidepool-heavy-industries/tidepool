@@ -15090,11 +15090,23 @@ pub(crate) mod tests {
             .chain(prior_planned.certified.recovery_products.iter().cloned())
             .chain(planned.certified.recovery_products.iter().cloned())
             .collect::<Vec<_>>();
-        let view = crate::declaration_context::certified_product_artifact_view(
+        let rebound = crate::declaration_context::certified_product_artifact_view(
             canonical_producer,
             &custody,
             &[],
             None,
+        )
+        .unwrap();
+        assert!(matches!(
+            planned.certified.source_selection.selected_original_closure(&rebound),
+            Err(CertificationError::OriginalClosure(error))
+                if matches!(*error, crate::CompileError::ExtractFailed(_))
+        ));
+        let view = crate::declaration_context::certified_product_artifact_view(
+            canonical_producer,
+            &custody,
+            &[],
+            Some(planned.request.context().as_ref()),
         )
         .unwrap();
         let incompatible_source =
