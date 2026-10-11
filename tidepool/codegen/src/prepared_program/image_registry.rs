@@ -49,6 +49,7 @@ pub struct ImageRegistry {
 struct Entries {
     images: HashMap<ImageKey, Entry>,
     since_sweep: usize,
+    sweep_interval: usize,
 }
 
 /// Distinct content domains share one weak registry and one flight protocol.
@@ -339,17 +340,19 @@ impl Drop for CompileLease<'_> {
 }
 
 impl Entries {
-    /// A full scan after at least `len` indexed operations makes dead-key
-    /// collection amortized constant work per operation. Exact-key dead
-    /// entries are removed immediately, including between sweeps.
+    /// Freeze the next interval at the survivor count after each sweep so new
+    /// keys cannot postpone collection. At most one key is added per tick,
+    /// keeping full scans amortized constant work per indexed operation.
+    /// Exact-key dead entries are removed immediately between sweeps.
     fn tick(&mut self) {
         self.since_sweep += 1;
-        if self.since_sweep >= self.images.len().max(1) {
+        if self.since_sweep >= self.sweep_interval {
             self.images.retain(|_, entry| match entry {
                 Entry::Ready(image) => image.image.strong_count() != 0,
                 Entry::Compiling(_) => true,
             });
             self.since_sweep = 0;
+            self.sweep_interval = self.images.len().max(1);
         }
     }
 }
@@ -644,6 +647,7 @@ impl ImageRegistry {
 mod tests {
     use super::super::{PreparedMachine, PreparedMachineOptions, RunOptions};
     use super::*;
+    use proptest::strategy::Strategy;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -978,6 +982,127 @@ mod tests {
         assert!(Arc::ptr_eq(&registry.lookup(&live_key).unwrap(), &live));
         assert!(Arc::ptr_eq(&registry.lookup(&live_key).unwrap(), &live));
         assert_eq!(registry.entries.lock().unwrap().images.len(), 1);
+    }
+
+    #[test]
+    fn fresh_cold_keys_cannot_postpone_dead_key_collection() {
+        let registry = ImageRegistry::new();
+        let live_key = program();
+        let live = registry.insert(live_key.clone(), compiled());
+        let dead_key = program_returning(43);
+        let dead = registry.insert(
+            dead_key.clone(),
+            Arc::new(CompiledProgram::compile(&dead_key).unwrap()),
+        );
+        // Both owners are live at the sweep boundary; release one afterwards.
+        while registry.entries.lock().unwrap().since_sweep != 0 {
+            assert!(Arc::ptr_eq(&registry.lookup(&live_key).unwrap(), &live));
+        }
+        drop(dead);
+        for value in 44..108 {
+            let key = program_returning(value);
+            let image = Arc::new(CompiledProgram::compile(&key).unwrap());
+            drop(registry.insert(key, image));
+            assert!(registry.entries.lock().unwrap().images.len() <= 3);
+        }
+        assert!(!registry
+            .entries
+            .lock()
+            .unwrap()
+            .images
+            .contains_key(&ImageKey::Program(dead_key.prepared().clone())));
+        assert!(Arc::ptr_eq(&registry.lookup(&live_key).unwrap(), &live));
+    }
+
+    #[derive(Clone, Debug)]
+    enum HistoryOp {
+        Fresh(bool),
+        Lookup(u8),
+        CloneOwner(u8),
+        Release(u8),
+    }
+
+    fn replay_liveness_history(history: &[HistoryOp]) {
+        // Owners are the liveness oracle; no Weak counts or production sweep
+        // state determine expectations. Keys remain distinct across fresh ops.
+        let registry = ImageRegistry::new();
+        let mut keys = Vec::new();
+        let mut owners: Vec<Vec<Arc<CompiledProgram>>> = Vec::new();
+        let mut deadlines = Vec::new();
+        let mut indexed_ops = 0usize;
+        for op in history {
+            match *op {
+                HistoryOp::Fresh(retain) => {
+                    let key = program_returning(keys.len() as i64);
+                    let image = Arc::new(CompiledProgram::compile(&key).unwrap());
+                    let image = registry.insert(key.clone(), image);
+                    indexed_ops += 1;
+                    keys.push(key);
+                    owners.push(if retain { vec![image] } else { vec![] });
+                    deadlines.push((!retain).then_some(indexed_ops + keys.len()));
+                }
+                HistoryOp::Lookup(slot) if !keys.is_empty() => {
+                    let slot = usize::from(slot) % keys.len();
+                    let found = registry.lookup(&keys[slot]);
+                    indexed_ops += 1;
+                    if let Some(owner) = owners[slot].first() {
+                        assert!(Arc::ptr_eq(owner, &found.expect("live owner is reusable")));
+                    } else {
+                        assert!(found.is_none(), "released image must not be retained");
+                    }
+                }
+                HistoryOp::CloneOwner(slot) if !keys.is_empty() => {
+                    let slot = usize::from(slot) % keys.len();
+                    if let Some(owner) = owners[slot].first().cloned() {
+                        owners[slot].push(owner);
+                    }
+                }
+                HistoryOp::Release(slot) if !keys.is_empty() => {
+                    let slot = usize::from(slot) % keys.len();
+                    if owners[slot].pop().is_some() && owners[slot].is_empty() {
+                        // The frozen interval cannot exceed all keys issued so
+                        // far. Later fresh keys must not extend this deadline.
+                        deadlines[slot] = Some(indexed_ops + keys.len());
+                    }
+                }
+                _ => {}
+            }
+            let entries = registry.entries.lock().unwrap();
+            for (slot, key) in keys.iter().enumerate() {
+                let entry = entries
+                    .images
+                    .get(&ImageKey::Program(key.prepared().clone()));
+                if !owners[slot].is_empty() {
+                    assert!(
+                        matches!(entry, Some(Entry::Ready(_))),
+                        "live key {slot} lost"
+                    );
+                } else if deadlines[slot].is_some_and(|deadline| indexed_ops >= deadline) {
+                    assert!(entry.is_none(), "dead key {slot} retained beyond liveness bound at op {indexed_ops}: {history:?}");
+                }
+            }
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::default())]
+        #[test]
+        fn generated_owner_histories_bound_dead_keys(
+            prefix in proptest::collection::vec(
+                proptest::prop_oneof![
+                    proptest::arbitrary::any::<bool>().prop_map(HistoryOp::Fresh),
+                    (0u8..16).prop_map(HistoryOp::Lookup),
+                    (0u8..16).prop_map(HistoryOp::CloneOwner),
+                    (0u8..16).prop_map(HistoryOp::Release),
+                ], 0..40),
+            cold_keys in 8usize..24,
+        ) {
+            let mut history = prefix;
+            // Targeted fresh-key growth follows arbitrary shared-owner history.
+            history.extend([HistoryOp::Fresh(true), HistoryOp::Fresh(false)]);
+            history.extend(std::iter::repeat_n(HistoryOp::Fresh(false), cold_keys));
+            replay_liveness_history(&history);
+        }
     }
 
     #[test]

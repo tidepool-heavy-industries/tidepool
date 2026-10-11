@@ -476,6 +476,30 @@ mod tests {
     }
 
     #[test]
+    fn fresh_constructor_requests_prune_dead_keys_and_preserve_live_identity() {
+        let target = target();
+        let live_decl = declaration("PruningLive", 90000);
+        let live = shared_constructor(&target, &live_decl).unwrap();
+        let dead_decl = declaration("PruningDead", 90001);
+        drop(shared_constructor(&target, &dead_decl).unwrap());
+        for index in 0..128 {
+            let cold = declaration(&format!("PruningCold{index}"), 90002 + index);
+            drop(shared_constructor(&target, &cold).unwrap());
+        }
+        let pool = PROCESS_CONSTRUCTORS.get().unwrap().lock().unwrap();
+        assert!(!pool.entries.contains_key(&(target.clone(), dead_decl)));
+        assert!(
+            pool.entries.len() <= 3,
+            "cold requests have two ticks per new key"
+        );
+        drop(pool);
+        assert!(Arc::ptr_eq(
+            &live,
+            &shared_constructor(&target, &live_decl).unwrap()
+        ));
+    }
+
+    #[test]
     fn commit_externals_caches_the_shared_singleton_without_conflict() {
         // `commit_externals` used to refuse a second program's externals
         // unless they were `Arc`-identical to whatever the machine had
