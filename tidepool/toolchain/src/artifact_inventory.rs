@@ -12156,6 +12156,107 @@ mod tests {
     }
 
     #[test]
+    fn indirect_native_group_requires_capture_absent_from_root_globals() {
+        use crate::certified_products::PendingImportOwner;
+        use tidepool_repr::execution_schema::testing;
+
+        let capture_identity = testing::identity("Values", "first");
+        let child_for_generation = |generation| {
+            issued_native_groups(
+                "Child",
+                vec![(
+                    7,
+                    vec![PendingImportOwner::Retained {
+                        identity: capture_identity.clone(),
+                        generation,
+                    }],
+                )],
+                &[],
+                &BTreeMap::new(),
+            )
+        };
+        let child = child_for_generation(4);
+        let root = issued_native_groups(
+            "Root",
+            vec![(2, vec![issued_source(&child, 7)])],
+            &[],
+            &BTreeMap::new(),
+        );
+        let values = ArtifactEntry::canonical(crate::certified_products::fixture_module_interface(
+            [2; 32],
+            "fixture",
+            "Values",
+            BTreeMap::new(),
+        ));
+        let ArtifactPayload::Original(product) = &root.payload else {
+            panic!("native root");
+        };
+        let globals = crate::certified_products::original_native_group_definitions(product, 2)
+            .unwrap()
+            .globals();
+        assert_eq!(globals.len(), 1);
+        assert_eq!(globals[0].identity.module, "Child");
+        assert_eq!(globals[0].required_generation, None);
+        assert!(root
+            .native_requirements_for(2)
+            .iter()
+            .all(|(_, edge)| { matches!(edge, ArtifactDependency::NativeGroup { .. }) }));
+
+        let inventory = ArtifactInventory::default();
+        for offered_child in [None, Some(child_for_generation(5))] {
+            let mut entries = vec![root.clone(), values.clone()];
+            entries.extend(offered_child);
+            assert!(matches!(
+                inventory.admit(&inventory.empty_view(), entries),
+                Err(CompileError::ArtifactInventory(error))
+                    if matches!(error.failure, ArtifactInventoryFailure::MissingDependency { .. })
+            ));
+            assert_eq!(inventory.node_count(), 0);
+        }
+        let root_id = root.descriptor.id;
+        let expected = NativeRequirements {
+            bindings: vec![NativeBindingRequirement {
+                artifact_id: values.descriptor.id,
+                identity: capture_identity,
+                generation: 4,
+            }],
+            packages: vec![],
+        };
+        let admitted = inventory
+            .admit(&inventory.empty_view(), vec![root, child, values])
+            .unwrap();
+        let selected = admitted.select_roots(vec![root_id]).unwrap();
+        let demand = NativeRequirementRoot::Group {
+            artifact: root_id,
+            original_ordinal: 2,
+        };
+        assert_eq!(
+            selected.native_requirements_from_roots(&[demand]).unwrap(),
+            expected
+        );
+        assert_eq!(
+            selected
+                .native_requirements_from_roots(&[demand, demand])
+                .unwrap(),
+            expected
+        );
+        assert!(matches!(
+            selected.native_requirements_from_roots(&[NativeRequirementRoot::Group {
+                artifact: root_id,
+                original_ordinal: 7,
+            }]),
+            Err(CompileError::ArtifactInventory(error))
+                if error.failure == ArtifactInventoryFailure::NativeGroupUnavailable {
+                    artifact: root_id,
+                    original_ordinal: 7,
+                }
+        ));
+        drop(selected);
+        drop(admitted);
+        assert_eq!(inventory.node_count(), 0);
+    }
+
+    #[test]
     fn native_package_obligations_follow_selected_groups_without_package_artifact_nodes() {
         let inventory = ArtifactInventory::default();
         let package_file = tempfile::NamedTempFile::new().unwrap();
