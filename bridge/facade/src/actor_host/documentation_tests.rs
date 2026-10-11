@@ -3431,6 +3431,10 @@ async fn recipe_check_compile_failure_reports_the_ghc_diagnostic_text() {
         message.contains("undefinedRecipeIdentifierXyz") && message.contains("not in scope"),
         "{message}"
     );
+    std::fs::write(&work, original).unwrap();
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .expect("the restored Collaboration recipe must execute after the compiler refusal");
 }
 
 #[tokio::test(flavor = "multi_thread")]
