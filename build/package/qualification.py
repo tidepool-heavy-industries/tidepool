@@ -236,6 +236,13 @@ def cohorts() -> dict:
                 "ignored": True, "timeout": 1800, "compiler_mode": "owned-resident",
                 "max_jobs": 1, "retain_artifacts": True,
                 "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY"]},
+            "skill-workflow": {
+                "tests": ["actor_host::documentation_tests::skill_recipe_receives_its_typed_request"],
+                "expected_count": 1, "ignored": False, "timeout": 1800,
+                "compiler_mode": "owned-resident", "max_jobs": 1,
+                "retain_artifacts": True,
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
                 "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY"]}}
 
 def sha256(path: Path) -> str:

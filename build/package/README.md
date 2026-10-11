@@ -447,6 +447,13 @@ python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
 
+The separate `skill-workflow` cohort executes the published Skill recipe through
+its typed request, source checkpoint and resident compilation history. Run it
+against the same frozen descriptor as M3, using `--cohort skill-workflow`.
+It retains artifacts and uses the owned resident compiler with one test process.
+Its result is independent of the recursive cohort; neither a component interface
+comparison nor a previous bundle's recipe result establishes this acceptance.
+
 The supplementary `harness-performance` cohort selects the one ignored
 eight-phase HTTP/Engine/Store/notebook workload. The separate
 `harness-performance-three-actor` cohort selects the scripted parent/two-child

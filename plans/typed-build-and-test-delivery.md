@@ -43,6 +43,32 @@ The supplementary performance cohorts do not block M2 acceptance, but they
 are required for M3. No result currently recorded in this plan substitutes for
 the fresh candidate's pending gates.
 
+## Final blocking repairs
+
+Complete these owning changes before final frozen qualification:
+
+- Separate exact artifact/group custody seeds from issued compiler selection
+  roots. Retention, leases and recovery keep historical dependencies without
+  promoting them into executable demand. Preserve exact edges and genuine
+  ambiguity refusals. Version changed durable selections and contexts and
+  reject incompatible older records; do not infer their intended selection.
+- Preserve the authenticated original dependency selection through recipe
+  publication, source checkpointing and the parent declaration. Consuming that
+  completed selection reuses its exact products; explicit reload inspects
+  current source. Authored path identity and compiler equality remain intact.
+- Cover both failures through their actual production histories and maintained
+  property tests for joins, projection, retention, recovery and refusal. The
+  frozen `skill-workflow` cohort must pass alongside M3; isolated repeated
+  compilation is not a substitute for the relocated-source history.
+
+Integrate component repairs incrementally, then freeze the joined production
+and fast-dev bundles and run the applicable complete rosters. After final
+qualification, promote the exact joined source to main, push its matched pins,
+and retain an annotated acceptance tag referencing the frozen descriptors and
+executed reports. Complete the live browser trial before closing the campaign.
+Unrelated optimization and architecture leads remain follow-ups rather than
+expanding this closure wave.
+
 ## Remaining performance comparison
 
 [Compiler and harness reuse delivery](compiler-harness-reuse.md) owns the
