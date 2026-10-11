@@ -466,6 +466,7 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         CompileError::Io(_)
         | CompileError::CompilerEndpoint(_)
         | CompileError::CompilerCloseUnconfirmed(_)
+        | CompileError::CompilerPreparationCloseUnconfirmed(_)
         | CompileError::EntryPreparationUnfinished { .. }
         | CompileError::EntryReservationReleaseUnconfirmed { .. }
         | CompileError::EntryPublicationUnconfirmed { .. } => {
@@ -504,7 +505,10 @@ pub fn classify_compile(err: &CompileError) -> FailureEnvelope {
         | CompileError::EntryReservationReleaseUnconfirmed { .. }
         | CompileError::EntryPublicationUnconfirmed { .. } => CompileFailureCause::Io,
         CompileError::CompilerEndpoint(_) => CompileFailureCause::CompilerEndpoint,
-        CompileError::CompilerCloseUnconfirmed(_) => CompileFailureCause::CompilerCloseUnconfirmed,
+        CompileError::CompilerCloseUnconfirmed(_)
+        | CompileError::CompilerPreparationCloseUnconfirmed(_) => {
+            CompileFailureCause::CompilerCloseUnconfirmed
+        }
         CompileError::ExtractFailed(_) => CompileFailureCause::ExtractorContract,
         CompileError::CompilerEvidence(error) => CompileFailureCause::CompilerEvidence {
             failure: error.as_ref().into(),

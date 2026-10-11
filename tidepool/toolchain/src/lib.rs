@@ -28,8 +28,8 @@ mod declaration_context;
 pub mod declaration_join;
 pub mod diag;
 pub mod digest;
-mod execution_source;
 pub mod exact_context;
+mod execution_source;
 pub mod failclass;
 pub(crate) mod module_candidates;
 pub(crate) mod owned_input_arena;
@@ -73,6 +73,12 @@ pub enum CompileError {
                 Result<tidepool_extract_cmd::ExtractRun, tidepool_extract_cmd::SpawnError>,
             >,
         >,
+    ),
+    /// Completed host preparation is unusable until its compiler END is
+    /// confirmed. Exact input directories remain with this close evidence.
+    #[error("completed compiler preparation close is unconfirmed")]
+    CompilerPreparationCloseUnconfirmed(
+        Box<tidepool_extract_cmd::CompilerTransactionCloseEvidence>,
     ),
     /// This original preparation was reserved before compiler execution. Its
     /// retained output must never be mistaken for permission to execute again.

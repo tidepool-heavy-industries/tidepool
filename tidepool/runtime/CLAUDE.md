@@ -62,6 +62,16 @@ product materialization only for the exact artifact identity in that same
 compiler context. The materialization owner preserves durable filenames and
 independent interfaces; callers do not supply unverified references to skip IO.
 
+Notebook compilation first admits physical targets and checked-item receipts,
+then prepares existing cumulative declaration projections under one compiler
+ticket. The ticket closes normally before contextual item sealing, prefix
+assembly and candidate publication. `PreparedRuntimeCell` retains its physical
+scratch owner and checked facts across that boundary; an explicit
+`HostAdmissionCancellation` preserves invocation cancellation after END.
+Convenience callers use `compile_cell_program_admitted`, which owns the same
+prepare/close/seal pipeline. Ticket owners use `prepare_cell_program_admitted`
+and pass its independent action/close result to `finish_cell_program_admitted`.
+
 Execution intent retains the exact original declaration and value identities.
 A declaration publication attempt captures its current public predecessors
 before issuing its own join identity. Restaging allocates a fresh attempt;

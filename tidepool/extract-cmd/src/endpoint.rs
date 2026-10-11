@@ -692,7 +692,7 @@ impl HostAdmissionCancellation {
         Self::default()
     }
 
-    pub fn cancel(&self) {
+    fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
     }
 
@@ -811,11 +811,17 @@ impl CompilerTransactionCancellation {
         self.host.clone()
     }
 
+    /// Stop post-close host work without interrupting an armed compiler child.
+    /// Sealing consumers only receive the read-only host observer.
+    pub fn cancel_host_admission(&self) {
+        self.host.cancel();
+    }
+
     /// Interrupt the currently armed transaction, if any. Repeated calls are
     /// harmless and an arm installed after cancellation is interrupted
     /// immediately.
     pub fn cancel(&self) {
-        self.host.cancel();
+        self.cancel_host_admission();
         let target = {
             let mut state = self
                 .state
@@ -2740,6 +2746,34 @@ mod tests {
     }
 
     #[test]
+    fn scoped_directory_owner_survives_unconfirmed_end_and_completed_output() {
+        let fixture = tempfile::tempdir().unwrap();
+        let spec = direct_handshake_fixture(fixture.path(), 6);
+        let directory = Arc::new(tempfile::tempdir().unwrap());
+        let weak = Arc::downgrade(&directory);
+        let path = directory.path().join("prepared.cbor");
+        std::fs::write(&path, b"completed host preparation").unwrap();
+        let outcome = scoped_transport_fixture_after_response(spec, false, move || {
+            assert!(retain_compiler_input_directory(directory));
+        });
+        assert!(
+            outcome.action.is_ok(),
+            "completed output and close are independent"
+        );
+        assert!(matches!(
+            outcome.close,
+            CompilerTransactionClose::Unconfirmed(_)
+        ));
+        let close = outcome.close.clone();
+        drop(outcome);
+        assert!(weak.upgrade().is_some());
+        assert_eq!(std::fs::read(&path).unwrap(), b"completed host preparation");
+        drop(close);
+        assert!(weak.upgrade().is_none());
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn standalone_directory_inputs_survive_until_actual_clean_end() {
         let (fixture, endpoint, command, directory, path) = standalone_directory_fixture(5);
         let weak = Arc::downgrade(&directory);
@@ -4036,8 +4070,9 @@ mod tests {
         let host = cancellation.host_admission_cancellation();
         cancellation.disarm();
         let detached = host.clone();
+        let detached_owner = cancellation.clone();
         let task = std::thread::spawn(move || {
-            detached.cancel();
+            detached_owner.cancel_host_admission();
             detached.checkpoint().unwrap_err().kind()
         });
         assert_eq!(task.join().unwrap(), io::ErrorKind::Interrupted);

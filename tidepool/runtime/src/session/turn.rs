@@ -2803,6 +2803,7 @@ fn compile_cell_program_admitted_receipt_controls(
 #[derive(Clone, Copy)]
 enum CellProgramAudit<'a> {
     None,
+    MalformedBindingBeforeProjection,
     Receipts(&'static str),
     PublicationRefusal(&'a Path),
     WorkCounts(Option<scaling_tests::SegmentWorkShape>),
@@ -2945,7 +2946,69 @@ fn compile_cell_program_admitted_work_controls(
     })
 }
 
-#[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.prepare", level = "debug", skip_all, fields(inclusive = true, cell_bytes = tracing::field::Empty))]
+/// Compiler facts and physical output owners prepared under the caller's ticket.
+/// No endpoint or compiler lease survives in this host admission owner.
+pub struct PreparedRuntimeCell {
+    checked: CellCheck,
+    program: tidepool_toolchain::artifacts::PreparedCellProgram,
+    offer: ModuleCandidateOffer,
+    command: ExtractCmd,
+    root: Arc<tempfile::TempDir>,
+    stderr: Vec<u8>,
+}
+
+pub fn prepare_cell_program_admitted(
+    admission: Arc<super::RuntimeCellAdmission>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<PreparedRuntimeCell, CellCheckFailure> {
+    prepare_cell_program_admitted_inner(
+        admission,
+        #[cfg(test)]
+        CellProgramAudit::None,
+        settlement,
+    )
+}
+
+/// Consume prepared outputs after the affine compiler owner has settled END.
+/// Unconfirmed close preserves exact input owners in the existing close evidence.
+pub fn finish_cell_program_admitted(
+    outcome: crate::CompilerTransactionOutcome<Result<PreparedRuntimeCell, CellCheckFailure>>,
+    cancellation: &crate::HostAdmissionCancellation,
+) -> Result<
+    (
+        CellCheck,
+        Arc<tidepool_toolchain::checked_cell::CellProgram>,
+    ),
+    CellCheckFailure,
+> {
+    let prepared = outcome.action?;
+    if let crate::CompilerTransactionClose::Unconfirmed(evidence) = outcome.close {
+        tracing::warn!(target: "exomonad_harness::timing", preparation_completed = true, compiler_close = "unconfirmed", "cell program publication refused");
+        return Err(CompileError::CompilerPreparationCloseUnconfirmed(Box::new(evidence)).into());
+    }
+    prepared.seal(cancellation)
+}
+
+impl PreparedRuntimeCell {
+    #[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.seal", level = "debug", skip_all, fields(inclusive = true))]
+    fn seal(
+        self,
+        cancellation: &crate::HostAdmissionCancellation,
+    ) -> Result<
+        (
+            CellCheck,
+            Arc<tidepool_toolchain::checked_cell::CellProgram>,
+        ),
+        CellCheckFailure,
+    > {
+        let program = self.program.seal(cancellation).map_err(|error| {
+            self.offer
+                .retain_failure(self.root.path(), &self.command, &self.stderr, error)
+        })?;
+        Ok((self.checked, program))
+    }
+}
+
 fn compile_cell_program_admitted_inner(
     admission: Arc<super::RuntimeCellAdmission>,
     #[cfg(test)] audit: CellProgramAudit<'_>,
@@ -2957,6 +3020,75 @@ fn compile_cell_program_admitted_inner(
     ),
     CellCheckFailure,
 > {
+    let cancellation = crate::CompilerTransactionCancellation::new();
+    let host = cancellation.host_admission_cancellation();
+    let settlement = std::cell::RefCell::new(settlement);
+    let outcome = crate::with_compiler_transaction_cancellable(
+        cancellation,
+        |close| settlement.borrow_mut()(close),
+        || {
+            prepare_cell_program_admitted_inner(
+                admission,
+                #[cfg(test)]
+                audit,
+                &mut |close| settlement.borrow_mut()(close),
+            )
+        },
+    );
+    #[cfg(test)]
+    let evidence = outcome
+        .action
+        .as_ref()
+        .ok()
+        .map(|prepared| (prepared.root.clone(), prepared.stderr.clone()));
+    #[cfg(test)]
+    if let (CellProgramAudit::Receipts(test_name), Ok(prepared)) = (audit, &outcome.action) {
+        audit_compiler_issued_item_receipts(&prepared.offer, prepared.root.path(), test_name);
+    }
+    let result = finish_cell_program_admitted(outcome, &host);
+    #[cfg(test)]
+    if let (CellProgramAudit::PublicationRefusal(cache), Some((root, _))) = (audit, &evidence) {
+        let outcome = match &result {
+            Ok(_) => "admitted".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        let count = observe_candidate_publication(
+            cache,
+            root.path(),
+            CandidatePublicationStage::Valid,
+            &outcome,
+        );
+        if result.is_ok() {
+            assert!(
+                count > 0,
+                "valid follow-up must publish ordinary support suggestions"
+            );
+        }
+    }
+    #[cfg(test)]
+    if let (
+        CellProgramAudit::NativeEmissionOwnersAbsent(old_owners),
+        Ok((_, program)),
+        Some((root, _)),
+    ) = (audit, &result, &evidence)
+    {
+        audit_current_native_emission(program, root.path(), old_owners);
+    }
+    #[cfg(test)]
+    if let (CellProgramAudit::WorkCounts(expected_shape), Ok((_, program)), Some((_, stderr))) =
+        (audit, &result, &evidence)
+    {
+        scaling_tests::assert_compiler_work(program, stderr, expected_shape);
+    }
+    result
+}
+
+#[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.prepare", level = "debug", skip_all, fields(inclusive = true, cell_bytes = tracing::field::Empty))]
+fn prepare_cell_program_admitted_inner(
+    admission: Arc<super::RuntimeCellAdmission>,
+    #[cfg(test)] audit: CellProgramAudit<'_>,
+    settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+) -> Result<PreparedRuntimeCell, CellCheckFailure> {
     let setup_span =
         tracing::debug_span!(target: "exomonad_harness::timing", "cell_program.setup").entered();
     if !admission.has_execution_purpose() {
@@ -2980,7 +3112,13 @@ fn compile_cell_program_admitted_inner(
         .iter()
         .map(|generation| tidepool_repr::SessionModule::lib(*generation).module_name())
         .collect();
-    let scratch = compiler_scratch_directory()?;
+    let scratch = Arc::new(compiler_scratch_directory()?);
+    if !tidepool_extract_cmd::retain_compiler_input_directory(scratch.clone()) {
+        return Err(CompileError::ExtractFailed(
+            "cell preparation requires its owning compiler transaction".into(),
+        )
+        .into());
+    }
     let cell_path = scratch.path().join("cell.txt");
     let template_path = scratch.path().join("CellCheckTemplate.hs");
     let output_path = scratch.path().join("cell.cbor");
@@ -3049,44 +3187,26 @@ fn compile_cell_program_admitted_inner(
             offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
         })?;
     #[cfg(test)]
-    if let CellProgramAudit::Receipts(test_name) = audit {
-        audit_compiler_issued_item_receipts(&offer, scratch.path(), test_name);
+    if let CellProgramAudit::PublicationRefusal(cache) = audit {
+        audit_compiler_publication_refusal(&offer, &scratch, cache);
     }
     #[cfg(test)]
-    if let CellProgramAudit::PublicationRefusal(cache) = audit {
-        audit_compiler_publication_refusal(&offer, scratch.path(), cache);
+    if let CellProgramAudit::MalformedBindingBeforeProjection = audit {
+        let path = scratch.path().join("item-1/turn.cbor");
+        let bytes = std::fs::read(&path).unwrap();
+        let mut turn: CborValue = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+        let fields = turn.as_array_mut().unwrap();
+        assert_eq!(fields[0].as_text(), Some("Bind"));
+        fields[1].as_array_mut().unwrap()[0] =
+            CborValue::Array(vec![CborValue::Text("foreign_bound_name".into())]);
+        let mut bytes = Vec::new();
+        ciborium::ser::into_writer(&turn, &mut bytes).unwrap();
+        std::fs::write(path, bytes).unwrap();
     }
-    let result = offer.admit_cell_program(scratch.path());
-    #[cfg(test)]
-    if let CellProgramAudit::PublicationRefusal(cache) = audit {
-        let outcome = match &result {
-            Ok(_) => "admitted".to_owned(),
-            Err(error) => error.to_string(),
-        };
-        let count = observe_candidate_publication(
-            cache,
-            scratch.path(),
-            CandidatePublicationStage::Valid,
-            &outcome,
-        );
-        if result.is_ok() {
-            assert!(
-                count > 0,
-                "valid follow-up must publish ordinary support suggestions"
-            );
-        }
-    }
+    let result = offer.prepare_cell_program(scratch.clone());
     let program = result.map_err(|error| {
         offer.retain_failure(scratch.path(), &command, &run.output.stderr, error)
     })?;
-    #[cfg(test)]
-    if let CellProgramAudit::NativeEmissionOwnersAbsent(old_owners) = audit {
-        audit_current_native_emission(&program, scratch.path(), old_owners);
-    }
-    #[cfg(test)]
-    if let CellProgramAudit::WorkCounts(expected_shape) = audit {
-        scaling_tests::assert_compiler_work(&program, &run.output.stderr, expected_shape);
-    }
     let mut checked = decode_cell_out(
         program.checked_cell().observations(),
         &recipe.cell_source,
@@ -3100,7 +3220,14 @@ fn compile_cell_program_admitted_inner(
         .map_err(|error| CompileError::ExtractFailed(error.to_string()))?;
     checked.authority = Some(program.checked_cell().clone());
     checked.admission = Some(admission);
-    Ok((checked, program))
+    Ok(PreparedRuntimeCell {
+        checked,
+        program,
+        offer,
+        command,
+        root: scratch,
+        stderr: run.output.stderr,
+    })
 }
 
 fn check_cell_impl(
@@ -3441,7 +3568,12 @@ fn observe_candidate_publication(
 }
 
 #[cfg(test)]
-fn audit_compiler_publication_refusal(offer: &ModuleCandidateOffer, root: &Path, cache: &Path) {
+fn audit_compiler_publication_refusal(
+    offer: &ModuleCandidateOffer,
+    owner: &Arc<tempfile::TempDir>,
+    cache: &Path,
+) {
+    let root = owner.path();
     assert_eq!(
         observe_candidate_publication(
             cache,
@@ -3483,7 +3615,7 @@ fn audit_compiler_publication_refusal(offer: &ModuleCandidateOffer, root: &Path,
     std::fs::write(&path, &bytes).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), bytes);
     let before = tidepool_extract_cmd::extract_spawn_count();
-    let result = offer.admit_cell_program(root);
+    let result = offer.prepare_cell_program(owner.clone());
     let outcome = match &result {
         Ok(_) => "admitted".to_owned(),
         Err(error) => error.to_string(),
@@ -6027,7 +6159,7 @@ mod tests {
             }
         }
 
-        fn check_in(
+        fn admit_in(
             resident: &mut crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
             execution: &Arc<crate::session::PrivateExecutionAdmission>,
             effects: &tidepool_testing::effect_surface::TestEffectSurface,
@@ -6035,7 +6167,7 @@ mod tests {
             source: &str,
             imports: &[&str],
             first_include: Option<&Path>,
-        ) -> Result<CheckedHomeCell, CompileError> {
+        ) -> Result<Arc<crate::session::RuntimeCellAdmission>, CompileError> {
             use crate::session::{
                 resident_cell_check_template, resident_workbench_templates, SourceImports,
             };
@@ -6080,6 +6212,27 @@ mod tests {
                     None,
                 )
                 .unwrap();
+            Ok(admission)
+        }
+
+        fn check_in(
+            resident: &mut crate::session::ResidentSession<frunk::HNil, CheckedHomeOutput>,
+            execution: &Arc<crate::session::PrivateExecutionAdmission>,
+            effects: &tidepool_testing::effect_surface::TestEffectSurface,
+            root: &Path,
+            source: &str,
+            imports: &[&str],
+            first_include: Option<&Path>,
+        ) -> Result<CheckedHomeCell, CompileError> {
+            let admission = Self::admit_in(
+                resident,
+                execution,
+                effects,
+                root,
+                source,
+                imports,
+                first_include,
+            )?;
             let (checked, program) = tidepool_testing::with_settlement(|settlement| {
                 compile_cell_program_admitted(admission.clone(), settlement)
             })
@@ -6908,6 +7061,183 @@ mod tests {
             .begin_cell_program(admission, program)
             .expect("refusal must leave original admission unclaimed")
             .unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn malformed_cell_binding_refuses_before_cumulative_projection_request() {
+        let mut fixture = CheckedHomeFixture::new();
+        let admission = CheckedHomeFixture::admit_in(
+            &mut fixture.resident,
+            &fixture.execution,
+            &fixture.effects,
+            fixture.root.path(),
+            "declaredNumber = (42 :: Int)\nlet capturedNumber = declaredNumber",
+            &[],
+            None,
+        )
+        .unwrap();
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let failure = tidepool_testing::with_settlement(|settlement| {
+            compile_cell_program_admitted_inner(
+                admission,
+                CellProgramAudit::MalformedBindingBeforeProjection,
+                settlement,
+            )
+        })
+        .unwrap_err();
+        assert!(failure
+            .to_string()
+            .contains("compiled bind has another authored verdict or wrapper"));
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count() - before,
+            1,
+            "a malformed native receipt refuses before existing declaration projections"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn cell_program_host_cancellation_after_end_refuses_sealing_without_new_request() {
+        let mut fixture = CheckedHomeFixture::new();
+        let admission = CheckedHomeFixture::admit_in(
+            &mut fixture.resident,
+            &fixture.execution,
+            &fixture.effects,
+            fixture.root.path(),
+            "let capturedNumber = (42 :: Int)",
+            &[],
+            None,
+        )
+        .unwrap();
+        let cancellation = crate::CompilerTransactionCancellation::new();
+        let host = cancellation.host_admission_cancellation();
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let outcome = crate::with_compiler_transaction_cancellable(
+            cancellation.clone(),
+            |_| {},
+            || prepare_cell_program_admitted(admission, &mut |_| {}),
+        );
+        assert!(outcome.action.is_ok());
+        assert_eq!(outcome.close, crate::CompilerTransactionClose::Clean);
+        let after = tidepool_extract_cmd::extract_spawn_count();
+        assert_eq!(after - before, 1, "one physical whole-cell request");
+        cancellation.cancel();
+        let failure = finish_cell_program_admitted(outcome, &host).unwrap_err();
+        assert!(
+            matches!(failure.error, CompileError::Io(ref error) if error.kind() == std::io::ErrorKind::Interrupted)
+        );
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            after,
+            "cancelled host sealing cannot reacquire or request a compiler"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn completed_cell_preparation_with_unconfirmed_end_retains_exact_scratch() {
+        let mut fixture = CheckedHomeFixture::new();
+        let admission = CheckedHomeFixture::admit_in(
+            &mut fixture.resident,
+            &fixture.execution,
+            &fixture.effects,
+            fixture.root.path(),
+            "let capturedNumber = (42 :: Int)",
+            &[],
+            None,
+        )
+        .unwrap();
+        let cancellation = crate::CompilerTransactionCancellation::new();
+        let host = cancellation.host_admission_cancellation();
+        let observed = std::cell::RefCell::new(None);
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let outcome = crate::with_compiler_transaction_cancellable(
+            cancellation.clone(),
+            |close| *observed.borrow_mut() = Some(close),
+            || {
+                let prepared = prepare_cell_program_admitted(admission, &mut |_| {});
+                assert!(
+                    prepared.is_ok(),
+                    "physical preparation completes before cancellation"
+                );
+                cancellation.cancel();
+                prepared
+            },
+        );
+        assert!(matches!(
+            outcome.close,
+            crate::CompilerTransactionClose::Unconfirmed(_)
+        ));
+        let prepared = outcome.action.as_ref().unwrap();
+        let root = prepared.root.path().to_owned();
+        let weak = Arc::downgrade(&prepared.root);
+        assert!(root.join("cell.cbor").exists());
+        let after = tidepool_extract_cmd::extract_spawn_count();
+        assert_eq!(after - before, 1);
+        let failure = finish_cell_program_admitted(outcome, &host).unwrap_err();
+        assert!(matches!(
+            failure.error,
+            CompileError::CompilerPreparationCloseUnconfirmed(_)
+        ));
+        drop(failure);
+        assert!(
+            weak.upgrade().is_some(),
+            "retained close owns the original scratch"
+        );
+        assert!(root.join("cell.cbor").exists());
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            after,
+            "uncertainty permits no replay"
+        );
+        drop(observed.into_inner());
+        assert!(weak.upgrade().is_none());
+        // The counted runner may deliberately retain filesystem diagnostics.
+        // The weak owner proves release independently of that case policy.
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn prepared_cell_seals_after_parent_runtime_drops_and_projection_end_settles() {
+        let mut fixture = CheckedHomeFixture::new();
+        let admission = CheckedHomeFixture::admit_in(
+            &mut fixture.resident,
+            &fixture.execution,
+            &fixture.effects,
+            fixture.root.path(),
+            "declaredNumber = (42 :: Int)\nlet capturedNumber = declaredNumber",
+            &[],
+            None,
+        )
+        .unwrap();
+        let cancellation = crate::CompilerTransactionCancellation::new();
+        let host = cancellation.host_admission_cancellation();
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let outcome = crate::with_compiler_transaction_cancellable(
+            cancellation,
+            |_| {},
+            || prepare_cell_program_admitted(admission, &mut |_| {}),
+        );
+        assert!(outcome.action.is_ok());
+        assert_eq!(outcome.close, crate::CompilerTransactionClose::Clean);
+        let after = tidepool_extract_cmd::extract_spawn_count();
+        assert_eq!(
+            after - before,
+            2,
+            "whole cell plus the existing cumulative declaration projection"
+        );
+        drop(fixture);
+        let (checked, program) = finish_cell_program_admitted(outcome, &host).unwrap();
+        assert_eq!(checked.items.len(), 2);
+        assert_eq!(program.items().len(), 2);
+        assert!(program.items()[0].native().is_none());
+        assert!(program.items()[1].native().is_some());
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            after,
+            "detached contextual capture holds no physical compiler lease"
+        );
     }
 
     #[test]

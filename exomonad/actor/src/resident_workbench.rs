@@ -6338,15 +6338,17 @@ where
         cancel_on_drop.0 = Some(compiler_work.cancellation());
         let (checked, program) =
             crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                compiler_work.run(|settlement| {
-                    tidepool_runtime::session::turn::compile_cell_program_admitted(
+                let host = compiler_work.cancellation().host_admission_cancellation();
+                let prepared = compiler_work.run_with_close(|settlement| {
+                    tidepool_runtime::session::turn::prepare_cell_program_admitted(
                         check_admission,
                         settlement,
                     )
+                });
+                tidepool_runtime::session::turn::finish_cell_program_admitted(prepared, &host)
                     .map_err(|failure| {
                         cell_check_error(failure, &check_specification.cell.cell_source)
                     })
-                })
             }))
             .await
             .map_err(ResidentActorWorkbenchError::Join)??;

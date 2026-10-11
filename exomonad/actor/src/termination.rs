@@ -211,7 +211,7 @@ impl CompilerWorkReceipt {
 
     pub(crate) fn request_cancellation(&self) {
         if let Some(cancellation) = &self.cancellation {
-            cancellation.host_admission_cancellation().cancel();
+            cancellation.cancel_host_admission();
         }
         let cancellation = {
             let close = self.close.lock();
