@@ -2409,7 +2409,7 @@ compilerLifecycleCompilation = bracket temporary removeDirectoryRecursive $ \roo
       createDirectory path
       pure path
 
--- Object identity observes the transaction cache's immutable Core/STG payloads,
+-- Object identity observes the compiler universe's immutable Core/STG payloads,
 -- not the result wrappers or compiler session. Interface hashes and selected
 -- owners independently check semantic equivalence.
 data CompilerProductSharing = CompilerProductSharing
@@ -2496,10 +2496,11 @@ requestMemoLifecycle root = do
         , "dependency :: Int"
         , "dependency = missing"
         ]
+      validLibrary = "module MemoLibrary (one) where\none :: Int\none = 1\n"
       dependencies = ["Tidepool.Session.Lib.G1", "MemoLibrary"]
   createDirectoryIfMissing True dependencyDir
   writeFile dependencyPath validDependency
-  writeFile libraryPath "module MemoLibrary (one) where\none :: Int\none = 1\n"
+  writeFile libraryPath validLibrary
   writeFile targetPath $ unlines
     [ "module MemoTarget where"
     , "import Tidepool.Session.Lib.G1 (dependency)"
@@ -2519,7 +2520,10 @@ requestMemoLifecycle root = do
     (anonymous, anonymousSharing) <- fresh
     (next, nextSharing) <- fresh
     assertSameInterfaceEvidenceAndPreparedShape "normal request cleanup preserves output" anonymous next
-    assertCoreSharing "normal close releases compiler graphs" False dependencies anonymousSharing nextSharing
+    assertCoreSharing "normal close retains completed ordinary dependencies" True
+      ["MemoLibrary"] anonymousSharing nextSharing
+    assertCoreSharing "anonymous session dependencies have no reusable incarnation" False
+      ["Tidepool.Session.Lib.G1"] anonymousSharing nextSharing
     failedGraphs <- newIORef Nothing
     failedRequest <- try (runRequest (pure ()) $ \compiler -> do
       result <- compile compiler
@@ -2533,7 +2537,26 @@ requestMemoLifecycle root = do
     (afterException, afterExceptionSharing) <- fresh
     assertSameInterfaceEvidenceAndPreparedShape "exceptional cleanup preserves output" next afterException
     failedSharing <- readIORef failedGraphs >>= maybe (fail "exception probe did not reach compilation") pure
-    assertCoreSharing "exceptional close releases compiler graphs" False dependencies failedSharing afterExceptionSharing
+    assertCoreSharing "caller failure preserves completed ordinary dependencies" True
+      ["MemoLibrary"] failedSharing afterExceptionSharing
+    assertCoreSharing "caller failure does not authorize anonymous session reuse" False
+      ["Tidepool.Session.Lib.G1"] failedSharing afterExceptionSharing
+
+    -- Retention cannot bypass fresh source validation, even across requests.
+    writeFile libraryPath "module MemoLibrary (one) where\none :: Int\none = missing\n"
+    invalidLibrary <- try fresh :: IO (Either DependencyLoadFailure (PreparedPipelineResult, CompilerProductSharing))
+    case invalidLibrary of
+      Left (DependencySourceFailure diagnostics) ->
+        unless (any (\diagnostic -> dSeverity diagnostic == DiagError
+            && dFile diagnostic == Just (libraryPath, 3, 7, 3, 14)) diagnostics) $
+          fail "changed ordinary dependency lost its exact source error"
+      Left DependencyWorkerFailure -> fail "changed ordinary dependency became a worker failure"
+      Right _ -> fail "changed invalid ordinary dependency reused a stale completed version"
+    writeFile libraryPath validLibrary
+    (restoredLibrary, restoredLibrarySharing) <- fresh
+    assertSameInterfaceEvidenceAndPreparedShape "restored ordinary source preserves output" next restoredLibrary
+    assertCoreSharing "refused source does not evict an earlier completed version" True
+      ["MemoLibrary"] nextSharing restoredLibrarySharing
     runRequest (pure ()) $ \compiler -> do
       cold <- compileIn incarnate GeneralCompile compiler
       coldSharing <- compilerProductSharing cold
@@ -2557,7 +2580,7 @@ requestMemoLifecycle root = do
       retry <- compileIn incarnate GeneralCompile compiler
       retrySharing <- compilerProductSharing retry
       assertSameInterfaceEvidenceAndPreparedShape "same-request retry restores output" cold retry
-      assertCoreSharing "source rejection releases graphs before retry" False dependencies coldSharing retrySharing
+      assertCoreSharing "source rejection preserves earlier completed versions" True dependencies coldSharing retrySharing
     (restored, restoredSharing) <- runRequest (pure ()) $ \compiler -> do
       result <- compileIn incarnate GeneralCompile compiler
       sharing <- compilerProductSharing result
@@ -2569,7 +2592,15 @@ requestMemoLifecycle root = do
       sharing <- compilerProductSharing result
       pure (result, sharing)
     assertSameInterfaceEvidenceAndPreparedShape "fresh incarnated requests preserve prepared output" restored following
-    assertCoreSharing "incarnation retains no graphs across requests" False dependencies restoredSharing followingSharing
+    assertCoreSharing "same incarnation reuses dependencies across unrelated requests" True dependencies restoredSharing followingSharing
+    (_, differentIncarnationSharing) <- runRequest (pure ()) $ \compiler -> do
+      result <- compileIn (Just (SessionScope root [] Nothing (Just "8"))) GeneralCompile compiler
+      sharing <- compilerProductSharing result
+      pure (result, sharing)
+    assertCoreSharing "ordinary dependencies survive an incarnation change" True
+      ["MemoLibrary"] followingSharing differentIncarnationSharing
+    assertCoreSharing "a different incarnation cannot borrow session versions" False
+      ["Tidepool.Session.Lib.G1"] followingSharing differentIncarnationSharing
 
 captureStderr :: FilePath -> String -> IO a -> IO (a, String)
 captureStderr root label action = do
