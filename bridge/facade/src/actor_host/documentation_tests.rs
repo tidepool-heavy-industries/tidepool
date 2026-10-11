@@ -3844,51 +3844,74 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
     assert_eq!(expanded["status"], "committed", "{expanded}");
     let next = explicit_display_output(&expanded);
     assert_eq!(explicit_display_identity(next), identity);
-    assert_eq!(next["expansions"][0][0], right, "sibling key stays stable");
-    assert_eq!(next["expansions"].as_array().unwrap().len(), 1);
+    assert!(
+        next["expansions"].as_array().unwrap().iter().any(|entry| entry[0] == right),
+        "sibling key stays stable beside newly issued continuations: {next}"
+    );
     assert!(policy.expand_display_boxed(identity, left).await.is_err());
     assert!(policy
         .expand_display_boxed((identity.0, identity.1 + 1, identity.2), right)
         .await
         .is_err());
-    let final_page = campaign
-        .drive_actor_output(&store, policy.expand_display_boxed(identity, right))
-        .await
-        .unwrap();
-    assert!(explicit_display_output(&final_page)["expansions"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    // Bound this finite two-leaf scenario's work while allowing each 4000-character
+    // value to require several pages under the host's publication allowance.
+    const MAX_PAGES: usize = 16;
+    let mut consumed = std::collections::HashSet::from([left]);
+    let mut latest = next.clone();
+    for _ in 2..MAX_PAGES {
+        let remaining = latest["expansions"].as_array().unwrap();
+        let Some(entry) = remaining.first() else { break };
+        let selected = entry[0].as_i64().unwrap();
+        assert!(consumed.insert(selected), "consumed key reappeared: {latest}");
+        let expanded = campaign
+            .drive_actor_output(&store, policy.expand_display_boxed(identity, selected))
+            .await
+            .unwrap();
+        assert_eq!(expanded["status"], "committed", "{expanded}");
+        latest = explicit_display_output(&expanded).clone();
+        assert_eq!(explicit_display_identity(&latest), identity);
+        assert!(policy.expand_display_boxed(identity, selected).await.is_err());
+    }
+    assert!(latest["expansions"].as_array().unwrap().is_empty(), "{latest}");
+    assert!(consumed.contains(&right), "both original siblings were expanded");
     assert_eq!(
         tidepool_extract_cmd::extract_spawn_count(),
         0,
         "native expansion must not invoke the source compiler"
     );
     assert_eq!(backend.executions(), 1, "authored effects execute once");
-    let history = store.actor_output_page(&origin, 0, 10).unwrap();
-    assert_eq!(
-        history.outputs.len(),
-        3,
-        "one durable row per displayed page"
-    );
+    let history = store.actor_output_page(&origin, 0, MAX_PAGES + 1).unwrap();
+    assert!(history.next_after.is_none());
+    assert!(history.outputs.len() <= MAX_PAGES);
     assert_eq!(
         history
             .outputs
             .iter()
             .map(|output| output.emission().id.page_ordinal)
             .collect::<Vec<_>>(),
-        vec![1, 2, 3]
+        (1..=history.outputs.len() as u64).collect::<Vec<_>>()
+    );
+    let sequences = history.outputs.iter().map(|output| output.reference().sequence).collect::<Vec<_>>();
+    assert!(sequences.windows(2).all(|pair| pair[0] < pair[1]));
+    let emission_ids = history.outputs.iter().map(|output| {
+        let id = &output.emission().id;
+        (id.display_slot, id.page_ordinal)
+    }).collect::<std::collections::HashSet<_>>();
+    assert_eq!(emission_ids.len(), history.outputs.len());
+    assert_eq!(
+        history.outputs.iter().map(|output| output.emission().page.text.chars().filter(|character| *character == 'x').count()).sum::<usize>(),
+        8000,
+        "the two 4000-character payloads survive all pages without loss or duplication"
     );
 
     campaign.observe_shutdown().await.unwrap();
     assert!(policy.expand_display_boxed(identity, right).await.is_err());
     assert_eq!(
         store
-            .actor_output_page(&origin, 0, 10)
+            .actor_output_page(&origin, 0, MAX_PAGES + 1)
             .unwrap()
-            .outputs
-            .len(),
-        3
+            .outputs,
+        history.outputs
     );
     assert!(
         display["text"].as_str().unwrap().contains("DisplayPair"),
