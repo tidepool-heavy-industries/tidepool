@@ -33,7 +33,7 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
                         "bridge/facade/src/actor_host/fixtures/embedded_cold_declaration.hs",
                     )
                 } else {
-                    "case coldAnswer of RecoveryBox value -> value".to_owned()
+                    "display (case coldAnswer of RecoveryBox value -> value)".to_owned()
                 };
                 vec![harness::item::Item(json!({
                     "type":"custom_tool_call", "call_id":call,
@@ -68,8 +68,8 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
                         assert_eq!(output["nextIndex"], 1, "{output}");
                         assert_eq!(receipts.len(), 1, "{output}");
                         assert_eq!(
-                            receipts[0]["output"].as_str().map(str::trim),
-                            Some("42"),
+                            super::test_campaign::committed_display_text(&output).trim(),
+                            "42",
                             "cold original constructor/value returned a different result: {output}"
                         );
                     }
