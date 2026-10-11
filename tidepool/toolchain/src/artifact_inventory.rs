@@ -3026,6 +3026,7 @@ impl ArtifactInventory {
                         .filter(|key| planned.contains_key(key)),
                 )
                 .map(resolve)
+                .filter(|node| !parent_nodes.contains(node))
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect()
