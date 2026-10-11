@@ -29,8 +29,12 @@ async fn timer_expiry_claims_the_original_control_once() {
     tokio::time::advance(Duration::from_secs(5)).await;
     assert!(matches!(wait.await, SleepWaitEvent::Expired));
     assert!(!control.claim_expiry());
+    assert!(control.request_cancellation());
+    assert!(control.cancellation_requested());
+    // Expiry consumed the timer selection, not the enclosing cell's stop gate.
+    control.finish_sleep();
+    assert!(control.cancellation_requested());
     assert!(!control.request_cancellation());
-    assert!(!control.cancellation_requested());
 }
 
 #[tokio::test(start_paused = true)]
@@ -54,21 +58,24 @@ async fn cancellation_before_expiry_wins_when_both_wakes_are_ready() {
 async fn expiry_before_late_cancellation_never_becomes_abort_cleanup() {
     let idle_owner = crate::RetainedActorExit::new();
     let control = control();
+    let continuation_cancel = control.native_cancel();
+    let selected = wait_sleep_event(&control, Duration::ZERO, &idle_owner).await;
+    assert!(matches!(selected, SleepWaitEvent::Expired));
+    assert!(!continuation_cancel.load(std::sync::atomic::Ordering::Acquire));
+    assert!(control.request_cancellation());
+    assert!(continuation_cancel.load(std::sync::atomic::Ordering::Acquire));
+    assert!(matches!(selected, SleepWaitEvent::Expired));
+    // The original wake still owns native resume. Finishing that wake cannot
+    // erase cancellation delivered to its continuing cell.
+    control.finish_sleep();
+    assert!(control.cancellation_requested());
+    assert!(continuation_cancel.load(std::sync::atomic::Ordering::Acquire));
+    control.arm_sleep();
     assert!(matches!(
-        wait_sleep_event(&control, Duration::ZERO, &idle_owner).await,
-        SleepWaitEvent::Expired
+        wait_sleep_event(&control, Duration::from_secs(300), &idle_owner).await,
+        SleepWaitEvent::Cancelled
     ));
     assert!(!control.request_cancellation());
-    assert!(matches!(
-        wait_sleep_event(&control, Duration::from_secs(300), &retiring_owner()).await,
-        SleepWaitEvent::Expired
-    ));
-    assert!(!control.cancellation_requested());
-    // A failed late abort must not acknowledge cancellation: the owning timer
-    // already selected native resume. Native resume still owns finish_sleep.
-    control.finish_sleep();
-    control.arm_sleep();
-    assert!(control.request_cancellation());
 }
 
 #[tokio::test(start_paused = true)]
@@ -140,7 +147,12 @@ async fn one_cancelled_execution_never_claims_another_timer() {
     ));
     assert!(first.cancellation_requested());
     assert!(!second.cancellation_requested());
-    assert!(!second.request_cancellation());
+    assert!(second.request_cancellation());
+    second.finish_sleep();
+    assert!(second.cancellation_requested());
+    assert!(first.cancellation_requested());
+    assert!(!first.request_cancellation());
+    assert!(!first.claim_expiry());
 }
 
 fn retiring_owner() -> crate::RetainedActorExit {

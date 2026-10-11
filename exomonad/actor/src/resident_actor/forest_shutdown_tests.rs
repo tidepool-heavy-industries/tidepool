@@ -518,15 +518,9 @@ async fn tool_abort_validates_original_owner_before_empty_settlement() {
     assert!(!behavior.settled_checkpoint_boundaries.contains(&boundary));
     assert!(error.detail.contains("original") || error.detail.contains("exact"));
 
-    let original = crate::resident_tools::WorkbenchCallKey::from(
-        exomonad_tool::ToolInvocationContext::external(
-            "thread".into(),
-            "turn".into(),
-            "call".into(),
-            Some("call".into()),
-            None,
-        ),
-    );
+    let invocation =
+        exomonad_tool::ToolInvocationContext::original(boundary.hosted().unwrap().clone());
+    let original = crate::resident_tools::WorkbenchCallKey::from(invocation.clone());
     behavior
         .workbench_executions
         .lock()
@@ -534,8 +528,43 @@ async fn tool_abort_validates_original_owner_before_empty_settlement() {
     behavior
         .tool_aborted(&kernel, boundary.clone())
         .await
-        .expect("the original owner can settle an empty abort after validation");
-    assert!(behavior.settled_checkpoint_boundaries.contains(&boundary));
+        .expect_err("adding an original entry does not certify multiple owners");
+    assert!(!behavior.settled_checkpoint_boundaries.contains(&boundary));
+
+    // A separate admitted operation owns a fresh journal; the refused nested
+    // and ambiguous journals remain intact.
+    let mut original_behavior = fixture.behavior(ActorDescriptor::new("abort-owner", placement));
+    let control = crate::WorkbenchExecutionControl::from_invocation(Some(invocation));
+    let execution = control.execution_id(kernel.identity());
+    let request = WorkbenchRequest::from_cell_input("pure ()")
+        .with_execution_id(execution.clone())
+        .with_checkpoint_boundary(boundary.clone());
+    actor
+        .hosted_cell()
+        .publish_provider_transport(kernel.identity(), control.clone());
+    actor.hosted_cell().accept(&control);
+    {
+        let mut journal = original_behavior.workbench_executions.lock();
+        journal.begin(&execution, request, Some(&original));
+        journal.bind_provider_finalization(&execution, Some(&original), Some(&control));
+    }
+    let owner = actor.hosted_cell().retained_boundary(&boundary).unwrap();
+    assert!(matches!(
+        owner.finalization(),
+        crate::HostedOperationFinalization::Pending
+    ));
+    original_behavior
+        .tool_aborted(&kernel, boundary.clone())
+        .await
+        .expect("the issued original owner can settle an empty abort after validation");
+    assert!(original_behavior
+        .settled_checkpoint_boundaries
+        .contains(&boundary));
+    assert!(matches!(
+        owner.finalization(),
+        crate::HostedOperationFinalization::Settled(Ok(crate::ProviderFinalizationKind::Aborted))
+    ));
+    assert!(!behavior.settled_checkpoint_boundaries.contains(&boundary));
 
     let shutdown = forest.shutdown().await;
     assert!(shutdown.iter().all(crate::ForestRootShutdown::is_confirmed));

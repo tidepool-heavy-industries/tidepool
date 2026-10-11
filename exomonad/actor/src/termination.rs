@@ -1887,10 +1887,12 @@ mod tests {
         let terminal = completed_request.recv().unwrap();
         retiring.join().unwrap();
         assert_eq!(owner.requested_shutdown(), Some(terminal));
-        assert!(
-            !control.request_cancellation(),
-            "wake already owns native delivery"
-        );
+        assert!(control.request_cancellation());
+        // The wake claim precedes shutdown, but the resumed cell remains
+        // cancellable until its own terminal publication.
+        control.finish_sleep();
+        assert!(control.cancellation_requested());
+        assert!(!control.claim_expiry());
     }
 
     #[tokio::test]
