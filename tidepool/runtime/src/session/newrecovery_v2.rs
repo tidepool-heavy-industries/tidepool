@@ -94,7 +94,7 @@ pub(crate) struct RecoveryNode {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RecoveryNodeKind {
+pub enum RecoveryNodeKind {
     Authored,
     Join,
 }
@@ -108,7 +108,7 @@ pub(crate) enum RecoveryNodeState {
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "reference", rename_all = "snake_case")]
-pub(crate) enum RecoveryArtifactClosure {
+pub enum RecoveryArtifactClosure {
     Home(RecoveryArtifactRef),
     Join(RecoveryJoinRef),
     ModuleInterface(RecoveryModuleInterfaceRef),
@@ -196,7 +196,7 @@ impl RecoveryArtifactClosure {
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RecoverySymbolIdentity {
+pub struct RecoverySymbolIdentity {
     pub unit: String,
     pub module: String,
     /// GHC namespace tag, preserved as a value rather than interpreted from
@@ -208,7 +208,7 @@ pub(crate) struct RecoverySymbolIdentity {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RecoveryExport {
+pub struct RecoveryExport {
     pub identity: RecoverySymbolIdentity,
     pub kind: RecoveryExportKind,
     /// Exact GHC identities of constructors, selectors, methods, or associated
@@ -218,7 +218,7 @@ pub(crate) struct RecoveryExport {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RecoveryExportKind {
+pub enum RecoveryExportKind {
     Value,
     Type,
     Class,
@@ -226,7 +226,7 @@ pub(crate) enum RecoveryExportKind {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RecoveryInstanceEvidence {
+pub struct RecoveryInstanceEvidence {
     pub dfun: RecoverySymbolIdentity,
     pub class: RecoverySymbolIdentity,
     pub selected: bool,
@@ -235,7 +235,7 @@ pub(crate) struct RecoveryInstanceEvidence {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RecoveryInstanceInventory {
+pub struct RecoveryInstanceInventory {
     pub classes: Vec<RecoveryInstanceEvidence>,
     pub selected_family_axioms: Vec<RecoverySymbolIdentity>,
     /// Full consistency closure is retained independently of the selected

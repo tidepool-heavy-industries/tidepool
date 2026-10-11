@@ -290,6 +290,14 @@ impl RunRecoveryStore {
         writer_configuration(path, &connection)?;
         Self::from_connection(path, identity, physical_identity, connection)
     }
+
+    /// Inspect an existing store without creating it or applying writer PRAGMAs.
+    pub(crate) fn open_read_only(path: &Path) -> Result<Self, StoreError> {
+        let physical_identity = physical_identity(path)?;
+        let connection = read_connection(path)?;
+        let identity = read_contract(path, &connection)?;
+        Self::from_connection(path, identity, physical_identity, connection)
+    }
     fn from_connection(
         path: &Path,
         database_id: [u8; 16],

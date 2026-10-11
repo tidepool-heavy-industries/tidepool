@@ -105,6 +105,9 @@ pub use publication::{
 pub use tidepool_codegen::prepared_program::ImageRegistry;
 
 pub use recovery::{
+    observe_declaration_domain, DeclarationDomainObservation, DeclarationObservation,
+    RecoveryArtifactClosure, RecoveryExport, RecoveryExportKind, RecoveryInstanceEvidence,
+    RecoveryInstanceInventory, RecoveryNodeKind, RecoverySymbolIdentity,
     DeclarationRecoveryReport, RecoveryFormatRefusal, RecoveryPublicOwner, RestoredDeclaration,
     UnavailableBinding,
 };
