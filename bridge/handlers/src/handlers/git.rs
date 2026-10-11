@@ -965,13 +965,16 @@ mod tests {
             GitHandler::new(cwd.clone()),
             crate::TimeHandler,
         ];
-        let result = tidepool_runtime::compile_and_run(
-            &source,
-            "result",
-            &include_paths,
-            &mut handlers,
-            &captured,
-        );
+        let result = tidepool_testing::with_settlement(|settlement| {
+            tidepool_runtime::compile_and_run(
+                &source,
+                "result",
+                &include_paths,
+                &mut handlers,
+                &captured,
+                settlement,
+            )
+        });
         match result {
             Ok(v) => {
                 let json = v.to_json();

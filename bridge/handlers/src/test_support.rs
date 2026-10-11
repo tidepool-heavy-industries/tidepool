@@ -63,13 +63,16 @@ pub(crate) fn jit_eval(code: &[&str]) -> serde_json::Value {
         ExecHandler::new(cwd.clone()),
         LlmHandler::new("ollama:llama3.2".to_string())
     ];
-    let result = tidepool_runtime::compile_and_run(
-        &source,
-        "result",
-        &include_paths,
-        &mut handlers,
-        &captured,
-    );
+    let result = tidepool_testing::with_settlement(|settlement| {
+        tidepool_runtime::compile_and_run(
+            &source,
+            "result",
+            &include_paths,
+            &mut handlers,
+            &captured,
+            settlement,
+        )
+    });
     match result {
         Ok(eval_result) => eval_result.to_json(),
         Err(e) => panic!("JIT eval failed: {:?}", e),

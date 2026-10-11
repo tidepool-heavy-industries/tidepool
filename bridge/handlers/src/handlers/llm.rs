@@ -285,13 +285,16 @@ mod tests {
                 response: mock_response
             }
         ];
-        let result = tidepool_runtime::compile_and_run(
-            &source,
-            "result",
-            &include_paths,
-            &mut handlers,
-            &captured,
-        );
+        let result = tidepool_testing::with_settlement(|settlement| {
+            tidepool_runtime::compile_and_run(
+                &source,
+                "result",
+                &include_paths,
+                &mut handlers,
+                &captured,
+                settlement,
+            )
+        });
         match result {
             Ok(eval_result) => eval_result.to_json(),
             Err(e) => panic!("JIT eval failed: {:?}", e),

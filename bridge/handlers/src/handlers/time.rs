@@ -110,13 +110,16 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        let result = tidepool_runtime::compile_and_run(
-            &source,
-            "result",
-            &include_paths,
-            &mut handlers,
-            &captured,
-        );
+        let result = tidepool_testing::with_settlement(|settlement| {
+            tidepool_runtime::compile_and_run(
+                &source,
+                "result",
+                &include_paths,
+                &mut handlers,
+                &captured,
+                settlement,
+            )
+        });
         let rust_after = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

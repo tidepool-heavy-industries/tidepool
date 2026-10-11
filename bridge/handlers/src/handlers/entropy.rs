@@ -122,13 +122,16 @@ mod tests {
         let cwd = repo_root();
         let captured = CapturedOutput::new();
         let mut handlers = entropy_jit_handlers(cwd, kv_path);
-        let result = tidepool_runtime::compile_and_run(
-            &source,
-            "result",
-            &include_paths,
-            &mut handlers,
-            &captured,
-        );
+        let result = tidepool_testing::with_settlement(|settlement| {
+            tidepool_runtime::compile_and_run(
+                &source,
+                "result",
+                &include_paths,
+                &mut handlers,
+                &captured,
+                settlement,
+            )
+        });
         match result {
             Ok(v) => {
                 assert_eq!(
