@@ -77,7 +77,7 @@ function hostActor(snapshot, actor) {
     && candidate.identity?.run === actor.run);
 }
 
-async function releaseBarrier(spec, defaultExpectedInput) {
+async function releaseBarrier(spec, defaultExpectedInput, observeDisplay) {
   const finalPhase = spec.until_phase ?? spec.phase;
   if (typeof finalPhase !== 'string' || finalPhase.length === 0) {
     throw new Error('provider barrier must declare phase or until_phase');
@@ -100,6 +100,7 @@ async function releaseBarrier(spec, defaultExpectedInput) {
     }
     if (barrier.phase === finalPhase) {
       assertRequestIncludes(barrier.request_summary, spec.expected_request_text ?? defaultExpectedInput, finalPhase);
+      if (spec.assert_explicit_display === true) await observeDisplay(barrier.committed_display);
       send({ type: 'provider_release', id: barrier.id });
       return barrier.request_id;
     }
@@ -210,6 +211,8 @@ async function runJourney(ready) {
     const hostOperationWaiters = [];
     const requestWaiters = [];
     const commandReceipts = [];
+    const committedDisplayEvents = [];
+    let canonicalDisplay;
     const receiptWaiters = new Map();
     let latestSnapshot;
     let firstOperation;
@@ -291,6 +294,7 @@ async function runJourney(ready) {
         }
         if (frame?.type === 'event') {
           const event = frame.event?.event;
+          if (event?.kind === 'actor.output.committed') committedDisplayEvents.push(event.value);
           if (operationId && event?.kind === 'command.receipt' && event.value?.commandId === operationId) {
             droppedFirstReceipt += 1;
             return;
@@ -369,6 +373,44 @@ async function runJourney(ready) {
         }, timeoutMs);
         receiptWaiters.set(operationId, waiter);
       });
+    };
+    const assertCanonicalDisplay = async () => {
+      if (!canonicalDisplay) throw new Error('browser has no canonical explicit display');
+      const projection = hostActor(latestSnapshot, actor);
+      assert.deepEqual(canonicalDisplay.reference.origin, projection?.outputOrigin,
+        'canonical display belongs to another projected actor');
+      const origin = canonicalDisplay.reference.origin;
+      const query = new URLSearchParams({ run: origin.run, actor: String(origin.nativeActor),
+        incarnation: String(origin.incarnation), after: '0', limit: '100' });
+      const historyResponse = await context.request.get(new URL(`/api/actor-output?${query}`, baseUrl).toString());
+      assert.equal(historyResponse.status(), 200, 'canonical actor history request failed');
+      const history = await historyResponse.json();
+      assert.deepEqual(history.origin, origin);
+      assert.equal(history.nextAfter, null, 'fixture actor history unexpectedly needs another page');
+      assert.deepEqual(history.outputs, [canonicalDisplay], 'retry or reload lost or replayed the canonical display');
+      assert.deepEqual(committedDisplayEvents.filter((row) =>
+        row.reference?.sequence === canonicalDisplay.reference.sequence), [canonicalDisplay],
+      'canonical display must have exactly one committed event');
+      const row = page.getByRole('region', { name: 'Selected worker Chat' })
+        .locator(`[data-sequence="${canonicalDisplay.reference.sequence}"]`);
+      await row.getByRole('heading', { name: 'Displayed values', exact: true }).waitFor({ timeout: 30_000 });
+      assert.equal(await row.count(), 1, 'canonical display appears more than once in unified chat');
+      assert.equal(await row.locator('pre').innerText(), '42', 'unified chat changed the committed page');
+    };
+    const observeDisplay = async (row) => {
+      assert.ok(row?.reference?.sequence > 0 && row?.emission?.execution?.kind === 'notebook',
+        'provider barrier omitted the canonical notebook display');
+      assert.deepEqual(row.reference.origin, row.emission.origin);
+      assert.equal(row.emission.page.text, '42');
+      canonicalDisplay = row;
+      // Publication commits before the provider reply; allow its websocket frame
+      // to arrive before checking the browser's retained history.
+      const deadline = performance.now() + 30_000;
+      while (!committedDisplayEvents.some((event) => event.reference?.sequence === row.reference.sequence)) {
+        if (performance.now() >= deadline) throw new Error('canonical display committed event did not reach the browser');
+        await page.waitForTimeout(10);
+      }
+      await assertCanonicalDisplay();
     };
     const inspectRequestHistory = async (expectedText, conversationId, requestId) => {
       requireString(requestId, 'provider barrier request_id');
@@ -476,7 +518,7 @@ async function runJourney(ready) {
           const barriers = step.provider_barriers ?? [{ phase: step.barrier, expected_request_text: text }];
           if (!Array.isArray(barriers) || barriers.length === 0) throw new Error('input step must declare provider barriers');
           for (const barrier of barriers) {
-            historyRequestId = await releaseBarrier(barrier, text);
+            historyRequestId = await releaseBarrier(barrier, text, observeDisplay);
           }
           if (step.wait_for_receipt !== false) {
             await page.getByRole('region', { name: 'Command handoff receipts' }).waitFor({ timeout: 30_000 });
@@ -546,6 +588,7 @@ async function runJourney(ready) {
           if (hostOperations.length !== sentBeforeReload) {
             throw new Error('reconnect replayed a retained browser operation automatically');
           }
+          if (canonicalDisplay) await assertCanonicalDisplay();
         } else if (step.action === 'assert_settled_retry') {
           if (!lastOperation) throw new Error('settled retry step has no earlier retained browser operation');
           const operation = page.locator(`[data-operation-id="${lastOperation.operation_id}"]`);
@@ -556,6 +599,7 @@ async function runJourney(ready) {
           assert.equal(await operation.getByRole('button', { name: 'Retry same operation' }).isDisabled(), true,
             'authoritatively settled operations must disable retry');
           assert.equal(hostOperations.length, before, 'settled retry assertion sent another operation');
+          if (canonicalDisplay) await assertCanonicalDisplay();
         } else {
           throw new Error('scenario contains an unsupported browser action');
         }

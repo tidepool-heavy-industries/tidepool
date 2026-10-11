@@ -14,7 +14,9 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-use super::hosted_test_context::{cell_output_matches, HostedTestRuntime};
+use super::hosted_test_context::{
+    committed_explicit_display_operation, explicit_cell_display_matches, HostedTestRuntime,
+};
 use super::test_campaign::haskell_call;
 
 #[path = "m1_browser_process.rs"]
@@ -348,7 +350,7 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
         request_after_cell
             .input
             .iter()
-            .any(|item| cell_output_matches(item, "host-real-cell", "42")),
+            .any(|item| explicit_cell_display_matches(item, "host-real-cell", "42")),
         "successor request must retain the real resident Haskell result: {:#?}",
         request_after_cell.input
     );
@@ -436,7 +438,11 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
     );
     assert!(
         retained_items.iter().any(|item| {
-            cell_output_matches(&harness::item::Item(item.clone()), "host-real-cell", "42")
+            explicit_cell_display_matches(
+                &harness::item::Item(item.clone()),
+                "host-real-cell",
+                "42",
+            )
         }),
         "browser history did not retain the real Haskell output"
     );
@@ -889,7 +895,11 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
                                 .replay_output_operation(&claim.operation)
                                 .unwrap()
                                 .is_some_and(|item| {
-                                    cell_output_matches(&item, "before-rejection-cell", "42")
+                                    explicit_cell_display_matches(
+                                        &item,
+                                        "before-rejection-cell",
+                                        "42",
+                                    )
                                 })
                         }) {
                             assert_eq!(claims.len(), 1);
@@ -1007,7 +1017,9 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
             followup_request
                 .input
                 .iter()
-                .filter(|item| { cell_output_matches(item, "before-rejection-cell", "42") })
+                .filter(|item| {
+                    explicit_cell_display_matches(item, "before-rejection-cell", "42")
+                })
                 .count(),
             1,
             "settled ancestor output was not recovered exactly once"

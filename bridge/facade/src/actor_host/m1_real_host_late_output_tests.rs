@@ -256,7 +256,7 @@ impl ResponsesTransport for PendingCellTransport {
                     )));
                 }
                 let output = output_for_call(&request).next().expect("count checked");
-                if !cell_output_matches(output, CELL_CALL_ID, "42") {
+                if !explicit_cell_display_matches(output, CELL_CALL_ID, "42") {
                     return Err(TransportError::Stream(format!(
                         "late Haskell output did not retain the exact committed result: {output:?}"
                     )));
@@ -357,7 +357,7 @@ async fn wait_for_cell_state(
                         "resident operation completed before the pending barrier",
                     );
                     assert!(
-                        cell_output_matches(
+                        explicit_cell_display_matches(
                             &Item::tool_output(&operation.call, ToolKind::Custom, &output),
                             CELL_CALL_ID,
                             "42",
@@ -368,7 +368,7 @@ async fn wait_for_cell_state(
                         assert!(claims.iter().all(|claim| claim.state == ClaimState::Settled));
                         let persisted = persisted.expect("settled claim must retain its output");
                         assert!(
-                            cell_output_matches(&persisted, CELL_CALL_ID, "42"),
+                            explicit_cell_display_matches(&persisted, CELL_CALL_ID, "42"),
                             "persisted original output must match the completed result: {persisted:?}",
                         );
                         return;
@@ -563,7 +563,7 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
     let outputs = output_for_call(&late_request).collect::<Vec<_>>();
     assert_eq!(outputs.len(), 1, "late output must be retained once");
     assert!(
-        cell_output_matches(outputs[0], CELL_CALL_ID, "42"),
+        explicit_cell_display_matches(outputs[0], CELL_CALL_ID, "42"),
         "late output must retain the completed cell's exact committed value: {:?}",
         outputs[0],
     );

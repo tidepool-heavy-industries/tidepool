@@ -1579,7 +1579,76 @@ pub(super) async fn test_stop(hooks: &mut Option<HostTestHooks>) {
     }
 }
 
-pub(super) fn cell_output_matches(
+/// Explicit display is an effect receipt, independent of the cell's return text.
+pub(super) fn committed_explicit_display_operation(
+    response: &serde_json::Value,
+) -> Result<&serde_json::Value, String> {
+    let fail = |detail: &str| Err(format!("explicit display: {detail}"));
+    if !matches!(response["status"].as_str(), Some("completed" | "committed")) {
+        return fail("cell did not complete");
+    }
+    let Some(total) = response["total"].as_u64() else {
+        return fail("missing total");
+    };
+    let Some(items) = response["items"].as_array() else {
+        return fail("missing item receipts");
+    };
+    if total == 0
+        || response["nextIndex"].as_u64() != Some(total)
+        || items.len() as u64 != total
+        || items.iter().any(|item| item["status"] != "committed")
+    {
+        return fail("input units are not all committed");
+    }
+    let displays = items
+        .iter()
+        .filter_map(|item| item["operations"].as_array())
+        .flatten()
+        .filter(|operation| {
+            operation.get("display").is_some() || operation.get("displayPublication").is_some()
+        })
+        .collect::<Vec<_>>();
+    let [operation] = displays.as_slice() else {
+        return fail("expected exactly one explicit display operation");
+    };
+    let display = &operation["display"];
+    let publication = &operation["displayPublication"];
+    if operation["disposition"] != "committed" || publication["status"] != "published" {
+        return fail("display publication is not committed and published");
+    }
+    let Some(identity) = display["identity"].as_array() else {
+        return fail("missing display identity");
+    };
+    if identity.len() != 3
+        || identity.iter().any(|part| part.as_u64().is_none())
+        || identity[2].as_u64() == Some(0)
+        || publication["publication"]["display"] != display["identity"]
+        || !publication["publication"]["pageOrdinal"]
+            .as_u64()
+            .is_some_and(|ordinal| ordinal > 0)
+        || publication["output"] != display["output"]
+    {
+        return fail("publication identity or canonical reference differs from the displayed page");
+    }
+    if !display["output"]["run"]
+        .as_str()
+        .is_some_and(|run| !run.is_empty() && run.len() <= 1024)
+        || !display["output"]["sequence"]
+            .as_i64()
+            .is_some_and(|sequence| sequence > 0)
+        || display["text"].as_str().is_none()
+        || !operation["id"]["execution"]
+            .as_str()
+            .is_some_and(|execution| !execution.is_empty())
+        || operation["id"]["inputUnitIndex"].as_u64().is_none()
+        || operation["id"]["effectOrdinal"].as_u64().is_none()
+    {
+        return fail("invalid canonical reference or operation coordinate");
+    }
+    Ok(operation)
+}
+
+pub(super) fn explicit_cell_display_matches(
     item: &harness::item::Item,
     call_id: &str,
     expected: &str,
@@ -1587,27 +1656,164 @@ pub(super) fn cell_output_matches(
     if item.0["type"] != "custom_tool_call_output" || item.0["call_id"] != call_id {
         return false;
     }
-    let Some(output) = item.0["output"].as_str() else {
-        return false;
+    let output = item.0["output"]
+        .as_str()
+        .expect("settled explicit-display call has text output");
+    let response = serde_json::from_str::<serde_json::Value>(output)
+        .expect("settled explicit-display call has a Workbench response");
+    let operation = committed_explicit_display_operation(&response)
+        .unwrap_or_else(|error| panic!("call {call_id}: {error}; response={response}"));
+    assert_eq!(
+        operation["display"]["text"].as_str().unwrap().trim(),
+        expected,
+        "call {call_id} settled with the wrong explicit display"
+    );
+    true
+}
+
+#[cfg(test)]
+pub(super) fn committed_display_response_fixture(text: &str) -> serde_json::Value {
+    use tidepool_runtime::session::workbench::*;
+    let publication = WorkbenchDisplayPublicationIdentity {
+        display: (3, 5, 7),
+        page_ordinal: 1,
     };
-    let Ok(response) = serde_json::from_str::<serde_json::Value>(output) else {
-        return false;
+    let output = ActorOutputReference {
+        run: "fixture-run".into(),
+        sequence: 17,
     };
-    matches!(response["status"].as_str(), Some("completed" | "committed"))
-        && response["total"] == 1
-        && response["nextIndex"] == 1
-        && response["items"].as_array().is_some_and(|items| {
-            items.len() == 1
-                && items[0]["status"] == "committed"
-                && items[0]["output"]
-                    .as_str()
-                    .is_some_and(|value| value.trim() == expected)
-        })
+    serde_json::to_value(WorkbenchResponse {
+        status: WorkbenchRunStatus::Completed,
+        summary: None,
+        next_index: 1,
+        total: 1,
+        publication: None,
+        items: vec![WorkbenchItemReceipt {
+            index: 0,
+            kind: None,
+            span: None,
+            source_items: vec![],
+            status: WorkbenchItemStatus::Committed,
+            output: String::new(),
+            value: None,
+            diagnostics: vec![],
+            failure_layer: None,
+            warnings: vec![],
+            installed_bindings: vec![],
+            terminal_transfer: None,
+            operations: vec![WorkbenchOperationReceipt {
+                display: Some(WorkbenchDisplayOutput {
+                    page: WorkbenchDisplayPage {
+                        identity: publication.display,
+                        text: text.into(),
+                        expansions: vec![],
+                        unavailable: false,
+                    },
+                    output: output.clone(),
+                }),
+                display_publication: Some(WorkbenchDisplayPublication::Published {
+                    publication,
+                    output,
+                }),
+                id: WorkbenchOperationId {
+                    execution: WorkbenchExecutionId::from_digest([3; 16]),
+                    input_unit_index: 0,
+                    effect_ordinal: 0,
+                },
+                effect: "Console.DisplayWith".into(),
+                disposition: WorkbenchOperationDisposition::Committed,
+            }],
+        }],
+    })
+    .unwrap()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committed_explicit_display_requires_the_published_operation() {
+        let valid = committed_display_response_fixture("42");
+        assert_eq!(
+            committed_explicit_display_operation(&valid).unwrap()["display"]["text"],
+            "42"
+        );
+        let mut multi = valid.clone();
+        let mut declaration = multi["items"][0].clone();
+        declaration["operations"] = json!([]);
+        multi["items"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, declaration);
+        multi["total"] = json!(2);
+        multi["items"][1]["index"] = json!(1);
+        multi["items"][1]["operations"][0]["id"]["inputUnitIndex"] = json!(1);
+        multi["nextIndex"] = json!(2);
+        assert!(committed_explicit_display_operation(&multi).is_ok());
+        let changes = [
+            ("/status", json!("replied")),
+            ("/nextIndex", json!(0)),
+            ("/items/0/status", json!("stopped")),
+            ("/items/0/operations/0/disposition", json!("unknown")),
+            (
+                "/items/0/operations/0/displayPublication/status",
+                json!("pending"),
+            ),
+            (
+                "/items/0/operations/0/displayPublication/status",
+                json!("unconfirmed"),
+            ),
+            (
+                "/items/0/operations/0/displayPublication/status",
+                json!("refused"),
+            ),
+            (
+                "/items/0/operations/0/displayPublication/output/sequence",
+                json!(18),
+            ),
+            (
+                "/items/0/operations/0/displayPublication/publication/display",
+                json!([3, 5, 8]),
+            ),
+            (
+                "/items/0/operations/0/displayPublication/publication/pageOrdinal",
+                json!(0),
+            ),
+            ("/items/0/operations/0/display/output/run", json!("")),
+            ("/items/0/operations/0/display/output/sequence", json!(0)),
+        ];
+        for (pointer, replacement) in changes {
+            let mut response = valid.clone();
+            *response.pointer_mut(pointer).unwrap() = replacement;
+            assert!(
+                committed_explicit_display_operation(&response).is_err(),
+                "accepted {pointer}"
+            );
+        }
+        let mut duplicate = valid.clone();
+        let operation = duplicate["items"][0]["operations"][0].clone();
+        duplicate["items"][0]["operations"]
+            .as_array_mut()
+            .unwrap()
+            .push(operation);
+        assert!(committed_explicit_display_operation(&duplicate).is_err());
+        assert!(
+            committed_explicit_display_operation(&json!({"error":"execution failed"})).is_err()
+        );
+    }
+
+    #[test]
+    fn explicit_display_rejects_a_settled_wrong_result_promptly() {
+        let item = harness::item::Item(
+            json!({"type":"custom_tool_call_output", "call_id":"fixture",
+            "output":committed_display_response_fixture("41").to_string()}),
+        );
+        assert!(
+            std::panic::catch_unwind(|| explicit_cell_display_matches(&item, "fixture", "42"))
+                .is_err()
+        );
+    }
 
     fn operation_claim(
         store: &harness::store::Store,

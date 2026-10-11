@@ -38,7 +38,7 @@ impl CancelTransport {
         if request
             .input
             .iter()
-            .any(|item| cell_output_matches(item, WARMUP_CALL, "42"))
+            .any(|item| explicit_cell_display_matches(item, WARMUP_CALL, "42"))
         {
             self.warmup_displayed.notify_one();
         }

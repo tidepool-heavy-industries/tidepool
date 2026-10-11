@@ -278,7 +278,7 @@ impl WarmTransport {
                 }) {
                     let displayed = Instant::now();
                     assert!(
-                        cell_output_matches(output, call_id, &workload.expected),
+                        explicit_cell_display_matches(output, call_id, &workload.expected),
                         "source-backed display mismatch for {}: {:?}",
                         workload.source,
                         output

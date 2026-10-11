@@ -41,7 +41,16 @@ fn final_answer(text: &str) -> harness::item::Item {
 }
 
 fn real_cell_returned_42(item: &harness::item::Item) -> bool {
-    cell_output_matches(item, "browser-real-cell", "42")
+    if item.0["type"] != "custom_tool_call_output" || item.0["call_id"] != "browser-real-cell" {
+        return false;
+    }
+    item.0["output"]
+        .as_str()
+        .and_then(|output| serde_json::from_str::<Value>(output).ok())
+        .is_some_and(|response| {
+            committed_explicit_display_operation(&response)
+                .is_ok_and(|operation| operation["display"]["text"].as_str() == Some("42"))
+        })
 }
 
 fn typed_result_matches(item: &harness::item::Item, call_id: &str, expected: &str) -> bool {
@@ -131,6 +140,7 @@ impl BrowserTransport {
         request: ResponsesRequest,
         request_id: Option<&harness::model::RequestId>,
     ) -> Result<ResponsesTurn, TransportError> {
+        validate_completed_replies(&request.input).map_err(TransportError::Stream)?;
         for item in request.input.iter().filter(|item| {
             matches!(
                 item.0["call_id"].as_str(),
@@ -155,7 +165,7 @@ impl BrowserTransport {
                     "nextIndex": response["nextIndex"],
                     "total": response["total"],
                     "items": response["items"].as_array().map(|items| items.iter().map(|item| {
-                        json!({"status":item["status"], "outputIs42":item["output"].as_str().is_some_and(|value| value.trim() == "42")})
+                        json!({"status":item["status"], "operations":item["operations"]})
                     }).collect::<Vec<_>>()),
                 })
             });
@@ -360,6 +370,97 @@ async fn verify_cancelled_resident_call(
     Ok(())
 }
 
+/// Join the originating provider call, notebook receipt and Store-owned row.
+fn committed_browser_display(
+    fixture: &HostedTestRuntime,
+    input: &[harness::item::Item],
+) -> Result<harness::store::actor_output::StoredActorOutput, String> {
+    use harness::store::actor_output::{ActorOutputExecution, ActorOutputOrigin};
+    let call = harness::model::CallId("browser-real-cell".into());
+    let replies = input
+        .iter()
+        .filter(|item| item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == call.0)
+        .collect::<Vec<_>>();
+    let [reply] = replies.as_slice() else {
+        return Err("raw display barrier must retain exactly one original call reply".into());
+    };
+    let response: Value =
+        serde_json::from_str(reply.0["output"].as_str().ok_or("missing raw reply")?)
+            .map_err(|error| error.to_string())?;
+    let receipt = committed_explicit_display_operation(&response)?;
+    let target = browser_target(&fixture.context);
+    let expected_conversation = harness::model::ConversationIdentity::Embedded {
+        run: target.run.clone(),
+        actor: target.actor,
+        incarnation: target.incarnation,
+    };
+    let store = fixture.runtime.store();
+    let claims = store.claims(&call).map_err(|error| error.to_string())?;
+    let [claim] = claims.as_slice() else {
+        return Err("raw display call must have exactly one retained originating claim".into());
+    };
+    if claim.call_id != call
+        || claim.operation.call != call
+        || claim.operation.origin != expected_conversation
+        || claim.operation.request != claim.request
+        || claim.state != harness::store::ClaimState::Settled
+    {
+        return Err("raw display claim belongs to another actor or operation".into());
+    }
+    if store
+        .replay_output_operation(&claim.operation)
+        .map_err(|error| error.to_string())?
+        .as_ref()
+        != Some(*reply)
+    {
+        return Err("raw display reply differs from the retained original operation output".into());
+    }
+    let actor = fixture.context.actor.identity();
+    let origin = ActorOutputOrigin {
+        run: target.run,
+        native_actor: actor.id.0,
+        incarnation: actor.incarnation.0,
+    };
+    let page = store
+        .actor_output_page(&origin, 0, 100)
+        .map_err(|error| error.to_string())?;
+    let [row] = page.outputs.as_slice() else {
+        return Err("browser fixture must commit exactly one actor display without replay".into());
+    };
+    let display = &receipt["display"];
+    let emission = row.emission();
+    let expected_execution = ActorOutputExecution::Notebook {
+        execution: receipt["id"]["execution"].as_str().unwrap().into(),
+        input_unit_index: receipt["id"]["inputUnitIndex"].as_u64().unwrap(),
+        effect_ordinal: receipt["id"]["effectOrdinal"].as_u64().unwrap(),
+    };
+    if page.next_after.is_some()
+        || row.reference().origin != origin
+        || emission.origin != origin
+        || display["output"]["run"].as_str() != Some(origin.run.as_str())
+        || display["output"]["sequence"].as_i64() != Some(row.reference().sequence)
+        || display["identity"]
+            != json!([
+                origin.native_actor,
+                origin.incarnation,
+                emission.id.display_slot
+            ])
+        || receipt["displayPublication"]["publication"]["pageOrdinal"].as_u64()
+            != Some(emission.id.page_ordinal)
+        || emission.execution != expected_execution
+        || emission.conversation.as_ref() != Some(&expected_conversation)
+        || emission.page.text != "42"
+        || display["text"] != emission.page.text
+        || serde_json::to_value(&emission.page.expansions).unwrap() != display["expansions"]
+        || display["unavailable"] != emission.page.unavailable
+    {
+        return Err(
+            "canonical actor-output row differs from its original notebook publication".into(),
+        );
+    }
+    Ok(row.clone())
+}
+
 async fn pending_sleep_operation(
     fixture: &HostedTestRuntime,
 ) -> Result<Option<harness::model::OperationId>, String> {
@@ -448,8 +549,8 @@ async fn drive_browser(
         "scenario":{"steps":[
             {"action":"input", "text":RAW_INPUT,"retry_unresolved":true,"wait_for_receipt":false,"provider_barriers":[
                 {"phase":"raw_input","expected_request_text":RAW_INPUT},
-                {"until_phase":"raw_result","timeout_ms":300000,"allowed_intermediate_phases":["raw_wait"],"expected_request_text":"42"}
-            ], "wait_for_text":"The resident cell returned 42."},
+                {"until_phase":"raw_result","timeout_ms":300000,"allowed_intermediate_phases":["raw_wait"],"expected_request_text":"42","assert_explicit_display":true}
+            ]},
             {"action":"reload"}, {"action":"assert_settled_retry"},
             {"action":"input", "text":TYPED_INPUT, "wait_for_receipt":false, "provider_barriers":[
                 {"phase":"typed_first", "expected_request_text":TYPED_INPUT},
@@ -477,6 +578,7 @@ async fn drive_browser(
         let mut started = false;
         let mut waiting: Option<Barrier> = None;
         let mut raw_completed = false;
+        let mut raw_display = None;
         let mut typed_completed = false;
         let mut typed_compile_count = None;
         let mut cancel_wait = false;
@@ -541,11 +643,16 @@ async fn drive_browser(
                             return Err("interrupt did not stop the pending 30-second cell promptly".into());
                         }
                     }
+                    let committed_display = if barrier.phase == "raw_result" {
+                        Some(committed_browser_display(fixture, &barrier.request.input)?)
+                    } else { None };
+                    if let Some(row) = &committed_display { raw_display = Some(row.clone()); }
                     raw_completed |= barrier.phase == "raw_result";
                     cancel_wait |= barrier.phase == "cancel_wait";
                     continued |= barrier.phase == "continued";
                     process.send_frame(&json!({"type":"provider_barrier", "id":barrier.id,
-                        "phase":barrier.phase, "request_id":barrier.request_id, "request_summary":{"input":barrier.request.input}})).await?;
+                        "phase":barrier.phase, "request_id":barrier.request_id, "committed_display":committed_display,
+                        "request_summary":{"input":barrier.request.input}})).await?;
                     waiting = Some(barrier);
                 }
                 frame = process.next_frame() => {
@@ -568,6 +675,12 @@ async fn drive_browser(
                             }
                             if !started || waiting.is_some() || !raw_completed || !typed_completed || !cancel_wait || !continued {
                                 return Err("browser finished before the real provider scenario completed".into());
+                            }
+                            let row = raw_display.as_ref().ok_or("browser finished without canonical display evidence")?;
+                            let page = fixture.runtime.store().actor_output_page(&row.reference().origin, 0, 100)
+                                .map_err(|error| error.to_string())?;
+                            if page.next_after.is_some() || page.outputs != [row.clone()] {
+                                return Err("browser retry, reload or cancellation replayed or lost the original display".into());
                             }
                             return Ok(());
                         }
@@ -734,7 +847,11 @@ fn completed_browser_replies_report_failures_and_wrong_results() {
     ] {
         for output in [
             json!({"error":"native custody requires identical certified inputs", "failure":{"phase":"compile"}}).to_string(),
-            json!({"status":"completed", "total":1, "nextIndex":1, "items":[{"status":"committed", "output":"41"}]}).to_string(),
+            if kind == "custom_tool_call_output" {
+                super::super::hosted_test_context::committed_display_response_fixture("41").to_string()
+            } else {
+                json!({"status":"completed", "total":1, "nextIndex":1, "items":[{"status":"committed", "output":"41"}]}).to_string()
+            },
             "not a JSON response".to_owned(),
         ] {
             let input = [harness::item::Item(json!({
@@ -766,8 +883,12 @@ fn browser_reply_observation_allows_pending_and_successful_calls() {
     ] {
         input.push(harness::item::Item(json!({
             "type":kind, "call_id":call_id,
-            "output":json!({"status":"completed", "total":1, "nextIndex":1,
-                "items":[{"status":"committed", "output":expected}]}).to_string(),
+            "output": if kind == "custom_tool_call_output" {
+                super::super::hosted_test_context::committed_display_response_fixture(expected).to_string()
+            } else {
+                json!({"status":"completed", "total":1, "nextIndex":1,
+                    "items":[{"status":"committed", "output":expected}]}).to_string()
+            },
         })));
         assert!(validate_completed_replies(&input).is_ok());
     }

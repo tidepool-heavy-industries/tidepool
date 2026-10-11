@@ -68,38 +68,28 @@ impl EightActorTransport {
                     )
                 }
                 1 => {
-                    assert!(request.input.iter().any(|item| {
-                        if item.0["type"] != "custom_tool_call_output"
-                            || item.0["call_id"] != "eight-actor-setup"
-                        {
-                            return false;
-                        }
-                        let Some(output) = item.0["output"].as_str() else {
-                            return false;
-                        };
-                        let value: Value = serde_json::from_str(output).unwrap();
-                        matches!(value["status"].as_str(), Some("completed" | "committed"))
-                            && value["items"]
-                                .as_array()
-                                .unwrap()
-                                .last()
-                                .is_some_and(|item| {
-                                    item["output"]
-                                        .as_str()
-                                        .is_some_and(|output| output.trim() == "True")
-                                })
-                    }));
+                    assert!(request
+                        .input
+                        .iter()
+                        .any(|item| explicit_cell_display_matches(
+                            item,
+                            "eight-actor-setup",
+                            "True"
+                        )));
                     self.clients.issue(&operation("eight-actor-launch"));
                     harness::item::Item(
                         json!({"type":"custom_tool_call","call_id":"eight-actor-launch","name":"haskell","input":tidepool_testing::fixture_source("bridge/facade/src/actor_host/m1_eight_actor_launch.hs")}),
                     )
                 }
                 2 => {
-                    assert!(request.input.iter().any(|item| cell_output_matches(
-                        item,
-                        "eight-actor-launch",
-                        "True"
-                    )));
+                    assert!(request
+                        .input
+                        .iter()
+                        .any(|item| explicit_cell_display_matches(
+                            item,
+                            "eight-actor-launch",
+                            "True"
+                        )));
                     self.root_finished.notify_one();
                     final_item(
                         "All eight typed replies arrived through their original parent invocation.",
@@ -121,11 +111,14 @@ impl EightActorTransport {
                 if let Some(cell) = child.pending.take() {
                     let workload = &self.workloads[cell.sequence];
                     assert!(
-                        request.input.iter().any(|item| cell_output_matches(
-                            item,
-                            &cell.operation.call.0,
-                            &workload.expected
-                        )),
+                        request
+                            .input
+                            .iter()
+                            .any(|item| explicit_cell_display_matches(
+                                item,
+                                &cell.operation.call.0,
+                                &workload.expected
+                            )),
                         "exact source display before next cell"
                     );
                     let elapsed_ns = cell.started.elapsed().as_nanos();
