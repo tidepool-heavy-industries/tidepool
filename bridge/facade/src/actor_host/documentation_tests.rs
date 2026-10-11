@@ -3286,8 +3286,7 @@ async fn broad_collaboration_recipe_preserves_authored_compilation_workload() {
             })
             .collect(),
     );
-    let (_, _, phases, _) = super::test_campaign::prepare_performance_traces();
-    super::test_campaign::install_tracing();
+    let (_, _, phases, _, trace_capture) = super::test_campaign::prepare_performance_traces();
     let repository = recipe_workspace(Some(&["Project.CollaborationChecks.collaboration"]));
     let artifact_root =
         std::path::PathBuf::from(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").unwrap());
@@ -3298,6 +3297,7 @@ async fn broad_collaboration_recipe_preserves_authored_compilation_workload() {
         &phases,
         serde_json::json!({
             "phase": "broad_collaboration_started",
+            "trace_capture": trace_capture,
             "authored_workspace": retained,
             "git_dates": "2000-01-01T00:00:00Z",
         }),
