@@ -7453,8 +7453,15 @@ mod module_product_tests {
                 )
             },
         );
-        assert!(matches!(refusal.action,
-            Err(CompileError::Io(ref error)) if error.kind() == std::io::ErrorKind::WouldBlock));
+        let Err(CompileError::CompilerEndpoint(error)) = &refusal.action else {
+            panic!(
+                "unexpected preparation refusal: {:?}",
+                refusal.action.as_ref().err()
+            );
+        };
+        assert_eq!(error.source.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(error.definitely_unsubmitted());
+        assert!(!error.permits_rebind());
         assert_eq!(refusal.close, CompilerTransactionClose::NotStarted);
         assert_eq!(extract_spawn_count(), before);
         assert!(!output.exists());
