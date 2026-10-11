@@ -184,7 +184,16 @@ impl Driver {
             pane_environment: BTreeMap::new(),
             jev: None,
         };
-        let session = ModelFreeSession::start(&config, |admission| admission).await?;
+        // Recipes have no provider conversation, but the selected spec can
+        // require Reflect. Install its actual typed unavailable service.
+        let session = ModelFreeSession::start_with_conversation(
+            &config,
+            |admission| admission,
+            Some(Arc::new(|_, _| {
+                Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
+            })),
+        )
+        .await?;
         let installations =
             HashMap::from([(session.actor.identity(), session.root_installation.clone())]);
         Ok(Self {
