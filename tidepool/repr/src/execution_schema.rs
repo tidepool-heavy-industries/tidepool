@@ -1126,6 +1126,41 @@ impl ProjectedGroup {
         DefinitionsView::from(self.definitions.as_ref())
     }
 
+    // Certified admission proves that exported binders form this exact suffix.
+    // Locate its first slice from group lengths, then visit each export once.
+    fn exported_values(&self) -> impl Iterator<Item = (&SymbolIdentity, ValueId)> {
+        let bindings = &self.definitions.bindings;
+        let mut remaining = self.binders.len();
+        let mut first = bindings.len();
+        let mut offset = 0;
+        for (index, group) in bindings.iter().enumerate().rev() {
+            if remaining == 0 {
+                break;
+            }
+            let len = match group {
+                Group::NonRecursive(_) => 1,
+                Group::Recursive(tops) => tops.len(),
+            };
+            if remaining <= len {
+                first = index;
+                offset = len - remaining;
+                break;
+            }
+            remaining -= len;
+        }
+        bindings[first..]
+            .iter()
+            .enumerate()
+            .flat_map(move |(index, group)| {
+                let tops = match group {
+                    Group::NonRecursive(top) => std::slice::from_ref(top),
+                    Group::Recursive(tops) => tops.as_slice(),
+                };
+                &tops[if index == 0 { offset } else { 0 }..]
+            })
+            .map(|top| (&top.identity, top.binding.id))
+    }
+
     #[must_use]
     pub fn original_ordinal(&self) -> u32 {
         self.original_ordinal
@@ -1292,6 +1327,12 @@ impl CertifiedGroup {
     pub fn binders(&self) -> &[SymbolIdentity] {
         self.group.binders()
     }
+    /// Exported identities and value IDs in their certified definition order.
+    /// Admission proves uniqueness and the exact suffix, excluding helper tops.
+    pub fn exported_values(&self) -> impl Iterator<Item = (&SymbolIdentity, ValueId)> {
+        self.group.exported_values()
+    }
+
     pub fn imports(&self) -> &[ImportOwner] {
         &self.imports
     }
@@ -1838,4 +1879,163 @@ pub(super) fn linked_from_validated(
     imports: Vec<ImportedValue>,
 ) -> LinkedProgram {
     LinkedProgram { prepared, imports }
+}
+
+#[cfg(test)]
+mod certified_exports_tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::hint::black_box;
+    use std::time::Instant;
+
+    fn owner() -> CachedHomeOwner {
+        CachedHomeOwner {
+            unit: "fixture".into(),
+            module: "Fixture".into(),
+            module_version: ModuleVersion([1; 32]),
+            skinny_iface_sha256: [2; 32],
+            product_sha256: [3; 32],
+        }
+    }
+
+    fn fixture(exports: usize) -> (ProjectedGroup, Vec<(SymbolIdentity, ValueId)>) {
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(template) = &wire.bindings[0] else {
+            unreachable!()
+        };
+        let tops = (0..32 + exports)
+            .map(|index| {
+                let mut top = template.clone();
+                top.binding.id = ValueId(index as u32);
+                let HeapRhs::Function { body, .. } = &mut top.binding.rhs else {
+                    unreachable!()
+                };
+                *body = index;
+                top.identity = if index < 32 {
+                    testing::identity("Helpers", &format!("helper{index}"))
+                } else {
+                    testing::identity("Fixture", &format!("export{}", exports + 31 - index))
+                };
+                top
+            })
+            .collect::<Vec<_>>();
+        let expected = tops[32..]
+            .iter()
+            .map(|top| (top.identity.clone(), top.binding.id))
+            .collect::<Vec<_>>();
+        wire.expressions.nodes = (0..tops.len())
+            .map(|_| wire.expressions.nodes[0].clone())
+            .collect();
+        wire.bindings = vec![
+            Group::NonRecursive(tops[0].clone()),
+            Group::Recursive(tops[1..tops.len() - 1].to_vec()),
+            Group::NonRecursive(tops.last().unwrap().clone()),
+        ];
+        let mut group = testing::projected_group(wire, 11).unwrap();
+        group.binders =
+            SharedContent::new(expected.iter().map(|(binder, _)| binder.clone()).collect());
+        (group, expected)
+    }
+
+    #[test]
+    fn certified_exports_preserve_order_exclude_helpers_and_visit_each_pair_once() {
+        for count in [1, 8, 64, 256] {
+            let (group, expected) = fixture(count);
+            let code = CertifiedGroupCode::admit(owner(), group.clone()).unwrap();
+            let certified = CertifiedGroup::admit(owner(), group, Vec::new()).unwrap();
+            let visits = Cell::new(0);
+            let pairs = certified
+                .exported_values()
+                .inspect(|_| visits.set(visits.get() + 1))
+                .map(|(binder, id)| (binder.clone(), id))
+                .collect::<Vec<_>>();
+            assert_eq!(pairs, expected);
+            assert_eq!(
+                code.binders(),
+                expected
+                    .iter()
+                    .map(|(binder, _)| binder.clone())
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(visits.get(), count);
+            let definitions = certified.definitions();
+            let old_visits = Cell::new(0);
+            let started = Instant::now();
+            for binder in certified.binders() {
+                let top = definitions
+                    .bindings()
+                    .iter()
+                    .flat_map(|group| match group {
+                        Group::NonRecursive(top) => std::slice::from_ref(top),
+                        Group::Recursive(tops) => tops.as_slice(),
+                    })
+                    .inspect(|_| old_visits.set(old_visits.get() + 1))
+                    .find(|top| &top.identity == binder)
+                    .unwrap();
+                black_box(top.binding.id);
+            }
+            let old_elapsed_ns = started.elapsed().as_nanos();
+            let started = Instant::now();
+            for pair in certified.exported_values() {
+                black_box(pair);
+            }
+            let elapsed_ns = started.elapsed().as_nanos();
+            assert_eq!(old_visits.get(), 32 * count + count * (count + 1) / 2);
+            eprintln!(
+                "certified export work: {}",
+                serde_json::json!({"exports":count,"helper_prefix":32,"legacy_top_visits":old_visits.get(),"export_pair_visits":visits.get(),"legacy_elapsed_ns":old_elapsed_ns,"elapsed_ns":elapsed_ns})
+            );
+        }
+    }
+
+    #[test]
+    fn certified_exports_refuse_missing_reordered_duplicate_and_foreign_inventory() {
+        let (group, expected) = fixture(3);
+        for binders in [
+            vec![testing::identity("Fixture", "missing")],
+            expected
+                .iter()
+                .rev()
+                .map(|(binder, _)| binder.clone())
+                .collect(),
+            vec![expected[2].0.clone(), expected[2].0.clone()],
+            vec![testing::identity("Helpers", "helper0")],
+        ] {
+            let malformed = ProjectedGroup {
+                binders: SharedContent::new(binders),
+                ..group.clone()
+            };
+            assert!(matches!(
+                CertifiedGroupCode::admit(owner(), malformed.clone()),
+                Err(ParseError::InvalidReference(_))
+            ));
+            assert!(matches!(
+                CertifiedGroup::admit(owner(), malformed, Vec::new()),
+                Err(ParseError::InvalidReference(_))
+            ));
+        }
+        let mut definitions = group.definitions.as_ref().clone();
+        let Group::NonRecursive(first) = &mut definitions.bindings[0] else {
+            unreachable!()
+        };
+        first.identity = expected[0].0.clone();
+        let duplicate_top = ProjectedGroup {
+            definitions: SharedContent::new(definitions),
+            ..group.clone()
+        };
+        assert!(matches!(
+            CertifiedGroupCode::admit(owner(), duplicate_top.clone()),
+            Err(ParseError::InvalidReference(_))
+        ));
+        assert!(matches!(
+            CertifiedGroup::admit(owner(), duplicate_top, Vec::new()),
+            Err(ParseError::InvalidReference(_))
+        ));
+        let empty = ProjectedGroup {
+            binders: SharedContent::new(Vec::new()),
+            ..group
+        };
+        let certified = CertifiedGroup::admit(owner(), empty, Vec::new()).unwrap();
+        assert_eq!(certified.exported_values().count(), 0);
+    }
 }

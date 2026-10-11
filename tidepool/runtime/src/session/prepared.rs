@@ -4129,23 +4129,11 @@ impl PreparedEngine {
         let mut source = BTreeMap::<SourceBinder, (usize, ValueId)>::new();
         for (index, selected) in demanded.iter().enumerate() {
             let group = selected.group();
-            let definitions = group.definitions();
-            for binder in group.binders() {
-                let top = definitions.bindings().iter().find_map(|binding| {
-                    let tops = match binding {
-                        Group::NonRecursive(top) => std::slice::from_ref(top),
-                        Group::Recursive(tops) => tops.as_slice(),
-                    };
-                    tops.iter().find(|top| &top.identity == binder)
-                });
+            for (binder, id) in group.exported_values() {
                 let key = SourceBinder {
                     version: group.owner().module_version.clone(),
                     binder: binder.clone(),
                 };
-                let id = top
-                    .ok_or_else(|| DemandError::MissingSource(key.clone()))?
-                    .binding
-                    .id;
                 if source.insert(key.clone(), (index, id)).is_some() {
                     return Err(DemandError::DuplicateBinder(key).into());
                 }
@@ -4457,23 +4445,7 @@ impl PreparedEngine {
         let mut source = BTreeMap::<ScopedSourceBinder, (usize, ValueId)>::new();
         for (index, selected) in demanded.iter().enumerate() {
             let group = selected.group();
-            for binder in group.binders() {
-                let id = group
-                    .definitions()
-                    .bindings()
-                    .iter()
-                    .flat_map(|binding| match binding {
-                        Group::NonRecursive(top) => std::slice::from_ref(top),
-                        Group::Recursive(tops) => tops.as_slice(),
-                    })
-                    .find(|top| &top.identity == binder)
-                    .map(|top| top.binding.id)
-                    .ok_or_else(|| {
-                        DemandError::MissingSource(SourceBinder {
-                            version: group.owner().module_version.clone(),
-                            binder: binder.clone(),
-                        })
-                    })?;
+            for (binder, id) in group.exported_values() {
                 let key = ScopedSourceBinder {
                     domain: selected.domain(),
                     source: SourceBinder {
@@ -7465,6 +7437,139 @@ pub(super) mod tests {
             SettledIds::from_facts([&done, &split_units]),
             Err(PreparedRuntimeError::ConflictingSettledConstructors)
         ));
+    }
+
+    #[test]
+    fn certified_recursive_exports_keep_value_ids_and_refuse_duplicates_atomically() {
+        use tidepool_codegen::prepared_program::DemandedImage;
+        use tidepool_repr::execution_schema::ModuleVersion;
+
+        let mut wire = testing::wire_program();
+        let Group::NonRecursive(template) = wire.bindings[0].clone() else {
+            unreachable!()
+        };
+        let expected = [("z", ValueId(8)), ("a", ValueId(3)), ("m", ValueId(12))];
+        let tops = expected
+            .iter()
+            .enumerate()
+            .map(|(index, (name, id))| {
+                let mut top = template.clone();
+                top.identity = testing::identity("Fixture", name);
+                top.binding.id = *id;
+                let HeapRhs::Function { body, .. } = &mut top.binding.rhs else {
+                    unreachable!()
+                };
+                *body = index;
+                top
+            })
+            .collect();
+        wire.expressions.nodes = vec![wire.expressions.nodes[0].clone(); expected.len()];
+        wire.bindings = vec![Group::Recursive(tops)];
+        let group = CertifiedGroup::admit(
+            CachedHomeOwner {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                module_version: ModuleVersion([1; 32]),
+                skinny_iface_sha256: [2; 32],
+                product_sha256: [3; 32],
+            },
+            testing::projected_group(wire, 9).unwrap(),
+            vec![],
+        )
+        .unwrap();
+        let registry = ImageRegistry::new();
+        let compile = || DemandedImage::compile(group.clone(), &registry).unwrap();
+        let source_evidence = certified_source_evidence(std::slice::from_ref(&group));
+        let mut target_wire = testing::wire_program();
+        let owners = expected
+            .iter()
+            .map(|(name, _)| {
+                let binder = testing::identity("Fixture", name);
+                target_wire.globals.push(GlobalDecl {
+                    identity: binder.clone(),
+                    rep: RuntimeRep::LiftedRef,
+                    entry_signature: None,
+                    required_evaluated: false,
+                    required_generation: None,
+                });
+                ImportOwner::Source {
+                    version: ModuleVersion([1; 32]),
+                    binder,
+                }
+            })
+            .collect::<Vec<_>>();
+        let target_prepared = testing::prepare(target_wire).unwrap();
+        let target = || CertifiedTargetImage::compile(target_prepared.clone(), &registry).unwrap();
+        let (mut engine, _) =
+            PreparedEngine::bootstrap(testing::prepare(testing::wire_program()).unwrap()).unwrap();
+        let before = engine.residency();
+        let duplicate = SourceBinder {
+            version: ModuleVersion([1; 32]),
+            binder: testing::identity("Fixture", "z"),
+        };
+        assert!(matches!(
+            engine.install_certified_demand(
+                vec![compile(), compile()],
+                &HashMap::new(),
+                &BindingTable::new(),
+            ),
+            Err(PreparedRuntimeError::Demand(DemandError::DuplicateBinder(key))) if key == duplicate
+        ));
+        assert_eq!(engine.residency(), before);
+        assert!(matches!(
+            engine.install_certified_turn(
+                target(), &owners, &source_evidence, vec![compile(), compile()],
+                &[], &BTreeMap::new(), &HashMap::new(), &BindingTable::new(),
+            ),
+            Err(PreparedRuntimeError::Demand(DemandError::DuplicateBinder(key))) if key == duplicate
+        ));
+        assert_eq!(engine.residency(), before);
+        let standalone = engine
+            .install_certified_demand(vec![compile()], &HashMap::new(), &BindingTable::new())
+            .unwrap();
+        assert_eq!(standalone.len(), 1);
+        let mut installed = engine
+            .install_certified_turn(
+                target(),
+                &owners,
+                &source_evidence,
+                vec![compile()],
+                &[],
+                &BTreeMap::new(),
+                &HashMap::new(),
+                &BindingTable::new(),
+            )
+            .unwrap();
+        assert_eq!(installed.groups.len(), 1);
+        assert_eq!(installed.leases.len(), expected.len());
+        for (name, id) in expected {
+            let lease = installed
+                .leases
+                .iter()
+                .find(|lease| lease.binder().binder == testing::identity("Fixture", name))
+                .unwrap();
+            assert_eq!(lease.value(), id);
+            let direct = engine
+                .machine
+                .retain_export_top(installed.groups[0], id)
+                .unwrap();
+            assert_eq!(
+                engine.machine.handle_root(direct).unwrap().current(),
+                engine
+                    .machine
+                    .handle_root(lease.handle())
+                    .unwrap()
+                    .current(),
+            );
+            assert!(engine.machine.release(direct));
+        }
+        let mut scopes = tidepool_codegen::scope::ScopeTree::new();
+        let scope = scopes.mint_isolated();
+        let mut bindings = BindingTable::new();
+        bindings
+            .register_source_instances_in(&scopes, scope, std::mem::take(&mut installed.leases))
+            .unwrap();
+        engine.commit_certified_turn(installed);
     }
 
     #[test]
