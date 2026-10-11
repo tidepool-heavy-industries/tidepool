@@ -3602,8 +3602,9 @@ fn explicit_display_identity(display: &serde_json::Value) -> (i64, i64, i64) {
 
 #[tokio::test]
 async fn explicit_display_expands_siblings_without_compilation_or_repeated_effects() {
-    use super::command_test_support::backend_request;
+    use super::command_test_support::backend_request_while_live;
     use super::command_test_support::TestCommands;
+    use super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET;
 
     let campaign = TestCampaign::start().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
@@ -3630,10 +3631,9 @@ async fn explicit_display_expands_siblings_without_compilation_or_repeated_effec
             .await
     });
     let backend = TestCommands::completed(&"x".repeat(4000));
-    tokio::select! {
-        request = backend_request(campaign) => request.supply(Ok(backend.clone())),
-        result = &mut running => panic!("display ended before its authored command: {result:?}"),
-    }
+    backend_request_while_live(campaign, &mut running, COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
+        .await
+        .supply(Ok(backend.clone()));
     let initial = campaign
         .next_deployment(
             "initial display publication",
