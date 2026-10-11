@@ -1,3 +1,5 @@
+{-# LANGUAGE BangPatterns #-}
+
 module Tidepool.ExecutionProjection
   ( ProjectionContext(..)
   , ProjectionError(..)
@@ -1277,7 +1279,8 @@ admitReachFacts :: [Unique] -> [[(Id, [Unique])]] -> PreparedReachability
 admitReachFacts seeds admitted carried = preparedReachabilityAfter
   (advanceReachFacts IncrementalReached seeds admitted carried)
 
--- The reachability owner issues exactly the uniques this update first visits.
+-- Construction completes the graph update and issues exactly its newly visited
+-- uniques. Consumers need no traversal of the complete sets to force the work.
 -- Replacement starts from an empty closure and retires the reference ledger;
 -- incremental admission retains previously visited groups and bare references.
 data PreparedReachDelta
@@ -1306,8 +1309,8 @@ advanceReachFacts delta seeds admitted carried = PreparedReachAdvance reach (del
     reexpanded (unique, references)
       | unique `elementOfUniqSet` reachedUniques carried = references
       | otherwise = []
-    close visited freshUniques [] = (visited, freshUniques)
-    close visited freshUniques (unique : pending)
+    close !visited !freshUniques [] = (visited, freshUniques)
+    close !visited !freshUniques (unique : pending)
       | unique `elementOfUniqSet` visited = close visited freshUniques pending
       | otherwise = close (addOneToUniqSet visited unique) (unique:freshUniques)
           (fromMaybe [] (lookupUFM dependencies unique) <> pending)

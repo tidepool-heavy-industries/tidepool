@@ -358,6 +358,7 @@ seedIndexProperty = bracket scratch removePathForcibly $ \directory -> do
     liftIO $ do
       assert (length identities >= count) "seed benchmark lost its declared home census"
       verifySeedIndexHistories context home [package]
+      verifyStrictReachBenchmark context home package
       (scanned, scanMs) <- timeSection (observe (\query -> preparedSeedUniques query home))
       (indexed, indexMs) <- timeSection $ do
         let index = Projection.prepareHomeSeedIndex home
@@ -373,6 +374,56 @@ seedIndexProperty = bracket scratch removePathForcibly $ \directory -> do
       removeFile path
       createDirectoryIfMissing True path
       pure path
+
+-- The same issued binders drive both modes. Each round admits one graph
+-- vertex; its successor is first reached as a bare reference. Final reached,
+-- admitted and emitted-reference results are fully consumed in both timings.
+verifyStrictReachBenchmark :: ProjectionContext -> [PreparedModule] -> Id -> IO ()
+verifyStrictReachBenchmark context home package = do
+  let units = take 2048
+        [ (prepared { preparedBindings = [binding] }, first)
+        | prepared <- home, binding@(top, _) <- pmBindings prepared
+        , first:_ <- [Projection.topBinders top] ]
+      root = varUnique (snd (head units))
+      successor = map (Just . varUnique . snd) (drop 1 units) ++ [Nothing]
+      steps = zip units successor
+      reference = Projection.ReferenceFact package (preparedRootIdentity package)
+      run probe = walk emptyPreparedReachability Projection.emptyPreparedReferenceWorklist Map.empty steps
+        where
+          walk reached _ emitted [] = do
+            let observations =
+                  ( Set.fromList (map getKey (nonDetEltsUniqSet (reachedUniques reached)))
+                  , Set.fromList (map getKey (nonDetEltsUniqSet (admittedTops reached)))
+                  , Map.keysSet emitted )
+            _ <- evaluate (let (seen, tops, names) = observations
+              in sum (Set.toList seen) + sum (Set.toList tops) + fromIntegral (Set.size names))
+            pure observations
+          walk reached ledger emitted (((prepared, binder), next):remaining) = do
+            advanced <- evaluate (updatePreparedReachability [root]
+              (AdmitPreparedFacts [[(binder, maybe [] pure next)]]) reached)
+            let nextReach = Projection.preparedReachabilityAfter advanced
+            when probe $ do
+              _ <- evaluate (sizeUniqSet (reachedUniques nextReach))
+              _ <- evaluate (sizeUniqSet (admittedTops nextReach))
+              pure ()
+            let (frontier, nextLedger) = Projection.discoverPreparedReferences context advanced
+                  [(prepared, Map.singleton (getKey (varUnique binder)) [reference])] ledger
+                nextEmitted = Map.union emitted (Map.fromList [(varName ref, ref) | ref <- frontier])
+            _ <- evaluate (length frontier)
+            walk nextReach nextLedger nextEmitted remaining
+  _ <- run False
+  (probed, probeMs) <- timeSection (run True)
+  (strict, strictMs) <- timeSection (run False)
+  (strictAgain, strictAgainMs) <- timeSection (run False)
+  (probedAgain, probeAgainMs) <- timeSection (run True)
+  assert (probed == strict && strict == strictAgain && strictAgain == probedAgain) "cardinality forcing changed consumed closure or references"
+  let (seen, tops, names) = strict
+  assert (Set.size seen == length units && Set.size tops == length units
+    && names == Set.singleton (varName package)) "strict benchmark lacked its declared graph or external demand"
+  putStrLn ("reach-update A/B: rounds=" ++ show (length units)
+    ++ " reached=" ++ show (Set.size seen) ++ " admitted=" ++ show (Set.size tops)
+    ++ " external=" ++ show (Set.size names) ++ " cardinality-probes-ms=" ++ show [probeMs, probeAgainMs]
+    ++ " strict-updates-ms=" ++ show [strictMs, strictAgainMs])
 
 -- Generated replacement histories exercise the production reach update owner.
 -- The independent oracle always scans the current adjacency from all roots.

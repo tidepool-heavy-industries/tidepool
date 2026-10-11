@@ -16,7 +16,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Maybe (isJust)
 import Data.Word (Word64)
-import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet, sizeUniqSet, addListToUniqSet)
+import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet, addListToUniqSet)
 import GHC.Types.Unique (Unique, getKey)
 import System.Environment (lookupEnv)
 import GHC.Core (CoreBind, Bind(..))
@@ -311,11 +311,7 @@ newPreparedRecoveryUsing executor demand env cache ownerCache bodyCache baseCont
                 (advance, reachMs) <- timeSection $ do
                   let admittedFacts = [facts | (_,(_,facts)) <- additions]
                       update = if recoveryRebuild current then ReplacePreparedFacts admittedFacts else AdmitPreparedFacts admittedFacts
-                      advanced = updatePreparedReachability seedList update (recoveryReach current)
-                      extended = preparedReachabilityAfter advanced
-                  _ <- evaluate (sizeUniqSet (reachedUniques extended))
-                  _ <- evaluate (sizeUniqSet (admittedTops extended))
-                  pure advanced
+                  evaluate (updatePreparedReachability seedList update (recoveryReach current))
                 let reach = preparedReachabilityAfter advance
                 (references, refsMs) <- timeSection $ do
                   let referenceAdditions = [(prepared,references) | (prepared,(references,_)) <- additions]
