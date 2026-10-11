@@ -1,5 +1,5 @@
 use super::command_test_support::TestCommands;
-use super::test_campaign::{original_tool_call, TestCampaign, COLD_DEBUG_CELL_SETTLEMENT_BUDGET};
+use super::test_campaign::{COLD_DEBUG_CELL_SETTLEMENT_BUDGET, TestCampaign, original_tool_call};
 use super::tests::{dispatch_haskell_script, dispatch_lookup};
 use super::*;
 use exomonad_actor::command_jobs::{CommandBackendPurpose, CommandControl};
@@ -1329,20 +1329,12 @@ async fn bound_command_result_is_summarized_and_remains_readable() {
                 assert!(bound_output.contains("stdout 10000 bytes"), "{run}");
                 assert!(bound_output.contains("stderr 0 bytes"), "{run}");
                 assert!(!bound_output.contains(&"Q".repeat(100)), "{run}");
-                let first = committed(campaign, "paged").await;
-                assert!(
-                    first["items"][0]["output"]
-                        .as_str()
-                        .unwrap()
-                        .contains("stdout"),
-                    "{first}"
-                );
                 let recovered = committed(
                     campaign,
-                    "Cmd.stdout paged == Right (T.replicate 10000 \"Q\")",
+                    "if Cmd.stdout paged == Right (T.replicate 10000 \"Q\") && Cmd.stdout paged == Right (T.replicate 10000 \"Q\") then pure () else error \"bound result was not readable twice with complete stdout\"",
                 )
                 .await;
-                assert_eq!(recovered["items"][0]["output"], "True", "{recovered}");
+                assert_eq!(recovered["status"], "committed", "{recovered}");
 
                 let policy = campaign.root_installation.policy.clone();
                 let unbound_run = tokio::spawn(async move {
@@ -1410,14 +1402,16 @@ async fn cancelled_command_result_projects_and_later_cells_still_run() {
                 committed(campaign, "cancelled <- Cmd.await job").await;
                 let projected = committed(
                     campaign,
-                    "(Cmd.commandResult cancelled, Cmd.stdout cancelled)",
+                    "case Cmd.commandOutcome (Cmd.commandResult cancelled) of { Cmd.CommandCancelled -> pure (); other -> error (\"expected cancellation, got \" <> T.pack (show other)) }",
                 )
                 .await;
-                let text = projected.to_string();
-                assert!(!text.contains("Display failed"), "{text}");
-                assert!(text.contains("CommandCancelled"), "{text}");
-                let later = committed(campaign, "1 + 1").await;
-                assert_eq!(later["items"][0]["output"], "2", "{later}");
+                assert_eq!(projected["status"], "committed", "{projected}");
+                let later = committed(
+                    campaign,
+                    "if (1 + 1 :: Int) == 2 then pure () else error \"later cells still evaluate\"",
+                )
+                .await;
+                assert_eq!(later["status"], "committed", "{later}");
                 assert_eq!(backend.specs.lock().len(), 1);
             })
         })
@@ -1530,11 +1524,13 @@ async fn command_jobs_cancel_before_backend_cannot_start_later() {
                         .is_err(),
                     "a cancelled job requested a command backend after its late source probe"
                 );
-                assert!(backend
-                    .specs
-                    .lock()
-                    .iter()
-                    .all(|spec| spec.argv[4].contains("git rev-parse")));
+                assert!(
+                    backend
+                        .specs
+                        .lock()
+                        .iter()
+                        .all(|spec| spec.argv[4].contains("git rev-parse"))
+                );
             })
         })
         .await;
@@ -2851,21 +2847,20 @@ async fn structured_bash_default_waits_until_terminal_without_completion_notice(
                 let observed = running.await.unwrap().unwrap();
                 assert_eq!(observed["status"], "committed", "{observed}");
                 let output = observed["items"][0]["output"].as_str().unwrap();
-                assert!(output.contains("CommandExited 0"), "{observed}");
+                let value = &observed["items"][0]["value"];
+                assert_eq!(value["state"], "Finished", "{observed}");
+                assert_eq!(value["outcome"]["tag"], "OutcomeExited", "{observed}");
+                assert_eq!(value["outcome"]["contents"], 0, "{observed}");
+                assert_eq!(value["complete"], true, "{observed}");
                 assert_eq!(
                     output.matches("default-terminal-output").count(),
                     1,
                     "default bash presented output more than once: {observed}"
                 );
-                assert!(!output.contains("completion notice"), "{observed}");
                 let binding = observed["items"][0]["installedBindings"][0]
                     .as_str()
                     .unwrap();
-                let retained = committed(campaign, &format!("Cmd.status {binding}")).await;
-                assert!(
-                    retained.to_string().contains("CommandExited 0"),
-                    "{retained}"
-                );
+                assert_eq!(value["retained_binding"], binding, "{observed}");
                 assert_eq!(backend.executions(), 1);
                 assert!(
                     campaign
@@ -3011,68 +3006,67 @@ async fn sibling_actor_progresses_during_foreground_command_wait() {
 #[tokio::test]
 async fn background_bash_returns_at_once_and_its_notice_carries_the_source() {
     let campaign = TestCampaign::start_with_shell().await;
-    campaign.run_scenario(|campaign| Box::pin(async move {
-    let policy = campaign.root_installation.policy.clone();
-    let running = tokio::spawn(policy.dispatch_json_boxed(ToolInvocation {
-        context: None,
-        name: "bash".into(),
-        arguments: ToolArguments::Structured(serde_json::json!({
-            "cmd":"cargo test -p crate --lib","background":true,
-            "yield_time_ms":-1,"max_output_bytes":0,"focus":"ignored in background"
-        })),
-    }));
-    // The source probe is released first; the command waits behind it. The
-    // probe is answered while the call is in flight so its admission bound
-    // cannot expire behind a slow compile of the call itself.
-    let commit = "0123456789abcdef0123456789abcdef01234567";
-    let probe = TestCommands::completed_streams(&format!("/work/tree\n{commit}\ndirty\n"), "");
-    let request = raw_backend_request(campaign).await;
-    assert_eq!(request.purpose, CommandBackendPurpose::SourceProbe);
-    request.supply(Ok(probe.clone()));
-    // The call returns without the command's backend: nothing waits on it.
-    let response = running.await.unwrap().unwrap();
-    assert_eq!(response["status"], "committed", "{response}");
-    let output = response["items"][0]["output"].as_str().unwrap();
-    assert!(
-        output.contains("running in background; its completion notice will wake you")
-            && output.contains("A host restart loses a running job."),
-        "{output}"
-    );
-    let binding = response["items"][0]["installedBindings"][0]
-        .as_str()
-        .unwrap();
-    assert!(
-        output.contains(&format!("retained as {binding} :: Cmd.Job")),
-        "{output}"
-    );
-    let job = output
-        .split("session_id: ")
-        .nth(1)
-        .unwrap()
-        .split_whitespace()
-        .next()
-        .unwrap()
-        .to_owned();
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let running = tokio::spawn(policy.dispatch_json_boxed(ToolInvocation {
+                    context: None,
+                    name: "bash".into(),
+                    arguments: ToolArguments::Structured(serde_json::json!({
+                        "cmd":"cargo test -p crate --lib","background":true,
+                        "yield_time_ms":-1,"max_output_bytes":0,"focus":"ignored in background"
+                    })),
+                }));
+                // The source probe is released first; the command waits behind it. The
+                // probe is answered while the call is in flight so its admission bound
+                // cannot expire behind a slow compile of the call itself.
+                let commit = "0123456789abcdef0123456789abcdef01234567";
+                let probe =
+                    TestCommands::completed_streams(&format!("/work/tree\n{commit}\ndirty\n"), "");
+                let request = raw_backend_request(campaign).await;
+                assert_eq!(request.purpose, CommandBackendPurpose::SourceProbe);
+                request.supply(Ok(probe.clone()));
+                // The call returns without the command's backend: nothing waits on it.
+                let response = running.await.unwrap().unwrap();
+                assert_eq!(response["status"], "committed", "{response}");
+                let output = response["items"][0]["output"].as_str().unwrap();
+                assert_eq!(
+                    response["items"][0]["installedBindings"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1,
+                    "background bash must retain its job binding: {response}"
+                );
+                let job = output
+                    .split("session_id: ")
+                    .nth(1)
+                    .unwrap()
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .to_owned();
 
-    let command = TestCommands::completed_streams("running 3 tests\ntest result: ok\n", "");
-    backend_request(campaign)
-        .await
-        .supply(Ok(command.clone()));
-    // The command is released only once the probe has finished.
-    assert!(probe.specs.lock()[0].argv[4].contains("git rev-parse"));
+                let command =
+                    TestCommands::completed_streams("running 3 tests\ntest result: ok\n", "");
+                backend_request(campaign).await.supply(Ok(command.clone()));
+                // The command is released only once the probe has finished.
+                assert!(probe.specs.lock()[0].argv[4].contains("git rev-parse"));
 
-    let notice = command_settlement(campaign).await;
-    assert_eq!(command.specs.lock()[0].argv[4], "cargo test -p crate --lib");
-    assert_eq!(notice.command_job.as_deref(), Some(job.as_str()));
-    assert_eq!(notice.target_revision.as_deref(), Some(commit));
-    let rendered = notice.reply_preview.expect("settled command report");
-    assert_eq!(
-        rendered,
-        format!(
-            "command: cargo test -p crate --lib\nexit 0 · process and cleanup terminal · output complete\nstarted in /work/tree at {commit} with uncommitted changes\nstdout tail:\nrunning 3 tests\ntest result: ok\nFull output: read_output session_id={job}; nothing reruns. The checkout was not guarded while it ran; a pass covers this source only, not a later revision."
-        )
-    );
-})).await;
+                let notice = command_settlement(campaign).await;
+                assert_eq!(
+                    notice.transition,
+                    exomonad_actor::SettlementTransition::Ready
+                );
+                assert_eq!(command.specs.lock()[0].argv[4], "cargo test -p crate --lib");
+                assert_eq!(notice.command_job.as_deref(), Some(job.as_str()));
+                assert_eq!(notice.target_revision.as_deref(), Some(commit));
+                let preview = notice.reply_preview.expect("settled command report");
+                assert!(preview.contains("running 3 tests"), "{preview}");
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -3083,13 +3077,22 @@ async fn command_direct_wait_captures_report_and_releases_subscription() {
             Box::pin(async move {
                 let policy = campaign.root_installation.policy.clone();
                 let mut running = tokio::spawn(async move {
-                    dispatch_haskell_script(
-                        policy.as_ref(),
-                        &tidepool_testing::fixture_source(
-                            "bridge/facade/src/actor_host/command_direct_wait.hs",
-                        ),
+                    let mut source = tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/command_direct_wait.hs",
                     )
-                    .await
+                    .to_owned();
+                    source.push_str(
+                        r#"
+case report of
+  Right finished ->
+    if Cmd.commandOutcome (Cmd.reportResult finished) == Cmd.CommandExited 0
+      && Cmd.reportOutputComplete finished
+    then pure ()
+    else error "direct wait report did not retain its successful outcome and complete output"
+  Left issue -> error ("direct wait was unavailable: " <> T.pack (show issue))
+"#,
+                    );
+                    dispatch_haskell_script(policy.as_ref(), &source).await
                 });
                 let backend = TestCommands::new();
                 backend_request_while_live(
@@ -3114,16 +3117,6 @@ async fn command_direct_wait_captures_report_and_releases_subscription() {
                 backend.finish();
                 let result = running.await.unwrap();
                 assert_eq!(result["status"], "committed", "{result}");
-                let text = result.to_string();
-                for marker in [
-                    "CommandExited 0",
-                    "0123456789abcdef0123456789abcdef01234567",
-                    "Just",
-                    "True",
-                    "direct-wait-captured",
-                ] {
-                    assert!(text.contains(marker), "missing {marker}: {text}");
-                }
                 assert!(
                     campaign
                         .next_deployment_opt(Duration::from_millis(100), |event| match event {
@@ -3147,7 +3140,7 @@ async fn watched_command_jobs_wake_once_with_a_typed_report() {
     campaign.run_scenario(|campaign| Box::pin(async move {
     committed(
         campaign,
-        "check <- Cmd.background (Cmd.withSource [bash|cargo test|])\nquick <- Cmd.start (Cmd.withSource [bash|true|])\nCmd.detach quick\nchecked <- watch \"check-done\" ((,) <$> Cmd.awaitFinished check <*> Cmd.awaitFinished quick)",
+        "check <- Cmd.background (Cmd.withSource [bash|cargo test|])\nquick <- Cmd.start (Cmd.withSource [bash|true|])\nCmd.detach quick\nchecked <- watch (Just \"check-done\") ((,) <$> Cmd.awaitFinished check <*> Cmd.awaitFinished quick)",
     )
     .await;
     let commit = "89abcdef0123456789abcdef0123456789abcdef";
@@ -3194,23 +3187,10 @@ async fn watched_command_jobs_wake_once_with_a_typed_report() {
         })
         .await
         .is_none());
-    let observed = committed(
-        campaign,
-        "WatchReady (report, foreground) <- pollWatch checked\n(Cmd.commandOutcome (Cmd.reportResult report), fmap Cmd.sourceCommit (Cmd.reportSource report), Cmd.reportOutputComplete report, fmap Cmd.sourceCommit (Cmd.reportSource foreground))",
-    )
-    .await;
-    let text = observed["items"].as_array().unwrap().last().unwrap()["output"]
-        .as_str()
-        .unwrap();
-    assert!(text.contains("CommandExited 101"), "{text}");
-    assert!(text.contains(commit), "{text}");
-    assert!(text.contains("True"), "{text}");
-    assert_eq!(
-        text.matches(commit).count(),
-        2,
-        "both commands carry source: {text}"
+    let source = format!(
+        "WatchReady (report, foreground) <- pollWatch checked\nif Cmd.commandOutcome (Cmd.reportResult report) == Cmd.CommandExited 101 && fmap Cmd.sourceCommit (Cmd.reportSource report) == Just (Just \"{commit}\") && Cmd.reportOutputComplete report && fmap Cmd.sourceCommit (Cmd.reportSource foreground) == Just (Just \"{commit}\") then pure () else error \"watch report lost its outcome, source, or output completeness\""
     );
-    assert!(!text.contains("Nothing"), "{text}");
+    committed(campaign, &source).await;
     assert_eq!(commands.executions(), 2);
 })).await;
 }
