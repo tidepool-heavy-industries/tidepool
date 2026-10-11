@@ -4600,12 +4600,9 @@ impl ArtifactView {
             .custody_roots()
             .iter()
             .copied()
-            .chain(
-                selected
-                    .iter()
-                    .copied()
-                    .filter(|node| !roots.contains(node)),
-            )
+            .chain(selected.iter().copied().filter(|node| {
+                matches!(node, InventoryNodeKey::Group(_)) && !issued_roots.contains(node)
+            }))
             .filter(|node| &state.payloads[&node.artifact()].descriptor.owner != excluded)
             .collect::<BTreeSet<_>>()
             .into_iter()
