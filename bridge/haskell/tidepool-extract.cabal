@@ -824,6 +824,7 @@ test-suite model-turn-test
     Tidepool.View.Types
     Tidepool.Internal.ActorRef
     Tidepool.Internal.ActorExit
+    Tidepool.Internal.ActorProfiles
     Tidepool.Internal.ExitCell
     Tidepool.Internal.ModelControl
     Tidepool.Internal.RequestSite
@@ -1099,6 +1100,7 @@ test-suite command-tools-contract
     Tidepool.Inspection.Display
     Tidepool.Inspection.Tree
     Tidepool.View.Types
+    Tidepool.Internal.ActorProfiles
     Tidepool.Internal.ActorRef
     Tidepool.Internal.ActorExit
     Tidepool.Internal.ExitCell
