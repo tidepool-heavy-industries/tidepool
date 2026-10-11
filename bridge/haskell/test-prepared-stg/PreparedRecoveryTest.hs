@@ -17,7 +17,7 @@ import Data.List.NonEmpty qualified as NE
 import Data.ByteString qualified as BS
 import Tidepool.CborEncode (encodeMetadata)
 import Data.Maybe (isJust)
-import Data.IORef (newIORef, readIORef, modifyIORef')
+import Data.IORef (IORef, newIORef, readIORef, modifyIORef')
 import System.Mem.StableName (makeStableName)
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -227,6 +227,32 @@ homonymousUnitProperty = bracket scratch removePathForcibly $ \directory -> do
       createDirectoryIfMissing True path
       pure path
 
+-- Effects come from the full-scan model, never from the incremental result.
+-- Repeat admitted facts through the production owners, including discovery.
+-- Count repeated attempts separately so constructor coverage cannot stand in
+-- for admissions, removals or newly reachable demand.
+data HistoryEffect
+  = NewAdmission | ReplacementRemoval | NewlyReached | NewlyReferenced
+  | DuplicateAdmission | DuplicateRoot | NoStateChange | EmptySelection
+  deriving (Eq, Ord, Show)
+
+recordHistoryEffects :: IORef (Int, Map.Map HistoryEffect Int) -> ([HistoryEffect], Bool) -> IO Bool
+recordHistoryEffects totals (effects, correct) = do
+  modifyIORef' totals $ \(cases, counts) ->
+    (cases + 1, foldr (\effect -> Map.insertWith (+) effect 1) counts effects)
+  pure correct
+
+reportHistoryEffects :: String -> IORef (Int, Map.Map HistoryEffect Int) -> IO ()
+reportHistoryEffects label totals = do
+  (cases, counts) <- readIORef totals
+  putStrLn (label ++ " effects: callbacks=" ++ show cases ++ " " ++ show (Map.toAscList counts))
+
+coverHistoryEffects :: [HistoryEffect] -> QC.Property -> QC.Property
+coverHistoryEffects effects property = foldr
+  (\effect -> QC.cover 20 (effect `elem` effects) (show effect)) property
+  [NewAdmission, ReplacementRemoval, NewlyReached, DuplicateAdmission,
+    DuplicateRoot, NoStateChange, EmptySelection]
+
 -- Query and graph histories retain real GHC binders; only demand and the
 -- adjacency relation vary. The oracle rescans home identities and walks the
 -- complete current graph independently of both production indexes.
@@ -239,6 +265,7 @@ data SeedOperation
 
 verifySeedIndexHistories :: ProjectionContext -> [PreparedModule] -> [Id] -> IO ()
 verifySeedIndexHistories base home packageIds = do
+  totals <- newIORef (0, Map.empty)
   let index = Projection.prepareHomeSeedIndex home
       issued = preparedTopIdentityBindings home
       identifiers = concatMap (take 3 . concatMap (Projection.topBinders . fst) . pmBindings) home
@@ -263,14 +290,15 @@ verifySeedIndexHistories base home packageIds = do
             | otherwise = walk (Set.insert n seen) (Map.findWithDefault [] n edges ++ pending)
       history mutate = walk Map.empty (query 0 []) [] emptyPreparedReachability
         where
-          walk _ _ _ _ [] = True
+          walk _ _ _ _ [] = ([], True)
           walk rows context packages carried (operation:rest) =
             let (nextRows, nextContext, nextPackages, update) = case operation of
                   SelectHomeSeeds entry auxiliary ->
                     (rows, query entry auxiliary, [], ReplacePreparedFacts (facts rows))
                   AddPackageSeed n -> (rows, context, n:packages, AdmitPreparedFacts [])
                   AdmitSeedFact n refs -> case Map.lookup n rows of
-                    Just _ -> (rows, context, packages, AdmitPreparedFacts [])
+                    Just original -> (rows, context, packages,
+                      AdmitPreparedFacts (facts (Map.singleton n original)))
                     Nothing -> (Map.insert n refs rows, context, packages,
                       AdmitPreparedFacts (facts (Map.singleton n refs)))
                   ReplaceSeedFacts incoming -> let replaced = Map.fromList incoming
@@ -279,13 +307,27 @@ verifySeedIndexHistories base home packageIds = do
                 scanned = preparedSeedUniques nextContext home
                 packageSeeds = map (varUnique . (packageIds !!)) nextPackages
                 selected = nonDetEltsUniqSet indexed ++ if mutate then [] else packageSeeds
-                expectedSeeds = nonDetEltsUniqSet scanned ++ packageSeeds
                 actual = Projection.preparedReachabilityAfter (updatePreparedReachability selected update carried)
-            in keys indexed == keys scanned
-                && keys (reachedUniques actual) == fullReach nextRows (map getKey expectedSeeds)
-                && keys (admittedTops actual) == Set.fromList
+                beforeSeeds = keys (preparedSeedUniques context home) `Set.union`
+                  Set.fromList [getKey (varUnique (packageIds !! n)) | n <- packages]
+                afterSeeds = keys scanned `Set.union` Set.fromList (map getKey packageSeeds)
+                beforeReach = fullReach rows (Set.toList beforeSeeds)
+                afterReach = fullReach nextRows (Set.toList afterSeeds)
+                effects = [NewAdmission | AdmitSeedFact{} <- [operation],
+                    not (Map.keysSet nextRows `Set.isSubsetOf` Map.keysSet rows)]
+                  ++ [ReplacementRemoval | ReplaceSeedFacts{} <- [operation],
+                    not (Map.keysSet rows `Set.isSubsetOf` Map.keysSet nextRows)]
+                  ++ [NewlyReached | not (afterReach `Set.isSubsetOf` beforeReach)]
+                  ++ [DuplicateAdmission | AdmitSeedFact n _ <- [operation], Map.member n rows]
+                  ++ [DuplicateRoot | AddPackageSeed n <- [operation], n `elem` packages]
+                  ++ [NoStateChange | rows == nextRows && beforeSeeds == afterSeeds]
+                  ++ [EmptySelection | Map.null nextRows]
+                (later, valid) = walk nextRows nextContext nextPackages actual rest
+                correct = keys indexed == keys scanned
+                  && keys (reachedUniques actual) == afterReach
+                  && keys (admittedTops actual) == Set.fromList
                     [getKey (varUnique (node n)) | n <- Map.keys nextRows]
-                && walk nextRows nextContext nextPackages actual rest
+            in (effects ++ later, correct && valid)
       vertex = QC.chooseInt (0, length nodes - 1)
       root = QC.frequency [(1, pure (length roots - 1)), (3, QC.chooseInt (0, length roots - 2))]
       operations = QC.listOf $ QC.frequency
@@ -302,7 +344,7 @@ verifySeedIndexHistories base home packageIds = do
         ReplaceSeedFacts rows -> map ReplaceSeedFacts (QC.shrink rows)
   assert (not (null identities) && not (null packageIds)) "seed history lacks issued roots"
   let calibration = [SelectHomeSeeds (length roots - 1) [], AddPackageSeed 0]
-  assert (history False calibration && not (history True calibration))
+  assert (snd (history False calibration) && not (snd (history True calibration)))
     "dropping direct package seeds escaped the independent seed/graph oracle"
   result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess = 160, QC.maxSize = 32 }
     (QC.checkCoverage $ QC.forAllShrink operations (QC.shrinkList shrinkOperation) $ \steps ->
@@ -312,7 +354,15 @@ verifySeedIndexHistories base home packageIds = do
       QC.cover 20 (any (\case ReplaceSeedFacts{} -> True; _ -> False) steps) "site replacement" $
       QC.cover 10 (any (\case SelectHomeSeeds e aux -> e `elem` aux || length aux /= Set.size (Set.fromList aux); _ -> False) steps) "duplicate roots" $
       QC.cover 10 (any (\case SelectHomeSeeds e aux -> length roots - 1 `elem` (e:aux); _ -> False) steps) "absent roots" $
-      QC.counterexample (show steps) (history False steps))
+      let guided = [SelectHomeSeeds 0 [], ReplaceSeedFacts [], AdmitSeedFact 0 [length identifiers]
+            , AdmitSeedFact 0 [], AddPackageSeed 0, AddPackageSeed 0
+            , ReplaceSeedFacts [], AdmitSeedFact 0 [], SelectHomeSeeds (length roots - 1) []]
+          (prefix, suffix) = splitAt (length steps `div` 2) steps
+          actualSteps = prefix ++ guided ++ suffix
+          observed@(effects, _) = history False actualSteps
+      in coverHistoryEffects effects $
+        QC.counterexample (show actualSteps) (QC.ioProperty (recordHistoryEffects totals observed)))
+  reportHistoryEffects "seed history" totals
   unless (QC.isSuccess result) (fail "indexed seed histories diverged from full recomputation")
 
 seedIndexProperty :: IO ()
@@ -441,6 +491,7 @@ data ReferenceOperation
 -- the issued reach delta or the discovery ledger to choose expected references.
 verifyReferenceHistories :: ProjectionContext -> [PreparedModule] -> IO ()
 verifyReferenceHistories base home = do
+  totals <- newIORef (0, Map.empty)
   let units = [prepared { preparedBindings = [binding] }
         | prepared <- home, binding <- pmBindings prepared]
       identities = either (error . show) id (preparedTopIdentities home)
@@ -474,14 +525,19 @@ verifyReferenceHistories base home = do
         where defined = Set.fromList [getKey (varUnique binder)
                 | prepared <- selected, (binding, _) <- pmBindings prepared
                 , binder <- Projection.topBinders binding]
-      history dropFrontier = walk Map.empty base emptyPreparedReachability
+      entryIndex = case [n | (n, identity) <- zip [0..] identities, identity == projectionEntry base] of
+        [n] -> n
+        _ -> error "reference fixture lacks its exact entry root"
+      unrooted = base { projectionEntry = (projectionEntry base) { symbolOccurrence = "absent-reference-root" }
+        , projectionAuxiliaryRoots = [] }
+      history dropFrontier = walk Map.empty unrooted emptyPreparedReachability
         Projection.emptyPreparedReferenceWorklist Map.empty
         where
-          walk _ _ _ _ _ [] = True
+          walk _ _ _ _ _ [] = ([], True)
           walk admitted context carried references emitted (operation:remaining) =
             let (selected, nextContext, update, additions, priorEmitted) = case operation of
                   AdmitReferenceUnit n -> case Map.lookup n admitted of
-                    Just _ -> (admitted, context, AdmitPreparedFacts [], [], emitted)
+                    Just unit -> (admitted, context, AdmitPreparedFacts (reachFacts [unit]), [unit], emitted)
                     Nothing -> let unit = units !! n in
                       (Map.insert n unit admitted, context, AdmitPreparedFacts (reachFacts [unit]), [unit], emitted)
                   GrowReferenceRoot n -> (admitted,
@@ -504,10 +560,25 @@ verifyReferenceHistories base home = do
                 defined = Set.fromList [getKey (varUnique binder)
                   | prepared <- Map.elems selected, (binding, _) <- pmBindings prepared
                   , binder <- Projection.topBinders binding]
-            in Map.keysSet stillExternal == expected
-                && keySet (reachedUniques actual) == complete
-                && keySet (admittedTops actual) == defined
-                && walk selected nextContext actual nextReferences nextEmitted remaining
+                beforeReach = completeReach context (Map.elems admitted)
+                beforeReferences = completeReferences context (Map.elems admitted) beforeReach
+                effects = [NewAdmission | AdmitReferenceUnit{} <- [operation],
+                    not (Map.keysSet selected `Set.isSubsetOf` Map.keysSet admitted)]
+                  ++ [ReplacementRemoval | ReplaceReferenceUnits{} <- [operation],
+                    not (Map.keysSet admitted `Set.isSubsetOf` Map.keysSet selected)]
+                  ++ [NewlyReached | not (complete `Set.isSubsetOf` beforeReach)]
+                  ++ [NewlyReferenced | not (expected `Set.isSubsetOf` beforeReferences)]
+                  ++ [DuplicateAdmission | AdmitReferenceUnit n <- [operation], Map.member n admitted]
+                  ++ [DuplicateRoot | GrowReferenceRoot n <- [operation],
+                    identities !! n `elem` (projectionEntry context : projectionAuxiliaryRoots context)]
+                  ++ [NoStateChange | Map.keysSet selected == Map.keysSet admitted,
+                    Set.fromList (map getKey (seeds nextContext)) == Set.fromList (map getKey (seeds context))]
+                  ++ [EmptySelection | Map.null selected]
+                (later, valid) = walk selected nextContext actual nextReferences nextEmitted remaining
+                correct = Map.keysSet stillExternal == expected
+                  && keySet (reachedUniques actual) == complete
+                  && keySet (admittedTops actual) == defined
+            in (effects ++ later, correct && valid)
       generator = QC.listOf $ QC.frequency
         [(4, AdmitReferenceUnit <$> QC.chooseInt (0, length units - 1))
         ,(2, GrowReferenceRoot <$> QC.chooseInt (0, length identities - 1))
@@ -517,9 +588,10 @@ verifyReferenceHistories base home = do
         GrowReferenceRoot n -> map GrowReferenceRoot (QC.shrink n)
         ReplaceReferenceUnits ns -> map ReplaceReferenceUnits (QC.shrink ns)
       allUnits = [0 .. length units - 1]
-      calibration = [ReplaceReferenceUnits allUnits, ReplaceReferenceUnits [], ReplaceReferenceUnits allUnits]
+      calibration = [ReplaceReferenceUnits allUnits, GrowReferenceRoot entryIndex,
+        ReplaceReferenceUnits [], ReplaceReferenceUnits allUnits]
   assert (not (null (preparedTargetReferences base home))) "reference history has no genuine external demand"
-  assert (history False calibration && not (history True calibration))
+  assert (snd (history False calibration) && not (snd (history True calibration)))
     "lost reference frontier escaped the independent whole-graph oracle"
   result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess = 160, QC.maxSize = 32 }
     (QC.checkCoverage $ QC.forAllShrink generator (QC.shrinkList shrinkOperation) $ \operations ->
@@ -527,23 +599,40 @@ verifyReferenceHistories base home = do
       QC.cover 20 (any (\case GrowReferenceRoot{} -> True; _ -> False) operations) "root growth" $
       QC.cover 20 (any (\case ReplaceReferenceUnits{} -> True; _ -> False) operations) "replacement" $
       QC.cover 5 (any (\case ReplaceReferenceUnits [] -> True; _ -> False) operations) "empty replacement" $
-      QC.counterexample (show operations) (history False operations))
+      let guided = [ReplaceReferenceUnits [], ReplaceReferenceUnits allUnits
+            , GrowReferenceRoot entryIndex, GrowReferenceRoot entryIndex, AdmitReferenceUnit 0
+            , ReplaceReferenceUnits [], AdmitReferenceUnit 0, ReplaceReferenceUnits allUnits]
+          (prefix, suffix) = splitAt (length operations `div` 2) operations
+          actualOperations = prefix ++ guided ++ suffix
+          observed@(effects, _) = history False actualOperations
+      in coverHistoryEffects effects $
+        QC.cover 20 (NewlyReferenced `elem` effects) "new external references" $
+        QC.counterexample (show actualOperations) (QC.ioProperty (recordHistoryEffects totals observed)))
+  reportHistoryEffects "reference history" totals
   unless (QC.isSuccess result) (fail "owner-issued reference frontier diverged from full recomputation")
 
 reachHistoryProperty :: IO ()
 reachHistoryProperty = do
+  totals <- newIORef (0, Map.empty)
   result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess=160, QC.maxSize=40 }
     (QC.checkCoverage $ QC.forAllShrink history (QC.shrinkList shrinkOperation) $ \operations ->
       QC.cover 20 (any isReplacement operations) "site replacement" $
       QC.cover 20 (any isAdmission operations) "pure admission" $
       QC.cover 20 (any isRoot operations) "root growth" $
       QC.cover 5 (any selfCycle operations) "cycles" $
-      QC.counterexample (show operations) (runHistory False operations))
+      let guided = [ReplaceArena [], AdmitNode 0 [1], AdmitNode 0 [2], AdmitNode 1 [1]
+            , AddRoot 0, AddRoot 0, ReplaceArena [(0, [])], ReplaceArena [], AdmitNode 0 [1]]
+          (prefix, suffix) = splitAt (length operations `div` 2) operations
+          actualOperations = prefix ++ guided ++ suffix
+          observed@(effects, _) = runHistory False actualOperations
+      in coverHistoryEffects effects $
+        QC.counterexample (show actualOperations) (QC.ioProperty (recordHistoryEffects totals observed)))
+  reportHistoryEffects "reach history" totals
   unless (QC.isSuccess result) (fail "component reachability history differs from recomputation")
   -- Mutation calibration: retaining a removed site's edge keeps an unrelated
   -- top reachable. The production replacement must remove that old demand.
   let removed = [AddRoot 0,ReplaceArena [(0,[1]),(1,[])],ReplaceArena [(0,[]),(1,[])]]
-  unless (runHistory False removed && not (runHistory True removed))
+  unless (snd (runHistory False removed) && not (snd (runHistory True removed)))
     (fail "site-edge union mutation was not detected")
   where
     history = QC.listOf $ QC.frequency
@@ -572,11 +661,11 @@ reachHistoryProperty = do
       , varUnique (identifier index) `elementOfUniqSet` uniques]
     runHistory mutate = walk Map.empty [] emptyPreparedReachability
       where
-        walk _ _ _ [] = True
+        walk _ _ _ [] = ([], True)
         walk rows roots carried (operation:remaining) =
           let (nextRows,nextRoots,update) = case operation of
                 AdmitNode node edges -> case Map.lookup node rows of
-                  Just _ -> (rows,roots,AdmitPreparedFacts [])
+                  Just original -> (rows,roots,AdmitPreparedFacts (facts (Map.singleton node original)))
                   Nothing -> (Map.insert node edges rows,roots,AdmitPreparedFacts (facts (Map.singleton node edges)))
                 ReplaceArena incoming ->
                   let replaced = Map.fromList incoming
@@ -585,9 +674,20 @@ reachHistoryProperty = do
               actual = Projection.preparedReachabilityAfter
                 (updatePreparedReachability (map (varUnique . identifier) nextRoots) update carried)
               expected = fullReach nextRows nextRoots
-          in keySet (reachedUniques actual) == expected
-              && keySet (admittedTops actual) == Map.keysSet nextRows
-              && walk nextRows nextRoots actual remaining
+              beforeReach = fullReach rows roots
+              effects = [NewAdmission | AdmitNode{} <- [operation],
+                  not (Map.keysSet nextRows `Set.isSubsetOf` Map.keysSet rows)]
+                ++ [ReplacementRemoval | ReplaceArena{} <- [operation],
+                  not (Map.keysSet rows `Set.isSubsetOf` Map.keysSet nextRows)]
+                ++ [NewlyReached | not (expected `Set.isSubsetOf` beforeReach)]
+                ++ [DuplicateAdmission | AdmitNode n _ <- [operation], Map.member n rows]
+                ++ [DuplicateRoot | AddRoot n <- [operation], n `elem` roots]
+                ++ [NoStateChange | rows == nextRows && Set.fromList roots == Set.fromList nextRoots]
+                ++ [EmptySelection | Map.null nextRows]
+              (later, valid) = walk nextRows nextRoots actual remaining
+              correct = keySet (reachedUniques actual) == expected
+                && keySet (admittedTops actual) == Map.keysSet nextRows
+          in (effects ++ later, correct && valid)
     fullReach rows roots = grow Set.empty roots
       where
         grow seen [] = seen
