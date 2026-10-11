@@ -4033,51 +4033,100 @@ mod tests {
     }
 
     #[test]
-    fn private_read_subscription_retains_projection_after_public_root_forget() {
+    fn private_read_subscription_retains_projection_after_either_public_root_forget_order() {
         use readiness::{Node, Plan};
         use tidepool_bridge_effects::{
             CommandCleanup, CommandOutcome, CommandReport, CommandResult,
         };
-        let registry = std::sync::Arc::new(RequestRegistry::default());
-        let owner = actor(1);
-        let request = registry.reserve_command_settlement(owner, "read-job".into(), false);
-        let source = registry.register_watch(owner, vec![request]).unwrap().0;
-        let report = CommandReport {
-            command: vec!["true".into()],
-            source: None,
-            result: CommandResult {
-                outcome: CommandOutcome::CommandExited(0),
-                cleanup: CommandCleanup::CommandClean,
-            },
-            output_complete: true,
-            tail: "stable projection".into(),
-        };
-        registry.settle_command(request, "exit 0".into(), None, report.clone());
-        let read = registry
-            .register_transient_watch(
-                owner,
-                Plan::checked(vec![Node::Leaf(ReadinessDependency::Watch(source))], 0).unwrap(),
-            )
-            .unwrap();
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-        let reader = {
-            let registry = registry.clone();
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                let readiness = registry.observe_watch(owner, read).unwrap();
-                barrier.wait();
-                barrier.wait();
-                (
-                    readiness,
-                    registry
-                        .observe_watch_snapshot_command(read, &[0], "read-job")
-                        .unwrap(),
+        let setup = || {
+            let registry = std::sync::Arc::new(RequestRegistry::default());
+            let owner = actor(1);
+            let request = registry.reserve_command_settlement(owner, "read-job".into(), false);
+            let source = registry.register_watch(owner, vec![request]).unwrap().0;
+            let report = CommandReport {
+                command: vec!["true".into()],
+                source: None,
+                result: CommandResult {
+                    outcome: CommandOutcome::CommandExited(0),
+                    cleanup: CommandCleanup::CommandClean,
+                },
+                output_complete: true,
+                tail: "stable projection".into(),
+            };
+            registry.settle_command(request, "exit 0".into(), None, report.clone());
+            let read = registry
+                .register_transient_watch(
+                    owner,
+                    Plan::checked(vec![Node::Leaf(ReadinessDependency::Watch(source))], 0).unwrap(),
                 )
-            })
+                .unwrap();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let reader = {
+                let registry = registry.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let readiness = registry.observe_watch(owner, read).unwrap();
+                    barrier.wait();
+                    barrier.wait();
+                    (
+                        readiness,
+                        registry
+                            .observe_watch_snapshot_command(read, &[0], "read-job")
+                            .unwrap(),
+                    )
+                })
+            };
+            (
+                registry, owner, request, source, read, report, barrier, reader,
+            )
         };
+
+        // Explicitly forget the response while its public source watch still
+        // retains the request record, then forget that watch.
+        let (registry, owner, request, source, read, report, barrier, reader) = setup();
         barrier.wait();
-        registry.forget_watch(owner, source).unwrap();
-        registry.forget_response(owner, request).unwrap();
+        assert_eq!(
+            registry.forget_response(owner, request).unwrap().0,
+            ForgetResponseOutcome::Forgotten
+        );
+        assert_eq!(
+            registry.forget_watch(owner, source).unwrap(),
+            ForgetWatchOutcome::Forgotten
+        );
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Err(ReplyError::Stale)
+        );
+        assert_eq!(
+            registry.observe_watch(owner, source),
+            Err(ReplyError::Stale)
+        );
+        barrier.wait();
+        let (readiness, projected) = reader.join().unwrap();
+        assert!(matches!(readiness, WatchObservation::Ready(_)));
+        assert_eq!(projected, Some(report));
+        registry.release_transient_watch(owner, read).unwrap();
+        assert_eq!(
+            registry.observe_watch_snapshot_command(read, &[0], "read-job"),
+            Err(ReplyError::Stale)
+        );
+
+        // Forgetting the source first retires an unreferenced command request
+        // automatically, so a second explicit response forget is Stale.
+        let (registry, owner, request, source, read, report, barrier, reader) = setup();
+        barrier.wait();
+        assert_eq!(
+            registry.forget_watch(owner, source).unwrap(),
+            ForgetWatchOutcome::Forgotten
+        );
+        assert_eq!(
+            registry.forget_response(owner, request),
+            Err(ReplyError::Stale)
+        );
+        assert_eq!(
+            registry.observe_response(owner, request),
+            Err(ReplyError::Stale)
+        );
         assert_eq!(
             registry.observe_watch(owner, source),
             Err(ReplyError::Stale)
