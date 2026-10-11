@@ -30,8 +30,8 @@ import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (Module, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionProjection
-  ( PreparedReachability(..), ProjectionContext(..), PreparedReachUpdate(..), updatePreparedReachability
-  , PreparedReferenceWorklist, emptyPreparedReferenceWorklist, admitPreparedReferenceUnits, discoverPreparedReferences
+  ( PreparedReachability(..), ProjectionContext(..), PreparedReachUpdate(..), updatePreparedReachability, preparedReachabilityAfter
+  , PreparedReferenceWorklist, emptyPreparedReferenceWorklist, discoverPreparedReferences
   , ReferenceFact, emptyPreparedReachability
   , preparedModuleReachFacts, preparedModuleReferenceFacts, prepareHomeSeedIndex, indexedPreparedSeedUniques
   , preparedTargetReferences, preparedRootIdentity, topBinders )
@@ -308,18 +308,19 @@ newPreparedRecoveryUsing executor demand env cache ownerCache bodyCache baseCont
                     entries = homeFacts ++ concatMap Map.elems (Map.elems (recoveryLiveUnits current))
                     additions = if recoveryRebuild current then entries else recoveryNewUnits current
                     modules = map fst entries
-                (reach, reachMs) <- timeSection $ do
+                (advance, reachMs) <- timeSection $ do
                   let admittedFacts = [facts | (_,(_,facts)) <- additions]
                       update = if recoveryRebuild current then ReplacePreparedFacts admittedFacts else AdmitPreparedFacts admittedFacts
-                      extended = updatePreparedReachability seedList update (recoveryReach current)
+                      advanced = updatePreparedReachability seedList update (recoveryReach current)
+                      extended = preparedReachabilityAfter advanced
                   _ <- evaluate (sizeUniqSet (reachedUniques extended))
                   _ <- evaluate (sizeUniqSet (admittedTops extended))
-                  pure extended
+                  pure advanced
+                let reach = preparedReachabilityAfter advance
                 (references, refsMs) <- timeSection $ do
                   let referenceAdditions = [(prepared,references) | (prepared,(references,_)) <- additions]
-                      prior = if recoveryRebuild current then emptyPreparedReferenceWorklist else recoveryReferences current
-                      admittedReferences = admitPreparedReferenceUnits referenceAdditions prior
-                      (frontier,nextReferences) = discoverPreparedReferences context reach admittedReferences
+                      (frontier,nextReferences) = discoverPreparedReferences context advance referenceAdditions
+                        (recoveryReferences current)
                   modifyIORef' state (\latest -> latest { recoveryReferences=nextReferences })
                   refs <- evaluate (includeRoots selectedRoots reach frontier)
                   _ <- evaluate (length refs)

@@ -280,7 +280,7 @@ verifySeedIndexHistories base home packageIds = do
                 packageSeeds = map (varUnique . (packageIds !!)) nextPackages
                 selected = nonDetEltsUniqSet indexed ++ if mutate then [] else packageSeeds
                 expectedSeeds = nonDetEltsUniqSet scanned ++ packageSeeds
-                actual = updatePreparedReachability selected update carried
+                actual = Projection.preparedReachabilityAfter (updatePreparedReachability selected update carried)
             in keys indexed == keys scanned
                 && keys (reachedUniques actual) == fullReach nextRows (map getKey expectedSeeds)
                 && keys (admittedTops actual) == Set.fromList
@@ -379,6 +379,106 @@ seedIndexProperty = bracket scratch removePathForcibly $ \directory -> do
 data ReachOperation = AdmitNode Int [Int] | ReplaceArena [(Int,[Int])] | AddRoot Int
   deriving Show
 
+data ReferenceOperation
+  = AdmitReferenceUnit Int
+  | GrowReferenceRoot Int
+  | ReplaceReferenceUnits [Int]
+  deriving Show
+
+-- Each unit borrows one genuine GHC binding group and its original identity
+-- census. The oracle rescans the complete current source graph; it never uses
+-- the issued reach delta or the discovery ledger to choose expected references.
+verifyReferenceHistories :: ProjectionContext -> [PreparedModule] -> IO ()
+verifyReferenceHistories base home = do
+  let units = [prepared { preparedBindings = [binding] }
+        | prepared <- home, binding <- pmBindings prepared]
+      identities = either (error . show) id (preparedTopIdentities home)
+      index = Projection.prepareHomeSeedIndex home
+      reachFacts selected = map (preparedModuleReachFacts base) selected
+      referenceFacts selected = [(prepared, Projection.preparedModuleReferenceFacts base prepared)
+        | prepared <- selected]
+      seeds context = nonDetEltsUniqSet (Projection.indexedPreparedSeedUniques context index)
+      keySet = Set.fromList . map getKey . nonDetEltsUniqSet
+      -- Raw uniques preserve the full home's issued private identity census.
+      -- Reassigning names from a filtered home would alias different floated
+      -- tops that shared an authored spelling before complete preparation.
+      completeReach context selected = walk Set.empty (nonDetEltsUniqSet (preparedSeedUniques context home))
+        where
+          dependencies = Map.fromList [(getKey (varUnique binder), refs)
+            | facts <- reachFacts selected, (binder, refs) <- facts]
+          walk seen [] = seen
+          walk seen (unique:pending)
+            | getKey unique `Set.member` seen = walk seen pending
+            | otherwise = walk (Set.insert (getKey unique) seen)
+                (Map.findWithDefault [] (getKey unique) dependencies ++ pending)
+      completeReferences context selected reached = Set.fromList
+        [ varName (Projection.referenceBinder fact)
+        | prepared <- selected, (binding, _) <- pmBindings prepared
+        , any ((`Set.member` reached) . getKey . varUnique) (Projection.topBinders binding)
+        , first:_ <- [Projection.topBinders binding]
+        , fact <- Map.findWithDefault [] (getKey (varUnique first))
+            (Projection.preparedModuleReferenceFacts base prepared)
+        , getKey (varUnique (Projection.referenceBinder fact)) `Set.notMember` defined
+        , Map.notMember (Projection.referenceSymbol fact) (projectionRetainedGenerations context) ]
+        where defined = Set.fromList [getKey (varUnique binder)
+                | prepared <- selected, (binding, _) <- pmBindings prepared
+                , binder <- Projection.topBinders binding]
+      history dropFrontier = walk Map.empty base emptyPreparedReachability
+        Projection.emptyPreparedReferenceWorklist Map.empty
+        where
+          walk _ _ _ _ _ [] = True
+          walk admitted context carried references emitted (operation:remaining) =
+            let (selected, nextContext, update, additions, priorEmitted) = case operation of
+                  AdmitReferenceUnit n -> case Map.lookup n admitted of
+                    Just _ -> (admitted, context, AdmitPreparedFacts [], [], emitted)
+                    Nothing -> let unit = units !! n in
+                      (Map.insert n unit admitted, context, AdmitPreparedFacts (reachFacts [unit]), [unit], emitted)
+                  GrowReferenceRoot n -> (admitted,
+                    context { projectionAuxiliaryRoots = identities !! n : projectionAuxiliaryRoots context },
+                    AdmitPreparedFacts [], [], emitted)
+                  ReplaceReferenceUnits ns ->
+                    let current = Map.fromList [(n, units !! n) | n <- ns]
+                        currentUnits = Map.elems current
+                    in (current, context, ReplacePreparedFacts (reachFacts currentUnits), currentUnits, Map.empty)
+                advance = updatePreparedReachability (seeds nextContext) update carried
+                actual = Projection.preparedReachabilityAfter advance
+                (frontier, nextReferences) = Projection.discoverPreparedReferences nextContext advance
+                  (referenceFacts additions) references
+                nextEmitted = Map.union priorEmitted (Map.fromList
+                  [(varName binder, binder) | binder <- if dropFrontier then [] else frontier])
+                stillExternal = Map.filter (\binder -> not
+                  (varUnique binder `elementOfUniqSet` admittedTops actual)) nextEmitted
+                complete = completeReach nextContext (Map.elems selected)
+                expected = completeReferences nextContext (Map.elems selected) complete
+                defined = Set.fromList [getKey (varUnique binder)
+                  | prepared <- Map.elems selected, (binding, _) <- pmBindings prepared
+                  , binder <- Projection.topBinders binding]
+            in Map.keysSet stillExternal == expected
+                && keySet (reachedUniques actual) == complete
+                && keySet (admittedTops actual) == defined
+                && walk selected nextContext actual nextReferences nextEmitted remaining
+      generator = QC.listOf $ QC.frequency
+        [(4, AdmitReferenceUnit <$> QC.chooseInt (0, length units - 1))
+        ,(2, GrowReferenceRoot <$> QC.chooseInt (0, length identities - 1))
+        ,(2, ReplaceReferenceUnits <$> QC.listOf (QC.chooseInt (0, length units - 1)))]
+      shrinkOperation operation = case operation of
+        AdmitReferenceUnit n -> map AdmitReferenceUnit (QC.shrink n)
+        GrowReferenceRoot n -> map GrowReferenceRoot (QC.shrink n)
+        ReplaceReferenceUnits ns -> map ReplaceReferenceUnits (QC.shrink ns)
+      allUnits = [0 .. length units - 1]
+      calibration = [ReplaceReferenceUnits allUnits, ReplaceReferenceUnits [], ReplaceReferenceUnits allUnits]
+  assert (not (null (preparedTargetReferences base home))) "reference history has no genuine external demand"
+  assert (history False calibration && not (history True calibration))
+    "lost reference frontier escaped the independent whole-graph oracle"
+  result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess = 160, QC.maxSize = 32 }
+    (QC.checkCoverage $ QC.forAllShrink generator (QC.shrinkList shrinkOperation) $ \operations ->
+      QC.cover 20 (any (\case AdmitReferenceUnit{} -> True; _ -> False) operations) "unit admission" $
+      QC.cover 20 (any (\case GrowReferenceRoot{} -> True; _ -> False) operations) "root growth" $
+      QC.cover 20 (any (\case ReplaceReferenceUnits{} -> True; _ -> False) operations) "replacement" $
+      QC.cover 5 (any (\case ReplaceReferenceUnits [] -> True; _ -> False) operations) "empty replacement" $
+      QC.counterexample (show operations) (history False operations))
+  unless (QC.isSuccess result) (fail "owner-issued reference frontier diverged from full recomputation")
+
 reachHistoryProperty :: IO ()
 reachHistoryProperty = do
   result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess=160, QC.maxSize=40 }
@@ -431,7 +531,8 @@ reachHistoryProperty = do
                   let replaced = Map.fromList incoming
                   in (replaced,roots,if mutate then AdmitPreparedFacts (facts replaced) else ReplacePreparedFacts (facts replaced))
                 AddRoot root -> (rows,root:roots,AdmitPreparedFacts [])
-              actual = updatePreparedReachability (map (varUnique . identifier) nextRoots) update carried
+              actual = Projection.preparedReachabilityAfter
+                (updatePreparedReachability (map (varUnique . identifier) nextRoots) update carried)
               expected = fullReach nextRows nextRoots
           in keySet (reachedUniques actual) == expected
               && keySet (admittedTops actual) == Map.keysSet nextRows
@@ -551,6 +652,7 @@ scenario = do
           , projectionTextUnit = selectedText
           }
     closure <- liftIO $ do
+      verifyReferenceHistories context modules
       cache <- newFatIfaceCache
       ownerCache <- newOwnerInterfaceCache
       bodyCache <- newPreparedBodyCache

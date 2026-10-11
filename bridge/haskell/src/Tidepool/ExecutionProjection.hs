@@ -38,9 +38,9 @@ module Tidepool.ExecutionProjection
   , PreparedReachability(..)
   , emptyPreparedReachability
   , admitReachFacts
-  , PreparedReachUpdate(..), updatePreparedReachability
+  , PreparedReachUpdate(..), PreparedReachAdvance, preparedReachabilityAfter, updatePreparedReachability
   , PreparedReferenceWorklist, emptyPreparedReferenceWorklist
-  , admitPreparedReferenceUnits, discoverPreparedReferences
+  , discoverPreparedReferences
   , topBinders
   , projectLiteralAtomForTest
   , assignTopIdentitySpellings
@@ -1112,15 +1112,14 @@ combinePreparedTargetReferences context defined kept entries =
 -- examines only newly reached tops and groups whose definitions just arrived.
 data PreparedReferenceWorklist = PreparedReferenceWorklist
   { referenceGroupOf :: Map Word64 Word64
-  , referenceGroupTops :: Map Word64 (Set.Set Word64)
+  , referenceGroupTops :: Map Word64 [Unique]
   , referenceGroupBodies :: Map Word64 [ReferenceFact]
   , referenceNewGroups :: Set.Set Word64
   , referenceVisitedGroups :: Set.Set Word64
-  , referenceReached :: Set.Set Word64
   }
 
 emptyPreparedReferenceWorklist :: PreparedReferenceWorklist
-emptyPreparedReferenceWorklist = PreparedReferenceWorklist Map.empty Map.empty Map.empty Set.empty Set.empty Set.empty
+emptyPreparedReferenceWorklist = PreparedReferenceWorklist Map.empty Map.empty Map.empty Set.empty Set.empty
 
 admitPreparedReferenceUnits :: [(PreparedModule,Map Word64 [ReferenceFact])]
   -> PreparedReferenceWorklist -> PreparedReferenceWorklist
@@ -1131,33 +1130,40 @@ admitPreparedReferenceUnits units initial = foldl' addUnit initial units
       [] -> known
       first:rest ->
         let key = getKey (varUnique first)
-            tops = Set.fromList (map (getKey . varUnique) (first:rest))
+            tops = map varUnique (first:rest)
         in known
           { referenceGroupOf = foldl' (\index top -> Map.insert top key index)
-              (referenceGroupOf known) (Set.toList tops)
+              (referenceGroupOf known) (map getKey tops)
           , referenceGroupTops = Map.insert key tops (referenceGroupTops known)
           , referenceGroupBodies = Map.insert key (Map.findWithDefault [] key facts) (referenceGroupBodies known)
           , referenceNewGroups = Set.insert key (referenceNewGroups known) }
 
 -- The complete reached set is carried by the reachability owner. This frontier
 -- retains no source or compiler authority and never supplies definitions.
-discoverPreparedReferences :: ProjectionContext -> PreparedReachability
+-- Incremental units have immutable, disjoint group definitions. Replacing an
+-- existing group's body requires a replacement advance and the complete current
+-- unit selection, which retires this ledger before admitting the new facts.
+discoverPreparedReferences :: ProjectionContext -> PreparedReachAdvance
+  -> [(PreparedModule,Map Word64 [ReferenceFact])]
   -> PreparedReferenceWorklist -> ([Id],PreparedReferenceWorklist)
-discoverPreparedReferences context reach known =
-  let reached = Set.fromList (map getKey (nonDetEltsUniqSet (reachedUniques reach)))
-      changed = reached `Set.difference` referenceReached known
-      groups = (Set.fromList [group | top <- Set.toList changed
-                 , Just group <- [Map.lookup top (referenceGroupOf known)]]
+discoverPreparedReferences context advance units previous =
+  let reach = preparedReachabilityAfter advance
+      (changed, prior) = case preparedReachDelta advance of
+        IncrementalReached fresh -> (fresh, previous)
+        ReplacementReached fresh -> (fresh, emptyPreparedReferenceWorklist)
+      known = admitPreparedReferenceUnits units prior
+      groups = (Set.fromList [group | top <- changed
+                 , Just group <- [Map.lookup (getKey top) (referenceGroupOf known)]]
           `Set.union` referenceNewGroups known) `Set.difference` referenceVisitedGroups known
-      selected = Set.filter (\group -> not (Set.null
-          (Map.findWithDefault Set.empty group (referenceGroupTops known) `Set.intersection` reached))) groups
+      selected = Set.filter (\group -> any (`elementOfUniqSet` reachedUniques reach)
+          (Map.findWithDefault [] group (referenceGroupTops known))) groups
       references = Map.elems (Map.fromList
         [(referenceSymbol fact,referenceBinder fact) | group <- Set.toAscList selected
         , fact <- Map.findWithDefault [] group (referenceGroupBodies known)
         , not (elementOfUniqSet (varUnique (referenceBinder fact)) (admittedTops reach))
         , Map.notMember (referenceSymbol fact) (projectionRetainedGenerations context)])
   in (references,known
-      { referenceReached=reached,referenceNewGroups=Set.empty
+      { referenceNewGroups=Set.empty
       , referenceVisitedGroups=referenceVisitedGroups known `Set.union` selected })
 
 -- | Exact external value references of the selected top closure. The identity
@@ -1268,13 +1274,31 @@ emptyPreparedReachability =
 -- the previous round could not follow.
 admitReachFacts :: [Unique] -> [[(Id, [Unique])]] -> PreparedReachability
   -> PreparedReachability
-admitReachFacts seeds admitted carried = PreparedReachability
-  { admittedTops = addListToUniqSet (admittedTops carried) (map fst entries)
-  , reachedUniques =
-      close (reachedUniques carried) (seeds ++ concatMap reexpanded entries)
-  , topDependencies = dependencies
+admitReachFacts seeds admitted carried = preparedReachabilityAfter
+  (advanceReachFacts IncrementalReached seeds admitted carried)
+
+-- The reachability owner issues exactly the uniques this update first visits.
+-- Replacement starts from an empty closure and retires the reference ledger;
+-- incremental admission retains previously visited groups and bare references.
+data PreparedReachDelta
+  = IncrementalReached ![Unique]
+  | ReplacementReached ![Unique]
+
+data PreparedReachAdvance = PreparedReachAdvance
+  { preparedReachabilityAfter :: !PreparedReachability
+  , preparedReachDelta :: !PreparedReachDelta
   }
+
+advanceReachFacts :: ([Unique] -> PreparedReachDelta) -> [Unique]
+  -> [[(Id, [Unique])]] -> PreparedReachability -> PreparedReachAdvance
+advanceReachFacts delta seeds admitted carried = PreparedReachAdvance reach (delta fresh)
   where
+    (reached, fresh) = close (reachedUniques carried) [] (seeds ++ concatMap reexpanded entries)
+    reach = PreparedReachability
+      { admittedTops = addListToUniqSet (admittedTops carried) (map fst entries)
+      , reachedUniques = reached
+      , topDependencies = dependencies
+      }
     entries = [ (varUnique binder, references)
               | facts <- admitted, (binder, references) <- facts ]
     dependencies = foldl' (\deps (unique, references) -> addToUFM deps unique references)
@@ -1282,10 +1306,10 @@ admitReachFacts seeds admitted carried = PreparedReachability
     reexpanded (unique, references)
       | unique `elementOfUniqSet` reachedUniques carried = references
       | otherwise = []
-    close visited [] = visited
-    close visited (unique : pending)
-      | unique `elementOfUniqSet` visited = close visited pending
-      | otherwise = close (addOneToUniqSet visited unique)
+    close visited freshUniques [] = (visited, freshUniques)
+    close visited freshUniques (unique : pending)
+      | unique `elementOfUniqSet` visited = close visited freshUniques pending
+      | otherwise = close (addOneToUniqSet visited unique) (unique:freshUniques)
           (fromMaybe [] (lookupUFM dependencies unique) <> pending)
 
 -- Site arenas are replaceable; pure component facts are only admitted.
@@ -1294,10 +1318,10 @@ data PreparedReachUpdate
   = AdmitPreparedFacts [[(Id,[Unique])]]
   | ReplacePreparedFacts [[(Id,[Unique])]]
 
-updatePreparedReachability :: [Unique] -> PreparedReachUpdate -> PreparedReachability -> PreparedReachability
+updatePreparedReachability :: [Unique] -> PreparedReachUpdate -> PreparedReachability -> PreparedReachAdvance
 updatePreparedReachability seeds update carried = case update of
-  AdmitPreparedFacts additions -> admitReachFacts seeds additions carried
-  ReplacePreparedFacts current -> admitReachFacts seeds current emptyPreparedReachability
+  AdmitPreparedFacts additions -> advanceReachFacts IncrementalReached seeds additions carried
+  ReplacePreparedFacts current -> advanceReachFacts ReplacementReached seeds current emptyPreparedReachability
 
 -- A registered replacement has no source-body dependencies. Split recursive
 -- groups for this fact query so unrelated siblings retain their own references.
