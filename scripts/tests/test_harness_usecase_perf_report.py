@@ -221,11 +221,14 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
             activation["sequence"] = 0
             activation["workspace_preparation_ns"] = 11_000
             activation["host_start_readiness_ns"] = 7_000
+        measured_phase = {"harness-eight-phase": "reuse-retained", "three-actor-capture": "root-fork-capture",
+                          "two-children-concurrent": "root-fork-capture", "notebook-a-a-b-a": "repeat-a",
+                          "prepare-once-repeated-launch": "fresh-preparation"}[cohort]
         workload = [
             {"schema": 1, "phase": name, "sequence": index, "completed": True,
-             "call_id": "usecase-3" if name in ("reuse-retained", "root-fork-capture")
+             "call_id": "usecase-3" if name == measured_phase
                         else f"case-{index}",
-             "logical_compiler_requests": 1 if name in ("reuse-retained", "root-fork-capture") else 0,
+             "logical_compiler_requests": 1 if name == measured_phase else 0,
              "wall_ns": 1000, "source": "retained source",
              "evidence": ({"cell_role": "first"} if name == "root-setup" else
                           {"cell_role": "repeated"} if name == "parent-publication-read" else {}),
@@ -244,6 +247,140 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
             payload["test"] = "actor_host::scripted_three_actor_performance::production_harness_three_actor_capture_phases"
         self.write_json(record, payload)
         return record
+
+    def test_concurrent_phase_owns_each_exact_dispatch_once(self):
+        phases = [{"phase": "both-children", "call_ids": ["alpha", "beta"]}]
+        submissions = [{"phase_owners": [], "executions": [execution], "startup_owner_spans": []}
+                       for execution in ("exec-alpha", "exec-beta")]
+        reporter.assign_submission_phases(submissions, {"alpha": {"exec-alpha"}, "beta": {"exec-beta"}},
+                                          phases, ["both-children"])
+        self.assertEqual([row["phase_attribution"] for row in submissions], ["both-children", "both-children"])
+        for invalid in (["alpha", "alpha"], ["alpha", None], "alpha", []):
+            with self.subTest(calls=invalid), self.assertRaises(ValueError):
+                reporter.phase_call_ids({"call_ids": invalid})
+
+    def test_grouped_dispatch_distinguishes_exact_and_shared_execution(self):
+        record = self.make_complete_case("two-children-concurrent")
+        phase_path = self.root / "artifacts/phases.jsonl"
+        phases = reporter.read_jsonl(phase_path)
+        phase = next(row for row in phases if row["phase"] == "children-concurrent-replies")
+        phase.pop("call_id")
+        phase["call_ids"] = ["alpha", "beta"]
+        self.write_jsonl(phase_path, phases)
+        host_path = self.root / "artifacts/host.jsonl"
+        original = reporter.read_jsonl(host_path)
+        events = [{"target": "exomonad_actor::resident_tools", "fields": {
+                   "message": "workbench cell dispatched to its actor", "context_call_id": call,
+                   "execution": execution}}
+                  for call, execution in (("alpha", "exec-alpha"), ("beta", "exec-beta"))]
+        self.write_jsonl(host_path, original + events)
+        result = reporter.analyze(record)
+        self.assertEqual(next(row for row in result["phases"] if row["phase"] == phase["phase"])["dispatch_attribution"], "exact_group")
+        events[1]["fields"]["execution"] = "exec-alpha"
+        self.write_jsonl(host_path, original + events)
+        result = reporter.analyze(record)
+        self.assertNotEqual(next(row for row in result["phases"] if row["phase"] == phase["phase"])["dispatch_attribution"], "exact_group")
+        with self.assertRaises(ValueError):
+            reporter.phase_call_ids({"call_id": "alpha", "call_ids": ["alpha", "beta"]})
+
+    def test_preparation_request_uses_its_issuing_owner(self):
+        submissions = [{"phase_owners": [], "executions": [],
+                        "startup_owner_spans": ["workspace_toolsets_prepare"]}]
+        reporter.assign_submission_phases(submissions, {}, [], ["fresh-preparation", "launch-1"])
+        self.assertEqual(submissions[0]["phase_attribution"], "fresh-preparation")
+
+    def test_group_compiler_completeness_requires_each_declared_call(self):
+        record = self.make_case()
+        phase_path = self.root / "artifacts/phases.jsonl"
+        phases = reporter.read_jsonl(phase_path)
+        phases[-1].pop("call_id")
+        phases[-1].update(call_ids=["usecase-3", "beta"], logical_compiler_requests=2)
+        self.write_jsonl(phase_path, phases)
+        host_path = self.root / "artifacts/host.jsonl"
+        host = reporter.read_jsonl(host_path)
+        host.append({"target": "exomonad_actor::resident_tools", "fields": {
+            "message": "workbench cell dispatched to its actor", "context_call_id": "usecase-3",
+            "execution": "exec-other"}})
+        other = json.loads(json.dumps(host[2]))
+        other["fields"].update(request_ordinal=3, compile_request="digest-b")
+        other["span"]["execution"] = "exec-other"
+        host.append(other)
+        self.write_jsonl(host_path, host)
+        compiler_path = self.root / "artifacts/compiler/compiler.jsonl"
+        compiler = reporter.read_jsonl(compiler_path)
+        service = json.loads(json.dumps(compiler[0]))
+        service["span"].update(request_ordinal=3, compile_request="digest-b")
+        self.write_jsonl(compiler_path, compiler + [service])
+        phase = reporter.analyze(record)["phases"][0]
+        self.assertEqual(len(phase["dispatch_executions"]), 2)
+        self.assertEqual(phase["compiler_attribution"], "partial")
+
+    def test_physical_request_identity_binds_one_digest_across_both_streams(self):
+        for ordinal, digest in ((3, "digest-a"), (3, "digest-b"), (2, "digest-b")):
+            with self.subTest(ordinal=ordinal, digest=digest):
+                record = self.make_case()
+                host_path = self.root / "artifacts/host.jsonl"
+                compiler_path = self.root / "artifacts/compiler/compiler.jsonl"
+                phase_path = self.root / "artifacts/phases.jsonl"
+                host = reporter.read_jsonl(host_path)
+                compiler = reporter.read_jsonl(compiler_path)
+                request = json.loads(json.dumps(host[-1]))
+                request["fields"].update(request_ordinal=ordinal, compile_request=digest)
+                service = json.loads(json.dumps(compiler[0]))
+                service["span"].update(request_ordinal=ordinal, compile_request=digest)
+                self.write_jsonl(host_path, host + [request])
+                self.write_jsonl(compiler_path, compiler + [service])
+                phases = reporter.read_jsonl(phase_path)
+                phases[-1]["logical_compiler_requests"] = 2
+                self.write_jsonl(phase_path, phases)
+                if ordinal == 2:
+                    with self.assertRaisesRegex(ValueError, "rebound"):
+                        reporter.analyze(record)
+                else:
+                    result = reporter.analyze(record)
+                    self.assertEqual(result["phases"][0]["compiler_attribution"], "complete")
+                    self.assertEqual(result["whole_physical_stream_reconciliation"]["status"], "complete")
+        record = self.make_case()
+        compiler_path = self.root / "artifacts/compiler/compiler.jsonl"
+        compiler = reporter.read_jsonl(compiler_path)
+        compiler[0]["span"]["compile_request"] = "digest-other-stream"
+        self.write_jsonl(compiler_path, compiler)
+        with self.assertRaisesRegex(ValueError, "rebound"):
+            reporter.analyze(record)
+
+    def test_physical_alias_must_agree_with_each_explicit_coordinate(self):
+        for name in ("daemon_epoch", "admission_id", "request_ordinal"):
+            row = {"fields": {"daemon_epoch": "epoch-a", "admission_id": 7,
+                              "request_ordinal": 2, "compile_request": "digest-a",
+                              "physical_execution": "epoch-a:7:2"}}
+            self.assertEqual(reporter.request_identity(row), ("epoch-a", 7, 2, "digest-a"))
+            row["fields"][name] = "epoch-other" if name == "daemon_epoch" else 99
+            for resolver in (reporter.request_identity, reporter.admission_identity):
+                with self.subTest(name=name, resolver=resolver.__name__), self.assertRaisesRegex(ValueError, "contradicts"):
+                    resolver(row)
+        self.assertEqual(reporter.request_identity({"fields": {
+            "physical_execution": "epoch-a:7:2", "compile_request": "digest-a"}}),
+            ("epoch-a", 7, 2, "digest-a"))
+
+    def test_repeat_launch_zero_requests_requires_complete_counter_and_stream_evidence(self):
+        record = self.make_complete_case("prepare-once-repeated-launch")
+        phase_path = self.root / "artifacts/phases.jsonl"
+        phases = reporter.read_jsonl(phase_path)
+        for phase in phases[1:]:
+            phase["logical_compiler_requests"] = 0
+        self.write_jsonl(phase_path, phases)
+        self.write_jsonl(self.root / "artifacts/host.jsonl", [])
+        self.write_jsonl(self.root / "artifacts/compiler/compiler.jsonl", [])
+        report = reporter.analyze(record)
+        self.assertEqual(report["queue_trace_status"], "no_admissions_verified")
+        self.assertEqual(report["compiler_job_grants"]["status"], "not_applicable_no_compiler_requests")
+        self.assertEqual(report["owned_artifact_observations"]["status"], "partial_or_unknown")
+        phases[-1]["logical_compiler_requests"] = 1
+        self.write_jsonl(phase_path, phases)
+        self.assertEqual(reporter.analyze(record)["queue_evidence"]["status"], "partial_or_unknown")
+        phases[-1]["logical_compiler_requests"] = 0
+        self.write_jsonl(phase_path, phases[:-1])
+        self.assertEqual(reporter.analyze(record)["compiler_job_grants"]["status"], "partial_or_unknown")
 
     def test_joins_phase_to_host_and_physical_service_but_keeps_queue_at_admission_scope(self):
         report = reporter.analyze(self.make_case())
@@ -587,7 +724,9 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
                 record = self.make_complete_case(cohort)
                 phase_path = self.root / "artifacts/phases.jsonl"
                 phases = reporter.read_jsonl(phase_path)
-                second_phase = "first-arithmetic" if cohort == "harness-eight-phase" else "child-alpha-reply"
+                second_phase = {"harness-eight-phase": "first-arithmetic", "three-actor-capture": "child-alpha-reply",
+                                "two-children-concurrent": "children-concurrent-replies", "notebook-a-a-b-a": "changed-b",
+                                "prepare-once-repeated-launch": "launch-1"}[cohort]
                 next(phase for phase in phases if phase["phase"] == second_phase)["logical_compiler_requests"] = 1
                 self.write_jsonl(phase_path, phases)
                 host_path = self.root / "artifacts/host.jsonl"

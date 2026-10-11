@@ -1009,7 +1009,8 @@ fn campaign_trace_filter_for(profile: &str) -> tracing_subscriber::EnvFilter {
             "warn,tidepool::actor_host::startup=info,exomonad_harness::timing=debug,\
                       exomonad_actor::request=info,exomonad_actor::workbench_phase=info,\
                       tidepool_extract_cmd::endpoint=info,exomonad_actor::resident_tools=info,\
-                      exomonad_actor::call_timing=info,tidepool_runtime::prepared_install=info,\
+                      exomonad_actor::call_timing=info,exomonad_actor::resident_actor=info,\
+                      tidepool_runtime::prepared_install=info,\
                       tidepool_codegen::prepared_compile=info,tidepool_codegen::image_registry=info,\
                       tidepool_codegen::image_lifetime=info,tidepool_codegen::image_install=info,\
                       tidepool_runtime::activation_renderer_install=info,exomonad::content=off"
@@ -1986,6 +1987,8 @@ mod tests {
             .with_writer(std::sync::Mutex::new(file))
             .finish();
         tracing::subscriber::with_default(subscriber, || {
+            let cell = tracing::info_span!(target: "exomonad_actor::resident_actor", "cell", execution = "minimal-exact-execution");
+            cell.in_scope(|| tracing::info!(target: "tidepool_extract_cmd::endpoint", "compiler request identified"));
             tracing::info!(target: "exomonad_actor::request", request = 7u64,
                 "request activation origin issued");
             tracing::debug!(target: "exomonad_harness::timing", phase = "reply_to_successor",
@@ -2006,6 +2009,16 @@ mod tests {
             tracing::info!(target: crate::exomonad::CONTENT_TARGET, source = "private-content");
         });
         let captured = std::fs::read_to_string(path).unwrap();
+        let rows: Vec<serde_json::Value> = captured
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let request = rows
+            .iter()
+            .find(|row| row["fields"]["message"] == "compiler request identified")
+            .unwrap();
+        assert_eq!(request["span"]["execution"], "minimal-exact-execution");
+        assert_eq!(request["span"]["name"], "cell");
         assert!(captured.contains("request activation origin issued"));
         assert!(captured.contains("coarse workload timing"));
         assert!(captured.contains("native image registry decision"));

@@ -208,6 +208,27 @@ def cohorts() -> dict:
                 "workload_cohort": "three-actor-capture",
                 "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
                 "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY"]},
+            "harness-performance-repeat-launch": {
+                "tests": ["actor_host::context_transaction_acceptance_tests::harness_usecase_performance::production_harness_prepare_once_repeated_launch"], "expected_count": 1,
+                "ignored": True, "timeout": 2400, "compiler_mode": "owned-resident",
+                "max_jobs": 1, "retain_artifacts": True,
+                "measurement_reporter": HARNESS_PERFORMANCE_REPORTER, "workload_cohort": "prepare-once-repeated-launch",
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES"]},
+            "harness-performance-notebook-reuse": {
+                "tests": ["actor_host::context_transaction_acceptance_tests::harness_usecase_performance::production_harness_notebook_a_a_b_a"], "expected_count": 1,
+                "ignored": True, "timeout": 2400, "compiler_mode": "owned-resident",
+                "max_jobs": 1, "retain_artifacts": True,
+                "measurement_reporter": HARNESS_PERFORMANCE_REPORTER, "workload_cohort": "notebook-a-a-b-a",
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES"]},
+            "harness-performance-concurrent-children": {
+                "tests": ["actor_host::scripted_three_actor_performance::production_harness_two_children_execute_concurrently"], "expected_count": 1,
+                "ignored": True, "timeout": 2400, "compiler_mode": "owned-resident",
+                "max_jobs": 1, "retain_artifacts": True,
+                "measurement_reporter": HARNESS_PERFORMANCE_REPORTER, "workload_cohort": "two-children-concurrent",
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES"]},
             "m3-recursive": {
                 "tests": M3_RECURSIVE_TESTS, "expected_count": len(M3_RECURSIVE_TESTS),
                 "ignored": True, "timeout": 1800, "compiler_mode": "owned-resident",
@@ -1959,10 +1980,10 @@ def analyze_harness_performance(descriptor, records, record_paths, cohort, behav
         "raw_trace_capture_complete": (report.get("whole_physical_stream_reconciliation") or {}).get("raw_event_capture_status") == "complete",
         "queue_evidence_complete": (report.get("queue_evidence") or {}).get("status") == "complete",
         "compiler_allowance_selection_confirmed": compiler_allowance_selection_confirmed,
-        "compiler_job_grants_complete": (report.get("compiler_job_grants") or {}).get("status") == "observed",
+        "compiler_job_grants_complete": (report.get("compiler_job_grants") or {}).get("status") in ("observed", "not_applicable_no_compiler_requests"),
         "startup_owner_complete": (report.get("startup_scope") or {}).get("owner_status") == "complete",
         "cleanup_confirmed": ((report.get("runner") or {}).get("cleanup") or {}).get("complete") is True,
-        "bounded_owner_observations_complete": (report.get("owned_artifact_observations") or {}).get("status") == "observed",
+        "bounded_owner_observations_complete": (report.get("owned_artifact_observations") or {}).get("status") in ("observed", "native_only_no_compiler_requests"),
     }
     complete = all(prerequisites.values())
     report["status"] = "qualified" if complete else "partial"

@@ -52,6 +52,7 @@ impl PhaseClock {
 
     fn record(
         self,
+        roster: &[&str],
         path: &Path,
         sequence: usize,
         role: &str,
@@ -65,9 +66,9 @@ impl PhaseClock {
         record_phase(
             path,
             json!({
-                "schema": 1, "phase": WORKLOAD_ROSTER[sequence], "sequence": sequence,
+                "schema": 1, "phase": roster[sequence], "sequence": sequence,
                 "completed": true, "role": role, "actor_id": actor,
-                "call_id": call_id, "boundary_kind": boundary_kind, "source": source,
+                "call_id": call_id, "call_ids": evidence.get("call_ids"), "boundary_kind": boundary_kind, "source": source,
                 "wall_ns": self.started.elapsed().as_nanos(),
                 "scripted_response_hold_ns": scripted_response_hold_ns,
                 "logical_compiler_requests": tidepool_extract_cmd::extract_spawn_count() - self.compiler_requests,
@@ -423,7 +424,31 @@ async fn engine_yield_claim_waits_and_settles_without_native_dispatch() {
 #[tokio::test]
 #[ignore = "requires isolated owned matched resident compiler, prepared bundle inputs and retained traces"]
 async fn production_harness_three_actor_capture_phases() {
+    three_actor_capture(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires exclusive matched compiler daemon and frozen prepared bundle"]
+async fn production_harness_two_children_execute_concurrently() {
+    three_actor_capture(true).await;
+}
+
+async fn three_actor_capture(concurrent: bool) {
     let (host_trace, compiler_trace, phase_trace, lifecycle) = prepare_performance_traces();
+    let roster: &[&str] = if concurrent {
+        &[
+            "activation",
+            "root-setup",
+            "root-fork-capture",
+            "async-yield",
+            "children-concurrent-replies",
+            "parent-publication-read",
+            "explicit-child-cleanup",
+            "host-cleanup",
+        ]
+    } else {
+        &WORKLOAD_ROSTER
+    };
     let deployment: BTreeMap<_, _> = [
         "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT",
         "TIDEPOOL_PREPARED_ROOT_ENTRY",
@@ -447,9 +472,9 @@ async fn production_harness_three_actor_capture_phases() {
     record_phase(
         &phase_trace,
         json!({
-            "schema": 1, "phase": "environment", "workload_cohort": WORKLOAD_COHORT,
+            "schema": 1, "phase": "environment", "workload_cohort": if concurrent { "two-children-concurrent" } else { WORKLOAD_COHORT },
             "campaign_trace_profile": super::test_campaign::campaign_trace_profile(),
-            "workload_roster": WORKLOAD_ROSTER, "prepared_root_entry_supplied": true,
+            "workload_roster": roster, "prepared_root_entry_supplied": true,
             "host_trace": host_trace, "compiler_trace": compiler_trace, "phase_trace": phase_trace,
             "owned_compiler_lifecycle": lifecycle, "deployment": deployment,
             "provider_mode": "scripted Responses transport; all runtime/compiler/workspace owners real",
@@ -489,7 +514,7 @@ async fn production_harness_three_actor_capture_phases() {
         let mut round = next_root(host, &mut requests, &mut pending).await;
         assert_eq!(round.request.model, "gpt-6.1-sol");
         let root_session = round.request.session_id.clone();
-        activation.record(&scenario_phases, 0, "root", &root_name, None, "lifecycle", "",
+        activation.record(roster, &scenario_phases, 0, "root", &root_name, None, "lifecycle", "",
             None,
             json!({"prepared_root_original": true, "http_input_admitted": true,
                 "workspace_preparation_ns": host.preparation_elapsed_ns(),
@@ -500,7 +525,7 @@ async fn production_harness_three_actor_capture_phases() {
         round.call("three-actor-setup", SETUP);
         round = next_root(host, &mut requests, &mut pending).await;
         round.assert_value("three-actor-setup", "True");
-        phase.record(&scenario_phases, 1, "root", &root_name, Some("three-actor-setup"), "native-tool", SETUP,
+        phase.record(roster, &scenario_phases, 1, "root", &root_name, Some("three-actor-setup"), "native-tool", SETUP,
             Some(scripted_response_hold_ns), json!({"retained_value": 41, "cell_role": "first"}));
         let prefix = round.request.input.iter().filter(|item| !item.is_configuration_update())
             .cloned().collect::<Vec<_>>();
@@ -552,7 +577,7 @@ async fn production_harness_three_actor_capture_phases() {
         };
         assert!(installation.policy.retained_operation(parent_invocation).is_ok(),
             "the real parent supplies the positive native settlement control");
-        phase.record(&scenario_phases, 2, "root", &root_name, Some(PARENT_CALL), "native-tool", CAPTURE,
+        phase.record(roster, &scenario_phases, 2, "root", &root_name, Some(PARENT_CALL), "native-tool", CAPTURE,
             Some(scripted_response_hold_ns),
             json!({"milestone": "both captured workers admitted while parent parked", "operation": parent,
                 "model_actors": 3, "held_worker_responses": 2}));
@@ -580,12 +605,54 @@ async fn production_harness_three_actor_capture_phases() {
         // the provider or issuing a native workbench settlement owner.
         assert_engine_yield_owner(host, installation.policy.as_ref(), &yield_operation,
             harness::store::ClaimState::Pending).await;
-        phase.record(&scenario_phases, 3, "root", &root_name, Some(YIELD_CALL), "engine-builtin", "yield {}",
+        phase.record(roster, &scenario_phases, 3, "root", &root_name, Some(YIELD_CALL), "engine-builtin", "yield {}",
             Some(scripted_response_hold_ns),
             json!({"milestone": "yield persisted with exact parent Pending and both child responses held", "parent_operation": parent,
                 "yield_operation": yield_operation, "yield_claim_pending": true, "native_yield_owner": false}));
 
         let child_actors = children.iter().map(|(_, actor, _)| *actor).collect::<Vec<_>>();
+        if concurrent {
+            let concurrent_clock = PhaseClock::begin();
+            let mut issued = Vec::new();
+            for (index, (label, actor, child_round)) in children.into_iter().enumerate() {
+                let phase = PhaseClock::begin();
+                let call = format!("three-actor-child-{}", if index == 0 { "alpha" } else { "beta" });
+                let origin = child_round.origin();
+                let operation = OperationId { origin: origin.clone(), request: host.runtime.store().embedded_round_frontier(&child_round.host_identity()).unwrap().pending_head.expect("held child has its issued request"), call: CallId(call.clone()) };
+                let held = child_round.scripted_response_hold_ns();
+                child_round.call(&call, "respond capturedGetter");
+                issued.push((index, label, actor, call, origin, operation, held, phase));
+            }
+            host.while_operation_succeeds(&issued[0].5,
+                host.while_operation_succeeds(&issued[1].5,
+                tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                    loop {
+                        if issued.iter().all(|(_, _, _, _, _, operation, _, _)|
+                            exact_claim(&host.runtime.store(), operation).is_some_and(|claim|
+                                claim.state == harness::store::ClaimState::Pending)) { break; }
+                        tokio::task::yield_now().await;
+                    }
+                }))).await.unwrap_or_else(|error| panic!("{error}"))
+                .unwrap_or_else(|error| panic!("{error}"))
+                .expect("both exact calls are pending before either result is consumed");
+            let mut replies = Vec::new();
+            for (_index, label, actor, call, origin, operation, held, phase) in issued {
+                let completed = host.while_operation_succeeds(&operation,
+                    next_hosted_script_round(&mut requests, &mut pending, origin.actor()))
+                    .await.unwrap_or_else(|error| panic!("{error}"));
+                assert_eq!(completed.request.model, "gpt-6-luna");
+                assert_replied(&completed, &call);
+                replies.push(json!({"actor": actor.to_string(), "label": label,
+                    "call_id": call, "operation": operation, "observation_elapsed_ns": phase.started.elapsed().as_nanos(),
+                    "timing_scope": "elapsed until this receipt is consumed; sequential observation can overlap the other child",
+                    "scripted_response_hold_ns": held, "typed_reply_accepted": true, "expected_value": 42}));
+                completed.finish();
+            }
+            concurrent_clock.record(roster, &scenario_phases, 4, "children", "two-child-operations", None, "native-tool", "respond capturedGetter",
+                None, json!({"call_ids": ["three-actor-child-alpha", "three-actor-child-beta"],
+                    "both_child_calls_pending_together": true, "replies": replies,
+                    "wall_scope": "one group window covering both simultaneous real child calls"}));
+        } else {
         for (index, (label, actor, child_round)) in children.into_iter().enumerate() {
             let phase = PhaseClock::begin();
             let call = format!("three-actor-child-{}", if index == 0 { "alpha" } else { "beta" });
@@ -598,10 +665,11 @@ async fn production_harness_three_actor_capture_phases() {
             assert_eq!(completed.request.model, "gpt-6-luna");
             assert_replied(&completed, &call);
             if index == 0 { assert_pending(host, &parent); }
-            phase.record(&scenario_phases, 4 + index, &label, &actor.to_string(), Some(&call), "native-tool", "respond capturedGetter",
+            phase.record(roster, &scenario_phases, 4 + index, &label, &actor.to_string(), Some(&call), "native-tool", "respond capturedGetter",
                 Some(scripted_response_hold_ns),
                 json!({"typed_reply_accepted": true, "expected_value": 42}));
             completed.finish();
+        }
         }
         let phase = PhaseClock::begin();
         round = next_root(host, &mut requests, &mut pending).await;
@@ -617,7 +685,7 @@ async fn production_harness_three_actor_capture_phases() {
         round.call("three-actor-read", READ);
         round = next_root(host, &mut requests, &mut pending).await;
         round.assert_value("three-actor-read", "True");
-        phase.record(&scenario_phases, 6, "root", &root_name, Some("three-actor-read"), "native-tool", READ,
+        phase.record(roster, &scenario_phases, if concurrent { 5 } else { 6 }, "root", &root_name, Some("three-actor-read"), "native-tool", READ,
             Some(scripted_response_hold_ns),
             json!({"parent_published": true, "retained_action_reused": true, "yield_parent_result_observed": true,
                 "cell_role": "retained_action_reuse"}));
@@ -637,7 +705,7 @@ async fn production_harness_three_actor_capture_phases() {
             assert_eq!(cleanup.actor(), actor);
             assert!(cleanup.is_confirmed(), "{cleanup:?}");
         }
-        phase.record(&scenario_phases, 7, "root", &root_name, Some("three-actor-cleanup"), "native-tool", CLEANUP,
+        phase.record(roster, &scenario_phases, if concurrent { 6 } else { 7 }, "root", &root_name, Some("three-actor-cleanup"), "native-tool", CLEANUP,
             Some(scripted_response_hold_ns),
             json!({"checkpoint_release_idempotent": true, "child_cleanup_confirmed": 2}));
         *cleanup_clock.lock() = Some(PhaseClock::begin());
@@ -648,8 +716,9 @@ async fn production_harness_three_actor_capture_phases() {
         .take()
         .expect("scenario reached its cleanup boundary")
         .record(
+            roster,
             &phase_trace,
-            8,
+            if concurrent { 7 } else { 8 },
             "host",
             "host",
             None,

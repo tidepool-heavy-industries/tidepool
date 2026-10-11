@@ -456,6 +456,27 @@ provider replies are scripted. The frozen owner runs its bundled
 `harness-usecase-perf-report.py` after the counted test and writes
 `harness-usecase-perf-report.json` beside `report.json`.
 
+Three separate production controls retain different workload histories.
+`harness-performance-repeat-launch` prepares one default workspace, then performs
+three independent durable selections and fresh HTTP hosts from that completed
+deployment. It checks zero launch compiler requests and distinct actor identities
+and journals. Its fresh preparation and launch readiness windows are reported
+separately. `harness-performance-notebook-reuse` runs A,A,B,A in one prepared
+host and asserts displayed values 42,42,43,42. `harness-performance-concurrent-children`
+issues both actual child calls before consuming either result, verifies both
+exact operations are pending together, and forces both typed replies through
+the parent. Its one group phase joins both call IDs without double-counting
+global compiler submissions. The ordered cold capture control retains its
+original history. These cohorts use the same counted runner and frozen inputs;
+only provider replies are scripted.
+
+The CLI's `prepare` followed by `init` already selects the completed deployment.
+Fresh fixture preparation measures the initial preparation cost; it does not
+represent preparation repeated on every application launch.
+For repeat launch, the activation control aliases `launch-1`; it is not an
+additional interval. Readiness is nested within its launch window. Cleanup
+reports the sum of the three disjoint input, completion and shutdown windows.
+
 Performance cohorts default to `--trace-profile minimal`: phase outcomes,
 exact compiler request/service joins, per-call timing, validation summaries,
 native-image decisions, successful Cranelift compile summaries and machine

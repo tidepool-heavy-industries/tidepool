@@ -561,6 +561,28 @@ class NativeQualificationTests(unittest.TestCase):
                          {'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY'})
         self.assertNotIn('measurement_reporter', recursive)
 
+    def test_production_performance_controls_have_separate_sealed_rosters(self):
+        expected = {
+            "repeat-launch": ("prepare-once-repeated-launch", "production_harness_prepare_once_repeated_launch"),
+            "notebook-reuse": ("notebook-a-a-b-a", "production_harness_notebook_a_a_b_a"),
+            "concurrent-children": ("two-children-concurrent", "production_harness_two_children_execute_concurrently"),
+        }
+        selected = qualification.cohorts()
+        for suffix, (roster, test) in expected.items():
+            with self.subTest(control=suffix):
+                cohort = selected["harness-performance-" + suffix]
+                self.assertEqual(cohort["workload_cohort"], roster)
+                self.assertEqual(cohort["expected_count"], 1)
+                self.assertEqual(len(cohort["tests"]), 1)
+                self.assertTrue(cohort["tests"][0].endswith("::" + test))
+                self.assertTrue(cohort["ignored"])
+                self.assertEqual(cohort["compiler_mode"], "owned-resident")
+                self.assertEqual(cohort["max_jobs"], 1)
+                self.assertEqual(cohort["required_stdlib_mode"], "catalog-backed")
+                self.assertEqual(cohort["required_startup_mode"], "prepared")
+                self.assertIn("TIDEPOOL_PREPARED_BUILTIN_ENTRIES", cohort["required_environment"])
+                self.assertEqual(cohort["measurement_reporter"], qualification.HARNESS_PERFORMANCE_REPORTER)
+
     def test_result_delivery_seals_actual_machine_and_value_premises_separately_from_m2(self):
         cohorts = qualification.cohorts()
         result = cohorts['result-delivery']

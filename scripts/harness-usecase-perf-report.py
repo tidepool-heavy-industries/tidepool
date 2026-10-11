@@ -24,7 +24,10 @@ if not THREE_ACTOR_ROSTER_PATH.is_file():
     THREE_ACTOR_ROSTER_PATH = Path(__file__).resolve().parent / "three-actor-workload-roster.json"
 THREE_ACTOR_PHASES = tuple(json.loads(THREE_ACTOR_ROSTER_PATH.read_text()))
 KNOWN_ROSTERS = {"harness-eight-phase": EXPECTED_PHASES,
-                 "three-actor-capture": THREE_ACTOR_PHASES}
+                 "three-actor-capture": THREE_ACTOR_PHASES,
+                 "two-children-concurrent": ("activation", "root-setup", "root-fork-capture", "async-yield", "children-concurrent-replies", "parent-publication-read", "explicit-child-cleanup", "host-cleanup"),
+                 "notebook-a-a-b-a": ("first-a", "repeat-a", "changed-b", "return-a"),
+                 "prepare-once-repeated-launch": ("fresh-preparation", "launch-1", "launch-2", "launch-3", "host-cleanup")}
 STARTUP_OWNER_SPANS = {"compile_root", "workspace_toolsets_prepare", "actor_application_prepare"}
 PROVIDER_RESPONSE_PHASES = {
     "root-setup", "root-fork-capture", "async-yield", "child-alpha-reply",
@@ -47,18 +50,32 @@ def nonnegative_integer(value):
     return parsed if parsed is not None and parsed >= 0 else None
 
 
+def phase_call_ids(phase):
+    call = phase.get("call_id")
+    calls = phase.get("call_ids")
+    if calls is not None and (not isinstance(calls, list) or not calls
+            or any(not isinstance(value, str) or not value for value in calls)
+            or len(calls) != len(set(calls))):
+        raise ValueError("phase call_ids must contain unique nonempty exact operation call IDs")
+    result = ([call] if isinstance(call, str) and call else []) + (calls or [])
+    if len(result) != len(set(result)):
+        raise ValueError("phase call_id and call_ids must not repeat an exact operation")
+    return result
+
+
 def assign_submission_phases(submissions, dispatches, phases, roster):
     """Reconcile independent owner observations once, before any phase joins."""
     phases_by_execution = {}
     for phase in phases:
-        for execution in dispatches.get(str(phase.get("call_id")), set()):
+        for execution in set().union(*(dispatches.get(call, set()) for call in phase_call_ids(phase))):
             phases_by_execution.setdefault(execution, set()).add(phase["phase"])
     for request in submissions:
         candidates = set(request["phase_owners"])
         for execution in request["executions"]:
             candidates.update(phases_by_execution.get(execution, set()))
         if request["startup_owner_spans"]:
-            candidates.add("activation")
+            candidates.add("fresh-preparation" if "fresh-preparation" in roster and
+                           "workspace_toolsets_prepare" in request["startup_owner_spans"] else "activation")
         if (request.get("activation_input_origin") is not None
                 and request["activation_input_origin"]["status"] != "verified"):
             candidates.clear()
@@ -145,32 +162,34 @@ def integer(value):
     return None
 
 
-def request_identity(row):
+def physical_coordinates(row):
     epoch = attr(row, "daemon_epoch")
     admission = integer(attr(row, "admission_id"))
     ordinal = integer(attr(row, "request_ordinal"))
-    digest = attr(row, "compile_request")
     physical = attr(row, "physical_execution")
-    if physical is not None and (epoch is None or admission is None or ordinal is None):
+    if physical is not None:
         parts = str(physical).split(":")
-        if len(parts) == 3:
-            epoch = epoch or parts[0]
-            admission = admission if admission is not None else integer(parts[1])
-            ordinal = ordinal if ordinal is not None else integer(parts[2])
+        if len(parts) != 3 or not parts[0] or integer(parts[1]) is None or integer(parts[2]) is None:
+            raise ValueError("malformed physical_execution identity")
+        alias = (parts[0], integer(parts[1]), integer(parts[2]))
+        if any(value is not None and value != supplied
+               for value, supplied in zip((epoch, admission, ordinal), alias)):
+            raise ValueError("physical_execution contradicts explicit physical request identity")
+        epoch, admission, ordinal = (value if value is not None else supplied
+                                     for value, supplied in zip((epoch, admission, ordinal), alias))
+    return epoch, admission, ordinal
+
+
+def request_identity(row):
+    epoch, admission, ordinal = physical_coordinates(row)
+    digest = attr(row, "compile_request")
     if epoch is None or admission is None or ordinal is None or digest is None:
         return None
     return str(epoch), admission, ordinal, str(digest)
 
 
 def admission_identity(row):
-    epoch = attr(row, "daemon_epoch")
-    admission = integer(attr(row, "admission_id"))
-    physical = attr(row, "physical_execution")
-    if physical is not None and (epoch is None or admission is None):
-        parts = str(physical).split(":")
-        if len(parts) == 3:
-            epoch = epoch or parts[0]
-            admission = admission if admission is not None else integer(parts[1])
+    epoch, admission, _ = physical_coordinates(row)
     if epoch is None or admission is None:
         return None
     return str(epoch), admission
@@ -302,14 +321,24 @@ def compiler_events(host_rows, daemon_rows):
                 entry["invalid_timing_record_count"] += 1
             if event_fields.get("message"):
                 entry["messages"].append(event_fields["message"])
+    # The daemon issues an ordinal once. A digest describes that invocation's
+    # input and cannot turn the same issued invocation into a second identity.
+    payloads = {}
+    for event in submissions + services:
+        identity = event["identity"]
+        if identity is None:
+            continue
+        physical, digest = identity[:3], identity[3]
+        if physical in payloads and payloads[physical] != digest:
+            raise ValueError("physical compiler request rebound to a different compile_request digest")
+        payloads[physical] = digest
     return dispatches, calls, submissions, services, queues, unidentified_queue_events
 
 
 def runtime_cost_events(host_rows, phases):
     phase_by_call = {}
     for phase in phases:
-        call_id = phase.get("call_id")
-        if isinstance(call_id, str):
+        for call_id in phase_call_ids(phase):
             phase_by_call.setdefault(call_id, set()).add(phase["phase"])
     events = []
     for index, row in enumerate(host_rows):
@@ -644,7 +673,7 @@ def analyze(record_path):
     services_by_identity = {}
     for service in services:
         if service["identity"] is not None:
-            services_by_identity.setdefault(service["identity"], []).append(service)
+            services_by_identity.setdefault(service["identity"][:3], []).append(service)
 
     prior_sources = set()
     prior_digests = set()
@@ -656,7 +685,10 @@ def analyze(record_path):
         if not isinstance(phase_evidence, dict):
             phase_evidence = {}
         call_id = phase.get("call_id")
-        execution_ids = sorted(dispatches.get(str(call_id), set())) if call_id else []
+        declared_calls = phase_call_ids(phase)
+        execution_ids = sorted(set().union(*(dispatches.get(call, set()) for call in declared_calls)))
+        exact_dispatch_group = (len(declared_calls) > 1 and len(execution_ids) == len(declared_calls)
+                                and all(len(dispatches.get(call, set())) == 1 for call in declared_calls))
         phase_submissions = [request for request in submissions
                              if request["phase_attribution"] == phase["phase"]]
         identities = sorted({request["identity"] for request in phase_submissions
@@ -664,7 +696,7 @@ def analyze(record_path):
         digest_set = {identity[3] for identity in identities}
         service_rows = []
         for identity in identities:
-            matched = services_by_identity.get(identity, [])
+            matched = services_by_identity.get(identity[:3], [])
             timed_record = (len(matched) == 1 and matched[0]["elapsed_ms"] is not None
                             and matched[0]["exit_code"] == 0)
             service_rows.append({
@@ -689,13 +721,14 @@ def analyze(record_path):
         missing_identities = sum(request["identity"] is None for request in phase_submissions)
         unattributed_events = sum(request["phase_attribution"] in ("unknown", "ambiguous")
                                   for request in submissions)
-        identity_counts = Counter(request["identity"] for request in phase_submissions
+        identity_counts = Counter(request["identity"][:3] for request in phase_submissions
                                   if request["identity"] is not None)
         duplicate_identities = sum(count > 1 for count in identity_counts.values())
         if not phase_submissions and logical == 0 and unattributed_events == 0:
             attribution = "zero_logical_requests_no_correlated_submission_observed"
         elif (logical is not None and logical == len(phase_submissions)
-              and not missing_identities and (len(execution_ids) == 1 or
+              and not missing_identities and (exact_dispatch_group or
+                                               (len(declared_calls) == 1 and len(execution_ids) == 1) or
                                                all(request["phase_owners"] == [phase["phase"]]
                                                    for request in phase_submissions))
               and len(identities) == len(phase_submissions) and duplicate_identities == 0
@@ -727,7 +760,7 @@ def analyze(record_path):
             "daemon_service_ambiguous_count": ambiguous_services,
             "globally_unattributed_host_submission_event_count": unattributed_events,
             "dispatch_executions": execution_ids,
-            "dispatch_attribution": "one" if len(execution_ids) == 1 else
+            "dispatch_attribution": "exact_group" if exact_dispatch_group else "one" if len(execution_ids) == 1 else
                                     "missing" if not execution_ids else "ambiguous",
             "call_timing_records": call_timing,
             "publication_work": publication_work_observation(call_timing),
@@ -737,6 +770,8 @@ def analyze(record_path):
             "client_compiler_submissions": service_rows,
             "compiler_attribution": attribution,
             "source_sha256": source_digest,
+            "successful_native_image_constructions": nonnegative_integer(phase.get("successful_native_image_constructions")),
+            "evidence": phase_evidence,
             "same_source_seen_in_prior_phase": source_digest in prior_sources if source_digest else None,
             "compiler_request_digest_seen_before": {
                 digest: digest in prior_digests for digest in sorted(digest_set)
@@ -870,7 +905,7 @@ def analyze(record_path):
     for request in submissions:
         if request["identity"] is None or request["phase_attribution"] in ("unknown", "ambiguous"):
             identity = request["identity"]
-            matched = services_by_identity.get(identity, []) if identity is not None else []
+            matched = services_by_identity.get(identity[:3], []) if identity is not None else []
             unattributed_host.append({
                 "identity": identity, "executions": request["executions"],
                 "phase_owners": request["phase_owners"],
@@ -883,9 +918,9 @@ def analyze(record_path):
     orphan_services = [service for service in services
                        if service["identity"] is None or service["identity"] not in all_host_identities]
 
-    host_identity_counts = Counter(request["identity"] for request in submissions
+    host_identity_counts = Counter(request["identity"][:3] for request in submissions
                                    if request["identity"] is not None)
-    service_identity_counts = Counter(service["identity"] for service in services
+    service_identity_counts = Counter(service["identity"][:3] for service in services
                                       if service["identity"] is not None)
     host_identities = [request["identity"] for request in submissions]
     service_identities = [service["identity"] for service in services]
@@ -931,12 +966,24 @@ def analyze(record_path):
         and activation_record is not None
         and integer(activation_record.get("logical_compiler_requests")) ==
             len(explicit_activation_requests) + len(startup_owned_requests)
-        and all(len(services_by_identity.get(request["identity"], [])) == 1
-                and services_by_identity[request["identity"]][0]["exit_code"] == 0
+        and all(len(services_by_identity.get(request["identity"][:3], [])) == 1
+                and services_by_identity[request["identity"][:3]][0]["exit_code"] == 0
                 for request in explicit_activation_requests + startup_owned_requests)
     )
     startup_owner_status = "complete" if startup_owner_complete else "unknown_unowned_or_unmatched_requests"
-    queue_complete = (bool(queues) and unidentified_queue_events == 0 and not queue_missing
+    zero_compiler_work_verified = (
+        cohort_name == "prepare-once-repeated-launch" and phase_coverage["complete"]
+        and not invalid_phase_measurements and whole_stream_complete
+        and not submissions and not services and not queues and unidentified_queue_events == 0
+        and all(phase.get("logical_compiler_requests") == 0 for phase in phases
+                if phase["phase"] != "environment")
+    )
+    if (zero_compiler_work_verified and not owner_observations["problems"]
+            and owner_observations["machine_installations_observed"] is not None
+            and owner_observations["actual_native_image_compiles_observed"] is not None):
+        owner_observations["status"] = "native_only_no_compiler_requests"
+        owner_observations["compiler_validation_applicability"] = "no_requests_verified_by_phase_counters_and_both_physical_streams"
+    queue_complete = ((bool(queues) or zero_compiler_work_verified) and unidentified_queue_events == 0 and not queue_missing
                       and not queue_unexpected and not queue_duplicate_records)
     cleanup = {
         key: execution.get(key)
@@ -1016,7 +1063,7 @@ def analyze(record_path):
             "events": cost_events,
             "coverage": runtime_cost_coverage(cost_events),
         },
-        "queue_trace_status": ("records_observed" if queues else "no_records_observed_unknown"),
+        "queue_trace_status": ("records_observed" if queues else "no_admissions_verified" if zero_compiler_work_verified else "no_records_observed_unknown"),
         "queue_evidence": {
             "status": "complete" if queue_complete else "partial_or_unknown",
             "expected_admission_count_from_exact_requests": len(queue_admissions_expected),
@@ -1074,7 +1121,8 @@ def analyze(record_path):
             "explicit_startup_span_requests": [
                 {"identity": request["identity"],
                  "owner_spans": request["startup_owner_spans"],
-                 "daemon_service_records": services_by_identity.get(request["identity"], [])}
+                 "daemon_service_records": services_by_identity.get(request["identity"][:3], [])
+                 if request["identity"] is not None else []}
                 for request in startup_owned_requests
             ],
             "requests": startup_unowned,
@@ -1085,7 +1133,7 @@ def analyze(record_path):
         },
         "compiler_allowances": requested_allowances,
         "compiler_job_grants": {
-            "status": "observed" if (queue_complete and compiler_grants
+            "status": "not_applicable_no_compiler_requests" if zero_compiler_work_verified else "observed" if (queue_complete and compiler_grants
                                      and all(row["valid"] and row["exceeds_requested_maximum"] is not True
                                              for row in compiler_grants)) else "partial_or_unknown",
             "admissions": compiler_grants,

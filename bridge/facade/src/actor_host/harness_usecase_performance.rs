@@ -8,6 +8,21 @@ use super::super::test_campaign::{prepare_performance_traces, record_phase};
 use super::*;
 use std::time::Instant;
 
+#[derive(Clone, Copy)]
+enum NotebookHistory {
+    OrderedUsecase,
+    AABA,
+}
+
+impl NotebookHistory {
+    fn cohort(self) -> &'static str {
+        match self {
+            Self::OrderedUsecase => "harness-eight-phase",
+            Self::AABA => "notebook-a-a-b-a",
+        }
+    }
+}
+
 struct Phase {
     name: &'static str,
     source: &'static str,
@@ -43,80 +58,7 @@ fn has_output(round: &RequestedRound, call_id: &str) -> bool {
 #[tokio::test]
 #[ignore = "requires exclusive matched compiler daemon and retained host/daemon traces"]
 async fn production_harness_notebook_usecase_phases() {
-    let (host_trace, compiler_trace, phase_trace, compiler_lifecycle) =
-        prepare_performance_traces();
-    assert!(
-        std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_some(),
-        "measure resident production compilation, not per-request worker spawning"
-    );
-    assert!(
-        std::env::var_os("TIDEPOOL_TEST_TRACE").is_some(),
-        "retain complete host scope and request correlation evidence"
-    );
-    assert!(
-        std::env::var_os("TIDEPOOL_PERFORMANCE_COMPILER_TRACE").is_some(),
-        "retain owning daemon queue/service evidence; host durations alone cannot establish it"
-    );
-    let deployment: BTreeMap<_, _> = [
-        "TIDEPOOL_TEST_ARTIFACT_ROOT",
-        "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT",
-        "TIDEPOOL_TEST_TRACE",
-        "TIDEPOOL_PREPARED_ROOT_ENTRY",
-        "TIDEPOOL_COMPILER_DEPLOYMENT",
-        "TIDEPOOL_COMPILER_MODULES",
-        "TIDEPOOL_EXTRACT_WORKER",
-        "TIDEPOOL_PERFORMANCE_COMPILER_TRACE",
-        "TIDEPOOL_TEST_TRACE",
-        "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID",
-        "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER",
-        "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH",
-    ]
-    .into_iter()
-    .map(|key| {
-        (
-            key,
-            std::env::var_os(key).map(|value| value.to_string_lossy().into_owned()),
-        )
-    })
-    .collect();
-    record_phase(
-        &phase_trace,
-        json!({
-            "schema": 1,
-            "phase": "environment",
-            "workload_cohort": "harness-eight-phase",
-            "campaign_trace_profile": super::super::test_campaign::campaign_trace_profile(),
-            "workload_roster": [
-                "first-arithmetic", "publish-retained", "lookup-retained", "reuse-retained",
-                "repeat-retained", "async-yield-result", "reuse-async-action", "repeat-arithmetic",
-            ],
-            "prepared_root_entry_supplied": deployment["TIDEPOOL_PREPARED_ROOT_ENTRY"].is_some(),
-            "host_trace": host_trace,
-            "compiler_trace": compiler_trace,
-            "phase_trace": phase_trace,
-            "owned_compiler_lifecycle": compiler_lifecycle,
-            "deployment": deployment,
-        }),
-    );
-    let activation_started = Instant::now();
-    let activation_requests = tidepool_extract_cmd::extract_spawn_count();
-    let (_files, fixture, mut rounds) = start_with_spec(None).await;
-    let mut round = next_round(&mut rounds, &fixture.context).await;
-    let actor = fixture.context.actor.identity();
-    let session = round.request.session_id.clone();
-    record_phase(
-        &phase_trace,
-        json!({
-            "schema": 1, "phase": "activation", "completed": true,
-            "wall_ns": activation_started.elapsed().as_nanos(),
-            "logical_compiler_requests": tidepool_extract_cmd::extract_spawn_count() - activation_requests,
-            "provider_calls": round.provider_calls.load(Ordering::SeqCst),
-            "context_items": round.request.input.len(),
-            "context_json_bytes": serde_json::to_vec(&round.request.input).unwrap().len(),
-            "cold_scope": "fresh host/session; daemon and artifact cache history recorded externally",
-        }),
-    );
-    let phases = [
+    notebook_phases(NotebookHistory::OrderedUsecase, &[
         Phase {
             name: "first-arithmetic",
             source: "_ <- display (40 + 2 :: Int)",
@@ -165,10 +107,150 @@ async fn production_harness_notebook_usecase_phases() {
             expected: "42",
             asynchronous: false,
         },
-    ];
+    ]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires exclusive matched compiler daemon and retained host/daemon traces"]
+async fn production_harness_notebook_a_a_b_a() {
+    notebook_phases(
+        NotebookHistory::AABA,
+        &[
+            Phase {
+                name: "first-a",
+                source: "_ <- display (40 + 2 :: Int)",
+                expected: "42",
+                asynchronous: false,
+            },
+            Phase {
+                name: "repeat-a",
+                source: "_ <- display (40 + 2 :: Int)",
+                expected: "42",
+                asynchronous: false,
+            },
+            Phase {
+                name: "changed-b",
+                source: "_ <- display (40 + 3 :: Int)",
+                expected: "43",
+                asynchronous: false,
+            },
+            Phase {
+                name: "return-a",
+                source: "_ <- display (40 + 2 :: Int)",
+                expected: "42",
+                asynchronous: false,
+            },
+        ],
+    )
+    .await;
+}
+
+async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
+    let cohort = history.cohort();
+    let (host_trace, compiler_trace, phase_trace, compiler_lifecycle) =
+        prepare_performance_traces();
+    assert!(
+        std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_some(),
+        "measure resident production compilation, not per-request worker spawning"
+    );
+    assert!(
+        std::env::var_os("TIDEPOOL_TEST_TRACE").is_some(),
+        "retain complete host scope and request correlation evidence"
+    );
+    assert!(
+        std::env::var_os("TIDEPOOL_PERFORMANCE_COMPILER_TRACE").is_some(),
+        "retain owning daemon queue/service evidence; host durations alone cannot establish it"
+    );
+    let deployment: BTreeMap<_, _> = [
+        "TIDEPOOL_TEST_ARTIFACT_ROOT",
+        "TIDEPOOL_EXTRACT_REQUIRED_DAEMON_ENDPOINT",
+        "TIDEPOOL_TEST_TRACE",
+        "TIDEPOOL_PREPARED_ROOT_ENTRY",
+        "TIDEPOOL_COMPILER_DEPLOYMENT",
+        "TIDEPOOL_COMPILER_MODULES",
+        "TIDEPOOL_EXTRACT_WORKER",
+        "TIDEPOOL_PERFORMANCE_COMPILER_TRACE",
+        "TIDEPOOL_TEST_TRACE",
+        "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PID",
+        "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_PRODUCER",
+        "TIDEPOOL_EXTRACT_MEASUREMENT_DAEMON_EPOCH",
+    ]
+    .into_iter()
+    .map(|key| {
+        (
+            key,
+            std::env::var_os(key).map(|value| value.to_string_lossy().into_owned()),
+        )
+    })
+    .collect();
+    record_phase(
+        &phase_trace,
+        json!({
+            "schema": 1,
+            "phase": "environment",
+            "workload_cohort": cohort,
+            "campaign_trace_profile": super::super::test_campaign::campaign_trace_profile(),
+            "workload_roster": phases.iter().map(|phase| phase.name).collect::<Vec<_>>(),
+            "prepared_root_entry_supplied": deployment["TIDEPOOL_PREPARED_ROOT_ENTRY"].is_some(),
+            "host_trace": host_trace,
+            "compiler_trace": compiler_trace,
+            "phase_trace": phase_trace,
+            "owned_compiler_lifecycle": compiler_lifecycle,
+            "deployment": deployment,
+        }),
+    );
+    let activation_started = Instant::now();
+    let activation_requests = tidepool_extract_cmd::extract_spawn_count();
+    let (_files, fixture, mut rounds) = if matches!(history, NotebookHistory::AABA) {
+        let (files, settings) = settings();
+        let (requests, rounds) = mpsc::unbounded_channel();
+        let transport: Arc<dyn ResponsesTransport> = Arc::new(ScriptedProvider {
+            requests,
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let fixture =
+            HostedTestRuntime::start_prepared_configured(&settings, &transport, |config| {
+                crate::exomonad::write_fixture_project_config(
+                    &config.workspace.join(".exomonad"),
+                    "test-model",
+                    |project| {
+                        project.launch.embedded = Some(settings.clone());
+                    },
+                );
+                super::super::test_campaign::commit_workspace(&config.workspace);
+            })
+            .await
+            .unwrap();
+        fixture
+            .http_input("Exercise the prepared A,A,B,A notebook history.")
+            .await
+            .unwrap();
+        (files, fixture, rounds)
+    } else {
+        start_with_spec(None).await
+    };
+    let mut round = next_round(&mut rounds, &fixture.context).await;
+    let actor = fixture.context.actor.identity();
+    let session = round.request.session_id.clone();
+    record_phase(
+        &phase_trace,
+        json!({
+            "schema": 1, "phase": "activation", "completed": true,
+            "wall_ns": activation_started.elapsed().as_nanos(),
+            "logical_compiler_requests": tidepool_extract_cmd::extract_spawn_count() - activation_requests,
+            "provider_calls": round.provider_calls.load(Ordering::SeqCst),
+            "context_items": round.request.input.len(),
+            "context_json_bytes": serde_json::to_vec(&round.request.input).unwrap().len(),
+            "workspace_preparation_ns": fixture.preparation_elapsed_ns(),
+            "host_start_readiness_ns": fixture.startup_readiness_elapsed_ns(),
+            "cold_scope": "fresh host/session; daemon and artifact cache history recorded externally",
+        }),
+    );
     for (index, phase) in phases.iter().enumerate() {
         let call_id = format!("usecase-{index}-{}", phase.name);
         let before = tidepool_extract_cmd::extract_spawn_count();
+        let images_before =
+            tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations();
         let provider_before = round.provider_calls.load(Ordering::SeqCst);
         let started = Instant::now();
         issue(round, phase, &call_id);
@@ -201,6 +283,7 @@ async fn production_harness_notebook_usecase_phases() {
                 "schema": 1, "phase": phase.name, "sequence": index, "call_id": call_id,
                 "completed": true, "wall_ns": completed_ns, "first_successor_ns": first_successor_ns,
                 "logical_compiler_requests": logical_compiler_requests,
+                "successful_native_image_constructions": tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations() - images_before,
                 "provider_calls": round.provider_calls.load(Ordering::SeqCst) - provider_before,
                 "context_items": round.request.input.len(),
                 "context_json_bytes": serde_json::to_vec(&round.request.input).unwrap().len(),
@@ -213,4 +296,157 @@ async fn production_harness_notebook_usecase_phases() {
     }
     round.finish();
     fixture.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires exclusive matched compiler daemon and frozen prepared bundle"]
+async fn production_harness_prepare_once_repeated_launch() {
+    use super::super::test_campaign::{
+        commit_workspace, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+    };
+    use crate::exomonad::workspace::{prepare_workspace, FrozenWorkspace};
+    use harness::model::AgentPath;
+    use std::collections::{HashSet, VecDeque};
+    let (host_trace, compiler_trace, phase_trace, lifecycle) = prepare_performance_traces();
+    let roster = [
+        "fresh-preparation",
+        "launch-1",
+        "launch-2",
+        "launch-3",
+        "host-cleanup",
+    ];
+    record_phase(
+        &phase_trace,
+        json!({"schema": 1, "phase": "environment",
+        "workload_cohort": "prepare-once-repeated-launch", "workload_roster": roster,
+        "campaign_trace_profile": super::super::test_campaign::campaign_trace_profile(),
+        "prepared_root_entry_supplied": std::env::var_os("TIDEPOOL_PREPARED_ROOT_ENTRY").is_some(),
+        "host_trace": host_trace, "compiler_trace": compiler_trace, "phase_trace": phase_trace,
+        "owned_compiler_lifecycle": lifecycle,
+        "deployment": (["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_COMPILER_DEPLOYMENT"].into_iter().map(|key| (key, std::env::var(key).unwrap())).collect::<BTreeMap<_, _>>())}),
+    );
+    let artifact_root = PathBuf::from(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").unwrap());
+    let mut files = tempfile::Builder::new()
+        .prefix("repeat-launch-")
+        .tempdir_in(&artifact_root)
+        .unwrap();
+    files.disable_cleanup(true);
+    let settings = hosted_test_settings(&files, 1);
+    let mut repository = exomonad_worktree::testing::TestRepo::init_in(&artifact_root).unwrap();
+    repository.disable_cleanup(true);
+    crate::exomonad::write_fixture_project_config(
+        &repository.path().join(".exomonad"),
+        "test-model",
+        |project| {
+            project.launch.embedded = Some(settings.clone());
+        },
+    );
+    commit_workspace(repository.path());
+    let directory = Arc::new(
+        tidepool_atomic_write::DirectoryAnchor::open_existing(files.path())
+            .unwrap()
+            .child("prepared-once")
+            .unwrap(),
+    );
+    let started = Instant::now();
+    let requests_before = tidepool_extract_cmd::extract_spawn_count();
+    let prepared = prepare_workspace(repository.path(), Arc::clone(&directory))
+        .await
+        .unwrap();
+    let preparation_ns = started.elapsed().as_nanos();
+    let selection = prepared.pointer().unwrap().selection_digest;
+    record_phase(
+        &phase_trace,
+        json!({"schema": 1, "phase": "fresh-preparation", "sequence": 0,
+        "completed": true, "wall_ns": preparation_ns, "logical_compiler_requests": tidepool_extract_cmd::extract_spawn_count() - requests_before,
+        "evidence": {"deployment": directory.path(), "selection_digest": selection, "fresh_preparation": true}}),
+    );
+    let mut actors = HashSet::new();
+    let mut journals = HashSet::new();
+    let mut shutdown_ns = 0;
+    let mut shutdown_requests = 0;
+    for index in 0..3 {
+        let (provider, mut rounds) = hosted_script_provider();
+        let started = Instant::now();
+        let requests_before = tidepool_extract_cmd::extract_spawn_count();
+        let images_before =
+            tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations();
+        let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+            config.workspace = repository.path().to_owned();
+            let inputs = FrozenWorkspace::select_prepared(
+                repository.path(),
+                config.run_directory.path(),
+                Some(directory.path()),
+            )
+            .unwrap();
+            assert!(
+                inputs.prepared_toolset.is_none(),
+                "each launch authenticates the completed deployment independently"
+            );
+            config.haskell_root = inputs.runtime_actors();
+            config.workspace_inputs = Some(inputs);
+        })
+        .await
+        .unwrap();
+        let launch_ns = started.elapsed().as_nanos();
+        if index == 0 {
+            record_phase(
+                &phase_trace,
+                json!({"schema": 1, "phase": "activation", "completed": true,
+                "wall_ns": launch_ns, "logical_compiler_requests": 0, "workspace_preparation_ns": preparation_ns,
+                "host_start_readiness_ns": host.startup_readiness_elapsed_ns(),
+                "evidence": {"scope": "first durable production launch; fresh preparation recorded separately"}}),
+            );
+        }
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            requests_before,
+            "repeat launch submits no compiler request"
+        );
+        assert!(actors.insert(host.context.actor.identity()));
+        let run_id = host
+            .context
+            .config
+            .run_directory
+            .path()
+            .file_name()
+            .unwrap()
+            .to_owned();
+        assert!(journals.insert(crate::exomonad::exomonad_journal_path(
+            repository.path(),
+            run_id.to_str().unwrap()
+        )));
+        record_phase(
+            &phase_trace,
+            json!({"schema": 1, "phase": roster[index + 1], "sequence": index + 1,
+            "completed": true, "wall_ns": launch_ns, "logical_compiler_requests": 0,
+            "successful_native_image_constructions": tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations() - images_before,
+            "evidence": {"fresh_preparation": false, "selection_digest": selection,
+                "host_start_readiness_ns": host.startup_readiness_elapsed_ns(), "fresh_actor_identity": host.context.actor.identity().to_string(),
+                "selection_and_fixture_ns": launch_ns.saturating_sub(host.startup_readiness_elapsed_ns())}}),
+        );
+        let shutdown_started = Instant::now();
+        let shutdown_requests_before = tidepool_extract_cmd::extract_spawn_count();
+        host.run_scenario(|host| {
+            Box::pin(async move {
+                host.http_input("Start this independently launched resident actor.")
+                    .await
+                    .unwrap();
+                let mut pending = VecDeque::new();
+                let round =
+                    next_hosted_script_round(&mut rounds, &mut pending, &AgentPath("/root".into()))
+                        .await;
+                round.finish();
+            })
+        })
+        .await;
+        shutdown_ns += shutdown_started.elapsed().as_nanos();
+        shutdown_requests += tidepool_extract_cmd::extract_spawn_count() - shutdown_requests_before;
+    }
+    record_phase(
+        &phase_trace,
+        json!({"schema": 1, "phase": "host-cleanup", "sequence": 4,
+        "completed": true, "wall_ns": shutdown_ns, "logical_compiler_requests": shutdown_requests,
+        "evidence": {"production_hosts_shutdown_acknowledged": 3, "scope": "sum of disjoint HTTP input, provider completion and host shutdown windows"}}),
+    );
 }
