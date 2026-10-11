@@ -42,7 +42,10 @@ import Tidepool.Agent.Contract
 newtype Probe = Probe {{ topic :: Text }}
   deriving (Generic, FromJSON, JsonSchema)
 
-newtype SpecTools mode = SpecTools {{ probe :: mode :- Call Probe Text }}
+data SpecTools effects mode = SpecTools
+  {{ probe :: mode :- Call Probe Text
+  , notebook :: HaskellTools effects mode
+  }}
   deriving (Generic)
 
 -- | The tool's implementation as ordinary source, so a slot can exercise the
@@ -50,10 +53,13 @@ newtype SpecTools mode = SpecTools {{ probe :: mode :- Call Probe Text }}
 probeBody :: Probe -> Eff effects Text
 probeBody _ = pure "{answer}"
 
-tools :: SpecTools (AsServerT (Eff effects))
-tools = SpecTools {{ probe = presentWith id $ tool "{description}" probeBody }}
+tools :: (KnownToolEffects effects, AsyncEffects effects) => SpecTools effects (AsServerT (Eff effects))
+tools = SpecTools
+  {{ probe = presentWith id $ tool "{description}" probeBody
+  , notebook = haskellTools
+  }}
 
-agentSpec :: AgentSpec SpecTools effects
+agentSpec :: (KnownToolEffects effects, AsyncEffects effects) => AgentSpec (SpecTools effects) effects
 agentSpec = defaultSpec {{ specTools = tools }}
 "#
     )
@@ -73,7 +79,7 @@ import qualified Data.Text as T
 import Tidepool.Agent.Contract
 import qualified Project.Tools as Tools
 
-agentSpec :: AgentSpec Tools.SpecTools effects
+agentSpec :: (KnownToolEffects effects, AsyncEffects effects) => AgentSpec (Tools.SpecTools effects) effects
 agentSpec = defaultSpec
   {{ specTools = Tools.tools
   , afterTool = Just noted
@@ -101,7 +107,7 @@ import qualified Data.Text as T
 import Tidepool.Agent.Contract
 import qualified Project.Tools as Tools
 
-agentSpec :: AgentSpec Tools.SpecTools effects
+agentSpec :: (KnownToolEffects effects, AsyncEffects effects) => AgentSpec (Tools.SpecTools effects) effects
 agentSpec = defaultSpec
   {{ specTools = Tools.tools
   , afterTool = Just noted
@@ -133,7 +139,7 @@ import Tidepool.Effects.Core (Sleep, sleep)
 import Tidepool.Duration (seconds)
 import qualified Project.Tools as Tools
 
-agentSpec :: Member Sleep effects => AgentSpec Tools.SpecTools effects
+agentSpec :: (KnownToolEffects effects, AsyncEffects effects, Member Sleep effects) => AgentSpec (Tools.SpecTools effects) effects
 agentSpec = defaultSpec
   {{ specTools = Tools.tools
   , afterTool = Just noted
@@ -625,10 +631,10 @@ async fn a_changed_description_is_refused_with_the_difference_and_the_old_record
                 );
                 let cell = dispatch_haskell_script(
                     policy,
-                    "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
+                    "answer <- Project.Tools.probeBody (Project.Tools.Probe \"cell\")\nif answer == \"one\" then pure () else error \"the retained Project.Tools source changed\"",
                 )
                 .await;
-                assert!(cell.to_string().contains("one"), "{cell}");
+                assert_eq!(cell["status"], "committed", "{cell}");
             })
         })
         .await;
@@ -678,10 +684,10 @@ async fn a_spec_that_does_not_typecheck_leaves_the_old_one_active_and_the_file_o
                 );
                 let cell = dispatch_haskell_script(
                     policy,
-                    "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
+                    "answer <- Project.Tools.probeBody (Project.Tools.Probe \"cell\")\nif answer == \"one\" then pure () else error \"the retained Project.Tools source changed\"",
                 )
                 .await;
-                assert!(cell.to_string().contains("one"), "{cell}");
+                assert_eq!(cell["status"], "committed", "{cell}");
             })
         })
         .await;
@@ -718,10 +724,10 @@ async fn an_installer_execution_failure_keeps_source_cells_and_old_handlers() {
                 assert!(probe(policy).await.contains("one"));
                 let cell = dispatch_haskell_script(
                     policy,
-                    "Project.Tools.probeBody (Project.Tools.Probe \"cell\") >>= inspectFull",
+                    "answer <- Project.Tools.probeBody (Project.Tools.Probe \"cell\")\nif answer == \"one\" then pure () else error \"the retained Project.Tools source changed\"",
                 )
                 .await;
-                assert!(cell.to_string().contains("one"), "{cell}");
+                assert_eq!(cell["status"], "committed", "{cell}");
                 assert_eq!(
                     std::fs::read_to_string(
                         campaign
@@ -1397,7 +1403,7 @@ const CODING_CHILD: &str = "import qualified Tidepool.Agent.Contract as A\n\
      import qualified Project.Tools as Tools\n\
      Right seed <- checkpoint \"agent-spec child context\"\n\
      Right child <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)\n\
-       ((defaultSpawnOptions (Spec.agentSpec :: A.AgentSpec Tools.SpecTools '[Replies, Commands, Lookup, BoundWorktree]))\n\
+       ((defaultSpawnOptions (Spec.agentSpec :: A.AgentSpec (Tools.SpecTools '[Replies, Commands, Lookup, BoundWorktree]) '[Replies, Commands, Lookup, BoundWorktree]))\n\
          { spawnLabel = Just \"editor\", spawnLifetime = ActorOwned\n\
          , spawnInstructions = Just \"Use the configured workspace tools for this request and return the typed result.\" })\n\
      Right worker <- request @Text child () (defaultRequestOptions { requestLabel = Just \"editor\" })\n";
