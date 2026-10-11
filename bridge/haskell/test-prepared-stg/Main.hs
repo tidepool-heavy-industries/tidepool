@@ -807,15 +807,17 @@ verifyRepeatedConstructorEvidence result = do
     , clone name fields conflictingFields
     , clone otherName fields conflictingFields
     ]
-assertWireSite :: String -> Schema.SiteDelivery -> String
+assertWireSite :: String -> Schema.SiteDelivery -> String -> [String]
   -> Either Projection.ProjectionError Schema.WireProgram -> IO ()
-assertWireSite label delivery family outcome = case outcome of
+assertWireSite label delivery family inputs outcome = case outcome of
   Left failure -> ioError (userError (label ++ ": projection failed: " ++ show failure))
   Right program -> case Schema.programSites program of
     [site]
       | Schema.siteDelivery site == delivery
       , Just identity <- nominalSiteIdentity (Schema.programTypes program) (Schema.siteWire site)
-      , Schema.symbolOccurrence identity == fromString family -> pure ()
+      , Schema.symbolOccurrence identity == fromString family
+      , map (fmap Schema.symbolOccurrence . nominalSiteIdentity (Schema.programTypes program))
+          (Schema.siteInputs site) == map (Just . fromString) inputs -> pure ()
     sites -> ioError (userError (label ++ ": unexpected site evidence " ++ show sites
       ++ " in " ++ show (Schema.programTypes program)))
 
@@ -1145,8 +1147,8 @@ fullMain = do
       let dep = dir </> "Dep.hs"
           effectsDir = dir </> "Tidepool" </> "Effects"
           effects = dir </> "Tidepool" </> "Actor.hs"
-          unfoldDir = dir </> "Tidepool" </> "Actors"
-          unfold = unfoldDir </> "Unfold.hs"
+          requestDir = dir </> "Tidepool" </> "Actors" </> "Internal"
+          requestModule = requestDir </> "Agent.hs"
           replyDir = dir </> "Tidepool" </> "Agent" </> "Reply"
           replyInternal = replyDir </> "Internal.hs"
           currentRequestTarget = dir </> "CurrentRequestSiteExpr.hs"
@@ -1156,7 +1158,7 @@ fullMain = do
           laterRequestTarget = dir </> "LaterRequestSiteExpr.hs"
           changedRequestTarget = dir </> "ChangedRequestSiteExpr.hs"
           siteTarget = dir </> "SiteExpr.hs"
-          partialChildTarget = dir </> "PartialChildExpr.hs"
+          partialRequestTarget = dir </> "PartialRequestExpr.hs"
           polySiteTarget = dir </> "PolySiteExpr.hs"
           target = dir </> "Expr.hs"
           validTarget = unlines
@@ -1170,7 +1172,7 @@ fullMain = do
             ]
       writeRequestSiteFixture dir
       createDirectoryIfMissing True effectsDir
-      createDirectoryIfMissing True unfoldDir
+      createDirectoryIfMissing True requestDir
       createDirectoryIfMissing True replyDir
       let originalDep = unlines
             [ "module Dep where"
@@ -1191,21 +1193,21 @@ fullMain = do
         , "receiveSited :: forall a. RequestSite '[] a -> String -> Maybe a"
         , "receiveSited _ _ = Nothing"
         ])
-      writeFile unfold (unlines
+      writeFile requestModule (unlines
         [ "{-# LANGUAGE ExplicitForAll #-}"
         , "{-# LANGUAGE DataKinds #-}"
-        , "module Tidepool.Actors.Unfold where"
+        , "module Tidepool.Actors.Internal.Agent where"
         , "import Tidepool.Internal.RequestSite (RequestSite)"
         , "import Data.Kind (Type)"
         , "import Tidepool.Agent.Reply.Internal (ResponseResult)"
         , "keepResponseResultAuthority :: Maybe (ResponseResult Bool)"
         , "keepResponseResultAuthority = Nothing"
-        , "{-# OPAQUE child #-}"
-        , "child :: forall result (child :: Type) input (parent :: Type). input -> Maybe result"
-        , "child _ = Nothing"
-        , "{-# OPAQUE childSited #-}"
-        , "childSited :: forall result (child :: Type) input (parent :: Type). RequestSite '[input] result -> input -> Maybe result"
-        , "childSited _ _ = Nothing"
+        , "{-# OPAQUE request #-}"
+        , "request :: forall result input (effs :: Type). input -> Maybe result"
+        , "request = requestSited (error \"unavailable carrier\")"
+        , "{-# OPAQUE requestSited #-}"
+        , "requestSited :: forall result input (effs :: Type). RequestSite '[input, ResponseResult result] result -> input -> Maybe result"
+        , "requestSited _ _ = Nothing"
         ])
       writeFile replyInternal (unlines
         [ "{-# LANGUAGE ExplicitForAll #-}"
@@ -1303,12 +1305,12 @@ fullMain = do
         , "usesNested :: Maybe Bool"
         , "usesNested = polyNested @Bool True \"nested\""
         ])
-      writeFile partialChildTarget (unlines
+      writeFile partialRequestTarget (unlines
         [ "{-# LANGUAGE TypeApplications #-}"
-        , "module PartialChildExpr where"
-        , "import Tidepool.Actors.Unfold"
-        , "partialChild :: Char -> Maybe Bool"
-        , "partialChild = child @Bool @Int @Char @String"
+        , "module PartialRequestExpr where"
+        , "import Tidepool.Actors.Internal.Agent"
+        , "partialRequest :: Char -> Maybe Bool"
+        , "partialRequest = request @Bool @Char @String"
         ])
 
       direct <- runPipelineSelected PreparedStg target [dir]
@@ -1337,12 +1339,13 @@ fullMain = do
                   && show (ysSite site) `isInfixOf` siteInventory
                 _ -> False)
         "typed site was not elaborated before preparation"
-      partialChildDirect <- runPipelineSelected PreparedStg partialChildTarget [dir]
-      assertWireSite "direct value-partial child site" Schema.ExitCellFill "ResponseResult"
-        (projectEntry partialChildDirect "PartialChildExpr" "partialChild" mempty)
-      assert (case snd (preparedEvidence "PartialChildExpr" partialChildDirect) of
-        [site] -> stType (ysAnswer site) == "Bool" && map stType (ysInputs site) == ["Char"]
-        _ -> False) "partial child must retain its concrete result and input types"
+      partialRequestDirect <- runPipelineSelected PreparedStg partialRequestTarget [dir]
+      assertWireSite "direct value-partial request site" Schema.ExitCellFill "Bool"
+        ["Char", "ResponseResult"]
+        (projectEntry partialRequestDirect "PartialRequestExpr" "partialRequest" mempty)
+      assert (case snd (preparedEvidence "PartialRequestExpr" partialRequestDirect) of
+        [site] -> stType (ysAnswer site) == "Bool" && map stType (ysInputs site) == ["Char", "ResponseResult Bool"]
+        _ -> False) "partial request must retain its concrete result and input types"
       -- Open result types reject only when executable projection reaches them.
       polyDirect <- runPipelineSelected PreparedStg polySiteTarget [dir]
       assertProjects "unrelated top beside a polymorphic site helper"
@@ -1378,9 +1381,9 @@ fullMain = do
           "resident cold typed-site evidence differs from direct"
         assert (preparedEvidence "SiteExpr" siteWarm == (siteInventory, directSites))
           "resident warm typed-site evidence differs from direct"
-        partialChildResident <- compileSite PreparedStg mempty GeneralCompile Nothing partialChildTarget [] Nothing
-        assertProjects "resident value-partial child site"
-          (projectEntry partialChildResident "PartialChildExpr" "partialChild" mempty)
+        partialRequestResident <- compileSite PreparedStg mempty GeneralCompile Nothing partialRequestTarget [] Nothing
+        assertProjects "resident value-partial request site"
+          (projectEntry partialRequestResident "PartialRequestExpr" "partialRequest" mempty)
         siteRecovered <- compileSite PreparedStg mempty GeneralCompile Nothing siteTarget [] Nothing
         assert (preparedEvidence "SiteExpr" siteRecovered == (siteInventory, directSites))
           "resident compiler did not recover after a partial recognized site"
