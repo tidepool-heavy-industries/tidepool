@@ -617,7 +617,7 @@ impl ResponsesTransport for RejectFirstRequest {
                 response_id: "before-rejection-tool".into(),
                 items: vec![harness::item::Item(json!({
                     "type":"custom_tool_call", "call_id":"before-rejection-cell",
-                    "name":"haskell", "input":include_str!("m1_rejected_ancestor_cell.hs")
+                    "async":true, "name":"haskell", "input":include_str!("m1_rejected_ancestor_cell.hs")
                 }))],
                 usage: Usage::default(),
             });
