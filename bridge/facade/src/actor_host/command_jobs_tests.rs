@@ -20,7 +20,9 @@ fn require_committed(result: &serde_json::Value) {
         assert_eq!(item["status"], "committed", "{result}");
     }
 }
-pub(super) use super::command_test_support::{backend_request, raw_backend_request};
+pub(super) use super::command_test_support::{
+    backend_request, backend_request_while_live, raw_backend_request,
+};
 
 #[test]
 fn cargo_report_preserves_nonzero_diagnostics_and_typed_parse_errors() {
@@ -1607,7 +1609,7 @@ async fn command_hidden_by_the_response_budget_remains_unobserved() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let policy = campaign.root_installation.policy.clone();
-                let running = tokio::spawn(async move {
+                let mut running = tokio::spawn(async move {
                     dispatch_haskell_script(
             policy.as_ref(),
             "inspectFull (T.replicate 70000 \"x\")\nhidden <- Cmd.run [bash|printf ignored|]",
@@ -1616,7 +1618,9 @@ async fn command_hidden_by_the_response_budget_remains_unobserved() {
                 });
                 let backend = TestCommands::new();
                 backend.finish.send_replace(true);
-                backend_request(campaign).await.supply(Ok(backend.clone()));
+                backend_request_while_live(campaign, &mut running)
+                    .await
+                    .supply(Ok(backend.clone()));
                 let first = running.await.unwrap();
                 assert_eq!(first["status"], "committed");
                 assert!(!first.to_string().contains("stdout ·"));
@@ -1656,21 +1660,14 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
                 let first = invocation();
                 let mut waiter =
                     tokio::spawn(async move { policy.dispatch_json_boxed(first).await });
-                let request = tokio::select! {
-                    result = &mut waiter => panic!(
-                        "command invocation settled before backend admission: {result:?}"
-                    ),
-                    request = campaign.next_deployment(
-                        "initial command backend",
-                        COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-                        |event| match event {
-                            LocalResidentDeployment::CommandBackend(request) => Ok(request),
-                            other => Err(other),
-                        },
-                    ) => request,
-                };
-                assert_eq!(request.purpose, CommandBackendPurpose::Command);
-                request.supply(Ok(backend.clone()));
+                backend_request_while_live(campaign, &mut waiter)
+                    .await
+                    .supply(Ok(backend.clone()));
+                let owner = campaign
+                    .root_installation
+                    .policy
+                    .retained_operation(context.clone())
+                    .expect("the admitted original has its native settlement owner");
                 tokio::time::timeout(Duration::from_secs(30), async {
                     while backend.executions() == 0 {
                         assert!(!waiter.is_finished(), "command call ended before execution");
@@ -1689,29 +1686,41 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
                 backend.finish();
                 let second = TestCommands::completed("second");
                 let suffix = TestCommands::completed("suffix");
-                let policy = campaign.root_installation.policy.clone();
-                let retry = invocation();
-                let mut recovery =
-                    tokio::spawn(async move { policy.dispatch_json_boxed(retry).await });
+                let original_settlement = async {
+                    loop {
+                        match owner.terminal() {
+                            exomonad_actor::HostedOperationTerminal::Pending => {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                            }
+                            exomonad_actor::HostedOperationTerminal::Settled(outcome) => {
+                                break outcome;
+                            }
+                        }
+                    }
+                };
+                tokio::pin!(original_settlement);
                 for backend in [&second, &suffix] {
-                    let request = tokio::select! {
-                        result = &mut recovery => panic!(
-                            "transport retry settled before remaining command admission: {result:?}"
-                        ),
-                        request = campaign.next_deployment(
-                            "remaining command backend",
-                            COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-                            |event| match event {
-                                LocalResidentDeployment::CommandBackend(request) => Ok(request),
-                                other => Err(other),
-                            },
-                        ) => request,
-                    };
-                    assert_eq!(request.purpose, CommandBackendPurpose::Command);
-                    request.supply(Ok(backend.clone()));
+                    backend_request_while_live(campaign, &mut original_settlement)
+                        .await
+                        .supply(Ok(backend.clone()));
                 }
+                let terminal = tokio::time::timeout(
+                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                    &mut original_settlement,
+                )
+                .await
+                .expect("the original settles before transport replay");
+                let exomonad_actor::WorkbenchCancellationOutcome::PublicationSettled {
+                    reply, ..
+                } = terminal
+                else {
+                    panic!("the original lacks confirmed terminal publication: {terminal:?}");
+                };
+                require_committed(
+                    &serde_json::to_value(reply.expect("original native reply")).unwrap(),
+                );
                 let policy = campaign.root_installation.policy.as_ref();
-                let recovered = recovery.await.unwrap().unwrap();
+                let recovered = policy.dispatch_json_boxed(invocation()).await.unwrap();
                 let repeated = policy.dispatch_json_boxed(invocation()).await.unwrap();
                 assert_eq!(
                     recovered, repeated,
@@ -1812,7 +1821,7 @@ async fn command_wait_preserves_the_exact_continuation_until_terminal_completion
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let policy = campaign.root_installation.policy.clone();
-                let running = tokio::spawn(async move {
+                let mut running = tokio::spawn(async move {
                     dispatch_haskell_script(
                         policy.as_ref(),
                         &tidepool_testing::fixture_source(
@@ -1823,7 +1832,9 @@ async fn command_wait_preserves_the_exact_continuation_until_terminal_completion
                 });
                 let backend = TestCommands::new();
                 *backend.stdout.lock() = "first".into();
-                backend_request(campaign).await.supply(Ok(backend.clone()));
+                backend_request_while_live(campaign, &mut running)
+                    .await
+                    .supply(Ok(backend.clone()));
                 tokio::time::timeout(Duration::from_secs(30), async {
                     while backend.executions() == 0 {
                         assert!(
@@ -1848,9 +1859,13 @@ async fn command_wait_preserves_the_exact_continuation_until_terminal_completion
                 );
                 backend.finish();
                 let second = TestCommands::completed("second");
-                backend_request(campaign).await.supply(Ok(second.clone()));
+                backend_request_while_live(campaign, &mut running)
+                    .await
+                    .supply(Ok(second.clone()));
                 let suffix = TestCommands::completed("suffix");
-                backend_request(campaign).await.supply(Ok(suffix.clone()));
+                backend_request_while_live(campaign, &mut running)
+                    .await
+                    .supply(Ok(suffix.clone()));
                 let result = running.await.unwrap();
                 assert_eq!(result["status"], "committed", "{result}");
                 for item in result["items"].as_array().unwrap() {
@@ -1890,10 +1905,7 @@ async fn command_handler_returns_typed_output_failure_without_interactive_recove
     backend
         .output_unavailable
         .store(true, std::sync::atomic::Ordering::Release);
-    let request = tokio::select! {
-        result = &mut running => panic!("handler ended before requesting backend: {result:?}"),
-        request = backend_request(campaign) => request,
-    };
+    let request = backend_request_while_live(campaign, &mut running).await;
     request.supply(Ok(backend.clone()));
     let result = running
         .await
@@ -1917,67 +1929,68 @@ async fn command_handler_returns_typed_output_failure_without_interactive_recove
 #[tokio::test]
 async fn command_wait_values_and_explicit_observations_have_one_display_owner() {
     let campaign = TestCampaign::start().await;
-    campaign.run_scenario(|campaign| Box::pin(async move {
-    let policy = campaign.root_installation.policy.clone();
-    let mut running = tokio::spawn(async move {
-        dispatch_haskell_script(
-            policy.as_ref(),
-            &tidepool_testing::fixture_source(
-                "bridge/facade/src/actor_host/command_presentation.hs",
-            ),
-        )
-        .await
-    });
-    let backend = TestCommands::new();
-    backend.finish.send_replace(true);
-    for _ in 0..3 {
-        let request = tokio::select! {
-            result = &mut running => panic!("command program ended before its expected launches: {result:?}"),
-            request = backend_request(campaign) => request,
-        };
-        request.supply(Ok(backend.clone()));
-    }
-    let result = running.await.unwrap();
-    assert_eq!(result["status"], "committed", "{result}");
-    let text = |index: usize| result["items"][index]["output"].as_str().unwrap();
-    // A bound command statement summarizes instead of presenting output.
-    assert!(text(0).contains("exit 0 · stdout 6 bytes"), "{result}");
-    assert!(!text(0).contains("stdout ·"), "{result}");
-    assert!(!text(1).contains("stdout ·"), "{result}");
-    assert_eq!(text(2).matches("stdout ·").count(), 1, "{result}");
-    // The finished-command status/next block renders exactly once, not once
-    // from an implicit command presentation and again from ordinary value display.
-    assert_eq!(
-        text(2).matches("next: inspect outcome and output").count(),
-        1,
-        "status block renders once: {result}"
-    );
-    assert!(text(3).contains("Right \"result\""), "{result}");
-    assert!(
-        !text(4).contains("stdout ·"),
-        "bound await presented output: {result}"
-    );
-    assert!(
-        !text(4).contains("retained as"),
-        "await minted a presentation binding: {result}"
-    );
-    assert!(text(5).contains("Right \"result\""), "{result}");
-    assert_eq!(
-        text(6).matches("stdout ·").count(),
-        1,
-        "explicit observation presents output exactly once: {result}"
-    );
-    assert_eq!(
-        text(6).matches("next: inspect outcome and output").count(),
-        1,
-        "observation status block renders once: {result}"
-    );
-    assert!(
-        text(7).contains("result"),
-        "explicit page output was consumed: {result}"
-    );
-    assert_eq!(backend.specs.lock().len(), 3);
-})).await;
+    campaign
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let policy = campaign.root_installation.policy.clone();
+                let mut running = tokio::spawn(async move {
+                    dispatch_haskell_script(
+                        policy.as_ref(),
+                        &tidepool_testing::fixture_source(
+                            "bridge/facade/src/actor_host/command_presentation.hs",
+                        ),
+                    )
+                    .await
+                });
+                let backend = TestCommands::new();
+                backend.finish.send_replace(true);
+                for _ in 0..3 {
+                    let request = backend_request_while_live(campaign, &mut running).await;
+                    request.supply(Ok(backend.clone()));
+                }
+                let result = running.await.unwrap();
+                assert_eq!(result["status"], "committed", "{result}");
+                let text = |index: usize| result["items"][index]["output"].as_str().unwrap();
+                // A bound command statement summarizes instead of presenting output.
+                assert!(text(0).contains("exit 0 · stdout 6 bytes"), "{result}");
+                assert!(!text(0).contains("stdout ·"), "{result}");
+                assert!(!text(1).contains("stdout ·"), "{result}");
+                assert_eq!(text(2).matches("stdout ·").count(), 1, "{result}");
+                // The finished-command status/next block renders exactly once, not once
+                // from an implicit command presentation and again from ordinary value display.
+                assert_eq!(
+                    text(2).matches("next: inspect outcome and output").count(),
+                    1,
+                    "status block renders once: {result}"
+                );
+                assert!(text(3).contains("Right \"result\""), "{result}");
+                assert!(
+                    !text(4).contains("stdout ·"),
+                    "bound await presented output: {result}"
+                );
+                assert!(
+                    !text(4).contains("retained as"),
+                    "await minted a presentation binding: {result}"
+                );
+                assert!(text(5).contains("Right \"result\""), "{result}");
+                assert_eq!(
+                    text(6).matches("stdout ·").count(),
+                    1,
+                    "explicit observation presents output exactly once: {result}"
+                );
+                assert_eq!(
+                    text(6).matches("next: inspect outcome and output").count(),
+                    1,
+                    "observation status block renders once: {result}"
+                );
+                assert!(
+                    text(7).contains("result"),
+                    "explicit page output was consumed: {result}"
+                );
+                assert_eq!(backend.specs.lock().len(), 3);
+            })
+        })
+        .await;
 }
 
 #[tokio::test]
@@ -3029,7 +3042,7 @@ async fn command_direct_wait_captures_report_and_releases_subscription() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let policy = campaign.root_installation.policy.clone();
-                let running = tokio::spawn(async move {
+                let mut running = tokio::spawn(async move {
                     dispatch_haskell_script(
                         policy.as_ref(),
                         &tidepool_testing::fixture_source(
@@ -3039,7 +3052,9 @@ async fn command_direct_wait_captures_report_and_releases_subscription() {
                     .await
                 });
                 let backend = TestCommands::new();
-                backend_request(campaign).await.supply(Ok(backend.clone()));
+                backend_request_while_live(campaign, &mut running)
+                    .await
+                    .supply(Ok(backend.clone()));
                 tokio::time::timeout(Duration::from_secs(30), async {
                     while backend.executions() == 0 {
                         assert!(!running.is_finished(), "direct wait ended before execution");

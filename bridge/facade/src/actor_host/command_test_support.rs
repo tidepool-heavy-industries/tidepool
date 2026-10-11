@@ -341,7 +341,11 @@ pub(super) async fn backend_request(
     campaign: &mut super::test_campaign::TestCampaign,
 ) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
     loop {
-        let request = raw_backend_request(campaign).await;
+        let request = raw_backend_request_with_budget(
+            campaign,
+            super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+        )
+        .await;
         match request.purpose {
             exomonad_actor::command_jobs::CommandBackendPurpose::Command => return request,
             exomonad_actor::command_jobs::CommandBackendPurpose::SourceProbe => {
@@ -353,17 +357,78 @@ pub(super) async fn backend_request(
     }
 }
 
+/// Command admission can include cold compilation; observe its actual operation too.
+pub(super) async fn backend_request_while_live<F>(
+    campaign: &mut super::test_campaign::TestCampaign,
+    operation: &mut F,
+) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest>
+where
+    F: std::future::Future + Unpin,
+    F::Output: std::fmt::Debug,
+{
+    command_admission_while_live(operation, backend_request(campaign)).await
+}
+
+async fn command_admission_while_live<F>(
+    operation: &mut F,
+    admission: impl std::future::Future<
+        Output = Arc<exomonad_actor::command_jobs::CommandBackendRequest>,
+    >,
+) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest>
+where
+    F: std::future::Future + Unpin,
+    F::Output: std::fmt::Debug,
+{
+    tokio::select! {
+        biased;
+        result = operation => panic!("command operation settled before backend admission: {result:?}"),
+        request = admission => request,
+    }
+}
+
 pub(super) async fn raw_backend_request(
     campaign: &mut super::test_campaign::TestCampaign,
 ) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
+    raw_backend_request_with_budget(campaign, std::time::Duration::from_secs(30)).await
+}
+
+async fn raw_backend_request_with_budget(
+    campaign: &mut super::test_campaign::TestCampaign,
+    budget: std::time::Duration,
+) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
     campaign
-        .next_deployment(
-            "backend request",
-            std::time::Duration::from_secs(30),
-            |event| match event {
-                exomonad_actor::LocalResidentDeployment::CommandBackend(request) => Ok(request),
-                other => Err(other),
-            },
-        )
+        .next_deployment("backend request", budget, |event| match event {
+            exomonad_actor::LocalResidentDeployment::CommandBackend(request) => Ok(request),
+            other => Err(other),
+        })
         .await
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::command_admission_while_live;
+
+    #[tokio::test]
+    async fn completed_or_failed_dispatch_refuses_pending_backend_admission() {
+        for result in [Ok(()), Err("dispatch failure")] {
+            let task = tokio::spawn(async move {
+                let mut operation = std::future::ready(result);
+                command_admission_while_live(&mut operation, std::future::pending()).await;
+            });
+            let failure = task.await.unwrap_err();
+            assert!(failure.is_panic());
+            let message = failure.into_panic().downcast::<String>().unwrap();
+            assert!(message.contains(&format!("{result:?}")), "{message}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_dispatch_refuses_pending_backend_admission() {
+        let mut operation = tokio::spawn(std::future::pending::<()>());
+        operation.abort();
+        let task = tokio::spawn(async move {
+            command_admission_while_live(&mut operation, std::future::pending()).await;
+        });
+        assert!(task.await.unwrap_err().is_panic());
+    }
 }
