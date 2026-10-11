@@ -191,7 +191,7 @@ async fn next_round_with_state(
                     let graph = forest.inspect_host_graph();
                     if let Some(child) = graph.iter().find(|node| {
                         node.actor != root
-                            && node.terminal.as_ref().is_some_and(|terminal| {
+                            && node.terminal().is_some_and(|terminal| {
                                 terminal.kind != exomonad_actor::ActorExitKind::Completed
                             })
                     }) {
@@ -274,7 +274,7 @@ async fn prove_child_survives(
         .filter(|node| node.model_actor && node.creator == Some(root))
         .collect::<Vec<_>>();
     assert_eq!(children.len(), 1, "unexpected child admissions: {graph:?}");
-    assert!(children[0].terminal.is_none(), "child retired: {graph:?}");
+    assert!(children[0].terminal().is_none(), "child retired: {graph:?}");
     let raw = raw_request_items(fixture, &child.request);
     assert_before_call_prefix(&child.request, &raw, parent_call);
     assert_eq!(child.request.model, "test-model");
@@ -772,7 +772,7 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
         .collect::<Vec<_>>();
     assert_eq!(children.len(), 1, "{graph:?}");
     let child = children[0];
-    assert!(child.terminal.is_none());
+    assert!(child.terminal().is_none());
     assert_eq!(child.workbench, exomonad_actor::ActorWorkbenchPosture::Idle);
     assert!(child.active_requests.is_empty());
     assert!(child.queued_requests.is_empty());

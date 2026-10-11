@@ -350,7 +350,7 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
                         .into_iter()
                         .find(|node| node.label == "worker")
                     {
-                        assert!(child.terminal.is_none(), "{child:?}");
+                        assert!(child.terminal().is_none(), "{child:?}");
                         assert_eq!(child.creator, Some(root_id));
                         assert_eq!(child.supervisor_parent, Some(root_id));
                         assert_eq!(child.context_parent, None);

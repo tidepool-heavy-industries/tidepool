@@ -1005,7 +1005,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-agents"] {
                     let record = graph.iter().find(|node| node.label == label).unwrap();
                     assert!(!record.model_actor);
-                    assert!(record.terminal.is_none());
+                    assert!(record.terminal().is_none());
                     assert_eq!(record.creator, Some(actor));
                     assert_eq!(
                         campaign.forest.actor_session(record.actor),
@@ -1068,7 +1068,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         assert_eq!(local.creator, Some(actor));
                         assert_eq!(local.supervisor_parent, Some(actor));
                         assert!(!local.model_actor);
-                        assert!(local.terminal.is_none());
+                        assert!(local.terminal().is_none());
                     }
                     assert!(transport.children.lock().is_empty());
                     finish_root(&transport, &campaign).await;
@@ -1199,7 +1199,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 let graph = campaign.forest.inspect_host_graph();
                 let gate = graph.iter().find(|node| node.label == "embedded-shutdown-park-gate")
                     .expect("the real owned gate actor is installed");
-                assert!(gate.terminal.is_none(), "gate must remain live before host teardown: {gate:?}");
+                assert!(gate.terminal().is_none(), "gate must remain live before host teardown: {gate:?}");
                 assert!(!gate.model_actor, "the gate is a record actor, not a provider branch");
                 assert_eq!(gate.creator, Some(actor), "the root owns the parked gate");
                 eprintln!("[captured-engine] exact sibling parks on owned actor gate {:?}", gate.actor);
@@ -1337,7 +1337,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         .iter()
                         .find(|node| node.actor == child.identity())
                         .expect("original captured child remains installed");
-                    assert!(node.terminal.is_none());
+                    assert!(node.terminal().is_none());
                     assert_eq!(node.creator, Some(actor));
                     assert_eq!(node.workbench, exomonad_actor::ActorWorkbenchPosture::Idle);
                     assert_eq!(
@@ -1433,7 +1433,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         .iter()
                         .find(|node| node.actor == child.identity())
                         .expect("original child retains its terminal observation");
-                    assert!(node.terminal.is_some());
+                    assert!(node.terminal().is_some());
                     assert!(node.active_requests.is_empty(), "{node:?}");
                     assert!(node.queued_requests.is_empty(), "{node:?}");
                 }
@@ -1442,7 +1442,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         .iter()
                         .find(|node| node.label == label)
                         .expect("persistent record service remains installed")
-                        .terminal
+                        .terminal()
                         .is_none());
                 }
                 eprintln!(
@@ -1776,7 +1776,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         .provider_turn
                         .as_ref()
                         .is_some_and(|turn| turn.state == exomonad_model::ProviderTurnState::Active));
-                    assert!(node.terminal.is_none());
+                    assert!(node.terminal().is_none());
                 }
                 let stopped = root_tool_call(
                     &campaign,
@@ -1908,7 +1908,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
             "the owned gate retains its exact terminal cleanup observation"
         );
         assert!(graph.iter().all(|node| {
-            node.terminal.is_some()
+            node.terminal().is_some()
                 && node.active_requests.is_empty()
                 && node.queued_requests.is_empty()
         }));

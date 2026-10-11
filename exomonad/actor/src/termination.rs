@@ -111,7 +111,7 @@ impl ActorTerminal {
 }
 
 /// Runtime lifecycle facts; `Live` does not claim application readiness.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub enum ActorLifecycle {
     Live,
     Paused(String),
@@ -903,6 +903,12 @@ impl RetainedActorExit {
         }
     }
 
+    /// Observe the lifecycle without waiting for an actor turn or consuming an exit.
+    #[must_use]
+    pub fn lifecycle(&self) -> ActorLifecycle {
+        self.state.lifecycle.lock().current.clone()
+    }
+
     /// Return the immutable result without consuming it.
     #[must_use]
     pub fn get(&self) -> Option<ActorTerminal> {
@@ -1622,9 +1628,14 @@ mod tests {
     #[test]
     fn lifecycle_retains_current_and_delivers_each_transition_until_detached() {
         let retained = RetainedActorExit::new();
+        assert_eq!(retained.lifecycle(), ActorLifecycle::Live);
         let (send, receive) = std::sync::mpsc::channel();
         let connection = retained.connect_lifecycle(move |event| send.send(event).is_ok());
         retained.publish_paused("failed input retained".into());
+        assert_eq!(
+            retained.lifecycle(),
+            ActorLifecycle::Paused("failed input retained".into())
+        );
         assert_eq!(
             receive.try_iter().collect::<Vec<_>>(),
             vec![
@@ -1646,6 +1657,10 @@ mod tests {
             ]
         );
         retained.publish_paused("too late".into());
+        assert_eq!(
+            retained.lifecycle(),
+            ActorLifecycle::Exited(completed("done"))
+        );
         assert_eq!(retained.get(), Some(completed("done")));
         assert!(late_receive.try_iter().next().is_none());
         let (final_send, final_receive) = std::sync::mpsc::channel();

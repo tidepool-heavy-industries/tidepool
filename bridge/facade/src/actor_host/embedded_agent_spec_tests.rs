@@ -82,7 +82,7 @@ async fn supplied_children(context: &HostedActorContext) -> Vec<ObservedInstalla
                 .expect("committed spawn has an exact actor record");
             assert_eq!(node.creator, Some(context.actor.identity()));
             assert_eq!(node.context_parent, None, "FreshCtx selects fresh context");
-            assert!(node.terminal.is_none(), "{node:?}");
+            assert!(node.terminal().is_none(), "{node:?}");
             assert!(node.active_requests.is_empty(), "idle spawn: {node:?}");
             assert!(node.queued_requests.is_empty(), "idle spawn: {node:?}");
             let installation = context.observer.installation(node.actor).await;

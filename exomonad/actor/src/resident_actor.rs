@@ -12912,7 +12912,8 @@ pub struct ActorGraphNode {
     pub creator: Option<ActorRef>,
     pub supervisor_parent: Option<ActorRef>,
     pub context_parent: Option<ActorRef>,
-    pub terminal: Option<ActorTerminal>,
+    /// None means neither a retained lifecycle owner nor a recorded exit was available.
+    pub lifecycle: Option<crate::ActorLifecycle>,
     pub workbench: crate::ActorWorkbenchPosture,
     pub provider_thread: Option<String>,
     pub provider_turn: Option<exomonad_model::ProviderTurnObservation>,
@@ -12920,6 +12921,16 @@ pub struct ActorGraphNode {
     pub bound_worktree: Option<String>,
     pub active_requests: Vec<crate::RequestId>,
     pub queued_requests: Vec<crate::RequestId>,
+}
+
+impl ActorGraphNode {
+    #[must_use]
+    pub fn terminal(&self) -> Option<&ActorTerminal> {
+        match self.lifecycle.as_ref() {
+            Some(crate::ActorLifecycle::Exited(terminal)) => Some(terminal),
+            _ => None,
+        }
+    }
 }
 
 /// Host-owned routing and resident execution domain. Every root uses the same
@@ -13623,11 +13634,15 @@ where
                     creator: record.descriptor.creator(),
                     supervisor_parent: record.descriptor.supervisor_parent(),
                     context_parent: record.descriptor.context_parent(),
-                    terminal: record.terminal.clone().or_else(|| {
-                        self.directory
-                            .resolve(*actor)
-                            .and_then(|a| a.terminal().get())
-                    }),
+                    lifecycle: record
+                        .terminal
+                        .clone()
+                        .map(crate::ActorLifecycle::Exited)
+                        .or_else(|| {
+                            self.directory
+                                .resolve(*actor)
+                                .map(|a| a.terminal().lifecycle())
+                        }),
                     workbench: runtime.workbench_posture,
                     provider_thread: runtime.provider_thread,
                     provider_turn: runtime.provider_turn,

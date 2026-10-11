@@ -150,10 +150,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use exomonad_actor::{
-    ActorDescriptor, ActorExitKind, ActorPlacement, ActorRef, ActorTerminal,
-    ActorWorkbenchSource, ExternalApplicationFailure, ExternalApplicationFailureClass,
-    ExternalFailureDisposition, LocalActorRef, LocalResidentDeployment, LocalResidentInstallation,
-    ResidentActorRoot, ResidentForest, WorkspaceAdmission, WorkspaceAdmissionError,
+    ActorDescriptor, ActorExitKind, ActorPlacement, ActorRef, ActorTerminal, ActorWorkbenchSource,
+    ExternalApplicationFailure, ExternalApplicationFailureClass, ExternalFailureDisposition,
+    LocalActorRef, LocalResidentDeployment, LocalResidentInstallation, ResidentActorRoot,
+    ResidentForest, WorkspaceAdmission, WorkspaceAdmissionError,
 };
 
 use exomonad_actor::ForkEffort;
@@ -1165,7 +1165,7 @@ fn prepare_embedded_browser_command(
     let is_live = nodes
         .iter()
         .find(|node| node.actor == actor)
-        .is_some_and(|node| node.terminal.is_none())
+        .is_some_and(|node| node.terminal().is_none())
         && live.contains(&actor);
     if !is_live {
         return refuse("target actor is no longer live".into());
