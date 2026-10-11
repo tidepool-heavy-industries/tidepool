@@ -255,7 +255,9 @@ pub struct StructuredDiagnostic {
 pub struct RenderedDiagnostics {
     /// Byte-for-byte what [`render_diagnostics`] returns.
     pub text: String,
-    /// One entry per block present in `text`, in the same order. Diagnostics
+    /// One entry per surviving original diagnostic, in presentation order.
+    /// Repeated warning text is compacted in `text`, while every warning
+    /// occurrence remains here. Diagnostics
     /// the render policy dropped (foreign gen warnings, the wrapper-fallout
     /// partition's suppressed tail) are absent here exactly as they are
     /// absent from the text; the fallout footer line, being a count and not a
@@ -264,11 +266,14 @@ pub struct RenderedDiagnostics {
 }
 
 /// Render surviving diagnostics (after the fallout partition + foreign-gen
-/// warning drop) into human-facing text: one block per diagnostic (a
+/// warning drop) into human-facing text: one block per error or distinct
+/// warning (a
 /// `{label}:{line}:{col}[-{end_col}]: {severity}:` header, the message body,
 /// and a gutter source excerpt when the span is single-line, the line exists
 /// in `opts.source`, and that line isn't itself wrapper-template scaffold),
-/// joined by a blank line, with a wrapper-fallout footer appended when the
+/// joined by a blank line. Repeated warnings include their occurrence count;
+/// structured diagnostics retain every surviving occurrence. A wrapper-fallout
+/// footer is appended when the
 /// `user_lines` partition dropped anything — UNLESS every surviving
 /// diagnostic was reported only on generated wrapper lines, in which case
 /// this renders one synthetic, plain-language framing line PLUS the cleaned underlying
@@ -285,8 +290,8 @@ pub fn render_diagnostics(diags: &[ExtractDiag], opts: &RenderOpts<'_>) -> Strin
 ///
 /// The text is produced by the identical code path — [`render_diagnostics`]
 /// is this function's `.text` — so the rendered form cannot drift from the
-/// structured one, and adding structure cannot change a single byte of what
-/// already-existing readers see.
+/// structured one. Ordering and warning grouping are presentation only;
+/// the compiler's diagnostic collection is never mutated.
 #[must_use]
 pub fn render_diagnostics_structured(
     diags: &[ExtractDiag],
@@ -300,7 +305,7 @@ pub fn render_diagnostics_structured(
         .collect();
 
     // User-lines fallout partition.
-    let (kept, fallout): (Vec<&ExtractDiag>, Vec<&ExtractDiag>) = match opts.user_lines {
+    let (mut kept, mut fallout): (Vec<&ExtractDiag>, Vec<&ExtractDiag>) = match opts.user_lines {
         Some(ranges) => {
             let mut kept = Vec::new();
             let mut fallout = Vec::new();
@@ -315,22 +320,32 @@ pub fn render_diagnostics_structured(
         }
         None => (after_gen_drop.clone(), Vec::new()),
     };
+    let priority = |d: &&ExtractDiag| {
+        (
+            d.severity != DiagnosticSeverity::Error,
+            !d.span
+                .as_ref()
+                .and_then(|span| display_coord(span, opts))
+                .is_some_and(|coord| coord.in_user_region),
+        )
+    };
+    kept.sort_by_key(priority);
+    fallout.sort_by_key(priority);
 
     // Every surviving diagnostic points at generated wrapper text. That span
     // does not identify the root cause, so describe only the known location
     // and retain the underlying diagnostics for diagnosis.
     if kept.is_empty() && !fallout.is_empty() {
         let mut out = format!(
-            "GHC reported {} error(s) only on generated workbench wrapper lines. Those \
+            "GHC reported {} only on generated workbench wrapper lines. Those \
              locations do not identify whether the root cause is in the authored input or \
              generated framing. Underlying GHC diagnostic(s):",
-            fallout.len()
+            severity_counts(&fallout)
         );
-        let mut structured = Vec::with_capacity(fallout.len());
-        for d in &fallout {
+        let (blocks, structured) = diagnostic_blocks(&fallout, opts, true);
+        for block in blocks {
             out.push_str("\n\n");
-            out.push_str(&render_one_raw(d, opts));
-            structured.push(structure_one_raw(d, opts));
+            out.push_str(&block);
         }
         return RenderedDiagnostics {
             text: out,
@@ -338,22 +353,69 @@ pub fn render_diagnostics_structured(
         };
     }
 
-    let mut blocks: Vec<String> = Vec::with_capacity(kept.len() + 1);
-    let mut structured: Vec<StructuredDiagnostic> = Vec::with_capacity(kept.len());
-    for d in &kept {
-        blocks.push(render_one(d, opts));
-        structured.push(structure_one(d, opts));
-    }
+    let (mut blocks, structured) = diagnostic_blocks(&kept, opts, false);
     if !fallout.is_empty() {
         blocks.push(format!(
-            "({} further error(s) reported on generated workbench wrapper lines; locations \
-             suppressed)",
-            fallout.len()
+            "(Further diagnostics on generated workbench wrapper lines: {}; locations suppressed)",
+            severity_counts(&fallout)
         ));
     }
     RenderedDiagnostics {
         text: blocks.join("\n\n"),
         diagnostics: structured,
+    }
+}
+
+fn diagnostic_blocks(
+    diags: &[&ExtractDiag],
+    opts: &RenderOpts<'_>,
+    raw: bool,
+) -> (Vec<String>, Vec<StructuredDiagnostic>) {
+    let mut blocks = Vec::new();
+    let mut structured = Vec::new();
+    let mut warning_blocks: Vec<(StructuredDiagnostic, usize, usize)> = Vec::new();
+    for d in diags {
+        let diagnostic = if raw {
+            structure_one_raw(d, opts)
+        } else {
+            structure_one(d, opts)
+        };
+        if diagnostic.severity == DiagnosticLevel::Warning {
+            if let Some((_, _, count)) = warning_blocks
+                .iter_mut()
+                .find(|(previous, _, _)| previous == &diagnostic)
+            {
+                *count += 1;
+                structured.push(diagnostic);
+                continue;
+            }
+            warning_blocks.push((diagnostic.clone(), blocks.len(), 1));
+        }
+        blocks.push(if raw {
+            render_one_raw(d, opts)
+        } else {
+            render_one(d, opts)
+        });
+        structured.push(diagnostic);
+    }
+    for (_, index, count) in warning_blocks {
+        if count > 1 {
+            blocks[index].push_str(&format!("\n(repeated {count} times)"));
+        }
+    }
+    (blocks, structured)
+}
+
+fn severity_counts(diags: &[&ExtractDiag]) -> String {
+    let errors = diags
+        .iter()
+        .filter(|d| d.severity == DiagnosticSeverity::Error)
+        .count();
+    let warnings = diags.len() - errors;
+    match (errors, warnings) {
+        (_, 0) => format!("{errors} error(s)"),
+        (0, _) => format!("{warnings} warning(s)"),
+        _ => format!("{errors} error(s), {warnings} warning(s)"),
     }
 }
 
@@ -585,13 +647,6 @@ fn render_one(d: &ExtractDiag, opts: &RenderOpts<'_>) -> String {
     let scrubbed_message = drop_scaffold_relevant_binds(&d.message, opts);
 
     let mut out = header;
-    out.push('\n');
-    for line in scrubbed_message.lines() {
-        out.push_str("    ");
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.pop(); // drop trailing newline (blocks are joined with "\n\n")
 
     // Gutter/caret excerpt: only for a single-line span, indexed by the
     // SOURCE's own (raw, un-remapped) line number — this excerpt reads
@@ -602,26 +657,35 @@ fn render_one(d: &ExtractDiag, opts: &RenderOpts<'_>) -> String {
     // real content is generated template text — never shown as if it were
     // the user's own code).
     if let Some(span) = &d.span {
-        if span.start_line == span.end_line {
-            if let Some(src_line) = opts.source.lines().nth(span.start_line as usize - 1) {
-                if !looks_like_wrapper_scaffold(src_line) {
-                    let disp_line = coord.as_ref().map_or(span.start_line as usize, |c| c.line);
-                    let gutter = format!("{disp_line}");
-                    out.push_str(&format!("\n{:>width$} |\n", "", width = gutter.len()));
-                    out.push_str(&format!("{gutter} | {src_line}\n"));
-                    let start = span.start_col.saturating_sub(1) as usize;
-                    let width = (span.end_col.saturating_sub(span.start_col)).max(1) as usize;
-                    out.push_str(&format!(
-                        "{:>gwidth$} | {:>start$}{}",
-                        "",
-                        "",
-                        "^".repeat(width),
-                        gwidth = gutter.len(),
-                        start = start
-                    ));
+        if coord.as_ref().is_some_and(|coord| coord.in_user_region) {
+            if span.start_line == span.end_line {
+                if let Some(src_line) = (span.start_line as usize)
+                    .checked_sub(1)
+                    .and_then(|line| opts.source.lines().nth(line))
+                {
+                    if !looks_like_wrapper_scaffold(src_line) {
+                        let disp_line = coord.as_ref().map_or(span.start_line as usize, |c| c.line);
+                        let gutter = format!("{disp_line}");
+                        out.push_str(&format!("\n{:>width$} |\n", "", width = gutter.len()));
+                        out.push_str(&format!("{gutter} | {src_line}\n"));
+                        let start = span.start_col.saturating_sub(1) as usize;
+                        let width = (span.end_col.saturating_sub(span.start_col)).max(1) as usize;
+                        out.push_str(&format!(
+                            "{:>gwidth$} | {:>start$}{}",
+                            "",
+                            "",
+                            "^".repeat(width),
+                            gwidth = gutter.len(),
+                            start = start
+                        ));
+                    }
                 }
             }
         }
+    }
+    for line in scrubbed_message.lines() {
+        out.push_str("\n    ");
+        out.push_str(line);
     }
     out
 }
@@ -1054,7 +1118,7 @@ mod tests {
         assert!(!got.contains("Overlapping instances"), "{got}");
         assert!(
             got.contains(
-                "1 further error(s) reported on generated workbench wrapper lines; locations suppressed"
+                "Further diagnostics on generated workbench wrapper lines: 1 error(s); locations suppressed"
             ),
             "{got}"
         );
@@ -1597,9 +1661,9 @@ mod tests {
         assert_eq!(rendered.diagnostics[0].severity, DiagnosticLevel::Error);
         assert_eq!(rendered.diagnostics[0].message, "No instance for HasField");
 
-        assert_eq!(header_of(blocks[1]), "Expr.hs:4:1-9: warning:");
+        assert_eq!(header_of(blocks[2]), "Expr.hs:4:1-9: warning:");
         assert_eq!(
-            rendered.diagnostics[1].location,
+            rendered.diagnostics[2].location,
             DiagnosticLocation::Foreign {
                 file: "Expr.hs".into(),
                 start_line: 4,
@@ -1608,11 +1672,11 @@ mod tests {
                 end_col: 9,
             }
         );
-        assert_eq!(rendered.diagnostics[1].severity, DiagnosticLevel::Warning);
+        assert_eq!(rendered.diagnostics[2].severity, DiagnosticLevel::Warning);
 
-        assert_eq!(header_of(blocks[2]), "compiler/GHC/Tc.hs:77:3: error:");
+        assert_eq!(header_of(blocks[1]), "compiler/GHC/Tc.hs:77:3: error:");
         assert_eq!(
-            rendered.diagnostics[2].location,
+            rendered.diagnostics[1].location,
             DiagnosticLocation::Foreign {
                 file: "compiler/GHC/Tc.hs".into(),
                 start_line: 77,
@@ -1657,10 +1721,8 @@ mod tests {
         assert_eq!(header_of(&rendered.text), "error:");
     }
 
-    /// Requirement: adding structure changes not one byte of the rendered
-    /// text. Held by construction (`render_diagnostics` IS
-    /// `render_diagnostics_structured(..).text`) and by a literal golden for
-    /// a case that predates the change.
+    /// The plain and structured presenters share the same text. Held by construction (`render_diagnostics` IS
+    /// `render_diagnostics_structured(..).text`) and by a literal source-first golden.
     #[test]
     fn rendered_text_is_byte_identical_beside_the_structure() {
         // 34 filler lines so the diagnostic's raw line 35 exists in the
@@ -1693,7 +1755,7 @@ mod tests {
         assert_eq!(text, structured.text);
         assert_eq!(
             text,
-            "<item>:2:6-12: error:\n    No instance for HasField\n  |\n2 | ageDays now c = _\n  |        ^^^^^^"
+            "<item>:2:6-12: error:\n  |\n2 | ageDays now c = _\n  |        ^^^^^^\n    No instance for HasField"
         );
         // ...and the same coordinates the text just showed, as data.
         assert_eq!(
@@ -1706,6 +1768,104 @@ mod tests {
                 end_col: 12,
             }
         );
+    }
+
+    #[test]
+    fn retained_pure_command_projection_shows_source_before_effect_row() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "fixtures/pure_command_projection_diagnostics.json"
+        ))
+        .unwrap();
+        let diagnostics: Vec<ExtractDiag> =
+            serde_json::from_value(fixture["diagnostics"].clone()).unwrap();
+        let source = fixture["cell"].as_str().unwrap();
+        let rendered = render_diagnostics_structured(
+            &diagnostics,
+            &RenderOpts {
+                anchor: "<cell>",
+                label: "<cell>",
+                user_lines: None,
+                line_offset: 0,
+                col_indent: 0,
+                drop_foreign_gen_warnings_except: None,
+                source,
+            },
+        );
+        assert!(
+            rendered
+                .text
+                .find("stdoutAssessment <- Cmd.stdout failedProbe")
+                .unwrap()
+                < rendered
+                    .text
+                    .find("Couldn't match expected type: Eff")
+                    .unwrap()
+        );
+        assert_eq!(rendered.diagnostics.len(), 1);
+        assert_eq!(rendered.diagnostics[0].message, diagnostics[0].message);
+        assert_eq!(rendered.diagnostics[0].severity, DiagnosticLevel::Error);
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn presentation_preserves_errors_and_warning_occurrences(
+            chars in proptest::collection::vec(proptest::char::any(), 0..32),
+            copies in 2usize..8,
+            reverse in proptest::bool::ANY,
+        ) {
+            let message: String = chars.into_iter().filter(|c| !matches!(c, '\n' | '\r')).collect();
+            let authored = diag("Expr.hs", 1, 1, 1, 2, DiagnosticSeverity::Error, &format!("authored {message}"));
+            let foreign = diag("Foreign.hs", 1, 1, 1, 2, DiagnosticSeverity::Error, &format!("foreign {message}"));
+            let warning = diag("Scaffold.hs", 1, 1, 1, 2, DiagnosticSeverity::Warning, "scaffold warning λ");
+            let mut input = vec![warning.clone(); copies];
+            input.extend([foreign, authored.clone(), authored]);
+            if reverse { input.reverse(); }
+            let original = input.clone();
+            let rendered = render_diagnostics_structured(&input, &RenderOpts {
+                anchor: "Expr.hs", label: "<cell>", user_lines: None,
+                line_offset: 0, col_indent: 0,
+                drop_foreign_gen_warnings_except: None, source: "λ = \"é\"",
+            });
+            proptest::prop_assert_eq!(input, original);
+            proptest::prop_assert_eq!(rendered.diagnostics.len(), copies + 3);
+            proptest::prop_assert_eq!(rendered.diagnostics.iter().filter(|d| d.severity == DiagnosticLevel::Error).count(), 3);
+            proptest::prop_assert!(matches!(rendered.diagnostics[0].location, DiagnosticLocation::Authored { .. }), "authored error must lead");
+            proptest::prop_assert_eq!(rendered.text.matches("scaffold warning λ").count(), 1);
+            proptest::prop_assert!(rendered.text.contains(&format!("repeated {copies} times")), "warning count must survive");
+            proptest::prop_assert!(rendered.diagnostics.windows(2).all(|pair|
+                pair[0].severity == DiagnosticLevel::Error || pair[1].severity == DiagnosticLevel::Warning));
+            proptest::prop_assert_eq!(rendered.diagnostics.iter().filter(|d| d.message == format!("authored {message}")).count(), 2);
+            let foreign_block = rendered.text.split("Foreign.hs").nth(1).unwrap().split("\n\n").next().unwrap();
+            proptest::prop_assert!(!foreign_block.contains("λ = \"é\""));
+        }
+    }
+
+    #[test]
+    fn generated_warning_counts_do_not_claim_errors() {
+        let warning = diag(
+            "Expr.hs",
+            1,
+            1,
+            1,
+            2,
+            DiagnosticSeverity::Warning,
+            "warning λ",
+        );
+        let rendered = render_diagnostics_structured(
+            &[warning.clone(), warning],
+            &RenderOpts {
+                anchor: "Expr.hs",
+                label: "<cell>",
+                user_lines: Some(&[(2, 2)]),
+                line_offset: 0,
+                col_indent: 0,
+                drop_foreign_gen_warnings_except: None,
+                source: "generated\nauthored",
+            },
+        );
+        assert!(rendered.text.starts_with("GHC reported 2 warning(s) only"));
+        assert_eq!(rendered.text.matches("warning λ").count(), 1);
+        assert_eq!(rendered.diagnostics.len(), 2);
     }
 
     /// The structured list mirrors the blocks actually rendered: a dropped
@@ -1755,7 +1915,7 @@ mod tests {
         );
         assert!(rendered.text.contains("kept in range"), "{}", rendered.text);
         assert!(
-            rendered.text.contains("1 further error(s)"),
+            rendered.text.contains("wrapper lines: 1 error(s)"),
             "{}",
             rendered.text
         );
