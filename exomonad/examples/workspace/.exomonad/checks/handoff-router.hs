@@ -9,4 +9,4 @@ parent <- R.start parentDefinition
 let forwardFinal = (WorkSink $ \_ event -> case event of
       WorkFinished _ _ -> do { R.send (componentFinished (R.client parent)) event; pure noWorkDelivery }
       _ -> pure noWorkDelivery) :: WorkSink Delivery
-Right handoff <- followWork [("left", left, leftProgress), ("right", right, rightProgress)] forwardFinal
+Right handoff <- traverse R.start (workDefinition [("left", R.settlement left, R.progress leftProgress), ("right", R.settlement right, R.progress rightProgress)] forwardFinal)

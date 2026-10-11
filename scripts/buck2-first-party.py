@@ -1295,9 +1295,20 @@ def facade_test_cases(binary):
         ("facade_selected_source_test", [
             "actor_host::tests::actor_sources_capture_current_then_deliver_every_publication_and_settlement",
         ], host_env, host_paths, host_resources, True, False, 600),
+        ("facade_terminal_transfer_test", [
+            "actor_host::terminal_transfer_tests::request_local_reply_helper_settles_exact_request_and_keeps_actor_live",
+        ], host_env, host_paths, host_resources, True, False, 600),
+        ("facade_selected_parent_spawn_test", [
+            "actor_host::terminal_transfer_tests::selected_parent_launches_exact_subset_and_refuses_wider_or_duplicate_rows",
+        ], host_env, host_paths, host_resources, True, False, 600),
         ("facade_selected_routing_tests", ["actor_host::documentation_tests::" + name for name in (
+            "recipe_workspace_definitions_compile_before_resident_execution",
             "work_actor_consumes_later_progress_without_rearming",
             "attention_actor_recipe_retains_independent_sources_through_closure",
+            "work_actor_projects_mixed_sources_without_changing_terminal_evidence",
+            "work_actor_refuses_invalid_configuration_before_creating_a_collector",
+            "work_router_queries_receipts_as_the_issuing_actor",
+            "assumption_actor_stages_a_concrete_progress_source_and_retains_decisions",
         )], host_env, host_paths, host_resources, True, False, 600),
         ("facade_exact_actor_effects_tests", ["actor_host::tests::" + name for name in (
             "haskell_mailbox_preserves_state_and_opaque_replies_across_calls",

@@ -2,10 +2,7 @@ use std::borrow::Cow;
 
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
-use crate::{
-    ActorCapabilities, ActorEffectProfile, ActorPlacement, ActorRef, ActorSessionContext,
-    ActorSourceImports,
-};
+use crate::{ActorCapabilities, ActorPlacement, ActorRef, ActorSessionContext, ActorSourceImports};
 
 /// The host or lineage owner chooses persistence independently of actor names
 /// and paths. Durable actors require an initialized public surface before use.
@@ -20,7 +17,6 @@ pub enum ActorPersistencePolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorDescriptor {
     label: Option<String>,
-    profile: ActorEffectProfile,
     effect_policy: EffectRunPolicy,
     live_payload: LivePayloadPolicy,
     placement: ActorPlacement,
@@ -50,7 +46,6 @@ impl ActorDescriptor {
     pub(crate) fn new_optional(label: Option<String>, placement: ActorPlacement) -> Self {
         Self {
             label,
-            profile: ActorEffectProfile::ReadWrite,
             effect_policy: EffectRunPolicy::HandleOrSuspend,
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             placement,
@@ -172,11 +167,6 @@ impl ActorDescriptor {
     }
 
     #[must_use]
-    pub fn profile(&self) -> ActorEffectProfile {
-        self.profile
-    }
-
-    #[must_use]
     pub fn capabilities(&self) -> &ActorCapabilities {
         &self.capabilities
     }
@@ -242,12 +232,6 @@ impl ActorDescriptor {
     #[must_use]
     pub fn with_actor_path(mut self, path: tidepool_repr::ActorPath) -> Self {
         self.actor_path = Some(path);
-        self
-    }
-
-    #[must_use]
-    pub fn with_profile(mut self, profile: ActorEffectProfile) -> Self {
-        self.profile = profile;
         self
     }
 

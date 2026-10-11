@@ -45,7 +45,6 @@ pub(crate) mod lookup_tool;
 mod mailbox;
 mod mount;
 mod notification;
-mod profile;
 mod prompt_catalog;
 pub(crate) mod reload_helpers_tool;
 pub(crate) mod reload_spec_tool;
@@ -131,7 +130,6 @@ pub use mount::{
 pub use notification::{
     NotificationError, NotificationPoll, NotificationReceipt, NotificationSend, NotificationState,
 };
-pub use profile::ActorEffectProfile;
 pub use prompt_catalog::hosted_prompt_fingerprint as exomonad_hosted_prompt_fingerprint;
 pub use recovery::{
     ActorRecoveryJournal, ApplicationConversation, DurableActorAdmission, DurableActorApplication,

@@ -16,8 +16,9 @@ claims; retain counted command receipts, review evidence, and integration checks
 separately. Stop for the owner when evidence is unknown, scope changes, or an
 admission fails.
 
-When several requests need ongoing progress routing, an authored `followWork`
-collector may observe the already-created request and progress handles. Its
+When several requests need ongoing progress routing, issue concrete
+`R.settlement` and `R.progress` sources, pass them to `workDefinition`, and start
+the validated specification with `R.start`. Its
 source IDs are ordinary domain labels. Read retained collector state before
 acting; `acknowledgeWork` records inspection, not incorporation. Finish the
 collector when done, then handle agent cleanup separately.

@@ -4944,7 +4944,7 @@ where
         let resolved_owner = self.resolve_resource_owner(context, &effect_owner, child.lifetime);
         let invocation_work = resolved_owner.as_ref().ok().cloned().flatten();
         let mut retained_spawn_admission = None;
-        let admission = (|| {
+        let admission: Result<_, ResidentActorWorkbenchError> = (|| {
             placement_registration.map_err(ResidentActorWorkbenchError::ActorProtocol)?;
             let invocation_work = resolved_owner?;
             let crate::start::CapturedChildLaunch {
@@ -4996,17 +4996,6 @@ where
                     .and_then(|lease| lease.issuer_effort);
                 descriptor = descriptor
                     .with_fork_effort(checkpoint_effort.or(self.descriptor.fork_effort()));
-            }
-            if !self
-                .descriptor
-                .profile()
-                .permits_child(descriptor.profile())
-            {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                    "actor profile {:?} cannot start child profile {:?}",
-                    self.descriptor.profile(),
-                    descriptor.profile()
-                )));
             }
             let capabilities = self
                 .descriptor

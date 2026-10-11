@@ -19,7 +19,7 @@ module Project.DecisionAnswers
   , AnswerFailure (..), DecisionChoice, startDecisionAnswers, startDecisionAnswersWith
   , semanticDecisionAnswer, withDecisionAnswers
   , prepareDecisionAnswer, interpretDecisionAnswer, DecisionAnswerPacket
-  , followAnsweredWork
+  , decisionAnswersDefinitionWith, answeredWorkDefinition
   ) where
 
 import Control.Monad.Freer (Eff, Member, raise)
@@ -149,17 +149,19 @@ startDecisionAnswers = startDecisionAnswersWith semanticDecisionAnswer
 startDecisionAnswersWith :: Member Actor effects
   => DecisionChoice -> AgentRef -> [AnswerTarget]
   -> Eff effects (Either AnswerFailure (ActorHandle DecisionAnswers))
-startDecisionAnswersWith choose owner targets
-  | null targets || length targets > 16 = pure (Left InvalidAnswerCount)
-  | length names /= length (nub names) || any (Text.null . Text.strip) names =
-      pure (Left InvalidAnswerNames)
-  | otherwise = Right <$> startValidDecisionAnswersWith choose owner targets
-  where names = map answerName targets
+startDecisionAnswersWith choose owner targets =
+  traverse R.start (decisionAnswersDefinitionWith choose owner targets)
 
-startValidDecisionAnswersWith :: Member Actor effects
-  => DecisionChoice -> AgentRef -> [AnswerTarget] -> Eff effects (ActorHandle DecisionAnswers)
-startValidDecisionAnswersWith choose owner targets = R.start specification
+decisionAnswersDefinitionWith
+  :: DecisionChoice -> AgentRef -> [AnswerTarget]
+  -> Either AnswerFailure (ActorSpec DecisionAnswers AnswerEffects)
+decisionAnswersDefinitionWith choose owner targets
+  | null targets || length targets > 16 = Left InvalidAnswerCount
+  | length names /= length (nub names) || any (Text.null . Text.strip) names =
+      Left InvalidAnswerNames
+  | otherwise = Right specification
   where
+    names = map answerName targets
     specification :: ActorSpec DecisionAnswers AnswerEffects
     specification = R.definition "decision-answers" (Actor.Selected knownEffects) DecisionAnswers
       { answerState = AnswerState True []
@@ -217,29 +219,24 @@ withDecisionAnswers actor (WorkSink sink) = WorkSink $ \policy event -> case eve
     sink policy (WorkChanged name delta { openedQuestions = [q | (q, False) <- results] })
   _ -> sink policy event
 
--- Configure routing and decision relays around requests the caller has already
--- launched. This function owns no spawn or request admission.
-followAnsweredWork
-  :: Member Actor effects
-  => AgentRef
-  -> [(Text, Task, Request value, Progress WorkProgress)]
+-- Validate both definitions before the caller creates either relay. The
+-- caller issues its typed sources and starts the concrete actor specifications.
+answeredWorkDefinition
+  :: AgentRef
+  -> [(Text, Task, AgentRef,
+       R.EventSource (Either ResponseFailure (ResponseResult value)),
+       R.EventSource (ProgressState WorkProgress))]
   -> WorkSink value
-  -> Eff effects (Either AnswerFailure
-       (ActorHandle (WorkActor value), ActorHandle DecisionAnswers))
-followAnsweredWork owner sources sink
-  | null sources || length sources > 16 = pure (Left InvalidAnswerCount)
-  | length names /= length (nub names) || any (Text.null . Text.strip) names =
-      pure (Left InvalidAnswerNames)
-  | otherwise = case workDefinition routedSources sink of
-      Left issue -> pure (Left (AnswerRoutingFailed issue))
-      Right _ -> do
-        answers <- startValidDecisionAnswersWith semanticDecisionAnswer owner targets
-        router <- followWork routedSources (withDecisionAnswers answers sink)
-        pure $ case router of
-          Left issue -> Left (AnswerRoutingFailed issue)
-          Right handle -> Right (handle, answers)
+  -> Either AnswerFailure
+       (ActorSpec DecisionAnswers AnswerEffects,
+        ActorHandle DecisionAnswers -> ActorSpec (WorkActor value) (WorkEffects value))
+answeredWorkDefinition owner sources sink = do
+  answers <- decisionAnswersDefinitionWith semanticDecisionAnswer owner targets
+  buildWork <- either (Left . AnswerRoutingFailed) Right
+    (workSourcesDefinition routedSources)
+  pure (answers, \actor -> buildWork (withDecisionAnswers actor sink))
   where
-    names = [name | (name, _, _, _) <- sources]
-    routedSources = [(name, request, progress) | (name, _, request, progress) <- sources]
-    targets = [AnswerTarget name (responseActor request) task
-      | (name, task, request, _) <- sources]
+    routedSources = [projectWorkSource name id id results updates
+      | (name, _, _, results, updates) <- sources]
+    targets = [AnswerTarget name recipient task
+      | (name, task, recipient, _, _) <- sources]

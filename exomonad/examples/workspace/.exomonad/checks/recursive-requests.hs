@@ -20,10 +20,13 @@ Right rightAgent <- spawnSubagent (childContext rightTask) (ForkWorktree current
 Right (rightRequest, rightProgress) <- requestWithProgress @WorkProgress @(Outcome Text) rightAgent rightTask
   (defaultRequestOptions { requestReporting = Silent })
 (collection, answerer) <- if phaseName == "subcomponents" then do
-  Right (admitted, answers) <- followAnsweredWork me
-    [("left", leftTask, leftRequest, leftProgress), ("right", rightTask, rightRequest, rightProgress)] sink
+  Right (answerSpec, workForAnswers) <- pure (answeredWorkDefinition me
+    [("left", leftTask, leftAgent, R.settlement leftRequest, R.progress leftProgress),
+     ("right", rightTask, rightAgent, R.settlement rightRequest, R.progress rightProgress)] sink)
+  answers <- R.start answerSpec
+  admitted <- R.start (workForAnswers answers)
   pure (admitted, Just answers)
   else do
-    Right admitted <- followWork [("left", leftRequest, leftProgress), ("right", rightRequest, rightProgress)] sink
+    Right admitted <- traverse R.start (workDefinition [("left", R.settlement leftRequest, R.progress leftProgress), ("right", R.settlement rightRequest, R.progress rightProgress)] sink)
     pure (admitted, Nothing)
 releaseCheckpoint localCheckpoint

@@ -1919,12 +1919,15 @@ async fn work_actor_consumes_later_progress_without_rearming() {
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
-    committed(
-        root.as_ref(),
+    let (setup, producer) = campaign.dispatch_native_spawn_setup(
+        "progress routing producer installation",
         &tidepool_testing::fixture_source(".exomonad/workspace/checks/progress-route-producer.hs"),
-    )
-    .await;
-    let (producer, _producer_binding) = next_project_worker(campaign).await;
+        Duration::from_secs(240),
+    ).await;
+    assert_eq!(setup["status"], "committed", "{setup}");
+    campaign.await_native_activation(
+        producer.actor.identity(), "progress routing producer request", Duration::from_secs(240),
+    ).await;
     committed(
         root.as_ref(),
         &tidepool_testing::fixture_source(".exomonad/workspace/checks/progress-route.hs"),
@@ -1955,7 +1958,7 @@ async fn work_actor_consumes_later_progress_without_rearming() {
     let replied =
         dispatch_haskell_script(producer.policy.as_ref(), "respond (\"finished\" :: Text)").await;
     assert_eq!(replied["status"], "replied", "{replied}");
-    let closed = displayed(campaign, root.as_ref(), "view <- readWork forwarding\n_ <- display (show (map Exomonad.Contrib.Routing.sourceStatus (collectedWork view)))\n_ <- finishWork forwarding >>= display . show").await;
+    let closed = displayed(campaign, root.as_ref(), "view <- readWork forwarding\n_ <- display (show (map Exomonad.Contrib.Routing.sourceStatus (collectedWork view)))\n_ <- R.finish forwarding >>= display . show").await;
     let pages = explicit_display_texts(&closed);
     assert_eq!(pages[0], "[WorkClosed]", "{closed}");
     assert!(pages[1].starts_with("Completed"), "{closed}");
@@ -3407,6 +3410,30 @@ async fn attention_actor_recipe_retains_independent_sources_through_closure() {
         .unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn work_actor_projects_mixed_sources_without_changing_terminal_evidence() {
+    let repository = recipe_workspace(Some(&["Project.RoutingChecks.mixedRequests"]));
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn work_actor_refuses_invalid_configuration_before_creating_a_collector() {
+    let repository = recipe_workspace(Some(&["Project.RoutingChecks.refusedRoutes"]));
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn assumption_actor_stages_a_concrete_progress_source_and_retains_decisions() {
+    let repository = recipe_workspace(Some(&["Project.AssumptionChecks.changes"]));
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn work_router_queries_receipts_as_the_issuing_actor() {
     let campaign = TestCampaign::start_with_config(
@@ -3431,32 +3458,15 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
-    displayed(
-        campaign,
-        root.as_ref(),
+    let (setup, source) = campaign.dispatch_native_spawn_setup(
+        "the progress source installation",
         &tidepool_testing::fixture_source("bridge/facade/src/actor_host/work_notification.hs"),
-    )
-    .await;
-    let source = campaign
-        .next_deployment(
-            "the progress source",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(source) => Ok(source),
-                other => Err(other),
-            },
-        )
-        .await;
-    campaign
-        .next_deployment(
-            "the source request activation",
-            Duration::from_secs(120),
-            |event| match event {
-                LocalResidentDeployment::SessionReady { .. } => Ok(()),
-                other => Err(other),
-            },
-        )
-        .await;
+        Duration::from_secs(240),
+    ).await;
+    assert_eq!(setup["status"], "committed", "{setup}");
+    campaign.await_native_activation(
+        source.actor.identity(), "the source request activation", Duration::from_secs(240),
+    ).await;
     let publisher = source.policy.clone();
     let publication = tokio::spawn(async move {
         committed(publisher.as_ref(),
@@ -3539,7 +3549,7 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
         "1",
         "{retained}"
     );
-    committed(root.as_ref(), "finishWork collector").await;
+    committed(root.as_ref(), "R.finish collector").await;
 })).await;
 }
 

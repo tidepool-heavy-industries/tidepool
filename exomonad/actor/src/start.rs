@@ -115,9 +115,9 @@ pub enum ActorEffectProfileWire {
 }
 
 impl ActorEffectProfileWire {
-    fn resolve(self) -> (crate::ActorEffectProfile, Vec<ActorEffectKeyWire>) {
+    fn resolve(self) -> Vec<ActorEffectKeyWire> {
         match self {
-            Self::ActorSelectedProfile(keys) => (crate::ActorEffectProfile::ReadOnly, keys),
+            Self::ActorSelectedProfile(keys) => keys,
         }
     }
 }
@@ -404,7 +404,7 @@ impl ResidentActorStart {
             session_id,
             parent_actor,
         } = request;
-        let (profile, effects) = profile.resolve();
+        let effects = profile.resolve();
         let capabilities = crate::ActorCapabilities::default()
             .with_effect_keys(effects.into_iter().map(Into::into).collect());
         let declaration_high_water = session.declaration_generation_high_water()?;
@@ -440,7 +440,6 @@ impl ResidentActorStart {
                 lexical_scope,
             },
         )
-        .with_profile(profile)
         .with_capabilities(capabilities)
         .with_creator(parent_actor)
         .with_supervisor_parent(parent_actor)
@@ -563,6 +562,53 @@ mod tests {
 
     proptest::proptest! {
         #[test]
+        fn selected_rows_preserve_attenuation_through_descendant_histories(
+            rows in proptest::collection::vec(proptest::collection::vec(0usize..5, 0..7), 1..7),
+            permitted in 0u8..32,
+            initial_depth in 0u16..7,
+            initial_width in 0u16..4,
+        ) {
+            use crate::{ActorCapabilities, ActorEffectKey as Key, DescendantBudget};
+            let keys = [Key::AgentLaunch, Key::Replies, Key::Actor, Key::Commands, Key::Reflect];
+            let mut mask = permitted;
+            let mut depth = initial_depth;
+            let mut width = initial_width;
+            let mut parent = ActorCapabilities::default()
+                .with_effect_keys(keys.iter().enumerate()
+                    .filter(|(index, _)| mask & (1 << index) != 0)
+                    .map(|(_, key)| *key).collect())
+                .with_descendant_budget(DescendantBudget {
+                    maximum_depth: depth,
+                    maximum_active_children: Some(width),
+                });
+            for row in rows {
+                let requested = row.iter().fold(0u8, |bits, index| bits | (1 << index));
+                let unique = requested.count_ones() as usize == row.len();
+                let expected = depth > 0 && width > 0 && unique && requested & !mask == 0;
+                let selected = row.iter().map(|index| keys[*index]).collect::<Vec<_>>();
+                let admission = parent.preview_child(
+                    ActorCapabilities::default().with_effect_keys(selected.clone()), None,
+                );
+                proptest::prop_assert_eq!(admission.is_ok(), expected);
+                if let Ok(child) = admission {
+                    mask = requested;
+                    if mask & 1 != 0 {
+                        depth -= 1;
+                    } else {
+                        depth = 0;
+                        width = 0;
+                    }
+                    proptest::prop_assert_eq!(child.effect_keys(), selected.as_slice());
+                    proptest::prop_assert_eq!(child.descendants(), DescendantBudget {
+                        maximum_depth: depth,
+                        maximum_active_children: Some(width),
+                    });
+                    parent = child;
+                }
+            }
+        }
+
+        #[test]
         fn selected_profiles_preserve_exact_keys_and_parent_refusal(
             selected in proptest::collection::vec(0usize..5, 0..9),
             allowed in proptest::prelude::any::<u8>(),
@@ -578,7 +624,7 @@ mod tests {
                 3 => Wire::EffectModelCall,
                 _ => Wire::EffectReflect,
             }).collect();
-            let (_, actual) = super::ActorEffectProfileWire::ActorSelectedProfile(wire).resolve();
+            let actual = super::ActorEffectProfileWire::ActorSelectedProfile(wire).resolve();
             let actual = actual.into_iter().map(Key::from).collect::<Vec<_>>();
             proptest::prop_assert_eq!(&actual, &expected);
             let permitted = keys.into_iter().enumerate()

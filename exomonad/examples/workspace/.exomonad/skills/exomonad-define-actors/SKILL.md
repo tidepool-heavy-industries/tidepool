@@ -75,6 +75,11 @@ carries the exact typed terminal result, including failure and execution evidenc
 `Cmd.completion job` carries `Cmd.CommandResult` for a command owned by the
 creator. It retains completion for a late collector. Route the result, including
 its cleanup evidence, rather than waking a model to poll command status.
+Issue `R.progress`, `R.settlement`, `R.start`, `R.replace`, and `R.finish`
+where the event, actor state, and result types are concrete. Generic helpers
+compose already-issued `EventSource` values and return `ActorSpec` definitions;
+the caller validates the configuration before creating relay actors.
+
 Sources compose with `fmap` and `(<>)`: tag independent sources with shared project
 constructors or names. Each handler receives one event. Publications accepted
 while it is busy remain ordered; handlers remain serialized even during

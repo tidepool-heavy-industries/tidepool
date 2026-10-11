@@ -74,7 +74,6 @@ rust_filegroup(
         "src/mount.rs": "exomonad/actor/src/mount.rs",
         "src/notification.rs": "exomonad/actor/src/notification.rs",
         "src/owned_result.rs": "exomonad/actor/src/owned_result.rs",
-        "src/profile.rs": "exomonad/actor/src/profile.rs",
         "src/prompt_catalog.rs": "exomonad/actor/src/prompt_catalog.rs",
         "src/recovery.rs": "exomonad/actor/src/recovery.rs",
         "src/reload_helpers_tool.rs": "exomonad/actor/src/reload_helpers_tool.rs",
@@ -267,7 +266,6 @@ rust_filegroup(
         "src/mount.rs": "exomonad/actor/src/mount.rs",
         "src/notification.rs": "exomonad/actor/src/notification.rs",
         "src/owned_result.rs": "exomonad/actor/src/owned_result.rs",
-        "src/profile.rs": "exomonad/actor/src/profile.rs",
         "src/prompt_catalog.rs": "exomonad/actor/src/prompt_catalog.rs",
         "src/recovery.rs": "exomonad/actor/src/recovery.rs",
         "src/reload_helpers_tool.rs": "exomonad/actor/src/reload_helpers_tool.rs",
@@ -814,7 +812,6 @@ filegroup(
         "exomonad/actor/src/mount.rs": "src/mount.rs",
         "exomonad/actor/src/notification.rs": "src/notification.rs",
         "exomonad/actor/src/owned_result.rs": "src/owned_result.rs",
-        "exomonad/actor/src/profile.rs": "src/profile.rs",
         "exomonad/actor/src/prompt_catalog.rs": "src/prompt_catalog.rs",
         "exomonad/actor/src/recovery.rs": "src/recovery.rs",
         "exomonad/actor/src/reload_helpers_tool.rs": "src/reload_helpers_tool.rs",
@@ -1269,20 +1266,6 @@ export_file(
     name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f73636f70655f72756e74696d655f756e6365727461696e2e6873",
     src = "src/resident_actor/scope_runtime_uncertain.hs",
     out = "scope_runtime_uncertain.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f7465726d696e616c5f7472616e736665725f726571756573742e6873",
-    src = "src/resident_actor/terminal_transfer_request.hs",
-    out = "terminal_transfer_request.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f7465726d696e616c5f7472616e736665725f73657475702e6873",
-    src = "src/resident_actor/terminal_transfer_setup.hs",
-    out = "terminal_transfer_setup.hs",
     visibility = ["PUBLIC"],
 )
 

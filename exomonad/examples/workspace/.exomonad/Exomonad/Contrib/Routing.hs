@@ -16,8 +16,8 @@ module Exomonad.Contrib.Routing
   ( WorkActor (workSnapshot, workNotification, acknowledgeWork), WorkState (..), WorkSource (..), WorkStatus (..)
   , WorkEvent (..), WorkDelta (..), workChange, Notice (..), WorkSink (..), WorkDelivery (..), ObserverAdmission (..), noWorkDelivery, observeWork
   , WorkNoticePolicy (..), WorkPolicyReceipt (..), setWorkNoticePolicy
-  , WorkSourceInput, projectWorkSource
-  , followWork, followWorkSources, workDefinition, readWork, finishWork, keepWork, outstandingEvidence, outstandingReviewed
+  , WorkEffects, WorkSourceInput, projectWorkSource
+  , workDefinition, workSourcesDefinition, readWork, keepWork, outstandingEvidence, outstandingReviewed
   , notifyWork, workNoticeMessage, workMessage, workQuestionsMessage, withCheckpoints
   , ReviewReadiness (..), reviewReadiness, reviewReadyMessage, notifyReviewReady
   , RoutingError (..)
@@ -29,7 +29,6 @@ import GHC.Generics (Generic)
 import qualified Tidepool.Actor.Record as R
 import Data.Text (Text)
 import qualified Data.Text as Text
-import qualified Tidepool.Actor as Actor
 import Tidepool.Actors.Exomonad
 import Tidepool.Worktree (renderGitOid)
 import Tidepool.Effects.Core (Actor)
@@ -41,7 +40,7 @@ data WorkSources value = WorkSources
   , resultEvents :: R.EventSource (Text, Either ResponseFailure (ResponseResult value))
   }
 
--- One already-issued typed request projected into the collector's common
+-- Already-issued typed sources projected into the collector's common
 -- result type. Constructing this value has no effects and admits no work.
 data WorkSourceInput value = WorkSourceInput
   { inputName :: Text
@@ -196,23 +195,16 @@ observeWork name endpoint project (WorkSink sink) = WorkSink $ \policy event -> 
       admitted <- R.trySend endpoint projected
       pure delivered { observerWorkAdmissions = observerWorkAdmissions delivered ++ [(name, admitted)] }
 
-followWork
-  :: Member Actor effects
-  => [(Text, Request value, Progress WorkProgress)] -> WorkSink value
-  -> Eff effects (Either RoutingError (ActorHandle (WorkActor value)))
-followWork inputs sink = case workDefinition inputs sink of
-  Left issue -> pure (Left issue)
-  Right spec -> Right <$> R.start spec
-
 -- Project independently typed progress and results into one authored route.
 -- The receipt's request, actor and worktree evidence remains unchanged.
 projectWorkSource
   :: Text -> (progress -> WorkProgress) -> (answer -> value)
-  -> Request answer -> Progress progress -> WorkSourceInput value
-projectWorkSource name projectProgress projectAnswer request updates = WorkSourceInput
+  -> R.EventSource (Either ResponseFailure (ResponseResult answer))
+  -> R.EventSource (ProgressState progress) -> WorkSourceInput value
+projectWorkSource name projectProgress projectAnswer results updates = WorkSourceInput
   { inputName = name
-  , inputProgressEvents = fmap ((,) name . projectProgressState projectProgress) (R.progress updates)
-  , inputResultEvents = fmap (mapResult name projectAnswer) (R.settlement request)
+  , inputProgressEvents = fmap ((,) name . projectProgressState projectProgress) updates
+  , inputResultEvents = fmap (mapResult name projectAnswer) results
   }
 
 projectProgressState :: (progress -> WorkProgress) -> ProgressState progress -> ProgressState WorkProgress
@@ -226,14 +218,6 @@ mapResult :: Text -> (answer -> value)
   -> (Text, Either ResponseFailure (ResponseResult value))
 mapResult name project = (,) name . fmap (\receipt -> receipt { responseValue = project (responseValue receipt) })
 
-followWorkSources
-  :: Member Actor effects
-  => [WorkSourceInput value] -> WorkSink value
-  -> Eff effects (Either RoutingError (ActorHandle (WorkActor value)))
-followWorkSources inputs sink = case workSourcesDefinition inputs sink of
-  Left issue -> pure (Left issue)
-  Right spec -> Right <$> R.start spec
-
 readWork :: Member Actor effects => ActorHandle (WorkActor value) -> Eff effects (WorkState value)
 readWork router = R.call (workSnapshot (R.client router)) ()
 
@@ -244,24 +228,24 @@ setWorkNoticePolicy
   => ActorHandle (WorkActor value) -> WorkNoticePolicy -> Eff effects WorkPolicyReceipt
 setWorkNoticePolicy router policy = R.call (workPolicy (R.client router)) policy
 
-finishWork :: Member Actor effects => ActorHandle (WorkActor value) -> Eff effects (Actor.ActorExit (WorkState value))
-finishWork = R.finish
-
 workDefinition
-  :: forall value. [(Text, Request value, Progress WorkProgress)] -> WorkSink value
+  :: forall value.
+     [(Text, R.EventSource (Either ResponseFailure (ResponseResult value)),
+       R.EventSource (ProgressState WorkProgress))]
+  -> WorkSink value
   -> Either RoutingError (ActorSpec (WorkActor value) (WorkEffects value))
-workDefinition inputs sink = workSourcesDefinition
-  [projectWorkSource name id id request updates | (name, request, updates) <- inputs] sink
+workDefinition inputs sink = ($ sink) <$> workSourcesDefinition
+  [projectWorkSource name id id results updates | (name, results, updates) <- inputs]
 
 workSourcesDefinition
-  :: [WorkSourceInput value] -> WorkSink value
-  -> Either RoutingError (ActorSpec (WorkActor value) (WorkEffects value))
-workSourcesDefinition inputs sink = do
+  :: [WorkSourceInput value]
+  -> Either RoutingError (WorkSink value -> ActorSpec (WorkActor value) (WorkEffects value))
+workSourcesDefinition inputs = do
   let names = map inputName inputs
   validateSources names
   pure (sourceDefinition names (WorkSources
     (mconcat (map inputProgressEvents inputs))
-    (mconcat (map inputResultEvents inputs))) sink)
+    (mconcat (map inputResultEvents inputs))))
 
 sourceDefinition
   :: forall value. [Text] -> WorkSources value -> WorkSink value

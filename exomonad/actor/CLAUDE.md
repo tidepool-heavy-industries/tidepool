@@ -22,6 +22,10 @@ state.
 Installation-issued effect rows carry their exact nominal imports through
 templates, actor compile views, and inspection. Keep that source fragment coupled;
 authored type text does not issue imports or additional effect authority.
+Actor start and native spawn attenuate the selected keys and descendant limits
+through `ActorCapabilities::preview_child`. Do not retain a named effect profile
+as a second admission gate. Concrete workspace and provider grants remain
+independent of effect availability.
 
 Compiler work receives its stop relationship with the affine `CompilerWorkTicket`
 issued by the execution or preparation owner. The ticket opens and settles the
