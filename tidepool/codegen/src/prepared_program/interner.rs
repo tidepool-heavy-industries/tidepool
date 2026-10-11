@@ -312,25 +312,28 @@ impl DescriptorInterner {
         let mut identities = BTreeMap::new();
         let mut hosts = BTreeMap::new();
         for (declaration, _) in entries {
-            let existing = self
+            let known_identity = self
                 .constructor(&declaration.identity)
-                .map(|(decl, _)| decl)
-                .or_else(|| identities.get(&declaration.identity).copied());
+                .map(|(decl, _)| decl);
+            let existing =
+                known_identity.or_else(|| identities.get(&declaration.identity).copied());
             if let Some(existing) = existing.filter(|existing| *existing != declaration) {
                 return Err(AbsorbConflict::Identity {
                     existing: Box::new(existing.clone()),
                     incoming: Box::new(declaration.clone()),
                 });
             }
-            let existing = self
-                .host_identity(&declaration.host_id)
-                .or_else(|| hosts.get(&declaration.host_id).copied());
+            let known_host = self.host_identity(&declaration.host_id);
+            let existing = known_host.or_else(|| hosts.get(&declaration.host_id).copied());
             if let Some(existing) = existing.filter(|existing| *existing != &declaration.identity) {
                 return Err(AbsorbConflict::HostId {
                     host_id: declaration.host_id,
                     identity: Box::new(declaration.identity.clone()),
                     existing: Box::new(existing.clone()),
                 });
+            }
+            if known_identity.is_some() && known_host.is_some() {
+                continue;
             }
             identities.insert(&declaration.identity, declaration);
             hosts.insert(&declaration.host_id, &declaration.identity);
@@ -631,6 +634,59 @@ mod tests {
             }
             other => panic!("expected an Identity conflict, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn warm_and_mixed_absorb_costs_keep_conflicts_atomic() {
+        use crate::binding_table::cost_tests::measure;
+        use std::hint::black_box;
+        let target = target();
+        let mut destination = DescriptorInterner::default();
+        let mut producer = DescriptorInterner::default();
+        let entries = (0..256)
+            .map(|index| {
+                let declared = declaration(&format!("Warm{index}"), 40000 + index);
+                let descriptor = producer.intern(&target, &declared).unwrap();
+                (declared, descriptor)
+            })
+            .collect::<Vec<_>>();
+        destination.absorb(&entries).unwrap();
+        let new = declaration("MixedNew", 50000);
+        let mut mixed = entries.clone();
+        mixed.push((new.clone(), producer.intern(&target, &new).unwrap()));
+        for (name, incoming) in [("known", &entries), ("mixed", &mixed)] {
+            let (elapsed_ns, counts) = measure(|| {
+                for _ in 0..128 {
+                    black_box(destination.check_absorb(black_box(incoming))).unwrap();
+                }
+            });
+            let allocations = serde_json::to_value(counts).unwrap();
+            if name == "known" {
+                assert_eq!(allocations["allocations"], 0);
+                assert_eq!(allocations["reallocations"], 0);
+            }
+            eprintln!(
+                "interner absorb cost: {}",
+                serde_json::json!({"kind":name,"checks":128,"rows":incoming.len(),"elapsed_ns":elapsed_ns,"allocations":allocations})
+            );
+        }
+        assert!(destination.constructor(&new.identity).is_none());
+        assert!(destination.by_host(new.host_id).is_none());
+        let conflict = declaration("MixedConflict", entries[0].0.host_id.0);
+        let mut incoming = mixed;
+        incoming.push((
+            conflict.clone(),
+            DescriptorInterner::default()
+                .intern(&target, &conflict)
+                .unwrap(),
+        ));
+        assert!(matches!(
+            destination.absorb(&incoming),
+            Err(AbsorbConflict::HostId { .. })
+        ));
+        assert_eq!(destination.constructor_count(), entries.len());
+        assert!(destination.constructor(&new.identity).is_none());
+        assert!(destination.by_host(new.host_id).is_none());
     }
 
     #[test]
