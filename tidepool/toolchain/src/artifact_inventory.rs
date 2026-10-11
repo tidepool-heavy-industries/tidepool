@@ -4002,8 +4002,9 @@ impl ArtifactView {
         }
     }
 
+    /// Observe issued roots independently of retained native byte custody.
     pub fn is_empty(&self) -> bool {
-        self.roots().is_empty()
+        self.lease.selection.roots.is_empty()
     }
     pub fn inventory(&self) -> &ArtifactInventory {
         &self.lease.inventory

@@ -78,6 +78,24 @@ impl Catalog {
     }
 }
 
+fn check_empty_observation(view: &ArtifactView, empty: bool) -> Result<(), TestCaseError> {
+    let roots_were_materialized = view.reads.canonical_roots.get().is_some();
+    let parent_visits = view.reads.root_parent_visits.load(Ordering::Relaxed);
+    for _ in 0..12 {
+        prop_assert_eq!(view.is_empty(), empty);
+    }
+    prop_assert_eq!(
+        view.reads.canonical_roots.get().is_some(),
+        roots_were_materialized,
+        "emptiness must not materialize the inherited root union"
+    );
+    prop_assert_eq!(
+        view.reads.root_parent_visits.load(Ordering::Relaxed),
+        parent_visits
+    );
+    Ok(())
+}
+
 // This oracle starts from issued fixture operands, not the graph whose edge
 // construction and cached getters are being checked. Logical indices are kept
 // independent of production graph slots and content-id ordering.
@@ -86,6 +104,7 @@ fn check_constructed_projection(
     catalog: &Catalog,
     roots: &BTreeSet<usize>,
 ) -> Result<(), TestCaseError> {
+    check_empty_observation(view, roots.is_empty())?;
     let mut reachable = roots.clone();
     loop {
         let prior = reachable.len();
@@ -184,6 +203,7 @@ fn construction_history(
         .admit(&inventory.empty_view(), catalog.entries[..OWNERS].to_vec())
         .unwrap();
     let all_roots: BTreeSet<_> = (0..OWNERS).collect();
+    check_empty_observation(&all, false)?;
     if read_schedule[0] {
         check_constructed_projection(&all, catalog, &all_roots)?;
     }
@@ -199,6 +219,7 @@ fn construction_history(
                 .collect(),
         )
         .unwrap();
+    check_empty_observation(&peer, false)?;
     if read_schedule[1] {
         check_constructed_projection(&peer, catalog, &roots)?;
     }
@@ -210,7 +231,9 @@ fn construction_history(
     let branch = all
         .select_roots(vec![catalog.entries[OWNERS - 2].descriptor.id])
         .unwrap();
+    check_empty_observation(&branch, false)?;
     let merged = peer.merge(&branch).unwrap();
+    check_empty_observation(&merged, false)?;
     let merged_roots = roots.union(&branch_roots).copied().collect::<BTreeSet<_>>();
     if read_schedule[3] {
         check_constructed_projection(&merged, catalog, &merged_roots)?;
@@ -806,6 +829,62 @@ fn first_read_and_inventory_extension_settle_without_lock_recursion() {
     reader.join().unwrap();
     admission.join().unwrap();
     check_read_projection(&view).unwrap();
+}
+
+#[test]
+fn empty_observation_preserves_inherited_roots_and_separate_native_custody() {
+    let inventory = ArtifactInventory::default();
+    let empty = inventory.empty_view();
+    let all = inventory
+        .admit(&empty, Catalog::new(&[0; OWNERS], 1).entries)
+        .unwrap();
+    let inherited = inventory.retain(Vec::new(), Vec::new(), vec![all.lease.clone()], Vec::new());
+    assert!(inherited.lease.roots.is_empty());
+    check_empty_observation(&inherited, false).unwrap();
+    check_empty_observation(&empty, true).unwrap();
+    for merged in [
+        empty.merge(&inherited).unwrap(),
+        inherited.merge(&empty).unwrap(),
+    ] {
+        assert!(Arc::ptr_eq(&merged.lease, &inherited.lease));
+        check_empty_observation(&merged, false).unwrap();
+    }
+
+    let native = all
+        .lease
+        .selection
+        .roots
+        .keys()
+        .find_map(|root| match root {
+            InventoryNodeKey::Group(group) => Some(group.binding.artifact),
+            _ => None,
+        })
+        .expect("fixture admits native groups");
+    let carrier = {
+        let state = inventory.0.lock().unwrap();
+        all.resolve_binding(native, &all.read_projection(&state).nodes)
+            .unwrap()
+    };
+    let mut custody = inventory.retain(Vec::new(), vec![carrier], Vec::new(), Vec::new());
+    custody.replace_namespace(&BTreeMap::from([(carrier.artifact, carrier)]));
+    assert!(!custody.namespace().is_empty());
+    let inherited_custody = inventory.retain(
+        Vec::new(),
+        Vec::new(),
+        vec![custody.lease.clone()],
+        Vec::new(),
+    );
+    check_empty_observation(&custody, true).unwrap();
+    check_empty_observation(&inherited_custody, true).unwrap();
+    assert!(!inherited_custody.lease.selection.native_custody.is_empty());
+    assert!(!inherited_custody.entries().is_empty());
+    check_empty_observation(&inherited_custody, true).unwrap();
+    drop(inherited_custody);
+    drop(custody);
+    drop(inherited);
+    drop(all);
+    drop(empty);
+    assert_eq!(inventory.node_count(), 0);
 }
 
 #[test]
