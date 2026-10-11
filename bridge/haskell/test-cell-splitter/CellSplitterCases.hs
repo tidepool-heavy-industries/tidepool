@@ -988,7 +988,11 @@ portableOutputRequestValidation = do
         Right operation -> fail ("portable request accepted conflicting mode: " ++ show operation)
       other -> fail ("portable conflicting request has no decoded operation: " ++ show other)
   forM_ [[Input "Fixture.hs", Targets ["first"], PortableOutput]
-    , [Input "Fixture.hs", OutputDir "out", PortableOutput]] $ \fields -> do
+    , [Input "Fixture.hs", OutputDir "out", PortableOutput]
+    , [Input "Fixture.hs", Targets [], OutputDir "out", PortableOutput]
+    , [Input "Fixture.hs", Target "", OutputDir "out", PortableOutput]
+    , [Input "Fixture.hs", Targets [""], OutputDir "out", PortableOutput]
+    , [Input "Fixture.hs", Targets ["first", ""], OutputDir "out", PortableOutput]] $ \fields -> do
     (_, refused) <- admit fields
     assertEqual "portable output needs targets and output" (Left InvalidPortableOutputShape) refused
 

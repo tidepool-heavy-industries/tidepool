@@ -188,7 +188,9 @@ admitRequestOperation args
       , (requestCheckSource args, SourceCheckOperation)
       ] , selected]
     validPortableOutput = length (requestFiles args) == 1
-      && present (requestOutDir args) && (present (requestTarget args) || not (null (requestTargets args)))
+      && present (requestOutDir args)
+      && (maybe False (not . null) (requestTarget args) || not (null (requestTargets args)))
+      && maybe True (not . null) (requestTarget args) && all (not . null) (requestTargets args)
       && null operations && not hasSessionScope
       && not (present (requestSessionIncarnation args)) && not (present (requestBindGen args))
       && not (present (requestModuleCandidates args)) && not (requestCertifyHomeProducts args)

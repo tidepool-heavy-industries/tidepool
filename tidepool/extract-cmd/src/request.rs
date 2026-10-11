@@ -289,7 +289,10 @@ impl ExtractRequest {
                     .count()
                     != 1
                 || !has(|field| matches!(field, Field::OutputDir(_)))
-                || !has(|field| matches!(field, Field::Target(_) | Field::Targets(_)))
+                || {
+                    let targets = self.target_names();
+                    targets.is_empty() || targets.iter().any(String::is_empty)
+                }
                 || has(|field| {
                     matches!(
                         field,
@@ -1545,6 +1548,23 @@ mod tests {
                 .fields
                 .retain(|field| std::mem::discriminant(field) != std::mem::discriminant(&missing));
             assert!(invalid.admitted_mode().is_err());
+        }
+        for roots in [
+            Field::Targets(Vec::new()),
+            Field::Targets(vec![String::new()]),
+            Field::Targets(vec!["first".into(), String::new()]),
+            Field::Target("".into()),
+        ] {
+            let mut invalid = request.clone();
+            invalid
+                .fields
+                .retain(|field| !matches!(field, Field::Target(_) | Field::Targets(_)));
+            invalid.fields.push(roots);
+            assert!(invalid.admitted_mode().is_err());
+            assert!(ExtractRequest::decode(&invalid.encode())
+                .unwrap()
+                .admitted_mode()
+                .is_err());
         }
         assert_eq!(
             ExtractRequest::from_cli(&request.cli_argv())
