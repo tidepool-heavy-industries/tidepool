@@ -13,6 +13,7 @@ import Control.Exception (bracket, evaluate, finally, try)
 import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Data.List (stripPrefix)
+import Data.List.NonEmpty qualified as NE
 import Data.ByteString qualified as BS
 import Tidepool.CborEncode (encodeMetadata)
 import Data.Maybe (isJust)
@@ -43,13 +44,13 @@ import GHC.Types.Name (nameOccName, nameModule_maybe)
 import GHC.Types.Name (mkSystemName)
 import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.Name.Occurrence (mkVarOcc)
-import GHC.Types.Unique (mkUnique)
+import GHC.Types.Unique (mkUnique, getKey)
 import GHC.Types.Var (varName, varUnique)
 import GHC.Unit.Types (unitString, GenWithIsBoot(..), mkModule, stringToUnit)
 import GHC.Unit.Module.Location (ml_hi_file, ml_dyn_hi_file)
 import GHC.Unit.Finder (addModuleToFinder, initFinderCache)
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
-import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet)
+import GHC.Types.Unique.Set (elementOfUniqSet, nonDetEltsUniqSet, sizeUniqSet)
 import GHC.Stg.Syntax qualified as Stg
 import System.Directory (createDirectoryIfMissing, getCurrentDirectory, removeFile, removePathForcibly)
 import System.Environment (setEnv)
@@ -89,6 +90,7 @@ import Tidepool.PreparedStg
   , newPreparedBodyCache, prepareModule, prepareRecoveredBodies, newPreparedComponentTaskPreparer, runPreparedBodyTask
   , preparedExpectedEntry )
 import Tidepool.PreparedSites (SiteRejection(..))
+import Tidepool.Timing (timeSection)
 
 assert :: Bool -> String -> IO ()
 assert ok message = unless ok (ioError (userError message))
@@ -100,6 +102,7 @@ tests :: TestTree
 tests = testGroup "test-prepared-stg"
   [ compilerExecutionTests
   , entryScopeTests
+  , testCase "indexed home seeds agree with full-scan and graph histories" seedIndexProperty
   , testCase "component histories agree with complete reachability recomputation" reachHistoryProperty
   , testCase "overlapping structural groups retain every sibling" assertOverlapMerge
   , testCase "subset lookup preserves authoritative full group" assertSubsetPreservesFullGroup
@@ -219,6 +222,153 @@ homonymousUnitProperty = bracket scratch removePathForcibly $ \directory -> do
   where
     scratch = do
       (path, handle) <- openTempFile "/tmp" "homonymous-unit-history"
+      hClose handle
+      removeFile path
+      createDirectoryIfMissing True path
+      pure path
+
+-- Query and graph histories retain real GHC binders; only demand and the
+-- adjacency relation vary. The oracle rescans home identities and walks the
+-- complete current graph independently of both production indexes.
+data SeedOperation
+  = SelectHomeSeeds Int [Int]
+  | AddPackageSeed Int
+  | AdmitSeedFact Int [Int]
+  | ReplaceSeedFacts [(Int, [Int])]
+  deriving Show
+
+verifySeedIndexHistories :: ProjectionContext -> [PreparedModule] -> [Id] -> IO ()
+verifySeedIndexHistories base home packageIds = do
+  let index = Projection.prepareHomeSeedIndex home
+      issued = preparedTopIdentityBindings home
+      identifiers = concatMap (take 3 . concatMap (Projection.topBinders . fst) . pmBindings) home
+      identities = [issued Map.! varName binder | binder <- identifiers]
+      missing = (head identities) { symbolOccurrence = "absent-seed-root" }
+      roots = identities ++ [missing]
+      nodes = identifiers ++ packageIds
+      node n = nodes !! n
+      query entry auxiliary = base
+        { projectionEntry = roots !! entry
+        , projectionAuxiliaryRoots = map (roots !!) auxiliary }
+      keys uniques = Set.fromList (map getKey (nonDetEltsUniqSet uniques))
+      facts rows = [[(node n, map (varUnique . node) edges)
+        | (n, edges) <- Map.toAscList rows]]
+      fullReach rows seeds = walk Set.empty seeds
+        where
+          edges = Map.fromList [(getKey (varUnique (node n)), map (getKey . varUnique . node) refs)
+            | (n, refs) <- Map.toList rows]
+          walk seen [] = seen
+          walk seen (n:pending)
+            | n `Set.member` seen = walk seen pending
+            | otherwise = walk (Set.insert n seen) (Map.findWithDefault [] n edges ++ pending)
+      history mutate = walk Map.empty (query 0 []) [] emptyPreparedReachability
+        where
+          walk _ _ _ _ [] = True
+          walk rows context packages carried (operation:rest) =
+            let (nextRows, nextContext, nextPackages, update) = case operation of
+                  SelectHomeSeeds entry auxiliary ->
+                    (rows, query entry auxiliary, [], ReplacePreparedFacts (facts rows))
+                  AddPackageSeed n -> (rows, context, n:packages, AdmitPreparedFacts [])
+                  AdmitSeedFact n refs -> case Map.lookup n rows of
+                    Just _ -> (rows, context, packages, AdmitPreparedFacts [])
+                    Nothing -> (Map.insert n refs rows, context, packages,
+                      AdmitPreparedFacts (facts (Map.singleton n refs)))
+                  ReplaceSeedFacts incoming -> let replaced = Map.fromList incoming
+                    in (replaced, context, packages, ReplacePreparedFacts (facts replaced))
+                indexed = Projection.indexedPreparedSeedUniques nextContext index
+                scanned = preparedSeedUniques nextContext home
+                packageSeeds = map (varUnique . (packageIds !!)) nextPackages
+                selected = nonDetEltsUniqSet indexed ++ if mutate then [] else packageSeeds
+                expectedSeeds = nonDetEltsUniqSet scanned ++ packageSeeds
+                actual = updatePreparedReachability selected update carried
+            in keys indexed == keys scanned
+                && keys (reachedUniques actual) == fullReach nextRows (map getKey expectedSeeds)
+                && keys (admittedTops actual) == Set.fromList
+                    [getKey (varUnique (node n)) | n <- Map.keys nextRows]
+                && walk nextRows nextContext nextPackages actual rest
+      vertex = QC.chooseInt (0, length nodes - 1)
+      root = QC.frequency [(1, pure (length roots - 1)), (3, QC.chooseInt (0, length roots - 2))]
+      operations = QC.listOf $ QC.frequency
+        [(3, do entry <- root; aux <- QC.listOf root
+                duplicate <- QC.arbitrary
+                pure (SelectHomeSeeds entry (if duplicate then entry:aux else aux)))
+        ,(2, AddPackageSeed <$> QC.chooseInt (0, length packageIds - 1))
+        ,(4, AdmitSeedFact <$> vertex <*> QC.listOf vertex)
+        ,(2, ReplaceSeedFacts <$> QC.listOf ((,) <$> vertex <*> QC.listOf vertex))]
+      shrinkOperation operation = case operation of
+        SelectHomeSeeds entry auxiliary -> [SelectHomeSeeds e aux | (e, aux) <- QC.shrink (entry, auxiliary)]
+        AddPackageSeed n -> map AddPackageSeed (QC.shrink n)
+        AdmitSeedFact n edges -> [AdmitSeedFact smaller refs | (smaller, refs) <- QC.shrink (n, edges)]
+        ReplaceSeedFacts rows -> map ReplaceSeedFacts (QC.shrink rows)
+  assert (not (null identities) && not (null packageIds)) "seed history lacks issued roots"
+  let calibration = [SelectHomeSeeds (length roots - 1) [], AddPackageSeed 0]
+  assert (history False calibration && not (history True calibration))
+    "dropping direct package seeds escaped the independent seed/graph oracle"
+  result <- QC.quickCheckWithResult QC.stdArgs { QC.maxSuccess = 160, QC.maxSize = 32 }
+    (QC.checkCoverage $ QC.forAllShrink operations (QC.shrinkList shrinkOperation) $ \steps ->
+      QC.cover 20 (any (\case SelectHomeSeeds{} -> True; _ -> False) steps) "entry and auxiliary queries" $
+      QC.cover 20 (any (\case AddPackageSeed{} -> True; _ -> False) steps) "package root growth" $
+      QC.cover 20 (any (\case AdmitSeedFact{} -> True; _ -> False) steps) "fact admission" $
+      QC.cover 20 (any (\case ReplaceSeedFacts{} -> True; _ -> False) steps) "site replacement" $
+      QC.cover 10 (any (\case SelectHomeSeeds e aux -> e `elem` aux || length aux /= Set.size (Set.fromList aux); _ -> False) steps) "duplicate roots" $
+      QC.cover 10 (any (\case SelectHomeSeeds e aux -> length roots - 1 `elem` (e:aux); _ -> False) steps) "absent roots" $
+      QC.counterexample (show steps) (history False steps))
+  unless (QC.isSuccess result) (fail "indexed seed histories diverged from full recomputation")
+
+seedIndexProperty :: IO ()
+seedIndexProperty = bracket scratch removePathForcibly $ \directory -> do
+  let source = directory </> "SeedHome.hs"
+      count = 2048 :: Int
+  writeFile source (unlines ("module SeedHome where" : concat
+    [["f" ++ show n ++ " :: Int -> Int", "f" ++ show n ++ " x = x"] | n <- [0 .. count - 1]]))
+  libdir <- getLibdir
+  runGhc (Just libdir) $ do
+    flags <- getSessionDynFlags
+    _ <- setSessionDynFlags (updOptLevel 0 flags)
+      { importPaths = [directory], backend = noBackend, ghcLink = NoLink }
+    target <- guessTarget source Nothing Nothing
+    setTargets [target]
+    load LoadAllTargets >>= \case Failed -> fail "seed fixture failed to compile"; Succeeded -> pure ()
+    env <- getSession
+    summary <- getModSummary (mkModuleName "SeedHome")
+    parsed <- parseModule summary
+    typed <- typecheckModule parsed
+    desugared <- desugarModule typed
+    (guts, _) <- liftIO $ hscTidy env (coreModule desugared)
+    original <- maybe (fail "seed fixture lacks original interface") pure
+      (lookupHpt (hsc_HPT env) (mkModuleName "SeedHome"))
+    prepared <- liftIO $ prepareModule env (ms_location summary) mempty (FinalizedModule original guts)
+    let home = [prepared]
+        identities = either (error . show) id (preparedTopIdentities home)
+        entry = head identities
+        context = ProjectionContext "seed-index" "ghc-9.12.2"
+          (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []) mempty mempty entry []
+          Nothing Nothing Nothing Nothing
+        queries = [context { projectionEntry = identities !! (n `mod` length identities)
+          , projectionAuxiliaryRoots = [identities !! ((n + 7) `mod` length identities)] }
+          | n <- [0 .. 511 :: Int]]
+        observe seeds = evaluate (sum [sizeUniqSet (seeds query) | query <- queries])
+    setContext [IIDecl (simpleImportDecl (mkModuleName "Prelude"))]
+    names <- parseName "id"
+    package <- case NE.toList names of
+      [name] -> lookupName name >>= \case
+        Just (AnId identifier) -> pure identifier
+        _ -> fail "seed fixture lacks genuine package id"
+      _ -> fail "seed fixture id is ambiguous"
+    liftIO $ do
+      assert (length identities >= count) "seed benchmark lost its declared home census"
+      verifySeedIndexHistories context home [package]
+      (scanned, scanMs) <- timeSection (observe (\query -> preparedSeedUniques query home))
+      (indexed, indexMs) <- timeSection $ do
+        let index = Projection.prepareHomeSeedIndex home
+        observe (\query -> Projection.indexedPreparedSeedUniques query index)
+      assert (scanned == indexed) "seed benchmark changed selected uniques"
+      putStrLn ("seed-index A/B: home-tops=" ++ show (length identities)
+        ++ " queries=" ++ show (length queries) ++ " checksum=" ++ show scanned
+        ++ " full-scan-ms=" ++ show scanMs ++ " indexed-including-issuance-ms=" ++ show indexMs)
+  where
+    scratch = do
+      (path, handle) <- openTempFile "/tmp" "seed-index-property"
       hClose handle
       removeFile path
       createDirectoryIfMissing True path

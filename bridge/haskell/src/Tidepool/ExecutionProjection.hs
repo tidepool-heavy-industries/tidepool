@@ -33,6 +33,7 @@ module Tidepool.ExecutionProjection
   , combinePreparedTargetReferences
   , preparedModuleReachFacts
   , preparedSeedUniques
+  , PreparedHomeSeedIndex, prepareHomeSeedIndex, indexedPreparedSeedUniques
   , preparedRootIdentity
   , PreparedReachability(..)
   , emptyPreparedReachability
@@ -97,7 +98,7 @@ import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
 import GHC.Types.Name.Occurrence (isDataOcc, occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
-import GHC.Types.Unique.Set (UniqSet, addListToUniqSet, addOneToUniqSet, elementOfUniqSet, emptyUniqSet, mkUniqSet, nonDetEltsUniqSet)
+import GHC.Types.Unique.Set (UniqSet, addListToUniqSet, addOneToUniqSet, elementOfUniqSet, emptyUniqSet, mkUniqSet, nonDetEltsUniqSet, unionUniqSets)
 import GHC.Types.Unique (Unique, getKey)
 import GHC.Types.Unique.FM
   (UniqFM, addToUFM, emptyUFM, listToUFM, lookupUFM, nonDetEltsUFM)
@@ -1201,6 +1202,30 @@ preparedSeedUniques context home = mkUniqSet
   ]
   where
     identities = buildTopIdentityMap home
+
+-- | The immutable home census for one recovery factory. Build identities from
+-- the complete home graph before selecting any entry or auxiliary root; exact
+-- identity allocation, including stable internal spellings, remains owned by
+-- 'buildTopIdentityMap'. An identity can select more than one unique.
+newtype PreparedHomeSeedIndex = PreparedHomeSeedIndex
+  (Map SymbolIdentity (UniqSet Unique))
+
+prepareHomeSeedIndex :: [PreparedModule] -> PreparedHomeSeedIndex
+prepareHomeSeedIndex home = PreparedHomeSeedIndex (Map.fromListWith unionUniqSets
+  [ (symbol, mkUniqSet [varUnique binder])
+  | prepared <- home
+  , (binding, _) <- pmBindings prepared
+  , binder <- topBinders binding
+  , Just symbol <- [lookupVarEnv identities binder]
+  ])
+  where
+    identities = buildTopIdentityMap home
+
+indexedPreparedSeedUniques :: ProjectionContext -> PreparedHomeSeedIndex -> UniqSet Unique
+indexedPreparedSeedUniques context (PreparedHomeSeedIndex index) = foldl' unionUniqSets emptyUniqSet
+  [ Map.findWithDefault emptyUniqSet root index
+  | root <- projectionEntry context : projectionAuxiliaryRoots context
+  ]
 
 -- | 'selectPreparedTarget''s reachable closure over top uniques instead of
 -- assigned identities (tops and identities correspond one to one within a

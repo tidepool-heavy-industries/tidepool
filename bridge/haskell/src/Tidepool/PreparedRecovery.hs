@@ -33,7 +33,7 @@ import Tidepool.ExecutionProjection
   ( PreparedReachability(..), ProjectionContext(..), PreparedReachUpdate(..), updatePreparedReachability
   , PreparedReferenceWorklist, emptyPreparedReferenceWorklist, admitPreparedReferenceUnits, discoverPreparedReferences
   , ReferenceFact, emptyPreparedReachability
-  , preparedModuleReachFacts, preparedModuleReferenceFacts, preparedSeedUniques
+  , preparedModuleReachFacts, preparedModuleReferenceFacts, prepareHomeSeedIndex, indexedPreparedSeedUniques
   , preparedTargetReferences, preparedRootIdentity, topBinders )
 import Tidepool.ExecutionSchema (SymbolIdentity)
 import Tidepool.FatIface
@@ -203,6 +203,7 @@ newPreparedRecoveryUsing executor demand env cache ownerCache bodyCache baseCont
   let factsOf prepared =
         (preparedModuleReferenceFacts baseContext prepared, preparedModuleReachFacts baseContext prepared)
       homeFacts = [(prepared, factsOf prepared) | prepared <- home]
+      homeSeedIndex = prepareHomeSeedIndex home
       runJobs :: (input -> IO output) -> (input -> IO ()) -> (input -> output -> IO [input]) -> [input] -> IO [output]
       runJobs action started completed inputs = case executor of
         Just shared -> runCompilerWorklistWithStarted shared action started completed inputs
@@ -224,7 +225,7 @@ newPreparedRecoveryUsing executor demand env cache ownerCache bodyCache baseCont
                 , projectionAuxiliaryRoots = projectionAuxiliaryRoots baseContext
                     ++ map preparedRootIdentity selectedRoots }
               seedsFor selectedRoots = nonDetEltsUniqSet (addListToUniqSet
-                (preparedSeedUniques (contextFor selectedRoots) home) (map varUnique selectedRoots))
+                (indexedPreparedSeedUniques (contextFor selectedRoots) homeSeedIndex) (map varUnique selectedRoots))
           factHits <- newIORef (0 :: Int)
           spent <- newIORef (Spent 0 0 0 0 0 0 0)
           state <- newIORef RecoveryState
