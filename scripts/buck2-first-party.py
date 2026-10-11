@@ -711,6 +711,10 @@ def test_runtime_inputs(package_name, target_name, unit=False):
         if target_name == "facade_recipe_source_capture_test":
             env["TIDEPOOL_RECIPE_WORKSPACE"] = "$(location //exomonad/examples/workspace:facade_test_sources)/.exomonad"
             resources.append("//exomonad/examples/workspace:facade_test_sources")
+    if package_name == "tidepool-toolchain" and target_name == "declaration_join_worker":
+        env["TIDEPOOL_GHC"] = "$(exe toolchains//:ghc)"
+        env["TIDEPOOL_JOIN_PROOF_BIN"] = "$(exe //bridge/haskell:declaration_join_consumer)"
+        resources.extend(["toolchains//:ghc", "//bridge/haskell:declaration_join_consumer"])
     if package_name == "tidepool-toolchain" and target_name == "prepared_fixture":
         env["TIDEPOOL_PREPARED_FIXTURE_COMPILER"] = "$(exe //tidepool/toolchain:prepared-fixture)"
         resources.append("//tidepool/toolchain:prepared-fixture")
@@ -798,6 +802,7 @@ NATIVE_RESOURCE_ENV_KEYS = (
     "TIDEPOOL_HASKELL_ACTORS_DIR",
     "TIDEPOOL_JEV_SOURCE_DIR",
     "TIDEPOOL_JEV_WORKSPACE_DIR",
+    "TIDEPOOL_JOIN_PROOF_BIN",
     "TIDEPOOL_M3_FIXTURE_DIR",
     "TIDEPOOL_NATIVE_JSON_SOURCE_DIR",
     "TIDEPOOL_PREPARED_FIXTURE_COMPILER",

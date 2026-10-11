@@ -1250,9 +1250,11 @@ tidepool_rust_isolated_test(
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
+        "//bridge/haskell:declaration_join_consumer",
         "//bridge/haskell:facade_embedded_sources",
         "//build/package:compiler_deployment",
         "//build/package:tidepool_extract_runtime_libraries",
+        "toolchains//:ghc",
     ],
     resource_env = {
         "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
@@ -1260,6 +1262,8 @@ tidepool_rust_isolated_test(
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_GHC": "$(exe toolchains//:ghc)",
+        "TIDEPOOL_JOIN_PROOF_BIN": "$(exe //bridge/haskell:declaration_join_consumer)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
     },
     haskell_worker = True,

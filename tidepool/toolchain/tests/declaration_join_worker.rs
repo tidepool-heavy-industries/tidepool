@@ -1,5 +1,4 @@
-//! Run in the pinned shell with the matched Rust frontend/Haskell worker and
-//! optionally TIDEPOOL_JOIN_PROOF_BIN naming the compiled proof executable.
+//! Uses the declared matched compiler and recovered-declaration consumer.
 use std::path::Path;
 use std::process::Command;
 
@@ -52,11 +51,13 @@ fn exact_join_with_settlement(
     fixture(root, "BadNextFamily", include_str!("../../../bridge/haskell/test-cell-splitter/fixtures/declaration-join/exact-isolation/BadNextFamily.hs"));
     let mut artifacts = Vec::new();
     for module in ["Common", "Old", "Public"] {
-        let output = Command::new("ghc")
-            .current_dir(root)
-            .args(["-c", &format!("{module}.hs")])
-            .output()
-            .unwrap();
+        let output = Command::new(
+            std::env::var_os("TIDEPOOL_GHC").expect("declared matched GHC executable"),
+        )
+        .current_dir(root)
+        .args(["-c", &format!("{module}.hs")])
+        .output()
+        .unwrap();
         assert!(
             output.status.success(),
             "{}",
@@ -135,7 +136,9 @@ fn exact_join_with_settlement(
         .iter()
         .find(|record| record.class.occurrence == "A")
         .expect("Old A Int typed instance");
-    assert_eq!(associated.dfun.occurrence, "$fAInt");
+    assert_eq!(associated.dfun.unit, "main");
+    assert_eq!(associated.dfun.module, "Old");
+    assert_eq!(associated.dfun.namespace, ExportNamespace::Value);
     assert!(!associated.selected_axioms.is_empty());
     assert!(associated
         .selected_axioms
@@ -195,8 +198,68 @@ fn exact_join_with_settlement(
         input.expected_public_version
     );
     assert!(rejected.artifact.is_none());
+    // The recovered consumer checks overlapping joined views, including a
+    // partial axiom selection and restoration through a retained prior join.
+    let mut partial_input = input.clone();
+    partial_input.reserved = ReservedJoin {
+        unit: "main".into(),
+        module: "PartialJoined".into(),
+        path: root.join("PartialJoined.hi"),
+    };
+    for instance in &mut partial_input.expected_instances.classes {
+        instance.selected_axioms.clear();
+    }
+    partial_input.expected_instances.families.clear();
+    let partial = validate_declaration_join(
+        &partial_input,
+        &includes,
+        root,
+        &[],
+        scratch.clone(),
+        settlement,
+    )
+    .unwrap();
+    assert_eq!(partial.decision, JoinDecision::Accepted);
+    let partial = partial.artifact.unwrap();
+    let mut repeated_input = input.clone();
+    repeated_input.reserved = ReservedJoin {
+        unit: "main".into(),
+        module: "JoinedAgain".into(),
+        path: root.join("JoinedAgain.hi"),
+    };
+    repeated_input.artifacts.push(DeclarationArtifact {
+        interface: ExactIfaceArtifact {
+            unit: "main".into(),
+            module: partial.module,
+            path: partial.path,
+            sha256: partial.sha256,
+            requirements: vec![
+                ("main".into(), "Common".into()),
+                ("main".into(), "Old".into()),
+            ],
+        },
+        product: None,
+    });
+    let repeated = validate_declaration_join(
+        &repeated_input,
+        &includes,
+        root,
+        &[],
+        scratch.clone(),
+        settlement,
+    )
+    .unwrap();
+    assert_eq!(repeated.decision, JoinDecision::Accepted);
+    assert!(repeated.artifact.is_some());
     let proof = proof_binary();
-    let output = Command::new(proof)
+    let ghc = std::path::PathBuf::from(std::env::var_os("TIDEPOOL_GHC").unwrap());
+    let mut child_path = vec![ghc.parent().unwrap().to_owned()];
+    child_path.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    let output = Command::new(&proof)
+        .env("TIDEPOOL_TEST_DECLARATION_JOIN_CHILD", &proof)
+        .env("PATH", std::env::join_paths(child_path).unwrap())
         .args(["--consumer"])
         .arg(root)
         .output()
@@ -211,31 +274,6 @@ fn exact_join_with_settlement(
 }
 
 fn proof_binary() -> std::ffi::OsString {
-    if let Some(proof) = std::env::var_os("TIDEPOOL_JOIN_PROOF_BIN") {
-        return proof;
-    }
-    let bridge = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bridge/haskell");
-    // Compile just the owning proof target in the already admitted pinned shell.
-    // Cabal shares the library products built for the matched worker.
-    let output = Command::new("cabal")
-        .current_dir(&bridge)
-        .args(["build", "declaration-join-test", "--offline"])
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let location = Command::new("cabal")
-        .current_dir(bridge)
-        .args(["list-bin", "declaration-join-test"])
-        .output()
-        .unwrap();
-    assert!(
-        location.status.success(),
-        "{}",
-        String::from_utf8_lossy(&location.stderr)
-    );
-    String::from_utf8(location.stdout).unwrap().trim().into()
+    std::env::var_os("TIDEPOOL_JOIN_PROOF_BIN")
+        .expect("declared recovered-declaration consumer executable")
 }

@@ -939,6 +939,28 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         self.assertEqual(cohort['jobs'], 1)
         self.assertEqual(cohort['timeout'], 600)
 
+    def test_toolchain_declaration_join_declares_matched_ghc_and_consumer(self):
+        toolchain = self.package('tidepool-toolchain', 'tidepool/toolchain', [
+            ('tidepool_toolchain', 'lib', 'src/lib.rs'),
+            ('declaration_join_worker', 'test', 'tests/declaration_join_worker.rs'),
+        ])
+        metadata = json.loads(self.metadata.read_text())
+        metadata['packages'].append(toolchain)
+        metadata['workspace_members'].append(toolchain['id'])
+        metadata['resolve']['nodes'].append({'id': toolchain['id'], 'deps': []})
+        self.metadata.write_text(json.dumps(metadata))
+        self.write('tidepool/toolchain/Cargo.toml', "[package]\nname = 'tidepool-toolchain'\n")
+        self.write('tidepool/toolchain/src/lib.rs', 'pub fn toolchain() {}\n')
+        self.write('tidepool/toolchain/tests/declaration_join_worker.rs', '#[test] fn join() {}\n')
+        result = self.generate('--package', 'tidepool-toolchain')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rule = self.rule('tidepool/toolchain', 'declaration_join_worker')
+        self.assertEqual(rule['resource_env']['TIDEPOOL_GHC'], '$(exe toolchains//:ghc)')
+        self.assertEqual(rule['resource_env']['TIDEPOOL_JOIN_PROOF_BIN'],
+                         '$(exe //bridge/haskell:declaration_join_consumer)')
+        self.assertIn('//bridge/haskell:declaration_join_consumer', rule['resources'])
+        self.assertIn('toolchains//:ghc', rule['resources'])
+
     def test_facade_recipe_sources_are_declared_in_focused_and_aggregate_execution(self):
         result = self.generate("--package", "tidepool")
         self.assertEqual(result.returncode, 0, result.stderr)
