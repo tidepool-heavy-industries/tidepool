@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.RecipeBoundaryChecks (nestedCompilation, unboundAcrossRestart) where
+module Project.RecipeBoundaryChecks (nestedCompilation, unboundAcrossRestart, displayPublication) where
 
 import Control.Monad.Freer (Eff, Member)
 import qualified Data.Text as Text
@@ -23,3 +23,9 @@ unboundAcrossRestart = do
   check "restart issues a root in the new swarm" (after /= before)
   awaitCell after "restarted recipe reader reports its unbound conversation"
     "do { seen <- reflect 1; pure (case seen of { Left ReflectUnbound -> True; _ -> False }) }"
+
+displayPublication :: Member RecipeCheck effects => Eff effects ()
+displayPublication = do
+  actor <- root
+  shown <- turn actor "display True"
+  check "recipe display commits before its assertion" (output shown == "True")

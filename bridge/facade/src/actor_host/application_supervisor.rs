@@ -1419,11 +1419,19 @@ pub(super) async fn drain_resident_shutdown<L: Send + 'static>(
                 // owned workers and then checks RequestCleanupState::TargetClosed;
                 // an unclosed target keeps that cleanup unconfirmed.
             }
+            LocalResidentDeployment::DisplayPublished(request) => {
+                if request.outcome().is_none() {
+                    // Channel receipt cannot prove that an earlier Store attempt
+                    // committed or rolled back. Retain publication uncertainty.
+                    request.answer(exomonad_actor::DisplayPublicationOutcome::Unconfirmed(
+                        "host shutdown closed before display publication was confirmed".into(),
+                    ));
+                }
+            }
             // These notices only wake ordinary input in the embedded host.
             // Target closure is established by the request/actor owners, never
             // by receipt of a notice or the fact that its channel closed.
-            LocalResidentDeployment::DisplayPublished(_)
-            | LocalResidentDeployment::SessionReady { .. }
+            LocalResidentDeployment::SessionReady { .. }
             | LocalResidentDeployment::ChildExited { .. }
             | LocalResidentDeployment::WatchChanged { .. }
             | LocalResidentDeployment::SettlementChanged { .. } => {}
@@ -1492,6 +1500,72 @@ pub(super) fn settle_embedded_completion(
 mod tests {
     use super::{ensure_run_store_admission, RunStoreAdmissionFailure};
     use tidepool_runtime::session::{RunRecoveryStore, StoreErrorKind};
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_display_uncertainty_preserves_late_publication() {
+        use super::super::*;
+        use exomonad_actor::DisplayPublicationOutcome;
+        use exomonad_tool::{ToolArguments, ToolInvocation};
+
+        let campaign = test_campaign::TestCampaign::start().await;
+        campaign.run_scenario(|campaign| Box::pin(async move {
+            let policy = campaign.root_installation.policy.clone();
+            let mut running = Some(tokio::spawn(async move {
+                policy.dispatch_boxed(ToolInvocation {
+                    context: None,
+                    name: exomonad_actor::HASKELL_TOOL.into(),
+                    arguments: ToolArguments::Raw("display True".into()),
+                }).await
+            }));
+            let request = campaign.next_deployment(
+                "display publication before shutdown drain",
+                Duration::from_secs(120),
+                |event| match event {
+                    LocalResidentDeployment::DisplayPublished(request) => Ok(request),
+                    other => Err(other),
+                },
+            ).await;
+            let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
+            let run = runtime_namespace(campaign.session_root.path());
+            let owners = Arc::new(Mutex::new(HashMap::new()));
+            let mut tasks: JoinSet<(ActorRef, (), Result<(), embedded_service::EmbeddedDriverError>)> = JoinSet::new();
+            let mut notifications = JoinSet::new();
+            let (projection, _) = embedded_projection::LifecycleSender::channel();
+            let mut waiters = HashMap::new();
+            for published in [false, true] {
+                let (sender, mut lifecycle) = mpsc::channel(1);
+                sender.send(LocalResidentDeployment::DisplayPublished(Arc::clone(&request)))
+                    .await.unwrap();
+                let (_forest, shutdown) = watch::channel(ApplicationShutdown::ForestSettled(
+                    NativeRetirement::Preserve,
+                ));
+                let result = super::drain_resident_shutdown(
+                    &mut lifecycle, &mut tasks, &owners, &campaign.authority,
+                    &mut notifications, &projection, None, &mut waiters, shutdown,
+                ).await;
+                assert_eq!(result, EmbeddedShutdownOutcome::default());
+                if published {
+                    assert!(matches!(request.outcome(), Some(DisplayPublicationOutcome::Published(_))));
+                } else {
+                    assert!(matches!(request.outcome(), Some(DisplayPublicationOutcome::Unconfirmed(_))));
+                    assert!(!request.answer(DisplayPublicationOutcome::Refused("closed admission".into())));
+                    assert!(matches!(request.outcome(), Some(DisplayPublicationOutcome::Unconfirmed(_))));
+                    let result = running.take().unwrap().await.unwrap();
+                    let receipts = match &result {
+                        Err(exomonad_actor::ResidentToolError::Invocation(failure)) => failure.receipts(),
+                        Ok(exomonad_actor::ResidentToolResponse::Workbench(reply)) => &reply.items,
+                        other => panic!("display uncertainty lost its typed receipt: {other:?}"),
+                    };
+                    assert!(receipts.iter().flat_map(|item| &item.operations).any(|operation| matches!(
+                        operation.display_publication,
+                        Some(tidepool_runtime::session::WorkbenchDisplayPublication::Unconfirmed { .. })
+                    )));
+                    display_output::publish(&campaign.forest, &store, &run, None, None, &request);
+                    assert!(matches!(request.outcome(), Some(DisplayPublicationOutcome::Published(_))));
+                }
+            }
+        })).await;
+    }
 
     #[test]
     fn original_native_owner_refuses_replaced_database_while_successor_is_ready() {

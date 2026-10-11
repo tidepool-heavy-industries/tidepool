@@ -34,7 +34,7 @@ pub(crate) async fn run(
         println!("Recipe {entry}; definitions {}", selected.identity());
         let prepared = tokio::task::block_in_place(|| prepare_recipe(entry, selected))?;
         let mut driver = Driver::start(workspace, selected.clone()).await?;
-        let result = driver.execute(prepared);
+        let result = driver.execute(&prepared);
         let cleanup = driver.shutdown_session().await;
         driver.installations.clear();
         driver.pending.clear();
@@ -169,6 +169,8 @@ struct Driver {
     runtime: tempfile::TempDir,
     config: ActorHostConfig,
     session: Option<ModelFreeSession>,
+    output_store: Option<Arc<harness::store::Store>>,
+    shutting_down: bool,
     installations: HashMap<ActorRef, LocalResidentInstallation>,
     pending: VecDeque<LocalResidentDeployment>,
     assertions: Vec<String>,
@@ -259,6 +261,8 @@ impl Driver {
             runtime,
             config,
             session: Some(session),
+            output_store: None,
+            shutting_down: false,
             installations,
             pending: VecDeque::new(),
             assertions: Vec::new(),
@@ -321,7 +325,7 @@ impl Driver {
             .map_err(|error| runtime_error(format!("recipe file operation: {error:?}")))
     }
 
-    fn execute(&mut self, prepared: PreparedRecipe) -> Result<()> {
+    fn execute(&mut self, prepared: &PreparedRecipe) -> Result<()> {
         tokio::task::block_in_place(|| {
             tidepool_runtime::run_compiled_target(
                 &prepared.artifacts,
@@ -417,6 +421,10 @@ impl Driver {
     }
 
     async fn shutdown_session(&mut self) -> Result<()> {
+        self.shutting_down = true;
+        while let Some(event) = self.pending.pop_front() {
+            self.handle_deployment(event).await?;
+        }
         let shutdown = if let Some(session) = &self.session {
             let forest = Arc::clone(&session.forest);
             self.pump(forest.shutdown()).await.map(|_| ())
@@ -434,6 +442,7 @@ impl Driver {
         }
         let hosted_result = self.await_hosted().await;
         let resources = self.finish_resources().await;
+        drop(self.output_store.take());
         drop(self.session.take());
         match (hosted_result, resources) {
             (Err(hosted), Err(resources)) => Err(runtime_error(format!(
@@ -488,6 +497,31 @@ impl Driver {
         event: LocalResidentDeployment,
     ) -> Result<Option<LocalResidentDeployment>> {
         match event {
+            LocalResidentDeployment::DisplayPublished(request) => {
+                if self.output_store.is_none() {
+                    match display_output::open_run_store(self.session()?.session_root.path()) {
+                        Ok(store) => self.output_store = Some(store),
+                        Err(error) => {
+                            request.answer(exomonad_actor::DisplayPublicationOutcome::Unconfirmed(
+                                format!("recipe output store is unavailable: {error}"),
+                            ));
+                            return Ok(None);
+                        }
+                    }
+                }
+                let session = self.session()?;
+                display_output::publish(
+                    &session.forest,
+                    self.output_store
+                        .as_ref()
+                        .expect("recipe output store was opened"),
+                    &runtime_namespace(session.session_root.path()),
+                    None,
+                    None,
+                    &request,
+                );
+                Ok(None)
+            }
             LocalResidentDeployment::PolicyInstalled(installation) => {
                 let session = self.session()?;
                 let workspace_ready = (|| -> Result<()> {
@@ -615,7 +649,22 @@ impl Driver {
                 }
                 Ok(None)
             }
-            other => Ok(Some(other)),
+            LocalResidentDeployment::RequestUpdate { delivery } if self.shutting_down => {
+                if let Some(presentation) = delivery.begin() {
+                    presentation.not_presented("recipe session is shutting down".into());
+                }
+                Ok(None)
+            }
+            event @ (LocalResidentDeployment::SessionReady { .. }
+            | LocalResidentDeployment::RequestUpdate { .. }) => Ok(Some(event)),
+            LocalResidentDeployment::ChildExited { .. }
+            | LocalResidentDeployment::WatchChanged { .. }
+            | LocalResidentDeployment::SettlementChanged { .. }
+            | LocalResidentDeployment::RequestCancellation { .. } => {
+                // Recipe effects observe the actor/request owners directly. These
+                // notices neither acknowledge requests nor certify target cleanup.
+                Ok(None)
+            }
         }
     }
 
@@ -678,6 +727,7 @@ impl Driver {
         self.installations
             .insert(session.actor.identity(), session.root_installation.clone());
         self.session = Some(session);
+        self.shutting_down = false;
         Ok(identity)
     }
 
@@ -878,6 +928,80 @@ mod tests {
                 tidepool_runtime::CompilerTransactionClose::Clean
             ),]
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recipe_display_commits_and_reopens_in_each_restarted_session() {
+        use super::*;
+        use harness::store::actor_output::ActorOutputOrigin;
+
+        let workspace = tempfile::tempdir().unwrap();
+        crate::exomonad::workspace::copy_authored(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../exomonad/examples/workspace"),
+            workspace.path(),
+        )
+        .unwrap();
+        let authored = workspace.path().join(".exomonad");
+        std::fs::write(
+            authored.join("Project/RecipeBoundaryChecks.hs"),
+            include_str!("fixtures/recipe_unbound_restart.hs"),
+        )
+        .unwrap();
+        crate::exomonad::edit_fixture_project_config(&authored, |project| {
+            project.haskell.modules.clear();
+            project.haskell.checks = vec!["Project.RecipeBoundaryChecks.displayPublication".into()];
+        });
+        let selection = tempfile::tempdir().unwrap();
+        let selected = FrozenWorkspace::load(workspace.path(), selection.path()).unwrap();
+        let prepared = tokio::task::block_in_place(|| {
+            prepare_recipe("Project.RecipeBoundaryChecks.displayPublication", &selected)
+        })
+        .unwrap();
+        let mut driver = Driver::start(workspace.path(), selected).await.unwrap();
+        let mut origins = Vec::new();
+        for round in 0..2 {
+            let result = driver.execute(&prepared);
+            if let Err(error) = result {
+                driver.shutdown_session().await.unwrap();
+                panic!("actual display recipe failed: {error}");
+            }
+            assert_eq!(driver.assertions.len(), round + 1);
+            let session = driver.session().unwrap();
+            let root = Arc::clone(&session.session_root);
+            let actor = session.actor.identity();
+            let origin = ActorOutputOrigin {
+                run: runtime_namespace(root.path()),
+                native_actor: actor.id.0,
+                incarnation: actor.incarnation.0,
+            };
+            let history = driver
+                .output_store
+                .as_ref()
+                .unwrap()
+                .actor_output_page(&origin, 0, 10)
+                .unwrap();
+            assert_eq!(history.outputs.len(), 1);
+            assert_eq!(history.outputs[0].emission().page.text, "True");
+            origins.push(origin.clone());
+            if round == 0 {
+                driver.restart().await.unwrap();
+                assert!(driver.output_store.is_none());
+            } else {
+                driver.shutdown_session().await.unwrap();
+            }
+            let reopened = display_output::open_run_store(root.path()).unwrap();
+            let recovered = reopened.actor_output_page(&origin, 0, 10).unwrap();
+            assert_eq!(recovered.outputs.len(), 1);
+            assert_eq!(
+                recovered.outputs[0].reference(),
+                history.outputs[0].reference()
+            );
+            assert_eq!(
+                recovered.outputs[0].emission(),
+                history.outputs[0].emission()
+            );
+        }
+        assert_ne!(origins[0].run, origins[1].run);
     }
 
     #[test]
