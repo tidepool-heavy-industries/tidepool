@@ -1,4 +1,4 @@
-//! Check the complete Event wire output against its retained immutable snapshot,
+//! Check the complete Event wire output against its retained immutable output,
 //! and independently check its field types, ordering and derives.
 
 use tidepool_protocol::effects;
@@ -8,11 +8,7 @@ use tidepool_protocol::gen::wire_rs;
 fn event_wire_module_matches_pin() {
     let event = effects::event::event();
     let generated = wire_rs::file(&event);
-    let snapshot =
-        include_str!("snapshots/protocol__event_wire_rust__event_wire_module_matches_pin.snap");
-    let (_, expected) = snapshot
-        .split_once("\n---\n")
-        .expect("the retained snapshot has a metadata header");
+    let expected = include_str!("event_wire.rs.expected");
     assert_eq!(generated.contents, expected);
 }
 

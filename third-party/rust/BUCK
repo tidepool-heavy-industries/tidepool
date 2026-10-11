@@ -2547,45 +2547,6 @@ cargo.rust_library(
 )
 
 http_archive(
-    name = "console-0.16.4.crate",
-    sha256 = "4fe5f465a4f6fee88fad41b85d990f84c835335e85b5d9e6e63e0d06d28cba7c",
-    strip_prefix = "console-0.16.4",
-    urls = ["https://static.crates.io/crates/console/0.16.4/download"],
-    visibility = [],
-)
-
-cargo.rust_library(
-    name = "console-0.16",
-    srcs = [":console-0.16.4.crate"],
-    crate = "console",
-    crate_root = "console-0.16.4.crate/src/lib.rs",
-    edition = "2021",
-    env = {
-        "CARGO_BIN_NAME": "console",
-        "CARGO_CRATE_NAME": "console",
-        "CARGO_MANIFEST_DIR": "console-0.16.4.crate",
-        "CARGO_PKG_AUTHORS": "",
-        "CARGO_PKG_DESCRIPTION": "A terminal and console abstraction for Rust",
-        "CARGO_PKG_HOMEPAGE": "https://github.com/console-rs/console",
-        "CARGO_PKG_NAME": "console",
-        "CARGO_PKG_README": "README.md",
-        "CARGO_PKG_REPOSITORY": "https://github.com/console-rs/console",
-        "CARGO_PKG_RUST_VERSION": "1.71",
-        "CARGO_PKG_VERSION": "0.16.4",
-        "CARGO_PKG_VERSION_MAJOR": "0",
-        "CARGO_PKG_VERSION_MINOR": "16",
-        "CARGO_PKG_VERSION_PATCH": "4",
-        "CARGO_PKG_VERSION_PRE": "",
-    },
-    features = [
-        "alloc",
-        "std",
-    ],
-    visibility = [],
-    deps = [":libc-0.2"],
-)
-
-http_archive(
     name = "const-oid-0.10.2.crate",
     sha256 = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c",
     strip_prefix = "const-oid-0.10.2",
@@ -7831,57 +7792,6 @@ cargo.rust_library(
     deps = [
         ":equivalent-1",
         ":hashbrown-0.17",
-    ],
-)
-
-alias(
-    name = "insta",
-    actual = ":insta-1",
-    visibility = ["PUBLIC"],
-)
-
-http_archive(
-    name = "insta-1.48.0.crate",
-    sha256 = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82",
-    strip_prefix = "insta-1.48.0",
-    urls = ["https://static.crates.io/crates/insta/1.48.0/download"],
-    visibility = [],
-)
-
-cargo.rust_library(
-    name = "insta-1",
-    srcs = [":insta-1.48.0.crate"],
-    crate = "insta",
-    crate_root = "insta-1.48.0.crate/src/lib.rs",
-    edition = "2021",
-    env = {
-        "CARGO_BIN_NAME": "insta",
-        "CARGO_CRATE_NAME": "insta",
-        "CARGO_MANIFEST_DIR": "insta-1.48.0.crate",
-        "CARGO_PKG_AUTHORS": "Armin Ronacher <armin.ronacher@active-4.com>",
-        "CARGO_PKG_DESCRIPTION": "A snapshot testing library for Rust",
-        "CARGO_PKG_HOMEPAGE": "https://insta.rs/",
-        "CARGO_PKG_NAME": "insta",
-        "CARGO_PKG_README": "README.md",
-        "CARGO_PKG_REPOSITORY": "https://github.com/mitsuhiko/insta",
-        "CARGO_PKG_RUST_VERSION": "1.66.0",
-        "CARGO_PKG_VERSION": "1.48.0",
-        "CARGO_PKG_VERSION_MAJOR": "1",
-        "CARGO_PKG_VERSION_MINOR": "48",
-        "CARGO_PKG_VERSION_PATCH": "0",
-        "CARGO_PKG_VERSION_PRE": "",
-    },
-    features = [
-        "colors",
-        "console",
-        "default",
-    ],
-    visibility = [],
-    deps = [
-        ":console-0.16",
-        ":once_cell-1",
-        ":similar-2",
-        ":tempfile-3",
     ],
 )
 
@@ -13418,45 +13328,6 @@ cargo.rust_library(
         "CARGO_PKG_VERSION_PATCH": "10",
         "CARGO_PKG_VERSION_PRE": "",
     },
-    visibility = [],
-)
-
-http_archive(
-    name = "similar-2.7.0.crate",
-    sha256 = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa",
-    strip_prefix = "similar-2.7.0",
-    urls = ["https://static.crates.io/crates/similar/2.7.0/download"],
-    visibility = [],
-)
-
-cargo.rust_library(
-    name = "similar-2",
-    srcs = [":similar-2.7.0.crate"],
-    crate = "similar",
-    crate_root = "similar-2.7.0.crate/src/lib.rs",
-    edition = "2018",
-    env = {
-        "CARGO_BIN_NAME": "similar",
-        "CARGO_CRATE_NAME": "similar",
-        "CARGO_MANIFEST_DIR": "similar-2.7.0.crate",
-        "CARGO_PKG_AUTHORS": "Armin Ronacher <armin.ronacher@active-4.com>:Pierre-Étienne Meunier <pe@pijul.org>:Brandon Williams <bwilliams.eng@gmail.com>",
-        "CARGO_PKG_DESCRIPTION": "A diff library for Rust",
-        "CARGO_PKG_HOMEPAGE": "",
-        "CARGO_PKG_NAME": "similar",
-        "CARGO_PKG_README": "README.md",
-        "CARGO_PKG_REPOSITORY": "https://github.com/mitsuhiko/similar",
-        "CARGO_PKG_RUST_VERSION": "1.60",
-        "CARGO_PKG_VERSION": "2.7.0",
-        "CARGO_PKG_VERSION_MAJOR": "2",
-        "CARGO_PKG_VERSION_MINOR": "7",
-        "CARGO_PKG_VERSION_PATCH": "0",
-        "CARGO_PKG_VERSION_PRE": "",
-    },
-    features = [
-        "default",
-        "inline",
-        "text",
-    ],
     visibility = [],
 )
 

@@ -33,7 +33,6 @@ path = "empty.rs"
 "harness" = { package = "harness", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "26fb5665d50a38cceabfdc9ec85ac0558a9ab7b8" }
 "ignore" = { package = "ignore", version = "=0.4.33", default-features = true, features = [] }
 "imbl" = { package = "imbl", version = "=7.0.2", default-features = false, features = [] }
-"insta" = { package = "insta", version = "=1.48.0", default-features = true, features = [] }
 "inventory" = { package = "inventory", version = "=0.3.24", default-features = true, features = [] }
 "libc" = { package = "libc", version = "=0.2.189", default-features = true, features = [] }
 "log" = { package = "log", version = "=0.4.33", default-features = true, features = [] }

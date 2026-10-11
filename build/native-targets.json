@@ -416,9 +416,7 @@
     "tidepool-protocol": {
       "binaries": {
         "tidepool-protocol-gen": {
-          "build": "//bridge/protocol:tidepool_protocol_gen",
-          "test": "//bridge/protocol:tidepool_protocol_gen_unit_tests",
-          "test_build": "//bridge/protocol:tidepool_protocol_gen_unit_tests_binary"
+          "build": "//bridge/protocol:tidepool_protocol_gen"
         }
       },
       "directory": "bridge/protocol",
