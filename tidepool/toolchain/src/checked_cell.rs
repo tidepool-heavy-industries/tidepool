@@ -997,7 +997,14 @@ pub(crate) struct CheckedValueInputs {
 #[derive(Clone, Debug)]
 pub(crate) struct ProducedValueTypeInterfaces {
     interfaces: Arc<[ProducedValueTypeInterface]>,
+    lookup: Arc<ProducedValueTypeLookup>,
     selection: ProducedValueTypeSelection,
+}
+
+#[derive(Debug)]
+struct ProducedValueTypeLookup {
+    artifacts: BTreeMap<crate::artifact_inventory::ArtifactId, usize>,
+    generations: BTreeMap<u64, usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -1093,6 +1100,39 @@ struct ProducedValueTypeInterface {
 }
 
 impl ProducedValueTypeInterfaces {
+    fn from_outputs(
+        interfaces: Vec<ProducedValueTypeInterface>,
+        segment: std::ops::Range<usize>,
+    ) -> Result<Self, CompileError> {
+        let mut lookup = ProducedValueTypeLookup {
+            artifacts: BTreeMap::new(),
+            generations: BTreeMap::new(),
+        };
+        for (index, output) in interfaces.iter().enumerate() {
+            if output.ordinal >= segment.end
+                || (index > 0 && interfaces[index - 1].ordinal >= output.ordinal)
+                || output.input.owner.kind != tidepool_repr::SessionModuleKind::Val
+                || lookup
+                    .artifacts
+                    .insert(output.interface.artifact_id(), index)
+                    .is_some()
+                || lookup
+                    .generations
+                    .insert(output.input.owner.gen.0, index)
+                    .is_some()
+            {
+                return Err(failure(
+                    "produced type inventory repeats or reorders an output",
+                ));
+            }
+        }
+        Ok(Self {
+            interfaces: interfaces.into(),
+            lookup: Arc::new(lookup),
+            selection: ProducedValueTypeSelection(segment),
+        })
+    }
+
     /// Keep complete physical output custody private while selecting only the
     /// current segment's mandatory outputs and preceding type evidence.
     pub(crate) fn for_segment(
@@ -1109,6 +1149,7 @@ impl ProducedValueTypeInterfaces {
         }
         Ok(Self {
             interfaces: self.interfaces.clone(),
+            lookup: self.lookup.clone(),
             selection: ProducedValueTypeSelection(segment),
         })
     }
@@ -1117,9 +1158,11 @@ impl ProducedValueTypeInterfaces {
         &self,
         owner: tidepool_repr::SessionModule,
     ) -> Result<&ProducedValueTypeInterface, CompileError> {
-        self.interfaces
-            .iter()
-            .find(|output| self.selection.requires(output.ordinal) && output.input.owner == owner)
+        self.lookup
+            .generations
+            .get(&owner.gen.0)
+            .map(|index| &self.interfaces[*index])
+            .filter(|output| self.selection.requires(output.ordinal) && output.input.owner == owner)
             .ok_or_else(|| failure("current item lacks its captured value interface"))
     }
 
@@ -1135,14 +1178,14 @@ impl ProducedValueTypeInterfaces {
     }
 
     pub(crate) fn owns_artifact(&self, artifact: crate::artifact_inventory::ArtifactId) -> bool {
-        self.interfaces
-            .iter()
-            .any(|output| output.interface.artifact_id() == artifact)
+        self.lookup.artifacts.contains_key(&artifact)
     }
 
     pub(crate) fn selects_artifact(&self, artifact: crate::artifact_inventory::ArtifactId) -> bool {
-        self.interfaces()
-            .any(|interface| interface.artifact_id() == artifact)
+        self.lookup
+            .artifacts
+            .get(&artifact)
+            .is_some_and(|index| self.selection.includes(self.interfaces[*index].ordinal))
     }
 
     /// Select one actual item from the once-captured segment inventory. Earlier
@@ -1151,6 +1194,7 @@ impl ProducedValueTypeInterfaces {
     pub(crate) fn for_item(&self, ordinal: usize) -> Result<Self, CompileError> {
         Ok(Self {
             interfaces: self.interfaces.clone(),
+            lookup: self.lookup.clone(),
             selection: self.selection.for_item(ordinal)?,
         })
     }
@@ -1165,26 +1209,31 @@ impl ProducedValueTypeInterfaces {
                 _,
                 crate::artifact_inventory::JoinedInterfaceRole::ValueInterface
             )
-        ) && self
-            .interfaces()
-            .any(|interface| interface.artifact_id() == entry.descriptor.id)
+        ) && self.selects_artifact(entry.descriptor.id)
     }
 
     pub(crate) fn interfaces(
         &self,
     ) -> impl Iterator<Item = &Arc<crate::recovery_artifacts::CertifiedValueInterface>> {
-        self.interfaces
+        let end = self
+            .interfaces
+            .partition_point(|output| self.selection.includes(output.ordinal));
+        self.interfaces[..end]
             .iter()
-            .filter(|output| self.selection.includes(output.ordinal))
             .map(|output| &output.interface)
     }
 
     pub(crate) fn required(
         &self,
     ) -> impl Iterator<Item = &Arc<crate::recovery_artifacts::CertifiedValueInterface>> {
-        self.interfaces
+        let start = self
+            .interfaces
+            .partition_point(|output| output.ordinal < self.selection.0.start);
+        let end = self
+            .interfaces
+            .partition_point(|output| self.selection.includes(output.ordinal));
+        self.interfaces[start..end]
             .iter()
-            .filter(|output| self.selection.requires(output.ordinal))
             .map(|output| &output.interface)
     }
 }
@@ -1834,10 +1883,15 @@ impl CheckedValueInputs {
                 interface,
             });
         }
-        Ok(ProducedValueTypeInterfaces {
-            interfaces: interfaces.into(),
-            selection: ProducedValueTypeSelection(segment),
-        })
+        validation
+            .inventory
+            .reserve::<(crate::artifact_inventory::ArtifactId, usize)>(interfaces.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        validation
+            .inventory
+            .reserve::<(u64, usize)>(interfaces.len())
+            .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+        ProducedValueTypeInterfaces::from_outputs(interfaces, segment)
     }
 
     pub(crate) fn capture_checked(
@@ -5136,16 +5190,27 @@ mod tests {
             ] {
                 std::fs::remove_file(output_path).unwrap();
             }
-            ProducedValueTypeInterfaces {
-                interfaces: vec![output].into(),
-                selection: ProducedValueTypeSelection(4..5),
-            }
+            ProducedValueTypeInterfaces::from_outputs(vec![output], 4..5).unwrap()
         });
         let captured = inputs
             .capture_output(1, &cell, original, &[], original, produced.as_ref())
             .unwrap();
         if let Some(produced) = produced {
             let output = produced.output(owner).unwrap();
+            let artifact = output.interface.artifact_id();
+            let hidden = produced.for_segment(4..4).unwrap();
+            assert!(Arc::ptr_eq(&hidden.lookup, &produced.lookup));
+            assert!(hidden.owns_artifact(artifact));
+            assert!(!hidden.selects_artifact(artifact));
+            assert!(hidden.current_interface(owner.gen.0).is_err());
+            assert_eq!(hidden.interfaces().count(), 0);
+            assert_eq!(hidden.required().count(), 0);
+            let item = produced.for_item(4).unwrap();
+            assert!(item.selects_artifact(artifact));
+            assert!(Arc::ptr_eq(
+                item.current_interface(owner.gen.0).unwrap(),
+                &output.interface
+            ));
             assert!(Arc::ptr_eq(captured.bytes_owned(), &output.input.bytes));
             assert!(Arc::ptr_eq(
                 captured.certified_interface(),
