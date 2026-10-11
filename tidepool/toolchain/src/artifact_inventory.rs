@@ -2146,15 +2146,15 @@ impl ArtifactInventory {
             .map(|id| (*id, Arc::clone(&entries[id])))
             .collect();
         let mut owners = SelectedOwners::new(&state, &namespace_entries, &BTreeSet::new())?;
-        // Native direct edges name full original owners, including historical
-        // custody which deliberately has no current compiler interface role.
-        for (id, entry) in &entries {
-            if let ArtifactPayload::Original(product) = &entry.payload {
-                owners
-                    .native
-                    .insert(NativeOwnerKey::from_owner(product.owner()), *id);
-            }
-        }
+        // Freeze one checked full owner for each native reference. Historical
+        // custody remains admissible; an ambiguous resolver cannot be issued.
+        let native_entries = entries
+            .iter()
+            .filter(|(_, entry)| matches!(entry.payload, ArtifactPayload::Original(_)))
+            .map(|(id, entry)| (*id, Arc::clone(entry)))
+            .collect();
+        let parent_ids = artifact_ids(&parent.read_projection(&state).nodes);
+        owners.native = SelectedOwners::new(&state, &native_entries, &parent_ids)?.native;
         let mut groups = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupBinding>>::new();
         for group in &graph.native_groups {
             groups
@@ -2212,7 +2212,7 @@ impl ArtifactInventory {
         {
             return Err(failure("bound target belongs to another inventory"));
         }
-        let mut allowed_values = cursor.namespace().keys().copied().collect::<BTreeSet<_>>();
+        let mut allowed_values = BTreeSet::new();
         for entry in visible_values {
             let Some(issued) = fixed.entries.get(&entry.descriptor.id) else {
                 return Err(failure("visible output was not captured by this segment"));
@@ -2252,7 +2252,12 @@ impl ArtifactInventory {
             }
         };
         let namespace_ids = selection
-            .artifact_ids_from_bound_entries(&fixed.entries, &fixed.owners.native, &allowed_values)
+            .artifact_ids_from_bound_entries(
+                &fixed.entries,
+                &fixed.owners.native,
+                cursor,
+                &allowed_values,
+            )
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
         let mut materialization_parents = fixed.materializations.clone();
         cursor.collect_cached_materializations(&mut materialization_parents)?;
@@ -2427,6 +2432,7 @@ impl ArtifactInventory {
             state.graph_visits.fetch_add(1, Ordering::Relaxed);
             if fixed.entries[&node.artifact()].descriptor.kind == ArtifactKind::ValueInterface
                 && !allowed_values.contains(&node.artifact())
+                && !cursor.contains_namespace_artifact(node.artifact())
             {
                 return Err(failure("bound target reaches a future value interface"));
             }
@@ -3060,7 +3066,8 @@ impl ArtifactInventory {
                 )
                 .map(resolve)
                 .filter(|node| {
-                    matches!(node, InventoryNodeKey::Group(_)) || !parent_nodes.contains(node)
+                    matches!(node, InventoryNodeKey::Group(_))
+                        || parent.roots().binary_search(node).is_err()
                 })
                 .collect::<BTreeSet<_>>()
                 .into_iter()
@@ -4304,6 +4311,10 @@ impl ArtifactView {
                 })
                 .collect(),
         ))
+    }
+
+    pub(crate) fn contains_namespace_artifact(&self, id: ArtifactId) -> bool {
+        self.lease.selection.namespace.contains_key(&id)
     }
 
     fn namespace(&self) -> BTreeMap<ArtifactId, ArtifactBinding> {
@@ -5916,6 +5927,127 @@ mod tests {
             unreachable!()
         };
         assert_eq!(product.source_sha256(), None);
+    }
+
+    #[test]
+    fn explicit_root_promotion_matches_fresh_selection_and_recovers() {
+        let inventory = ArtifactInventory::default();
+        let root = entry("Root", &["Child"]);
+        let child = entry("Child", &[]);
+        let initial = inventory
+            .admit(&inventory.empty_view(), vec![root.clone(), child.clone()])
+            .unwrap();
+        let projected = initial.select_roots(vec![root.descriptor.id]).unwrap();
+        assert_eq!(
+            projected
+                .root_entries()
+                .iter()
+                .map(|entry| entry.descriptor.id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([root.descriptor.id])
+        );
+        let promoted = inventory.admit(&projected, vec![child.clone()]).unwrap();
+        let fresh_inventory = ArtifactInventory::default();
+        let fresh = fresh_inventory
+            .admit(&fresh_inventory.empty_view(), vec![root, child])
+            .unwrap();
+        assert_eq!(
+            promoted.capture_graph_selection(),
+            fresh.capture_graph_selection()
+        );
+        assert_eq!(
+            promoted
+                .root_entries()
+                .iter()
+                .map(|entry| entry.descriptor.id)
+                .collect::<BTreeSet<_>>(),
+            fresh
+                .root_entries()
+                .iter()
+                .map(|entry| entry.descriptor.id)
+                .collect()
+        );
+        let recovered_inventory = ArtifactInventory::default();
+        let recovered = recovered_inventory
+            .recover_selection(
+                &recovered_inventory.empty_view(),
+                promoted.entries(),
+                &promoted.capture_graph_selection(),
+                &promoted.binding_dependencies(),
+            )
+            .unwrap();
+        assert_eq!(
+            recovered.capture_graph_selection(),
+            promoted.capture_graph_selection()
+        );
+        drop(recovered);
+        assert_eq!(recovered_inventory.node_count(), 0);
+        drop(fresh);
+        assert_eq!(fresh_inventory.node_count(), 0);
+        drop(promoted);
+        drop(projected);
+        drop(initial);
+        assert_eq!(inventory.node_count(), 0);
+    }
+
+    #[test]
+    fn bound_resolver_refuses_ambiguous_full_native_owner_without_changing_custody() {
+        let inventory = ArtifactInventory::default();
+        let first = issued_native_groups("Original", vec![(0, Vec::new())], &[], &BTreeMap::new());
+        let ArtifactPayload::Original(product) = &first.payload else {
+            unreachable!()
+        };
+        let other = ArtifactEntry::original(
+            [3; 32],
+            crate::certified_products::fixture_finalized_product(product.clone(), [3; 32]),
+        )
+        .unwrap();
+        let ArtifactPayload::Original(other_product) = &other.payload else {
+            unreachable!()
+        };
+        assert_eq!(product.owner(), other_product.owner());
+        assert_ne!(first.descriptor.id, other.descriptor.id);
+        let left = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![Arc::new(first)],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let right = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![Arc::new(other)],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let combined = left
+            .merge_selected(&right, &CompilerInputProjection::default())
+            .unwrap();
+        let selected = bound_selection_for_entries(&combined, &[]);
+        let graph = combined.capture_graph_selection();
+        let nodes = inventory.node_count();
+        assert!(
+            matches!(inventory.bind_segment(&combined, vec![], &selected), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::OwnerConflict { .. }) && error.owner_conflict.is_some())
+        );
+        assert_eq!(combined.capture_graph_selection(), graph);
+        assert_eq!(inventory.node_count(), nodes);
+        let recovered_inventory = ArtifactInventory::default();
+        let recovered = recovered_inventory
+            .recover_selection(
+                &recovered_inventory.empty_view(),
+                combined.entries(),
+                &graph,
+                &combined.binding_dependencies(),
+            )
+            .unwrap();
+        assert_eq!(recovered.capture_graph_selection(), graph);
+        drop(recovered);
+        assert_eq!(recovered_inventory.node_count(), 0);
+        drop(combined);
+        drop(left);
+        drop(right);
+        assert_eq!(inventory.node_count(), 0);
     }
 
     #[test]

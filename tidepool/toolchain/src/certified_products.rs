@@ -2530,9 +2530,10 @@ impl CertifiedSourceSelection {
             crate::artifact_inventory::NativeOwnerKey,
             crate::artifact_inventory::ArtifactId,
         >,
+        parent: &crate::artifact_inventory::ArtifactView,
         allowed_values: &BTreeSet<crate::artifact_inventory::ArtifactId>,
     ) -> CertResult<BTreeSet<crate::artifact_inventory::ArtifactId>> {
-        self.artifact_ids_with_owners(entries, native, Some(allowed_values))
+        self.artifact_ids_with_owners(entries, native, Some((parent, allowed_values)))
     }
 
     fn artifact_ids_with_owners(
@@ -2545,7 +2546,10 @@ impl CertifiedSourceSelection {
             crate::artifact_inventory::NativeOwnerKey,
             crate::artifact_inventory::ArtifactId,
         >,
-        allowed_values: Option<&BTreeSet<crate::artifact_inventory::ArtifactId>>,
+        allowed_values: Option<(
+            &crate::artifact_inventory::ArtifactView,
+            &BTreeSet<crate::artifact_inventory::ArtifactId>,
+        )>,
     ) -> CertResult<BTreeSet<crate::artifact_inventory::ArtifactId>> {
         use crate::artifact_inventory::{ArtifactKind, ArtifactPayload, NativeOwnerKey};
         let mut ids = BTreeSet::new();
@@ -2554,7 +2558,10 @@ impl CertifiedSourceSelection {
             if !entries.get(&interface).is_some_and(|entry| {
                 !matches!(entry.payload, ArtifactPayload::Original(_))
                     && (entry.descriptor.kind != ArtifactKind::ValueInterface
-                        || allowed_values.is_none_or(|allowed| allowed.contains(&interface)))
+                        || allowed_values.is_none_or(|(parent, allowed)| {
+                            parent.contains_namespace_artifact(interface)
+                                || allowed.contains(&interface)
+                        }))
             }) {
                 return Err(CertificationError::Mismatch(
                     "issued compiler interface artifact",
