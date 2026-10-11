@@ -518,6 +518,67 @@ pub(crate) fn test_graph(
     test_graph_with_interfaces(root, |_| b"iface".to_vec())
 }
 
+// Graph-only fixtures may use opaque payload digests. Inventory consumers need
+// the actual encoded originals whose identities are carried by this graph.
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct PreparedExecutionSourceOriginal {
+    pub owner: CachedHomeOwner,
+    pub interface: Vec<u8>,
+    pub product: Vec<u8>,
+}
+
+#[cfg(test)]
+pub(crate) fn test_prepared_graph(
+    root: &Path,
+) -> (
+    Arc<CertifiedExecutionSourceGraph>,
+    Vec<PreparedExecutionSourceOriginal>,
+) {
+    let (graph, owners) = test_graph(root);
+    let mut wire = GraphWire::decode(graph.bytes()).unwrap();
+    let originals = owners
+        .into_iter()
+        .map(|mut owner| {
+            let interface = b"iface".to_vec();
+            let product = tidepool_test_data::prepared_encode::encode_module_products(&[
+                tidepool_repr::execution_schema::RawModuleProduct {
+                    unit: owner.unit.clone(),
+                    module: owner.module.clone(),
+                    interface: interface.clone(),
+                    groups: Vec::new(),
+                },
+            ]);
+            owner.product_sha256 = Sha256::digest(&product).into();
+            wire.owners
+                .iter_mut()
+                .find(|row| row.unit == owner.unit && row.module == owner.module)
+                .unwrap()
+                .product_sha256 = owner.product_sha256;
+            PreparedExecutionSourceOriginal {
+                owner,
+                interface,
+                product,
+            }
+        })
+        .collect();
+    (
+        CertifiedExecutionSourceGraph::recover(wire.encode().unwrap()).unwrap(),
+        originals,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn test_prepared_graph_with_local_source_dependency(
+    root: &Path,
+) -> (
+    Arc<CertifiedExecutionSourceGraph>,
+    Vec<PreparedExecutionSourceOriginal>,
+) {
+    let (graph, originals) = test_prepared_graph(root);
+    (graph_with_local_source_dependency(root, &graph), originals)
+}
+
 #[cfg(test)]
 pub(crate) fn test_graph_with_distinct_interfaces(
     root: &Path,
@@ -1835,6 +1896,14 @@ pub(crate) fn test_graph_with_local_source_dependency(
     root: &Path,
 ) -> (Arc<CertifiedExecutionSourceGraph>, Vec<CachedHomeOwner>) {
     let (graph, owners) = test_graph(root);
+    (graph_with_local_source_dependency(root, &graph), owners)
+}
+
+#[cfg(test)]
+fn graph_with_local_source_dependency(
+    root: &Path,
+    graph: &CertifiedExecutionSourceGraph,
+) -> Arc<CertifiedExecutionSourceGraph> {
     let mut wire = GraphWire::decode(graph.bytes()).unwrap();
     let selected = root.join("B.hs");
     wire.evidence
@@ -1856,8 +1925,7 @@ pub(crate) fn test_graph_with_local_source_dependency(
         selected: Some(selected.clone()),
         candidates: vec![selected],
     });
-    let graph = CertifiedExecutionSourceGraph::recover(wire.encode().unwrap()).unwrap();
-    (graph, owners)
+    CertifiedExecutionSourceGraph::recover(wire.encode().unwrap()).unwrap()
 }
 
 /// One shared proof for every original issued by the same source transaction.

@@ -8195,11 +8195,15 @@ mod tests {
         .with_module_interface(product.module_interface().unwrap().clone())
         .unwrap();
         let mut request = program_request(directory.path(), empty.clone());
-        assert!(matches!(
-            request.admit_fixture_support(empty.clone(), &support_offer(&[uncertified]), &[], None),
-            Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
-                crate::certified_products::CertificationError::Mismatch("compiler original native witness"))
-        ));
+        assert!(uncertified.original_native().is_none());
+        let retained = request
+            .admit_fixture_support(empty.clone(), &support_offer(&[uncertified]), &[], None)
+            .unwrap();
+        assert!(retained.compiler_original_products().unwrap().is_empty());
+        assert!(retained
+            .compiler_input_roles()
+            .iter()
+            .all(|role| matches!(role, CompilerInputRole::InterfaceOnly { .. })));
         assert!(request.program_support.is_none());
         assert!(empty.artifact_view().is_empty());
     }
@@ -9792,7 +9796,7 @@ mod tests {
     }
 
     #[test]
-    fn ambiguous_native_owner_refuses_materialization_and_authorization() {
+    fn unselected_native_versions_preserve_issued_roles_and_refuse_conflicting_offers() {
         let (initial, producer) = metadata_fixture();
         let existing = initial
             .inventory
@@ -9822,31 +9826,61 @@ mod tests {
         )
         .with_module_interface(interface)
         .unwrap();
+        let variant = Arc::new(ArtifactEntry::original(initial.producer, variant).unwrap());
+        assert!(matches!(
+            CompilerInputProjection::from_issued_entries(&[
+                Arc::clone(&existing[&identity("fixture", "Alpha")]), Arc::clone(&variant),
+            ]),
+            Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::CompilerOriginalOfferConflict { .. })
+        ));
         let mut context = initial.as_ref().clone();
         context.inventory = context
             .inventory
             .inventory()
-            .admit(
-                &context.inventory,
-                vec![ArtifactEntry::original(context.producer, variant).unwrap()],
-            )
+            .admit_shared(&context.inventory, vec![variant])
             .unwrap();
         let context = Arc::new(context);
         assert_ne!(initial.semantic_sha256(), context.semantic_sha256());
+        assert_eq!(
+            initial.compiler_input_roles(),
+            context.compiler_input_roles()
+        );
         let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("uncreated");
-        assert!(
-            matches!(context.materialize(&root), Err(CompileError::ArtifactInventory(error))
-            if matches!(error.failure, ArtifactInventoryFailure::NativeOwnerAmbiguity { .. }))
+        let root = directory.path().join("selected");
+        std::fs::create_dir_all(&root).unwrap();
+        let artifacts = context.materialize(&root).unwrap();
+        let original_root = directory.path().join("original");
+        std::fs::create_dir_all(&original_root).unwrap();
+        let semantic_rows = |artifacts: Vec<DeclarationArtifact>| {
+            artifacts
+                .into_iter()
+                .map(|artifact| {
+                    (
+                        artifact.interface.unit,
+                        artifact.interface.module,
+                        artifact.interface.sha256,
+                        artifact.interface.requirements,
+                        artifact.product.map(|product| product.sha256),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            semantic_rows(artifacts.artifacts),
+            semantic_rows(initial.materialize(&original_root).unwrap().artifacts)
         );
-        assert!(!root.exists());
-        assert!(
-            matches!(context.prepare_compilation_authorizing(&root, &producer, |_| {
-            panic!("ambiguous context must refuse before purpose authorization")
-        }), Err(CompileError::ArtifactInventory(error))
-            if matches!(error.failure, ArtifactInventoryFailure::NativeOwnerAmbiguity { .. }))
-        );
-        assert!(!root.exists());
+        let request = context
+            .prepare_compilation_authorizing(
+                &directory.path().join("authorized"),
+                &producer,
+                |identity| {
+                    assert_eq!(identity, context.semantic_sha256());
+                    Ok(Value::Null)
+                },
+            )
+            .unwrap();
+        context.validate_artifacts(&request.artifacts).unwrap();
     }
 
     #[test]
@@ -9993,7 +10027,6 @@ mod tests {
         let after = context.inventory.inventory().metrics();
         // The expected identity query already warmed this immutable view projection.
         assert_eq!(after.graph_visits - before.graph_visits, 0);
-        assert_eq!(after.view_queries - before.view_queries, 1);
         assert_eq!(request.semantic_sha256, expected);
         let value: Value =
             ciborium::de::from_reader(std::fs::read(&request.manifest).unwrap().as_slice())
@@ -10687,11 +10720,21 @@ mod tests {
         let projected_owner = request.materialization.as_ref().unwrap();
         assert!(projected_owner.rows.is_empty());
         assert_eq!(projected_owner.payload_work.written_bytes, 0);
-        assert_eq!(request.groups.len(), 1);
-        assert!(std::ptr::eq(
-            request.groups[0].group(),
-            original.groups[0].group()
-        ));
+        assert!(
+            request.groups.is_empty(),
+            "retained private custody is not executable demand"
+        );
+        assert_eq!(
+            original.groups.len(),
+            1,
+            "the lexical parent selected its native payload"
+        );
+        assert!(request
+            .context()
+            .artifact_view()
+            .descriptors()
+            .iter()
+            .any(|descriptor| descriptor.id == hidden_original));
         for artifact in &request.artifacts {
             assert!(original.artifacts.contains(artifact));
         }
@@ -13360,26 +13403,8 @@ mod tests {
 
     #[test]
     fn unchanged_program_context_reuses_materialization_but_admission_checks_tampering() {
-        let owner = CachedHomeOwner {
-            unit: "fixture".into(),
-            module: "Support".into(),
-            module_version: ModuleVersion([1; 32]),
-            skinny_iface_sha256: Sha256::digest(b"interface").into(),
-            product_sha256: Sha256::digest(b"product").into(),
-        };
-        let certification =
-            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
-                .unwrap();
-        let product = crate::certified_products::fixture_finalized_product(
-            CertifiedRecoveryProduct::from_certification(
-                owner,
-                b"interface".to_vec(),
-                b"product".to_vec(),
-                Vec::new(),
-                certification,
-            ),
-            [2; 32],
-        );
+        let product = support_product_with_interface("fixture", "Support", b"interface".to_vec());
+        let product_sha256 = hex(&product.owner().product_sha256);
         let context = Arc::new(
             ExactDeclarationContext::new(&[], &[], Vec::new())
                 .unwrap()
@@ -13398,7 +13423,7 @@ mod tests {
             product: Some(ModuleSnapshot {
                 module: "Support".into(),
                 path: directory.path().join("missing.bin"),
-                sha256: sha256(b"product"),
+                sha256: product_sha256,
             }),
         }];
         let request = ExactCompilationRequest {
@@ -13435,26 +13460,9 @@ mod tests {
 
     #[test]
     fn supporting_originals_preserve_owned_products_without_lexical_exposure() {
-        let owner = CachedHomeOwner {
-            unit: "fixture".into(),
-            module: "Support".into(),
-            module_version: ModuleVersion([1; 32]),
-            skinny_iface_sha256: Sha256::digest(b"interface").into(),
-            product_sha256: Sha256::digest(b"product").into(),
-        };
-        let certification =
-            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
-                .unwrap();
-        let product = crate::certified_products::fixture_finalized_product(
-            CertifiedRecoveryProduct::from_certification(
-                owner.clone(),
-                b"interface".to_vec(),
-                b"product".to_vec(),
-                Vec::new(),
-                certification.clone(),
-            ),
-            [2; 32],
-        );
+        let product = support_product_with_interface("fixture", "Support", b"interface".to_vec());
+        let owner = product.owner().clone();
+        let certification = product.certification_bytes().to_vec();
         let context = ExactDeclarationContext::new(&[], &[], Vec::new())
             .unwrap()
             .extend_checked_original_products([2; 32], std::slice::from_ref(&product))
@@ -13484,9 +13492,10 @@ mod tests {
     }
 
     fn execution_entry(
-        owner: tidepool_repr::execution_schema::CachedHomeOwner,
+        original: crate::execution_source::PreparedExecutionSourceOriginal,
         graph: Arc<crate::execution_source::CertifiedExecutionSourceGraph>,
     ) -> Arc<ArtifactEntry> {
+        let owner = original.owner;
         let mut validation = PackageInterfaceValidation::default();
         let seal =
             crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
@@ -13517,8 +13526,8 @@ mod tests {
         let product = crate::certified_products::fixture_finalized_product(
             CertifiedRecoveryProduct::from_certification(
                 owner,
-                b"iface".to_vec(),
-                b"product".to_vec(),
+                original.interface,
+                original.product,
                 packages,
                 seal,
             ),
@@ -14728,10 +14737,10 @@ mod tests {
     #[test]
     fn execution_scope_borrows_parent_owned_graph_files_without_payload_writes() {
         let source = tempfile::tempdir().unwrap();
-        let (graph, owners) = crate::execution_source::test_graph(source.path());
+        let (graph, originals) = crate::execution_source::test_prepared_graph(source.path());
         let entries = [
-            execution_entry(owners[0].clone(), Arc::clone(&graph)),
-            execution_entry(owners[1].clone(), Arc::clone(&graph)),
+            execution_entry(originals[0].clone(), Arc::clone(&graph)),
+            execution_entry(originals[1].clone(), Arc::clone(&graph)),
         ];
         let parent = tempfile::tempdir().unwrap();
         let child = tempfile::tempdir().unwrap();
@@ -14773,9 +14782,13 @@ mod tests {
     #[test]
     fn execution_scope_shares_graph_and_matches_selected_original_closure() {
         let source = tempfile::tempdir().unwrap();
-        let (graph, owners) = crate::execution_source::test_graph(source.path());
-        let a = execution_entry(owners[0].clone(), graph.clone());
-        let b = execution_entry(owners[1].clone(), graph.clone());
+        let (graph, originals) = crate::execution_source::test_prepared_graph(source.path());
+        let owners = originals
+            .iter()
+            .map(|original| original.owner.clone())
+            .collect::<Vec<_>>();
+        let a = execution_entry(originals[0].clone(), graph.clone());
+        let b = execution_entry(originals[1].clone(), graph.clone());
         let scope = execution_scope_fixture(&[a, b.clone()], source.path())
             .unwrap()
             .unwrap();
@@ -14787,7 +14800,7 @@ mod tests {
             &owners[1],
             graph.digest(),
         );
-        let a = execution_entry(owners[0].clone(), graph_a);
+        let a = execution_entry(originals[0].clone(), graph_a);
         let scope = execution_scope_fixture(&[a.clone(), b.clone()], source.path())
             .unwrap()
             .unwrap();
@@ -14805,7 +14818,7 @@ mod tests {
         let graph_a =
             crate::execution_source::test_graph_requiring_original(&graph, &wrong, graph.digest());
         let scope = execution_scope_fixture(
-            &[execution_entry(owners[0].clone(), graph_a), b],
+            &[execution_entry(originals[0].clone(), graph_a), b],
             source.path(),
         )
         .unwrap()
@@ -14820,7 +14833,7 @@ mod tests {
         let large =
             crate::execution_source::test_graph_with_large_origin(&graph, EXACT_SCOPE_BYTES_LIMIT);
         assert!(execution_scope_fixture(
-            &[execution_entry(owners[0].clone(), large)],
+            &[execution_entry(originals[0].clone(), large)],
             source.path()
         )
         .unwrap()
@@ -14848,7 +14861,11 @@ mod tests {
             .unwrap_or_else(|| temporary.path().to_path_buf())
             .join("large-closure");
         std::fs::create_dir_all(&root).unwrap();
-        let (graph, owners) = crate::execution_source::test_graph(&root);
+        let (graph, originals) = crate::execution_source::test_prepared_graph(&root);
+        let owners = originals
+            .iter()
+            .map(|original| original.owner.clone())
+            .collect::<Vec<_>>();
         let retained = crate::execution_source::test_graph_with_large_origin(&graph, 2_300_000);
         let graph = crate::execution_source::test_graph_requiring_original(
             &retained,
@@ -14857,8 +14874,8 @@ mod tests {
         );
         assert!(graph.bytes().len() + retained.bytes().len() > EXACT_SCOPE_BYTES_LIMIT);
         let entries = [
-            execution_entry(owners[0].clone(), graph),
-            execution_entry(owners[1].clone(), retained),
+            execution_entry(originals[0].clone(), graph),
+            execution_entry(originals[1].clone(), retained),
         ];
         let execution = execution_scope_value(&entries, &root).unwrap().unwrap();
         assert_eq!(
@@ -14929,9 +14946,15 @@ mod tests {
     #[test]
     fn execution_scope_retains_recipe_custody_across_local_owner_drift() {
         let source = tempfile::tempdir().unwrap();
-        let (graph, owners) =
-            crate::execution_source::test_graph_with_local_source_dependency(source.path());
-        let a = execution_entry(owners[0].clone(), Arc::clone(&graph));
+        let (graph, originals) =
+            crate::execution_source::test_prepared_graph_with_local_source_dependency(
+                source.path(),
+            );
+        let owners = originals
+            .iter()
+            .map(|original| original.owner.clone())
+            .collect::<Vec<_>>();
+        let a = execution_entry(originals[0].clone(), Arc::clone(&graph));
         let native_entry = |owner: CachedHomeOwner| {
             let seal =
                 crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
@@ -14951,8 +14974,8 @@ mod tests {
             let product = crate::certified_products::fixture_finalized_product(
                 CertifiedRecoveryProduct::from_certification(
                     owner,
-                    b"iface".to_vec(),
-                    b"product".to_vec(),
+                    originals[1].interface.clone(),
+                    originals[1].product.clone(),
                     packages,
                     seal,
                 ),

@@ -242,14 +242,18 @@ fn selected_rows_keep_same_issuance_directory_files_until_last_capture() {
 #[test]
 fn captured_dependency_graph_files_keep_their_issued_directories() {
     let source = tempfile::tempdir().unwrap();
-    let (graph_b, owners) = crate::execution_source::test_graph(source.path());
+    let (graph_b, originals) = crate::execution_source::test_prepared_graph(source.path());
+    let owners = originals
+        .iter()
+        .map(|original| original.owner.clone())
+        .collect::<Vec<_>>();
     let graph_a = crate::execution_source::test_graph_requiring_original(
         &graph_b,
         &owners[1],
         graph_b.digest(),
     );
-    let a = execution_entry(owners[0].clone(), Arc::clone(&graph_a));
-    let b = execution_entry(owners[1].clone(), Arc::clone(&graph_b));
+    let a = execution_entry(originals[0].clone(), Arc::clone(&graph_a));
+    let b = execution_entry(originals[1].clone(), Arc::clone(&graph_b));
     let product = |entry: &ArtifactEntry| match &entry.payload {
         ArtifactPayload::Original(product) => product.clone(),
         _ => unreachable!(),
