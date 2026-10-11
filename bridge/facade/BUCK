@@ -1566,6 +1566,7 @@ rust_filegroup(
         "src/actor_host/m1_eight_actor_performance.rs": "bridge/facade/src/actor_host/m1_eight_actor_performance.rs",
         "src/actor_host/m1_host_tests.rs": "bridge/facade/src/actor_host/m1_host_tests.rs",
         "src/actor_host/m1_real_host_late_output_tests.rs": "bridge/facade/src/actor_host/m1_real_host_late_output_tests.rs",
+        "src/actor_host/m1_rejected_ancestor_cell.hs": "bridge/facade/src/actor_host/m1_rejected_ancestor_cell.hs",
         "src/actor_host/m1_request_reload_tests.rs": "bridge/facade/src/actor_host/m1_request_reload_tests.rs",
         "src/actor_host/m1_warm_cell_performance.rs": "bridge/facade/src/actor_host/m1_warm_cell_performance.rs",
         "src/actor_host/m1_warm_cell_workloads.json": "bridge/facade/src/actor_host/m1_warm_cell_workloads.json",
@@ -2747,6 +2748,7 @@ filegroup(
         "bridge/facade/src/actor_host/m1_eight_actor_performance.rs": "src/actor_host/m1_eight_actor_performance.rs",
         "bridge/facade/src/actor_host/m1_host_tests.rs": "src/actor_host/m1_host_tests.rs",
         "bridge/facade/src/actor_host/m1_real_host_late_output_tests.rs": "src/actor_host/m1_real_host_late_output_tests.rs",
+        "bridge/facade/src/actor_host/m1_rejected_ancestor_cell.hs": "src/actor_host/m1_rejected_ancestor_cell.hs",
         "bridge/facade/src/actor_host/m1_request_reload_tests.rs": "src/actor_host/m1_request_reload_tests.rs",
         "bridge/facade/src/actor_host/m1_warm_cell_performance.rs": "src/actor_host/m1_warm_cell_performance.rs",
         "bridge/facade/src/actor_host/m1_warm_cell_workloads.json": "src/actor_host/m1_warm_cell_workloads.json",
@@ -3971,6 +3973,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f6d315f65696768745f6163746f725f6c61756e63682e6873",
     src = "src/actor_host/m1_eight_actor_launch.hs",
     out = "m1_eight_actor_launch.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f6d315f72656a65637465645f616e636573746f725f63656c6c2e6873",
+    src = "src/actor_host/m1_rejected_ancestor_cell.hs",
+    out = "m1_rejected_ancestor_cell.hs",
     visibility = ["PUBLIC"],
 )
 

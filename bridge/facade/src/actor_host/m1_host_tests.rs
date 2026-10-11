@@ -122,7 +122,7 @@ impl ResponsesTransport for HostCellTransport {
                     "type":"custom_tool_call",
                     "call_id":"host-real-cell",
                     "name":"haskell",
-                    "input":"display (40 + 2 :: Int)"
+                    "input":"_ <- display (40 + 2 :: Int)"
                 }))],
                 usage: Usage::default(),
             }),
@@ -442,12 +442,13 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
     );
     reconnected.close(None).await.unwrap();
 
+    let retire_operation = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
     let retire = client
         .post(format!("{api}/commands"))
         .header("Origin", &origin)
         .header(reqwest::header::COOKIE, &cookie)
         .json(&harness::server::ClientCommand::Host {
-            operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+            operation_id: retire_operation,
             command: harness::server::HostCommand::Retire {
                 target: target.clone(),
             },
@@ -456,6 +457,30 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
         .await
         .unwrap();
     assert_eq!(retire.status(), reqwest::StatusCode::ACCEPTED);
+    fixture
+        .while_host_running(tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(receipt) = store
+                    .embedded_command(&target.run, retire_operation)
+                    .unwrap()
+                    .and_then(|operation| operation.receipt)
+                {
+                    assert_eq!(
+                        receipt.outcome,
+                        harness::server::CommandReceiptOutcome::ControlRequested {
+                            target: target.clone(),
+                            control: harness::server::CommandControl::Retire,
+                        },
+                        "native retirement must acknowledge cleanup through the supervisor"
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }))
+        .await
+        .expect("host exited before the retirement receipt")
+        .expect("native retirement did not settle its exact command receipt");
     let (mut retired_socket, retired_snapshot) =
         browser_snapshot_until(address, &cookie, "retired").await;
     assert_eq!(
@@ -592,7 +617,7 @@ impl ResponsesTransport for RejectFirstRequest {
                 response_id: "before-rejection-tool".into(),
                 items: vec![harness::item::Item(json!({
                     "type":"custom_tool_call", "call_id":"before-rejection-cell",
-                    "name":"haskell", "input":"display (40 + 2 :: Int)"
+                    "name":"haskell", "input":include_str!("m1_rejected_ancestor_cell.hs")
                 }))],
                 usage: Usage::default(),
             });
@@ -674,6 +699,14 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
     let fixture = HostedTestRuntime::start(&settings, &host_transport)
         .await
         .unwrap();
+    let output_release = fixture
+        .context
+        .config
+        .workspace
+        .join("ancestor-output-release");
+    if tool_before_rejection {
+        std::fs::write(&output_release, "pending").unwrap();
+    }
     let target = browser_target(&fixture.context);
     let actor = fixture.context.actor.identity();
     let api = format!("http://{}/api", fixture.address);
@@ -716,6 +749,7 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
             item.0["type"] == "custom_tool_call_output"
                 && item.0["call_id"] == "before-rejection-cell"
         }));
+        std::fs::write(&output_release, "release").unwrap();
         tokio::time::timeout(Duration::from_secs(300), async {
             loop {
                 let claims = store

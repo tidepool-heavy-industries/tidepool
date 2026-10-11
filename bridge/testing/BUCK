@@ -308,6 +308,7 @@ filegroup(
         "bridge/facade/src/actor_host/lookup_topics_found.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f6c6f6f6b75705f746f706963735f666f756e642e6873",
         "bridge/facade/src/actor_host/m1_cancel_cell.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f6d315f63616e63656c5f63656c6c2e6873",
         "bridge/facade/src/actor_host/m1_eight_actor_launch.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f6d315f65696768745f6163746f725f6c61756e63682e6873",
+        "bridge/facade/src/actor_host/m1_rejected_ancestor_cell.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f6d315f72656a65637465645f616e636573746f725f63656c6c2e6873",
         "bridge/facade/src/actor_host/mailbox_state.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f6d61696c626f785f73746174652e6873",
         "bridge/facade/src/actor_host/message_actor.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f6d6573736167655f6163746f722e6873",
         "bridge/facade/src/actor_host/notebook_actor_scoped_handle.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f6e6f7465626f6f6b5f6163746f725f73636f7065645f68616e646c652e6873",

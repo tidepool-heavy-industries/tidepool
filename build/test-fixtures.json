@@ -180,6 +180,7 @@
     "bridge/facade/src/actor_host/lookup_topics_found.hs",
     "bridge/facade/src/actor_host/m1_cancel_cell.hs",
     "bridge/facade/src/actor_host/m1_eight_actor_launch.hs",
+    "bridge/facade/src/actor_host/m1_rejected_ancestor_cell.hs",
     "bridge/facade/src/actor_host/mailbox_state.hs",
     "bridge/facade/src/actor_host/message_actor.hs",
     "bridge/facade/src/actor_host/notebook_actor_scoped_handle.hs",
