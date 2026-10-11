@@ -45,6 +45,7 @@ import Tidepool.ExactHydration (ExactIfaceArtifact(..))
 import Tidepool.Identity (stableVarId)
 import Tidepool.PlannedDeclaration
 import Tidepool.ExtractUtil (getLibdir)
+import Tidepool.TurnSource (preambleDefaultDeclaration, replaceTemplateMarker)
 import Tidepool.Session
   ( Generation(..), SessionModule(..), SessionModuleKind(..), sessionModuleString
   , parseSessionModule, isReservedSessionModuleName
@@ -213,7 +214,9 @@ checkOriginalDeclarationShadow work = do
   writeFile previousFile previousSource
   writeFile (directory </> "Foreign.hs") foreignSource
   authored <- readFile "test-planned-declaration/fixtures/shadow-cell.hs"
-  wrapper <- readFile "test-planned-declaration/fixtures/shadow-decl-wrapper.hs"
+  wrapperTemplate <- readFile "test-planned-declaration/fixtures/shadow-decl-wrapper.hs"
+  wrapper <- either fail pure (replaceTemplateMarker "{{COMPILER_DEFAULTS}}\n"
+    preambleDefaultDeclaration wrapperTemplate)
   plan <- analyzeCell wrapper authored >>= either (fail . show) pure
   original <- either (fail . show) pure (preparePlannedDeclaration originalName wrapper plan)
   unless (not (null (cellPlanGenericDeclarations plan))

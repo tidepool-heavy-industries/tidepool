@@ -6,8 +6,7 @@ import Data.Text (Text)
 import qualified "text" Data.Text as OriginalText
 import Tidepool.Session.Lib.G6
 import Foreign as Selected (Box(..))
--- tidepool-preamble-imports-v1
-default (Int, Double, Text)
+{{COMPILER_DEFAULTS}}
 {{TURN}}
 __result :: ()
 __result = ()
