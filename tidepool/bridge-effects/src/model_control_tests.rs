@@ -142,6 +142,18 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
             }
         }
     }
+    let cancelled = json!({"kind": "cancelled"});
+    assert_eq!(
+        serde_json::to_value(ModelOutcomeEnvelope::ModelCancelledOutcome {}).unwrap(),
+        cancelled
+    );
+    assert_eq!(
+        serde_json::from_value::<ModelOutcomeEnvelope>(cancelled.clone()).unwrap(),
+        ModelOutcomeEnvelope::ModelCancelledOutcome {}
+    );
+    let mut surplus = cancelled;
+    surplus["value"] = json!("foreign");
+    assert!(serde_json::from_value::<ModelOutcomeEnvelope>(surplus).is_err());
     assert_eq!(
         serde_json::to_value(ModelOutcomeEnvelope::ModelExhaustedOutcome {
             value: ModelLimitEnvelope::ModelTokensLimit

@@ -62,7 +62,7 @@ pub enum ModelOutcomeEnvelope {
     #[serde(rename = "failed")]
     ModelFailedOutcome { value: String },
     #[serde(rename = "cancelled")]
-    ModelCancelledOutcome,
+    ModelCancelledOutcome {},
     #[serde(rename = "exhausted")]
     ModelExhaustedOutcome { value: ModelLimitEnvelope },
 }
