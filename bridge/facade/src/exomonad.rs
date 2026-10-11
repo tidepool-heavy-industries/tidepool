@@ -758,6 +758,8 @@ pub struct RunStatus {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recovered_actors: Vec<RecoveredActorObservation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actors: Vec<harness::server::HostActorProjection>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lost_state: Vec<String>,
     #[serde(default)]
     pub resource_service: ResourceServiceObservation,
@@ -1595,6 +1597,7 @@ async fn run_host(
         .ensure_active(&workspace_inputs)?
         .identity;
     let mut unavailable_actors = Vec::new();
+    let mut actor_observations = Vec::new();
     let lost_state = recovery_lost_state(host_generation);
     if host_generation > 1 {
         let mut status = RunStatus::new(
@@ -1738,6 +1741,23 @@ async fn run_host(
     loop {
         tokio::select! {
             readiness = readiness_rx.recv() => match readiness {
+                Some(crate::actor_host::ActorHostReadiness::ActorsObserved { actors }) => {
+                    actor_observations = actors;
+                    match std::fs::read(&options.status_path)
+                        .map_err(Box::<dyn std::error::Error>::from)
+                        .and_then(|bytes| decode_run_status(&bytes))
+                    {
+                        Ok(mut status) if status.host_generation == host_generation => {
+                            if status.replace_actor_observations(host_generation, actor_observations.clone()) {
+                                if let Err(error) = write_status(&options.status_path, &status) {
+                                    tracing::error!(%error, "could not publish actor availability");
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => tracing::debug!(%error, "actor observation preceded run status"),
+                    }
+                }
                 Some(crate::actor_host::ActorHostReadiness::CoordinationFailed { root, error }) => {
                     tracing::error!(actor = ?root, %error, "root coordination failed; preserving native application");
                     if let Err(error) = write_startup_failure(
@@ -1752,7 +1772,7 @@ async fn run_host(
                     }
                 }
                 Some(crate::actor_host::ActorHostReadiness::EmbeddedReady { root, address }) => {
-                    let status = observe_run_runtime(RunStatus::new(
+                    let mut status = observe_run_runtime(RunStatus::new(
                         &options.run_id,
                         &options.workspace,
                         &options.session,
@@ -1766,6 +1786,7 @@ async fn run_host(
                         &recovered_actors,
                         &lost_state,
                     ).await;
+                    status.replace_actor_observations(host_generation, actor_observations.clone());
                     if let Err(error) = write_status(&options.status_path, &status) {
                         tracing::error!(%error, "could not publish embedded readiness; host remains active");
                     }
@@ -1948,6 +1969,7 @@ fn settle_host_result(
         if previous.host_generation == host_generation {
             status.unavailable_actors = previous.unavailable_actors;
             status.recovered_actors = previous.recovered_actors;
+            status.actors = previous.actors;
             status.lost_state = previous.lost_state;
             status.resource_service = previous.resource_service;
         }
@@ -2100,6 +2122,7 @@ impl RunStatus {
             host_generation: 0,
             unavailable_actors: Vec::new(),
             recovered_actors: Vec::new(),
+            actors: Vec::new(),
             lost_state: Vec::new(),
             resource_service: ResourceServiceObservation::default(),
             run_storage: BoundedStorageObservation::default(),
@@ -2119,6 +2142,18 @@ impl RunStatus {
     fn with_unavailable_actors(mut self, actors: Vec<String>) -> Self {
         self.unavailable_actors = actors;
         self
+    }
+
+    fn replace_actor_observations(
+        &mut self,
+        host_generation: u64,
+        actors: Vec<harness::server::HostActorProjection>,
+    ) -> bool {
+        if self.host_generation != host_generation || self.actors == actors {
+            return false;
+        }
+        self.actors = actors;
+        true
     }
 }
 
@@ -3741,12 +3776,43 @@ mod tests {
             "session": "exomonad-work",
             "phase": {"state": "awaiting_input", "root_actor": root_actor},
         });
-        assert!(
-            decode_run_status(&serde_json::to_vec(&old).unwrap())
-                .unwrap_err()
-                .to_string()
-                .contains("unsupported Exomonad run status version 3")
-        );
+        assert!(decode_run_status(&serde_json::to_vec(&old).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported Exomonad run status version 3"));
+    }
+
+    #[test]
+    fn actor_availability_remains_distinct_from_host_readiness_and_fences_generations() {
+        let root = ActorRef::first(exomonad_actor::ActorId(7));
+        let mut status = RunStatus::new(
+            "run-1",
+            Path::new("/tmp/work"),
+            "exomonad-work",
+            test_agent_defaults(),
+            RunPhase::EmbeddedReady {
+                root_actor: root,
+                browser_address: "127.0.0.1:1234".parse().unwrap(),
+            },
+        )
+        .at_generation(2);
+        let lost =
+            serde_json::from_value::<harness::server::HostActorProjection>(serde_json::json!({
+                "identity": {"run":"run-1", "actor":"/root", "incarnation":"1"},
+                "parent":null,
+                "kind":"model",
+                "lifecycle":"lost",
+                "modelConversation":"/root",
+                "modelHeadRequest":"retained-failed-head",
+            }))
+            .unwrap();
+        assert!(status.replace_actor_observations(2, vec![lost.clone()]));
+        assert!(matches!(status.phase, RunPhase::EmbeddedReady { .. }));
+        assert!(!status.replace_actor_observations(1, Vec::new()));
+        assert!(!status.replace_actor_observations(2, vec![lost.clone()]));
+        let restored = decode_run_status(&serde_json::to_vec(&status).unwrap()).unwrap();
+        assert_eq!(restored.actors, vec![lost]);
+        assert!(matches!(restored.phase, RunPhase::EmbeddedReady { .. }));
     }
 
     #[test]
