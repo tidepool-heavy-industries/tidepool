@@ -12,30 +12,49 @@ pub use newrecovery_v2::{
     RecoveryRefusal as RecoveryFormatRefusal, RecoverySymbolIdentity,
 };
 
-/// Authenticated immutable storage facts. These observations grant no compiler,
-/// source-instance, publication, or native execution authority.
+/// Authenticated domain header and exact immutable fact access. Observation
+/// grants no compiler, source-instance, publication, or execution authority.
+/// Only explicitly selected leaves are checked; this is not recovery validation.
+#[derive(Debug)]
 pub struct DeclarationDomainObservation {
     pub domain: super::RecoveryDomainId,
     pub source_session: u64,
     pub high_water: tidepool_repr::Generation,
-    pub declarations: Vec<DeclarationObservation>,
-    pub artifacts: Vec<std::sync::Arc<RecoveryArtifactClosure>>,
-    graph: RecoveryGraph,
-}
-
-impl std::fmt::Debug for DeclarationDomainObservation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DeclarationDomainObservation")
-            .field("domain", &self.domain)
-            .field("source_session", &self.source_session)
-            .field("high_water", &self.high_water)
-            .field("declarations", &self.declarations)
-            .field("artifact_count", &self.artifacts.len())
-            .finish()
-    }
+    reader: RecoveryDomainReader,
 }
 
 impl DeclarationDomainObservation {
+    pub fn declaration(
+        &self,
+        generation: tidepool_repr::Generation,
+    ) -> Result<Option<DeclarationObservation>, SessionError> {
+        self.reader
+            .node(generation)
+            .map_err(|error| graph_error(self.reader.store.path(), error))
+            .map(|node| {
+                node.map(|node| DeclarationObservation {
+                    generation: node.id,
+                    parent: node.parent,
+                    kind: node.kind,
+                    implementation_refs: node.implementation_refs,
+                    artifact_refs: node.artifact_refs,
+                    exports: node.exports,
+                    lexical_roots: node.lexical_roots,
+                    instances: node.instances,
+                    context_root: node.context_root,
+                })
+            })
+    }
+
+    pub fn artifact(
+        &self,
+        id: tidepool_toolchain::artifact_inventory::ArtifactId,
+    ) -> Result<Option<RecoveryArtifactClosure>, SessionError> {
+        self.reader
+            .artifact(id)
+            .map_err(|error| graph_error(self.reader.store.path(), error))
+    }
+
     /// Demand only this declaration's exact selected dependency facts.
     pub fn declaration_dependencies(
         &self,
@@ -48,21 +67,21 @@ impl DeclarationDomainObservation {
         )>,
         SessionError,
     > {
-        let path = self.graph.store().path();
+        let path = self.reader.store.path();
         let node = self
-            .graph
+            .reader
             .node(generation)
             .map_err(|error| graph_error(path, error))?
             .ok_or_else(|| SessionError::RecoveryManifest {
                 path: path.to_path_buf(),
                 detail: "observed declaration is absent from this exact domain snapshot".into(),
             })?;
-        self.graph
-            .context(&node.context_root)
-            .map_err(|error| graph_error(path, error))?
-            .snapshot()
-            .binding_dependencies()
-            .map_err(|error| SessionError::RecoverySnapshot(Box::new(error)))
+        tidepool_toolchain::exact_context::hydrate_context(
+            self.reader.store.as_ref(),
+            &node.context_root,
+        )
+        .and_then(|context| context.snapshot().binding_dependencies())
+        .map_err(|error| SessionError::RecoverySnapshot(Box::new(error)))
     }
 }
 
@@ -71,15 +90,18 @@ pub struct DeclarationObservation {
     pub generation: tidepool_repr::Generation,
     pub parent: Option<tidepool_repr::Generation>,
     pub kind: RecoveryNodeKind,
+    pub implementation_refs: Vec<tidepool_repr::Generation>,
+    pub artifact_refs: Vec<tidepool_toolchain::artifact_inventory::ArtifactId>,
     pub exports: Vec<RecoveryExport>,
     pub lexical_roots: Vec<tidepool_toolchain::declaration_join::ExactModuleIdentity>,
     pub instances: RecoveryInstanceInventory,
     pub context_root: tidepool_toolchain::exact_context::ContextRoot,
 }
 
-/// Read a domain through the production block and context acquisition owners.
-/// A missing database is an error; an authenticated absent domain is `None`.
-/// Concurrent publication refuses the observation instead of mixing revisions.
+/// Read scalar status through the production store owner and retain the exact
+/// immutable domain root for subsequent selected reads. A missing database is
+/// an error; an authenticated absent domain is `None`. Concurrent publication
+/// during header acquisition refuses instead of mixing revisions.
 pub fn observe_declaration_domain(
     path: &Path,
     domain: super::RecoveryDomainId,
@@ -88,53 +110,26 @@ pub fn observe_declaration_domain(
         super::RunRecoveryStore::open_read_only(path)
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?,
     );
-    let state = store
+    let Some(state) = store
         .read_domain(domain)
-        .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-    let Some(state) = state else { return Ok(None) };
-    let graph = RecoveryGraph::hydrate_domain(store.clone(), domain, &state)
+        .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?
+    else {
+        return Ok(None);
+    };
+    let reader = RecoveryDomainReader::open(store.clone(), &state)
         .map_err(|error| graph_error(path, error))?;
-    let mut declarations = Vec::new();
-    for generation in graph.node_ids() {
-        let node = graph
-            .node(generation)
-            .map_err(|error| graph_error(path, error))?
-            .expect("the immutable declaration map contains its iterated key");
-        declarations.push(DeclarationObservation {
-            generation: node.id,
-            parent: node.parent,
-            kind: node.kind,
-            exports: node.exports.clone(),
-            lexical_roots: node.lexical_roots.clone(),
-            instances: node.instances.clone(),
-            context_root: node.context_root.clone(),
-        });
-    }
-    let artifacts = graph
-        .artifact_ids()
-        .map(|id| {
-            graph
-                .artifact(id)
-                .map_err(|error| graph_error(path, error))
-                .map(|artifact| {
-                    artifact.expect("the immutable artifact map contains its iterated key")
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     if store
         .read_domain(domain)
         .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?
-        != Some(state)
+        != Some(state.clone())
     {
         return Err(SessionError::StaleStagedDeclaration);
     }
     Ok(Some(DeclarationDomainObservation {
         domain,
-        source_session: graph.source_session(),
-        high_water: graph.high_water(),
-        declarations,
-        artifacts,
-        graph,
+        source_session: reader.source_session(),
+        high_water: state.allocation_ceiling,
+        reader,
     }))
 }
 

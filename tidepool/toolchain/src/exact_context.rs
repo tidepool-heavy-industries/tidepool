@@ -394,6 +394,46 @@ impl<V: Clone + Eq + Serialize + DeserializeOwned> SnapshotValueCodec<V> for Inl
     }
 }
 
+/// Authenticate only the HAMT route selected by this typed key. Unselected
+/// leaves are neither inspected nor granted compiler authority.
+pub fn lookup_map<K, V, BS>(
+    store: &BS,
+    root: &SnapshotMapRoot,
+    key: &K,
+) -> Result<Option<V>, SnapshotError>
+where
+    K: SnapshotKey,
+    V: Clone + Eq + Serialize + DeserializeOwned,
+    BS: Blockstore,
+{
+    lookup_map_with::<K, V, InlineValues, BS>(store, root, key)
+}
+
+pub fn lookup_map_with<K, V, C, BS>(
+    store: &BS,
+    root: &SnapshotMapRoot,
+    key: &K,
+) -> Result<Option<V>, SnapshotError>
+where
+    K: SnapshotKey,
+    V: Clone + Eq,
+    C: SnapshotValueCodec<V>,
+    BS: Blockstore,
+{
+    let encoded = key.encode_key()?;
+    if K::decode_key(&encoded)?.encode_key()? != encoded {
+        return Err(malformed("noncanonical typed snapshot key"));
+    }
+    let checked = CheckedStore(store);
+    let hamt: Hamt<_, C::Wire> =
+        Hamt::load_with_config(root.cid(), &checked, HAMT_CONFIG).map_err(hamt_error)?;
+    hamt.get(&BytesKey(encoded))
+        .map_err(hamt_error)?
+        .cloned()
+        .map(|value| C::decode(store, value))
+        .transpose()
+}
+
 pub fn hydrate_map<K, V, BS>(
     store: &BS,
     root: &SnapshotMapRoot,

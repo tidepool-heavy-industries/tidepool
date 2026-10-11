@@ -741,7 +741,7 @@ async fn production_old_startup_journal_is_refused_without_rewriting_evidence() 
 }
 
 #[tokio::test]
-async fn production_missing_manifest_refuses_bound_root_without_rewriting_journal() {
+async fn production_missing_recovery_store_refuses_bound_root_without_rewriting_journal() {
     tidepool_testing::eval_harness::require_extract();
     let retained_root = fixture();
     let root = retained_root.as_path();
@@ -749,21 +749,35 @@ async fn production_missing_manifest_refuses_bound_root_without_rewriting_journa
     crashed(root, "retained-bound-root", &mut first).await;
     let journal = root.join("run/actor-lifecycle.v2.jsonl");
     let journal_bytes = std::fs::read(&journal).unwrap();
-    let manifest = root.join("run/root-declarations.json");
-    let retained_manifest = root.join("run/retained-root-declarations.json");
-    let manifest_bytes = std::fs::read(&manifest).unwrap();
-    std::fs::rename(&manifest, &retained_manifest).unwrap();
-    let mut refused_root = start(root, "missing-manifest");
+    let database = root.join("run/recovery.sqlite");
+    assert!(tidepool_runtime::session::observe_declaration_domain(
+        &database,
+        tidepool_runtime::session::RecoveryDomainId::Root,
+    )
+    .unwrap()
+    .is_some());
+    let mut retained_files = Vec::new();
+    for suffix in ["", "-wal", "-shm"] {
+        let original = root.join(format!("run/recovery.sqlite{suffix}"));
+        if original.try_exists().unwrap() {
+            let retained = root.join(format!("run/retained-recovery.sqlite{suffix}"));
+            let bytes = std::fs::read(&original).unwrap();
+            std::fs::rename(&original, &retained).unwrap();
+            retained_files.push((retained, bytes));
+        }
+    }
+    let mut refused_root = start(root, "missing-recovery-store");
     refused(
         root,
-        "missing-manifest",
+        "missing-recovery-store",
         &mut refused_root,
-        "root startup lost its retained public manifest",
+        "root startup lost its retained public recovery domain",
     )
     .await;
     assert_eq!(std::fs::read(&journal).unwrap(), journal_bytes);
-    assert_eq!(std::fs::read(&retained_manifest).unwrap(), manifest_bytes);
-    assert!(!manifest.exists());
+    for (retained, bytes) in retained_files {
+        assert_eq!(std::fs::read(&retained).unwrap(), bytes);
+    }
     finish_fixture(retained_root);
 }
 
@@ -861,6 +875,15 @@ async fn production_cold_successor_executes_retained_original_declaration_in_fre
     let initial_actor: ActorRef = serde_json::from_value(initial["actor"].clone()).unwrap();
     let initial_identity =
         embedded_recovery::host_identity(&root.join("run"), "/root", initial_actor);
+    use tidepool_runtime::session::{
+        observe_declaration_domain, RecoveryArtifactClosure, RecoveryDomainId, RecoveryExportKind,
+        RecoveryNodeKind,
+    };
+    let recovery_path = root.join("run/recovery.sqlite");
+    let before = observe_declaration_domain(&recovery_path, RecoveryDomainId::Root)
+        .unwrap()
+        .unwrap()
+        .high_water;
     input(
         initial["address"].as_str().unwrap(),
         &initial_identity,
@@ -872,80 +895,77 @@ async fn production_cold_successor_executes_retained_original_declaration_in_fre
     original.0.kill().unwrap();
     original.0.wait().unwrap();
     let original_calls = std::fs::read_to_string(root.join("publish-original.calls")).unwrap();
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.join("run/root-declarations.json")).unwrap())
-            .unwrap();
-    let authored = manifest["nodes"]
-        .as_array()
+    let published = observe_declaration_domain(&recovery_path, RecoveryDomainId::Root)
         .unwrap()
-        .iter()
+        .unwrap();
+    let authored = ((before.0 + 1)..=published.high_water.0)
+        .filter_map(|id| {
+            published
+                .declaration(tidepool_repr::Generation(id))
+                .unwrap()
+        })
         .find(|node| {
-            node["kind"] == "authored"
-                && node["exports"].as_array().is_some_and(|exports| {
-                    exports.iter().any(|export| {
-                        export["kind"] == "value"
-                            && export["identity"]["occurrence"] == "coldAnswer"
-                    })
+            node.kind == RecoveryNodeKind::Authored
+                && node.exports.iter().any(|export| {
+                    export.kind == RecoveryExportKind::Value
+                        && export.identity.occurrence == "coldAnswer"
                 })
         })
         .expect("coldAnswer original authored declaration was not retained");
-    let exports = authored["exports"].as_array().unwrap();
-    let answer = exports
+    let answer = authored
+        .exports
         .iter()
-        .find(|export| export["identity"]["occurrence"] == "coldAnswer")
+        .find(|export| export.identity.occurrence == "coldAnswer")
         .unwrap();
-    let unit = answer["identity"]["unit"].as_str().unwrap();
-    let module = answer["identity"]["module"].as_str().unwrap();
+    let unit = &answer.identity.unit;
+    let module = &answer.identity.module;
     assert!(!unit.is_empty());
-    let authored_generation = tidepool_repr::Generation(authored["id"].as_u64().unwrap());
     assert_eq!(
-        module,
-        tidepool_repr::SessionModule::lib(authored_generation).module_name(),
+        *module,
+        tidepool_repr::SessionModule::lib(authored.generation).module_name(),
         "authored owner does not match its original declaration generation"
     );
     assert!(
-        exports.iter().any(|export| {
-            export["kind"] == "type"
-                && export["identity"]["occurrence"] == "RecoveryBox"
-                && export["identity"]["unit"] == unit
-                && export["identity"]["module"] == module
-                && export["children"].as_array().is_some_and(|children| {
-                    children.iter().any(|child| {
-                        child["occurrence"] == "RecoveryBox"
-                            && child["unit"] == unit
-                            && child["module"] == module
-                    })
-                })
-        }),
+        authored
+            .exports
+            .iter()
+            .any(|export| export.kind == RecoveryExportKind::Type
+                && export.identity.occurrence == "RecoveryBox"
+                && export.identity.unit == *unit
+                && export.identity.module == *module
+                && export
+                    .children
+                    .iter()
+                    .any(|child| child.occurrence == "RecoveryBox"
+                        && child.unit == *unit
+                        && child.module == *module)),
         "original RecoveryBox type and constructor identities were not retained"
     );
     for class in ["Eq", "Show"] {
         assert!(
-            authored["instances"]["classes"]
-                .as_array()
-                .unwrap()
+            authored
+                .instances
+                .classes
                 .iter()
-                .any(|instance| {
-                    instance["selected"] == true
-                        && instance["class"]["occurrence"] == class
-                        && instance["dfun"]["unit"] == unit
-                        && instance["dfun"]["module"] == module
-                }),
+                .any(|instance| instance.selected
+                    && instance.class.occurrence == class
+                    && instance.dfun.unit == *unit
+                    && instance.dfun.module == *module),
             "original {class} instance was not retained"
         );
     }
-    let original_artifact = manifest["artifacts"]
-        .as_array()
-        .unwrap()
+    let original_reference = authored
+        .artifact_refs
         .iter()
-        .find(|artifact| {
-            artifact["kind"] == "home"
-                && artifact["reference"]["unit"] == unit
-                && artifact["reference"]["module"] == module
+        .find_map(|id| match published.artifact(*id).unwrap() {
+            Some(RecoveryArtifactClosure::Home(reference))
+                if reference.unit == *unit && reference.module == *module =>
+            {
+                Some(reference)
+            }
+            _ => None,
         })
         .expect("authored original module product/interface was not retained");
-    let original_reference: tidepool_toolchain::recovery_artifacts::RecoveryArtifactRef =
-        serde_json::from_value(original_artifact["reference"].clone()).unwrap();
     tidepool_toolchain::recovery_artifacts::verify_materialized_ref(
         &root.join("run"),
         &original_reference,
@@ -974,14 +994,17 @@ async fn production_cold_successor_executes_retained_original_declaration_in_fre
     wait_calls(root, "execute-original").await;
     recovered.0.kill().unwrap();
     recovered.0.wait().unwrap();
-    let recovered_manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.join("run/root-declarations.json")).unwrap())
-            .unwrap();
-    assert!(
-        recovered_manifest["artifacts"]
-            .as_array()
-            .unwrap()
-            .contains(original_artifact),
+    let recovered_domain = observe_declaration_domain(&recovery_path, RecoveryDomainId::Root)
+        .unwrap()
+        .unwrap();
+    let original_id =
+        tidepool_toolchain::artifact_inventory::ArtifactDescriptor::from_recovery_product(
+            &original_reference,
+        )
+        .id;
+    assert_eq!(
+        recovered_domain.artifact(original_id).unwrap(),
+        Some(RecoveryArtifactClosure::Home(original_reference.clone())),
         "cold successor replaced the original module/product identity"
     );
     tidepool_toolchain::recovery_artifacts::verify_materialized_ref(

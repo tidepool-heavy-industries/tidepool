@@ -513,6 +513,8 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
             },
         )
         .await;
+    let child_before = observe_declaration_domain(&recovery_path, RecoveryDomainId::Session(child_session))
+        .unwrap().expect("the typed child has retained its declaration domain").high_water;
     let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
     let reply = campaign.drive_actor_output(&store, dispatch_haskell_script(
         installation.policy.as_ref(),
@@ -528,29 +530,23 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
         .unwrap().expect("the dedicated child declaration domain is retained");
     assert_eq!(child_domain.domain, RecoveryDomainId::Session(child_session));
     assert_eq!(child_domain.source_session, child_session.0);
-    let authored = child_domain.declarations.iter().find(|node| {
-        node.kind == RecoveryNodeKind::Authored && node.exports.iter()
-            .any(|export| export.identity.occurrence == "FreshChildNominal")
-    }).expect("the child retains its own authored nominal declaration");
+    let authored = ((child_before.0 + 1)..=child_domain.high_water.0)
+        .filter_map(|id| child_domain.declaration(tidepool_repr::Generation(id)).unwrap())
+        .find(|node| node.kind == RecoveryNodeKind::Authored && node.exports.iter()
+            .any(|export| export.identity.occurrence == "FreshChildNominal"))
+        .expect("the child's cell retains its own authored nominal declaration");
     let generation = authored.generation;
     assert!(generation > parent_high_water, "{child_domain:?}");
     let identity = &authored.exports.iter()
         .find(|export| export.identity.occurrence == "FreshChildNominal").unwrap().identity;
     assert_eq!(identity.module, tidepool_repr::SessionModule::lib(generation).module_name());
-    let projections: Vec<_> = child_domain.artifacts.iter().filter_map(|artifact| match artifact.as_ref() {
-        RecoveryArtifactClosure::Join(reference) => Some(reference),
+    let native = authored.artifact_refs.iter().find_map(|id| match child_domain.artifact(*id).unwrap() {
+        Some(RecoveryArtifactClosure::Home(reference)) if reference.unit == identity.unit && reference.module == identity.module => Some(reference),
         _ => None,
-    }).collect();
-    assert!(authored.lexical_roots.iter().any(|root| projections.iter()
-        .any(|projection| root.unit == projection.unit && root.module == projection.module)),
-        "the public lexical root must be an issued interface: {child_domain:?}");
-    let native = child_domain.artifacts.iter().find_map(|artifact| match artifact.as_ref() {
-        RecoveryArtifactClosure::Home(reference) if reference.unit == identity.unit && reference.module == identity.module => Some(reference),
-        _ => None,
-    }).expect("the authored child retains its original native product");
-    tidepool_toolchain::recovery_artifacts::verify_materialized_ref(&child_root, native).unwrap();
+    }).expect("the authored child retains its exact original native product");
+    tidepool_toolchain::recovery_artifacts::verify_materialized_ref(&child_root, &native).unwrap();
     use tidepool_toolchain::artifact_inventory::ArtifactDescriptor;
-    let native_id = ArtifactDescriptor::from_recovery_product(native).id;
+    let native_id = ArtifactDescriptor::from_recovery_product(&native).id;
     let dependencies = child_domain.declaration_dependencies(generation).unwrap();
     let mut reached = std::collections::BTreeSet::new();
     let mut pending = dependencies.iter().flat_map(|(source,target,_)| [*source,*target])
@@ -561,16 +557,21 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
                 (*owner == source).then_some(*dependency)));
         }
     }
-    assert!(projections.iter().any(|projection| reached.iter().any(|node|
-        node.artifact() == ArtifactDescriptor::from_recovery_join(projection).id)),
-        "original native declaration must retain its exact selected interface dependency: {child_domain:?}");
+    let selected_ids = reached.iter().map(|node| node.artifact()).collect::<std::collections::BTreeSet<_>>();
+    let projections = selected_ids.into_iter().filter_map(|id| match child_domain.artifact(id).unwrap() {
+        Some(RecoveryArtifactClosure::Join(reference)) => Some(reference),
+        _ => None,
+    }).collect::<Vec<_>>();
+    assert!(authored.lexical_roots.iter().any(|root| projections.iter()
+        .any(|projection| root.unit == projection.unit && root.module == projection.module)),
+        "the public lexical root must be an exact selected interface: {authored:?}");
     for projection in &projections {
         tidepool_toolchain::recovery_artifacts::verify_materialized_join(&child_root, projection).unwrap();
     }
     let parent_after = observe_declaration_domain(&recovery_path, RecoveryDomainId::Root)
         .unwrap().expect("the parent declaration domain remains retained");
-    assert!(!parent_after.declarations.iter().any(|node| node.exports.iter()
-        .any(|export| export.identity.occurrence == "FreshChildNominal")));
+    assert!(parent_after.declaration(generation).unwrap().is_none(),
+        "the child's issued declaration must be absent from the parent's domain");
 
     let replied = dispatch_haskell_script(
         installation.policy.as_ref(),

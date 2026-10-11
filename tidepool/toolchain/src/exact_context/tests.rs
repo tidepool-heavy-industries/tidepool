@@ -38,6 +38,10 @@ proptest! {
             prop_assert_eq!(root.root(), canonical_root.root());
             let hydrated: MaterializedMap<u64,u16> = hydrate_map(&store, root.root()).unwrap();
             prop_assert_eq!(hydrated.facts().iter().map(|(k,v)| (*k,*v)).collect::<Vec<_>>(), expected.iter().map(|(k,v)| (*k,*v)).collect::<Vec<_>>());
+            for selected in [u64::from(key), 81] {
+                prop_assert_eq!(lookup_map::<_,u16,_>(&store, root.root(), &selected).unwrap(), expected.get(&selected).copied());
+                prop_assert_eq!(lookup_map::<_,u16,_>(&store, root.root(), &selected).unwrap(), hydrated.facts().get(&selected).copied());
+            }
             prop_assert_eq!(base.facts().iter().map(|(k,v)| (*k,*v)).collect::<Vec<_>>(), oracle.iter().map(|(k,v)| (*k,*v)).collect::<Vec<_>>());
             history.push((root,expected));
         }
@@ -216,5 +220,95 @@ fn existing_key_corruption_and_storage_errors_keep_their_types() {
     assert!(matches!(
         hydrate_map::<u64, u64, _>(&ClassifiedStore, &root),
         Err(SnapshotError::Integrity(_))
+    ));
+}
+
+#[test]
+fn selected_lookup_authenticates_only_its_route_and_preserves_refusals() {
+    struct ObservedStore<'a> {
+        inner: &'a MemoryBlockstore,
+        reads: RefCell<std::collections::BTreeSet<Cid>>,
+    }
+    impl Blockstore for ObservedStore<'_> {
+        fn get(&self, cid: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
+            self.reads.borrow_mut().insert(*cid);
+            self.inner.get(cid)
+        }
+        fn put_keyed(&self, _: &Cid, _: &[u8]) -> anyhow::Result<()> {
+            unreachable!()
+        }
+    }
+    let store = MemoryBlockstore::new();
+    let facts: OrdMap<u64, u64> = (0u64..4096).map(|key| (key, key + 100)).collect();
+    let mut materializer = Materializer::new(&store);
+    let root = materializer.materialize_map(None, &facts).unwrap();
+    let blocks = materializer.finish().unwrap();
+    let total_blocks = blocks.blocks().len();
+    install(&store, blocks);
+    let observed = ObservedStore {
+        inner: &store,
+        reads: RefCell::new(Default::default()),
+    };
+    assert_eq!(
+        lookup_map::<_, u64, _>(&observed, root.root(), &2000u64).unwrap(),
+        Some(2100)
+    );
+    let route = observed.reads.into_inner();
+    assert!(
+        route.len() < total_blocks / 8,
+        "selected route {route:?}, map blocks {total_blocks}"
+    );
+    let selected_only = MemoryBlockstore::new();
+    for cid in &route {
+        selected_only
+            .put_keyed(cid, &store.get(cid).unwrap().unwrap())
+            .unwrap();
+    }
+    assert_eq!(
+        lookup_map::<_, u64, _>(&selected_only, root.root(), &2000u64).unwrap(),
+        Some(2100)
+    );
+    assert!(
+        matches!(
+            hydrate_map::<u64, u64, _>(&selected_only, root.root()),
+            Err(SnapshotError::MissingBlock(_))
+        ),
+        "selected observation must not imply complete snapshot availability"
+    );
+    assert_eq!(
+        lookup_map::<_, u64, _>(&store, root.root(), &5000u64).unwrap(),
+        None
+    );
+    for selected_block in &route {
+        let missing = MemoryBlockstore::new();
+        for cid in route.iter().filter(|cid| *cid != selected_block) {
+            missing
+                .put_keyed(cid, &store.get(cid).unwrap().unwrap())
+                .unwrap();
+        }
+        assert!(
+            matches!(lookup_map::<_,u64,_>(&missing, root.root(), &2000u64),
+            Err(SnapshotError::MissingBlock(cid)) if cid == *selected_block)
+        );
+        missing
+            .put_keyed(selected_block, b"corrupt selected block")
+            .unwrap();
+        assert!(
+            matches!(lookup_map::<_,u64,_>(&missing, root.root(), &2000u64),
+            Err(SnapshotError::Integrity(cid)) if cid == *selected_block)
+        );
+    }
+    struct BrokenStore;
+    impl Blockstore for BrokenStore {
+        fn get(&self, _: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into())
+        }
+        fn put_keyed(&self, _: &Cid, _: &[u8]) -> anyhow::Result<()> {
+            unreachable!()
+        }
+    }
+    assert!(matches!(
+        lookup_map::<_, u64, _>(&BrokenStore, root.root(), &2000u64),
+        Err(SnapshotError::Storage(_))
     ));
 }

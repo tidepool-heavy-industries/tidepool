@@ -10,8 +10,8 @@ use fvm_ipld_blockstore::Blockstore;
 use imbl::OrdMap;
 use parking_lot::Mutex;
 use tidepool_toolchain::exact_context::{
-    hydrate_context, hydrate_map, read_value, MaterializedContext, MaterializedMap, Materializer,
-    SnapshotMapRoot, StagedBlocks,
+    hydrate_context, hydrate_map, lookup_map, read_value, MaterializedContext, MaterializedMap,
+    Materializer, SnapshotMapRoot, StagedBlocks,
 };
 
 const VERSION: u32 = 1;
@@ -23,6 +23,89 @@ struct DomainSnapshot {
     nodes: SnapshotMapRoot,
     artifacts: SnapshotMapRoot,
 }
+/// A retained domain descriptor permits exact immutable reads without
+/// hydrating unrelated metadata maps or historical contexts.
+pub(crate) struct RecoveryDomainReader {
+    pub(crate) store: Arc<RunRecoveryStore>,
+    snapshot: DomainSnapshot,
+}
+impl std::fmt::Debug for RecoveryDomainReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecoveryDomainReader")
+            .field("snapshot", &self.snapshot)
+            .finish()
+    }
+}
+impl RecoveryDomainReader {
+    pub(crate) fn open(
+        store: Arc<RunRecoveryStore>,
+        state: &RecoveryDomainState,
+    ) -> Result<Self, RecoveryError> {
+        store.ensure_ready()?;
+        let snapshot: DomainSnapshot = read_value(store.as_ref(), state.snapshot_root.cid())?;
+        if snapshot.version != VERSION {
+            return Err(error("unsupported domain snapshot version"));
+        }
+        Ok(Self { store, snapshot })
+    }
+    pub(crate) fn source_session(&self) -> u64 {
+        self.snapshot.source_session
+    }
+    pub(crate) fn node(&self, id: Generation) -> Result<Option<RecoveryNode>, RecoveryError> {
+        let Some(cid) =
+            lookup_map::<u64, Cid, _>(self.store.as_ref(), &self.snapshot.nodes, &id.0)?
+        else {
+            return Ok(None);
+        };
+        let node = read_value(self.store.as_ref(), &cid)?;
+        validate_node(&node, id)?;
+        Ok(Some(node))
+    }
+    pub(crate) fn artifact(
+        &self,
+        id: ArtifactId,
+    ) -> Result<Option<RecoveryArtifactClosure>, RecoveryError> {
+        let Some(cid) =
+            lookup_map::<ArtifactId, Cid, _>(self.store.as_ref(), &self.snapshot.artifacts, &id)?
+        else {
+            return Ok(None);
+        };
+        let artifact = read_value(self.store.as_ref(), &cid)?;
+        validate_artifact(&artifact, id)?;
+        Ok(Some(artifact))
+    }
+}
+
+fn validate_node(node: &RecoveryNode, id: Generation) -> Result<(), RecoveryError> {
+    if node.id != id
+        || node.parent.is_some_and(|parent| parent >= id)
+        || node
+            .implementation_refs
+            .iter()
+            .any(|dependency| *dependency >= id)
+    {
+        return Err(error(
+            "declaration block identity or causal ancestry is invalid",
+        ));
+    }
+    Ok(())
+}
+fn validate_artifact(
+    artifact: &RecoveryArtifactClosure,
+    id: ArtifactId,
+) -> Result<(), RecoveryError> {
+    if artifact.artifact_id() != id
+        || artifact.declared_artifact_id() != id
+        || artifact
+            .component_paths()
+            .iter()
+            .any(|(_, path)| !relative(path))
+    {
+        return Err(error("artifact block identity or custody path is invalid"));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SurfaceSnapshot {
@@ -289,17 +372,7 @@ impl RecoveryGraph {
             return Ok(Some(node));
         }
         let node: RecoveryNode = read_value(self, cid)?;
-        if node.id != id
-            || node.parent.is_some_and(|parent| parent >= id)
-            || node
-                .implementation_refs
-                .iter()
-                .any(|dependency| *dependency >= id)
-        {
-            return Err(error(
-                "declaration block identity or causal ancestry is invalid",
-            ));
-        }
+        validate_node(&node, id)?;
         let node = Arc::new(node);
         self.acquired.lock().nodes.insert((id, *cid), node.clone());
         Ok(Some(node))
@@ -316,15 +389,7 @@ impl RecoveryGraph {
             return Ok(Some(artifact));
         }
         let artifact: RecoveryArtifactClosure = read_value(self, cid)?;
-        if artifact.artifact_id() != id
-            || artifact.declared_artifact_id() != id
-            || artifact
-                .component_paths()
-                .iter()
-                .any(|(_, path)| !relative(path))
-        {
-            return Err(error("artifact block identity or custody path is invalid"));
-        }
+        validate_artifact(&artifact, id)?;
         let artifact = Arc::new(artifact);
         self.acquired
             .lock()
@@ -790,6 +855,66 @@ mod tests {
         let store = Arc::new(RunRecoveryStore::open(graph.store().path()).unwrap());
         let state = store.read_domain(graph.domain_id()).unwrap().unwrap();
         RecoveryGraph::hydrate_domain(store, graph.domain_id(), &state).unwrap()
+    }
+
+    #[test]
+    fn selected_domain_observation_retains_roots_and_refuses_selected_damage() {
+        let (_directory, base) = fixture();
+        let mut first = base.candidate();
+        let root = context(&mut first);
+        first
+            .insert_node(node(1, None, root.clone(), "first"))
+            .unwrap();
+        let first = publish(first, &base);
+        let observe = || {
+            crate::session::observe_declaration_domain(first.store().path(), RecoveryDomainId::Root)
+                .unwrap()
+                .unwrap()
+        };
+        let retained = observe();
+        assert_eq!(retained.source_session, 7);
+        assert!(retained.declaration(Generation(1)).unwrap().is_some());
+        assert!(retained.declaration(Generation(2)).unwrap().is_none());
+        assert!(retained
+            .declaration_dependencies(Generation(1))
+            .unwrap()
+            .is_empty());
+        let mut next = first.candidate();
+        next.insert_node(node(2, Some(1), root, "second")).unwrap();
+        let next = publish(next, &first);
+        assert!(
+            retained.declaration(Generation(2)).unwrap().is_none(),
+            "later publication cannot widen a retained exact snapshot"
+        );
+        let selected = observe();
+        assert_eq!(
+            selected.declaration(Generation(2)).unwrap().unwrap().parent,
+            Some(Generation(1))
+        );
+        let damaged = next.nodes.get(&2).unwrap();
+        // Inject damage at raw storage ingress, outside the production writer.
+        let raw = rusqlite::Connection::open(next.store().path()).unwrap();
+        raw.execute(
+            "UPDATE blocks SET bytes=?1 WHERE cid=?2",
+            rusqlite::params![
+                b"damaged selected declaration".as_slice(),
+                damaged.to_bytes()
+            ],
+        )
+        .unwrap();
+        let header = observe();
+        assert!(
+            header.declaration(Generation(1)).unwrap().is_some(),
+            "unselected damaged leaves cannot broaden a narrow observation"
+        );
+        assert!(matches!(header.declaration(Generation(2)),
+            Err(crate::session::SessionError::RecoverySnapshot(error))
+                if matches!(*error, SnapshotError::Integrity(cid) if cid == *damaged)));
+        raw.execute("DELETE FROM blocks WHERE cid=?1", [damaged.to_bytes()])
+            .unwrap();
+        assert!(matches!(header.declaration(Generation(2)),
+            Err(crate::session::SessionError::RecoverySnapshot(error))
+                if matches!(*error, SnapshotError::MissingBlock(cid) if cid == *damaged)));
     }
 
     #[test]

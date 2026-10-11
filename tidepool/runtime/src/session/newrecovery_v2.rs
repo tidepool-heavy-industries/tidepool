@@ -18,7 +18,9 @@ use tidepool_toolchain::recovery_artifacts::{
 
 #[path = "newrecovery_v2/snapshots.rs"]
 mod snapshots;
-pub(crate) use snapshots::{RecoveryGraph, RecoveryPublicSurface, StagedRecoveryManifest};
+pub(crate) use snapshots::{
+    RecoveryDomainReader, RecoveryGraph, RecoveryPublicSurface, StagedRecoveryManifest,
+};
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryPublicOwner {
