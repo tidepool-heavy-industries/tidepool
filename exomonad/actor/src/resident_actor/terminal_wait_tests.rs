@@ -33,9 +33,16 @@ async fn exact_terminal_is_observed_before_or_after_subscription() {
         let event = tokio::time::timeout(Duration::from_secs(2), wait)
             .await
             .unwrap();
+        assert!(matches!(&event, ExitWaitEvent::Observed(observed) if observed == &terminal));
+        let continuation_cancel = control.native_cancel();
+        assert!(control.request_cancellation());
+        assert!(continuation_cancel.load(std::sync::atomic::Ordering::Acquire));
         assert!(matches!(event, ExitWaitEvent::Observed(observed) if observed == terminal));
+        control.finish_sleep();
+        assert!(control.cancellation_requested());
         assert!(!control.request_cancellation());
         assert_eq!(target.get(), Some(terminal));
+        assert!(target.cleanup().is_none());
     }
 }
 
