@@ -4080,23 +4080,7 @@ pub(crate) mod tests {
         };
         let mut record = record;
         record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
-        let owner = computed_owner(&record);
-        let original = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
-            owner.clone(),
-            record.interface.clone(),
-            record.products.clone(),
-            record.package_imports.clone(),
-            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
-                .unwrap(),
-        )
-        .with_source_sha256(Sha256::digest(&source_bytes).into());
-        let original = crate::certified_products::fixture_finalized_product(
-            original,
-            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                &record.endpoint,
-            )
-            .sha256(),
-        );
+        let original = finalized_candidate_fixture(&record);
         let dir = fixture_record_dir(root);
         fs::create_dir_all(&dir).unwrap();
         let producer_dir = dir.parent().unwrap();
@@ -4119,6 +4103,28 @@ pub(crate) mod tests {
         );
         fs::write(dir.join(name), bytes).unwrap();
         module_interface
+    }
+
+    fn finalized_candidate_fixture(
+        record: &Record,
+    ) -> crate::recovery_artifacts::CertifiedRecoveryProduct {
+        let owner = computed_owner(record);
+        let original = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            owner.clone(),
+            record.interface.clone(),
+            record.products.clone(),
+            record.package_imports.clone(),
+            crate::certified_products::encode_home_certification(&owner, &[], &BTreeMap::new())
+                .unwrap(),
+        )
+        .with_source_sha256(parse_sha(&record.source_sha256).unwrap());
+        crate::certified_products::fixture_finalized_product(
+            original,
+            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
+                &record.endpoint,
+            )
+            .sha256(),
+        )
     }
 
     pub(super) fn candidate_fixture(root: &Path, module: &str) -> Record {
@@ -5141,6 +5147,7 @@ pub(crate) mod tests {
                 &package_bundle(&record.unit, &record.module, &record.interface),
             )
             .unwrap();
+            let certified = [finalized_candidate_fixture(&record)];
             let (_, publication) = prepare_publication(
                 &record.endpoint,
                 &record.include,
@@ -5148,7 +5155,7 @@ pub(crate) mod tests {
                 parsed,
                 &record.target_source,
                 CandidateVersionOrigin::Ordinary,
-                &[],
+                &certified,
             );
             assert_eq!(publication.records.len(), 1);
             publish_prepared(publication).unwrap();
@@ -5800,6 +5807,7 @@ pub(crate) mod tests {
             std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", root.path());
         }
         let include = [root.path().into()];
+        let certified = [finalized_candidate_fixture(&record)];
         let (_, publication) = prepare_publication(
             b"endpoint",
             &include,
@@ -5807,7 +5815,7 @@ pub(crate) mod tests {
             parsed,
             &record.target_source,
             CandidateVersionOrigin::Ordinary,
-            &[],
+            &certified,
         );
         publish_prepared(publication).unwrap();
         let selected = select_in(root.path(), scratch.path()).unwrap();

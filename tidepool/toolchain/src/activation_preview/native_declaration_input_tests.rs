@@ -515,16 +515,12 @@ fn original_native_declaration_body_is_available_without_heap_or_lexical_promoti
         extra_native.validate_artifacts().is_err(),
         "private availability cannot give unrelated type-only roles executable products"
     );
-    let unissued =
-        original_context_with_products(&[(true, true, true)], vec![declaration(1, true)]);
+    let canonical_only =
+        original_context_with_products(&[(true, false, true)], vec![declaration(1, true)]);
     assert!(
-        matches!(
-            original_native_declaration_inputs(&unissued, PRODUCER),
-            Err(CompileError::CompilerEvidence(error)) if matches!(error.as_ref(),
-                crate::certified_products::CertificationError::Mismatch(
-                    "native availability lacks authenticated census"
-                ))
-        ),
+        original_native_declaration_inputs(&canonical_only, PRODUCER)
+            .unwrap()
+            .is_none(),
         "finalized canonical custody cannot issue a native availability census"
     );
 }
