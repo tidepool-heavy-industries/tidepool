@@ -1298,6 +1298,9 @@ def facade_test_cases(binary):
         ("facade_terminal_transfer_test", [
             "actor_host::terminal_transfer_tests::request_local_reply_helper_settles_exact_request_and_keeps_actor_live",
         ], host_env, host_paths, host_resources, True, False, 600),
+        ("facade_selected_parent_spawn_test", [
+            "actor_host::terminal_transfer_tests::selected_parent_launches_exact_subset_and_refuses_wider_or_duplicate_rows",
+        ], host_env, host_paths, host_resources, True, False, 600),
         ("facade_selected_routing_tests", ["actor_host::documentation_tests::" + name for name in (
             "work_actor_consumes_later_progress_without_rearming",
             "attention_actor_recipe_retains_independent_sources_through_closure",

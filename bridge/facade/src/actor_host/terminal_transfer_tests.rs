@@ -5,6 +5,45 @@ use test_campaign::{dispatch_haskell_script, dispatch_haskell_script_response, T
 use tidepool_runtime::session::{WorkbenchRunStatus, WorkbenchTerminalTransfer};
 
 #[tokio::test]
+async fn selected_parent_launches_exact_subset_and_refuses_wider_or_duplicate_rows() {
+    TestCampaign::start()
+        .await
+        .run_scenario(|campaign| {
+            Box::pin(async move {
+                let root = campaign.root_installation.policy.clone();
+                let (setup, child) = campaign
+                    .dispatch_native_spawn_setup(
+                        "selected parent native subset admission",
+                        include_str!("fixtures/selected_parent_spawn.hs"),
+                        Duration::from_secs(240),
+                    )
+                    .await;
+                assert_eq!(setup["status"], "committed", "{setup}");
+                let activation = campaign
+                    .await_native_activation(
+                        child.actor.identity(),
+                        "selected parent's exact request",
+                        Duration::from_secs(240),
+                    )
+                    .await;
+                assert_eq!(
+                    campaign.forest.open_request_without_reply(child.actor.identity()),
+                    Some(activation.request)
+                );
+                let reply = dispatch_haskell_script(child.policy.as_ref(), "respond (42 :: Int)").await;
+                assert_eq!(reply["status"], "replied", "{reply}");
+                let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let observed = campaign.drive_actor_output(&store, dispatch_haskell_script(
+                    root.as_ref(),
+                    "selectedExit <- Actor.awaitExit selectedOwner\ndisplay (case selectedExit of { Actor.Completed result -> result; _ -> False })",
+                )).await;
+                assert_eq!(test_campaign::committed_display_text(&observed), "True");
+            })
+        })
+        .await;
+}
+
+#[tokio::test]
 async fn request_local_reply_helper_settles_exact_request_and_keeps_actor_live() {
     TestCampaign::start()
         .await

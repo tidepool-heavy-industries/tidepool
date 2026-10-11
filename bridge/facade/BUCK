@@ -1536,6 +1536,7 @@ rust_filegroup(
         "src/actor_host/fixtures/scripted_three_actor_cleanup.hs": "bridge/facade/src/actor_host/fixtures/scripted_three_actor_cleanup.hs",
         "src/actor_host/fixtures/scripted_three_actor_read.hs": "bridge/facade/src/actor_host/fixtures/scripted_three_actor_read.hs",
         "src/actor_host/fixtures/scripted_three_actor_setup.hs": "bridge/facade/src/actor_host/fixtures/scripted_three_actor_setup.hs",
+        "src/actor_host/fixtures/selected_parent_spawn.hs": "bridge/facade/src/actor_host/fixtures/selected_parent_spawn.hs",
         "src/actor_host/fixtures/spec_reload_flake.lock": "bridge/facade/src/actor_host/fixtures/spec_reload_flake.lock",
         "src/actor_host/fixtures/spec_reload_flake.nix": "bridge/facade/src/actor_host/fixtures/spec_reload_flake.nix",
         "src/actor_host/fixtures/supplied_live_observe.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_observe.hs",
@@ -2150,6 +2151,48 @@ tidepool_rust_test_cases(
     binary = ":tidepool_unit_tests",
     exact_tests = [
         "actor_host::terminal_transfer_tests::request_local_reply_helper_settles_exact_request_and_keeps_actor_live",
+    ],
+    expected_count = 1,
+    ignored = False,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 660000,
+    env = {
+        "EXOMONAD_NIX_OFFLINE": "1",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "toolchains//:test_tools_closure",
+        "//build/rust:workspace_gitlink",
+        "//build/rust:workspace_git_bundle",
+        "//bridge/testing:haskell_test_fixtures",
+        "toolchains//:exomonad_runtime_tools",
+        "//web:dist",
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:compiler_deployment",
+    ],
+    resource_env = {
+        "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
+        "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
+        "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
+        "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
+        "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "facade_selected_parent_spawn_test",
+    binary = ":tidepool_unit_tests",
+    exact_tests = [
+        "actor_host::terminal_transfer_tests::selected_parent_launches_exact_subset_and_refuses_wider_or_duplicate_rows",
     ],
     expected_count = 1,
     ignored = False,
@@ -3069,6 +3112,7 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/scripted_three_actor_cleanup.hs": "src/actor_host/fixtures/scripted_three_actor_cleanup.hs",
         "bridge/facade/src/actor_host/fixtures/scripted_three_actor_read.hs": "src/actor_host/fixtures/scripted_three_actor_read.hs",
         "bridge/facade/src/actor_host/fixtures/scripted_three_actor_setup.hs": "src/actor_host/fixtures/scripted_three_actor_setup.hs",
+        "bridge/facade/src/actor_host/fixtures/selected_parent_spawn.hs": "src/actor_host/fixtures/selected_parent_spawn.hs",
         "bridge/facade/src/actor_host/fixtures/spec_reload_flake.lock": "src/actor_host/fixtures/spec_reload_flake.lock",
         "bridge/facade/src/actor_host/fixtures/spec_reload_flake.nix": "src/actor_host/fixtures/spec_reload_flake.nix",
         "bridge/facade/src/actor_host/fixtures/supplied_live_observe.hs": "src/actor_host/fixtures/supplied_live_observe.hs",
@@ -4022,6 +4066,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f73637269707465645f74687265655f6163746f725f73657475702e6873",
     src = "src/actor_host/fixtures/scripted_three_actor_setup.hs",
     out = "scripted_three_actor_setup.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f73656c65637465645f706172656e745f737061776e2e6873",
+    src = "src/actor_host/fixtures/selected_parent_spawn.hs",
+    out = "selected_parent_spawn.hs",
     visibility = ["PUBLIC"],
 )
 
