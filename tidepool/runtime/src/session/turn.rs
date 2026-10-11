@@ -2990,7 +2990,13 @@ pub fn finish_cell_program_admitted(
 }
 
 impl PreparedRuntimeCell {
-    #[tracing::instrument(target = "exomonad_harness::timing", name = "cell_program.seal", level = "debug", skip_all, fields(inclusive = true))]
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "cell_program.seal",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     fn seal(
         self,
         cancellation: &crate::HostAdmissionCancellation,
@@ -3001,10 +3007,12 @@ impl PreparedRuntimeCell {
         ),
         CellCheckFailure,
     > {
-        let program = self.program.seal(cancellation).map_err(|error| {
-            self.offer
-                .retain_failure(self.root.path(), &self.command, &self.stderr, error)
-        })?;
+        let program = cancellation
+            .run_sync(|| self.program.seal(cancellation))
+            .map_err(|error| {
+                self.offer
+                    .retain_failure(self.root.path(), &self.command, &self.stderr, error)
+            })?;
         Ok((self.checked, program))
     }
 }

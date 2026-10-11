@@ -686,6 +686,20 @@ pub struct HostAdmissionCancellation {
     cancelled: Arc<AtomicBool>,
 }
 
+thread_local! {
+    static HOST_ADMISSION_CHECKPOINTS: RefCell<Vec<HostAdmissionCancellation>> = const { RefCell::new(Vec::new()) };
+}
+
+struct HostCheckpointScope;
+
+impl Drop for HostCheckpointScope {
+    fn drop(&mut self) {
+        HOST_ADMISSION_CHECKPOINTS.with(|scopes| {
+            scopes.borrow_mut().pop();
+        });
+    }
+}
+
 impl HostAdmissionCancellation {
     #[must_use]
     pub fn new() -> Self {
@@ -705,6 +719,18 @@ impl HostAdmissionCancellation {
         } else {
             Ok(())
         }
+    }
+
+    /// Propagate this observer to existing synchronous host checkpoints.
+    /// This scope owns no endpoint or admission and restores observers on unwind.
+    /// Pass the observer explicitly when moving work to another thread; this
+    /// synchronous extent does not propagate across await or thread boundaries.
+    pub fn run_sync<T>(&self, action: impl FnOnce() -> T) -> T {
+        HOST_ADMISSION_CHECKPOINTS.with(|scopes| {
+            scopes.borrow_mut().push(self.clone());
+        });
+        let _scope = HostCheckpointScope;
+        action()
     }
 }
 
@@ -1629,6 +1655,12 @@ pub fn retain_compiler_input_directory(directory: Arc<tempfile::TempDir>) -> boo
 /// Unscoped work is allowed. An interrupted checkpoint leaves accepted requests
 /// and transaction cleanup custody with the existing scope.
 pub fn compiler_host_checkpoint() -> io::Result<()> {
+    HOST_ADMISSION_CHECKPOINTS.with(|scopes| {
+        scopes
+            .borrow()
+            .iter()
+            .try_for_each(HostAdmissionCancellation::checkpoint)
+    })?;
     let cancelled = TRANSACTION_SCOPE.with(|scope| {
         scope.borrow().as_ref().is_some_and(|state| {
             state
@@ -4026,6 +4058,100 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn synchronous_host_checkpoints_after_end_do_not_admit_a_compiler() {
+        let cancellation = CompilerTransactionCancellation::new();
+        let host = cancellation.host_admission_cancellation();
+        let mut fixture =
+            DeferredDaemonFixture::new(DaemonFixtureBehavior::Normal, cancellation.clone());
+        let command = fixture.command();
+        let outcome = with_compiler_transaction_cancellable(
+            cancellation.clone(),
+            |_| {},
+            || {
+                fixture
+                    .bind(&command)
+                    .unwrap()
+                    .execute(&command)
+                    .unwrap()
+                    .output
+                    .stdout
+            },
+        );
+        assert_eq!(outcome.close, CompilerTransactionClose::Clean);
+        fixture.settle();
+        host.run_sync(|| {
+            TRANSACTION_SCOPE.with(|scope| assert!(scope.borrow().is_none()));
+            compiler_host_checkpoint().unwrap();
+            let inner = HostAdmissionCancellation::new();
+            let mut steps = 0;
+            let work: io::Result<()> = inner.run_sync(|| {
+                for _ in 0..4096 {
+                    compiler_host_checkpoint()?;
+                    steps += 1;
+                    if steps == 3 {
+                        cancellation.cancel_host_admission();
+                    }
+                }
+                Ok(())
+            });
+            assert_eq!(work.unwrap_err().kind(), io::ErrorKind::Interrupted);
+            assert_eq!(
+                steps, 3,
+                "a deep checkpoint observes its cancelled outer owner"
+            );
+        });
+        compiler_host_checkpoint().unwrap();
+        assert_eq!(outcome.action, [1]);
+        let counts = fixture.counts.lock().unwrap();
+        assert_eq!(
+            (
+                counts.requests,
+                counts.begins,
+                counts.admissions,
+                counts.ends,
+                counts.active
+            ),
+            (1, 1, 1, 1, 0)
+        );
+    }
+
+    #[test]
+    fn nested_host_checkpoints_preserve_ancestors_and_restore_after_panic() {
+        let outer_owner = CompilerTransactionCancellation::new();
+        let outer = outer_owner.host_admission_cancellation();
+        let inner_owner = CompilerTransactionCancellation::new();
+        let inner = inner_owner.host_admission_cancellation();
+        compiler_host_checkpoint().unwrap();
+        outer.run_sync(|| {
+            let panic = std::panic::catch_unwind(|| {
+                inner.run_sync(|| {
+                    inner_owner.cancel_host_admission();
+                    assert_eq!(
+                        compiler_host_checkpoint().unwrap_err().kind(),
+                        io::ErrorKind::Interrupted
+                    );
+                    panic!("restore nested host observer");
+                })
+            });
+            assert!(panic.is_err());
+            compiler_host_checkpoint().unwrap();
+            outer_owner.cancel_host_admission();
+            HostAdmissionCancellation::new().run_sync(|| {
+                assert_eq!(
+                    compiler_host_checkpoint().unwrap_err().kind(),
+                    io::ErrorKind::Interrupted
+                );
+            });
+        });
+        compiler_host_checkpoint().unwrap();
+        let panic =
+            std::panic::catch_unwind(|| outer.run_sync(|| panic!("restore outer host observer")));
+        assert!(panic.is_err());
+        compiler_host_checkpoint().unwrap();
+        TRANSACTION_SCOPE.with(|scope| assert!(scope.borrow().is_none()));
     }
 
     #[test]
