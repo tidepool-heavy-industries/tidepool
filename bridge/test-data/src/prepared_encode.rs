@@ -935,7 +935,7 @@ mod tests {
             parse_module_products(
                 &encode_module_products(&products),
                 &requirements,
-                DecodeLimits::default(),
+                InventoryDecodeLimits::default(),
             )
             .unwrap(),
             products,
