@@ -25,7 +25,7 @@ pub use tidepool_extract_cmd::{
 };
 use tidepool_repr::execution_schema::DecodeLimits;
 use tidepool_repr::execution_schema::{PreparedProgram, RawModuleProduct};
-use tidepool_repr::serial::{read_metadata, MetaWarnings};
+use tidepool_repr::serial::MetaWarnings;
 use tidepool_repr::DataConTable;
 
 use crate::prepared_artifact::{prepared_artifact_name, PreparedArtifact};
@@ -771,6 +771,13 @@ struct BoundSegment {
     offer: ModuleCandidateOffer,
     source: crate::declaration_context::ExactProgramSegmentAdmission,
     produced_types: crate::checked_cell::ProducedValueTypeInterfaces,
+    artifacts: crate::artifact_inventory::BoundArtifactSelection,
+}
+
+struct SegmentItemDemand<'a> {
+    selection: &'a mut crate::artifact_inventory::BoundArtifactSelection,
+    view: &'a crate::artifact_inventory::ArtifactView,
+    groups: &'a [certified_products::PendingCertifiedGroup],
 }
 
 struct SegmentCursor {
@@ -783,14 +790,14 @@ struct SegmentCursor {
 }
 
 struct ItemAdmission<'a> {
-    segment: &'a BoundSegment,
+    segment: &'a mut BoundSegment,
     cursor: &'a mut SegmentCursor,
     ordinal: usize,
 }
 
 impl BoundSegment {
     fn item<'a>(
-        &'a self,
+        &'a mut self,
         cursor: &'a mut SegmentCursor,
         ordinal: usize,
     ) -> Result<ItemAdmission<'a>, CompileError> {
@@ -829,7 +836,11 @@ impl ItemAdmission<'_> {
             self.ordinal,
             admission_digest,
             &self.segment.source,
-            Some((&self.cursor.artifacts, self.cursor.groups.as_ref())),
+            SegmentItemDemand {
+                selection: &mut self.segment.artifacts,
+                view: &self.cursor.artifacts,
+                groups: self.cursor.groups.as_ref(),
+            },
             validation,
         )?;
         let mut request = self.cursor.request.clone();
@@ -2327,7 +2338,15 @@ impl ModuleCandidateOffer {
                     &produced_types,
                     &mut validation,
                 )?;
-                let bound = BoundSegment {
+                let physical = segment_offer.exact.as_ref().expect("exact segment");
+                let artifacts =
+                    crate::declaration_context::bind_certified_segment_artifacts_with_validation(
+                        source_segment.original_products(physical, &validation.inventory)?,
+                        &physical.compiler_inputs().artifacts,
+                        &mut validation,
+                    )?;
+                let mut bound = BoundSegment {
+                    artifacts,
                     offer: segment_offer,
                     source: source_segment,
                     produced_types,
@@ -2350,7 +2369,7 @@ impl ModuleCandidateOffer {
                         .expect("exact segment")
                         .groups
                         .clone(),
-                    request: program_request.clone(),
+                    request: bound.offer.exact.as_ref().expect("exact segment").clone(),
                     context,
                 };
                 while index < end {
@@ -2592,10 +2611,7 @@ impl ModuleCandidateOffer {
         item_index: usize,
         admission_digest: [u8; 32],
         source_segment: &crate::declaration_context::ExactProgramSegmentAdmission,
-        cursor: Option<(
-            &crate::artifact_inventory::ArtifactView,
-            &[certified_products::PendingCertifiedGroup],
-        )>,
+        cursor: SegmentItemDemand<'_>,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ProgramNativeOutput, CompileError> {
         let turn: Arc<[u8]> =
@@ -2629,7 +2645,7 @@ impl ModuleCandidateOffer {
                 Some(produced_types),
                 Some((typed_segments, item_index, admission_digest)),
                 Some(source_segment),
-                cursor,
+                Some(cursor),
                 validation,
             )?
             .ok_or_else(|| {
@@ -3250,10 +3266,7 @@ fn seal_turn_outputs_with_validation(
         [u8; 32],
     )>,
     source_segment: Option<&crate::declaration_context::ExactProgramSegmentAdmission>,
-    segment_cursor: Option<(
-        &crate::artifact_inventory::ArtifactView,
-        &[certified_products::PendingCertifiedGroup],
-    )>,
+    mut segment_cursor: Option<SegmentItemDemand<'_>>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
@@ -3583,13 +3596,15 @@ fn seal_turn_outputs_with_validation(
             .sha256();
     let artifact_view = match segment_originals {
         Some(originals) => {
+            let cursor = segment_cursor.as_mut().ok_or_else(|| {
+                CompileError::ExtractFailed("segment item lacks its demand cursor".into())
+            })?;
             crate::declaration_context::certified_segment_artifact_view_with_validation(
                 producer,
                 originals,
+                cursor.selection,
                 &certified.value_interfaces,
-                segment_cursor
-                    .map(|(view, _)| view)
-                    .or_else(|| compiler_inputs.as_ref().map(|input| &input.artifacts)),
+                cursor.view,
                 demand,
                 validation,
                 &certified.source_selection,
@@ -3611,12 +3626,15 @@ fn seal_turn_outputs_with_validation(
     certified.groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
         &artifact_view,
         &certified.groups,
-        segment_cursor.map(|(_, groups)| groups).unwrap_or_else(|| {
-            offer
-                .exact
-                .as_ref()
-                .map_or(&[], |request| request.groups.as_ref())
-        }),
+        segment_cursor
+            .as_ref()
+            .map(|cursor| cursor.groups)
+            .unwrap_or_else(|| {
+                offer
+                    .exact
+                    .as_ref()
+                    .map_or(&[], |request| request.groups.as_ref())
+            }),
         validation,
     )?
     .into();
@@ -8568,7 +8586,7 @@ mod constructor_identity_tests {
         let output =
             read_native_turn_artifacts(directory.path(), turn.clone(), "module Input where".into())
                 .unwrap();
-        let (table, warnings) = read_metadata(&output.metadata).unwrap();
+        let (table, warnings) = tidepool_repr::serial::read_metadata(&output.metadata).unwrap();
         let retained = NativeTurnOutput {
             output,
             table,

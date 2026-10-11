@@ -90,6 +90,18 @@ Available module or site censuses cannot choose an item's execution context.
 The initial exact request and that item's selected closure retain that authority.
 Ordinary compilation uses the separate closed ordinary packet variant.
 
+The physical cell request captures produced value interfaces once. Its private
+inventory may contain later outputs; item views select current and preceding type
+outputs by ordinal, while runtime value authority comes only from completed prior
+items. Final value capture adds source/template authority to the same owned bytes
+and interface certificate. Sparse generation numbers do not determine visibility.
+
+A bound segment retains its physical compiler selection. Its cursor owns the
+admitted prefix and executable demand; item admission stages support and value
+results before advancing both. Compiler receipt, binder, table and target checks
+belong to `PreparedCellProgram`. Contextual sealing consumes those observations
+after physical compiler close and preserves independent host cancellation.
+
 Candidate publication occurs once after every item of that segment seals and
 rechecks mutable source observations at publication. A failed or cancelled
 segment publishes no original suggestions. Whole-program and value publication

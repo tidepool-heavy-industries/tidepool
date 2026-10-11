@@ -6710,13 +6710,41 @@ pub(crate) fn certified_product_artifact_view_inner(
     }
 }
 
-/// Segment-original entries were issued once from immutable canonical/native
-/// facts. Each item adds only its checked type view and selects its own demand.
+/// Retain the physical request's complete private output custody and its
+/// compiler-selected native resolver once. No executable group is demanded.
+pub(crate) fn bind_certified_segment_artifacts_with_validation(
+    originals: &crate::certified_products::CertifiedSegmentOriginals,
+    baseline: &ArtifactView,
+    validation: &mut PackageInterfaceValidation,
+) -> Result<crate::artifact_inventory::BoundArtifactSelection, CompileError> {
+    if !Arc::ptr_eq(originals.operation(), &validation.inventory) {
+        return Err(failure("segment artifacts have another accounting owner"));
+    }
+    validation
+        .inventory
+        .reserve::<Arc<ArtifactEntry>>(
+            originals.artifact_entries().len() + originals.value_entries().len(),
+        )
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    let entries = originals
+        .artifact_entries()
+        .iter()
+        .chain(originals.value_entries())
+        .cloned()
+        .collect();
+    baseline
+        .inventory()
+        .bind_segment(baseline, entries, originals.source_selection())
+}
+
+/// Each item adds only ordinal-visible values to its admitted prefix, then
+/// resolves executable demand against the fixed physical selection.
 pub(crate) fn certified_segment_artifact_view_with_validation(
     producer: [u8; 32],
     originals: &crate::certified_products::CertifiedSegmentOriginals,
+    bound: &mut crate::artifact_inventory::BoundArtifactSelection,
     values: &[CertifiedValueInterface],
-    baseline: Option<&ArtifactView>,
+    cursor: &ArtifactView,
     demand: crate::artifact_inventory::NativeArtifactDemand<'_>,
     validation: &mut PackageInterfaceValidation,
     selection: &crate::certified_products::CertifiedSourceSelection,
@@ -6724,21 +6752,25 @@ pub(crate) fn certified_segment_artifact_view_with_validation(
     if !Arc::ptr_eq(originals.operation(), &validation.inventory) {
         return Err(failure("segment artifacts have another accounting owner"));
     }
-    let view = baseline.map_or_else(|| ArtifactInventory::default().empty_view(), Clone::clone);
-    validation
-        .inventory
-        .reserve::<Arc<ArtifactEntry>>(originals.artifact_entries().len() + values.len())
-        .map_err(|error| compiler_evidence_failure(error.into()))?;
-    let mut entries = originals.artifact_entries().to_vec();
     if values
         .iter()
         .any(|value| value.interface().toolchain_identity_sha256() != producer)
     {
         return Err(failure("captured value has another compiler producer"));
     }
-    entries.extend(originals.selected_value_entries(values).cloned());
-    view.inventory()
-        .admit_certified_with_demand(&view, entries, demand, selection)
+    validation
+        .inventory
+        .reserve::<Arc<ArtifactEntry>>(values.len())
+        .map_err(|error| compiler_evidence_failure(error.into()))?;
+    let admitted = cursor.artifact_ids().into_iter().collect::<BTreeSet<_>>();
+    let visible = originals
+        .selected_value_entries(values)
+        .filter(|entry| !admitted.contains(&entry.descriptor.id))
+        .cloned()
+        .collect();
+    cursor
+        .inventory()
+        .admit_bound_target(bound, cursor, demand, visible, selection)
 }
 
 /// Admit only the inventory's selected dependency closure. Original byte custody
