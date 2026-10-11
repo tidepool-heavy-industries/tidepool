@@ -8,7 +8,7 @@ module Tidepool.Check
   ( RecipeCheck, CheckActor, Activation (..)
   , root, turn, activation, git, writeFile, readFile
   , present, notPresented, unconfirmed, check, restart
-  , assertThat, assertEventually, assertCell, awaitCell
+  , assertThat, assertEventually, assertEventuallyBy, assertCell, awaitCell, awaitCellBy
   , output, literal, gitOidLiteral, checkpoint
   ) where
 
@@ -83,12 +83,19 @@ assertThat name observed =
 
 -- | Observe a typed predicate at most 120 times in the checked actor.
 assertEventually :: Text -> Eff effects Bool -> Eff effects ()
-assertEventually name observe = go (120 :: Int)
+assertEventually name observe = assertEventuallyBy name id observe >> pure ()
+
+-- | Return the first matching typed observation, or retain the last sample
+-- in the failure after at most 120 observations.
+assertEventuallyBy :: Show a => Text -> (a -> Bool) -> Eff effects a -> Eff effects a
+assertEventuallyBy name matches observe = go (120 :: Int)
   where
     go remaining = do
       observed <- observe
-      if observed then pure ()
-      else if remaining == 1 then assertThat name False
+      if matches observed then pure observed
+      else if remaining == 1 then
+        error (Text.unpack ("Check assertion failed: " <> name
+          <> "\nLast observation: " <> Text.pack (show observed)))
       else go (remaining - 1)
 
 -- | Evaluate a pure Bool expression in the checked actor's lexical scope.
@@ -102,6 +109,16 @@ assertCell actor name source = do
 awaitCell :: Member RecipeCheck effects => CheckActor -> Text -> Text -> Eff effects ()
 awaitCell actor name source = do
   _ <- turn actor (assertionCell "assertEventually" name source)
+  check name True
+
+-- | Await a typed sample using a pure predicate in the actor's lexical scope.
+awaitCellBy :: Member RecipeCheck effects => CheckActor -> Text -> Text -> Text -> Eff effects ()
+awaitCellBy actor name predicate source = do
+  _ <- turn actor (Text.unlines $
+    [ "import qualified Tidepool.Check"
+    , "Tidepool.Check.assertEventuallyBy " <> literal name <> " ("
+    ] ++ map ("  " <>) (Text.lines predicate) ++ ["  ) ("]
+      ++ map ("  " <>) (Text.lines source) ++ ["  ) >> pure ()"])
   check name True
 
 assertionCell :: Text -> Text -> Text -> Text

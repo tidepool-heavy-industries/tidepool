@@ -110,6 +110,16 @@ cellCheck label awaited source expected = do
   require label (case result of Left outcome -> outcome == expected; Right _ -> False)
   readIORef successes
 
+typedCellCheck :: IO ()
+typedCellCheck = do
+  support <- requiredInput "TIDEPOOL_TEST_EFFECTS_DIR"
+  successes <- newIORef []
+  let executeSource source = runCell support "native-contract-cells/typed-sample" source >>= throwIO
+  result <- try @CellOutcome $ host successes executeSource $ do
+    actor <- Check.root
+    Check.awaitCellBy actor "typed sample" "(== 42)" "pure scopedValue"
+  require "typed sample cell" (case result of Left CellAccepted -> True; _ -> False)
+
 tests :: TestTree
 tests = testGroup "native helper contract"
   [ testCase "true assertion completes" $
@@ -137,6 +147,31 @@ tests = testGroup "native helper contract"
   , testCase "failed await performs exactly 120 observations" $ do
       (_, count) <- boundedObservations
       require "bounded count" (count == 120)
+  , testCase "typed await returns the first matching sample" $ do
+      let observe :: Eff '[State Int] (Int, Text)
+          observe = modify @Int (+ 1) >> ((\n -> (n, "sample")) <$> get @Int)
+          (sample, observations) = run (runState (0 :: Int)
+            (Check.assertEventuallyBy "sample" ((== 3) . fst) observe))
+      require "returned sample" (sample == (3, "sample") && observations == 3)
+  , testCase "typed await accepts the final observation" $ do
+      let observe :: Eff '[State Int] Int
+          observe = modify @Int (+ 1) >> get @Int
+          (sample, observations) = run (runState (0 :: Int)
+            (Check.assertEventuallyBy "final" (== 120) observe))
+      require "returned final sample" (sample == 120 && observations == 120)
+  , testCase "typed await failure retains last sample and bound" $ do
+      observations <- newIORef (0 :: Int)
+      result <- try @ErrorCall $ runM $ Check.assertEventuallyBy "sentinel" (const False) $
+        sendM $ do
+          modifyIORef' observations (+ 1)
+          count <- readIORef observations
+          pure (count, "last-sentinel" :: Text)
+      count <- readIORef observations
+      require "last sample" (case result of
+        Left failure -> "(120,\"last-sentinel\")" `Text.isInfixOf` Text.pack (show failure)
+        Right _ -> False)
+      require "typed bound" (count == 120)
+  , testCase "typed sample cell executes in actor scope" typedCellCheck
   , testCase "pure assertion executes in actor scope" $
       cellCheck "scoped-true" False "scopedValue == 42" CellAccepted >> pure ()
   , testCase "case-expression assertion preserves layout" $
