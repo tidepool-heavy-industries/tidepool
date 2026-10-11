@@ -2382,12 +2382,13 @@ class IsolatedLibtestTests(unittest.TestCase):
                           process_cleanup_status='unconfirmed')
             return False, '', 'cleanup unconfirmed'
 
-        with patch.object(runner.tempfile, 'mkdtemp', return_value=str(retained)), \
+        with patch.object(runner.tempfile, 'mkdtemp', return_value=str(retained)) as allocate, \
              patch.object(runner, 'run_one', side_effect=case):
             result, output, errors = self.invoke(
                 ['--exact', 'suite::works', '--expected-count', '1',
                  '--case-compiler-mode', 'suite::works=owned-resident'], lambda argv, *args, **kwargs: self.discover(argv))
         self.assertEqual(result, 1)
+        allocate.assert_called_once_with(prefix='tidepool-libtest-case-', dir='/tmp')
         self.assertIn(str(retained), output)
         report = json.loads(next(retained.glob('*.json')).read_text())
         self.assertFalse(report['passed'])

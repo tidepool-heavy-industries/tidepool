@@ -1444,7 +1444,9 @@ def main(argv=None):
             record = {}
             compiler_mode = (options.compiler_mode or
                              options.case_compiler_modes.get(name, 'direct'))
-            temporary_output = (Path(tempfile.mkdtemp(prefix='tidepool-libtest-case-'))
+            # Caller TMPDIR may be removed by the enclosing Buck/dev shell.
+            # The runner retains failed-case evidence outside that lifetime.
+            temporary_output = (Path(tempfile.mkdtemp(prefix='tidepool-libtest-case-', dir='/tmp'))
                                 if compiler_mode == 'owned-resident' and options.output_dir is None
                                 else None)
             output_dir = options.output_dir or temporary_output
