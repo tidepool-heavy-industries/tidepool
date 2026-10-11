@@ -3436,26 +3436,7 @@ async fn assumption_actor_stages_a_concrete_progress_source_and_retains_decision
 
 #[tokio::test]
 async fn work_router_queries_receipts_as_the_issuing_actor() {
-    let campaign = TestCampaign::start_with_config(
-        |admission| admission,
-        |config| {
-            let package = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .and_then(Path::parent)
-                .unwrap()
-                .join("exomonad/examples/workspace");
-            crate::exomonad::workspace::copy_authored(&package, &config.workspace).unwrap();
-            super::test_campaign::commit_workspace(&config.workspace);
-            config.workspace_inputs = Some(
-                crate::exomonad::workspace::FrozenWorkspace::load(
-                    &config.workspace,
-                    &config.run_directory.path(),
-                )
-                .unwrap(),
-            );
-        },
-    )
-    .await;
+    let campaign = workspace_campaign().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
     let (setup, source) = campaign.dispatch_native_spawn_setup(
@@ -3497,17 +3478,14 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     admit_notification(&message, key.into(), &inbox);
     publication.await.unwrap();
     let wrong_owner = displayed(campaign, root.as_ref(),
-        "view <- readWork collector\nlet [receipt] = [r | Notice _ (Right r) <- workNotices view]\n_ <- pollNotification receipt >>= display . show"
+        "view <- readWork collector\nlet [receipt] = [r | Notice _ (Right r) <- workNotices view]\n_ <- pollNotification receipt >>= display . (== Left NotificationUnauthorized)"
     ).await;
-    assert!(
-        wrong_owner.to_string().contains("NotificationUnauthorized"),
-        "{wrong_owner}"
-    );
+    assert_eq!(explicit_display_output(&wrong_owner)["text"], "True", "{wrong_owner}");
     let policy = root.clone();
     let query = tokio::spawn(async move {
         committed(
             policy.as_ref(),
-            "_ <- R.call (workNotification (R.client collector)) receipt >>= display . show",
+            "_ <- R.call (workNotification (R.client collector)) receipt >>= display . (== Right NotificationAccepted)",
         )
         .await
     });
@@ -3527,17 +3505,11 @@ async fn work_router_queries_receipts_as_the_issuing_actor() {
     poll.observed(observed);
     let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
     let result = campaign.drive_actor_output(&store, query).await.unwrap();
-    assert!(
-        result.to_string().contains("NotificationAccepted"),
-        "{result}"
-    );
+    assert_eq!(explicit_display_output(&result)["text"], "True", "{result}");
     let replaced = displayed(campaign, root.as_ref(),
-        "collector <- R.replace collector (workDefinition sources (notifyWork owner (workMessage id)))\n_ <- R.call (workNotification (R.client collector)) receipt >>= display . show"
+        "Right replacementSpec <- pure (workDefinition sources (notifyWork owner (workMessage id)))\ncollector <- R.replace collector replacementSpec\n_ <- R.call (workNotification (R.client collector)) receipt >>= display . (== Left NotificationUnauthorized)"
     ).await;
-    assert!(
-        replaced.to_string().contains("NotificationUnauthorized"),
-        "{replaced}"
-    );
+    assert_eq!(explicit_display_output(&replaced)["text"], "True", "{replaced}");
     let retained = displayed(
         campaign,
         root.as_ref(),
