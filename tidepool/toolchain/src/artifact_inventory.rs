@@ -8869,9 +8869,28 @@ mod tests {
         )
         .unwrap()
         .expect("catalog candidates");
+        let canonical = candidates
+            .by_owner
+            .iter()
+            .map(|(owner, candidate)| (owner.clone(), candidate.original_module_interface.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let protected = crate::module_candidates::ExactCandidateContext::new(
+            canonical.keys().cloned().collect(),
+            BTreeSet::new(),
+        )
+        .with_canonical_interfaces(canonical, BTreeSet::new());
+        let private = crate::module_candidates::select_with_catalog(
+            &crate::toolchain::CatalogSelection::Acquired(Some(package.clone())),
+            endpoint.identity().producer_bytes(),
+            &package.source_selection().include_roots(),
+            scratch.path(),
+            Some(&protected),
+        )
+        .unwrap()
+        .expect("protected catalog native availability");
         let producer =
             CanonicalProducerIdentity::from_producer_bytes(endpoint.identity().producer_bytes());
-        let product = candidates
+        let product = private
             .native_availability
             .iter()
             .find(|product| product.owner().module == "Tidepool.View.Types")
@@ -8914,7 +8933,7 @@ mod tests {
             interfaces,
             helper_import,
             endpoint.identity().producer_bytes(),
-            &candidates.native_availability,
+            &private.native_availability,
         );
     }
     #[test]
