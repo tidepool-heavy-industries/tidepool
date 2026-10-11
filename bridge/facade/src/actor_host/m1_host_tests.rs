@@ -122,7 +122,7 @@ impl ResponsesTransport for HostCellTransport {
                     "type":"custom_tool_call",
                     "call_id":"host-real-cell",
                     "name":"haskell",
-                    "input":"40 + 2 :: Int"
+                    "input":"display (40 + 2 :: Int)"
                 }))],
                 usage: Usage::default(),
             }),
@@ -310,8 +310,6 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
         .parse::<i64>()
         .unwrap();
 
-    // Whole-cell checking, item compilation, and display compilation are distinct
-    // worker requests; this budget covers all three on a cold compiler.
     let request_after_cell = tokio::time::timeout(Duration::from_secs(300), async {
         while let Some(request) = second_rx.recv().await {
             if request.input.iter().any(|item| {
@@ -594,7 +592,7 @@ impl ResponsesTransport for RejectFirstRequest {
                 response_id: "before-rejection-tool".into(),
                 items: vec![harness::item::Item(json!({
                     "type":"custom_tool_call", "call_id":"before-rejection-cell",
-                    "name":"haskell", "input":"40 + 2 :: Int"
+                    "name":"haskell", "input":"display (40 + 2 :: Int)"
                 }))],
                 usage: Usage::default(),
             });
@@ -718,7 +716,6 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
             item.0["type"] == "custom_tool_call_output"
                 && item.0["call_id"] == "before-rejection-cell"
         }));
-        // Match the existing real-cell fixture budget for its three compiler stages.
         tokio::time::timeout(Duration::from_secs(300), async {
             loop {
                 let claims = store

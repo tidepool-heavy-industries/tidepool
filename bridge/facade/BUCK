@@ -2054,6 +2054,48 @@ tidepool_rust_test_cases(
 )
 
 tidepool_rust_test_cases(
+    name = "facade_rejected_ancestor_output_test",
+    binary = ":tidepool_unit_tests",
+    exact_tests = [
+        "actor_host::m1_host_tests::production_host_recovers_ancestor_tool_output_after_request_rejection",
+    ],
+    expected_count = 1,
+    ignored = False,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 660000,
+    env = {
+        "EXOMONAD_NIX_OFFLINE": "1",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "toolchains//:test_tools_closure",
+        "//build/rust:workspace_gitlink",
+        "//build/rust:workspace_git_bundle",
+        "//bridge/testing:haskell_test_fixtures",
+        "toolchains//:exomonad_runtime_tools",
+        "//web:dist",
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:compiler_deployment",
+    ],
+    resource_env = {
+        "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
+        "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
+        "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
+        "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
+        "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
     name = "facade_late_output_test",
     binary = ":tidepool_unit_tests",
     exact_tests = [

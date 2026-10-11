@@ -1288,6 +1288,9 @@ def facade_test_cases(binary):
         ("facade_host_raw_test", [prefix +
             "production_host_retains_http_haskell_commands_and_reconnects_without_replay"],
          host_env, host_paths, host_resources, True, False, 600),
+        ("facade_rejected_ancestor_output_test", [prefix +
+            "production_host_recovers_ancestor_tool_output_after_request_rejection"],
+         host_env, host_paths, host_resources, True, False, 600),
         ("facade_late_output_test", [prefix +
             "real_host_late_output_tests::real_host_retains_one_late_haskell_output_across_compaction"],
          host_env, host_paths, host_resources, True, False, 600),
