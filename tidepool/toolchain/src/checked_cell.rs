@@ -3773,29 +3773,142 @@ impl CheckedItemOffer {
         target_imports: &[crate::certified_products::PendingImportOwner],
         produced: Option<&ProducedValueTypeInterfaces>,
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
+        let output = PreparedCheckedItemOutput::capture(
+            &self.item,
+            self.generation,
+            self.observation_name.as_deref(),
+            self.is_program,
+            root,
+            request,
+            source,
+            target,
+            original_execution,
+            program_entry,
+            target_imports,
+        )?;
+        self.seal_prepared(output, artifact_context, source_lexical, produced)
+    }
+
+    pub(crate) fn seal_prepared(
+        &self,
+        output: PreparedCheckedItemOutput,
+        artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
+        source_lexical: &[crate::declaration_join::ExactLexicalNode],
+        produced: Option<&ProducedValueTypeInterfaces>,
+    ) -> Result<Arc<ExactCompiledItem>, CompileError> {
+        if !Arc::ptr_eq(&output.item.cell, &self.item.cell)
+            || output.item.index != self.item.index
+            || output.generation != self.generation
+            || output.observation_name != self.observation_name
+            || output.is_program != self.is_program
+        {
+            return Err(failure("prepared item differs from its checked offer"));
+        }
+        let PreparedCheckedItemOutput {
+            original_execution,
+            target,
+            table,
+            bound_binders,
+            authenticated_sites,
+            typed_entry,
+            has_interface,
+            ..
+        } = output;
+        let value_interface = if has_interface {
+            Some(self.item.cell.value_inputs.capture_output(
+                self.generation,
+                &self.item.cell,
+                artifact_context,
+                source_lexical,
+                &original_execution,
+                produced,
+            )?)
+        } else {
+            None
+        };
+        Ok(Arc::new(ExactCompiledItem {
+            original_interfaces: Arc::new(
+                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
+                    self.item.cell.producer,
+                    original_execution.artifact_view(),
+                    original_execution.compiler_input_projection().clone(),
+                )?,
+            ),
+            original_execution,
+            item: self.item.clone(),
+            target,
+            table,
+            yield_sites_digest: authenticated_sites,
+            value_interface,
+            generation: self.generation,
+            bound_binders,
+            observation_name: self.observation_name.clone(),
+            admission: if self.is_program {
+                CheckedExecutionAdmission::CellProgram(self.item.admission_digest())
+            } else {
+                CheckedExecutionAdmission::RuntimeItem(self.runtime_prefix_digest)
+            },
+            settled_values: self.settled_values.clone(),
+            typed_entry,
+        }))
+    }
+}
+
+/// Receipt, binder and target observations retained before compiler close.
+/// Contextual value/source retention is issued only by the sealing phase.
+#[derive(Debug)]
+pub(crate) struct PreparedCheckedItemOutput {
+    item: ExactCheckedItem,
+    generation: u64,
+    observation_name: Option<String>,
+    is_program: bool,
+    original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
+    target: Arc<tidepool_repr::execution_schema::PreparedProgram>,
+    table: tidepool_repr::DataConTable,
+    bound_binders: Vec<Value>,
+    authenticated_sites: [u8; 32],
+    typed_entry: Option<SealedTypedEntry>,
+    has_interface: bool,
+}
+
+impl PreparedCheckedItemOutput {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn capture(
+        item: &ExactCheckedItem,
+        generation: u64,
+        observation_name: Option<&str>,
+        is_program: bool,
+        root: &Path,
+        request: &str,
+        source: &str,
+        target: &Arc<tidepool_repr::execution_schema::PreparedProgram>,
+        original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
+        program_entry: Option<&CheckedTypedEntry>,
+        target_imports: &[crate::certified_products::PendingImportOwner],
+    ) -> Result<Self, CompileError> {
         let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
-        let fields = row(&receipt, if self.is_program { 9 } else { 8 })?;
+        let fields = row(&receipt, if is_program { 9 } else { 8 })?;
         validate_item_receipt(
             fields,
             request,
-            self.item.admission_digest(),
-            self.item.cell.receipt_digest,
-            self.item.index,
+            item.admission_digest(),
+            item.cell.receipt_digest,
+            item.index,
             source,
-            self.is_program,
+            is_program,
         )?;
-        let typed_entry = if self.is_program {
+        let item_index = item.index;
+        let typed_entry = if is_program {
             let issued =
                 program_entry.ok_or_else(|| failure("typed native entry was not admitted"))?;
-            let (plan, item) = self
-                .item
+            let (plan, item) = item
                 .cell
                 .typed_segments
                 .iter()
                 .find_map(|plan| {
                     plan.items
                         .iter()
-                        .find(|item| item.ordinal == self.item.index)
+                        .find(|item| item.ordinal == item_index)
                         .map(|item| (plan, item))
                 })
                 .ok_or_else(|| failure("native item lacks its normalized typed segment"))?;
@@ -3823,12 +3936,12 @@ impl CheckedItemOffer {
         };
         let turn = decode(&read(root.join("turn.cbor"), 32 * 1024 * 1024)?)?;
         let turn = row(&turn, 2)?;
-        let expected_binders = if let Some(observation) = &self.observation_name {
-            vec![observation.clone()]
+        let expected_binders = if let Some(observation) = observation_name {
+            vec![observation.to_owned()]
         } else {
-            self.item.binders().to_vec()
+            item.binders().to_vec()
         };
-        let (bound_binders, authenticated_sites) = match (self.item.kind(), string(&turn[0])?) {
+        let (bound_binders, authenticated_sites) = match (item.kind(), string(&turn[0])?) {
             (CheckedItemKind::Bind | CheckedItemKind::Expression, "Bind") => {
                 let fields = row(&turn[1], 5)?;
                 if fields[0] != Value::Array(expected_binders.iter().map(text).collect())
@@ -3850,7 +3963,7 @@ impl CheckedItemOffer {
                     if string(&fields[0])? != binder
                         || string(&fields[2])?
                             != tidepool_repr::SessionModule::val(tidepool_repr::Generation(
-                                self.generation,
+                                generation,
                             ))
                             .module_name()
                     {
@@ -3863,18 +3976,6 @@ impl CheckedItemOffer {
             }
             _ => return Err(failure("compiled turn kind differs from checked item")),
         };
-        let value_interface = if !expected_binders.is_empty() {
-            Some(self.item.cell.value_inputs.capture_output(
-                self.generation,
-                &self.item.cell,
-                artifact_context,
-                source_lexical,
-                &original_execution,
-                produced,
-            )?)
-        } else {
-            None
-        };
         let typed_entry = typed_entry
             .map(|entry| {
                 let native_sites = original_execution
@@ -3886,31 +3987,19 @@ impl CheckedItemOffer {
                 })
             })
             .transpose()?;
-        Ok(Arc::new(ExactCompiledItem {
-            original_interfaces: Arc::new(
-                crate::declaration_context::ExactDeclarationContext::from_authenticated_interfaces(
-                    self.item.cell.producer,
-                    original_execution.artifact_view(),
-                    original_execution.compiler_input_projection().clone(),
-                )?,
-            ),
-            original_execution,
-            item: self.item.clone(),
+        Ok(Self {
+            item: item.clone(),
+            generation,
+            observation_name: observation_name.map(str::to_owned),
+            is_program,
             target: target.clone(),
             table: read_table(root, target)?,
-            yield_sites_digest: authenticated_sites,
-            value_interface,
-            generation: self.generation,
+            original_execution,
             bound_binders,
-            observation_name: self.observation_name.clone(),
-            admission: if self.is_program {
-                CheckedExecutionAdmission::CellProgram(self.item.admission_digest())
-            } else {
-                CheckedExecutionAdmission::RuntimeItem(self.runtime_prefix_digest)
-            },
-            settled_values: self.settled_values.clone(),
+            authenticated_sites,
             typed_entry,
-        }))
+            has_interface: !expected_binders.is_empty(),
+        })
     }
 }
 

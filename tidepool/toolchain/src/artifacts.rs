@@ -618,6 +618,145 @@ pub struct ModuleCandidateOffer {
     selected_session_values: std::sync::OnceLock<Vec<tidepool_repr::SessionModule>>,
 }
 
+/// Compiler-authenticated physical outputs. This owner carries no endpoint;
+/// contextual sealing continues after the physical transaction has settled.
+pub struct PreparedCellProgram {
+    root_owner: Option<Arc<tempfile::TempDir>>,
+    checked: Arc<crate::checked_cell::ExactCheckedCell>,
+    planned: crate::checked_cell::CheckedPlannedCellSpecification,
+    context: Arc<crate::declaration_context::ExactDeclarationContext>,
+    source_lexical: Vec<crate::declaration_join::ExactLexicalNode>,
+    produced_outputs: crate::checked_cell::ProducedValueTypeInterfaces,
+    outputs: BTreeMap<usize, ProgramNativeOutput>,
+    prepared_items: BTreeMap<usize, crate::checked_cell::PreparedCheckedItemOutput>,
+    pending_segments: Vec<(
+        ModuleCandidateOffer,
+        crate::declaration_context::ExactProgramSegmentAdmission,
+    )>,
+    validation: crate::recovery_artifacts::PackageInterfaceValidation,
+}
+
+impl std::fmt::Debug for PreparedCellProgram {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PreparedCellProgram")
+            .field("items", &self.checked.item_count())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PreparedCellProgram {
+    pub fn checked_cell(&self) -> &Arc<crate::checked_cell::ExactCheckedCell> {
+        &self.checked
+    }
+
+    pub fn seal(
+        self,
+        cancellation: &tidepool_extract_cmd::HostAdmissionCancellation,
+    ) -> Result<Arc<crate::checked_cell::CellProgram>, CompileError> {
+        use crate::checked_cell::{
+            self, CellProgram, CellProgramItem, CellProgramObservations, CheckedItemKind,
+            CheckedPlannedCellSlot,
+        };
+        cancellation.checkpoint()?;
+        let Self {
+            root_owner: _root_owner,
+            checked: cell,
+            planned,
+            context,
+            source_lexical,
+            produced_outputs,
+            mut outputs,
+            mut prepared_items,
+            pending_segments,
+            mut validation,
+        } = self;
+        let mut prefix = if cell.item_count() == 0 {
+            None
+        } else {
+            Some(cell.item(0)?.initial_prefix()?)
+        };
+        let mut items = Vec::with_capacity(cell.item_count());
+        for index in 0..cell.item_count() {
+            cancellation.checkpoint()?;
+            let _item_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_item", index, inclusive = true).entered();
+            let item = cell.item(index)?;
+            let completed = prefix.as_ref().expect("nonempty program prefix");
+            if item.kind() == CheckedItemKind::Declaration {
+                prefix = Some(completed.append_program_original(item.clone())?);
+                items.push(CellProgramItem {
+                    checked: item,
+                    native: None,
+                    native_observations: None,
+                });
+                continue;
+            }
+            let output = outputs.remove(&index).ok_or_else(|| {
+                CompileError::ExtractFailed("program native target is missing".into())
+            })?;
+            let (generation, observation) = match &planned.slots[index] {
+                CheckedPlannedCellSlot::Bind { value } => (*value, None),
+                CheckedPlannedCellSlot::Expression {
+                    capture,
+                    observation_name,
+                    ..
+                } => (*capture, Some(observation_name.clone())),
+                _ => {
+                    return Err(CompileError::ExtractFailed(
+                        "program native slot differs".into(),
+                    ));
+                }
+            };
+            let native = checked_cell::CheckedItemOffer {
+                item: item.clone(),
+                prefix: completed.clone(),
+                runtime_prefix_digest: cell.admission_digest(),
+                generation,
+                observation_name: observation,
+                is_program: true,
+                settled_values: completed.prepared_value_selection()?,
+            }
+            .seal_prepared(
+                prepared_items.remove(&index).ok_or_else(|| {
+                    CompileError::ExtractFailed("program checked target is missing".into())
+                })?,
+                &context,
+                &source_lexical,
+                Some(&produced_outputs.for_segment(index..index + 1)?),
+            )?;
+            let next = completed.append(native.clone())?;
+            let observation = CellProgramObservations {
+                turn: output.turn,
+                metadata: output.metadata,
+                products: output.products.expect("program output was sealed"),
+            };
+            items.push(CellProgramItem {
+                checked: item,
+                native: Some(native),
+                native_observations: Some(observation),
+            });
+            prefix = Some(next);
+        }
+        if !outputs.is_empty() {
+            return Err(CompileError::ExtractFailed(
+                "program contains unowned prepared targets".into(),
+            ));
+        }
+        let program = Arc::new(CellProgram {
+            checked: cell,
+            parsed: planned.parsed_plan.clone(),
+            slots: planned.slots.clone(),
+            items,
+        });
+        cancellation.checkpoint()?;
+        for (offer, segment) in pending_segments {
+            cancellation.checkpoint()?;
+            offer.publish_segment_original_products(&segment, &mut validation)?;
+        }
+        Ok(program)
+    }
+}
+
 fn selected_session_value_modules(
     command: &ExtractCmd,
 ) -> Result<Vec<tidepool_repr::SessionModule>, CompileError> {
@@ -1886,11 +2025,27 @@ impl ModuleCandidateOffer {
         &self,
         root: &Path,
     ) -> Result<Arc<crate::checked_cell::CellProgram>, CompileError> {
+        self.prepare_cell_program_outputs(root)?
+            .seal(&tidepool_extract_cmd::HostAdmissionCancellation::new())
+    }
+
+    /// Retain compiler-observed outputs and validate all targets while the
+    /// caller still owns the physical compiler transaction.
+    pub fn prepare_cell_program(
+        &self,
+        root: Arc<tempfile::TempDir>,
+    ) -> Result<PreparedCellProgram, CompileError> {
+        let mut prepared = self.prepare_cell_program_outputs(root.path())?;
+        prepared.root_owner = Some(root);
+        Ok(prepared)
+    }
+
+    fn prepare_cell_program_outputs(
+        &self,
+        root: &Path,
+    ) -> Result<PreparedCellProgram, CompileError> {
         use crate::cell_plan::ParsedCellPlanKind;
-        use crate::checked_cell::{
-            self, CellProgram, CellProgramItem, CellProgramObservations, CheckedItemKind,
-            CheckedPlannedCellSlot,
-        };
+        use crate::checked_cell::{self, CheckedPlannedCellSlot};
         let specification = self.checked_cell.as_ref().ok_or_else(|| {
             CompileError::ExtractFailed("program has no source specification".into())
         })?;
@@ -2127,105 +2282,52 @@ impl ModuleCandidateOffer {
             declarations,
             Some(planned),
         )?;
-        let mut prefix = if cell.item_count() == 0 {
-            None
-        } else {
-            Some(cell.item(0)?.initial_prefix()?)
-        };
-        let mut items = Vec::with_capacity(cell.item_count());
-        for index in 0..cell.item_count() {
-            let _item_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_item", index, inclusive = true).entered();
-            let item = cell.item(index)?;
-            let completed = prefix.as_ref().expect("nonempty program prefix");
-            if item.kind() == CheckedItemKind::Declaration {
-                prefix = Some(completed.append_program_original(item.clone())?);
-                items.push(CellProgramItem {
-                    checked: item,
-                    native: None,
-                    native_observations: None,
-                });
-                continue;
-            }
-            let output = outputs.remove(&index).ok_or_else(|| {
-                CompileError::ExtractFailed("program native target is missing".into())
-            })?;
+        let mut prepared_items = BTreeMap::new();
+        for (&index, output) in &outputs {
             let (generation, observation) = match &planned.slots[index] {
                 CheckedPlannedCellSlot::Bind { value } => (*value, None),
                 CheckedPlannedCellSlot::Expression {
                     capture,
                     observation_name,
-                    ..
-                } => (*capture, Some(observation_name.clone())),
+                } => (*capture, Some(observation_name.as_str())),
                 _ => {
                     return Err(CompileError::ExtractFailed(
                         "program native slot differs".into(),
-                    ));
+                    ))
                 }
             };
-            let native = checked_cell::CheckedItemOffer {
-                item: item.clone(),
-                prefix: completed.clone(),
-                runtime_prefix_digest: cell.admission_digest(),
+            let sealed = output.products.as_ref().expect("program output was sealed");
+            let prepared = checked_cell::PreparedCheckedItemOutput::capture(
+                &cell.item(index)?,
                 generation,
-                observation_name: observation,
-                is_program: true,
-                settled_values: completed.prepared_value_selection()?,
-            }
-            .seal(
+                observation,
+                true,
                 &output.directory,
                 &initial.request_sha256,
                 &output.source,
                 &output.target,
-                &context,
-                program_request.program_source_lexical(),
-                output
-                    .products
-                    .as_ref()
-                    .and_then(|products| products.original_execution.clone())
-                    .ok_or_else(|| {
-                        CompileError::ExtractFailed(
-                            "program output lacks original execution evidence".into(),
-                        )
-                    })?,
-                output
-                    .products
-                    .as_ref()
-                    .and_then(|products| products.typed_entry.as_ref()),
-                &output
-                    .products
-                    .as_ref()
-                    .expect("program output was sealed")
-                    .pending_imports,
-                Some(&produced_outputs.for_segment(index..index + 1)?),
+                sealed.original_execution.clone().ok_or_else(|| {
+                    CompileError::ExtractFailed(
+                        "program output lacks original execution evidence".into(),
+                    )
+                })?,
+                sealed.typed_entry.as_ref(),
+                &sealed.pending_imports,
             )?;
-            let next = completed.append(native.clone())?;
-            let observation = CellProgramObservations {
-                turn: output.turn,
-                metadata: output.metadata,
-                products: output.products.expect("program output was sealed"),
-            };
-            items.push(CellProgramItem {
-                checked: item,
-                native: Some(native),
-                native_observations: Some(observation),
-            });
-            prefix = Some(next);
+            prepared_items.insert(index, prepared);
         }
-        if !outputs.is_empty() {
-            return Err(CompileError::ExtractFailed(
-                "program contains unowned prepared targets".into(),
-            ));
-        }
-        let program = Arc::new(CellProgram {
+        Ok(PreparedCellProgram {
+            root_owner: None,
             checked: cell,
-            parsed: planned.parsed_plan.clone(),
-            slots: planned.slots.clone(),
-            items,
-        });
-        for (offer, segment) in pending_segments {
-            offer.publish_segment_original_products(&segment, &mut validation)?;
-        }
-        Ok(program)
+            planned: planned.clone(),
+            context,
+            source_lexical: program_request.program_source_lexical().to_vec(),
+            produced_outputs,
+            outputs,
+            prepared_items,
+            pending_segments,
+            validation,
+        })
     }
 
     fn program_offer(&self, exact: crate::declaration_context::ExactCompilationRequest) -> Self {
