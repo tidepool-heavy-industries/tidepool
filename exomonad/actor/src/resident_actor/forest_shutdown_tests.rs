@@ -548,6 +548,15 @@ async fn tool_abort_validates_original_owner_before_empty_settlement() {
 
 #[tokio::test]
 async fn native_mailbox_casts_retain_recipient_compiler_close_after_caller_retirement() {
+    native_mailbox_compiler_lifecycle_history().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_mailbox_compiler_lifecycle_on_tokio_workers() {
+    native_mailbox_compiler_lifecycle_history().await;
+}
+
+async fn native_mailbox_compiler_lifecycle_history() {
     use crate::resident_workbench::CompilerCloseOwner;
     use std::path::PathBuf;
     use tidepool_codegen::scope::ScopeId;
