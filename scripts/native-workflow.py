@@ -75,14 +75,19 @@ def compile_labels(packages, selected):
     return sorted(labels)
 
 
-def buck(command, labels, extra=(), *, profile="fast-dev"):
+def buck(command, labels, extra=(), *, profile="fast-dev", print_passing_details=False):
     if not labels:
         raise ValueError("no declared targets selected")
     if profile not in PROFILES:
         raise ValueError(f"unsupported native profile {profile!r}")
+    if print_passing_details and command != "test":
+        raise ValueError("passing details require a Buck test invocation")
     args = ["bash", str(ROOT / "scripts/buck2-run.sh"), command,
             "--local-only", "-c", "remote.enabled=false",
-            "-c", f"tidepool.profile={profile}", *labels]
+            "-c", f"tidepool.profile={profile}"]
+    if print_passing_details:
+        args.append("--print-passing-details")
+    args.extend(labels)
     if extra:
         # sh_test RunInfo preserves its declared environment and resources.
         # `buck2 test -- ...` instead supplies arguments to the test executor.
@@ -154,7 +159,18 @@ def main(argv=None):
             return 0
         return execute("test", labels)
     if options.command == "quick":
-        return execute("test", [package_target(packages, name, "libraries")["test"] for name in QUICK_PACKAGES])
+        compile_labels(packages, QUICK_PACKAGES)
+        targets = [package_target(packages, name, "libraries") for name in QUICK_PACKAGES]
+        compile_only = sorted(target["build"] for target in targets if "test" not in target)
+        tests = [target["test"] for target in targets if "test" in target]
+        if not tests:
+            raise ValueError("quick has no registered executable suites")
+        compile_status = 0
+        if compile_only:
+            print("Quick compile-only targets:", *compile_only, sep="\n", file=sys.stderr)
+            compile_status = execute("build", compile_only)
+        test_status = execute("test", tests)
+        return compile_status or test_status
     if options.command == "fixtures-check":
         selected = options.cohorts or list(COHORTS)
         unknown = set(selected) - set(COHORTS)
@@ -162,7 +178,7 @@ def main(argv=None):
             raise ValueError(f"unknown or duplicate cohorts {selected!r}; available: {', '.join(COHORTS)}")
         labels = ["//bridge/haskell:corpus_" + cohort.replace("-", "_") + "_test" for cohort in selected]
         probe_status = execute("build", ["//bridge/haskell:probe_opacity"])
-        test_status = execute("test", labels)
+        test_status = execute("test", labels, print_passing_details=True)
         return probe_status or test_status
     test_labels = set()
     for package in packages.values():

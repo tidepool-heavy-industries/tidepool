@@ -27,6 +27,36 @@ class NativeWorkflowTests(unittest.TestCase):
             status = workflow.main(arguments)
             return status, buck.call_args_list
 
+    def test_quick_builds_declared_compile_only_library_and_executes_remaining_suite(self):
+        packages = copy.deepcopy(ROSTER)
+        packages["compile_only"] = {"libraries": {"leaf": {"build": "//leaf:library"}},
+                                    "binaries": {}, "integration": {}}
+        for build_status in (0, 7):
+            with self.subTest(build_status=build_status), patch.object(workflow, "QUICK_PACKAGES", ("compile_only", "example")), patch.object(workflow, "roster", return_value=packages), patch.object(workflow, "buck", side_effect=[build_status, 0]) as buck, contextlib.redirect_stderr(io.StringIO()) as report:
+                self.assertEqual(workflow.main(["quick"]), build_status)
+                self.assertEqual([call.args for call in buck.call_args_list],
+                                 [("build", ["//leaf:library"]), ("test", ["//pkg:unit_all"])])
+                self.assertIn("Quick compile-only targets:\n//leaf:library", report.getvalue())
+
+    def test_quick_refuses_incomplete_harness_metadata_before_launch(self):
+        packages = copy.deepcopy(ROSTER)
+        del packages["example"]["libraries"]["example"]["test_build"]
+        with patch.object(workflow, "QUICK_PACKAGES", ("example",)), patch.object(workflow, "roster", return_value=packages), patch.object(workflow, "buck") as buck:
+            with self.assertRaisesRegex(ValueError, "missing native target labels"):
+                workflow.main(["quick"])
+            buck.assert_not_called()
+
+    def test_passing_details_is_a_buck_test_option_before_labels(self):
+        with patch.object(workflow.subprocess, "call", return_value=0) as call, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(workflow.buck("test", ["//pkg:corpus"], print_passing_details=True), 0)
+        args = call.call_args.args[0]
+        self.assertLess(args.index("--print-passing-details"), args.index("//pkg:corpus"))
+        self.assertNotIn("--", args)
+        with patch.object(workflow.subprocess, "call") as call:
+            with self.assertRaisesRegex(ValueError, "Buck test"):
+                workflow.buck("build", ["//pkg:corpus"], print_passing_details=True)
+            call.assert_not_called()
+
     def test_focused_execution_uses_declared_runinfo_and_retains_exact_count(self):
         status, calls = self.invoke(["test-target", "example", "scenario", "--", "--exact", "scenario::valid", "--expected-count", "1"])
         self.assertEqual(status, 0)
@@ -93,6 +123,7 @@ class NativeWorkflowTests(unittest.TestCase):
         with patch.object(workflow, "roster", return_value=ROSTER), patch.object(workflow, "buck", side_effect=[7, 0]) as buck:
             self.assertEqual(workflow.main(["fixtures-check", "containers-contract"]), 7)
             self.assertEqual(buck.call_args_list[1].args, ("test", ["//bridge/haskell:corpus_containers_contract_test"]))
+            self.assertTrue(buck.call_args_list[1].kwargs["print_passing_details"])
 
     def test_duplicate_cohorts_and_missing_suite_refuse_without_fallback(self):
         for arguments in (["fixtures-check", "suite", "suite"], ["suite", "missing"]):
