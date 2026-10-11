@@ -1835,8 +1835,7 @@ mod tests {
             proptest::prop_assert!(rendered.diagnostics.windows(2).all(|pair|
                 pair[0].severity == DiagnosticLevel::Error || pair[1].severity == DiagnosticLevel::Warning));
             proptest::prop_assert_eq!(rendered.diagnostics.iter().filter(|d| d.message == format!("authored {message}")).count(), 2);
-            let foreign_block = rendered.text.split("Foreign.hs").nth(1).unwrap().split("\n\n").next().unwrap();
-            proptest::prop_assert!(!foreign_block.contains("λ = \"é\""));
+            proptest::prop_assert_eq!(rendered.text.matches("\n1 | λ = \"é\"").count(), 2);
         }
     }
 
@@ -1851,21 +1850,33 @@ mod tests {
             DiagnosticSeverity::Warning,
             "warning λ",
         );
-        let rendered = render_diagnostics_structured(
-            &[warning.clone(), warning],
-            &RenderOpts {
-                anchor: "Expr.hs",
-                label: "<cell>",
-                user_lines: Some(&[(2, 2)]),
-                line_offset: 0,
-                col_indent: 0,
-                drop_foreign_gen_warnings_except: None,
-                source: "generated\nauthored",
-            },
-        );
+        let opts = RenderOpts {
+            anchor: "Expr.hs",
+            label: "<cell>",
+            user_lines: Some(&[(2, 2)]),
+            line_offset: 0,
+            col_indent: 0,
+            drop_foreign_gen_warnings_except: None,
+            source: "generated\nauthored",
+        };
+        let rendered = render_diagnostics_structured(&[warning.clone(), warning.clone()], &opts);
         assert!(rendered.text.starts_with("GHC reported 2 warning(s) only"));
         assert_eq!(rendered.text.matches("warning λ").count(), 1);
         assert_eq!(rendered.diagnostics.len(), 2);
+        let error = diag(
+            "Expr.hs",
+            1,
+            1,
+            1,
+            2,
+            DiagnosticSeverity::Error,
+            "authored cause",
+        );
+        let mixed = render_diagnostics_structured(&[warning, error], &opts);
+        assert!(mixed
+            .text
+            .starts_with("GHC reported 1 error(s), 1 warning(s) only"));
+        assert_eq!(mixed.diagnostics[0].severity, DiagnosticLevel::Error);
     }
 
     /// The structured list mirrors the blocks actually rendered: a dropped
