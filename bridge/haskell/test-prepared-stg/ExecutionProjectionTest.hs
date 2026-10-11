@@ -708,7 +708,7 @@ verifyRintDoubleStateToken :: IO ()
 verifyRintDoubleStateToken = do
   prepared <- runPipelineSelected PreparedStg
     "test-prepared-stg/RintDouble.hs" ["test-prepared-stg"]
-  let identity = SymbolIdentity "main" "RintDouble" "value" "roundSimpleUp" Nothing
+  let identity = SymbolIdentity "main" "RintDouble" "value" "rintDoubleState" Nothing
       context = ProjectionContext { projectionProfile = "ghc-9.12-prepared-stg", projectionToolchain = "ghc-9.12.2", projectionTarget = (TargetDescriptor X86_64 LittleEndian 64 64 "sysv64" []), projectionRetainedGenerations = mempty, projectionCurrentOriginals = mempty, projectionEntry = identity, projectionAuxiliaryRoots = [], projectionFormattingAuthority = Nothing, projectionTimeAuthority = Nothing, projectionTextUnit = Nothing, projectionJsonAuthority = Nothing }
   case projectPreparedTarget context (pprModules prepared) of
     Left failure -> ioError (userError

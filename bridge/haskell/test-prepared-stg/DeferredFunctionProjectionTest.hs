@@ -7,16 +7,17 @@ import Control.Monad.IO.Class (liftIO)
 import Data.List (find)
 import Data.Map.Strict qualified as Map
 import Data.Text qualified as Text
+import GHC.Stg.Syntax (GenStgTopBinding(..), GenStgBinding(..))
 import GHC.StgToCmm.Closure (importedIdLFInfo)
 import GHC.StgToCmm.Types (LambdaFormInfo(LFReEntrant))
 import GHC qualified
 import GHC.Tc.Types (tcg_rdr_env)
 import GHC.Types.Id (Id, idType)
-import GHC.Types.Name (nameModule_maybe, nameOccName)
-import GHC.Types.Name.Occurrence (occNameString)
+import GHC.Types.Name (nameModule_maybe, nameOccName, mkExternalName, nameUnique, nameSrcSpan)
+import GHC.Types.Name.Occurrence (occNameString, mkVarOcc)
 import GHC.Types.Name.Reader (globalRdrEnvElts, greName)
 import GHC.Types.TyThing (TyThing(AnId))
-import GHC.Types.Var (varName)
+import GHC.Types.Var (varName, setVarName)
 import GHC.Unit.Module (moduleName, moduleNameString, moduleUnit)
 import GHC.Unit.Types (unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
@@ -34,7 +35,7 @@ import Tidepool.GhcPipeline
 import Tidepool.FatIface (newFatIfaceCache, newOwnerInterfaceCache)
 import Tidepool.PreparedBuiltins (DeferredFunction(..), deferredFunction)
 import Tidepool.PreparedRecovery (RecoveredClosure(..), recoverPreparedClosure)
-import Tidepool.PreparedStg (PreparedModule, newPreparedBodyCache)
+import Tidepool.PreparedStg (PreparedModule, pmBindings, newPreparedBodyCache)
 
 data Expected = Expected
   { expectedTarget :: String
@@ -165,13 +166,27 @@ verifyWorkerLookalike prepared = do
   closure <- recoverPreparedClosure (prHscEnv (pprPipelineResult prepared)) cache ownerCache bodyCache context
     (pprModules prepared)
   program <- projectOrFail context (closureModules closure)
+  -- Use an authored helper to keep the projection check independent of GHC's
+  -- worker-wrapper policy, then give its source-owned Id the exact catalog
+  -- spelling for the negative identity check.
+  let workers =
+        [ binder
+        | preparedModule <- pprModules prepared
+        , (binding, _) <- pmBindings preparedModule
+        , binder <- topBinders binding
+        , occurrenceOf binder == "go"
+        ]
+  unless (not (null workers))
+    (ioError (userError "prepared source omitted the go helper"))
+  unless (all ((== Nothing) . deferredFunction . exactLookalike) workers)
+    (ioError (userError "source-module $wgo entered the deferred catalog"))
   let matching =
         [ symbol
         | group <- programBindings program
         , TopBinding symbol _ <- groupItems group
         , symbolUnit symbol == "main"
         , symbolModule symbol == "DeferredFunctionProjection"
-        , symbolOccurrence symbol == "$wgo"
+        , symbolOccurrence symbol `elem` map (Text.pack . occurrenceOf) workers
         ]
   unless (not (null matching))
     (ioError (userError "projection omitted the source-module $wgo lookalike"))
@@ -179,6 +194,14 @@ verifyWorkerLookalike prepared = do
       (programOperations program))
     (ioError (userError
       "source-module $wgo lookalike emitted the IPE decoder capability"))
+  where
+    topBinders (StgTopStringLit binder _) = [binder]
+    topBinders (StgTopLifted (StgNonRec binder _)) = [binder]
+    topBinders (StgTopLifted (StgRec bindings)) = map fst bindings
+    exactLookalike binder = case nameModule_maybe (varName binder) of
+      Just owner -> let name = varName binder in setVarName binder
+        (mkExternalName (nameUnique name) owner (mkVarOcc "$wgo") (nameSrcSpan name))
+      Nothing -> error "prepared worker has no source-module owner"
 
 projectOrFail :: ProjectionContext -> [PreparedModule] -> IO WireProgram
 projectOrFail context modules = case projectPreparedTarget context modules of

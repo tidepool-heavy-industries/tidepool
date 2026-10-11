@@ -30,10 +30,12 @@ collectStackTrace1 :: IO (Maybe Bool)
 collectStackTrace1 = pure (Just True)
 {-# NOINLINE collectStackTrace1 #-}
 
--- The worker is also named $wgo, but belongs to this source module.
+-- A source-owned callable helper exercises the deferred catalog lookalike check.
 decodeStackEntriesLookalike :: [Int] -> Int
 decodeStackEntriesLookalike = go 0
-  where
-    go !total [] = total
-    go !total (value : values) = go (total + value) values
+
+go :: Int -> [Int] -> Int
+go !total [] = total
+go !total (value : values) = go (total + value) values
+{-# NOINLINE go #-}
 {-# NOINLINE decodeStackEntriesLookalike #-}
