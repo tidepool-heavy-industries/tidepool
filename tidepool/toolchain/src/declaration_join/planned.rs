@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     #[test]
-    fn authored_closure_reuses_owned_witnesses_and_preserves_legacy_validation() {
+    fn authored_closure_reuses_owned_witnesses_and_validates_uncaptured_products() {
         use crate::certified_products::{
             fixture_finalized_product,
             tests::{original_groups_fixture_with_interface, recovered_witness_fixtures},
@@ -1271,10 +1271,30 @@ mod tests {
             products[1].module_interface()
         );
         assert!(admit(&[products[0].clone(), wrong_version]).is_err());
+        let cold_before = ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get);
+        let finalized = issued_originals(&legacy).unwrap();
+        assert_eq!(finalized.products().len(), legacy.len());
+        assert!(finalized
+            .products()
+            .iter()
+            .all(|product| product.original_native().is_some()));
         assert!(
-            issued_originals(&legacy).is_err(),
-            "uncaptured originals require native certification before compiler selection"
+            ORIGINAL_PRODUCT_DECODES.with(std::cell::Cell::get) > cold_before,
+            "inventory admission authenticates uncaptured original bytes"
         );
+        let original = &legacy[1];
+        let mut changed_bytes = original.product_bytes().to_vec();
+        changed_bytes.push(0);
+        let changed = CertifiedRecoveryProduct::from_certification(
+            original.owner().clone(),
+            original.interface_bytes().to_vec(),
+            changed_bytes,
+            original.package_imports_bytes().to_vec(),
+            original.certification_bytes().to_vec(),
+        )
+        .with_module_interface(original.module_interface().unwrap().clone())
+        .unwrap();
+        assert!(issued_originals(&[legacy[0].clone(), changed]).is_err());
     }
 
     #[test]
