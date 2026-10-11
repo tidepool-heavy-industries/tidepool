@@ -1089,6 +1089,8 @@ const REVIEW_PROMPT: &str = include_str!("../../../exomonad/examples/workspace/.
         self.assertIn("TIDEPOOL_EXTRACT_WORKER", host["resource_env"])
         self.assertEqual(host["resource_env"]["TIDEPOOL_PRELUDE_DIR"], "$(location //bridge/haskell:facade_embedded_sources)/lib")
         self.assertEqual(host["env"], {"TIDEPOOL_KEEP_TEST_LOGS": "1", "EXOMONAD_NIX_OFFLINE": "1"})
+        self.assertEqual(host["resource_env"]["PATH"], "$(location toolchains//:exomonad_runtime_tools)/bin")
+        self.assertEqual(cases["tidepool_unit_tests_all"]["resource_env"]["PATH"], "$(location toolchains//:exomonad_runtime_tools)/bin")
         self.assertEqual(host["resource_env"]["EXOMONAD_NIX_BIN"], "$(location toolchains//:exomonad_runtime_tools)/bin/nix")
         self.assertIn("toolchains//:exomonad_runtime_tools", host["resources"])
         for browser_variable in ("TIDEPOOL_BROWSER_DRIVER", "PLAYWRIGHT_BROWSERS_PATH"):

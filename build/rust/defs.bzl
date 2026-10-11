@@ -31,7 +31,9 @@ def _test_environment(env, haskell_worker):
         if not ghc_bin or not ghc_libdir:
             fail("configure Buck with the pinned Nix GHC before building a Haskell-worker test")
         env["TIDEPOOL_GHC_LIBDIR"] = ghc_libdir
-        env["PATH"] = read_root_config("nix", "action_path") + ":" + ghc_bin
+        # Execution targets may supply a declared command directory. Compiler
+        # entrypoints and libdir are separate inputs; do not replace their PATH.
+        env.setdefault("PATH", read_root_config("nix", "action_path") + ":" + ghc_bin)
     return env
 
 def _test_regression_environment(env, package_dir, name):

@@ -248,7 +248,7 @@ impl Driver {
             model: defaults.defaults.model,
             effort: defaults.defaults.effort.into(),
 
-            pane_environment: BTreeMap::new(),
+            pane_environment: crate::exomonad::pane_environment(),
             jev: None,
         };
         let session = Self::acquire_session(&config).await?;
@@ -875,6 +875,31 @@ mod tests {
             vec![exomonad_actor::CompilerWorkClose::Settled(
                 tidepool_runtime::CompilerTransactionClose::Clean
             ),]
+        );
+    }
+
+    #[test]
+    fn recipe_commands_use_the_frozen_declared_environment() {
+        let environment = crate::exomonad::pane_environment();
+        let path = environment
+            .get("PATH")
+            .expect("recipe commands require the frozen command PATH");
+        assert_eq!(std::env::var("PATH").unwrap(), *path);
+        let bubblewrap = resolve_scope_bubblewrap(&environment)
+            .expect("declared recipe command tools include executable bubblewrap");
+        assert!(bubblewrap.is_absolute());
+
+        let unavailable = tempfile::tempdir().unwrap();
+        let unavailable_environment = BTreeMap::from([(
+            "PATH".into(),
+            unavailable.path().to_str().unwrap().into(),
+        )]);
+        assert_eq!(
+            resolve_scope_bubblewrap(&unavailable_environment)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound,
+            "an explicit frozen selection cannot fall back to ambient tools"
         );
     }
 

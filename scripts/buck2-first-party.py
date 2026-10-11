@@ -751,6 +751,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "tidepool":
         env["EXOMONAD_WORKSPACE_GITLINK"] = "$(location //build/rust:workspace_gitlink)"
         env["EXOMONAD_WORKSPACE_GIT_BUNDLE"] = "$(location //build/rust:workspace_git_bundle)"
+        env["PATH"] = "$(location toolchains//:exomonad_runtime_tools)/bin"
         env["EXOMONAD_NIX_BIN"] = "$(location toolchains//:exomonad_runtime_tools)/bin/nix"
         env["EXOMONAD_NIX_OFFLINE"] = "1"
         resources.append("//build/rust:workspace_gitlink")
@@ -763,6 +764,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
 # runner as declared resources. LD_LIBRARY_PATH here names one declared
 # runtime-libraries directory; scalar controls stay in ordinary env.
 NATIVE_RESOURCE_ENV_KEYS = (
+    "PATH",
     "EXOMONAD_BINDING_DIRECTORY_FAULT_LIBRARY",
     "EXOMONAD_INBOX_DIRECTORY_FAULT_LIBRARY",
     "EXOMONAD_JOURNAL_FAULT_LIBRARY",
@@ -1207,6 +1209,7 @@ def facade_test_cases(binary):
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "PATH": "$(location toolchains//:exomonad_runtime_tools)/bin",
         "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
     }
     host_env = {"TIDEPOOL_KEEP_TEST_LOGS": "1", "EXOMONAD_NIX_OFFLINE": "1"}

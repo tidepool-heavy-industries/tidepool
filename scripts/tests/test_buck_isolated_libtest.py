@@ -1423,6 +1423,56 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(len([args for args in observed if '--list' in args]), 2)
         self.assertEqual(len([args for args in observed if '--exact' in args]), 1)
 
+    def test_declared_command_path_survives_haskell_setup_and_both_execution_modes(self):
+        tools = Path(self.tmp.name) / 'declared-command-tools'
+        tools.mkdir()
+        command = tools / 'bwrap'
+        command.write_text('#!' + sys.executable + '\nprint("declared-command-witness")\n')
+        command.chmod(0o700)
+        calls = []
+        definitions = SCRIPT.with_name('defs.bzl').read_text()
+        namespace = {
+            'sh_test': lambda **kwargs: calls.append(kwargs),
+            'read_root_config': lambda section, key: {
+                'ghc_bin': '/declared/ghc/bin',
+                'ghc_libdir': '/declared/ghc/lib',
+                'action_path': '/compiler-actions/bin',
+            }[key],
+        }
+        exec('\n'.join(line for line in definitions.splitlines()
+                       if not line.startswith('load(')), namespace)
+        namespace['tidepool_rust_test_cases'](
+            name='command_control', binary=':libtest',
+            exact_tests=['suite::works'], expected_count=1,
+            resource_env={'PATH': os.path.relpath(tools)}, haskell_worker=True,
+        )
+        rule = calls.pop()
+        self.assertEqual(rule['env']['TIDEPOOL_GHC_LIBDIR'], '/declared/ghc/lib')
+        self.assertEqual(rule['env']['PATH'], os.path.relpath(tools))
+        self.binary.write_text('#!' + sys.executable + '\n' +
+            'import os, subprocess\n' +
+            'print(os.environ["PATH"])\n' +
+            'print(subprocess.check_output(["bwrap"], text=True).strip())\n')
+        self.binary.chmod(0o700)
+        with patch.dict(os.environ, {'PATH': rule['env']['PATH']}):
+            runner.resolve_resource_environment(['PATH'])
+            direct = runner.execute([str(self.binary)], 3)
+            delegated, _ = runner.delegated_command([str(self.binary)], 3, 'app.slice', {})
+            forwarded = {}
+            for argument in delegated:
+                if argument.startswith('--setenv='):
+                    name, value = argument[len('--setenv='):].split('=', 1)
+                    forwarded[name] = value
+            child = subprocess.run([str(self.binary)], env=forwarded,
+                                   capture_output=True, text=True, check=True)
+        self.assertEqual(direct.returncode, 0)
+        selected_path, witness = direct.stdout.splitlines()
+        self.assertTrue(Path(selected_path).is_absolute())
+        self.assertTrue(Path(selected_path).samefile(tools))
+        self.assertEqual(witness, 'declared-command-witness')
+        self.assertEqual(child.stdout, direct.stdout)
+        self.assertNotIn('/compiler-actions/bin', direct.stdout)
+
     def test_missing_declared_resource_refuses_before_discovery(self):
         for value in ('', str(Path(self.tmp.name) / 'missing web')):
             with self.subTest(value=value), \

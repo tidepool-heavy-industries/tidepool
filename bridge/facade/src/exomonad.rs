@@ -2398,7 +2398,7 @@ const DEPLOYMENT_ENV_NAMES: &[&str] = &[
 
 /// Variables whose current values must override a possibly older tmux server
 /// environment. Tmux supplies fresh `TMUX`/`TMUX_PANE` identities itself.
-fn pane_environment() -> std::collections::BTreeMap<String, String> {
+pub(crate) fn pane_environment() -> std::collections::BTreeMap<String, String> {
     pane_environment_from(|name| std::env::var(name).ok())
 }
 
