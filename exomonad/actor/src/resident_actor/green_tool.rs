@@ -388,4 +388,67 @@ mod tests {
             .cancellation_requested());
         assert!(!child_owner.control().unwrap().cancellation_requested());
     }
+    #[tokio::test]
+    async fn main_tool_reply_progress_polls_retained_fifo_frontier() {
+        use tidepool_runtime::session::registry::{CheckoutRequest, SessionRegistry};
+        let actor = ActorRef {
+            id: crate::ActorId(146),
+            incarnation: crate::Incarnation::FIRST,
+        };
+        let control = crate::WorkbenchExecutionControl::untracked();
+        let work = InvocationWork::new(actor, control.reservation_owner(actor).unwrap());
+        let mut cursor = ToolCursor::new(work, control, CheckpointPublication::Resident);
+        let session = tidepool_repr::SessionId(993);
+        let machines = Arc::new(SessionRegistry::<(), u8>::new());
+        assert!(machines.insert_idle(session, Box::new(())).is_none());
+        let (machine, held) = machines.checkout_run(session).unwrap().into_parts();
+        let queued_machines = machines.clone();
+        let mut green = GreenInvocation::default();
+        green.enqueue_frontier(
+            Vec::new(),
+            Box::pin(async move {
+                let (machine, receipt) = queued_machines
+                    .checkout_queued(session, CheckoutRequest::Run)
+                    .await
+                    .unwrap()
+                    .into_parts();
+                queued_machines.settle_suspended(receipt, machine, Vec::new());
+                (
+                    Err(ResidentActorWorkbenchError::InvocationCancelled),
+                    ToolEffectCompletion::default(),
+                )
+            }),
+        );
+        assert!(matches!(
+            futures_util::poll!(Box::pin(green.next())),
+            std::task::Poll::Pending
+        ));
+        cursor.green = Some(green);
+        assert!(
+            cursor.is_main_terminal(),
+            "main terminal does not release retained frontiers"
+        );
+        let resume = machines.checkout_queued(session, CheckoutRequest::Run);
+        tokio::pin!(resume);
+        assert!(matches!(
+            futures_util::poll!(&mut resume),
+            std::task::Poll::Pending
+        ));
+        machines.settle_suspended(held, machine, Vec::new());
+        let checkout = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            cursor.progress_while(resume),
+        )
+        .await
+        .expect("retained frontier releases FIFO before main reply continuation")
+        .unwrap();
+        let (machine, receipt) = checkout.into_parts();
+        machines.settle_suspended(receipt, machine, Vec::new());
+        let completion = cursor.green.as_mut().unwrap().next().await.unwrap();
+        assert!(matches!(
+            completion.result,
+            Some(Err(ResidentActorWorkbenchError::InvocationCancelled))
+        ));
+        assert!(completion.attachment.is_some());
+    }
 }

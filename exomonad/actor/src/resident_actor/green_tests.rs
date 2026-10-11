@@ -181,8 +181,13 @@ async fn parked_frontier_progress_releases_fifo_checkout_before_native_advance()
     complete.send(()).unwrap();
     let mut green = GreenInvocation::<()> {
         pending: vec![queued, ready],
+        threads: BTreeMap::from([(1, thread(0))]),
         ..Default::default()
     };
+    assert!(
+        green.active_work().is_none(),
+        "parent main can retain an unjoined child frontier"
+    );
     assert_eq!(green.next().await.unwrap().thread, 2);
     assert_eq!(acquired.load(Ordering::SeqCst), 0);
     machines.settle_suspended(held, machine, Vec::new());

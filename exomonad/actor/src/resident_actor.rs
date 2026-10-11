@@ -11798,10 +11798,12 @@ where
                                 diagnostic: None,
                             });
                         }
-                        outcome = self
-                            .environment
-                            .runner
-                            .resume_unit(context.clone(), reply.continuation)
+                        outcome = cursor
+                            .progress_while(
+                                self.environment
+                                    .runner
+                                    .resume_unit(context.clone(), reply.continuation),
+                            )
                             .await
                             .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                     }
