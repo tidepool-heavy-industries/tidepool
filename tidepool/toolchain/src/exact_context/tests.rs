@@ -312,3 +312,42 @@ fn selected_lookup_authenticates_only_its_route_and_preserves_refusals() {
         Err(SnapshotError::Storage(_))
     ));
 }
+
+#[test]
+fn old_selection_and_context_versions_are_rejected() {
+    let store = MemoryBlockstore::new();
+    let mut materializer = Materializer::new(&store);
+    let selection = materializer
+        .materialize_selection(None, &ExactSelectionSnapshot::default())
+        .unwrap();
+    install(&store, materializer.finish().unwrap());
+    assert!(hydrate_selection(&store, selection.root()).is_ok());
+    let mut descriptor: SelectionDescriptor = read_value(&store, selection.root().cid()).unwrap();
+    assert_eq!(descriptor.version, 2);
+    descriptor.version = 1;
+    let mut materializer = Materializer::new(&store);
+    let old_root = SelectionRoot(materializer.materialize_value(&descriptor).unwrap());
+    install(&store, materializer.finish().unwrap());
+    assert!(
+        matches!(hydrate_selection(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "selection encoding version")
+    );
+    let mut materializer = Materializer::new(&store);
+    let roles = materializer
+        .materialize_map::<ArtifactId, u64>(None, &OrdMap::new())
+        .unwrap();
+    let lexical = materializer
+        .materialize_map::<String, u64>(None, &OrdMap::new())
+        .unwrap();
+    let descriptor = ContextDescriptor {
+        version: 1,
+        producer: [0; 32],
+        selection: selection.root().clone(),
+        roles: roles.root().clone(),
+        lexical: lexical.root().clone(),
+    };
+    let old_root = ContextRoot(materializer.materialize_value(&descriptor).unwrap());
+    install(&store, materializer.finish().unwrap());
+    assert!(
+        matches!(hydrate_context(&store, &old_root), Err(SnapshotError::Malformed(message)) if message == "context encoding version")
+    );
+}

@@ -366,6 +366,7 @@ fn constructed_projection_matches_issued_facts_with_delayed_and_eager_reads() {
 struct Oracle {
     roots: BTreeSet<InventoryNodeKey>,
     closure: BTreeSet<InventoryNodeKey>,
+    selected: BTreeSet<InventoryNodeKey>,
     entries: Vec<Arc<ArtifactEntry>>,
     dependencies: Vec<(ArtifactId, ArtifactId, ArtifactDependency)>,
 }
@@ -383,13 +384,7 @@ fn exhaustive_oracle(view: &ArtifactView) -> Oracle {
             continue;
         }
         result.roots.extend(lease.roots.iter().copied());
-        custody.extend(
-            lease
-                .native_custody
-                .iter()
-                .copied()
-                .map(InventoryNodeKey::Artifact),
-        );
+        custody.extend(lease.custody_roots.iter().copied());
         pending.extend(lease.parents.iter());
     }
 
@@ -421,6 +416,19 @@ fn exhaustive_oracle(view: &ArtifactView) -> Oracle {
             .collect::<Vec<_>>();
         result.closure.extend(targets);
         if result.closure.len() == before {
+            break;
+        }
+    }
+    result.selected = result.roots.clone();
+    loop {
+        let before = result.selected.len();
+        let targets = result
+            .selected
+            .iter()
+            .flat_map(|node| adjacency.get(node).into_iter().flatten().copied())
+            .collect::<Vec<_>>();
+        result.selected.extend(targets);
+        if result.selected.len() == before {
             break;
         }
     }
@@ -475,7 +483,7 @@ fn check_read_projection(view: &ArtifactView) -> Result<(), TestCaseError> {
         .map(|entry| entry.descriptor.clone())
         .collect::<Vec<_>>();
     let expected_groups = expected
-        .closure
+        .selected
         .iter()
         .filter_map(|key| match key {
             InventoryNodeKey::Group(group) => Some(NativeGroupKey {
@@ -865,7 +873,12 @@ fn empty_observation_preserves_inherited_roots_and_separate_native_custody() {
         all.resolve_binding(native, &all.read_projection(&state).nodes)
             .unwrap()
     };
-    let mut custody = inventory.retain(Vec::new(), vec![carrier], Vec::new(), Vec::new());
+    let mut custody = inventory.retain(
+        Vec::new(),
+        vec![InventoryNodeKey::Artifact(carrier)],
+        Vec::new(),
+        Vec::new(),
+    );
     custody.replace_namespace(&BTreeMap::from([(carrier.artifact, carrier)]));
     assert!(!custody.namespace().is_empty());
     let inherited_custody = inventory.retain(
@@ -876,7 +889,7 @@ fn empty_observation_preserves_inherited_roots_and_separate_native_custody() {
     );
     check_empty_observation(&custody, true).unwrap();
     check_empty_observation(&inherited_custody, true).unwrap();
-    assert!(!inherited_custody.lease.selection.native_custody.is_empty());
+    assert!(!inherited_custody.lease.selection.custody_roots.is_empty());
     assert!(!inherited_custody.entries().is_empty());
     check_empty_observation(&inherited_custody, true).unwrap();
     drop(inherited_custody);

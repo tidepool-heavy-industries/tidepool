@@ -95,9 +95,11 @@ pub struct ArtifactGraphSelection {
     pub selections: Vec<Arc<ScopeProofV3>>,
     pub bindings: Vec<ArtifactBinding>,
     pub namespace: Vec<ArtifactBinding>,
+    /// Issued source roots and executable group demand.
     pub roots: Vec<ArtifactBindingNode>,
     pub native_groups: Vec<NativeGroupBinding>,
-    pub native_custody: Vec<ArtifactBinding>,
+    /// Exact retained nodes; these seeds grant no executable group demand.
+    pub custody_roots: Vec<ArtifactBindingNode>,
 }
 
 fn serialize_selection_plans<S: serde::Serializer>(
@@ -229,7 +231,7 @@ impl ExactArtifactSelection {
 
         let mut sink = DigestWriter(Sha256::new());
         sink.0
-            .update(b"Tidepool selected binding context observation v3\0");
+            .update(b"Tidepool selected binding context observation v4\0");
         {
             let mut buffered = std::io::BufWriter::new(&mut sink);
             let graph = self.graph_selection();
@@ -242,7 +244,7 @@ impl ExactArtifactSelection {
                     &graph.namespace,
                     &graph.roots,
                     &graph.native_groups,
-                    &graph.native_custody,
+                    &graph.custody_roots,
                 ),
             )
             .map_err(|error| failure(&format!("exact selection observation: {error}")))?;
@@ -2040,26 +2042,21 @@ impl ArtifactInventory {
     fn retain(
         &self,
         roots: Vec<InventoryNodeKey>,
-        native_custody: Vec<ArtifactBinding>,
+        custody_roots: Vec<ArtifactBindingNode>,
         parents: Vec<Arc<ViewLease>>,
         materialization_parents: Vec<
             Arc<crate::declaration_context::RetainedArtifactMaterialization>,
         >,
     ) -> ArtifactView {
         let mut state = self.0.lock().expect("inventory lock");
-        for id in roots.iter().copied().chain(
-            native_custody
-                .iter()
-                .copied()
-                .map(InventoryNodeKey::Artifact),
-        ) {
+        for id in roots.iter().copied().chain(custody_roots.iter().copied()) {
             *state.roots.entry(id).or_default() += 1;
         }
         let selection = selection_snapshot_for_lease(
             &state,
             &BTreeMap::new(),
             &roots,
-            &native_custody,
+            &custody_roots,
             &parents,
         );
         drop(state);
@@ -2067,7 +2064,7 @@ impl ArtifactInventory {
             selection,
             inventory: self.clone(),
             roots,
-            native_custody,
+            custody_roots,
             parents,
             issuing_payloads: BTreeMap::new(),
             materialization_parents,
@@ -2540,7 +2537,7 @@ impl ArtifactInventory {
                 selection: hidden_snapshot,
                 inventory: self.clone(),
                 roots: hidden_roots,
-                native_custody: vec![],
+                custody_roots: vec![],
                 parents: hidden_parents,
                 issuing_payloads: BTreeMap::new(),
                 materialization_parents: vec![],
@@ -2562,7 +2559,7 @@ impl ArtifactInventory {
             selection: snapshot,
             inventory: self.clone(),
             roots,
-            native_custody: vec![],
+            custody_roots: vec![],
             parents,
             issuing_payloads,
             materialization_parents,
@@ -2692,7 +2689,7 @@ impl ArtifactInventory {
         }
         let materialization_parents = Vec::new();
         let retained_roots: Option<Vec<InventoryNodeKey>> = None;
-        let native_custody = Vec::<ArtifactBinding>::new();
+        let custody_roots = Vec::<ArtifactBindingNode>::new();
         let mut expanded = entries;
         let mut implicit = Vec::new();
         for entry in &expanded {
@@ -3160,23 +3157,18 @@ impl ArtifactInventory {
         let prepared_proofs = scope_proof::prepare_install(&state, witness)?;
         BindingCommit::prepare(&state, &selected, &bound)?.commit(&mut state);
         scope_proof::install(&mut state, prepared_proofs);
-        for key in roots.iter().copied().chain(
-            native_custody
-                .iter()
-                .copied()
-                .map(InventoryNodeKey::Artifact),
-        ) {
+        for key in roots.iter().copied().chain(custody_roots.iter().copied()) {
             *state.roots.entry(key).or_default() += 1;
         }
         let parents = vec![Arc::clone(&parent.lease)];
         let snapshot =
-            selection_snapshot_for_lease(&state, &namespace, &roots, &native_custody, &parents);
+            selection_snapshot_for_lease(&state, &namespace, &roots, &custody_roots, &parents);
         drop(state);
         Ok(ArtifactView::new(ViewLease {
             selection: snapshot,
             inventory: self.clone(),
             roots,
-            native_custody,
+            custody_roots,
             parents,
             issuing_payloads,
             materialization_parents,
@@ -3268,14 +3260,22 @@ impl ArtifactInventory {
             .collect();
         SelectedOwners::new(&state, &namespace_entries, &BTreeSet::new())?;
         let roots = selection.roots.clone();
-        if roots.iter().copied().collect::<BTreeSet<_>>().len() != roots.len() {
+        if roots.iter().copied().collect::<BTreeSet<_>>().len() != roots.len()
+            || selection
+                .custody_roots
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len()
+                != selection.custody_roots.len()
+        {
             return Err(failure("duplicate bound recovery roots"));
         }
         if roots.iter().any(|key| !plan.contains_key(key))
             || selection
-                .native_custody
+                .custody_roots
                 .iter()
-                .any(|binding| !bindings.contains(binding))
+                .any(|node| !plan.contains_key(node))
         {
             return Err(failure("bound recovery root outside exact graph"));
         }
@@ -3283,13 +3283,7 @@ impl ArtifactInventory {
         let mut pending = roots
             .iter()
             .copied()
-            .chain(
-                selection
-                    .native_custody
-                    .iter()
-                    .copied()
-                    .map(InventoryNodeKey::Artifact),
-            )
+            .chain(selection.custody_roots.iter().copied())
             .collect::<Vec<_>>();
         while let Some(key) = pending.pop() {
             if reachable.insert(key) {
@@ -3303,28 +3297,21 @@ impl ArtifactInventory {
             scope_proof::prepare_install(&state, witnesses.into_values().map(|(proof, _)| proof))?;
         BindingCommit::prepare(&state, &entries, &plan)?.commit(&mut state);
         scope_proof::install(&mut state, prepared_proofs);
-        for key in roots.iter().copied().chain(
-            selection
-                .native_custody
-                .iter()
-                .copied()
-                .map(InventoryNodeKey::Artifact),
-        ) {
+        for key in roots
+            .iter()
+            .copied()
+            .chain(selection.custody_roots.iter().copied())
+        {
             *state.roots.entry(key).or_default() += 1;
         }
-        let snapshot = selection_snapshot_for_lease(
-            &state,
-            &namespace,
-            &roots,
-            &selection.native_custody,
-            &[],
-        );
+        let snapshot =
+            selection_snapshot_for_lease(&state, &namespace, &roots, &selection.custody_roots, &[]);
         drop(state);
         Ok(ArtifactView::new(ViewLease {
             selection: snapshot,
             inventory: self.clone(),
             roots,
-            native_custody: selection.native_custody.clone(),
+            custody_roots: selection.custody_roots.clone(),
             parents: vec![],
             issuing_payloads: entries,
             materialization_parents: vec![],
@@ -3361,8 +3348,9 @@ struct ViewLease {
     inventory: ArtifactInventory,
     roots: Vec<InventoryNodeKey>,
     /// Exact dependency carriers needed by currently unselected bodies. These
-    /// retain bytes without becoming source roots or executable group demand.
-    native_custody: Vec<ArtifactBinding>,
+    /// retain exact artifact/group closures without becoming source roots or
+    /// executable group demand.
+    custody_roots: Vec<ArtifactBindingNode>,
     parents: Vec<Arc<ViewLease>>,
     // Sparse immutable overrides for custody and fresh source admission proof.
     // Explicit None overrides mask a different parent's proof in a join.
@@ -3401,7 +3389,7 @@ fn selection_snapshot_for_lease(
     state: &InventoryState,
     namespace: &BTreeMap<ArtifactId, ArtifactBinding>,
     roots: &[InventoryNodeKey],
-    custody: &[ArtifactBinding],
+    custody: &[ArtifactBindingNode],
     parents: &[Arc<ViewLease>],
 ) -> Arc<ExactSelectionSnapshot> {
     let mut snapshot = parents
@@ -3419,9 +3407,9 @@ fn selection_snapshot_for_lease(
                 snapshot.roots.insert(*root, ());
             }
         }
-        for binding in parent.selection.native_custody.keys() {
-            if !snapshot.native_custody.contains_key(binding) {
-                snapshot.native_custody.insert(*binding, ());
+        for binding in parent.selection.custody_roots.keys() {
+            if !snapshot.custody_roots.contains_key(binding) {
+                snapshot.custody_roots.insert(*binding, ());
             }
         }
     }
@@ -3432,14 +3420,14 @@ fn selection_snapshot_for_lease(
         }
     }
     for binding in custody {
-        if !snapshot.native_custody.contains_key(binding) {
-            snapshot.native_custody.insert(*binding, ());
+        if !snapshot.custody_roots.contains_key(binding) {
+            snapshot.custody_roots.insert(*binding, ());
         }
     }
     let mut pending = roots
         .iter()
         .map(|root| root.selection())
-        .chain(custody.iter().map(|binding| binding.selection))
+        .chain(custody.iter().map(|node| node.selection()))
         .collect::<Vec<_>>();
     while let Some(scope) = pending.pop() {
         if snapshot.scopes.contains_key(&scope) {
@@ -3459,8 +3447,9 @@ fn selection_snapshot_for_lease(
 #[derive(Default)]
 struct ViewReadCache {
     canonical_roots: OnceLock<Vec<InventoryNodeKey>>,
-    canonical_native_custody: OnceLock<Vec<ArtifactBinding>>,
+    canonical_custody_roots: OnceLock<Vec<ArtifactBindingNode>>,
     read_projection: OnceLock<ViewReadProjection>,
+    selected_nodes: OnceLock<imbl::OrdSet<InventoryNodeKey>>,
     inherited_materializations:
         OnceLock<Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>>,
     #[cfg(test)]
@@ -3541,12 +3530,12 @@ impl Drop for ViewLease {
     fn drop(&mut self) {
         let mut state = self.inventory.0.lock().expect("inventory lock");
         let mut lost_roots = Vec::new();
-        for id in self.roots.iter().copied().chain(
-            self.native_custody
-                .iter()
-                .copied()
-                .map(InventoryNodeKey::Artifact),
-        ) {
+        for id in self
+            .roots
+            .iter()
+            .copied()
+            .chain(self.custody_roots.iter().copied())
+        {
             let count = state.roots.get_mut(&id).expect("retained root");
             *count -= 1;
             if *count == 0 {
@@ -3639,14 +3628,20 @@ fn validate_issued_selection(
                 .map(InventoryNodeKey::Group),
         )
         .collect::<imbl::OrdSet<_>>();
-    let seeds = graph.roots.iter().copied().chain(
-        graph
-            .native_custody
+    let seeds = graph
+        .roots
+        .iter()
+        .copied()
+        .chain(graph.custody_roots.iter().copied());
+    if expected.len() != graph.bindings.len() + graph.native_groups.len()
+        || graph.roots.iter().copied().collect::<BTreeSet<_>>().len() != graph.roots.len()
+        || graph
+            .custody_roots
             .iter()
             .copied()
-            .map(InventoryNodeKey::Artifact),
-    );
-    if expected.len() != graph.bindings.len() + graph.native_groups.len()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != graph.custody_roots.len()
         || graph
             .namespace
             .iter()
@@ -3860,16 +3855,20 @@ impl ArtifactView {
     // Closure and dependency initializers receive an already locked inventory. Nothing
     // initialized under either OnceLock acquires that mutex, so concurrent first
     // reads and admission always take inventory -> projection in that order.
+    fn selected_nodes(&self, state: &InventoryState) -> &imbl::OrdSet<InventoryNodeKey> {
+        self.reads
+            .selected_nodes
+            .get_or_init(|| admitted_closure(state, self.roots().iter().copied()))
+    }
+
     fn read_projection(&self, state: &InventoryState) -> &ViewReadProjection {
         self.reads.read_projection.get_or_init(|| {
             let nodes = admitted_closure(
                 state,
-                self.roots().iter().copied().chain(
-                    self.native_custody()
-                        .iter()
-                        .copied()
-                        .map(InventoryNodeKey::Artifact),
-                ),
+                self.roots()
+                    .iter()
+                    .copied()
+                    .chain(self.custody_roots().iter().copied()),
             );
             let ids = artifact_ids(&nodes);
             let mut custody = BTreeMap::new();
@@ -4007,7 +4006,7 @@ impl ArtifactView {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);
         let projection = self.read_projection(&state);
-        let selected_native_groups = native_groups(&projection.nodes);
+        let selected_native_groups = native_groups(self.selected_nodes(&state));
         let mut entries = BTreeMap::new();
         let mut artifacts = BTreeMap::new();
         let dependencies = self.read_dependencies(&state).clone();
@@ -4108,13 +4107,7 @@ impl ArtifactView {
                     _ => None,
                 })
                 .collect(),
-            native_custody: self
-                .lease
-                .selection
-                .native_custody
-                .keys()
-                .copied()
-                .collect(),
+            custody_roots: self.lease.selection.custody_roots.keys().copied().collect(),
         }
     }
     pub fn binding_dependencies(
@@ -4139,7 +4132,7 @@ impl ArtifactView {
     }
     pub fn selected_native_groups(&self) -> BTreeSet<NativeGroupKey> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
-        native_groups(&self.read_projection(&state).nodes)
+        native_groups(self.selected_nodes(&state))
     }
     /// Interface dependencies remain independent of executable group demand.
     pub fn interface_dependencies(&self) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
@@ -4412,7 +4405,7 @@ impl ArtifactView {
         }
         if live.roots != snapshot.roots
             || live.namespace != snapshot.namespace
-            || live.native_custody != snapshot.native_custody
+            || live.custody_roots != snapshot.custody_roots
             || live.scopes.len() != snapshot.scopes.len()
             || live.scopes.iter().any(|(scope, proof)| {
                 snapshot
@@ -4427,7 +4420,7 @@ impl ArtifactView {
         }
         let retained = self.lease.inventory.retain(
             self.roots().to_vec(),
-            self.native_custody().to_vec(),
+            self.custody_roots().to_vec(),
             Vec::new(),
             Vec::new(),
         );
@@ -4485,14 +4478,14 @@ impl ArtifactView {
             roots.into_iter().collect()
         })
     }
-    fn native_custody(&self) -> &[ArtifactBinding] {
-        self.reads.canonical_native_custody.get_or_init(|| {
+    fn custody_roots(&self) -> &[ArtifactBindingNode] {
+        self.reads.canonical_custody_roots.get_or_init(|| {
             let mut pending = vec![&self.lease];
             let mut custody = BTreeSet::new();
             let mut seen = BTreeSet::new();
             while let Some(lease) = pending.pop() {
                 if seen.insert(Arc::as_ptr(lease)) {
-                    custody.extend(lease.native_custody.iter().copied());
+                    custody.extend(lease.custody_roots.iter().copied());
                     pending.extend(lease.parents.iter());
                 }
             }
@@ -4562,15 +4555,18 @@ impl ArtifactView {
                 }
             }
         }
-        let native_custody = retained_ids
+        let custody_roots = retained_ids
             .difference(&initial)
-            .map(|id| self.resolve_binding(*id, owned))
+            .map(|id| {
+                self.resolve_binding(*id, owned)
+                    .map(InventoryNodeKey::Artifact)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         drop(state);
-        let retained =
-            self.lease
-                .inventory
-                .retain(selected, native_custody, Vec::new(), Vec::new());
+        let retained = self
+            .lease
+            .inventory
+            .retain(selected, custody_roots, Vec::new(), Vec::new());
         self.retain_projected_materializations(retained)
     }
 
@@ -4590,17 +4586,38 @@ impl ArtifactView {
             return Ok(self.clone());
         }
         let selected = admitted_closure(&state, self.roots().iter().copied());
+        let issued_roots = self.roots().iter().copied().collect::<BTreeSet<_>>();
         let roots = selected
             .iter()
-            .filter(|root| &state.payloads[&root.artifact()].descriptor.owner != excluded)
+            .filter(|node| {
+                &state.payloads[&node.artifact()].descriptor.owner != excluded
+                    && (matches!(node, InventoryNodeKey::Artifact(_))
+                        || issued_roots.contains(node))
+            })
             .copied()
-            .collect();
+            .collect::<Vec<_>>();
         let custody = self
-            .native_custody()
+            .custody_roots()
             .iter()
-            .filter(|binding| &state.payloads[&binding.artifact].descriptor.owner != excluded)
             .copied()
-            .collect();
+            .chain(
+                selected
+                    .iter()
+                    .copied()
+                    .filter(|node| !roots.contains(node)),
+            )
+            .filter(|node| &state.payloads[&node.artifact()].descriptor.owner != excluded)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if admitted_closure(&state, roots.iter().copied().chain(custody.iter().copied()))
+            .iter()
+            .any(|node| &state.payloads[&node.artifact()].descriptor.owner == excluded)
+        {
+            return Err(failure(
+                "support exclusion is required by retained exact dependencies",
+            ));
+        }
         drop(state);
         self.retain_projected_materializations(self.lease.inventory.retain(
             roots,
@@ -4690,7 +4707,7 @@ impl ArtifactView {
             return Err(failure("issued root lacks exact namespace binding"));
         }
         let selected = graph.roots.clone();
-        let custody = graph.native_custody.clone();
+        let custody = graph.custody_roots.clone();
         validate_issued_selection(&state, owned, graph)?;
         drop(state);
         let mut retained = self
@@ -4708,13 +4725,11 @@ impl ArtifactView {
             let state = self.lease.inventory.0.lock().expect("inventory lock");
             let nodes = admitted_closure(
                 &state,
-                retained.roots().iter().copied().chain(
-                    retained
-                        .native_custody()
-                        .iter()
-                        .copied()
-                        .map(InventoryNodeKey::Artifact),
-                ),
+                retained
+                    .roots()
+                    .iter()
+                    .copied()
+                    .chain(retained.custody_roots().iter().copied()),
             );
             let selected = artifact_ids(&nodes);
             if retained.lease.selection.namespace.is_empty() {
@@ -4771,8 +4786,13 @@ impl ArtifactView {
         if !selected_nodes.is_subset(owned) {
             return Err(failure("original custody selection exceeds retained graph"));
         }
-        let mut roots = selected.roots().iter().copied().collect::<BTreeSet<_>>();
-        roots.extend(
+        let roots = selected.roots().to_vec();
+        let mut custody = selected
+            .custody_roots()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        custody.extend(
             owned
                 .iter()
                 .filter(|node| {
@@ -4783,12 +4803,11 @@ impl ArtifactView {
                 })
                 .copied(),
         );
-        let custody = selected.native_custody().to_vec();
         let namespace = selected.namespace();
         drop(state);
         let mut retained = self.lease.inventory.retain(
-            roots.into_iter().collect(),
-            custody,
+            roots,
+            custody.into_iter().collect(),
             Vec::new(),
             Vec::new(),
         );
@@ -4829,7 +4848,7 @@ impl ArtifactView {
             selection,
             inventory: self.lease.inventory.clone(),
             roots: vec![],
-            native_custody: vec![],
+            custody_roots: vec![],
             parents,
             issuing_payloads: BTreeMap::new(),
             materialization_parents: vec![],
@@ -4879,7 +4898,7 @@ impl ArtifactView {
             selection,
             inventory: self.lease.inventory.clone(),
             roots: vec![],
-            native_custody: vec![],
+            custody_roots: vec![],
             parents,
             issuing_payloads: BTreeMap::new(),
             materialization_parents: vec![],
@@ -4941,7 +4960,7 @@ impl ArtifactView {
                 selection,
                 inventory: self.lease.inventory.clone(),
                 roots: Vec::new(),
-                native_custody: Vec::new(),
+                custody_roots: Vec::new(),
                 parents,
                 issuing_payloads,
                 materialization_parents: Vec::new(),
@@ -5232,7 +5251,7 @@ mod tests {
         );
         let observation = selection.observation_digest().unwrap();
         let mut expected = Sha256::new();
-        expected.update(b"Tidepool selected binding context observation v3\0");
+        expected.update(b"Tidepool selected binding context observation v4\0");
         let graph = selection.graph_selection();
         expected.update(
             serde_json::to_vec(&(
@@ -5240,7 +5259,7 @@ mod tests {
                 &graph.namespace,
                 &graph.roots,
                 &graph.native_groups,
-                &graph.native_custody,
+                &graph.custody_roots,
             ))
             .unwrap(),
         );
@@ -5264,7 +5283,7 @@ mod tests {
             let value = serde_json::to_value(&selection).unwrap();
             let reopened: ExactArtifactSelection = serde_json::from_value(value.clone()).unwrap();
             proptest::prop_assert_eq!(reopened.observation_digest().unwrap(), expected);
-            for field in ["bindings", "namespace", "roots", "native_groups", "native_custody"] {
+            for field in ["bindings", "namespace", "roots", "native_groups", "custody_roots"] {
                 let mut changed = value.clone();
                 let rows = changed["graph"][field].as_array_mut().unwrap();
                 if rows.is_empty() {
@@ -8109,7 +8128,7 @@ mod tests {
                 "authored live roots"
             );
             proptest::prop_assert!(
-                view.native_custody().is_empty(),
+                view.custody_roots().is_empty(),
                 "fixture has no separate live byte custody"
             );
             proptest::prop_assert_eq!(graph.roots.len(), self.roots.len(), "authored root count");
@@ -8126,7 +8145,7 @@ mod tests {
                 "authored exact edges"
             );
             proptest::prop_assert!(
-                graph.native_custody.is_empty(),
+                graph.custody_roots.is_empty(),
                 "fixture has no separate byte-only custody"
             );
             Ok(())
@@ -8761,16 +8780,69 @@ mod tests {
             assert!(joined.lease.roots.is_empty());
             assert!(joined.roots().iter().any(|root| matches!(root, InventoryNodeKey::Group(group) if group.binding.artifact == originals[0].descriptor.id)));
             assert!(!joined.roots().iter().any(|root| matches!(root, InventoryNodeKey::Group(group) if group.binding.artifact == helper.descriptor.id)));
+            // Reproduce the old retention rule as a control: exact descendants
+            // become roots and private compiler input recapture must refuse.
+            let legacy_roots = joined
+                .capture_graph_selection()
+                .native_groups
+                .into_iter()
+                .map(InventoryNodeKey::Group)
+                .chain(joined.roots().iter().copied())
+                .collect();
+            let mut legacy = joined
+                .retain_projected_materializations(inventory.retain(
+                    legacy_roots,
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                ))
+                .unwrap();
+            legacy.replace_namespace(&joined.namespace());
+            let legacy_context = ExactDeclarationContext::from_authenticated_execution(
+                producer.sha256(),
+                &legacy,
+                projection.clone(),
+                vec![],
+                originals[0].descriptor.owner.clone(),
+                &[],
+            )
+            .unwrap();
+            assert!(
+                matches!(OriginalCompilerInputs::from_native_availability(&legacy_context, producer, products),
+                Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                    ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == helper.descriptor.id))
+            );
+
+            let retained = joined.retain_original_custody(&joined).unwrap();
+            expected
+                .check(&retained)
+                .expect("retention preserves issuing groups");
+            assert_eq!(retained.roots(), joined.roots());
+            assert!(helper_groups.iter().all(|group| retained
+                .custody_roots()
+                .contains(&InventoryNodeKey::Group(*group))));
+            let generated = Arc::new(entry("RecaptureScaffold", &[]));
+            let scaffold = inventory
+                .admit_shared(&inventory.empty_view(), vec![generated.clone()])
+                .unwrap();
+            let with_scaffold = retained.merge_selected(&scaffold, &projection).unwrap();
+            let support = with_scaffold
+                .support_without_owner(&generated.descriptor.owner)
+                .unwrap();
+            expected
+                .check(&support)
+                .expect("support preserves issuing groups");
+            assert!(!support.roots().iter().any(|root| matches!(root, InventoryNodeKey::Group(group) if group.binding.artifact == helper.descriptor.id)));
             let recovery = ArtifactInventory::default();
             let restored = recovery
                 .recover_selection(
                     &recovery.empty_view(),
-                    joined.entries(),
-                    &joined.capture_graph_selection(),
-                    &joined.binding_dependencies(),
+                    support.entries(),
+                    &support.capture_graph_selection(),
+                    &support.binding_dependencies(),
                 )
                 .unwrap();
-            for view in [&joined, &restored] {
+            for view in [&joined, &retained, &support, &restored] {
                 let context = ExactDeclarationContext::from_authenticated_execution(
                     producer.sha256(),
                     view,
@@ -8824,6 +8896,28 @@ mod tests {
                 assert_eq!(admitted.inventory().node_count(), count);
             }
         }
+    }
+
+    #[test]
+    fn support_exclusion_refuses_reintroduced_owner_and_old_custody_transport() {
+        let inventory = ArtifactInventory::default();
+        let excluded = entry("ExcludedSupport", &[]);
+        let dependent = entry("DependentSupport", &["ExcludedSupport"]);
+        let view = inventory
+            .admit(&inventory.empty_view(), vec![dependent, excluded.clone()])
+            .unwrap();
+        let before = view.capture_graph_selection();
+        let nodes = inventory.node_count();
+        assert!(view
+            .support_without_owner(&excluded.descriptor.owner)
+            .is_err());
+        assert_eq!(view.capture_graph_selection(), before);
+        assert_eq!(inventory.node_count(), nodes);
+        let mut old = serde_json::to_value(&before).unwrap();
+        let object = old.as_object_mut().unwrap();
+        let custody = object.remove("custody_roots").unwrap();
+        object.insert("native_custody".into(), custody);
+        assert!(serde_json::from_value::<ArtifactGraphSelection>(old).is_err());
     }
 
     #[test]
@@ -9301,6 +9395,90 @@ mod tests {
         assert_eq!(source.binding_dependencies(), rows);
         assert_eq!(inventory.node_count(), nodes);
         assert_eq!(inventory.metrics().installed_binding_rows, installed);
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config { cases: 32, ..Default::default() })]
+        #[test]
+        fn exact_group_custody_histories_preserve_selection_recovery_and_release(
+            depth in 1usize..4, groups in 1u32..4,
+            history in proptest::collection::vec(0u8..5, 0..16),
+        ) {
+            use fvm_ipld_blockstore::{Blockstore, MemoryBlockstore};
+            use crate::exact_context::{Materializer, hydrate_selection};
+            let fixture = IndependentNativeClosures::new(depth, groups);
+            let joined = fixture.join(false);
+            let mut view = joined.retain_original_custody(&joined.inventory().empty_view()).unwrap();
+            let mut selected_roots = BTreeSet::new();
+            let mut operations = vec![0, 1, 2, 3, 4];
+            operations.extend(history);
+            let mut inventories = vec![view.inventory().clone()];
+            for operation in operations {
+                view = match operation {
+                    0 => {
+                        selected_roots.clear();
+                        view.retain_original_custody(&view.inventory().empty_view()).unwrap()
+                    },
+                    1 | 2 => {
+                        let source = &fixture.sources[usize::from(operation - 1)];
+                        selected_roots.extend(source.roots().iter().copied());
+                        view.merge_selected(source, &fixture.interfaces).unwrap()
+                    },
+                    3 => {
+                        let store = MemoryBlockstore::new();
+                        let mut materializer = Materializer::new(&store);
+                        let encoded = materializer.materialize_selection(None, view.selection_snapshot()).unwrap();
+                        for (cid, bytes) in materializer.finish().unwrap().into_blocks() {
+                            store.put_keyed(&cid, &bytes).unwrap();
+                        }
+                        let hydrated = hydrate_selection(&store, encoded.root()).unwrap();
+                        let graph = hydrated.snapshot().graph_selection().unwrap();
+                        proptest::prop_assert_eq!(&graph, &view.capture_graph_selection());
+                        let inventory = ArtifactInventory::default();
+                        let mut restored = inventory.recover_selection(&inventory.empty_view(), view.entries(), &graph, &view.binding_dependencies()).unwrap();
+                        restored.bind_selection_snapshot_baseline(hydrated.snapshot().clone()).unwrap();
+                        inventories.push(inventory);
+                        restored
+                    },
+                    _ => {
+                        let graph = view.capture_graph_selection();
+                        let inventory = ArtifactInventory::default();
+                        let mut forged = graph.clone();
+                        let group = graph.native_groups[0];
+                        forged.custody_roots.push(ArtifactBindingNode::Group(NativeGroupBinding {
+                            binding: ArtifactBinding { selection: ArtifactSelectionId([0xff;32]), ..group.binding },
+                            ..group
+                        }));
+                        proptest::prop_assert!(inventory.recover_selection(&inventory.empty_view(), view.entries(), &forged, &view.binding_dependencies()).is_err());
+                        proptest::prop_assert_eq!(inventory.node_count(), 0);
+                        view
+                    },
+                };
+                fixture.model.check(&view).map_err(proptest::test_runner::TestCaseError::fail)?;
+                let mut expected = selected_roots.clone();
+                loop {
+                    let before = expected.len();
+                    let children = fixture.model.rows.iter().filter(|(from, _, _)| expected.contains(from)).map(|(_, to, _)| *to).collect::<Vec<_>>();
+                    expected.extend(children);
+                    if expected.len() == before { break; }
+                }
+                let expected_groups = expected.iter().filter_map(|node| match node {
+                    ArtifactBindingNode::Group(group) => Some(NativeGroupKey { artifact: group.binding.artifact, original_ordinal: group.original_ordinal }),
+                    _ => None,
+                }).collect::<BTreeSet<_>>();
+                proptest::prop_assert_eq!(view.roots().iter().copied().collect::<BTreeSet<_>>(), selected_roots.clone());
+                proptest::prop_assert_eq!(view.selected_native_groups(), expected_groups.clone());
+                proptest::prop_assert_eq!(view.metadata_snapshot().selected_native_groups, expected_groups);
+                if selected_roots.is_empty() {
+                    proptest::prop_assert!(view.namespace().is_empty());
+                    for original in &fixture.originals {
+                        proptest::prop_assert!(NativeOriginalRequirement::from_selected_view(original.descriptor.id, &view).unwrap().is_none());
+                    }
+                }
+            }
+            drop(view); drop(joined); drop(fixture);
+            for inventory in inventories { proptest::prop_assert_eq!(inventory.node_count(), 0); }
+        }
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -9878,7 +10056,9 @@ mod tests {
                 0 => changed.roots.clear(),
                 1 => changed.namespace.clear(),
                 2 => {
-                    changed.native_custody.insert(graph.bindings[0], ());
+                    changed
+                        .custody_roots
+                        .insert(ArtifactBindingNode::Artifact(graph.bindings[0]), ());
                 }
                 3 => {
                     let (scope, reference) = changed.scopes.iter().next().unwrap();
@@ -10838,7 +11018,7 @@ mod tests {
                     namespace: vec![],
                     roots: vec![],
                     native_groups: vec![],
-                    native_custody: vec![],
+                    custody_roots: vec![],
                 },
             ),
             selection_sha256: [5; 32],

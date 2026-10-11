@@ -23,7 +23,9 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   must carry certification through the production consumer that needs selection.
   Retaining a complete native carrier must preserve its available exact child
   carriers for unselected bodies. Keep that byte custody separate from source
-  roots, compiler input roles and executable group demand; later requests can
+  roots, compiler input roles and executable group demand. Exact custody seeds
+  retain artifact or group nodes through snapshots, recovery and reclamation;
+  only issued roots and their closure select executable groups. Later requests can
   select another body without recreating its issuing dependency versions.
   Published originals retain their issuer's immutable artifact/group selection
   separately from later executable demand. Reopening and recovery validate that

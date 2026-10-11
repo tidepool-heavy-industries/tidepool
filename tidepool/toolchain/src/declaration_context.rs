@@ -5560,9 +5560,9 @@ impl ExactDeclarationContext {
                     self.original_instance_environment,
                     OriginalInstanceEnvironment::Unknown
                 ) {
-                    "3"
+                    "6"
                 } else {
-                    "5"
+                    "7"
                 },
             ),
             text(hex(&sha2::Sha256::digest(

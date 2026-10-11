@@ -523,13 +523,13 @@ impl PartialEq for ImmutableScopeProofRef {
 }
 impl Eq for ImmutableScopeProofRef {}
 
-/// Proof availability is distinct from roots, namespace and native byte custody.
+/// Proof availability is distinct from selected roots, namespace and exact custody.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ExactSelectionSnapshot {
     pub(crate) scopes: OrdMap<ArtifactSelectionId, ImmutableScopeProofRef>,
     pub(crate) roots: OrdMap<ArtifactBindingNode, ()>,
     pub(crate) namespace: OrdMap<ArtifactId, ArtifactBinding>,
-    pub(crate) native_custody: OrdMap<ArtifactBinding, ()>,
+    pub(crate) custody_roots: OrdMap<ArtifactBindingNode, ()>,
 }
 
 impl ExactSelectionSnapshot {
@@ -551,24 +551,22 @@ impl ExactSelectionSnapshot {
                 .iter()
                 .map(|binding| (binding.artifact, *binding))
                 .collect(),
-            native_custody: graph
-                .native_custody
+            custody_roots: graph
+                .custody_roots
                 .iter()
                 .map(|binding| (*binding, ()))
                 .collect(),
         }
     }
 
-    fn selected_nodes(
+    fn retained_nodes(
         &self,
     ) -> Result<std::collections::BTreeSet<ArtifactBindingNode>, SnapshotError> {
         self.nodes_from_seeds(
-            self.roots.keys().copied().chain(
-                self.native_custody
-                    .keys()
-                    .copied()
-                    .map(ArtifactBindingNode::Artifact),
-            ),
+            self.roots
+                .keys()
+                .copied()
+                .chain(self.custody_roots.keys().copied()),
         )
     }
 
@@ -612,7 +610,7 @@ impl ExactSelectionSnapshot {
     ) -> Result<std::collections::BTreeSet<ArtifactId>, SnapshotError> {
         let Some(previous) = previous else {
             return Ok(self
-                .selected_nodes()?
+                .retained_nodes()?
                 .into_iter()
                 .map(ArtifactBindingNode::artifact)
                 .collect());
@@ -626,13 +624,13 @@ impl ExactSelectionSnapshot {
                 DiffItem::Remove(_, _) => None,
             });
         let custody = previous
-            .native_custody
-            .diff(&self.native_custody)
+            .custody_roots
+            .diff(&self.custody_roots)
             .filter_map(|change| match change {
-                DiffItem::Add(binding, _) => Some(ArtifactBindingNode::Artifact(*binding)),
+                DiffItem::Add(binding, _) => Some(*binding),
                 DiffItem::Update {
                     new: (binding, _), ..
-                } => Some(ArtifactBindingNode::Artifact(*binding)),
+                } => Some(*binding),
                 DiffItem::Remove(_, _) => None,
             });
         Ok(self
@@ -642,10 +640,10 @@ impl ExactSelectionSnapshot {
             .collect())
     }
 
-    /// Derive selected payload/group rows from exact typed roots and custody.
+    /// Derive retained payload/group rows from exact typed roots and custody.
     /// Proof-only ancestors remain available without becoming payload authority.
     pub fn graph_selection(&self) -> Result<ArtifactGraphSelection, SnapshotError> {
-        let selected = self.selected_nodes()?;
+        let selected = self.retained_nodes()?;
         if self
             .namespace
             .values()
@@ -675,7 +673,7 @@ impl ExactSelectionSnapshot {
                     _ => None,
                 })
                 .collect(),
-            native_custody: self.native_custody.keys().copied().collect(),
+            custody_roots: self.custody_roots.keys().copied().collect(),
         })
     }
 
@@ -689,7 +687,7 @@ impl ExactSelectionSnapshot {
         )>,
         SnapshotError,
     > {
-        let selected = self.selected_nodes()?;
+        let selected = self.retained_nodes()?;
         let mut edges = Vec::new();
         for source in &selected {
             let proof = self.scopes[&source.selection()].proof();
@@ -714,7 +712,7 @@ struct SelectionDescriptor {
     scopes: SnapshotMapRoot,
     roots: SnapshotMapRoot,
     namespace: SnapshotMapRoot,
-    native_custody: SnapshotMapRoot,
+    custody_roots: SnapshotMapRoot,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -755,7 +753,7 @@ pub struct MaterializedSelection {
     scopes: MaterializedMap<ArtifactSelectionId, ImmutableScopeProofRef, ScopeProofCodec>,
     roots: MaterializedMap<ArtifactBindingNode, ()>,
     namespace: MaterializedMap<ArtifactId, ArtifactBinding>,
-    native_custody: MaterializedMap<ArtifactBinding, ()>,
+    custody_roots: MaterializedMap<ArtifactBindingNode, ()>,
 }
 impl MaterializedSelection {
     pub fn root(&self) -> &SelectionRoot {
@@ -775,20 +773,20 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             .materialize_map_with::<_, _, ScopeProofCodec>(base.map(|b| &b.scopes), &next.scopes)?;
         let roots = self.materialize_map(base.map(|b| &b.roots), &next.roots)?;
         let namespace = self.materialize_map(base.map(|b| &b.namespace), &next.namespace)?;
-        let native_custody =
-            self.materialize_map(base.map(|b| &b.native_custody), &next.native_custody)?;
+        let custody_roots =
+            self.materialize_map(base.map(|b| &b.custody_roots), &next.custody_roots)?;
         let descriptor = SelectionDescriptor {
-            version: 1,
+            version: 2,
             scopes: scopes.root.clone(),
             roots: roots.root.clone(),
             namespace: namespace.root.clone(),
-            native_custody: native_custody.root.clone(),
+            custody_roots: custody_roots.root.clone(),
         };
         let root = if base.is_some_and(|base| {
             base.scopes.root == scopes.root
                 && base.roots.root == roots.root
                 && base.namespace.root == namespace.root
-                && base.native_custody.root == native_custody.root
+                && base.custody_roots.root == custody_roots.root
         }) {
             base.expect("equal descriptor implies base").root.clone()
         } else {
@@ -800,7 +798,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             scopes,
             roots,
             namespace,
-            native_custody,
+            custody_roots,
         })
     }
 }
@@ -809,7 +807,7 @@ pub fn hydrate_selection<BS: Blockstore>(
     root: &SelectionRoot,
 ) -> Result<MaterializedSelection, SnapshotError> {
     let descriptor: SelectionDescriptor = read_value(store, root.cid())?;
-    if descriptor.version != 1 {
+    if descriptor.version != 2 {
         return Err(malformed("selection encoding version"));
     }
     let scopes: MaterializedMap<ArtifactSelectionId, ImmutableScopeProofRef, ScopeProofCodec> =
@@ -823,12 +821,12 @@ pub fn hydrate_selection<BS: Blockstore>(
     }
     let roots = hydrate_map(store, &descriptor.roots)?;
     let namespace = hydrate_map(store, &descriptor.namespace)?;
-    let native_custody = hydrate_map(store, &descriptor.native_custody)?;
+    let custody_roots = hydrate_map(store, &descriptor.custody_roots)?;
     let snapshot = Arc::new(ExactSelectionSnapshot {
         scopes: scopes.facts.clone(),
         roots: roots.facts.clone(),
         namespace: namespace.facts.clone(),
-        native_custody: native_custody.facts.clone(),
+        custody_roots: custody_roots.facts.clone(),
     });
     snapshot.graph_selection()?;
     Ok(MaterializedSelection {
@@ -837,7 +835,7 @@ pub fn hydrate_selection<BS: Blockstore>(
         scopes,
         roots,
         namespace,
-        native_custody,
+        custody_roots,
     })
 }
 
@@ -1150,7 +1148,7 @@ impl<BS: Blockstore> Materializer<'_, BS> {
             &next.lexical.facts,
         )?;
         let descriptor = ContextDescriptor {
-            version: 1,
+            version: 2,
             producer: next.producer,
             selection: selection.root.clone(),
             roles: roles.root.clone(),
@@ -1180,7 +1178,7 @@ pub fn hydrate_context<BS: Blockstore>(
     root: &ContextRoot,
 ) -> Result<MaterializedContext, SnapshotError> {
     let descriptor: ContextDescriptor = read_value(store, root.cid())?;
-    if descriptor.version != 1 {
+    if descriptor.version != 2 {
         return Err(malformed("context encoding version"));
     }
     let selection = hydrate_selection(store, &descriptor.selection)?;
