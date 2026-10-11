@@ -1090,6 +1090,56 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn recipe_fresh_worker_publishes_installed_originals_before_typed_request() {
+        use super::*;
+
+        let workspace = tempfile::tempdir().unwrap();
+        crate::exomonad::workspace::copy_authored(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../exomonad/examples/workspace"),
+            workspace.path(),
+        )
+        .unwrap();
+        let authored = workspace.path().join(".exomonad");
+        std::fs::write(
+            authored.join("Project/EpochStartupChecks.hs"),
+            include_str!("fixtures/recipe_fresh_original_epoch.hs"),
+        )
+        .unwrap();
+        crate::exomonad::edit_fixture_project_config(&authored, |project| {
+            project.haskell.modules.clear();
+            project.haskell.checks =
+                vec!["Project.EpochStartupChecks.installedOriginalEpoch".into()];
+        });
+        let selection = tempfile::tempdir().unwrap();
+        let selected = FrozenWorkspace::load(workspace.path(), selection.path()).unwrap();
+        let prepared = tokio::task::block_in_place(|| {
+            prepare_recipe(
+                "Project.EpochStartupChecks.installedOriginalEpoch",
+                &selected,
+            )
+        })
+        .unwrap();
+        let mut driver = Driver::start(workspace.path(), selected).await.unwrap();
+        let result = driver.execute(&prepared);
+        let installed = driver.installations.len();
+        let assertions = driver.assertions.clone();
+        let cleanup = driver.shutdown_session().await.unwrap();
+        result.expect(
+            "the real fresh worker must publish its installed source before request execution",
+        );
+        assert_eq!(installed, 2, "one root and one actual fresh worker");
+        assert_eq!(
+            assertions.len(),
+            2,
+            "both received input and exact reply assertions execute"
+        );
+        assert!(!cleanup.is_empty());
+        assert!(cleanup
+            .iter()
+            .all(exomonad_actor::ForestRootShutdown::is_confirmed));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn recipe_display_commits_and_reopens_in_each_restarted_session() {
         use super::*;
         use harness::store::actor_output::ActorOutputOrigin;

@@ -118,6 +118,7 @@
     "bridge/facade/src/actor_host/fixtures/project/Types.hs",
     "bridge/facade/src/actor_host/fixtures/project/Work.hs",
     "bridge/facade/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs",
+    "bridge/facade/src/actor_host/fixtures/recipe_fresh_original_epoch.hs",
     "bridge/facade/src/actor_host/fixtures/recipe_unbound_restart.hs",
     "bridge/facade/src/actor_host/fixtures/request_reload_agent_spec.hs",
     "bridge/facade/src/actor_host/fixtures/retained_handler_agent_spec.hs",

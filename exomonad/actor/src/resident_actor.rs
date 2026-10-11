@@ -7933,8 +7933,16 @@ where
             });
         }
         if matches!(boot, ResidentBoot::Workbench) && self.explicit_installer.is_some() {
+            let owner = self.ready_public_owner(context)?;
+            let bootstrap = self
+                .environment
+                .runner
+                .begin_public_bootstrap(context.clone(), Arc::clone(&owner))
+                .await?;
             let installation = self
                 .prepare_interactive_policy(kernel, context, None)
+                .await?;
+            self.publish_application_surface(kernel, context, owner, bootstrap)
                 .await?;
             let receiver = self.prepared_request_receiver.take().ok_or_else(|| {
                 ResidentActorWorkbenchError::ActorProtocol(
