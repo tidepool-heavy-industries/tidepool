@@ -499,6 +499,7 @@ tidepool_rust_test_cases(
         "TIDEPOOL_WORKSPACE_TEST_GIT": "$(location toolchains//:exomonad_runtime_tools)/bin/git",
     },
     haskell_worker = True,
+    case_compiler_modes = {"resident_workbench::request_tests::cancelled_lookup_interrupts_its_started_compiler_request_and_recovers": "owned-resident", "resident_workbench::request_tests::lookup_batches_qualified_export_facts_in_one_compiler_request": "owned-resident", "resident_workbench::request_tests::lookup_revalidation_is_actor_scoped_and_checkout_is_free_during_rpc": "owned-resident"},
     visibility = ["PUBLIC"],
 )
 
