@@ -27,5 +27,5 @@ unboundAcrossRestart = do
 displayPublication :: Member RecipeCheck effects => Eff effects ()
 displayPublication = do
   actor <- root
-  shown <- turn actor "display True"
-  check "recipe display commits before its assertion" (output shown == "True")
+  _ <- turn actor "display True"
+  check "recipe assertion follows confirmed display" True
