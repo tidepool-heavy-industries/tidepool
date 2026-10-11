@@ -2,8 +2,10 @@
 //! continuations and Haskell result cells remain owned by the resident machine.
 
 use super::*;
-use futures_util::future::{poll_fn, BoxFuture};
+use futures_util::future::{maybe_done, poll_fn, BoxFuture, MaybeDone};
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::task::Poll;
 
 #[cfg(test)]
@@ -80,7 +82,7 @@ pub(super) struct Completion<A> {
 
 struct Pending<A> {
     thread: i64,
-    future: BoxFuture<'static, Completion<A>>,
+    future: MaybeDone<BoxFuture<'static, Completion<A>>>,
 }
 
 struct Join {
@@ -153,7 +155,7 @@ impl<A: Send + 'static> GreenInvocation<A> {
         let thread = self.active;
         self.pending.push(Pending {
             thread,
-            future: Box::pin(async move {
+            future: maybe_done(Box::pin(async move {
                 let outcome = operation.await;
                 Completion {
                     thread,
@@ -162,7 +164,7 @@ impl<A: Send + 'static> GreenInvocation<A> {
                     terminal: Vec::new(),
                     result: Some(outcome),
                 }
-            }),
+            })),
         });
     }
 
@@ -174,7 +176,7 @@ impl<A: Send + 'static> GreenInvocation<A> {
         let thread = self.active;
         self.pending.push(Pending {
             thread,
-            future: Box::pin(async move {
+            future: maybe_done(Box::pin(async move {
                 let (result, attachment) = future.await;
                 Completion {
                     thread,
@@ -183,7 +185,7 @@ impl<A: Send + 'static> GreenInvocation<A> {
                     attachment: Some(attachment),
                     terminal: Vec::new(),
                 }
-            }),
+            })),
         });
     }
 
@@ -195,12 +197,35 @@ impl<A: Send + 'static> GreenInvocation<A> {
         }
         poll_fn(|cx| {
             for index in 0..self.pending.len() {
-                if let Poll::Ready(completion) = self.pending[index].future.as_mut().poll(cx) {
-                    drop(self.pending.remove(index));
+                if Pin::new(&mut self.pending[index].future)
+                    .poll(cx)
+                    .is_ready()
+                {
+                    let mut pending = self.pending.remove(index);
+                    let completion = Pin::new(&mut pending.future)
+                        .take_output()
+                        .expect("ready frontier owns one completion");
                     return Poll::Ready(Ok(completion));
                 }
             }
             Poll::Pending
+        })
+        .await
+    }
+
+    /// A parked frontier may own the FIFO position needed by a native advance.
+    /// Keep polling both under this invocation; ready frontiers retain their
+    /// completion until `next` selects them, without resuming a thread early.
+    pub(super) async fn progress_while<T>(
+        &mut self,
+        operation: impl std::future::Future<Output = T>,
+    ) -> T {
+        tokio::pin!(operation);
+        poll_fn(|cx| {
+            for pending in &mut self.pending {
+                let _ = Pin::new(&mut pending.future).poll(cx);
+            }
+            operation.as_mut().poll(cx)
         })
         .await
     }
@@ -300,7 +325,7 @@ where
                 let kernel = kernel.clone();
                 green.pending.push(Pending {
                     thread,
-                    future: Box::pin(async move {
+                    future: maybe_done(Box::pin(async move {
                         // Closing the native scope retires the payload-free Done frame.
                         drop(continuation);
                         let closed = close_thread(environment, kernel, work).await;
@@ -327,7 +352,7 @@ where
                             },
                             result: closed.err().map(Err),
                         }
-                    }),
+                    })),
                 });
             }
             GreenBoundary::Status {
@@ -392,7 +417,7 @@ where
                     let kernel = kernel.clone();
                     green.pending.push(Pending {
                         thread: caller,
-                        future: Box::pin(async move {
+                        future: maybe_done(Box::pin(async move {
                             let closed = close_thread(environment, kernel, work).await;
                             let terminal = if closed.is_ok() {
                                 descendants
@@ -420,7 +445,7 @@ where
                                 attachment: None,
                                 terminal,
                             }
-                        }),
+                        })),
                     });
                 }
             }

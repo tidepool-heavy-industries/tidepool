@@ -9255,17 +9255,21 @@ where
                                     }
                                     (resolved.outcome, Some(resolved.disposition))
                                 }
-                                boundary => (
-                                    self.resolve_effect(
+                                boundary => {
+                                    let ancestry = crate::CallAncestry::begin(context.actor);
+                                    let operation = self.resolve_effect(
                                         kernel,
                                         context,
                                         effect_owner.clone(),
-                                        &crate::CallAncestry::begin(context.actor),
+                                        &ancestry,
                                         boundary,
-                                    )
-                                    .await,
-                                    None,
-                                ),
+                                    );
+                                    let outcome = match current.green.as_mut() {
+                                        Some(green) => green.progress_while(operation).await,
+                                        None => operation.await,
+                                    };
+                                    (outcome, None)
+                                }
                             };
                             current.outcome = Some(match resolved {
                                 Ok(outcome) => {
@@ -11762,14 +11766,13 @@ where
                 cursor
                     .check_admission(kernel)
                     .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
-                let boundary = self
-                    .environment
-                    .runner
-                    .capture_boundary(
+                let realm = cursor.realm(context.placement.resource_scope);
+                let boundary = cursor
+                    .progress_while(self.environment.runner.capture_boundary(
                         context.clone(),
                         outcome,
-                        cursor.realm(context.placement.resource_scope),
-                    )
+                        realm,
+                    ))
                     .await
                     .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                 if !cursor.is_main_terminal()

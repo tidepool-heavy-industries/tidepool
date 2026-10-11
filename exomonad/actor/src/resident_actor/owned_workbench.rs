@@ -1678,9 +1678,19 @@ where
                     .workbench
                     .as_ref()
                     .expect("native advance retains original admitted workbench");
-                Box::pin(
-                    async move { advance_fragment(workbench, &runner, context, request).await },
-                )
+                let green = owned
+                    .state
+                    .cursor
+                    .running
+                    .as_mut()
+                    .and_then(|current| current.green.as_mut());
+                Box::pin(async move {
+                    let advance = advance_fragment(workbench, &runner, context, request);
+                    match green {
+                        Some(green) => green.progress_while(advance).await,
+                        None => advance.await,
+                    }
+                })
             },
             |_behavior, _kernel, mut owned, result| {
                 let current = owned
@@ -1741,15 +1751,18 @@ where
                                     .expect("display owns its fragment"),
                                 remaining: &mut cursor.unit.display_remaining,
                             };
-                            let prepared = prepare_actor_display_boundary(
+                            let preparation = prepare_actor_display_boundary(
                                 &environment,
                                 &context,
                                 boundary,
                                 allowance,
                                 operation,
                                 Some(receipt),
-                            )
-                            .await;
+                            );
+                            let prepared = match current.green.as_mut() {
+                                Some(green) => green.progress_while(preparation).await,
+                                None => preparation.await,
+                            };
                             if let Ok((_, Some(display))) = &prepared {
                                 let cursor = &mut owned.state.cursor;
                                 let current =

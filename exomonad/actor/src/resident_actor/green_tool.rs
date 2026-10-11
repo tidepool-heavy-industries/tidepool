@@ -31,6 +31,16 @@ impl ToolCursor {
         }
     }
 
+    pub(super) async fn progress_while<T>(
+        &mut self,
+        operation: impl std::future::Future<Output = T>,
+    ) -> T {
+        match &mut self.green {
+            Some(green) => green.progress_while(operation).await,
+            None => operation.await,
+        }
+    }
+
     pub(super) fn realm(&self, actor_realm: RealmId) -> RealmId {
         self.scopes
             .last()
@@ -131,10 +141,14 @@ where
                         token,
                         work,
                     } => {
-                        return self
-                            .environment
-                            .runner
-                            .run_owned_scope_callback(context.clone(), callback, realm, token, work)
+                        return green
+                            .progress_while(self.environment.runner.run_owned_scope_callback(
+                                context.clone(),
+                                callback,
+                                realm,
+                                token,
+                                work,
+                            ))
                             .await;
                     }
                     GreenAdvance::Wait => {}
@@ -147,17 +161,15 @@ where
                 let (work, realm) = match self.register_resource_scope(context, &owner) {
                     Ok(scope) => scope,
                     Err(detail) => {
-                        return self
-                            .environment
-                            .runner
-                            .resume_value(
+                        return cursor
+                            .progress_while(self.environment.runner.resume_value(
                                 context.clone(),
                                 continuation,
                                 (
                                     Err::<(), _>(ScopeFailure::ScopeRejected(detail)),
                                     Ok::<(), CleanupError>(()),
                                 ),
-                            )
+                            ))
                             .await
                     }
                 };
@@ -167,10 +179,14 @@ where
                     work: work.clone(),
                     realm,
                 });
-                return self
-                    .environment
-                    .runner
-                    .run_owned_scope_callback(context.clone(), callback, realm, token, work)
+                return cursor
+                    .progress_while(self.environment.runner.run_owned_scope_callback(
+                        context.clone(),
+                        callback,
+                        realm,
+                        token,
+                        work,
+                    ))
                     .await;
             }
             ResidentActorBoundary::ScopeDone {
@@ -218,14 +234,14 @@ where
             }
             boundary => {
                 let boundary = prepare_execution_effect(context, &owner, boundary);
-                let (boundary, _) = self
-                    .prepare_display_boundary(
+                let (boundary, _) = cursor
+                    .progress_while(self.prepare_display_boundary(
                         context,
                         boundary,
                         DEFAULT_DISPLAY_CHARACTER_ALLOWANCE,
                         None,
                         None,
-                    )
+                    ))
                     .await?;
                 match self.prepare_invocation_wait(kernel, context, &owner, boundary)? {
                     Ok(wait) => {
@@ -272,14 +288,14 @@ where
                     }
                     Err(boundary) => {
                         // Actor protocol transitions stay under the original exclusive tool owner.
-                        return self
-                            .resolve_effect(
+                        return cursor
+                            .progress_while(self.resolve_effect(
                                 kernel,
                                 context,
                                 owner,
                                 &crate::CallAncestry::begin(context.actor),
                                 boundary,
-                            )
+                            ))
                             .await;
                     }
                 }

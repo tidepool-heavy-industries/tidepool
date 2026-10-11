@@ -19,6 +19,12 @@ session rather than opening parallel contexts for one actor. Worker lifecycle,
 wake correlation, collection, and acknowledgement remain Rust interpreter
 state.
 
+Green frontiers remain owned by their admitted invocation. Native advances use
+its `progress_while` driver while parked frontiers exist: an unpolled frontier
+can retain the FIFO position needed by the next machine checkout. Buffer ready
+completions until scheduler selection; cancellation drops both queued futures
+and buffered completion custody under the same owner.
+
 Installation-issued effect rows carry their exact nominal imports through
 templates, actor compile views, and inspection. Keep that source fragment coupled;
 authored type text does not issue imports or additional effect authority.
