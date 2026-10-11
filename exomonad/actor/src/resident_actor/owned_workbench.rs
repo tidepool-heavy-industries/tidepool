@@ -550,9 +550,7 @@ impl<H, O> OwnedExecution<H, O> {
         operation: impl FnOnce() -> T + Send + 'static,
     ) -> tokio::task::JoinHandle<T> {
         let (timing, cleanup) = self.scopes();
-        tidepool_runtime::spawn_blocking_in_span(move || {
-            timing.sync_scope(|| cleanup.sync_scope(operation))
-        })
+        cleanup.spawn_blocking(Some(timing), operation)
     }
 
     fn expire_after_tool(&mut self) {

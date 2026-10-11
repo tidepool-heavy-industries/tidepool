@@ -2057,6 +2057,21 @@ impl ParkedHoleAbortRegistration {
         }
     }
 
+    pub(crate) fn spawn_blocking<T: Send + 'static>(
+        &self,
+        timing: Option<crate::call_timing::CallTimingRegistration>,
+        operation: impl FnOnce() -> T + Send + 'static,
+    ) -> tokio::task::JoinHandle<T> {
+        let cleanup = self.clone();
+        spawn_blocking_in_span(move || {
+            let scoped = || cleanup.sync_scope(operation);
+            match timing {
+                Some(timing) => timing.sync_scope(scoped),
+                None => scoped(),
+            }
+        })
+    }
+
     fn observe(&self, event: ResidentContinuationEvent) {
         let abort = {
             let mut state = self.0.state.lock();
@@ -9784,14 +9799,18 @@ where
             context.clone(),
             hole.cont_id().to_string(),
             "external operation lost its continuation owner".into(),
-        );
+        )
+        .with_compiler_owner(CompilerCloseOwner::current()?);
         let registration = guard.registration();
         let result = match work {
             tidepool_effect::DeferredEffect::Blocking(work) => {
                 let work = work
                     .into_inner()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match tidepool_runtime::spawn_blocking_in_span(work).await {
+                match registration
+                    .spawn_blocking(crate::call_timing::current_registration(), work)
+                    .await
+                {
                     Ok(result) => result,
                     Err(error) => Err(tidepool_effect::EffectError::Handler(format!(
                         "external operation terminated without a confirmed result: {error}"
@@ -23991,35 +24010,64 @@ pub(crate) mod request_tests {
         let cont_id = hole.cont_id().to_string();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let control = crate::WorkbenchExecutionControl::untracked();
         let task = {
             let runner = Arc::clone(&runner);
             let context = context.clone();
+            let compiler_owner = CompilerCloseOwner::Hosted(control.clone());
+            let expected_control = control.clone();
             tokio::spawn(async move {
-                let suspension = ResidentWorkbenchSuspension::Deferred {
-                    hole,
-                    request,
-                    work: tidepool_effect::DeferredEffect::blocking(move || {
-                        started_tx.send(()).expect("observer waiting");
-                        release_rx.recv().expect("release external work");
-                        Err(tidepool_effect::EffectError::Handler(
-                            "external refusal".into(),
-                        ))
-                    }),
-                };
-                let boundary = runner
-                    .capture_boundary(
-                        context.clone(),
-                        suspension.into(),
-                        context.placement.resource_scope,
-                    )
-                    .await?;
-                let ResidentActorBoundary::External { continuation, work } = boundary else {
-                    panic!("deferred fragment must retain its external work")
-                };
-                runner.run_external(context, continuation, work).await
+                compiler_owner
+                    .scope(async move {
+                        let suspension = ResidentWorkbenchSuspension::Deferred {
+                            hole,
+                            request,
+                            work: tidepool_effect::DeferredEffect::blocking(move || {
+                                let CompilerCloseOwner::Hosted(current) =
+                                    CompilerCloseOwner::current().unwrap()
+                                else {
+                                    panic!("deferred source check keeps its exact caller owner")
+                                };
+                                assert!(Arc::ptr_eq(&current, &expected_control));
+                                crate::ActorCompilerCloseOwner::current()
+                                    .unwrap()
+                                    .run(|_| {
+                                        started_tx.send(()).expect("observer waiting");
+                                        release_rx
+                                            .recv_timeout(Duration::from_secs(5))
+                                            .expect("release external work");
+                                        Err(tidepool_effect::EffectError::Handler(
+                                            "external refusal".into(),
+                                        ))
+                                    })
+                                    .unwrap()
+                                    .action
+                            }),
+                        };
+                        let boundary = runner
+                            .capture_boundary(
+                                context.clone(),
+                                suspension.into(),
+                                context.placement.resource_scope,
+                            )
+                            .await?;
+                        let ResidentActorBoundary::External { continuation, work } = boundary
+                        else {
+                            panic!("deferred fragment must retain its external work")
+                        };
+                        runner.run_external(context, continuation, work).await
+                    })
+                    .await
             })
         };
-        started_rx.await.expect("external work started");
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .expect("external work reaches source checking")
+            .expect("external work started");
+        assert_eq!(
+            control.compiler_close_observations(),
+            vec![crate::termination::CompilerWorkClose::Pending]
+        );
         let observed = tokio::time::timeout(
             Duration::from_secs(5),
             runner.access.with_machine(context.clone(), {
@@ -24041,6 +24089,17 @@ pub(crate) mod request_tests {
         assert!(
             failure.to_string().contains("external refusal"),
             "{failure}"
+        );
+        assert_eq!(
+            control.compiler_close_observations(),
+            vec![
+                crate::termination::CompilerWorkClose::Settled(
+                    tidepool_runtime::CompilerTransactionClose::NotStarted
+                ),
+                crate::termination::CompilerWorkClose::Settled(
+                    tidepool_runtime::CompilerTransactionClose::NotStarted
+                ),
+            ]
         );
         let parked = runner
             .access
