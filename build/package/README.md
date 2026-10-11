@@ -447,12 +447,38 @@ python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
   --delegated-service --service-slice "$ADMITTED_USER_SLICE"
 ```
 
-The separate `skill-workflow` cohort executes the published Skill recipe through
-its typed request, source checkpoint and resident compilation history. Run it
-against the same frozen descriptor as M3, using `--cohort skill-workflow`.
-It retains artifacts and uses the owned resident compiler with one test process.
-Its result is independent of the recursive cohort; neither a component interface
-comparison nor a previous bundle's recipe result establishes this acceptance.
+The separate `skill-workflow` cohort executes four independently selectable
+production-recipe scenarios against the same frozen descriptor as M3, using
+`--cohort skill-workflow`. The roster covers actor reuse across two differently
+typed requests (including both receipts, settlement subscription, and retained
+first receipt), the published record join, notebook authoring forms, and Jev
+packet examples. The actor-reuse history stays in one test because the typed
+request and reply identity assertions depend on the same actor incarnation and
+publication history. Together the cases cover every published block and
+assertion selected by the former full-skill recipe; they do not claim coverage
+of unselected examples elsewhere in those documents. The old full-history
+recipe remains an ignored manual diagnostic and is not part of the default suite
+or frozen cohort. The four-case cohort retains artifacts and uses the owned
+resident compiler with one test process. Its result is independent of the
+recursive cohort; neither a component interface comparison nor a previous
+bundle's recipe result establishes this acceptance.
+Freeze a candidate with the updated roster; descriptors sealed with the former
+single-case roster retain their own qualification contract.
+
+The coverage mapping is explicit: `actor_reuse_skill_recipe_retains_typed_request_history`
+executes the typed agent-work request and dependent settlement-collector
+history, including both request receipts and preservation of the first receipt;
+`routing_skill_recipe_executes_the_published_record_join` executes the
+independent define-actors join; `notebook_forms_skill_recipe_executes_published_authoring_forms`
+runs the notebook examples before the record-definition and authoring-form
+checks; `jev_skill_recipe_executes_the_published_packets` runs the selected Jev
+packet, answer and continuation examples. The old recipe ran these in the order
+request, record join, actor reuse, notebook examples, Jev examples, then the
+remaining notebook checks. A local counted-run attempt with its 600-second case
+limit timed out after settlement observation and before the final receipt/count
+assertion. That attempt did not execute the frozen bundle's owned-resident
+qualification contract, so it is retained as an unqualified diagnostic rather
+than evidence for the four-case cohort.
 
 The supplementary `harness-performance` cohort selects the one ignored
 eight-phase HTTP/Engine/Store/notebook workload. The separate

@@ -27,6 +27,7 @@ skills :: Member RecipeCheck effects => Eff effects ()
 skills = do
   owner <- root
   worker <- requestRoundTrip owner
+  routingHistory owner
   actorReuseHistory owner worker
   notebookExamples owner
   jevExamples owner
@@ -75,7 +76,6 @@ requestRoundTrip owner = do
 
 actorReuseHistory :: Member RecipeCheck effects => CheckActor -> Activation -> Eff effects ()
 actorReuseHistory owner worker = do
-  routingHistory owner
   void $ turn owner $ Text.unlines
     [ "import qualified Tidepool.Check"
     , "let resultsWorker = worker"
