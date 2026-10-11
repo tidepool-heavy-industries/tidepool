@@ -584,3 +584,14 @@ descriptor. The runtime environment binds `TIDEPOOL_TEST_FIXTURE_ROOT` to this
 bundle-owned directory and clears any inherited value before execution. Frozen
 verification rejects a changed manifest, missing or changed fixture, and extra
 fixture file.
+
+Compiler worker topology is independent of test process concurrency and per-request
+job grants. `run --compiler-workers 2 --foreground-jobs 2 --preparation-jobs 16`
+forwards the worker count through the owned compiler frontend and verifies the
+case receipt. Existing Harness performance callers issue Foreground work; these
+flags alone do not produce Preparation admissions. The native
+`daemon_integration::native_fairness` width cases measure component scheduling
+with actual Preparation requests and overlapping Foreground work, separately
+from frozen Harness latency. Their report records granted widths, physical
+service concurrency, throughput and sampled worker RSS; sampled RSS is not a
+cgroup or whole-run peak.

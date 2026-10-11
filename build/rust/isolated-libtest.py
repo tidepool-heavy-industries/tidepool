@@ -508,6 +508,8 @@ def parse_args(argv):
     for flag in ('foreground-jobs', 'preparation-jobs'):
         parser.add_argument('--' + flag, type=int,
                             help='positive per-request compiler allowance; owned-resident only')
+    parser.add_argument('--compiler-workers', type=int,
+                        help='resident compiler worker processes; owned-resident only (default: 1)')
     parser.add_argument('--delegated-service', action='store_true',
                         help='run each test alone in a fresh delegated user service')
     parser.add_argument('--service-slice',
@@ -523,6 +525,9 @@ def parse_args(argv):
     options = parser.parse_args(argv)
     if options.compiler_mode == 'owned-resident' and options.output_dir is None:
         parser.error('--compiler-mode owned-resident requires --output-dir')
+    if options.compiler_workers is not None:
+        if options.compiler_mode != 'owned-resident' or options.compiler_workers <= 0:
+            parser.error('--compiler-workers requires owned-resident and a positive count')
     for flag in ('foreground_jobs', 'preparation_jobs'):
         value = getattr(options, flag)
         if value is not None:
@@ -1182,7 +1187,7 @@ def case_artifact_evidence(artifact_root, compiler_mode, record):
 def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
             artifact_root=None, compiler_mode='direct', declared_resources=(),
             retain_artifacts=False, foreground_jobs=None, preparation_jobs=None,
-            trace_profile=None):
+            trace_profile=None, compiler_workers=None):
     if record is None:
         record = {}
     for key in ('artifact_disposition', 'artifacts_removed_after_success',
@@ -1194,13 +1199,16 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
     record['compiler_allowances'] = {
         'requested_foreground_jobs': foreground_jobs,
         'requested_preparation_jobs': preparation_jobs,
-        'worker_processes': 1 if compiler_mode == 'owned-resident' else None,
+        'worker_processes': (compiler_workers or 1) if compiler_mode == 'owned-resident' else None,
     }
     if (foreground_jobs is not None or preparation_jobs is not None) and compiler_mode != 'owned-resident':
         raise ValueError('compiler job allowances require owned-resident mode')
     for value in (foreground_jobs, preparation_jobs):
         if value is not None and (type(value) is not int or not 0 < value < 1 << 32):
             raise ValueError('compiler job allowances must be positive u32 values')
+    if compiler_workers is not None and (compiler_mode != 'owned-resident'
+            or type(compiler_workers) is not int or compiler_workers <= 0):
+        raise ValueError('compiler workers require owned-resident and a positive count')
     record['process_cleanup_scope'] = 'delegated_service' if service_slice is not None else 'process_group'
     args = [binary, '--exact', name, '--nocapture']
     if ignored:
@@ -1230,6 +1238,8 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         if artifact_root is None or not frontend:
             raise RuntimeError('owned-resident requires a declared compiler and per-case artifact root')
         options = []
+        if compiler_workers is not None:
+            options.extend(['--workers', str(compiler_workers)])
         for flag, value in (('--foreground-jobs', foreground_jobs), ('--preparation-jobs', preparation_jobs)):
             if value is not None:
                 options.extend([flag, str(value)])
@@ -1427,7 +1437,7 @@ def main(argv=None):
                 options.service_slice if options.delegated_service else None,
                 artifact_root, options.compiler_mode, options.resource_env,
                 options.retain_artifacts, options.foreground_jobs, options.preparation_jobs,
-                options.trace_profile,
+                options.trace_profile, options.compiler_workers,
             )
             return name, outcome, record
 

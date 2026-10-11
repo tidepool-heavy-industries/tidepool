@@ -50,6 +50,28 @@ fn bind(cmd: &ExtractCmd, socket: &Path, identity: &CompilerIdentity) -> Compile
 #[test]
 #[ignore = "requires an admitted matched two-worker compiler and retained trace resources"]
 fn real_preparation_preserves_foreground_worker_and_grants() {
+    run_fairness(1);
+}
+
+#[test]
+#[ignore = "requires matched compiler and retained measurement resources"]
+fn real_preparation_width_2() {
+    run_fairness(2);
+}
+
+#[test]
+#[ignore = "requires matched compiler and retained measurement resources"]
+fn real_preparation_width_8() {
+    run_fairness(8);
+}
+
+#[test]
+#[ignore = "requires matched compiler and retained measurement resources"]
+fn real_preparation_width_16() {
+    run_fairness(16);
+}
+
+fn run_fairness(preparation_jobs: u32) {
     assert!(
         std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_none(),
         "this fixture owns its daemon; use the counted runner's direct compiler mode"
@@ -91,6 +113,7 @@ fn real_preparation_preserves_foreground_worker_and_grants() {
     let socket = unique_socket_path("native-fairness");
     let log = root.join("compiler.log");
     let trace = log.with_extension("jsonl");
+    let preparation_jobs_text = preparation_jobs.to_string();
     let mut daemon = spawn_daemon(
         &bin,
         &socket,
@@ -101,7 +124,7 @@ fn real_preparation_preserves_foreground_worker_and_grants() {
             "--foreground-jobs",
             "2",
             "--preparation-jobs",
-            "1",
+            &preparation_jobs_text,
             "--rss-ceiling-mb",
             "10240",
             "--request-deadline-secs",
@@ -135,7 +158,16 @@ fn real_preparation_preserves_foreground_worker_and_grants() {
     let prep_one_endpoint = bind(&preparation_one, &socket, &identity);
     let prep_two_endpoint = bind(&preparation_two, &socket, &identity);
     let foreground_endpoint = bind(&foreground, &socket, &identity);
-    let observation = std::thread::scope(|scope| {
+    let memory_pids: Vec<_> = rows(&trace)
+        .into_iter()
+        .filter(|row| message(row, "compiler worker ready"))
+        .map(|row| row["fields"]["worker_pid"].as_u64().unwrap())
+        .collect();
+    assert_eq!(memory_pids.len(), 2);
+    let sampling = std::sync::atomic::AtomicBool::new(true);
+    let measured_started = Instant::now();
+    let (observation, memory) = std::thread::scope(|scope| {
+        let sampler = scope.spawn(|| sample_memory(&memory_pids, &sampling));
         let one = scope.spawn(|| prep_one_endpoint.execute(&preparation_one));
         let started = await_row(&trace, |r| {
             message(r, "compiler request started")
@@ -149,8 +181,13 @@ fn real_preparation_preserves_foreground_worker_and_grants() {
         let foreground_result = foreground_endpoint.execute(&foreground);
         let one = one.join().expect("preparation one thread");
         let two = two.join().expect("preparation two thread");
-        (started, waiting, foreground_result, one, two)
+        sampling.store(false, std::sync::atomic::Ordering::Release);
+        (
+            (started, waiting, foreground_result, one, two),
+            sampler.join().unwrap(),
+        )
     });
+    let measured_elapsed_ns = measured_started.elapsed().as_nanos();
     #[allow(clippy::disallowed_methods, reason = "existing compiler stop owner")]
     let stop = Command::new(&bin)
         .args(["--stop-daemon", "--socket"])
@@ -265,7 +302,17 @@ fn real_preparation_preserves_foreground_worker_and_grants() {
                     .is_some_and(|first| first != digest)
             })
         });
-    let report = json!({"schema":1,"workload":"compiler-only source graph and warm source repeat",
+    let concurrency = observed_concurrency(&all);
+    let report = json!({"schema":1,
+        "measurement_scope":"component compiler scheduling; excludes Harness latency",
+        "requested_foreground_jobs":2,"requested_preparation_jobs":preparation_jobs,
+        "worker_processes":2,"measured_elapsed_ns":measured_elapsed_ns,
+        "completed_measured_requests":3,"completed_preparation_requests":2,
+        "completed_preparation_requests_per_second":2.0 / (measured_elapsed_ns as f64 / 1e9),
+        "throughput_scope":"measured mixed workload wall interval after foreground warmup; includes queueing and service",
+        "completed_measured_requests_per_second":3.0 / (measured_elapsed_ns as f64 / 1e9),
+        "observed_concurrency":concurrency,"worker_memory":memory,
+        "module_ready_width":{"status":"not_collected","scope":"service concurrency and grants do not establish ready module width"},"workload":"compiler-only source graph and warm source repeat",
         "graph_modules":65,"physical_requests":physical,"queue_observations":all.iter()
             .filter(|r| message(r,"compiler job dequeued")).collect::<Vec<_>>(),
         "preparation_started":observation.0,"second_preparation_waiting":observation.1,
@@ -321,15 +368,116 @@ fn real_preparation_preserves_foreground_worker_and_grants() {
         assert_eq!(row["fields"]["exit_code"], 0);
         let preparation = span["compiler_workload"] == "preparation";
         assert_eq!(span["worker"], if preparation { 1 } else { 0 });
-        assert_eq!(span["compiler_jobs"], if preparation { 1 } else { 2 });
+        assert_eq!(
+            span["compiler_jobs"],
+            if preparation { preparation_jobs } else { 2 }
+        );
         assert_eq!(
             span["compiler_capabilities"],
-            if preparation { 1 } else { 2 }
+            if preparation { preparation_jobs } else { 2 }
         );
     }
+    assert_eq!(concurrency["status"], "observed");
+    assert_eq!(concurrency["peak_active_physical_requests"], 2);
+    assert_eq!(memory["status"], "observed");
     assert!(
         queued_digest_matches,
         "waiting request must settle under the same logical identity"
     );
     assert!(overlap, "inconclusive: preparation finished before reserved-slot overlap; retain report and retry a controlled larger graph");
+}
+
+/// Sample actual worker RSS together; this is a sampled aggregate, not a cgroup peak.
+fn sample_memory(pids: &[u64], sampling: &std::sync::atomic::AtomicBool) -> Value {
+    let mut samples = 0;
+    let mut failures = 0;
+    let mut aggregate_peak_kib = 0;
+    let mut individual_peak_kib = 0;
+    while sampling.load(std::sync::atomic::Ordering::Acquire) {
+        let values: Option<Vec<u64>> = pids
+            .iter()
+            .map(|pid| {
+                fs::read_to_string(format!("/proc/{pid}/status"))
+                    .ok()
+                    .and_then(|status| {
+                        status
+                            .lines()
+                            .find(|line| line.starts_with("VmRSS:"))
+                            .and_then(|line| line.split_whitespace().nth(1))
+                            .and_then(|value| value.parse().ok())
+                    })
+            })
+            .collect();
+        if let Some(values) = values {
+            samples += 1;
+            aggregate_peak_kib = aggregate_peak_kib.max(values.iter().sum::<u64>());
+            individual_peak_kib = individual_peak_kib.max(values.into_iter().max().unwrap_or(0));
+        } else {
+            failures += 1;
+        }
+        #[allow(
+            clippy::disallowed_methods,
+            reason = "bounded component measurement sampler"
+        )]
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    json!({"status":if samples > 0 && failures == 0 {"observed"} else {"partial_or_unknown"},
+        "samples":samples,"failed_samples":failures,"sample_interval_ms":5,
+        "sampled_aggregate_worker_peak_kib":aggregate_peak_kib,
+        "sampled_individual_worker_peak_kib":individual_peak_kib,
+        "scope":"both original compiler workers; excludes daemon and client; sampled RSS, not process/cgroup peak"})
+}
+
+fn observed_concurrency(rows: &[Value]) -> Value {
+    let mut active = std::collections::HashSet::new();
+    let mut peak = 0;
+    let mut complete = false;
+    let mut events: Vec<_> = rows
+        .iter()
+        .filter(|row| {
+            message(row, "compiler request started") || message(row, "compiler request finished")
+        })
+        .collect();
+    if !events.is_empty() {
+        complete = true;
+    }
+    events.sort_by_key(|row| row["timestamp"].as_str());
+    for row in events {
+        let Some(identity) = row["span"]["physical_execution"].as_str() else {
+            complete = false;
+            continue;
+        };
+        if message(row, "compiler request started") {
+            complete &= active.insert(identity);
+            peak = peak.max(active.len());
+        } else {
+            complete &= active.remove(identity);
+        }
+    }
+    complete &= active.is_empty();
+    json!({"status":if complete {"observed"} else {"partial_or_unknown"},
+        "peak_active_physical_requests":peak,"scope":"daemon physical service intervals; excludes queue wait"})
+}
+
+#[test]
+fn concurrency_report_distinguishes_overlap_from_grant_width_and_incomplete_trace() {
+    let event = |timestamp, message, identity| {
+        json!({"timestamp":timestamp,
+        "fields":{"message":message},"span":{"physical_execution":identity,"compiler_jobs":16}})
+    };
+    let rows = vec![
+        event("1", "compiler request started", "prep"),
+        event("2", "compiler request started", "foreground"),
+        event("3", "compiler request finished", "foreground"),
+        event("4", "compiler request finished", "prep"),
+    ];
+    assert_eq!(
+        observed_concurrency(&rows)["peak_active_physical_requests"],
+        2
+    );
+    assert_eq!(observed_concurrency(&rows)["status"], "observed");
+    assert_eq!(
+        observed_concurrency(&rows[..3])["status"],
+        "partial_or_unknown"
+    );
 }

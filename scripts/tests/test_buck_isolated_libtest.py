@@ -701,6 +701,38 @@ class IsolatedLibtestTests(unittest.TestCase):
             self.assertEqual(record['compiler_allowances'], {'requested_foreground_jobs': width,
                 'requested_preparation_jobs': width + 1, 'worker_processes': 1})
 
+    def test_owned_compiler_two_workers_forward_to_production_frontend(self):
+        root = Path(self.tmp.name) / 'two-worker-artifacts'
+        record = {}
+        frontend = Path(self.tmp.name) / 'two-worker-frontend'
+        frontend.write_text('declared compiler frontend')
+        def run(args, timeout, environment=None):
+            self.assertEqual(args[3:5], ['--workers', '2'])
+            self.assertEqual(args[-5:], ['--', str(self.binary), '--exact', 'suite::works', '--nocapture'])
+            (root / 'compiler').mkdir()
+            (root / 'compiler/owned-compiler-outcome.json').write_text(json.dumps({'cleanup': {'status': 'confirmed'}}))
+            return completed_process(args, 0, 'test result: ok. 1 passed; 0 failed; 0 ignored;\n', '')
+        with patch.dict(os.environ, {'TIDEPOOL_EXTRACT': str(frontend)}), \
+             patch.object(runner, 'execute', side_effect=run):
+            passed, _, _ = runner.run_one(str(self.binary), 'suite::works', False, 10, record,
+                artifact_root=root, compiler_mode='owned-resident', compiler_workers=2,
+                foreground_jobs=2, preparation_jobs=16)
+        self.assertTrue(passed)
+        self.assertEqual(record['compiler_allowances'], {'requested_foreground_jobs': 2,
+            'requested_preparation_jobs': 16, 'worker_processes': 2})
+
+    def test_worker_topology_refuses_invalid_counts_and_direct_mode_before_start(self):
+        for value in (0, -1, True):
+            with self.subTest(value=value), patch.object(runner, 'execute') as execute:
+                with self.assertRaises(ValueError):
+                    runner.run_one(str(self.binary), 'suite::works', False, 10,
+                        compiler_mode='owned-resident', compiler_workers=value)
+                execute.assert_not_called()
+        for arguments in (['--compiler-workers', '2'],
+                ['--compiler-mode', 'owned-resident', '--output-dir', self.tmp.name, '--compiler-workers', '0']):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                runner.parse_args([str(self.binary), *arguments])
+
     def test_compiler_allowance_parser_refuses_invalid_values_and_direct_mode(self):
         for flag in ('--foreground-jobs', '--preparation-jobs'):
             for value in ('0', '-1', 'invalid', str(1 << 32), str(1 << 64)):

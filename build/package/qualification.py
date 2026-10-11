@@ -1852,6 +1852,9 @@ def run_cohort(args) -> int:
 def _run_cohort(args) -> int:
     if 'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS' in os.environ:
         raise ValueError('diagnostic startup overrides cannot qualify a frozen cohort')
+    compiler_workers = getattr(args, 'compiler_workers', None)
+    if compiler_workers is not None and (type(compiler_workers) is not int or compiler_workers <= 0):
+        raise ValueError('--compiler-workers must be positive')
     allowances = {name: getattr(args, name, None) for name in ('foreground_jobs', 'preparation_jobs')}
     for name, value in allowances.items():
         if value is not None and (type(value) is not int or not 0 < value < 1 << 32):
@@ -1877,6 +1880,9 @@ def _run_cohort(args) -> int:
     compiler_mode = getattr(args, "compiler_mode", None) or required_compiler_mode
     if compiler_mode != required_compiler_mode:
         raise ValueError(f"{args.cohort} requires compiler mode {required_compiler_mode}")
+    if compiler_workers is not None and compiler_mode != "owned-resident":
+        raise ValueError("compiler workers require the sealed owned-resident mode")
+    selected_workers = (compiler_workers or 1) if compiler_mode == "owned-resident" else None
     if any(value is not None for value in allowances.values()) and compiler_mode != "owned-resident":
         raise ValueError("compiler job allowances require the sealed owned-resident mode")
     if args.jobs > cohort.get("max_jobs", args.jobs):
@@ -1894,6 +1900,8 @@ def _run_cohort(args) -> int:
     command = [str(tools / "bin/python3"), descriptor["programs"]["runner"], descriptor["programs"]["libtest"],
                "--expected-count", str(cohort["expected_count"]), "--jobs", str(args.jobs), "--timeout", str(cohort["timeout"]),
                "--output-dir", str(output / "tests"), "--compiler-mode", compiler_mode]
+    if compiler_workers is not None:
+        command.extend(["--compiler-workers", str(compiler_workers)])
     if trace_profile is not None:
         command.extend(["--trace-profile", trace_profile])
     for name, value in allowances.items():
@@ -1937,11 +1945,11 @@ def _run_cohort(args) -> int:
             "verified": len(matching) == 1 and case_confirmed(matching[0]),
         }
     compiler_allowance_selection_confirmed = True
-    if any(value is not None for value in allowances.values()):
+    if compiler_workers is not None or any(value is not None for value in allowances.values()):
         compiler_allowance_selection_confirmed = exact and len(records) == cohort["expected_count"] and all(
             (record.get("execution") or {}).get("compiler_allowances") == {
                 "requested_foreground_jobs": allowances["foreground_jobs"],
-                "requested_preparation_jobs": allowances["preparation_jobs"], "worker_processes": 1}
+                "requested_preparation_jobs": allowances["preparation_jobs"], "worker_processes": selected_workers}
             for record in records)
     behavioral_completed = result.returncode == 0 and confirmed
     measurement = None
@@ -1963,7 +1971,7 @@ def _run_cohort(args) -> int:
                              "compiler_mode": compiler_mode, "trace_profile": trace_profile,
                              "compiler_allowances": {"requested_foreground_jobs": allowances["foreground_jobs"],
                                                      "requested_preparation_jobs": allowances["preparation_jobs"],
-                                                     "worker_processes": 1 if compiler_mode == "owned-resident" else None},
+                                                     "worker_processes": selected_workers},
                              "timeout_seconds": cohort["timeout"], "case_timeout_seconds": cohort.get("case_timeouts", {})},
               "elapsed_ns": time.monotonic_ns() - started, "expected_count": cohort["expected_count"],
               "executed_test_count": sum((record.get("execution") or {}).get("executed_test_count") or 0 for record in records),
@@ -2268,6 +2276,8 @@ def main(argv=None) -> int:
     for flag in ("foreground-jobs", "preparation-jobs"):
         run.add_argument("--" + flag, type=int,
                          help="positive per-request compiler allowance; independent of --jobs")
+    run.add_argument("--compiler-workers", type=int,
+                     help="positive resident compiler worker count; independent of --jobs")
     run.add_argument("--compiler-mode", choices=("direct", "owned-resident"),
                      help="isolated per-case compiler lifecycle (default: cohort selection)")
     run.add_argument("--trace-profile", choices=("full", "minimal"),

@@ -77,8 +77,15 @@ Complete its matched comparison through the production HTTP/Harness/actor/
 compiler route with only provider replies scripted. Compare first preparation,
 immediate startup, durable startup, and first/repeated notebook calls. Run
 three final repetitions with matched source, descriptor, and profile. Compare
-2/8/16 foreground and preparation compiler-job allowances at one worker-process
-count; report realized ready width, throughput, and memory. Keep fast-dev and
+2/8/16 foreground compiler-job allowances with one worker, and retain these
+Harness latency observations as their own comparison. The current production
+Harness callers use Foreground urgency, including explicit workspace preparation.
+Measure actual Preparation scheduling separately through the declared
+`daemon_integration` native fairness component: two workers, foreground allowance
+2, preparation allowances 2/8/16, and three repetitions per allowance. Report
+actual grants, overlapping physical service width, compiler throughput and
+sampled aggregate worker RSS. Component scheduling evidence does not qualify
+Harness Preparation latency. Keep fast-dev and
 production results separate. Report diagnostic/request volume and allocation
 or GC evidence when available; do not convert absent observation into zero or
 claim a speedup from architectural changes alone.
@@ -86,8 +93,10 @@ claim a speedup from architectural changes alone.
 The frozen qualification owner exposes the independent
 `--foreground-jobs` and `--preparation-jobs` selections for sealed
 `owned-resident` execution. Confirm each report records the requested
-allowances and one worker process, and that the production observer shows the
-realized grants and width. A selected value or requested width alone is not
+allowances and selected worker process count (`--compiler-workers`, default 1),
+and that the production observer shows the realized grants and width. The native
+fairness fixture owns its two-worker daemon through the existing compiler
+endpoint and refuses a pre-existing daemon binding. A selected value or requested width alone is not
 evidence that the runtime granted it.
 
 ## Full migration gate
