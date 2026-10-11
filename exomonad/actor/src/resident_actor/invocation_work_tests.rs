@@ -1377,40 +1377,59 @@ async fn foreign_await_reads_retained_result_without_cleanup_or_control_authorit
         assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 0);
         assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
         backend.finish.add_permits(1);
+        // JobActor termination lets the resource owner observe cleanup before
+        // collectors read the retained result. Wait for that published evidence.
+        let settled = CommandResult {
+            outcome: original.outcome.clone(),
+            cleanup: backend.cleanup_answer.lock().clone(),
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if jobs.status(foreigners[0], &job).await.unwrap()
+                    == CommandStatus::CommandFinished(settled.clone())
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("resource owner publishes its cleanup observation");
+        assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 1);
         for foreign in foreigners {
             assert_eq!(
                 tokio::time::timeout(Duration::from_secs(1), jobs.finished(foreign, &job))
                     .await
                     .unwrap()
                     .unwrap(),
-                original
+                settled
             );
         }
         assert_eq!(
             backend.cleanup_probes.load(Ordering::SeqCst),
-            0,
-            "foreign completion reads never probe cleanup"
+            1,
+            "foreign completion reads never add cleanup probes"
         );
         let uncertain = jobs.finished(owner, &job).await.unwrap();
         assert_eq!(uncertain.outcome, original.outcome);
         assert_eq!(uncertain.cleanup, *backend.cleanup_answer.lock());
-        assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 2);
         for foreign in foreigners {
             assert_eq!(jobs.finished(foreign, &job).await.unwrap(), uncertain);
         }
-        assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 1);
+        assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 2);
         *backend.cleanup_answer.lock() = CommandCleanup::CommandClean;
         let confirmed = jobs.finished(owner, &job).await.unwrap();
         assert_eq!(confirmed.outcome, original.outcome);
         assert_eq!(confirmed.cleanup, CommandCleanup::CommandClean);
-        assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 2);
+        assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 3);
         for foreign in foreigners {
             assert_eq!(jobs.finished(foreign, &job).await.unwrap(), confirmed);
         }
         assert_eq!(jobs.finished(owner, &job).await.unwrap(), confirmed);
         assert_eq!(
             backend.cleanup_probes.load(Ordering::SeqCst),
-            2,
+            3,
             "confirmed cleanup is retained proof"
         );
         assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
