@@ -297,13 +297,326 @@ fn groups(facts: &BTreeSet<Fact>) -> BTreeSet<RawGroup> {
         .collect()
 }
 
+// Scope IDs are opaque issuer outputs. Only their equality is observed; rows and
+// reachability are derived from the catalog. This does not independently test
+// the issuer's digest/allocation law.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct Physical {
+    scope: usize,
+    fact: Fact,
+}
+
+#[derive(Default)]
+struct Rows {
+    scopes: BTreeMap<ArtifactSelectionId, usize>,
+    handles: BTreeMap<Physical, ArtifactBindingNode>,
+    edges: BTreeMap<Physical, BTreeSet<(Physical, ArtifactDependency)>>,
+}
+
+impl Rows {
+    fn register(&mut self, catalog: &Catalog, handle: ArtifactBindingNode) -> Physical {
+        let (binding, fact) = match handle {
+            ArtifactBindingNode::Artifact(binding) => (binding, Fact::Carrier(binding.artifact)),
+            ArtifactBindingNode::Group(group) => {
+                let node = catalog
+                    .originals
+                    .iter()
+                    .position(|entry| entry.descriptor.id == group.binding.artifact)
+                    .expect("issued group must name a catalog original");
+                assert!(
+                    ORDINALS.contains(&group.original_ordinal),
+                    "unexpected issued ordinal"
+                );
+                (group.binding, Fact::Group((node, group.original_ordinal)))
+            }
+        };
+        let next = self.scopes.len();
+        let scope = *self.scopes.entry(binding.selection).or_insert(next);
+        let key = Physical { scope, fact };
+        // No alias may overwrite an earlier correspondence, including one whose
+        // live inventory rows have since been released.
+        if let Some(prior) = self.handles.get(&key) {
+            assert_eq!(*prior, handle, "issuer handle correspondence is immutable");
+        } else {
+            assert!(!self.handles.values().any(|prior| *prior == handle));
+            self.handles.insert(key, handle);
+        }
+        key
+    }
+
+    fn close(&self, roots: BTreeSet<Physical>) -> BTreeSet<Physical> {
+        let mut closed = roots;
+        loop {
+            let prior = closed.clone();
+            for row in &prior {
+                closed.extend(self.edges[row].iter().map(|(target, _)| *target));
+            }
+            if closed == prior {
+                return closed;
+            }
+        }
+    }
+
+    fn carrier(&self, group: Physical) -> Physical {
+        let carriers = self.edges[&group]
+            .iter()
+            .filter_map(|(target, edge)| {
+                matches!(edge, ArtifactDependency::Interface).then_some(*target)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(carriers.len(), 1, "exactly one group carrier");
+        carriers[0]
+    }
+
+    fn resolve(&self, view: &View, id: ArtifactId) -> Option<Physical> {
+        if let Some(carrier) = view.namespace.get(&id) {
+            return Some(*carrier);
+        }
+        let carriers = view
+            .physical
+            .iter()
+            .filter(|row| row.fact == Fact::Carrier(id))
+            .copied()
+            .collect::<Vec<_>>();
+        (carriers.len() == 1).then(|| carriers[0])
+    }
+
+    fn group(&self, view: &View, raw: RawGroup, carrier: Physical) -> Option<Physical> {
+        let matches = view
+            .physical
+            .iter()
+            .filter(|row| row.fact == Fact::Group(raw) && self.carrier(**row) == carrier)
+            .copied()
+            .collect::<Vec<_>>();
+        (matches.len() == 1).then(|| matches[0])
+    }
+
+    fn compatible(&self, group: Physical, namespace: &BTreeMap<ArtifactId, Physical>) -> bool {
+        // Reuse means the entire independently expanded carrier closure fits
+        // the current issuer's choices, including retained-value interfaces.
+        self.close(BTreeSet::from([group]))
+            .iter()
+            .all(|row| match row.fact {
+                Fact::Carrier(id) => namespace.get(&id) == Some(row),
+                Fact::Group(_) => true,
+            })
+    }
+
+    fn admit(
+        &mut self,
+        catalog: &Catalog,
+        parent: &View,
+        issued: &ArtifactView,
+        available: &BTreeSet<ArtifactId>,
+        demanded: &BTreeSet<RawGroup>,
+    ) -> View {
+        let mut planned_groups = demanded.clone();
+        planned_groups.extend(groups(&parent.facts()));
+        let graph = issued.capture_graph_selection();
+        // These are identity observations at the issuance boundary, never the
+        // source of expected edges or expected reachable membership.
+        assert_eq!(
+            graph
+                .namespace
+                .iter()
+                .map(|binding| binding.artifact)
+                .collect::<BTreeSet<_>>(),
+            *available
+        );
+        assert_eq!(
+            graph.namespace.len(),
+            available.len(),
+            "namespace identities are unique"
+        );
+        assert_eq!(
+            graph
+                .bindings
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len(),
+            graph.bindings.len()
+        );
+        assert_eq!(
+            graph
+                .native_groups
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .len(),
+            graph.native_groups.len()
+        );
+        let namespace = graph
+            .namespace
+            .iter()
+            .map(|binding| {
+                (
+                    binding.artifact,
+                    self.register(catalog, ArtifactBindingNode::Artifact(*binding)),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let issued_groups = graph
+            .native_groups
+            .iter()
+            .map(|group| self.register(catalog, ArtifactBindingNode::Group(*group)))
+            .collect::<BTreeSet<_>>();
+        for row in namespace.values() {
+            if !self.edges.contains_key(row) {
+                let mut edges = BTreeSet::new();
+                if let Fact::Carrier(id) = row.fact {
+                    if let Some(node) = catalog
+                        .originals
+                        .iter()
+                        .position(|entry| entry.descriptor.id == id)
+                    {
+                        edges.insert((
+                            namespace[&catalog.interfaces[node].descriptor.id],
+                            ArtifactDependency::Interface,
+                        ));
+                    }
+                }
+                self.edges.insert(*row, edges);
+            }
+        }
+        for row in &issued_groups {
+            if self.edges.contains_key(row) {
+                continue;
+            }
+            let Fact::Group(raw) = row.fact else {
+                unreachable!()
+            };
+            assert!(
+                planned_groups.contains(&raw),
+                "new group outside requested and inherited raw closure"
+            );
+            let carrier = namespace[&catalog.originals[raw.0].descriptor.id];
+            let mut edges = BTreeSet::from([(carrier, ArtifactDependency::Interface)]);
+            for target in catalog.edges.get(&raw).into_iter().flatten() {
+                let same_issue = Physical {
+                    scope: row.scope,
+                    fact: Fact::Group(*target),
+                };
+                let dependency = if issued_groups.contains(&same_issue) {
+                    same_issue
+                } else {
+                    let chosen = namespace[&catalog.originals[target.0].descriptor.id];
+                    let candidates = issued_groups
+                        .iter()
+                        .filter(|group| {
+                            group.fact == Fact::Group(*target)
+                                && self.edges.contains_key(group)
+                                && self.carrier(**group) == chosen
+                                && self.compatible(**group, &namespace)
+                        })
+                        .copied()
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        candidates.len(),
+                        1,
+                        "issued dependency needs one exact prior group"
+                    );
+                    candidates[0]
+                };
+                edges.insert((
+                    dependency,
+                    ArtifactDependency::NativeGroup {
+                        dependent_ordinal: raw.1,
+                        required_ordinal: target.1,
+                    },
+                ));
+            }
+            if let Some((value, generation)) = catalog.bindings.get(&raw) {
+                let identity = binding_identity(*value, raw);
+                edges.insert((
+                    namespace[&catalog.values[*value].descriptor.id],
+                    ArtifactDependency::NativeBinding {
+                        dependent_ordinal: raw.1,
+                        generation: *generation,
+                        namespace: identity.namespace,
+                        occurrence: identity.occurrence,
+                        record_parent: identity.record_parent,
+                    },
+                ));
+            }
+            self.edges.insert(*row, edges);
+        }
+        let mut selected = namespace.values().copied().collect::<BTreeSet<_>>();
+        let offer = View {
+            inventory: parent.inventory,
+            physical: issued_groups.clone(),
+            namespace: namespace.clone(),
+            roots: BTreeSet::new(),
+        };
+        for raw in &planned_groups {
+            let carrier = namespace[&catalog.originals[raw.0].descriptor.id];
+            let fresh = issued_groups
+                .iter()
+                .filter(|row| row.fact == Fact::Group(*raw) && !parent.physical.contains(row))
+                .copied()
+                .collect::<Vec<_>>();
+            assert!(
+                fresh.len() <= 1,
+                "one newly issued identity per logical group"
+            );
+            if let Some(chosen) = fresh.first() {
+                assert_eq!(
+                    self.carrier(*chosen),
+                    carrier,
+                    "newly planned group uses chosen carrier"
+                );
+                selected.insert(*chosen);
+            } else {
+                // An issuer can return an already-held exact row when two
+                // branches issued equal group rows under the same carrier.
+                // Both remain custody; ordinary admission does not make later
+                // carrier-qualified reads unambiguous.
+                let matching = offer
+                    .physical
+                    .iter()
+                    .filter(|row| {
+                        row.fact == Fact::Group(*raw)
+                            && self.carrier(**row) == carrier
+                            && self.compatible(**row, &namespace)
+                    })
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                assert!(
+                    !matching.is_empty(),
+                    "planned group must have a qualified issuing identity"
+                );
+                assert!(
+                    matching.is_subset(&parent.physical),
+                    "unobserved fresh issuing identity"
+                );
+                selected.extend(matching);
+            }
+        }
+
+        let mut physical = self.close(selected);
+        physical.extend(&parent.physical);
+        View {
+            inventory: parent.inventory,
+            physical,
+            namespace,
+            roots: parent.roots.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct View {
     inventory: usize,
-    facts: BTreeSet<Fact>,
-    // Artifact projection of explicit typed roots, separate from reachable
-    // carrier custody. A zero-edge group root projects to its own carrier.
+    physical: BTreeSet<Physical>,
+    namespace: BTreeMap<ArtifactId, Physical>,
+    // Demand intent is separate from physical carrier custody.
     roots: BTreeSet<ArtifactId>,
+}
+
+impl View {
+    fn facts(&self) -> BTreeSet<Fact> {
+        self.physical.iter().map(|row| row.fact).collect()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -332,6 +645,11 @@ enum Op {
     Merge {
         left: usize,
         right: usize,
+        to: usize,
+    },
+    Recover {
+        from: usize,
+        inventory: usize,
         to: usize,
     },
     Read {
@@ -366,6 +684,7 @@ fn operations() -> impl Strategy<Value = Vec<Op>> {
             3 => (slot.clone(), proptest::collection::vec(0..MODULES, 0..5), slot.clone())
                 .prop_map(|(from, nodes, to)| Op::Project { from, nodes, to }),
             3 => (slot.clone(), slot.clone(), slot.clone()).prop_map(|(left, right, to)| Op::Merge { left, right, to }),
+            2 => (slot.clone(), 0usize..2, slot.clone()).prop_map(|(from, inventory, to)| Op::Recover { from, inventory, to }),
             4 => (slot, 0..MODULES, prop::sample::select(vec![3u32, 11, 29, 0, 4]), any::<bool>())
                 .prop_map(|(from, node, ordinal, all)| Op::Read { from, node, ordinal, all }),
         ],
@@ -386,6 +705,11 @@ struct Coverage {
     read_refusals: usize,
     reclaimed: usize,
     absent_slots: usize,
+    recoveries: usize,
+    namespace_masks: usize,
+    carrier_qualified_refusals: usize,
+    duplicate_scope_views: usize,
+    cross_scope_group_carriers: usize,
 }
 
 fn prefix() -> Vec<Op> {
@@ -490,6 +814,28 @@ fn prefix() -> Vec<Op> {
             right: 7,
             to: 4,
         },
+        Op::Read {
+            from: 4,
+            node: 0,
+            ordinal: 3,
+            all: false,
+        },
+        Op::Read {
+            from: 4,
+            node: 0,
+            ordinal: 29,
+            all: false,
+        },
+        Op::Recover {
+            from: 4,
+            inventory: 1,
+            to: 5,
+        },
+        Op::Project {
+            from: 5,
+            nodes: vec![0],
+            to: 5,
+        },
         Op::Merge {
             left: 2,
             right: 6,
@@ -561,6 +907,7 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
     let inventories = [ArtifactInventory::default(), ArtifactInventory::default()];
     let mut actual: [Option<ArtifactView>; SLOTS] = std::array::from_fn(|_| None);
     let mut model: [Option<View>; SLOTS] = std::array::from_fn(|_| None);
+    let mut rows = Rows::default();
     let mut coverage = Coverage::default();
     let mut prior_live = [0; 2];
     for (step, op) in ops.iter().enumerate() {
@@ -569,7 +916,8 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                 actual[*to] = Some(inventories[*inventory].empty_view());
                 model[*to] = Some(View {
                     inventory: *inventory,
-                    facts: BTreeSet::new(),
+                    physical: BTreeSet::new(),
+                    namespace: BTreeMap::new(),
                     roots: BTreeSet::new(),
                 });
             }
@@ -581,8 +929,9 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                 to,
             } => {
                 if let Some(view) = model[*parent].clone() {
-                    let mut available = carrier_ids(&view.facts);
-                    available.extend(catalog.supplied_ids(*future));
+                    let supplied = catalog.supplied_ids(*future);
+                    let mut available = carrier_ids(&view.facts());
+                    available.extend(&supplied);
                     let demanded = catalog.group_closure(&root_groups(*root));
                     let wanted = catalog.facts(available.clone(), demanded.clone());
                     let expected = carrier_ids(&wanted).is_subset(&available);
@@ -592,22 +941,27 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                         catalog.entries(*future, *reverse),
                         &catalog.selection(&demanded),
                     );
-                    prop_assert_eq!(result.is_ok(), expected, "step {}: {:?}", step, op);
+                    prop_assert_eq!(
+                        result.is_ok(),
+                        expected,
+                        "step {}: {:?}; {:?}",
+                        step,
+                        op,
+                        result
+                    );
                     if let Ok(result) = result {
-                        let mut facts = wanted;
-                        facts.extend(view.facts.clone());
-                        if facts == view.facts {
+                        let mut admitted =
+                            rows.admit(catalog, &view, &result, &available, &demanded);
+                        admitted.roots = view.roots.clone();
+                        admitted.roots.extend(supplied);
+                        admitted
+                            .roots
+                            .extend(demanded.iter().map(|raw| catalog.key(*raw).artifact));
+                        if admitted.physical == view.physical {
                             coverage.repeated += 1;
                         }
-                        let mut roots = view.roots;
-                        roots.extend(catalog.supplied_ids(*future));
-                        roots.extend(demanded.iter().map(|group| catalog.key(*group).artifact));
                         actual[*to] = Some(result);
-                        model[*to] = Some(View {
-                            inventory: view.inventory,
-                            facts,
-                            roots,
-                        });
+                        model[*to] = Some(admitted);
                         coverage.admissions += 1;
                     } else {
                         prop_assert_eq!(
@@ -636,46 +990,74 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                         .iter()
                         .map(|node| catalog.originals[*node].descriptor.id)
                         .collect::<BTreeSet<_>>();
-                    let expected = ids.is_subset(&carrier_ids(&view.facts));
+                    let carriers = ids
+                        .iter()
+                        .map(|id| rows.resolve(&view, *id))
+                        .collect::<Option<BTreeSet<_>>>();
                     let result = actual[*from]
                         .as_ref()
                         .unwrap()
                         .select_roots(ids.iter().copied().collect());
-                    prop_assert_eq!(result.is_ok(), expected, "step {}: {:?}", step, op);
+                    let unambiguous = carriers.as_ref().is_some_and(|carriers| carriers.iter().all(|carrier|
+                        ORDINALS.iter().all(|ordinal| view.physical.iter().filter(|row| matches!(row.fact,
+                            Fact::Group((node, selected)) if catalog.originals[node].descriptor.id == match carrier.fact { Fact::Carrier(id) => id, _ => unreachable!() } && selected == *ordinal)
+                            && rows.carrier(**row) == *carrier).count() <= 1)));
+                    prop_assert_eq!(result.is_ok(), unambiguous, "step {}: {:?}", step, op);
                     if let Ok(result) = result {
-                        let selected = groups(&view.facts)
-                            .into_iter()
-                            .filter(|group| nodes.contains(&group.0))
-                            .collect();
-                        let mut facts = catalog.facts(ids.clone(), selected);
-                        // A retained original's unselected bodies keep exact
-                        // dependency carriers, but add no group demand. The
-                        // oracle scans raw edges across every ordinal rather
-                        // than reading production's native-owner index.
-                        let available = carrier_ids(&view.facts);
+                        let mut selected = carriers.unwrap();
+                        for node in nodes {
+                            let carrier = rows
+                                .resolve(&view, catalog.originals[*node].descriptor.id)
+                                .unwrap();
+                            for ordinal in ORDINALS {
+                                if let Some(group) = rows.group(&view, (*node, ordinal), carrier) {
+                                    selected.insert(group);
+                                }
+                            }
+                        }
+                        let mut physical = rows.close(selected);
+                        // All bodies' source bytes retain available dependency
+                        // carriers; this adds no executable group demand.
                         loop {
-                            let prior = facts.clone();
-                            let carriers = carrier_ids(&prior);
-                            let mut needed = carriers.clone();
-                            for (from, targets) in &catalog.edges {
-                                if carriers.contains(&catalog.originals[from.0].descriptor.id) {
-                                    for (target, _) in targets {
-                                        let id = catalog.originals[*target].descriptor.id;
-                                        if available.contains(&id) {
-                                            needed.insert(id);
+                            let prior = physical.clone();
+                            for row in &prior {
+                                if let Fact::Carrier(id) = row.fact {
+                                    if let Some(node) = catalog
+                                        .originals
+                                        .iter()
+                                        .position(|entry| entry.descriptor.id == id)
+                                    {
+                                        for ((source, _), targets) in &catalog.edges {
+                                            if *source == node {
+                                                for (target, _) in targets {
+                                                    if let Some(carrier) = rows.resolve(
+                                                        &view,
+                                                        catalog.originals[*target].descriptor.id,
+                                                    ) {
+                                                        physical.insert(carrier);
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
-                            facts = catalog.facts(needed, groups(&prior));
-                            if facts == prior {
+                            physical = rows.close(physical);
+                            if physical == prior {
                                 break;
                             }
                         }
+                        let namespace = view
+                            .namespace
+                            .iter()
+                            .filter(|(_, carrier)| physical.contains(carrier))
+                            .map(|(id, carrier)| (*id, *carrier))
+                            .collect();
                         actual[*to] = Some(result);
                         model[*to] = Some(View {
                             inventory: view.inventory,
-                            facts,
+                            physical,
+                            namespace,
                             roots: ids,
                         });
                         coverage.projections += 1;
@@ -695,27 +1077,67 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                         .unwrap()
                         .merge(actual[*right].as_ref().unwrap());
                     prop_assert!(result.is_ok(), "step {}: {:?}: {:?}", step, op, result);
-                    let inventory = if right_view.facts.is_empty() {
+                    let inventory = if right_view.physical.is_empty() {
                         left_view.inventory
-                    } else if left_view.facts.is_empty() {
+                    } else if left_view.physical.is_empty() {
                         right_view.inventory
                     } else {
                         left_view.inventory
                     };
-                    let mut facts = left_view.facts;
-                    facts.extend(right_view.facts);
+                    let mut physical = left_view.physical.clone();
+                    physical.extend(&right_view.physical);
+                    coverage.namespace_masks += right_view
+                        .namespace
+                        .iter()
+                        .filter(|(id, carrier)| {
+                            left_view
+                                .namespace
+                                .get(id)
+                                .is_some_and(|old| old != *carrier)
+                        })
+                        .count();
+                    let mut namespace = left_view.namespace;
+                    namespace.extend(right_view.namespace);
                     let mut roots = left_view.roots;
                     roots.extend(right_view.roots);
                     actual[*to] = Some(result.unwrap());
                     model[*to] = Some(View {
                         inventory,
-                        facts,
+                        physical,
+                        namespace,
                         roots,
                     });
                     coverage.merges += 1;
                     if left_view.inventory != right_view.inventory {
                         coverage.cross_merges += 1;
                     }
+                } else {
+                    coverage.absent_slots += 1;
+                }
+            }
+            Op::Recover {
+                from,
+                inventory,
+                to,
+            } => {
+                if let Some(mut view) = model[*from].clone() {
+                    let original = actual[*from].as_ref().unwrap();
+                    let result = inventories[*inventory].recover_selection(
+                        &inventories[*inventory].empty_view(),
+                        original.entries(),
+                        &original.capture_graph_selection(),
+                        &original.binding_dependencies(),
+                    );
+                    prop_assert!(
+                        result.is_ok(),
+                        "exact recovery at step {}: {:?}",
+                        step,
+                        result
+                    );
+                    view.inventory = *inventory;
+                    actual[*to] = Some(result.unwrap());
+                    model[*to] = Some(view);
+                    coverage.recoveries += 1;
                 } else {
                     coverage.absent_slots += 1;
                 }
@@ -727,17 +1149,22 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                 all,
             } => {
                 if let Some(view) = &model[*from] {
-                    let roots = if *all {
+                    let requested = if *all {
                         ORDINALS
                             .map(|ordinal| (*node, ordinal))
                             .into_iter()
-                            .collect()
+                            .collect::<BTreeSet<_>>()
                     } else {
                         BTreeSet::from([(*node, *ordinal)])
                     };
-                    let expected = roots.is_subset(&groups(&view.facts))
-                        && carrier_ids(&view.facts)
-                            .contains(&catalog.originals[*node].descriptor.id);
+                    let selected = rows
+                        .resolve(view, catalog.originals[*node].descriptor.id)
+                        .and_then(|carrier| {
+                            requested
+                                .iter()
+                                .map(|raw| rows.group(view, *raw, carrier))
+                                .collect::<Option<BTreeSet<_>>>()
+                        });
                     let root = if *all {
                         NativeRequirementRoot::AllGroups(catalog.originals[*node].descriptor.id)
                     } else {
@@ -750,14 +1177,39 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                         .as_ref()
                         .unwrap()
                         .native_requirements_with_groups_from_roots(&[root]);
-                    prop_assert_eq!(result.is_ok(), expected, "step {}: {:?}", step, op);
-                    if let Ok((result, selected)) = result {
-                        prop_assert_eq!(selected, catalog.selection(&catalog.group_closure(&roots)), "exact requested closure excludes unrelated available groups at step {}", step);
-                        prop_assert_eq!(result.bindings, catalog.bindings_for(&roots));
+                    prop_assert_eq!(
+                        result.is_ok(),
+                        selected.is_some(),
+                        "step {}: {:?}",
+                        step,
+                        op
+                    );
+                    if let Ok((result, actual_selected)) = result {
+                        let closure = rows.close(selected.unwrap());
+                        let raw = closure
+                            .iter()
+                            .filter_map(|row| {
+                                if let Fact::Group(group) = row.fact {
+                                    Some(group)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                        prop_assert_eq!(
+                            actual_selected,
+                            catalog.selection(&raw),
+                            "exact qualified closure at step {}",
+                            step
+                        );
+                        prop_assert_eq!(result.bindings, catalog.bindings_for(&requested));
                         prop_assert!(result.packages.is_empty());
                         coverage.reads += 1;
                     } else {
                         coverage.read_refusals += 1;
+                        if requested.is_subset(&groups(&view.facts())) {
+                            coverage.carrier_qualified_refusals += 1;
+                        }
                     }
                 } else {
                     coverage.absent_slots += 1;
@@ -766,9 +1218,77 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
         }
         for slot in 0..SLOTS {
             if let (Some(view), Some(observed)) = (&model[slot], &actual[slot]) {
+                if view.physical.len() > view.facts().len() {
+                    coverage.duplicate_scope_views += 1;
+                }
+                coverage.cross_scope_group_carriers += view
+                    .physical
+                    .iter()
+                    .filter(|row| {
+                        matches!(row.fact, Fact::Group(_)) && rows.carrier(**row).scope != row.scope
+                    })
+                    .count();
+                let graph = observed.capture_graph_selection();
+                let expected_handles = view
+                    .physical
+                    .iter()
+                    .map(|row| rows.handles[row])
+                    .collect::<BTreeSet<_>>();
+                let actual_handles = graph
+                    .bindings
+                    .into_iter()
+                    .map(ArtifactBindingNode::Artifact)
+                    .chain(
+                        graph
+                            .native_groups
+                            .into_iter()
+                            .map(ArtifactBindingNode::Group),
+                    )
+                    .collect::<BTreeSet<_>>();
+                prop_assert_eq!(
+                    actual_handles,
+                    expected_handles,
+                    "physical closure at step {}, slot {}",
+                    step,
+                    slot
+                );
+                let expected_namespace = view
+                    .namespace
+                    .values()
+                    .map(|row| match rows.handles[row] {
+                        ArtifactBindingNode::Artifact(binding) => binding,
+                        _ => unreachable!(),
+                    })
+                    .collect::<BTreeSet<_>>();
+                prop_assert_eq!(
+                    graph.namespace.into_iter().collect::<BTreeSet<_>>(),
+                    expected_namespace,
+                    "chosen namespace at step {}, slot {}",
+                    step,
+                    slot
+                );
+                let expected_edges = view
+                    .physical
+                    .iter()
+                    .flat_map(|source| {
+                        rows.edges[source].iter().map(|(target, edge)| {
+                            (rows.handles[source], rows.handles[target], edge.clone())
+                        })
+                    })
+                    .collect::<BTreeSet<_>>();
+                prop_assert_eq!(
+                    observed
+                        .binding_dependencies()
+                        .into_iter()
+                        .collect::<BTreeSet<_>>(),
+                    expected_edges,
+                    "independent raw rows at step {}, slot {}",
+                    step,
+                    slot
+                );
                 prop_assert_eq!(
                     observed.selected_native_groups(),
-                    catalog.selection(&groups(&view.facts)),
+                    catalog.selection(&groups(&view.facts())),
                     "step {}, slot {}",
                     step,
                     slot
@@ -790,7 +1310,7 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                         .iter()
                         .map(|d| d.id)
                         .collect::<BTreeSet<_>>(),
-                    carrier_ids(&view.facts),
+                    carrier_ids(&view.facts()),
                     "step {}, slot {}",
                     step,
                     slot
@@ -802,7 +1322,7 @@ fn run_history(catalog: &Catalog, ops: &[Op]) -> Result<Coverage, TestCaseError>
                 .iter()
                 .flatten()
                 .filter(|view| view.inventory == inventory)
-                .flat_map(|view| view.facts.iter().copied())
+                .flat_map(|view| view.physical.iter().copied())
                 .collect::<BTreeSet<_>>();
             if prior_live[inventory] > live.len() {
                 coverage.reclaimed += prior_live[inventory] - live.len();
@@ -846,7 +1366,172 @@ fn staged_future_interface_does_not_widen_prior_views() {
     assert!(coverage.admissions >= 6 && coverage.refusals >= 2);
     assert!(coverage.reads >= 2 && coverage.read_refusals >= 3);
     assert!(coverage.repeated >= 1 && coverage.cross_merges >= 1 && coverage.reclaimed > 0);
+    assert!(
+        coverage.recoveries > 0
+            && coverage.namespace_masks > 0
+            && coverage.duplicate_scope_views > 0
+    );
+    assert!(coverage.carrier_qualified_refusals > 0 && coverage.cross_scope_group_carriers > 0);
     eprintln!("native staged regression coverage: {coverage:?}");
+}
+
+#[test]
+fn scoped_carrier_namespace_controls_projection_and_recovery() {
+    let catalog = Catalog::new(&[0; MODULES], &[0; 2 * MODULES], 1);
+    let history = [
+        Op::Empty {
+            inventory: 0,
+            to: 0,
+        },
+        Op::Empty {
+            inventory: 1,
+            to: 1,
+        },
+        Op::Admit {
+            parent: 0,
+            root: 0,
+            future: false,
+            reverse: false,
+            to: 2,
+        },
+        Op::Admit {
+            parent: 1,
+            root: 2,
+            future: false,
+            reverse: false,
+            to: 3,
+        },
+        Op::Merge {
+            left: 2,
+            right: 3,
+            to: 4,
+        },
+        Op::Read {
+            from: 4,
+            node: 0,
+            ordinal: 3,
+            all: false,
+        },
+        Op::Read {
+            from: 4,
+            node: 0,
+            ordinal: 29,
+            all: false,
+        },
+        Op::Recover {
+            from: 4,
+            inventory: 1,
+            to: 5,
+        },
+        Op::Project {
+            from: 5,
+            nodes: vec![0],
+            to: 6,
+        },
+        Op::Read {
+            from: 6,
+            node: 0,
+            ordinal: 3,
+            all: false,
+        },
+        Op::Read {
+            from: 6,
+            node: 0,
+            ordinal: 29,
+            all: false,
+        },
+    ];
+    let coverage = run_history(&catalog, &history).unwrap();
+    assert_eq!(coverage.carrier_qualified_refusals, 1);
+    assert_eq!(coverage.read_refusals, 2);
+    assert_eq!(coverage.reads, 2);
+    assert_eq!(coverage.recoveries, 1);
+    assert!(coverage.namespace_masks > 0 && coverage.duplicate_scope_views > 0);
+    eprintln!("scoped carrier regression coverage: {coverage:?}");
+}
+
+#[test]
+fn same_carrier_branch_groups_remain_ambiguous_after_readmission() {
+    let catalog = Catalog::new(&[0; MODULES], &[0; 2 * MODULES], 1);
+    let history = [
+        Op::Empty {
+            inventory: 0,
+            to: 0,
+        },
+        Op::Admit {
+            parent: 0,
+            root: 2,
+            future: false,
+            reverse: false,
+            to: 1,
+        },
+        Op::Project {
+            from: 1,
+            nodes: vec![0],
+            to: 1,
+        },
+        Op::Admit {
+            parent: 1,
+            root: 0,
+            future: false,
+            reverse: false,
+            to: 2,
+        },
+        Op::Admit {
+            parent: 1,
+            root: 1,
+            future: true,
+            reverse: false,
+            to: 3,
+        },
+        Op::Merge {
+            left: 3,
+            right: 2,
+            to: 4,
+        },
+        Op::Read {
+            from: 4,
+            node: 1,
+            ordinal: 3,
+            all: false,
+        },
+        Op::Admit {
+            parent: 4,
+            root: 0,
+            future: false,
+            reverse: false,
+            to: 5,
+        },
+        Op::Read {
+            from: 5,
+            node: 1,
+            ordinal: 3,
+            all: false,
+        },
+        Op::Project {
+            from: 5,
+            nodes: vec![1],
+            to: 6,
+        },
+        Op::Recover {
+            from: 5,
+            inventory: 1,
+            to: 7,
+        },
+        Op::Read {
+            from: 7,
+            node: 1,
+            ordinal: 3,
+            all: false,
+        },
+    ];
+    let coverage = run_history(&catalog, &history).unwrap();
+    assert_eq!(coverage.carrier_qualified_refusals, 3);
+    assert_eq!(coverage.read_refusals, 3);
+    assert_eq!(coverage.recoveries, 1);
+    assert_eq!(coverage.refusals, 1);
+    assert!(coverage.duplicate_scope_views > 0 && coverage.reclaimed > 0);
+    eprintln!("same carrier branch coverage: {coverage:?}");
 }
 
 proptest! {
@@ -891,6 +1576,8 @@ proptest! {
         prop_assert!(coverage.admissions >= 6 && coverage.refusals >= 2);
         prop_assert!(coverage.clones > 0 && coverage.projections > 0 && coverage.merges >= 2);
         prop_assert!(coverage.cross_merges > 0 && coverage.reclaimed > 0 && coverage.read_refusals >= 3);
+        prop_assert!(coverage.recoveries > 0 && coverage.namespace_masks > 0 && coverage.duplicate_scope_views > 0);
+        prop_assert!(coverage.carrier_qualified_refusals > 0 && coverage.cross_scope_group_carriers > 0);
         eprintln!("native history coverage: {coverage:?}");
     }
 }
