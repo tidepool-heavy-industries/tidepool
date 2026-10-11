@@ -3263,10 +3263,57 @@ async fn recipe_workspace_definitions_compile_before_resident_execution() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "broad authored compiler recovery performance comparison"]
 async fn broad_collaboration_recipe_preserves_authored_compilation_workload() {
+    // The counted runner executes this alone. Every Git task in the case uses
+    // the same dates; restore the process-local policy even if acceptance unwinds.
+    struct GitDates(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for GitDates {
+        fn drop(&mut self) {
+            for (key, previous) in &self.0 {
+                match previous {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+    let _dates = GitDates(
+        ["GIT_AUTHOR_DATE", "GIT_COMMITTER_DATE"]
+            .into_iter()
+            .map(|key| {
+                let previous = std::env::var_os(key);
+                std::env::set_var(key, "2000-01-01T00:00:00Z");
+                (key, previous)
+            })
+            .collect(),
+    );
+    let (_, _, phases, _) = super::test_campaign::prepare_performance_traces();
+    super::test_campaign::install_tracing();
     let repository = recipe_workspace(Some(&["Project.CollaborationChecks.collaboration"]));
-    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
-        .await
-        .expect("the full authored collaboration recipe must execute with its broad import set");
+    let artifact_root =
+        std::path::PathBuf::from(std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").unwrap());
+    let retained = artifact_root.join("authored-workspace");
+    std::fs::create_dir(&retained).unwrap();
+    crate::exomonad::workspace::copy_authored(repository.path(), &retained).unwrap();
+    super::test_campaign::record_phase(
+        &phases,
+        serde_json::json!({
+            "phase": "broad_collaboration_started",
+            "authored_workspace": retained,
+            "git_dates": "2000-01-01T00:00:00Z",
+        }),
+    );
+    let started = std::time::Instant::now();
+    let result = crate::exomonad::check(Some(repository.path().to_path_buf()), true).await;
+    super::test_campaign::record_phase(
+        &phases,
+        serde_json::json!({
+            "phase": "broad_collaboration_completed",
+            "elapsed_ns": started.elapsed().as_nanos(),
+            "passed": result.is_ok(),
+            "error": result.as_ref().err().map(ToString::to_string),
+        }),
+    );
+    result.expect("the full authored collaboration recipe must execute with its broad import set");
 }
 
 #[tokio::test(flavor = "multi_thread")]
