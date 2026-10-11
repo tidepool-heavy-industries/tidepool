@@ -3717,8 +3717,6 @@ fn compile_root(
     )
     .with_actor_path(root_declaration_recovery::root_path())
     .with_persistence_policy(exomonad_actor::ActorPersistencePolicy::Durable)
-    // Profiles classify resident Haskell rows, not the native Codex sandbox.
-    // The root allocates worktrees and may attenuate children to ReadOnly.
     .with_capabilities(exomonad_actor::ActorCapabilities::default());
     if let Some(layers) = source {
         descriptor = descriptor.with_source_layer(
