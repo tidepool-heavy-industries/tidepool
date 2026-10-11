@@ -49,7 +49,8 @@ class BuckProfileConfiguration(unittest.TestCase):
 
     def test_resolved_rule_argv_keeps_hot_libraries_and_harness_policy_distinct(self):
         for profile in ("fast-dev", "debug", "production"):
-            for package in ("tidepool", "tidepool-codegen", "tidepool-repr", "tidepool-heap"):
+            for package in ("tidepool", "tidepool-codegen", "tidepool-repr", "tidepool-heap",
+                            "tidepool-toolchain"):
                 for wrapper in ("tidepool_rust_library", "tidepool_rust_binary",
                                 "tidepool_rust_test", "tidepool_rust_isolated_test"):
                     with self.subTest(profile=profile, package=package, wrapper=wrapper):

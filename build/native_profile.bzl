@@ -1,7 +1,7 @@
 """Shared first-party native compiler profiles selected through Buck config."""
 
 _PROFILES = ["fast-dev", "debug", "production"]
-_HOT_RUST_PACKAGES = ["tidepool-codegen", "tidepool-repr", "tidepool-heap"]
+_HOT_RUST_PACKAGES = ["tidepool-codegen", "tidepool-repr", "tidepool-heap", "tidepool-toolchain"]
 
 def selected_native_profile():
     profile = read_root_config("tidepool", "profile", "fast-dev")
@@ -10,7 +10,7 @@ def selected_native_profile():
     return profile
 
 def rust_optimization_level(package_name, is_library):
-    # Fast-dev reuses optimized engine libraries. Test harnesses, including
+    # Fast-dev reuses optimized hot libraries. Test harnesses, including
     # engine unit tests that compile their owning code again, stay at O0.
     profile = selected_native_profile()
     if profile == "production":
