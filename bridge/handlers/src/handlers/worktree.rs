@@ -1271,8 +1271,8 @@ pub fn render_worktree_error(error: &WorktreeError) -> String {
             id.raw
         ),
         WorktreeError::WorktreeUnauthorized(id) => format!(
-            "worktree {} is observable, but this operation requires its binding or an explicit \
-             integration grant; ask the owning actor to perform it",
+            "worktree {} is observable, but this operation requires suitable workspace access \
+             or explicit repository authority; ask the owning actor to perform it",
             id.raw
         ),
         WorktreeError::WorktreeAuthorityDenied(detail) => {
