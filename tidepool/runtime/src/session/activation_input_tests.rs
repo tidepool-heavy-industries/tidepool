@@ -3398,6 +3398,15 @@ fn display_owner_shares_checked_segment_inputs_across_unrelated_value_prefix() {
                 previous.original_execution_digest(),
                 "the later item must have a broader actual original context"
             );
+            if admission.original_context_digest() != previous.original_context_digest() {
+                for (label, observed) in [
+                    ("earlier", previous.as_ref()),
+                    ("later", admission.as_ref()),
+                ] {
+                    let projected = observed.original_display_context().unwrap().declarations();
+                    eprintln!("DISPLAY_OBSERVATION {label} descriptors={:?} dependencies={:?} projection={:?} lexical={:?}", projected.artifact_view().descriptors(), projected.artifact_view().dependencies(), projected.compiler_input_projection(), projected.lexical_graph());
+                }
+            }
             assert_eq!(
                 admission.original_context_digest(),
                 previous.original_context_digest()
