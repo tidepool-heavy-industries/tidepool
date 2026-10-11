@@ -518,7 +518,9 @@ def parse_args(argv):
                         help='retain bounded stdout/stderr and outcome records for every test')
     parser.add_argument('--retain-artifacts', action='store_true',
                         help='preserve per-case artifact roots after passing tests')
-    parser.add_argument('--compiler-mode', choices=('direct', 'owned-resident'), default='direct',
+    parser.add_argument('--case-compiler-mode', action='append', default=[], metavar='NAME=MODE',
+                        help='declared per-case compiler default; explicit --compiler-mode takes precedence')
+    parser.add_argument('--compiler-mode', choices=('direct', 'owned-resident'), default=None,
                         help='select an explicitly owned compiler for each isolated test')
     parser.add_argument('--trace-profile', choices=('full', 'minimal'),
                         help='campaign trace detail profile for a retained performance case')
@@ -564,6 +566,14 @@ def parse_args(argv):
             parser.error('--case-timeout names must be unique')
         case_timeouts[name] = seconds
     options.case_timeouts = case_timeouts
+    options.case_compiler_modes = {}
+    for override in options.case_compiler_mode:
+        name, separator, mode = override.partition('=')
+        if not name or not separator or mode not in ('direct', 'owned-resident'):
+            parser.error('--case-compiler-mode must be NAME=direct or NAME=owned-resident')
+        if name in options.case_compiler_modes:
+            parser.error('--case-compiler-mode names must be unique')
+        options.case_compiler_modes[name] = mode
     if options.jobs is not None and options.jobs <= 0:
         parser.error('--jobs must be positive')
     if options.expected_count is not None and options.expected_count <= 0:
@@ -604,6 +614,9 @@ def select_tests(all_names, ignored_names, options):
     unknown_timeouts = sorted(set(options.case_timeouts) - set(selected))
     if unknown_timeouts:
         raise RuntimeError(f'case timeout names are not selected: {unknown_timeouts!r}')
+    unknown_modes = sorted(set(options.case_compiler_modes) - set(all_names))
+    if unknown_modes:
+        raise RuntimeError(f'case compiler mode names are not discovered: {unknown_modes!r}')
     return selected
 
 
@@ -1429,13 +1442,20 @@ def main(argv=None):
             if INTERRUPT_SIGNAL is not None:
                 raise RunnerInterrupted(INTERRUPT_SIGNAL)
             record = {}
-            artifact_root = (options.output_dir / hashlib.sha256(name.encode()).hexdigest() / 'artifacts'
-                             if options.output_dir is not None else None)
+            compiler_mode = (options.compiler_mode or
+                             options.case_compiler_modes.get(name, 'direct'))
+            temporary_output = (Path(tempfile.mkdtemp(prefix='tidepool-libtest-case-'))
+                                if compiler_mode == 'owned-resident' and options.output_dir is None
+                                else None)
+            output_dir = options.output_dir or temporary_output
+            record['temporary_output_dir'] = str(temporary_output) if temporary_output else None
+            artifact_root = (output_dir / hashlib.sha256(name.encode()).hexdigest() / 'artifacts'
+                             if output_dir is not None else None)
             outcome = run_one(
                 options.binary, name, name in ignored_names,
                 options.case_timeouts.get(name, options.timeout), record,
                 options.service_slice if options.delegated_service else None,
-                artifact_root, options.compiler_mode, options.resource_env,
+                artifact_root, compiler_mode, options.resource_env,
                 options.retain_artifacts, options.foreground_jobs, options.preparation_jobs,
                 options.trace_profile, options.compiler_workers,
             )
@@ -1444,8 +1464,10 @@ def main(argv=None):
         def retain_result(name, outcome):
             nonlocal failures
             _, (passed, output, stderr), record = outcome
-            if options.output_dir is not None:
-                retain_output(options.output_dir, name, passed, output, stderr, record)
+            output_dir = options.output_dir or record.get('temporary_output_dir')
+            if output_dir is not None:
+                output_dir = Path(output_dir)
+                retain_output(output_dir, name, passed, output, stderr, record)
                 artifact_root = Path(record['artifact_root'])
                 if artifact_root.exists():
                     (artifact_root / 'case.json').write_text(json.dumps({
@@ -1453,6 +1475,8 @@ def main(argv=None):
                         'scenario': 'failed' if record.get('failed_test_count') else record['status'],
                         'cleanup': record.get('delegated_service', {}).get('cleanup_confirmed'),
                     }, indent=2) + '\n')
+            if record.get('temporary_output_dir'):
+                print(f'Case evidence {name}: {output_dir}', flush=True)
             print(f'{"PASS" if passed else "FAIL"} {name}', flush=True)
             if not passed:
                 failures += 1

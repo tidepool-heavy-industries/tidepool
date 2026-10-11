@@ -2310,6 +2310,90 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(result, 0, errors)
         self.assertCountEqual(launched, ['suite::works', 'suite::also_works'])
 
+    def test_declared_case_compiler_modes_preserve_explicit_global_precedence(self):
+        for global_mode, expected in ((None, 'owned-resident'), ('direct', 'direct')):
+            with self.subTest(global_mode=global_mode):
+                arguments = ['--exact', 'suite::works', '--expected-count', '1',
+                             '--case-compiler-mode', 'suite::works=owned-resident',
+                             '--output-dir', str(Path(self.tmp.name) / 'modes')]
+                if global_mode:
+                    arguments += ['--compiler-mode', global_mode]
+                records = []
+
+                def case(binary, name, ignored, timeout, record, service_slice,
+                         artifact_root, compiler_mode, *rest):
+                    records.append(compiler_mode)
+                    record.update(artifact_root=str(artifact_root), status='completed')
+                    return True, '', ''
+
+                with patch.object(runner, 'run_one', side_effect=case):
+                    result, _, errors = self.invoke(arguments, lambda argv, *args, **kwargs: self.discover(argv))
+                self.assertEqual(result, 0, errors)
+                self.assertEqual(records, [expected])
+
+    def test_unselected_declared_case_mode_does_not_change_focused_case(self):
+        modes = []
+
+        def case(binary, name, ignored, timeout, record, service_slice,
+                 artifact_root, compiler_mode, *rest):
+            modes.append(compiler_mode)
+            return True, '', ''
+
+        with patch.object(runner, 'run_one', side_effect=case):
+            result, _, errors = self.invoke(
+                ['--exact', 'suite::also_works', '--expected-count', '1',
+                 '--case-compiler-mode', 'suite::works=owned-resident'],
+                lambda argv, *args, **kwargs: self.discover(argv))
+        self.assertEqual(result, 0, errors)
+        self.assertEqual(modes, ['direct'])
+
+    def test_invalid_case_compiler_modes_refuse_before_discovery(self):
+        for arguments in (
+            ['--case-compiler-mode', 'suite::works=unknown'],
+            ['--case-compiler-mode', '=owned-resident'],
+            ['--case-compiler-mode', 'suite::works'],
+            ['--case-compiler-mode', 'suite::works=direct',
+             '--case-compiler-mode', 'suite::works=owned-resident'],
+        ):
+            with self.subTest(arguments=arguments), patch.object(runner, 'execute') as execute, \
+                 contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                runner.main([str(self.binary), *arguments])
+            execute.assert_not_called()
+
+    def test_declared_case_compiler_modes_refuse_unknown_names(self):
+        for name in ('suite::absent',):
+            with self.subTest(name=name), patch.object(runner, 'run_one') as execute:
+                result, _, errors = self.invoke(
+                    ['--exact', 'suite::works', '--expected-count', '1',
+                     '--case-compiler-mode', name + '=owned-resident'], lambda argv, *args, **kwargs: self.discover(argv))
+            self.assertEqual(result, 1)
+            self.assertIn('case compiler mode names are not discovered', errors)
+            execute.assert_not_called()
+
+    def test_declared_owned_resident_case_retains_temporary_failure_evidence(self):
+        retained = Path(self.tmp.name) / 'temporary-case'
+        retained.mkdir()
+
+        def case(binary, name, ignored, timeout, record, service_slice,
+                 artifact_root, compiler_mode, *rest):
+            self.assertEqual(compiler_mode, 'owned-resident')
+            artifact_root.mkdir(parents=True)
+            record.update(artifact_root=str(artifact_root), status='cleanup_failed',
+                          process_cleanup_status='unconfirmed')
+            return False, '', 'cleanup unconfirmed'
+
+        with patch.object(runner.tempfile, 'mkdtemp', return_value=str(retained)), \
+             patch.object(runner, 'run_one', side_effect=case):
+            result, output, errors = self.invoke(
+                ['--exact', 'suite::works', '--expected-count', '1',
+                 '--case-compiler-mode', 'suite::works=owned-resident'], lambda argv, *args, **kwargs: self.discover(argv))
+        self.assertEqual(result, 1)
+        self.assertIn(str(retained), output)
+        report = json.loads(next(retained.glob('*.json')).read_text())
+        self.assertFalse(report['passed'])
+        self.assertEqual(report['execution']['process_cleanup_status'], 'unconfirmed')
+        self.assertTrue(Path(report['execution']['artifact_root']).is_dir())
+
     def test_case_timeouts_apply_to_process_and_delegated_watchdog_and_receipt(self):
         retained = Path(self.tmp.name) / 'case-timeouts'
         limits = {}
