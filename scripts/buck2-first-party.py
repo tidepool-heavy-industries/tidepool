@@ -1292,6 +1292,10 @@ def facade_test_cases(binary):
         ("facade_selected_notifications_test", [
             "actor_host::tests::haskell_actor_sends_normal_steering_without_a_native_session",
         ], host_env, host_paths, host_resources, True, False, 600),
+        ("facade_selected_routing_tests", ["actor_host::documentation_tests::" + name for name in (
+            "work_actor_consumes_later_progress_without_rearming",
+            "attention_actor_recipe_retains_independent_sources_through_closure",
+        )], host_env, host_paths, host_resources, True, False, 600),
         ("facade_exact_actor_effects_tests", ["actor_host::tests::" + name for name in (
             "haskell_mailbox_preserves_state_and_opaque_replies_across_calls",
             "stateful_actor_drains_accepted_messages_into_its_retained_exit",
