@@ -2917,9 +2917,28 @@ async fn forest_operator_survives_model_root_recovery() {
                 )
                 .await;
                 assert_eq!(replied["status"], "replied", "{replied:?}");
-                let response = submit(&operator, "inspectFull <$> pollResponse answer").await;
+                let output_store =
+                    display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let response = campaign
+                    .drive_actor_output(
+                        &output_store,
+                        submit(
+                            &operator,
+                            "_ <- pollResponse answer >>= display . inspectFull",
+                        ),
+                    )
+                    .await;
+                assert_eq!(
+                    response.status,
+                    tidepool_runtime::session::WorkbenchRunStatus::Committed
+                );
                 assert!(
-                    response.items.iter().any(|item| item.output.contains("42")),
+                    response
+                        .items
+                        .iter()
+                        .flat_map(|item| &item.operations)
+                        .filter_map(|operation| operation.display.as_ref())
+                        .any(|display| display.text.contains("42")),
                     "{response:?}"
                 );
                 campaign
@@ -2957,10 +2976,24 @@ async fn forest_operator_survives_model_root_recovery() {
                     tidepool_runtime::session::ResidentSessionState::Reusable
                 );
                 assert_ne!(replacement.identity(), campaign.actor.identity());
+                let retained = campaign
+                    .drive_actor_output(
+                        &output_store,
+                        submit(&operator, "display retainedOperatorValue"),
+                    )
+                    .await;
                 assert_eq!(
-                    submit(&operator, "retainedOperatorValue").await.items[0].output,
-                    "123"
+                    retained.status,
+                    tidepool_runtime::session::WorkbenchRunStatus::Committed
                 );
+                let displays = retained
+                    .items
+                    .iter()
+                    .flat_map(|item| &item.operations)
+                    .filter_map(|operation| operation.display.as_ref())
+                    .collect::<Vec<_>>();
+                assert_eq!(displays.len(), 1, "{retained:?}");
+                assert_eq!(displays[0].text, "123");
                 assert_eq!(
                     campaign
                         .forest
