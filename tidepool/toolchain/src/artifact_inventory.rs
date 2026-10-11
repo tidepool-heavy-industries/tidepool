@@ -2523,6 +2523,21 @@ impl ArtifactInventory {
             &[],
             &hidden_parents,
         );
+        let hidden_projection = if issued_groups.is_empty() {
+            None
+        } else {
+            let previous = fixed.view.read_projection(&state);
+            let mut nodes = previous.nodes.clone();
+            // The committed group rows resolve every artifact and existing group
+            // through fixed custody; their new group edges form the only delta.
+            nodes.extend(bound.keys().copied());
+            Some(ViewReadProjection {
+                nodes,
+                entries: previous.entries.clone(),
+                issuing_ids: previous.issuing_ids.clone(),
+                dependencies: OnceLock::new(),
+            })
+        };
         let totals = (
             state.canonical_hits.load(Ordering::Relaxed),
             state.canonical_comparisons.load(Ordering::Relaxed),
@@ -2543,6 +2558,13 @@ impl ArtifactInventory {
                 materialization_parents: vec![],
                 materialization: Mutex::new(BTreeMap::new()),
             });
+            fixed
+                .view
+                .reads
+                .read_projection
+                .set(hidden_projection.expect("issued availability projection"))
+                .ok()
+                .expect("fresh availability projection");
             for group in &issued_groups {
                 fixed.groups.insert(
                     NativeGroupKey {
@@ -5833,6 +5855,20 @@ mod tests {
                     assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 0);
                 }
                 let before = inventory.metrics();
+                // Availability and executable demand keep independent caches;
+                // both read orders reuse the closure already admitted above.
+                if ordinal % 2 == 0 {
+                    fixed.view.selected_native_groups();
+                    fixed.view.entries();
+                } else {
+                    fixed.view.entries();
+                    fixed.view.selected_native_groups();
+                }
+                assert_eq!(inventory.metrics().graph_visits, before.graph_visits);
+                assert_eq!(
+                    fixed.view.selected_native_groups().len(),
+                    ordinal as usize + 1
+                );
                 cursor = inventory
                     .admit_bound_target(
                         &mut fixed,
@@ -7948,7 +7984,23 @@ mod tests {
                 .unwrap();
             for parent in [joined, narrowed, restored] {
                 let owning = parent.inventory().clone();
-                let before = owning.0.lock().unwrap().selection_plans.len();
+                let before_nodes = owning
+                    .0
+                    .lock()
+                    .unwrap()
+                    .indices
+                    .keys()
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let before_plans = owning
+                    .0
+                    .lock()
+                    .unwrap()
+                    .selection_plans
+                    .keys()
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let before_edges = parent.binding_dependencies();
                 let validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
                 let receipt =
                     crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
@@ -7964,11 +8016,25 @@ mod tests {
                         &native.descriptor.owner.module,
                     )
                     .unwrap();
-                let after = owning.0.lock().unwrap().selection_plans.len();
-                assert_eq!(
-                    after, before,
-                    "whole-original certification must retain the issuer's exact group"
-                );
+                let state = owning.0.lock().unwrap();
+                let after_nodes = state.indices.keys().copied().collect::<BTreeSet<_>>();
+                let warm_plans = state.selection_plans.len();
+                for (scope, proof) in &state.selection_plans {
+                    if !before_plans.contains(scope) {
+                        assert!(proof
+                            .nodes
+                            .iter()
+                            .all(|node| { matches!(node, ArtifactBindingNode::Artifact(_)) }));
+                    }
+                }
+                drop(state);
+                // Restoring a narrowed compiler namespace may issue artifact rows;
+                // it cannot replace or add an executable native-group binding.
+                assert!(after_nodes
+                    .difference(&before_nodes)
+                    .all(|node| { matches!(node, InventoryNodeKey::Artifact(_)) }));
+                assert_eq!(parent.binding_dependencies(), before_edges);
+                assert_eq!(scoped_group_child(&parent, group).1, original_values);
                 let compiler_values = parent.namespace().get(&values.descriptor.id).copied();
                 let mut admitted = parent;
                 for _ in 0..2 {
@@ -7993,7 +8059,7 @@ mod tests {
                         vec![group]
                     );
                     assert_eq!(scoped_group_child(&selected, group).1, original_values);
-                    assert_eq!(owning.0.lock().unwrap().selection_plans.len(), before);
+                    assert_eq!(owning.0.lock().unwrap().selection_plans.len(), warm_plans);
                 }
             }
         }
