@@ -1318,6 +1318,50 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
                            "tidepool_rust_isolated_test")
         self.assertEqual(binary["required_test_modules"], ["tidepool/extract-cmd/src/main.rs"])
 
+    def test_toolchain_declares_only_the_resident_admission_case_mode(self):
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        generated = self.rule("tidepool/toolchain", "tidepool_toolchain_unit_tests",
+                              "tidepool_rust_isolated_test")
+        self.assertEqual(generated['case_compiler_modes'], {
+            'artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground':
+            'owned-resident'})
+
+    def test_delegated_command_resource_target_requires_three_ignored_cases(self):
+        metadata = json.loads(self.metadata.read_text())
+        metadata['workspace_members'].append('exomonad-node')
+        metadata['packages'].append(self.package('exomonad-node', 'exomonad/node', [
+            ('exomonad_node', 'lib', 'src/lib.rs'),
+            ('command_resources', 'test', 'tests/command_resources.rs')]))
+        self.metadata.write_text(json.dumps(metadata))
+        self.write('exomonad/node/Cargo.toml', "[package]\nname = 'exomonad-node'\n")
+        self.write('exomonad/node/src/lib.rs', '')
+        self.write('exomonad/node/tests/command_resources.rs', '#[test] fn delegated() {}')
+        result = self.generate('--package', 'exomonad-node')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        generated = self.rule('exomonad/node', 'command_resources', 'tidepool_rust_isolated_test')
+        self.assertTrue(generated['ignored'])
+        self.assertTrue(generated['delegated_service'])
+        self.assertEqual(generated['expected_count'], 3)
+        self.assertEqual(generated['jobs'], 1)
+
+    def test_manual_fingerprint_retains_execution_and_declared_source_resources(self):
+        metadata = json.loads(self.metadata.read_text())
+        package = next(p for p in metadata['packages'] if p['name'] == 'tidepool-extract-cmd')
+        package['targets'].append({'name': 'retained_fingerprint', 'kind': ['test'],
+            'src_path': str(self.root / 'tidepool/extract-cmd/tests/retained_fingerprint.rs'),
+            'edition': '2021'})
+        self.metadata.write_text(json.dumps(metadata))
+        self.write('tidepool/extract-cmd/tests/retained_fingerprint.rs', '#[test] fn probe() {}')
+        result = self.generate()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        generated = self.rule('tidepool/extract-cmd', 'retained_fingerprint', 'tidepool_rust_isolated_test')
+        self.assertEqual(generated['env']['TIDEPOOL_TIMING'], '1')
+        self.assertEqual(generated['resource_env']['TIDEPOOL_FINGERPRINT_FIXTURE_ROOT'],
+                         '$(location :retained_fingerprint_fixtures)')
+        self.assertIn('TIDEPOOL_PRELUDE_DIR', generated['resource_env'])
+        self.assertTrue(generated['haskell_worker'])
+
     def test_catalog_resources_reach_the_generated_delegated_child_command(self):
         result = self.generate()
         self.assertEqual(result.returncode, 0, result.stderr)

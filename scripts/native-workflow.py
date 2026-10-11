@@ -46,6 +46,17 @@ def package_target(packages, package, kind, target=None):
     return targets[target]
 
 
+def ordinary_test_label(target):
+    disposition = target.get("execution_disposition", "ordinary")
+    if disposition not in ("ordinary", "manual_measurement"):
+        raise ValueError(f"unsupported native execution disposition {disposition!r}")
+    if disposition == "manual_measurement":
+        print(f"Manual measurement not executed / not qualified: {target['test']}; "
+              "use test-target with --ignored --exact NAME --expected-count N", file=sys.stderr)
+        return None
+    return target.get("test")
+
+
 def compile_labels(packages, selected):
     """Resolve production and test consumers from the generated Cargo roster."""
     labels = set()
@@ -151,7 +162,8 @@ def main(argv=None):
     if options.command in ("suite", "suite-plan"):
         if options.package not in packages:
             raise ValueError(f"unsupported native package {options.package!r}")
-        labels = sorted(target["test"] for target in packages[options.package]["integration"].values())
+        labels = sorted(label for target in packages[options.package]["integration"].values()
+                        if (label := ordinary_test_label(target)) is not None)
         if not labels:
             raise ValueError(f"{options.package}: no registered integration targets")
         if options.command == "suite-plan":
@@ -180,14 +192,14 @@ def main(argv=None):
         probe_status = execute("build", ["//bridge/haskell:probe_opacity"])
         test_status = execute("test", labels, print_passing_details=True)
         return probe_status or test_status
+    if options.command == "lint":
+        return execute("build", ["//build/rust:native_checks"])
     test_labels = set()
     for package in packages.values():
         for kind in TARGET_KINDS:
             for target in package[kind].values():
-                if "test" in target:
-                    test_labels.add(target["test"])
-    if options.command == "lint":
-        return execute("build", ["//build/rust:native_checks"])
+                if "test" in target and (label := ordinary_test_label(target)) is not None:
+                    test_labels.add(label)
     if options.command == "verify":
         test_labels.update("//bridge/haskell:corpus_" + cohort.replace("-", "_") + "_test" for cohort in COHORTS)
         test_labels.update((

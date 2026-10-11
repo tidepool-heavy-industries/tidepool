@@ -406,6 +406,26 @@ tidepool_rust_isolated_test(
     required_test_modules = [
         "tidepool/extract-cmd/tests/retained_fingerprint.rs",
     ],
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+        "TIDEPOOL_TIMING": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:compiler_deployment",
+        "//build/package:tidepool_extract_runtime_libraries",
+        ":retained_fingerprint_fixtures",
+    ],
+    resource_env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_FINGERPRINT_FIXTURE_ROOT": "$(location :retained_fingerprint_fixtures)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    haskell_worker = True,
     visibility = ["PUBLIC"],
 )
 
@@ -460,6 +480,12 @@ tidepool_rust_isolated_test(
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
     },
     haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+filegroup(
+    name = "retained_fingerprint_fixtures",
+    srcs = {path[len("tests/fixtures/retained_fingerprint/"):]: path for path in glob(["tests/fixtures/retained_fingerprint/*.hs"])},
     visibility = ["PUBLIC"],
 )
 

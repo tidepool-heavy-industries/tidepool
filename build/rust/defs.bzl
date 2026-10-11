@@ -74,6 +74,8 @@ def tidepool_rust_test_cases(
         exact_tests = [],
         expected_count = None,
         ignored = False,
+        case_compiler_modes = {},
+        delegated_service = False,
         timeout = 300,
         jobs = None,
         env = {},
@@ -130,6 +132,12 @@ def tidepool_rust_test_cases(
         args.extend(["--exact", test])
     if expected_count != None:
         args.extend(["--expected-count", str(expected_count)])
+    for test, mode in sorted(case_compiler_modes.items()):
+        if mode not in ["direct", "owned-resident"]:
+            fail("unsupported declared compiler mode: " + mode)
+        args.extend(["--case-compiler-mode", test + "=" + mode])
+    if delegated_service:
+        args.append("--delegated-service")
     if ignored:
         args.append("--ignored")
     sh_test_kwargs = {
@@ -163,6 +171,8 @@ def tidepool_rust_isolated_test(
         exact_tests = [],
         expected_count = None,
         ignored = False,
+        case_compiler_modes = {},
+        delegated_service = False,
         timeout = 300,
         jobs = None,
         resources = [],
@@ -188,6 +198,8 @@ def tidepool_rust_isolated_test(
         exact_tests = exact_tests,
         expected_count = expected_count,
         ignored = ignored,
+        case_compiler_modes = case_compiler_modes,
+        delegated_service = delegated_service,
         timeout = timeout,
         jobs = jobs,
         env = runtime_env,

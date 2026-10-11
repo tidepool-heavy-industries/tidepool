@@ -651,6 +651,10 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if package_name == "tidepool-extract-cmd" and target_name == "no_open_coded_extract_spawns":
         env["TIDEPOOL_WORKSPACE_SOURCE_ROOT"] = "$(location //build/rust:native_qualification_sources)"
         resources.append("//build/rust:native_qualification_sources")
+    if package_name == "tidepool-extract-cmd" and target_name == "retained_fingerprint":
+        env["TIDEPOOL_FINGERPRINT_FIXTURE_ROOT"] = "$(location :retained_fingerprint_fixtures)"
+        env["TIDEPOOL_TIMING"] = "1"
+        resources.append(":retained_fingerprint_fixtures")
     if package_name == "tidepool-bignum" and target_name == "show_double_oracle":
         env["TIDEPOOL_GHC"] = "$(exe toolchains//:ghc)"
         env["TIDEPOOL_DOUBLE_ORACLE_SOURCE"] = "$(location :show_double_oracle_source)"
@@ -674,7 +678,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if (
         package_name in {"tidepool-toolchain", "tidepool-runtime", "tidepool-testing", "tidepool-handlers", "exomonad-actor"}
         or (package_name == "tidepool-extract-cmd" and not unit
-            and target_name in {"daemon_integration", "transaction_integration", "build_products_ownership"})
+            and target_name in {"daemon_integration", "transaction_integration", "build_products_ownership", "retained_fingerprint"})
         or (package_name == "tidepool" and target_name in {
             "facade_prepared_recipe_contract_test", "facade_recipe_source_capture_test",
             "exomonad_action_surface",
@@ -795,6 +799,7 @@ NATIVE_RESOURCE_ENV_KEYS = (
     "TIDEPOOL_EXTRACT",
     "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES",
     "TIDEPOOL_EXTRACT_WORKER",
+    "TIDEPOOL_FINGERPRINT_FIXTURE_ROOT",
     "TIDEPOOL_FREER_RESUME_FIXTURE_DIR",
     "TIDEPOOL_FREER_RETENTION_FIXTURE_DIR",
     "TIDEPOOL_GENERATED_SURFACE_FIXTURES",
@@ -1536,6 +1541,8 @@ tidepool_buildscript_run(
         unit_extra = ""
         env, resources, worker = test_runtime_inputs(package_name, unit_target["name"], unit=True)
         unit_extra = runtime_arguments(env, resources, worker)
+        if package_name == "tidepool-toolchain":
+            unit_extra += '\n    case_compiler_modes = {"artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground": "owned-resident"},'
         if package_name == "tidepool":
             unit_rule = "tidepool_rust_binary"
             unit_extra = '''    env = {"OUT_DIR": "$(location :tidepool_build_script_run[out_dir])"},
@@ -1613,6 +1620,8 @@ tidepool_buildscript_run(
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
         env, resources, worker = test_runtime_inputs(package_name, target["name"])
         extra = runtime_arguments(env, resources, worker)
+        if package_name == "exomonad-node" and target["name"] == "command_resources":
+            extra += '\n    ignored = True,\n    delegated_service = True,\n    expected_count = 3,\n    jobs = 1,'
         if package_name == "exomonad-worktree" and target["name"] == "worktree":
             extra += '\n    companion_executables = {"exomonad-view-helper": "//exomonad/node:view_helper_fixture"},'
         if package["name"] == "tidepool-atomic-write" and target["name"] == "strict_directory":
@@ -1634,8 +1643,12 @@ tidepool_buildscript_run(
             )
         )
         NATIVE_TARGETS[package_name]["integration"][target["name"]] = {"test_build": "//" + CURRENT_DIR + ":" + target["name"] + "_binary", "test": "//" + CURRENT_DIR + ":" + target["name"]}
+        if package_name == "tidepool-extract-cmd" and target["name"] == "retained_fingerprint":
+            NATIVE_TARGETS[package_name]["integration"][target["name"]]["execution_disposition"] = "manual_measurement"
         if package_name == "exomonad-actor" and target["name"] == "actor":
             rules.append(actor_notebook_contract_test_cases(target["name"] + "_binary", env, resources, worker))
+    if package_name == "tidepool-extract-cmd":
+        rules.append('filegroup(\n    name = "retained_fingerprint_fixtures",\n    srcs = {path[len("tests/fixtures/retained_fingerprint/"):]: path for path in glob(["tests/fixtures/retained_fingerprint/*.hs"])},\n    visibility = ["PUBLIC"],\n)\n')
     if package_name == "tidepool-bignum":
         rules.append('''export_file(
     name = "show_double_oracle_source",

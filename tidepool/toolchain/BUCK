@@ -950,6 +950,7 @@ tidepool_rust_isolated_test(
         "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
     },
     haskell_worker = True,
+    case_compiler_modes = {"artifacts::module_product_tests::retained_entry_known_preparation_refusal_allows_same_original_foreground": "owned-resident"},
     visibility = ["PUBLIC"],
 )
 

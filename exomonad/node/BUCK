@@ -194,6 +194,11 @@ tidepool_rust_isolated_test(
     required_test_modules = [
         "exomonad/node/tests/command_resources.rs",
     ],
+
+    ignored = True,
+    delegated_service = True,
+    expected_count = 3,
+    jobs = 1,
     visibility = ["PUBLIC"],
 )
 

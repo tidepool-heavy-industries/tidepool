@@ -1,7 +1,7 @@
 //! Manual matched probe of production prepared-interface construction.
 //!
-//! Run in the repository Nix shell with this checkout's `tidepool-extract`
-//! frontend and Haskell worker selected, and `TIDEPOOL_TIMING=1`.
+//! Run the declared target with `--ignored --exact
+//! unrelated_retained_symbols_do_not_scale_g3_interface --expected-count 1`.
 //! The typed ExtractCmd builder owns request encoding and producer binding.
 
 #![allow(
@@ -11,21 +11,20 @@
 )]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tidepool_extract_cmd::{ExtractCmd, SymbolIdentity};
 
 fn fixture_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/retained_fingerprint")
+    std::env::var_os("TIDEPOOL_FINGERPRINT_FIXTURE_ROOT")
+        .map(PathBuf::from)
+        .expect("declared retained fingerprint fixtures are required")
 }
 
 fn stdlib_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("bridge/haskell/lib")
+    std::env::var_os("TIDEPOOL_PRELUDE_DIR")
+        .map(PathBuf::from)
+        .expect("declared matched runtime source library is required")
 }
 
 fn run(

@@ -296,6 +296,7 @@
           "test_build": "//tidepool/extract-cmd:response_cleanup_binary"
         },
         "retained_fingerprint": {
+          "execution_disposition": "manual_measurement",
           "test": "//tidepool/extract-cmd:retained_fingerprint",
           "test_build": "//tidepool/extract-cmd:retained_fingerprint_binary"
         },

@@ -27,6 +27,38 @@ class NativeWorkflowTests(unittest.TestCase):
             status = workflow.main(arguments)
             return status, buck.call_args_list
 
+    def test_manual_measurement_disposition_preserves_direct_target_and_excludes_broad_suite(self):
+        packages = copy.deepcopy(ROSTER)
+        packages['example']['integration']['manual'] = {
+            'test': '//pkg:manual', 'test_build': '//pkg:manual_binary',
+            'execution_disposition': 'manual_measurement'}
+        with patch.object(workflow, 'roster', return_value=packages), \
+             patch.object(workflow, 'buck', return_value=0) as buck, \
+             contextlib.redirect_stderr(io.StringIO()) as report:
+            self.assertEqual(workflow.main(['suite', 'example']), 0)
+            self.assertEqual(buck.call_args.args[1], ['//pkg:scenario'])
+            self.assertIn('not executed / not qualified: //pkg:manual', report.getvalue())
+            self.assertEqual(workflow.main(['test-target', 'example', 'manual', '--ignored',
+                                            '--exact', 'case', '--expected-count', '1']), 0)
+            self.assertIn('//pkg:manual', buck.call_args.args[1])
+
+    def test_manual_only_suite_does_not_report_empty_execution_as_pass(self):
+        packages = copy.deepcopy(ROSTER)
+        packages['example']['integration']['scenario']['execution_disposition'] = 'manual_measurement'
+        with patch.object(workflow, 'roster', return_value=packages), \
+             patch.object(workflow, 'buck') as buck, \
+             contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(ValueError, 'no registered'):
+            workflow.main(['suite', 'example'])
+        buck.assert_not_called()
+
+    def test_unknown_execution_disposition_refuses_broad_suite(self):
+        packages = copy.deepcopy(ROSTER)
+        packages['example']['integration']['scenario']['execution_disposition'] = 'guess'
+        with patch.object(workflow, 'roster', return_value=packages), \
+             patch.object(workflow, 'buck') as buck, self.assertRaisesRegex(ValueError, 'execution disposition'):
+            workflow.main(['suite', 'example'])
+        buck.assert_not_called()
+
     def test_quick_builds_declared_compile_only_library_and_executes_remaining_suite(self):
         packages = copy.deepcopy(ROSTER)
         packages["compile_only"] = {"libraries": {"leaf": {"build": "//leaf:library"}},
