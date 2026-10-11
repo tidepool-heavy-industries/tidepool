@@ -749,7 +749,7 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
             item.0["type"] == "custom_tool_call_output"
                 && item.0["call_id"] == "before-rejection-cell"
         }));
-        std::fs::write(&output_release, "release").unwrap();
+        tidepool_atomic_write::write_durable(&output_release, b"release").unwrap();
         tokio::time::timeout(Duration::from_secs(300), async {
             loop {
                 let claims = store
