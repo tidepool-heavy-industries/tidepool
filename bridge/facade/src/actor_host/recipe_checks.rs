@@ -1112,31 +1112,13 @@ mod tests {
         });
         let selection = tempfile::tempdir().unwrap();
         let selected = FrozenWorkspace::load(workspace.path(), selection.path()).unwrap();
-        let prepared = tokio::task::block_in_place(|| {
-            prepare_recipe(
-                "Project.EpochStartupChecks.installedOriginalEpoch",
-                &selected,
-            )
-        })
-        .unwrap();
-        let mut driver = Driver::start(workspace.path(), selected).await.unwrap();
-        let result = driver.execute(&prepared);
-        let installed = driver.installations.len();
-        let assertions = driver.assertions.clone();
-        let cleanup = driver.shutdown_session().await.unwrap();
-        result.expect(
-            "the real fresh worker must publish its installed source before request execution",
-        );
-        assert_eq!(installed, 2, "one root and one actual fresh worker");
-        assert_eq!(
-            assertions.len(),
-            2,
-            "both received input and exact reply assertions execute"
-        );
-        assert!(!cleanup.is_empty());
-        assert!(cleanup
-            .iter()
-            .all(exomonad_actor::ForestRootShutdown::is_confirmed));
+        run(
+            workspace.path(),
+            &selected,
+            Some("Project.EpochStartupChecks.installedOriginalEpoch"),
+        )
+        .await
+        .expect("the real fresh worker must publish its installed source before request execution");
     }
 
     #[tokio::test(flavor = "multi_thread")]
