@@ -380,7 +380,7 @@ pub struct DurableActorApplication {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 enum EventKind {
-    Created,
+    Created {},
     Admitted {
         admission: Box<DurableActorAdmission>,
         startup: Option<RootStartupIntent>,
@@ -601,7 +601,7 @@ impl ActorRecoveryJournal {
         });
         if !existed {
             let mut state = journal.state.lock();
-            journal.append(&mut state, EventKind::Created)?;
+            journal.append(&mut state, EventKind::Created {})?;
         }
         Ok(journal)
     }
@@ -1133,8 +1133,8 @@ fn replay(rows: Vec<Row>) -> std::io::Result<Replayed> {
         }
         expected += 1;
         match row.event {
-            EventKind::Created if !created => created = true,
-            EventKind::Created => {
+            EventKind::Created {} if !created => created = true,
+            EventKind::Created {} => {
                 return Err(std::io::Error::other(
                     "duplicate actor lifecycle journal creation marker",
                 ));
@@ -1155,7 +1155,7 @@ fn apply_event(
     event: EventKind,
 ) -> std::io::Result<()> {
     match event {
-        EventKind::Created => {
+        EventKind::Created {} => {
             return Err(std::io::Error::other(
                 "actor lifecycle creation marker reached record replay",
             ));
@@ -1377,6 +1377,50 @@ mod tests {
     use tidepool_codegen::scope::ScopeId;
     use tidepool_codegen::suspension::RealmId;
     use tidepool_repr::SessionId;
+
+    #[test]
+    fn created_rows_refuse_surplus_fields_without_rewriting_recovery_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let path = directory.path().join("actors.jsonl");
+        let valid = format!("{{\"version\":{VERSION},\"sequence\":1,\"event\":\"created\"}}");
+        let row = parse_row(&valid).unwrap();
+        assert_eq!(serde_json::to_string(&row).unwrap(), valid);
+        let valid_bytes = format!("{valid}\n");
+        std::fs::write(&path, &valid_bytes).unwrap();
+        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+        assert!(journal.records().is_empty());
+        drop(journal);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), valid_bytes);
+        let valid: serde_json::Value = serde_json::from_str(&valid).unwrap();
+        for field in ["foreign", "actor", "admission", "terminal", "", "λ"] {
+            for value in [
+                serde_json::Value::Null,
+                serde_json::json!(true),
+                serde_json::json!(1),
+                serde_json::json!("extra"),
+                serde_json::json!([]),
+                serde_json::json!({}),
+            ] {
+                let mut invalid = valid.clone();
+                invalid[field] = value;
+                let bytes = format!("{invalid}\n");
+                std::fs::write(&path, &bytes).unwrap();
+                assert!(
+                    ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").is_err(),
+                    "surplus field {field:?} accepted"
+                );
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
+            }
+        }
+        let mut second = valid.clone();
+        second["sequence"] = serde_json::json!(2);
+        for bytes in [format!("{second}\n"), format!("{valid}\n{second}\n")] {
+            std::fs::write(&path, &bytes).unwrap();
+            assert!(ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
+        }
+    }
 
     #[test]
     fn terminal_without_diagnostic_remains_readable() {
