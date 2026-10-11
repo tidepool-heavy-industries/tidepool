@@ -1914,17 +1914,20 @@ impl ModuleCandidateOffer {
         })
     }
 
-    /// Specialize a pure renderer against the original input type and context.
+    /// Specialize a pure renderer against its compiler-issued display facts.
+    /// This boundary admits no request continuation annotations or protected
+    /// cell scaffold. Its original type, instance graph and native dependencies
+    /// belong to the opaque display context and preview authorization.
     pub fn select_activation_preview(
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
         include: &[PathBuf],
         scratch: &Path,
-        context: Arc<crate::declaration_context::ExactCompileContext>,
+        display_context: Arc<crate::activation_preview::OriginalDisplayContext>,
         prototype: Arc<crate::checked_cell::ExactHostBindingPrototype>,
         specification: crate::activation_preview::ActivationPreviewSpecification,
         catalog: &crate::toolchain::CatalogSelection,
-    ) -> Result<crate::activation_preview::ActivationPreviewSelection, CompileError> {
-        use crate::activation_preview::{ActivationPreviewOffer, ActivationPreviewSelection};
+    ) -> Result<Self, CompileError> {
+        use crate::activation_preview::ActivationPreviewOffer;
         let catalog = catalog.for_deployment(endpoint.deployment())?;
         let producer = endpoint.identity().producer_bytes();
         if crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(producer)
@@ -1935,17 +1938,12 @@ impl ModuleCandidateOffer {
                 "activation preview worker differs from the original producer".into(),
             ));
         }
-        if !crate::activation_preview::validate_original_display_context(
-            &prototype,
-            context.declarations(),
-        )? {
-            return Ok(ActivationPreviewSelection::OriginalDisplayEvidenceUnavailable);
+        if !display_context.matches_prototype(&prototype) {
+            return Err(CompileError::ExtractFailed(
+                "activation preview has another issued display input".into(),
+            ));
         }
-        let declarations = Arc::new(
-            (**context.declarations())
-                .clone()
-                .extend_interface_context(prototype.context())?,
-        );
+        let declarations = display_context.declarations().clone();
         let selected = immutable_candidates_in_context_with_catalog(
             &declarations,
             producer,
@@ -1957,7 +1955,8 @@ impl ModuleCandidateOffer {
         let offer = ActivationPreviewOffer {
             specification,
             prototype,
-            original_execution: context.declarations().clone(),
+            original_execution: declarations.clone(),
+            display_context,
         };
         let original_interfaces = Value::Array(
             offer
@@ -1990,9 +1989,7 @@ impl ModuleCandidateOffer {
             &offer.original_execution,
             producer,
         )?;
-        let exact = (*context)
-            .clone()
-            .with_declarations(declarations)
+        let exact = crate::declaration_context::ExactCompileContext::new(declarations)
             .prepare_compilation_with_private_input(
                 &scratch.join("exact-scope"),
                 producer,
@@ -2000,7 +1997,7 @@ impl ModuleCandidateOffer {
                 private,
             )?
             .with_source_search_context(include);
-        Ok(ActivationPreviewSelection::Ready(Self {
+        Ok(Self {
             selected,
             producer: producer.to_vec(),
             include: include.to_vec(),
@@ -2011,7 +2008,7 @@ impl ModuleCandidateOffer {
             checked_projections: Vec::new(),
             checked: Some(NativeCheckedOffer::ActivationPreview(offer)),
             selected_session_values: Default::default(),
-        }))
+        })
     }
 
     /// Read the compiler's distinct no-program result after a successful

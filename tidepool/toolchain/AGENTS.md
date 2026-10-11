@@ -48,6 +48,11 @@ It sits below `tidepool-runtime` and must not depend on runtime/session errors.
   bytes, and source-original Core recovery must not replay authored declarations.
   Renderer evidence contains no mounted-value or invocation authority. Fresh
   child interfaces and runtime admissions remain independent of specialization.
+  Only the opaque display issuer may exclude value roots outside the original
+  instance graph, sealed input closure and retained dependency graph. It retains
+  complete canonical, family, orphan and exact native capture evidence. Sharing
+  compares those authenticated facts after digest lookup; a nominal type or an
+  equal digest cannot establish membership in a display owner.
 - Validate compiler completion against the issued request roles, including private
   native availability. Its persistent declaration snapshot retains independent
   lexical and type roles and cannot validate a promoted request artifact closure.

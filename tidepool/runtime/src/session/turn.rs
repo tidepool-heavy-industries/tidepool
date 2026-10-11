@@ -2602,6 +2602,7 @@ pub fn bind_activation_renderer(
     };
     if !renderer.proof.matches_input(admission.input_interface())
         || renderer.proof.original_context_digest() != admission.original_context_digest()
+        || !admission.matches_original_display(&renderer.proof)
     {
         return Err(CompileError::ExtractFailed(
             "renderer differs from the mounted original input".into(),
@@ -2638,6 +2639,7 @@ impl From<std::io::Error> for ActivationRendererFailure {
 }
 
 /// Specialize immutable pure renderer code against the original compiler context.
+#[tracing::instrument(name = "activation_renderer_specialize", skip_all, fields(original_execution = ?admission.original_execution_digest(), original_display = ?admission.original_context_digest()))]
 pub fn compile_activation_renderer(
     admission: &super::RuntimeActivationPreviewAdmission,
     template_source: &str,
@@ -2645,10 +2647,10 @@ pub fn compile_activation_renderer(
     includes: &[PathBuf],
     settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
 ) -> Result<super::SharedActivationRenderer, ActivationRendererFailure> {
-    use tidepool_toolchain::activation_preview::{
-        ActivationPreviewSelection, ActivationPreviewSpecification,
+    use tidepool_toolchain::activation_preview::ActivationPreviewSpecification;
+    let Some(context) = admission.original_display_context().cloned() else {
+        return Ok(super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable);
     };
-    let context = admission.exact_context().clone();
     let temp = compiler_scratch_directory()?;
     let input_path = temp.path().join("ActivationPreviewTemplate.hs");
     std::fs::write(&input_path, template_source)?;
@@ -2660,7 +2662,7 @@ pub fn compile_activation_renderer(
         .output_dir(temp.path())
         .includes(includes);
     let endpoint = bind_extract_cmd(&cmd)?;
-    let selection = ModuleCandidateOffer::select_activation_preview(
+    let offer = ModuleCandidateOffer::select_activation_preview(
         &endpoint,
         includes,
         temp.path(),
@@ -2673,9 +2675,6 @@ pub fn compile_activation_renderer(
         },
         admission.catalog_selection(),
     )?;
-    let ActivationPreviewSelection::Ready(offer) = selection else {
-        return Ok(super::SharedActivationRenderer::OriginalDisplayEvidenceUnavailable);
-    };
     if let Some(root) = offer.checked_value_root() {
         cmd.session_root(root);
     }
@@ -2719,6 +2718,7 @@ pub fn compile_activation_renderer(
         })?
         .clone();
     if proof.original_context_digest() != admission.original_context_digest()
+        || !admission.matches_original_display(&proof)
         || !proof.matches_input(admission.input_interface())
         || !proof.matches_target(&compiled.prepared)
     {

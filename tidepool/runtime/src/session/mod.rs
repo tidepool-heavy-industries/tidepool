@@ -106,10 +106,9 @@ pub use tidepool_codegen::prepared_program::ImageRegistry;
 
 pub use recovery::{
     observe_declaration_domain, DeclarationDomainObservation, DeclarationObservation,
-    RecoveryArtifactClosure, RecoveryExport, RecoveryExportKind, RecoveryInstanceEvidence,
-    RecoveryInstanceInventory, RecoveryNodeKind, RecoverySymbolIdentity,
-    DeclarationRecoveryReport, RecoveryFormatRefusal, RecoveryPublicOwner, RestoredDeclaration,
-    UnavailableBinding,
+    DeclarationRecoveryReport, RecoveryArtifactClosure, RecoveryExport, RecoveryExportKind,
+    RecoveryFormatRefusal, RecoveryInstanceEvidence, RecoveryInstanceInventory, RecoveryNodeKind,
+    RecoveryPublicOwner, RecoverySymbolIdentity, RestoredDeclaration, UnavailableBinding,
 };
 
 pub use registry::{
@@ -132,13 +131,14 @@ pub use facade::{
 };
 
 pub use resident::{
-    truncate_preview_at_line, CompiledActivationPreview, HostBindingPrototype, HostBindingType,
-    HostCarrier, HostPayload, MountedActivationInput, PendingPreparedInstall, PendingPreparedMode,
-    PreparedStartupEntry, ProgramProvenance, ProgramProvenanceError, ReadyPreparedInstall,
-    ResidentContinuationEvent, ResidentError, ResidentHole, ResidentOutcome, ResidentParcel,
-    ResidentResumeError, ResidentSession, RootCustody, RuntimeActivationInput,
-    RuntimeActivationInputAdmission, RuntimeActivationPreviewAdmission, RuntimeProgressPublication,
-    RuntimeResultParcel, RuntimeResultPublication, SessionRunContext,
+    truncate_preview_at_line, ActivationDisplayOwners, CompiledActivationPreview,
+    HostBindingPrototype, HostBindingType, HostCarrier, HostPayload, MountedActivationInput,
+    PendingPreparedInstall, PendingPreparedMode, PreparedStartupEntry, ProgramProvenance,
+    ProgramProvenanceError, ReadyPreparedInstall, ResidentContinuationEvent, ResidentError,
+    ResidentHole, ResidentOutcome, ResidentParcel, ResidentResumeError, ResidentSession,
+    RootCustody, RuntimeActivationInput, RuntimeActivationInputAdmission,
+    RuntimeActivationPreviewAdmission, RuntimeProgressPublication, RuntimeResultParcel,
+    RuntimeResultPublication, SessionRunContext,
 };
 
 pub use view::{hide_preamble_exports, HaskellTypeSource, SessionCompileView, SourceImports};

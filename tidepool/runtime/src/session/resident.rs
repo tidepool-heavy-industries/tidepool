@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use parking_lot::Mutex;
 
@@ -258,12 +258,13 @@ impl CompiledProvenancePlan {
         Ok(provenance)
     }
 
-    fn instantiate(&self) -> Arc<ProgramProvenance> {
+    fn instantiate(&self, display_owners: &Arc<ActivationDisplayOwners>) -> Arc<ProgramProvenance> {
         let execution = self.original_execution.as_ref().map(|(context, identity)| {
             Arc::new(OriginalExecutionContext {
                 identity: *identity,
                 context: context.clone(),
-                renderers: Mutex::default(),
+                display_owners: display_owners.clone(),
+                displays: Mutex::default(),
             })
         });
         Arc::new(ProgramProvenance {
@@ -327,6 +328,65 @@ enum OriginalExecutionContexts {
 struct OriginalExecutionContext {
     identity: [u8; 32],
     context: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
+    display_owners: Arc<ActivationDisplayOwners>,
+    displays: Mutex<BTreeMap<[u8; 32], Vec<OriginalDisplayCapture>>>,
+}
+
+#[derive(Debug)]
+struct OriginalDisplayCapture {
+    prototype: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
+    owner: Arc<OriginalDisplayOwner>,
+}
+
+/// One run's weak index of compiler-issued display owners. Provenance and
+/// mounted admissions retain owners; an index entry alone keeps no native code
+/// alive. The owner's existing renderer slots remain the single-flight boundary.
+#[derive(Debug, Default)]
+pub struct ActivationDisplayOwners {
+    owners: Mutex<OriginalDisplayIndex>,
+}
+
+#[derive(Debug, Default)]
+struct OriginalDisplayIndex {
+    buckets: BTreeMap<[u8; 32], Vec<Weak<OriginalDisplayOwner>>>,
+    since_sweep: usize,
+}
+
+impl ActivationDisplayOwners {
+    fn intern(
+        &self,
+        display: Arc<tidepool_toolchain::activation_preview::OriginalDisplayContext>,
+    ) -> Arc<OriginalDisplayOwner> {
+        let mut owners = self.owners.lock();
+        owners.since_sweep += 1;
+        if owners.since_sweep >= owners.buckets.len().max(1) {
+            owners.buckets.retain(|_, bucket| {
+                bucket.retain(|owner| owner.strong_count() != 0);
+                !bucket.is_empty()
+            });
+            owners.since_sweep = 0;
+        }
+        let bucket = owners.buckets.entry(display.identity()).or_default();
+        bucket.retain(|owner| owner.strong_count() != 0);
+        for owner in bucket.iter().filter_map(Weak::upgrade) {
+            if owner.display.as_ref() == Some(&display) {
+                return owner;
+            }
+        }
+        let owner = Arc::new(OriginalDisplayOwner {
+            identity: display.identity(),
+            display: Some(display),
+            renderers: Mutex::default(),
+        });
+        bucket.push(Arc::downgrade(&owner));
+        owner
+    }
+}
+
+#[derive(Debug)]
+struct OriginalDisplayOwner {
+    identity: [u8; 32],
+    display: Option<Arc<tidepool_toolchain::activation_preview::OriginalDisplayContext>>,
     renderers: Mutex<BTreeMap<ActivationRendererKey, Arc<RendererSlot<SharedActivationRenderer>>>>,
 }
 
@@ -338,8 +398,52 @@ impl OriginalExecutionContext {
         Arc::new(Self {
             identity: context.semantic_sha256(),
             context,
-            renderers: Mutex::new(BTreeMap::new()),
+            display_owners: Arc::default(),
+            displays: Mutex::default(),
         })
+    }
+
+    fn display_owner(
+        &self,
+        prototype: &Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
+    ) -> Result<Arc<OriginalDisplayOwner>, crate::CompileError> {
+        let witness = prototype
+            .original_input_type()
+            .expect("authenticated input");
+        let mut displays = self.displays.lock();
+        let bucket = displays.entry(prototype.digest()).or_default();
+        for capture in bucket.iter() {
+            if capture.prototype.producer() == prototype.producer()
+                && capture
+                    .prototype
+                    .original_input_type()
+                    .is_some_and(|original| original.original_bytes() == witness.original_bytes())
+                && capture
+                    .prototype
+                    .context()
+                    .same_authenticated_context(prototype.context())
+            {
+                return Ok(capture.owner.clone());
+            }
+        }
+        let owner = match tidepool_toolchain::activation_preview::OriginalDisplayContext::issue(
+            prototype,
+            &self.context,
+        )? {
+            Some(display) => self.display_owners.intern(display),
+            // Missing original evidence remains local to its exact provenance;
+            // it cannot establish a shared negative instance observation.
+            None => Arc::new(OriginalDisplayOwner {
+                identity: self.identity,
+                display: None,
+                renderers: Mutex::default(),
+            }),
+        };
+        bucket.push(OriginalDisplayCapture {
+            prototype: prototype.clone(),
+            owner: owner.clone(),
+        });
+        Ok(owner)
     }
 }
 
@@ -1138,7 +1242,8 @@ pub struct RuntimeActivationInput {
     input_type_witness: Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>,
     prototype: Arc<tidepool_toolchain::checked_cell::ExactHostBindingPrototype>,
     original_execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
-    renderer_owner: Arc<OriginalExecutionContext>,
+    original_execution_identity: [u8; 32],
+    renderer_owner: Arc<OriginalDisplayOwner>,
     progress_type_witness: Option<Arc<tidepool_toolchain::checked_cell::CanonicalInputTypeWitness>>,
 }
 
@@ -1235,7 +1340,8 @@ static_assertions::assert_not_impl_any!(RuntimeActivationInputAdmission: Clone, 
 pub struct MountedActivationInput {
     interface: Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface>,
     original_execution: Arc<tidepool_toolchain::declaration_join::ExactDeclarationContext>,
-    renderer_owner: Arc<OriginalExecutionContext>,
+    original_execution_identity: [u8; 32],
+    renderer_owner: Arc<OriginalDisplayOwner>,
     binding: SessionVarId,
     scope: ScopeId,
     handle: PreparedHandle,
@@ -1264,7 +1370,6 @@ pub struct RuntimeActivationPreviewAdmission {
     view_digest: [u8; 32],
     generation: Generation,
     digest: [u8; 32],
-    exact_context: Arc<tidepool_toolchain::declaration_join::ExactCompileContext>,
     catalog_selection: tidepool_toolchain::toolchain::CatalogSelection,
     scope_lease: Arc<super::RuntimeLexicalScopeLease>,
     pub(super) image_registry: Arc<ImageRegistry>,
@@ -1285,9 +1390,6 @@ impl RuntimeActivationPreviewAdmission {
         &self,
     ) -> &Arc<tidepool_toolchain::checked_cell::ExactHostBindingInterface> {
         &self.mounted.interface
-    }
-    pub fn exact_context(&self) -> &Arc<tidepool_toolchain::declaration_join::ExactCompileContext> {
-        &self.exact_context
     }
     pub fn catalog_selection(&self) -> &tidepool_toolchain::toolchain::CatalogSelection {
         &self.catalog_selection
@@ -1512,6 +1614,30 @@ impl RuntimeActivationPreviewAdmission {
 
     pub fn original_context_digest(&self) -> [u8; 32] {
         self.mounted.renderer_owner.identity
+    }
+
+    pub fn original_execution_digest(&self) -> [u8; 32] {
+        self.mounted.original_execution_identity
+    }
+
+    pub fn original_display_context(
+        &self,
+    ) -> Option<&Arc<tidepool_toolchain::activation_preview::OriginalDisplayContext>> {
+        self.mounted.renderer_owner.display.as_ref()
+    }
+
+    pub fn matches_original_display(
+        &self,
+        proof: &tidepool_toolchain::activation_preview::ExactCompiledActivationPreview,
+    ) -> bool {
+        self.mounted
+            .renderer_owner
+            .display
+            .as_ref()
+            .is_some_and(|display| {
+                display == proof.original_display_context()
+                    && display.matches_prototype(self.input_interface().prototype())
+            })
     }
 }
 
@@ -3222,6 +3348,7 @@ pub struct ResidentSession<H, O> {
     /// Deferred releases produced when an affine handle is dropped away from a
     /// machine checkout. The next mutable session entry settles them.
     custody_cleanup: Arc<CustodyCleanup>,
+    display_owners: Arc<ActivationDisplayOwners>,
 }
 
 impl<H, O> ResidentSession<H, O>
@@ -3288,6 +3415,7 @@ where
             host_binding_prototypes: Vec::new(),
             run_context: SessionRunContext::ROOT,
             custody_cleanup: Arc::new(CustodyCleanup::default()),
+            display_owners: Arc::default(),
         }
     }
 
@@ -3314,6 +3442,12 @@ where
 
     pub fn set_image_registry(&mut self, registry: Arc<ImageRegistry>) {
         self.state.set_image_registry(registry);
+    }
+
+    /// Select the composition root's owner index before installing programs.
+    /// Existing provenance continues to retain its issuing run's index.
+    pub fn set_activation_display_owners(&mut self, owners: Arc<ActivationDisplayOwners>) {
+        self.display_owners = owners;
     }
 
     pub fn stage_published_source_originals_in(
@@ -4513,8 +4647,8 @@ where
             .authenticated_inputs
             .get(&site)
             .ok_or_else(invalid)?;
-        let renderer_owner = interfaces.execution.require_unique(site)?;
-        let original_execution = renderer_owner.context.clone();
+        let execution_owner = interfaces.execution.require_unique(site)?;
+        let original_execution = execution_owner.context.clone();
         let type_evidence = self
             .request_site_type_evidence(site)
             .ok_or_else(invalid)?
@@ -4525,6 +4659,9 @@ where
                 input_type_witness.clone(),
                 interfaces.types.clone(),
             )
+            .map_err(SessionError::Compile)?;
+        let renderer_owner = execution_owner
+            .display_owner(&prototype)
             .map_err(SessionError::Compile)?;
         let custody = self
             .live_payload_handle_owned_by(hole.cont_id(), realm)?
@@ -4537,6 +4674,7 @@ where
             input_type_witness: Arc::new(input_type_witness),
             prototype,
             original_execution,
+            original_execution_identity: execution_owner.identity,
             renderer_owner,
             progress_type_witness,
         })
@@ -5127,6 +5265,7 @@ where
         Ok(MountedActivationInput {
             interface,
             original_execution: owner.input.original_execution,
+            original_execution_identity: owner.input.original_execution_identity,
             renderer_owner: owner.input.renderer_owner,
             binding,
             scope,
@@ -6260,7 +6399,7 @@ where
             .provenance
             .get()
             .expect("plan was initialized")
-            .instantiate();
+            .instantiate(&self.display_owners);
         if let Some(certification) = code.certification.as_ref().as_ref() {
             // Implicit retained-value calls execute the original typed helper.
             // Resolve the same exact target and selected source-group imports
@@ -6400,11 +6539,6 @@ where
             .ok_or(SessionError::DeadScope(mounted.scope))?;
         let generation = self.state.val_gen().next();
         self.state.set_val_gen(generation);
-        let exact_context = Arc::new(
-            tidepool_toolchain::declaration_join::ExactCompileContext::new(
-                mounted.original_execution.clone(),
-            ),
-        );
         let owner_epoch = self.state.admission_owner().epoch();
         let mut hash = blake3::Hasher::new();
         hash.update(b"TidepoolActivationPreview1");
@@ -6413,7 +6547,7 @@ where
         hash.update(&generation.0.to_le_bytes());
         hash.update(&mounted.binding.raw().to_le_bytes());
         hash.update(&mounted.interface.admission_digest());
-        hash.update(&mounted.original_execution.semantic_sha256());
+        hash.update(&mounted.original_execution_identity);
         hash.update(&mounted.run_context.principal.identity.to_le_bytes());
         hash.update(&mounted.run_context.principal.incarnation.to_le_bytes());
         hash.update(&mounted.run_context.resource_scope.0.to_le_bytes());
@@ -6426,7 +6560,6 @@ where
             view_digest,
             generation,
             digest: *hash.finalize().as_bytes(),
-            exact_context,
             catalog_selection: self.state.catalog_selection().clone(),
             scope_lease,
             image_registry: self.state.certified_image_registry(),
@@ -6459,7 +6592,7 @@ where
     }
 
     /// Run only a sealed pure preview of this exact original committed root.
-    #[tracing::instrument(name = "activation_renderer_install", skip_all, fields(renderer_owner = Arc::as_ptr(&compiled.renderer) as usize, session = %self.state.lib().session_id(), binding = compiled.admission.mounted.binding.raw(), scope = ?compiled.admission.scope_lease.scope(), bundle_target = compiled.renderer.native.target_image_instance(), native_images = ?compiled.renderer.native.image_instances()))]
+    #[tracing::instrument(name = "activation_renderer_install", skip_all, fields(renderer_owner = Arc::as_ptr(&compiled.renderer) as usize, original_execution = ?compiled.admission.original_execution_digest(), original_display = ?compiled.admission.original_context_digest(), session = %self.state.lib().session_id(), binding = compiled.admission.mounted.binding.raw(), scope = ?compiled.admission.scope_lease.scope(), bundle_target = compiled.renderer.native.target_image_instance(), native_images = ?compiled.renderer.native.image_instances()))]
     pub fn run_activation_preview(
         &mut self,
         compiled: CompiledActivationPreview,
@@ -6476,6 +6609,7 @@ where
             || admission.owner_epoch != self.state.admission_owner().epoch()
             || self.state.compile_view_digest_in(mounted.scope) != Some(admission.view_digest)
             || compiled.renderer.proof.original_context_digest() != mounted.renderer_owner.identity
+            || !admission.matches_original_display(&compiled.renderer.proof)
             || !compiled.renderer.proof.matches_input(&mounted.interface)
             || !compiled
                 .renderer
@@ -11160,7 +11294,7 @@ mod compiled_provenance_plan_tests {
             let plan = CompiledProvenancePlan::build(&code).unwrap();
             let expected = sites.into_iter().map(|site| (site.site, site)).collect::<BTreeMap<_, _>>();
             for _ in 0..copies {
-                let observation = plan.instantiate();
+                let observation = plan.instantiate(&Arc::default());
                 prop_assert_eq!(&observation.sites, &expected);
                 prop_assert!(observation.authenticated_inputs.is_empty());
                 prop_assert!(observation.fresh_completion_sites.is_empty());

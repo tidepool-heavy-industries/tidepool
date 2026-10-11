@@ -232,6 +232,253 @@ fn offered_native_owners(context: &Arc<ExactDeclarationContext>) -> Vec<String> 
     owners
 }
 
+fn display_prototype(context: &Arc<ExactDeclarationContext>) -> Arc<ExactHostBindingPrototype> {
+    // Component codec fixture. Context authority comes from the original
+    // issuer above, rather than from these nominal signature bytes.
+    let mut structure = Vec::new();
+    ciborium::into_writer(
+        &array([text("literal"), text("nat"), text("1")]),
+        &mut structure,
+    )
+    .unwrap();
+    let wire = array([
+        text("TPCANONICALINPUTTYPE1"),
+        text("1"),
+        array([
+            text("TPCHECKEDSIGNATURE2"),
+            text("activation-input"),
+            text("fixture"),
+            Value::Bytes(vec![1]),
+            array([]),
+        ]),
+        Value::Bytes(structure),
+        array([]),
+    ]);
+    let mut bytes = Vec::new();
+    ciborium::into_writer(&wire, &mut bytes).unwrap();
+    ExactHostBindingPrototype::from_original_input(
+        CanonicalInputTypeWitness::from_bytes(&bytes).unwrap(),
+        context.clone(),
+    )
+    .unwrap()
+}
+
+fn with_irrelevant_values(
+    context: &Arc<ExactDeclarationContext>,
+    versions: &[u8],
+    lexical_value: bool,
+) -> Arc<ExactDeclarationContext> {
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
+    let values = versions
+        .iter()
+        .enumerate()
+        .map(|(index, version)| {
+            let module = format!("Tidepool.Session.Val.G{}", index + 100);
+            let bytes = vec![*version];
+            let package_roots = array([
+                text("TPPKGROOTS"),
+                text("2"),
+                array([text("main"), text(&module), text(hash(&bytes))]),
+                array([]),
+                array([]),
+            ]);
+            let mut packages = Vec::new();
+            ciborium::into_writer(&package_roots, &mut packages).unwrap();
+            Arc::new(
+                crate::recovery_artifacts::CertifiedValueInterface::from_checked_compilation(
+                    producer,
+                    ExactModuleIdentity {
+                        unit: "main".into(),
+                        module,
+                    },
+                    bytes,
+                    packages,
+                    Vec::new(),
+                )
+                .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut lexical = context.lexical_graph().to_vec();
+    if lexical_value && !values.is_empty() {
+        lexical.push(ExactLexicalNode {
+            owner: ExactModuleIdentity {
+                unit: values[0].interface().unit().into(),
+                module: values[0].interface().module().into(),
+            },
+            imports: vec![],
+        });
+    }
+    let expanded = (**context)
+        .clone()
+        .extend_with_value_interfaces(&values, lexical.clone())
+        .unwrap();
+    Arc::new(
+        ExactDeclarationContext::from_authenticated_execution(
+            producer,
+            expanded.artifact_view(),
+            expanded.compiler_input_projection().clone(),
+            lexical,
+            context.original_instance_target().unwrap().clone(),
+            &[],
+        )
+        .unwrap(),
+    )
+}
+
+fn display_property_config() -> proptest::test_runner::Config {
+    let mut config = property_config();
+    config.cases = 64;
+    config
+}
+
+proptest::proptest! {
+    #![proptest_config(display_property_config())]
+    #[test]
+    fn display_projection_ignores_only_unreachable_value_histories(versions in proptest::collection::vec(1u8..255, 1..12)) {
+        let original = original_context(&[(true, true, true)]);
+        let prototype = display_prototype(&original);
+        let expected = OriginalDisplayContext::issue(&prototype, &original).unwrap().unwrap();
+        let mut previous = original.semantic_sha256();
+        for count in 1..=versions.len() {
+            let expanded = with_irrelevant_values(&original, &versions[..count], false);
+            proptest::prop_assert_ne!(expanded.semantic_sha256(), previous);
+            previous = expanded.semantic_sha256();
+            let prototype = display_prototype(&expanded);
+            let projected = OriginalDisplayContext::issue(&prototype, &expanded).unwrap().unwrap();
+            proptest::prop_assert_eq!(&projected, &expected);
+            proptest::prop_assert_eq!(projected.identity(), expected.identity());
+            proptest::prop_assert!(projected.declarations().value_interfaces().is_empty());
+            proptest::prop_assert_eq!(offered_native_owners(projected.declarations()), vec!["Tidepool.Session.Lib.G1".to_owned()]);
+            let reopened = OriginalDisplayContext::issue(&prototype, projected.declarations()).unwrap().unwrap();
+            proptest::prop_assert_eq!(reopened, projected);
+        }
+        let visible = with_irrelevant_values(&original, &versions[..1], true);
+        let projected = OriginalDisplayContext::issue(&prototype, &visible).unwrap().unwrap();
+        proptest::prop_assert_ne!(&projected, &expected);
+        proptest::prop_assert_eq!(projected.declarations().value_interfaces().len(), 1);
+    }
+}
+
+#[test]
+fn display_projection_preserves_native_availability_and_refuses_missing_instance_evidence() {
+    let without_native = original_context(&[(true, false, true)]);
+    let with_native = original_context(&[(true, true, true)]);
+    let prototype = display_prototype(&with_native);
+    let absent = OriginalDisplayContext::issue(&prototype, &without_native)
+        .unwrap()
+        .unwrap();
+    let available = OriginalDisplayContext::issue(&prototype, &with_native)
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        absent, available,
+        "canonical type equality cannot erase original native custody"
+    );
+    assert!(offered_native_owners(absent.declarations()).is_empty());
+    assert_eq!(
+        offered_native_owners(available.declarations()),
+        ["Tidepool.Session.Lib.G1"]
+    );
+    let unknown = ExactDeclarationContext::from_authenticated_interfaces(
+        prototype.producer(),
+        with_native.artifact_view(),
+        with_native.compiler_input_projection().clone(),
+    )
+    .unwrap();
+    assert!(OriginalDisplayContext::issue(&prototype, &unknown)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn display_projection_preserves_exact_canonical_implementation_dependencies() {
+    use crate::certified_products::fixture_module_core;
+    let producer = CanonicalProducerIdentity::from_producer_bytes(PRODUCER).sha256();
+    let child = fixture_module_interface(producer, "main", "CapturedDependency", BTreeMap::new());
+    let target = fixture_module_interface(
+        producer,
+        "main",
+        "OriginalTarget",
+        BTreeMap::from([(
+            ("main".into(), "CapturedDependency".into()),
+            child.interface_sha256(),
+        )]),
+    );
+    let contexts = [
+        b"old implementation".as_slice(),
+        b"changed implementation".as_slice(),
+    ]
+    .map(|core| {
+        let inventory = ArtifactInventory::default();
+        let view = inventory
+            .admit(
+                &inventory.empty_view(),
+                vec![
+                    ArtifactEntry::canonical(target.clone()),
+                    ArtifactEntry::canonical(fixture_module_core(&child, core.to_vec())),
+                ],
+            )
+            .unwrap();
+        let target_id = view
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.owner.module == "OriginalTarget")
+            .unwrap()
+            .id;
+        let target = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "OriginalTarget".into(),
+        };
+        let dependency = ExactModuleIdentity {
+            unit: "main".into(),
+            module: "CapturedDependency".into(),
+        };
+        Arc::new(
+            ExactDeclarationContext::from_authenticated_execution(
+                producer,
+                &view,
+                CompilerInputProjection::restore(
+                    &view,
+                    &[CompilerInputRole::InterfaceOnly {
+                        interface: target_id,
+                    }],
+                )
+                .unwrap(),
+                vec![ExactLexicalNode {
+                    owner: target.clone(),
+                    imports: vec![dependency],
+                }],
+                target,
+                &[],
+            )
+            .unwrap(),
+        )
+    });
+    assert_eq!(
+        contexts[0].original_preview_interface_graph().unwrap(),
+        contexts[1].original_preview_interface_graph().unwrap(),
+        "the full original interface graph is unchanged"
+    );
+    let displays = contexts.map(|context| {
+        OriginalDisplayContext::issue(&display_prototype(&context), &context)
+            .unwrap()
+            .unwrap()
+    });
+    assert_ne!(
+        displays[0], displays[1],
+        "equal type and instance interfaces cannot erase their exact implementation dependency"
+    );
+    for display in displays {
+        let scratch = tempfile::tempdir().unwrap();
+        ExactCompileContext::new(display.declarations().clone())
+            .prepare_compilation(scratch.path(), PRODUCER)
+            .unwrap()
+            .validate_artifacts()
+            .unwrap();
+    }
+}
+
 #[test]
 fn original_native_declaration_body_is_available_without_heap_or_lexical_promotion() {
     let earlier = original_context(&[]);
