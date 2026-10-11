@@ -22,11 +22,11 @@ as separate evidence. Verify the resulting integration head against combined
 acceptance. Keep unfinished ownership with a named owner and retain its actual
 request and cleanup outcomes.
 
-A project-authored collector such as `followWork` is optional. It observes
-requests that have already been admitted and can route useful progress; it does
-not admit or own the agents. Use `readWork` to inspect retained state and
-`finishWork` to close the collector after its purpose ends. Agent retirement is a
-separate operation; use the cleanup skill and retain stop outcomes.
+A project-authored collector is optional. Issue concrete `R.settlement` and
+`R.progress` sources for admitted requests, pass them to `workDefinition`, and
+start the validated specification with `R.start`. The collector can route useful
+progress. Use `readWork` to inspect retained state and `R.finish` when its purpose
+ends. Agent retirement is a separate operation; use the cleanup skill and retain stop outcomes.
 
 Report the resulting source, decisive checks, unresolved gates, and next owner.
 Use the project's RSI method for requested outcome, usage, or friction analysis.

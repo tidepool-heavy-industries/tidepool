@@ -7,4 +7,4 @@ Right workerAgent <- spawnSubagent (FreshCtx (taskContext work)) (ForkWorktree p
     , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName work) })
 Right (worker, updates) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent work
   (defaultRequestOptions { requestReporting = Silent })
-Right readiness <- followWork [("candidate", worker, updates)] (notifyReviewReady me)
+Right readiness <- traverse R.start (workDefinition [("candidate", R.settlement worker, R.progress updates)] (notifyReviewReady me))

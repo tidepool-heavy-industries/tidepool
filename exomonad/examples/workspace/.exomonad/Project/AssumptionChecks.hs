@@ -19,7 +19,7 @@ changes = do
     , "Right (_, updates) <- requestWithProgress @Int @Text producer (\"report observed build failures\" :: Text) defaultRequestOptions"
     ])
   producer <- activation
-  void $ turn owner "let project observation = case observation of { ProgressUpdate _ value -> Just value; _ -> Nothing }\nwatcher <- watchAssumption me (0 :: Int) (R.progress updates) project (pure . regression id \"new build failures: revisit the pending work\")"
+  void $ turn owner "let project observation = case observation of { ProgressUpdate _ value -> Just value; _ -> Nothing }\nwatcher <- R.start (assumptionDefinition me (0 :: Int) (R.progress updates) project (pure . regression id \"new build failures: revisit the pending work\"))"
   void $ turn (checkActor producer) "reportProgress (2 :: Int)"
   awaitCell owner "a specialized policy observes and reports a typed regression"
     "do { state <- R.call (assumptionView (R.client watcher)) (); pure (assumptionCurrent state == 2 && assumptionChangeCount state == 1 && case assumptionLastChange state of { Just change -> case changeDecision change of { ReportChange _ -> True; _ -> False }; Nothing -> False }) }"
@@ -33,7 +33,7 @@ changes = do
   void $ turn owner "state <- R.call (assumptionView (R.client watcher)) ()"
   assertCell owner "text: ignored and reported changes retain their messages"
     "case map changeDecision (assumptionRecentChanges state) of { [IgnoreChange ignored, ReportChange reported] -> ignored == \"the observed measure did not increase\" && reported == \"new build failures: revisit the pending work\"; _ -> False }"
-  void $ turn owner "unresolved <- watchAssumption me (0 :: Int) (R.progress updates) project (const (pure (UnresolvedChange \"missing task context\")))"
+  void $ turn owner "unresolved <- R.start (assumptionDefinition me (0 :: Int) (R.progress updates) project (const (pure (UnresolvedChange \"missing task context\"))))"
   awaitCell owner "late attachment retains unresolved decision and mock notification refusal"
     "do { state <- R.call (assumptionView (R.client unresolved)) (); pure (case assumptionLastChange state of { Just change -> (case changeDecision change of { UnresolvedChange _ -> True; _ -> False }) && (case changeNotice change of { Just (Left NotificationUnavailable) -> True; _ -> False }); Nothing -> False }) }"
   void $ turn owner "state <- R.call (assumptionView (R.client unresolved)) ()"

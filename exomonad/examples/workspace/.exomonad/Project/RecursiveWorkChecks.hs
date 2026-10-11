@@ -56,7 +56,7 @@ nestedRequests = do
     finish actor = do
       awaitCell actor "both original sources have terminal results"
         "do { state <- readWork collection; pure (length (filter (maybe False (const True) . sourceResult) (collectedWork state)) == 2) }"
-      void $ turn actor "import qualified Tidepool.Actor as Actor\nclosed <- finishWork collection"
+      void $ turn actor "import qualified Tidepool.Actor as Actor\nclosed <- R.finish collection"
       assertCell actor "settled findings drain without retiring their workers"
         "case closed of { Actor.Completed _ -> True; _ -> False }"
 

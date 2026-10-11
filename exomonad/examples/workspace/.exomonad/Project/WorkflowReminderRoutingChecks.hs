@@ -10,7 +10,7 @@ import qualified Data.Text as Text
 import Tidepool.Check
 import Project.Checks (script)
 
--- A real followWork sink keeps its ordinary notification receipts while the
+-- A real work collector sink keeps its ordinary notification receipts while the
 -- reminder actor sees only newly opened, source-identified question deltas.
 questionRouting :: Member RecipeCheck effects => Eff effects ()
 questionRouting = do
@@ -25,7 +25,7 @@ questionRouting = do
     , "import qualified Tidepool.Actor.Record as R"
     , "let source = " <> gitOidLiteral source
     , "Right reminders <- startRemindersWith (\\_ _ -> pure Suggest) me reviewRelayPolicy"
-    , "Right routed <- followWork [(\"producer\", producer, updates)] (withQuestionReminders reminders (notifyWork (responseActor consumer) (workMessage id)))"
+    , "Right routed <- traverse R.start (workDefinition [(\"producer\", R.settlement producer, R.progress updates)] (withQuestionReminders reminders (notifyWork (responseActor consumer) (workMessage id))))"
     ])
   void $ turn (checkActor producer) (Text.unlines
     [ "let first = Question \"relay\" (DesignQuestion \"plans/review.md\" " <> gitOidLiteral source <> " \"Manual within-contract review relay\" [\"review result for exact candidate\"] [] [\"repair\"] )"
@@ -65,7 +65,7 @@ questionRouting = do
   awaitCell owner "terminal result keeps ordinary sink notice without a reminder"
     "do { view <- readWork routed; memory <- R.call (reminderRead (R.client reminders)) (); pure (length (workNotices view) == 4 && length (reminderEntries memory) == 2) }"
   void $ turn (checkActor consumer) "respond (\"done\" :: Text)"
-  void $ turn owner "finishWork routed\nR.finish reminders"
+  void $ turn owner "R.finish routed\nR.finish reminders"
 
 -- The owner reads a retained event and submits it to a separate shadow trial.
 -- Collector delivery remains independent of the trial actor.
@@ -81,7 +81,7 @@ snapshotTrial = do
     , "import Project.WorkflowReminders"
     , "import qualified Tidepool.Actor.Record as R"
     , "Right trial <- startReminderTrialWith (\\_ _ -> pure Suggest) me (notificationPolicy \"Integrate reviewed component slices\")"
-    , "Right routed <- followWork [(\"producer\", producer, updates)] (notifyWork me (workMessage id))"
+    , "Right routed <- traverse R.start (workDefinition [(\"producer\", R.settlement producer, R.progress updates)] (notifyWork me (workMessage id)))"
     ])
   void $ turn (checkActor producer) (Text.unlines
     [ "let question = Question \"ownership\" (DesignQuestion \"plans/component.md\" " <> gitOidLiteral source <> " \"Old status repeated, but who owns the new file?\" [\"ownership not assigned\"] [] [\"parent\"])"
@@ -110,4 +110,4 @@ snapshotTrial = do
   awaitCell owner "stopped trial does not affect later ordinary notices"
     "do { view <- readWork routed; pure (length (workNotices view) == 2 && length (workHistory view) == 3) }"
   void $ turn (checkActor producer) "respond (\"done\" :: Text)"
-  void $ turn owner "finishWork routed"
+  void $ turn owner "R.finish routed"

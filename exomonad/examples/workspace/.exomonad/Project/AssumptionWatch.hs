@@ -18,7 +18,6 @@ module Project.AssumptionWatch
   , AssumptionChange (..)
   , BaselineStatus (..)
   , assumptionDefinition
-  , watchAssumption
   , watchIncorporatedBaseline
   ) where
 
@@ -133,17 +132,6 @@ assumptionDefinition owner initial source project decide =
               }
     }
 
-watchAssumption
-  :: (Eq value, Member Actor effects)
-  => AgentRef
-  -> value
-  -> R.EventSource observation
-  -> (observation -> Maybe value)
-  -> (Change value -> Eff (AssumptionEffects value observation) ChangeDecision)
-  -> Eff effects (ActorHandle (AssumptionWatch value observation))
-watchAssumption owner initial source project decide =
-  R.start (assumptionDefinition owner initial source project decide)
-
 -- | A pending child's source advance is a deterministic specialization of the
 -- same watcher. The exact incorporation response remains the source of truth.
 watchIncorporatedBaseline
@@ -151,8 +139,8 @@ watchIncorporatedBaseline
   => AgentRef -> GitOid -> Text -> Request Incorporation
   -> Eff effects (ActorHandle (AssumptionWatch BaselineStatus (Either ResponseFailure (ResponseResult Incorporation))))
 watchIncorporatedBaseline owner baseline pendingChild incorporation =
-  watchAssumption owner (BaselineAt baseline)
-    (R.settlement incorporation) project (pure . decide)
+  R.start (assumptionDefinition owner (BaselineAt baseline)
+    (R.settlement incorporation) project (pure . decide))
   where
     project (Right result) = Just $ case responseValue result of
       Incorporated _ headOid _ -> BaselineAt headOid

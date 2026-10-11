@@ -25,13 +25,15 @@ Send the actual typed assignment as raw request input. Use
 `requestWithProgress` when intermediate questions or checkpoints affect the
 owner's next decisions; otherwise use `request`. A request has one control
 identity and a typed terminal result. Compose independent `result` projections
-as `Await` values, or use `followWork` when an authored event-source collector
-adds useful progress routing for already-created requests. Collector source IDs
+as `Await` values, or build a `workDefinition` when an authored event-source
+collector adds useful progress routing. Issue `R.settlement request` and
+`R.progress updates` at the concrete caller, then start the validated definition
+with `R.start`. Collector source IDs
 are ordinary domain labels. The collector does not create agents or batches.
 
 For a collector, inspect retained state and original receipts before acting on a
 notice. `acknowledgeWork` records inspected publications; it does not prove
-incorporation. `finishWork` closes the collector and returns a typed actor exit;
+incorporation. `R.finish` closes the collector and returns a typed actor exit;
 `Completed` contains the retained state. It does not retire the model agents.
 Agent retirement and workspace cleanup are separate operations, covered by the
 cleanup skill. Keep unfinished work under a

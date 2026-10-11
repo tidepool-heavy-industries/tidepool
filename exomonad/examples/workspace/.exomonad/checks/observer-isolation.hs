@@ -4,4 +4,4 @@ optional <- R.start optionalDefinition
 let staleObservation = observeOptional (R.client optional)
 optional <- R.replace optional optionalDefinition
 let optionalSink = Exomonad.Contrib.Routing.observeWork "stale" staleObservation Just (Exomonad.Contrib.Routing.observeWork "failed-handler" (observeOptional (R.client optional)) Just (notifyWork me (workMessage id)))
-Right collection <- followWork [("producer", producer, updates)] optionalSink
+Right collection <- traverse R.start (workDefinition [("producer", R.settlement producer, R.progress updates)] optionalSink)

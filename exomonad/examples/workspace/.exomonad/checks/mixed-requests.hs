@@ -5,6 +5,7 @@ Right (textRequest, textProgress) <- requestWithProgress @Bool @Text textAgent "
 Right numberAgent <- spawnSubagent (FreshCtx "Inspect the number source.") (ForkWorktree projectHead)
   ((defaultSpawnOptions workspaceAgentSpec) { spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just "number-worker" })
 Right (numberRequest, numberProgress) <- requestWithProgress @Text @Int numberAgent "Inspect numbers" defaultRequestOptions
-let textSource = projectWorkSource "text" (const (WorkProgress [] [])) TextResult textRequest textProgress
-let numberSource = projectWorkSource "number" (const (WorkProgress [] [])) NumberResult numberRequest numberProgress
-Right collection <- followWorkSources [textSource, numberSource] keepWork
+let textSource = projectWorkSource "text" (const (WorkProgress [] [])) TextResult (R.settlement textRequest) (R.progress textProgress)
+let numberSource = projectWorkSource "number" (const (WorkProgress [] [])) NumberResult (R.settlement numberRequest) (R.progress numberProgress)
+Right buildCollection <- pure (workSourcesDefinition [textSource, numberSource])
+collection <- R.start (buildCollection keepWork)
