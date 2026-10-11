@@ -1451,6 +1451,13 @@ async fn resident_command_grants_allow_root_coding_and_preserve_checkout_isolati
                 ],
             },
         );
+        eprintln!(
+            "command principal={actor} grant={:?} attachment_access={:?} invocation={invocation:?}",
+            authority.grant(actor.into()),
+            authority
+                .bound_worktree(actor.into())
+                .and_then(|tree| authority.workspace_access(actor.into(), &tree)),
+        );
         std::process::Command::new(invocation.program)
             .args(invocation.args)
             .output()

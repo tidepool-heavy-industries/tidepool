@@ -98,8 +98,8 @@ pub struct ActorWorktreeAuthority {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActorWorktreeGrant {
     Repository,
-    /// Repository inspection for the operator workbench, which has no
-    /// writable checkout of its own.
+    /// Repository inspection, capping current attachments and new capabilities
+    /// at read-only access. Previously issued capabilities retain their rights.
     RepositoryReadOnly,
     Bound {
         enumerate: bool,
@@ -252,6 +252,9 @@ impl ActorWorktreeAuthority {
         Ok(tree.clone())
     }
 
+    /// Effective access for a new operation on the exact current attachment.
+    /// An inspection grant caps the attachment without mutating its durable
+    /// access or capabilities issued before the grant was installed.
     pub fn workspace_access(
         &self,
         principal: tidepool_repr::PrincipalId,
@@ -262,10 +265,16 @@ impl ActorWorktreeAuthority {
             principal.identity,
             principal.incarnation,
         );
-        self.bindings
+        let access = self
+            .bindings
             .lock()
             .membership(tree, &agent)
-            .map(|binding| binding.access())
+            .map(|binding| binding.access());
+        if self.grant(principal) == ActorWorktreeGrant::RepositoryReadOnly {
+            access.map(|_| WorkspaceAccess::ReadOnly)
+        } else {
+            access
+        }
     }
 
     /// The worktree this principal currently holds custody of, if any.
@@ -1445,6 +1454,236 @@ mod tests {
             .resolve_workspace(&token, WorkspaceAccess::ReadOnly)
             .is_err());
         peer_lease.release(&mut bindings.lock()).unwrap();
+    }
+
+    #[test]
+    fn inspection_grant_caps_current_workspace_but_preserves_issued_capabilities() {
+        use tidepool_bridge::FromHaskell;
+        use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+
+        let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
+        repository
+            .writer()
+            .commit_file("README.md", "seed", "seed")
+            .unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
+        let manager = WorktreeManager::new(
+            GitCli::new(),
+            WorktreeRegistry::open(&anchor, "registry").unwrap(),
+            storage.path().join("workspaces"),
+            repository.path(),
+        );
+        let tree = manager.register_source_checkout().unwrap().id().clone();
+        let bindings = Arc::new(Mutex::new(BindingTable::open(&anchor, "bindings").unwrap()));
+        let authority = ActorWorktreeAuthority::new("run", bindings.clone());
+        let principal = tidepool_repr::PrincipalId::new(2, 1);
+        let actor = WorktreePrincipal::exact_actor("run", 2, 1);
+        let lease = bindings
+            .lock()
+            .bind(&tree, &actor, WorkspaceAccess::ReadWrite, 1)
+            .unwrap();
+        let previously_issued = authority
+            .issue_workspace(principal, &tree, WorkspaceAccess::ReadWrite)
+            .unwrap();
+        authority.install_grant(principal, ActorWorktreeGrant::RepositoryReadOnly);
+        assert_eq!(
+            authority.workspace_access(principal, &tree),
+            Some(WorkspaceAccess::ReadOnly)
+        );
+        assert_eq!(
+            bindings.lock().membership(&tree, &actor).unwrap().access(),
+            WorkspaceAccess::ReadWrite
+        );
+        assert!(authority
+            .issue_workspace(principal, &tree, WorkspaceAccess::ReadWrite)
+            .is_err());
+
+        let mut handler =
+            ActorWorktreeHandler::new(WorktreeHandler::from_manager(manager), authority.clone());
+        let table = workspace_response_table();
+        let output = tidepool_mcp::CapturedOutput::new();
+        let cx = EffectContext::with_principal(&table, principal, &output);
+        for request in [
+            WorktreeReq::WorktreeCurrentWorkspace,
+            WorktreeReq::WorktreeGrantWorkspace(worktree_id_to_wire(&tree)),
+        ] {
+            let response = handler.handle(request, &cx).unwrap();
+            let selected: Result<tidepool_bridge_effects::WtWorkspaceHandle, WorktreeError> =
+                FromHaskell::from_value(
+                    &crate::test_support::response_value(response, &table),
+                    &table,
+                )
+                .unwrap();
+            let selected = selected.unwrap();
+            assert_eq!(
+                authority
+                    .resolve_workspace(&selected.raw, WorkspaceAccess::ReadOnly)
+                    .unwrap(),
+                tree
+            );
+            assert!(authority
+                .resolve_workspace(&selected.raw, WorkspaceAccess::ReadWrite)
+                .is_err());
+            assert_ne!(selected.raw, previously_issued);
+        }
+        assert_eq!(
+            authority
+                .resolve_workspace(&previously_issued, WorkspaceAccess::ReadWrite)
+                .unwrap(),
+            tree
+        );
+        authority.remove_grant(principal);
+        assert_eq!(
+            authority.workspace_access(principal, &tree),
+            Some(WorkspaceAccess::ReadWrite)
+        );
+        lease.release(&mut bindings.lock()).unwrap();
+        assert_eq!(authority.workspace_access(principal, &tree), None);
+        assert_eq!(
+            authority
+                .resolve_workspace(&previously_issued, WorkspaceAccess::ReadWrite)
+                .unwrap(),
+            tree
+        );
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum AuthorityHistoryGrant {
+        Repository,
+        Inspection,
+        Bound {
+            enumerate: bool,
+            allocate: bool,
+            integrate: bool,
+        },
+    }
+
+    #[derive(Clone, Debug)]
+    enum AuthorityHistoryStep {
+        Grant(usize, AuthorityHistoryGrant),
+        RemoveGrant(usize),
+        Attach {
+            actor: usize,
+            tree: usize,
+            writable: bool,
+        },
+        Release(usize),
+    }
+
+    fn authority_history_step() -> impl proptest::strategy::Strategy<Value = AuthorityHistoryStep> {
+        use proptest::prelude::*;
+        let grant = prop_oneof![
+            Just(AuthorityHistoryGrant::Repository),
+            Just(AuthorityHistoryGrant::Inspection),
+            (any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
+                |(enumerate, allocate, integrate)| AuthorityHistoryGrant::Bound {
+                    enumerate,
+                    allocate,
+                    integrate
+                }
+            ),
+        ];
+        prop_oneof![
+            (0usize..3, grant).prop_map(|(actor, grant)| AuthorityHistoryStep::Grant(actor, grant)),
+            (0usize..3).prop_map(AuthorityHistoryStep::RemoveGrant),
+            (0usize..3, 0usize..2, any::<bool>()).prop_map(|(actor, tree, writable)| {
+                AuthorityHistoryStep::Attach {
+                    actor,
+                    tree,
+                    writable,
+                }
+            }),
+            (0usize..3).prop_map(AuthorityHistoryStep::Release),
+        ]
+    }
+
+    fn authority_history_config() -> proptest::test_runner::Config {
+        let mut config = proptest::test_runner::Config::default();
+        if std::env::var_os("PROPTEST_CASES").is_none() {
+            config.cases = 64;
+        }
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        config
+    }
+
+    proptest::proptest! {
+        #![proptest_config(authority_history_config())]
+        #[test]
+        fn grant_and_attachment_histories_preserve_effective_access_and_issued_rights(
+            prefix in proptest::collection::vec(authority_history_step(), 0..16),
+            suffix in proptest::collection::vec(authority_history_step(), 0..16),
+        ) {
+            let storage = tempfile::tempdir().unwrap();
+            let anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
+            let bindings = Arc::new(Mutex::new(BindingTable::open(&anchor, "bindings").unwrap()));
+            let authority = ActorWorktreeAuthority::new("run", bindings.clone());
+            let other_run = ActorWorktreeAuthority::new("other-run", bindings.clone());
+            let principals = [tidepool_repr::PrincipalId::new(1, 1), tidepool_repr::PrincipalId::new(1, 2), tidepool_repr::PrincipalId::new(2, 1)];
+            let trees = [WorktreeId::from_raw("one"), WorktreeId::from_raw("two")];
+            let mut leases: [Option<exomonad_worktree::ActiveBinding>; 3] = [None, None, None];
+            let mut attachments: [Option<(usize, bool)>; 3] = [None, None, None];
+            let mut grants: [Option<AuthorityHistoryGrant>; 3] = [None, None, None];
+            let mut issued = Vec::new();
+            // Embed the confirmed failure in arbitrary surrounding histories.
+            let targeted = [AuthorityHistoryStep::Release(0),
+                AuthorityHistoryStep::Attach { actor: 0, tree: 0, writable: true },
+                AuthorityHistoryStep::Grant(0, AuthorityHistoryGrant::Inspection),
+                AuthorityHistoryStep::Grant(0, AuthorityHistoryGrant::Repository),
+                AuthorityHistoryStep::RemoveGrant(0), AuthorityHistoryStep::Release(0)];
+            for (time, step) in prefix.into_iter().chain(targeted).chain(suffix).enumerate() {
+                match step {
+                    AuthorityHistoryStep::Grant(actor, grant) => {
+                        authority.install_grant(principals[actor], match grant {
+                            AuthorityHistoryGrant::Repository => ActorWorktreeGrant::Repository,
+                            AuthorityHistoryGrant::Inspection => ActorWorktreeGrant::RepositoryReadOnly,
+                            AuthorityHistoryGrant::Bound { enumerate, allocate, integrate } => ActorWorktreeGrant::Bound { enumerate, allocate, integrate },
+                        });
+                        grants[actor] = Some(grant);
+                    }
+                    AuthorityHistoryStep::RemoveGrant(actor) => { authority.remove_grant(principals[actor]); grants[actor] = None; }
+                    AuthorityHistoryStep::Attach { actor, tree, writable } => {
+                        let principal = principals[actor];
+                        let result = bindings.lock().bind(&trees[tree], &WorktreePrincipal::exact_actor("run", principal.identity, principal.incarnation),
+                            if writable { WorkspaceAccess::ReadWrite } else { WorkspaceAccess::ReadOnly }, time as i64);
+                        proptest::prop_assert_eq!(result.is_ok(), attachments[actor].is_none());
+                        if let Ok(lease) = result { leases[actor] = Some(lease); attachments[actor] = Some((tree, writable)); }
+                    }
+                    AuthorityHistoryStep::Release(actor) => {
+                        if let Some(lease) = leases[actor].take() { lease.release(&mut bindings.lock()).unwrap(); }
+                        attachments[actor] = None;
+                    }
+                }
+                for (actor, principal) in principals.iter().copied().enumerate() {
+                    let inspection = matches!(grants[actor], Some(AuthorityHistoryGrant::Inspection));
+                    let repository = matches!(grants[actor], Some(AuthorityHistoryGrant::Repository));
+                    for (tree, id) in trees.iter().enumerate() {
+                        let attached = attachments[actor].filter(|(selected, _)| *selected == tree);
+                        let expected = attached.map(|(_, writable)| if writable && !inspection { WorkspaceAccess::ReadWrite } else { WorkspaceAccess::ReadOnly });
+                        proptest::prop_assert_eq!(authority.workspace_access(principal, id), expected);
+                        proptest::prop_assert_eq!(other_run.workspace_access(principal, id), None);
+                        // Repository grants authorize unbound selection; an existing
+                        // attachment remains the ceiling even for Repository.
+                        let can_read = attached.is_some() || repository || inspection;
+                        let can_write = if let Some((_, writable)) = attached { writable && !inspection } else { repository };
+                        for (requested, allowed) in [(WorkspaceAccess::ReadOnly, can_read), (WorkspaceAccess::ReadWrite, can_write)] {
+                            let result = authority.issue_workspace(principal, id, requested);
+                            proptest::prop_assert_eq!(result.is_ok(), allowed, "actor={} tree={} requested={:?}", actor, tree, requested);
+                            if let Ok(token) = result { issued.push((token, id.clone(), requested)); }
+                        }
+                    }
+                }
+                for (token, tree, access) in &issued {
+                    proptest::prop_assert_eq!(authority.workspace_capability(token).unwrap(), (tree.clone(), *access));
+                    proptest::prop_assert_eq!(authority.resolve_workspace(token, WorkspaceAccess::ReadWrite).is_ok(), *access == WorkspaceAccess::ReadWrite);
+                    proptest::prop_assert_eq!(authority.resolve_workspace(token, WorkspaceAccess::ReadOnly).unwrap(), tree.clone());
+                }
+            }
+        }
     }
 
     fn workspace_response_table() -> tidepool_repr::DataConTable {
