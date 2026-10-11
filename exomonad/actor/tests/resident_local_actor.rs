@@ -581,17 +581,23 @@ impl ConcurrentResident {
         if let Some(layers) = layers {
             forest.set_source_layers(layers);
         }
-        let (actor, _task) = forest
-            .new_program_root(
+        let mut preparation = exomonad_actor::CompilerPreparationOwner::new();
+        let prepared = preparation
+            .scope(forest.new_program_root(
                 "concurrent-publication".into(),
                 exomonad_actor::ActorCapabilities::default().with_effect_keys(vec![
                     exomonad_actor::ActorEffectKey::Commands,
                     exomonad_actor::ActorEffectKey::Watches,
                 ]),
                 std::sync::Arc::new(compiled),
-            )
-            .await
-            .expect("concurrent workbench");
+            ))
+            .await;
+        assert!(
+            prepared.cleanup.observation().is_confirmed(),
+            "root preparation cleanup: {:?}",
+            prepared.cleanup
+        );
+        let (actor, _task) = prepared.action.expect("concurrent workbench");
         let deployment =
             tokio::time::timeout(std::time::Duration::from_secs(600), deployments.recv())
                 .await
@@ -1212,8 +1218,9 @@ async fn resident_await_watch_case(case: WatchCase) {
         _,
         std::sync::Arc<dyn exomonad_actor::ResidentToolEndpoint>,
     ) = if primary {
-        let (actor, task) = forest
-            .new_program_root(
+        let mut preparation = exomonad_actor::CompilerPreparationOwner::new();
+        let prepared = preparation
+            .scope(forest.new_program_root(
                 "resident-await-watch".into(),
                 exomonad_actor::ActorCapabilities::default().with_effect_keys(
                     if direct_binding_cell {
@@ -1227,9 +1234,14 @@ async fn resident_await_watch_case(case: WatchCase) {
                     },
                 ),
                 std::sync::Arc::new(notebook.expect("primary notebook installation")),
-            )
-            .await
-            .expect("spawn primary workbench");
+            ))
+            .await;
+        assert!(
+            prepared.cleanup.observation().is_confirmed(),
+            "root preparation cleanup: {:?}",
+            prepared.cleanup
+        );
+        let (actor, task) = prepared.action.expect("spawn primary workbench");
         let LocalResidentDeployment::PolicyInstalled(installation) = deployments
             .recv()
             .await

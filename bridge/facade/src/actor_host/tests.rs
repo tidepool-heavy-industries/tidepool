@@ -793,16 +793,21 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
         .await
         .unwrap();
     campaign.observe_hosted_completion().await.unwrap();
-    let (successor, task) = campaign
-        .forest
-        .recover_program_root(
+    let mut preparation = exomonad_actor::CompilerPreparationOwner::new();
+    let prepared = preparation
+        .scope(campaign.forest.recover_program_root(
             campaign.actor.identity(),
             "recovered-root".into(),
             exomonad_actor::ActorCapabilities::default(),
             campaign.program.clone(),
-        )
-        .await
-        .unwrap();
+        ))
+        .await;
+    assert!(
+        prepared.cleanup.observation().is_confirmed(),
+        "recovery preparation cleanup: {:?}",
+        prepared.cleanup
+    );
+    let (successor, task) = prepared.action.unwrap();
     assert_ne!(successor.identity(), campaign.actor.identity());
     assert!(
         campaign
@@ -2871,16 +2876,21 @@ async fn forest_operator_survives_model_root_recovery() {
                     tidepool_runtime::session::ResidentSessionState::Reusable,
                     "actor failure must not imply that the resident machine is safe to replace"
                 );
-                let (replacement, task) = campaign
-                    .forest
-                    .recover_program_root(
+                let mut preparation = exomonad_actor::CompilerPreparationOwner::new();
+                let prepared = preparation
+                    .scope(campaign.forest.recover_program_root(
                         campaign.actor.identity(),
                         "replacement".into(),
                         exomonad_actor::ActorCapabilities::default(),
                         campaign.program.clone(),
-                    )
-                    .await
-                    .unwrap();
+                    ))
+                    .await;
+                assert!(
+                    prepared.cleanup.observation().is_confirmed(),
+                    "recovery preparation cleanup: {:?}",
+                    prepared.cleanup
+                );
+                let (replacement, task) = prepared.action.unwrap();
                 assert_eq!(
                     campaign.forest.resident_session_state(),
                     tidepool_runtime::session::ResidentSessionState::Reusable
