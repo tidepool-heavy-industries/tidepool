@@ -1,5 +1,9 @@
 use super::*;
 
+fn is_pipe_read_wait(state: &str) -> bool {
+    matches!(state.trim(), "pipe_read" | "anon_pipe_read")
+}
+
 fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(10)
 }
@@ -48,7 +52,7 @@ impl Fixture {
             let limit = deadline();
             loop {
                 let state = std::fs::read_to_string(format!("/proc/{}/wchan", info.pid)).unwrap();
-                if state.trim() == "pipe_read" {
+                if is_pipe_read_wait(&state) {
                     break;
                 }
                 assert!(
@@ -77,11 +81,10 @@ impl Fixture {
         .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
         let pid = self.scope.info_record.as_ref().unwrap().pid;
-        assert_eq!(
-            std::fs::read_to_string(format!("/proc/{pid}/wchan"))
-                .unwrap()
-                .trim(),
-            "pipe_read"
+        let state = std::fs::read_to_string(format!("/proc/{pid}/wchan")).unwrap();
+        assert!(
+            is_pipe_read_wait(&state),
+            "init is not blocked in pipe read: {state}"
         );
         self.absent();
     }
