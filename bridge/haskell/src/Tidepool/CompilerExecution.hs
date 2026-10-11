@@ -50,7 +50,11 @@ withCompilerExecutor grant use = mask $ \restore -> do
   state <- newMVar (ExecutorState False 0 Map.empty)
   identity <- newTimingRequestIdentity
   let executor = CompilerExecutor identity queue state
-      worker = readChan queue >>= id >> worker
+      worker = do
+        ExecutorState closed _ _ <- readMVar state
+        -- A task can handle ThreadKilled and return normally. The closed owner
+        -- still retires its worker before that worker waits for another task.
+        when (not closed) (readChan queue >>= id >> worker)
       start = do
         done <- newEmptyMVar
         thread <- forkFinally (restore worker) (const (putMVar done ()))

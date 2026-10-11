@@ -5,7 +5,8 @@ module CompilerExecutionTest (compilerExecutionTests) where
 import Control.Concurrent (forkFinally, killThread)
 import Control.Concurrent.MVar
   (MVar, newEmptyMVar, putMVar, readMVar)
-import Control.Exception (SomeException, bracket, finally, throwIO)
+import Control.Exception
+  (AsyncException(ThreadKilled), SomeException, bracket, catch, finally, fromException, throwIO, try)
 import Control.Monad (forM_, unless)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import qualified Data.Map.Strict as Map
@@ -20,6 +21,7 @@ compilerExecutionTests = testGroup "compiler execution"
   , testCase "completion-triggered work shares the admitted bound" completionWork
   , testCase "dynamic demand incorporates ready ancestors before blocked descendants" dynamicDemand
   , testCase "cancellation joins running work and fences submission" cancellation
+  , testCase "shutdown joins a task that catches its cancellation" caughtCancellation
   , testCase "failed work cancels and joins its siblings" failedWork
   , testCase "dynamic cancellation joins children and preserves completed facts" dynamicCancellation
   , testCase "coordinator failure joins running sibling tasks" callbackFailure
@@ -129,6 +131,36 @@ cancellation = within $ do
   refusal <- observe stopped
   assert (case refusal of Left (_ :: SomeException) -> True; Right _ -> False)
     "closed executor accepted more work"
+
+caughtCancellation :: IO ()
+caughtCancellation = within $ do
+  entered <- newEmptyMVar
+  caught <- newEmptyMVar
+  never <- newEmptyMVar
+  settled <- newEmptyMVar
+  published <- newIORef False
+  executor <- withCompilerExecutor (jobs 1) $ \executor -> do
+    _ <- forkFinally
+      (runCompilerTasks executor
+        (\() -> (putMVar entered () >> readMVar never) `catch` \failure ->
+          case failure of
+            ThreadKilled -> putMVar caught ()
+            other -> throwIO other)
+        (\_ _ -> atomicModifyIORef' published (const (True, ()))) [()])
+      (putMVar settled)
+    observe entered
+    pure executor
+  observe caught
+  outcome <- observe settled
+  assert (case outcome of
+    Left failure -> fromException failure == Just ThreadKilled
+    Right _ -> False) "closed work reported the task's recovered cancellation as success"
+  observed <- readIORef published
+  assert (not observed) "closed work published a completion callback"
+  refusal <- try (runCompilerTasks executor pure (\_ _ -> pure ()) [()])
+  assert (case refusal of
+    Left (failure :: SomeException) -> fromException failure == Just ThreadKilled
+    Right _ -> False) "closed executor accepted work after its task recovered cancellation"
 
 failedWork :: IO ()
 failedWork = within $ do
