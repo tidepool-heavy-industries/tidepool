@@ -540,16 +540,21 @@ sessionValueFinalizedDependency = bracket temporary removeDirectoryRecursive $ \
     Right _ -> fail "conflicting existing packet bytes were replaced or accepted"
   _ <- materializeFinalizedModuleArtifacts projected finalized
   BS.appendFile (root </> changedPath) "changed"
-  changed <- try (materializeFinalizedModuleArtifacts (root </> "changed-packet") finalized)
+  let changedPacket = root </> "changed-packet"
+  changed <- materializeFinalizedModuleArtifacts changedPacket finalized
     `finally` BS.writeFile (root </> changedPath) originalPayload
-    :: IO (Either SomeException FinalizedModuleArtifacts)
-  case changed of
-    Left _ -> pure ()
-    Right _ -> fail "changed captured payload acquired new packet custody"
+  unless (toStrictByteString (encodeFinalizedModuleArtifacts changed) == encoded)
+    (fail "origin mutation changed the captured packet evidence")
+  retainedAfterMutation <- BS.readFile (changedPacket </> changedPath)
+  unless (retainedAfterMutation == originalPayload)
+    (fail "new packet custody reread the mutated origin instead of retained bytes")
   forM_ payloads $ \(path,_) -> removeFile (root </> path)
+  let removedPacket = root </> "removed-origin-packet"
+  _ <- materializeFinalizedModuleArtifacts removedPacket finalized
   forM_ payloads $ \(path,sha) -> do
     owned <- BS.readFile (projected </> path)
-    unless (shaHex owned == sha)
+    reissued <- BS.readFile (removedPacket </> path)
+    unless (shaHex owned == sha && reissued == owned)
       (fail "projected custody depended on the removed capture directory")
   -- Reinject an actually issued interface with altered nominal evidence. The
   -- source census and checking HPT still cannot authorize that sidecar.
@@ -1724,23 +1729,35 @@ dependencyEvidenceCompilation = bracket temporary removeDirectoryRecursive $ \ro
   previousTiming <- lookupEnv "TIDEPOOL_TIMING"
   setEnv "TIDEPOOL_TIMING" "1"
   (withResidentPipelineSelected [root] $ \compile -> do
-      _ <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
-      appendFile boot "\n-- boot-only mutation\n"
-      (_, changedLog) <- captureStderr root "boot-changed" $
-        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
-      assertContains "boot-only mutation invalidates its SOURCE importer"
-        "tidepool-memo-miss module=WitnessB" changedLog
-      assertContains "boot fingerprint participates in home dependency validity"
-        "same-home-dependencies=False" changedLog
-      appendFile types "\n-- transitive boot dependency mutation\n"
-      (_, transitiveLog) <- captureStderr root "boot-dependency-changed" $
-        compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
-      assertContains "dependency imported by boot interface invalidates SOURCE importer"
-        "tidepool-memo-miss module=WitnessB" transitiveLog
-      assertContains "transitive boot dependency fingerprint participates in validity"
-        "same-home-dependencies=False" transitiveLog)
+    before <- compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+    appendFile boot "\n-- boot-only mutation\n"
+    staleBoot <- revalidateDependencyEvidence (preparedFreshDependencies before)
+    assertEqual "boot mutation invalidates the prior consumed source witness" False staleBoot
+    (changed, changedLog) <- captureStderr root "boot-changed" $
+      compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+    assertContains "boot-only mutation invalidates its SOURCE importer"
+      "tidepool-memo-miss module=WitnessB" changedLog
+    assertConsumedSource "changed boot" boot changed
+    appendFile types "\n-- transitive boot dependency mutation\n"
+    staleTypes <- revalidateDependencyEvidence (preparedFreshDependencies changed)
+    assertEqual "transitive boot dependency invalidates the prior source witness" False staleTypes
+    (transitive, transitiveLog) <- captureStderr root "boot-dependency-changed" $
+      compile PreparedStg mempty GeneralCompile Nothing target [] Nothing
+    assertContains "dependency imported by boot interface invalidates SOURCE importer"
+      "tidepool-memo-miss module=WitnessB" transitiveLog
+    assertConsumedSource "transitive boot dependency" types transitive)
     `finally` maybe (unsetEnv "TIDEPOOL_TIMING") (setEnv "TIDEPOOL_TIMING") previousTiming
   where
+    assertConsumedSource label path result = do
+      actual <- shaHex <$> BS.readFile path
+      let evidence = preparedFreshDependencies result
+          consumed = [dependencySourceSha256 source | source <- dependencySources evidence
+            , dependencySourcePath source == path]
+      assertEqual (label ++ " records the actual current source bytes") [actual] consumed
+      current <- revalidateDependencyEvidence evidence
+      assertEqual (label ++ " returns a current dependency selection") True current
+      requirements <- either fail pure (preparedHomeRequirements result "main" "WitnessB")
+      assertEqual (label ++ " preserves its selected SOURCE owner") [("main","WitnessA")] requirements
     temporary = do
       parent <- getTemporaryDirectory
       (path, handle) <- openTempFile parent "tidepool-dependency-evidence"
@@ -2063,6 +2080,8 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
           assertEqual "checked target explicit exports omit private and imported names"
             ["visible"] (map infoName entries)
         _ -> fail ("explicit export browse returned an unexpected result: " ++ show exported)
+    successfulCloseClears <- readIORef recoveryClears
+    assertEqual "successful close retains reusable recovery graphs" 0 successfulCloseClears
     writeFile dependency "module MetadataDependency where\nvalue = missingDependencyName\n"
     rejected <- try (runRequest (modifyIORef' recoveryClears (+ 1)) $ \compiler -> do
       _ <- compiler CheckedEnvironment mempty GeneralCompile Nothing target [root] Nothing
@@ -2074,7 +2093,7 @@ metadataCompilation = bracket temporary removeDirectoryRecursive $ \root -> do
       Left DependencyWorkerFailure -> fail "metadata dependency rejection became a worker failure"
       Right _ -> fail "metadata reused an invalid dependency"
     cleared <- readIORef recoveryClears
-    assertEqual "successful close, failed attempt and rejected close clear recovery graphs" 3 cleared
+    assertEqual "failed attempt invalidates recovery graphs once; rejected close does not repeat it" 1 cleared
   where
     temporary = do
       parent <- getTemporaryDirectory
@@ -3145,10 +3164,16 @@ prologuePlans flags = do
   disabled <- analyzeCellWithFlags flags checkTemplate
     "{-# LANGUAGE NoQuasiQuotes #-}\nf = [bash|echo hello|]\n"
   case disabled of
-    Right (CellSourcePlan { cellPlanItems = [_, item] }) ->
-      assertEqual "NoQuasiQuotes survives classification" KExpr
+    Left (CellStatementParseFailure sourceSpan) ->
+      assertEqual "disabled quasiquote syntax is rejected at its authored line" 2 (cellStartLine sourceSpan)
+    other -> fail ("NoQuasiQuotes must reject quasiquote syntax: " ++ show other)
+  disabledLiteral <- analyzeCellWithFlags flags checkTemplate
+    "{-# LANGUAGE NoQuasiQuotes #-}\nf = \"[bash|echo hello|]\"\n"
+  case disabledLiteral of
+    Right (CellSourcePlan { cellPlanItems = [item] }) ->
+      assertEqual "disabled quasiquotes preserve literal text as an ordinary declaration" KDecl
         (sbKind (cellAnalysisVerdict item))
-    other -> fail ("NoQuasiQuotes plan: " ++ show other)
+    other -> fail ("NoQuasiQuotes literal plan: " ++ show other)
   let commentedImports = unlines
         [ "-- leading comment"
         , "{- outer {- nested -} -}"
