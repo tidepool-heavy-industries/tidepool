@@ -1,19 +1,14 @@
-//! REPRO: `send (Print …)` resolves to an unresolved variable at runtime in
-//! some contexts, even though it type-checks and `run`/other effects work.
-//! These tests MAP the minimal trigger in a controlled (single-Console-handler)
-//! effect stack.
-//!
-//! Each test runs one snippet through the real GHC→JIT pipeline and reports the
-//! exact outcome (Ok value / which RuntimeError). They assert the EXPECTED-good
-//! behavior, so a reproduction shows up as a failure naming the unresolved var.
+//! Print continuations run through the real GHC→JIT pipeline with one Console
+//! handler. A pure continuation exercises GHC's nospec specialization wrapper;
+//! a failing continuation must dispatch Print before its language failure.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tidepool_bridge_derive::FromHaskell;
 use tidepool_effect::dispatch::{EffectContext, EffectHandler};
 use tidepool_effect::error::EffectError;
 use tidepool_mcp::CapturedOutput;
-use tidepool_runtime::compile_and_run;
+use tidepool_runtime::{compile_and_run, RuntimeError};
 
 fn prelude_dir() -> PathBuf {
     PathBuf::from(
@@ -47,10 +42,9 @@ impl EffectHandler<CapturedOutput> for ConsoleHandler {
     }
 }
 
-/// Run `code` through the real pipeline (single Console handler). Returns the
-/// captured `say` output and either the debug-rendered result or the runtime
-/// error string.
-fn run(code: &str) -> (Vec<String>, Result<String, String>) {
+/// Run `code` with one Console handler, retaining compiler closure observations
+/// and preserving typed execution failures.
+fn run(code: &str) -> (Vec<String>, Result<serde_json::Value, RuntimeError>) {
     let decls = [tidepool_mcp::console_decl()];
     let preamble = tidepool_mcp::build_preamble(&decls, false);
     let stack = tidepool_mcp::build_effect_stack_type(&decls);
@@ -58,74 +52,66 @@ fn run(code: &str) -> (Vec<String>, Result<String, String>) {
 
     let pp = prelude_dir();
     let dirs = tidepool_mcp::ensure_effects_module(&decls).expect("write effects module");
-    let core = dirs.core.leak() as &Path;
-    let orchestration = dirs.orchestration.leak() as &Path;
-    let include = [pp.as_path(), core, orchestration];
+    let include = [
+        pp.as_path(),
+        dirs.core.as_path(),
+        dirs.orchestration.as_path(),
+    ];
 
     let captured = CapturedOutput::new();
     let mut handlers = frunk::hlist![ConsoleHandler];
-    let out = match compile_and_run(&source, "result", &include, &mut handlers, &captured) {
-        Ok(r) => Ok(format!("{r:?}")),
-        // `Display` on `RuntimeError`/`CompileError::Diagnostics` is a terse
-        // structural summary now (structured spans, not rendered text) — use
-        // the classifier's message so an assertion on the ABSENCE of a GHC
-        // marker (e.g. "unresolved variable") stays a real regression guard
-        // instead of trivially passing because the raw text never carries
-        // GHC's wording at all.
-        Err(e) => Err(tidepool_runtime::classify(&e).message),
-    };
+    let out = tidepool_testing::with_settlement(|settlement| {
+        compile_and_run(
+            &source,
+            "result",
+            &include,
+            &mut handlers,
+            &captured,
+            settlement,
+        )
+    })
+    .map(|result| result.to_json());
     (captured.drain(), out)
 }
 
-/// Control: a bare `pure` with no effect resolves fine.
 #[test]
 fn pure_only_ok() {
-    let (_out, r) = run("pure (123 :: Int)");
-    assert!(r.is_ok(), "pure (123) should succeed, got {r:?}");
+    let (out, r) = run("pure (123 :: Int)");
+    assert_eq!(
+        r.expect("pure (123) should succeed"),
+        serde_json::json!(123)
+    );
+    assert!(out.is_empty(), "pure must not dispatch Print: {out:?}");
 }
 
-/// Control: `send (Print …) >> error` already passes elsewhere — Print resolves
-/// when the continuation is an `error`.
 #[test]
 fn print_then_error_resolves() {
     let (out, r) =
         run(r#"send (Print (T.pack "MARK")) >> (error (T.pack "boom") :: Eff '[Console] Int)"#);
-    // Expect a Haskell error (NOT an unresolved-variable), with the marker captured.
-    match &r {
-        Err(e) => {
-            assert!(
-                !e.contains("unresolved variable"),
-                "Print unresolved even with `>> error`: {e}"
-            );
-            assert!(
-                out.iter().any(|l| l.contains("MARK")),
-                "marker not captured: {out:?}"
-            );
-        }
-        Ok(v) => panic!("expected an error, got Ok({v})"),
-    }
+    assert!(
+        matches!(&r, Err(RuntimeError::Prepared(error))
+            if error.kind() == tidepool_runtime::session::PreparedFailureKind::Language),
+        "expected a language failure after Print, got {r:?}"
+    );
+    assert_eq!(out, ["MARK"]);
 }
 
-/// REGRESSION GUARD (was failing): `send (Print x) >> (pure y)` forced the
-/// unresolved external `GHC.Magic.nospec` — the specializer's identity wrapper
-/// (emitted once Opt_Specialise is on), which the JIT didn't handle (only
-/// runRW#). Fixed by desugaring nospec as identity in Translate.hs.
 #[test]
 fn print_then_pure_resolves() {
-    let (_out, r) = run(r#"send (Print (T.pack "MARK")) >> (pure (123 :: Int))"#);
-    assert!(
-        r.is_ok(),
-        "send (Print) >> (pure 123) should succeed, got {r:?}"
+    let (out, r) = run(r#"send (Print (T.pack "MARK")) >> (pure (123 :: Int))"#);
+    assert_eq!(
+        r.expect("send (Print) >> pure should succeed"),
+        serde_json::json!(123)
     );
+    assert_eq!(out, ["MARK"]);
 }
 
-/// REGRESSION GUARD (was failing): same bug as `print_then_pure_resolves`
-/// (the `$!` is irrelevant — any `pure` tail after a unit-returning effect).
 #[test]
 fn print_then_strict_pure_resolves() {
-    let (_out, r) = run(r#"send (Print (T.pack "MARK")) >> (pure $! (123 :: Int))"#);
-    assert!(
-        r.is_ok(),
-        "send (Print) >> (pure $! 123) should succeed, got {r:?}"
+    let (out, r) = run(r#"send (Print (T.pack "MARK")) >> (pure $! (123 :: Int))"#);
+    assert_eq!(
+        r.expect("send (Print) >> strict pure should succeed"),
+        serde_json::json!(123)
     );
+    assert_eq!(out, ["MARK"]);
 }
