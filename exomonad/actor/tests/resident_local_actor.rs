@@ -1145,6 +1145,14 @@ async fn resident_await_watch_case(case: WatchCase) {
         ResidentSession::unbootstrapped(NoHandlers, TestSink, DEFAULT_NURSERY_SIZE, Some(lib));
     let notebook =
         primary.then(|| compile_notebook_entry(&machine, &preamble, &include, session_root.path()));
+    let descriptor = ActorDescriptor::new(
+        "resident-await-watch",
+        ActorPlacement {
+            session,
+            resource_scope: RealmId::fresh(),
+            lexical_scope: ScopeId::ROOT,
+        },
+    );
     let outcome = if primary {
         None
     } else {
@@ -1176,10 +1184,17 @@ async fn resident_await_watch_case(case: WatchCase) {
             TurnResult::Expr { compiled, .. } => compiled,
             other => panic!("policy should be an expression, got {other:?}"),
         };
-        machine.set_effect_execution(
-            EffectRunPolicy::SuspendAll,
-            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-        );
+        machine
+            .set_actor_execution(
+                tidepool_runtime::session::SessionRunContext {
+                    resource_scope: descriptor.placement().resource_scope,
+                    lexical_scope: descriptor.placement().lexical_scope,
+                    ..tidepool_runtime::session::SessionRunContext::ROOT
+                },
+                EffectRunPolicy::SuspendAll,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .expect("initial policy actor placement");
         Some(
             tidepool_testing::with_settlement(|settlement| {
                 machine.run_with_sites("resident_await_watch_policy", compiled.code(), settlement)
@@ -1187,14 +1202,6 @@ async fn resident_await_watch_case(case: WatchCase) {
             .expect("first policy boundary"),
         )
     };
-    let descriptor = ActorDescriptor::new(
-        "resident-await-watch",
-        ActorPlacement {
-            session,
-            resource_scope: RealmId::fresh(),
-            lexical_scope: ScopeId::ROOT,
-        },
-    );
     let mut source = ActorWorkbenchSource::new(preamble, include);
     if primary {
         source = source
@@ -1848,14 +1855,6 @@ async fn resident_cleanup_case(fail_hook: bool) {
         TurnResult::Expr { compiled, .. } => compiled,
         other => panic!("policy should be an expression, got {other:?}"),
     };
-    machine.set_effect_execution(
-        EffectRunPolicy::SuspendAll,
-        LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-    );
-    let outcome = tidepool_testing::with_settlement(|settlement| {
-        machine.run_with_sites("resident_local_policy", compiled.code(), settlement)
-    })
-    .expect("first policy boundary");
     let descriptor = ActorDescriptor::new(
         "resident-local-policy",
         ActorPlacement {
@@ -1864,6 +1863,21 @@ async fn resident_cleanup_case(fail_hook: bool) {
             lexical_scope: ScopeId::ROOT,
         },
     );
+    machine
+        .set_actor_execution(
+            tidepool_runtime::session::SessionRunContext {
+                resource_scope: descriptor.placement().resource_scope,
+                lexical_scope: descriptor.placement().lexical_scope,
+                ..tidepool_runtime::session::SessionRunContext::ROOT
+            },
+            EffectRunPolicy::SuspendAll,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        )
+        .expect("initial policy actor placement");
+    let outcome = tidepool_testing::with_settlement(|settlement| {
+        machine.run_with_sites("resident_local_policy", compiled.code(), settlement)
+    })
+    .expect("first policy boundary");
     let sibling_scope = machine.mint_isolated_scope();
     let sibling_realm = RealmId::fresh();
     machine
