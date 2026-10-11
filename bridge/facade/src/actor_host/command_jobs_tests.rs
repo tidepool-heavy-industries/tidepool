@@ -1810,7 +1810,7 @@ async fn command_run_returns_typed_output_failure_and_resumes_the_suffix() {
     }
     let policy = campaign.root_installation.policy.clone();
     let projected = campaign.drive_actor_output(&store, dispatch_haskell_script(policy.as_ref(),
-        "display (Cmd.commandOutcome (Cmd.commandResult (fst attempt)), Cmd.capturedOutput (fst attempt), Cmd.stdout (fst attempt), Cmd.stderr (fst attempt))",
+        "display (show (Cmd.commandOutcome (Cmd.commandResult (fst attempt)), Cmd.capturedOutput (fst attempt), Cmd.stdout (fst attempt), Cmd.stderr (fst attempt)))",
     )).await;
     let typed = super::test_campaign::committed_display_text(&projected);
     assert!(typed.contains("CommandExited 0"), "{typed}");
