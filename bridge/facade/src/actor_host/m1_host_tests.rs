@@ -615,7 +615,7 @@ impl exomonad_actor::JevBackend for AncestorOutputGate {
         request: String,
     ) -> futures_util::future::BoxFuture<'_, Result<String, exomonad_actor::JevCallFailure>> {
         Box::pin(async move {
-            self.requests.lock().push(request.clone());
+            self.requests.lock().push(request);
             let (release, held) = tokio::sync::oneshot::channel();
             self.entered.send(release).map_err(|_| {
                 exomonad_actor::JevCallFailure::JevTransport(
@@ -627,7 +627,7 @@ impl exomonad_actor::JevBackend for AncestorOutputGate {
                     "ancestor output test abandoned the admitted handler".into(),
                 )
             })?;
-            exomonad_actor::JevBackend::ask(&super::test_campaign::FixtureJev, request).await
+            Ok("released".into())
         })
     }
 }
@@ -790,8 +790,10 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
             .expect("the actual cell never entered its completion gate")
             .expect("the actual cell's completion gate closed");
         assert_eq!(output_gate.requests.lock().len(), 1);
-        assert!(output_gate.requests.lock()[0]
-            .contains("hold ancestor output until successor preparation"));
+        assert_eq!(
+            output_gate.requests.lock()[0],
+            "hold ancestor output until successor preparation"
+        );
         release_output
             .send(())
             .expect("the actual cell abandoned its completion gate");

@@ -1,6 +1,6 @@
+import qualified Tidepool.Effects.Core as Effects
+
 _ <- do
-  Right response <- J.ask1 (J.rawState (String "hold ancestor output until successor preparation"))
-    (J.choice "Release the retained cell?"
-      (J.alt #yes "Release" () J..| J.alt #no "Reject" ()))
-  True <- pure (J.handle (J.answers response) (#yes (\_ -> True) J..| #no (\_ -> False)))
+  Right response <- send (Effects.JevAskWith "hold ancestor output until successor preparation")
+  True <- pure (response == "released")
   display (40 + 2 :: Int)
