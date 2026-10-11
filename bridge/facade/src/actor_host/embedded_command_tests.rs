@@ -508,7 +508,7 @@ async fn claimed_control_and_retained_uncertainty_never_redispatch() {
         )
         .unwrap();
     assert_eq!(dispatch().await.unwrap(), Some(retained));
-    assert_eq!(fixture.hosts[&actor].controls.lock().unwrap().len(), 1);
+    assert!(fixture.hosts[&actor].controls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1108,7 +1108,7 @@ async fn durable_command_drain_runs_without_a_channel_hint_and_skips_claimed_wor
         harness::store::EmbeddedCommandState::InputAdmitted
     );
     assert_eq!(fixture.hosts[&actor].wakes.load(Ordering::Relaxed), 1);
-    assert_eq!(fixture.hosts[&actor].controls.lock().unwrap().len(), 1);
+    assert!(fixture.hosts[&actor].controls.lock().unwrap().is_empty());
 }
 
 use super::test_campaign::TestCampaign;
