@@ -52,7 +52,7 @@ import Tidepool.Agent.Watch.Internal (WatchId (..))
 import Tidepool.Agent.Session (requestSessionSited, publishResponse, publishProgressResponse)
 import Tidepool.View.Types (View(..))
 import Tidepool.Inspection
-  ( Display (..), DisplayTree (..), PageDisplay (..)
+  ( Display (..), DisplayTree (..), DisplayPage, PageDisplay (..)
   , opaqueHandle, pageWithContinuation )
 import Tidepool.Effects.Core
   ( AgentControl (..), AgentInspection (..), AgentTools, Notifications (..)
@@ -358,15 +358,24 @@ instance {-# OVERLAPPING #-} Display (Either NotificationError NotificationRecei
 
 -- | A retained pure page uses the same admission description.
 instance PageDisplay effects NotificationReceipt where
-  displayPage budget receipt =
-    pageWithContinuation budget (TextLeaf (notificationAccepted receipt)) Nothing
+  displayPage = notificationPage
+  displayPageWithout _ = notificationPage
 
 -- | 'sendMessage''s result, bound or observed as a cell's value.
 instance PageDisplay effects (Either NotificationError NotificationReceipt) where
-  displayPage budget (Right receipt) = displayPage budget receipt
-  displayPage budget (Left failure) =
-    pageWithContinuation budget
-      (Concat [TextLeaf "notification not accepted: ", displayTree failure]) Nothing
+  displayPage = notificationResultPage
+  displayPageWithout _ = notificationResultPage
+
+notificationPage :: Int -> NotificationReceipt -> DisplayPage effects
+notificationPage budget receipt =
+  pageWithContinuation budget (TextLeaf (notificationAccepted receipt)) Nothing
+
+notificationResultPage
+  :: Int -> Either NotificationError NotificationReceipt -> DisplayPage effects
+notificationResultPage budget (Right receipt) = notificationPage budget receipt
+notificationResultPage budget (Left failure) =
+  pageWithContinuation budget
+    (Concat [TextLeaf "notification not accepted: ", displayTree failure]) Nothing
 
 notificationSummary :: NotificationReceipt -> Text
 notificationSummary (NotificationReceipt (_, ((target, incarnation), (_, sequence)))) =

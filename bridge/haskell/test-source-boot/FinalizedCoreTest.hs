@@ -1,9 +1,9 @@
 {-# LANGUAGE GADTs #-}
 
-module FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory, snapshotExecutableHook, unownedUpToDateDependency, mixedCandidateLoads, canonicalLoadGraphHistories) where
+module FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory, snapshotExecutableHook, unownedUpToDateDependency, mixedCandidateLoads, canonicalLoadGraphHistories, agentPageDisplayFinalizationHistory) where
 
 import Control.Exception (SomeException, IOException, bracket, try)
-import Control.Monad (forM_, unless, when)
+import Control.Monad (forM, forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
@@ -57,7 +57,7 @@ import System.Directory
   ( copyFile, createDirectory, createDirectoryIfMissing, doesFileExist, getTemporaryDirectory
   , removeDirectoryRecursive, removeFile )
 import System.Environment (lookupEnv, setEnv, unsetEnv)
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeDirectory)
 import System.IO (hClose, openTempFile, hPutStrLn, stderr)
 import Tidepool.ArtifactBytes (artifactBytes)
 import Tidepool.ExactHydration
@@ -93,6 +93,58 @@ import SourceBootFixtureSupport
 import Tidepool.RetainedUnfoldings
   ( emptyRetainedContext, installRetainedUnfoldingsPlugin
   , scopeRetainedModuleGraph, scopeRetainedSummaryHscEnv )
+
+-- Equal authored source and dependency seals must not acquire a different
+-- PageDisplay dictionary when unrelated home modules change compilation order.
+-- Compare the issued bytes directly, independently of admission or recovery.
+agentPageDisplayFinalizationHistory :: IO ()
+agentPageDisplayFinalizationHistory = withScratch $ \work -> do
+  library <- lookupEnv "TIDEPOOL_PRELUDE_DIR" >>= maybe (fail "missing native standard library") pure
+  effects <- lookupEnv "TIDEPOOL_TEST_EFFECTS_DIR" >>= maybe (fail "missing native effects source") pure
+  let roots = [work, library, takeDirectory library </> "actors", effects]
+      owner = mkModuleName "Tidepool.Actors.Internal.Agent"
+      imports = ["Tidepool.Actors.Internal.Agent", "Tidepool.Actors.Internal.ExomonadDriver",
+        "Tidepool.Actors.Exomonad", "Tidepool.Command"]
+      body prepared = do
+        finalized <- maybe (fail "compiler omitted Agent finalization") pure
+          (Map.lookup owner (pprFinalizedModules prepared))
+        let env = prHscEnv (pprPipelineResult prepared)
+        interface <- serializeOriginalInterface env work (hm_iface (finalizedHomeModInfo finalized))
+        core <- requireRight =<< captureFinalizedCore env finalized work
+        pure (interface, artifactBytes core)
+      target index imported = do
+        let name = "AgentPageHistory" ++ show index
+            source = work </> name ++ ".hs"
+        writeFile source (unlines ["module " ++ name ++ " where",
+          "import Tidepool.Actors.Internal.Agent ()", "import " ++ imported ++ " ()",
+          "__result :: Int", "__result = 0"])
+        pure source
+  bodies <- forM (zip [0 :: Int ..] imports) $ \(index, imported) -> do
+    source <- target index imported
+    prepared <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+      Nothing source roots Nothing
+    fresh <- body prepared
+    if index /= 0 then pure [fresh] else do
+      fixture <- capturePreparedFixture work prepared
+      let support = map moduleNameString
+            (Map.keys (Map.delete owner
+              (Map.delete (mkModuleName "AgentPageHistory0") (pprFinalizedModules prepared))))
+      scopePath <- writeGenuineMetadataScope work support fixture
+      scope <- requireRight =<< readExactScope scopePath
+      admitted <- admitCheckedScope scope roots []
+      let session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
+      laterSource <- target (10 :: Int) "Tidepool.Actors.Exomonad"
+      later <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty
+        (ExactScopeCompile GeneralCompile admitted) (Just session) laterSource roots Nothing
+      hydrated <- body later
+      pure [fresh, hydrated]
+  let histories = concat bodies
+      fingerprint (interface, core) = (hexBytes (SHA256.hash interface), hexBytes (SHA256.hash core))
+  forM_ (zip [1 :: Int ..] (drop 1 histories)) $ \(index, captured) ->
+    assert (captured == head histories)
+      ("Agent canonical interface/Core changed with unrelated history " ++ show index)
+  putStrLn ("Agent PageDisplay: four fresh histories and a hydrated support history retain identical canonical bytes "
+    ++ show (map fingerprint histories))
 
 -- | A new GHC session hydrates captured interface bytes after the only source
 -- file has been removed. Its original Names, polymorphic types, recursive

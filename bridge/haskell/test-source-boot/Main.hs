@@ -8,7 +8,7 @@ import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestIn
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
-import FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory, snapshotExecutableHook, unownedUpToDateDependency, mixedCandidateLoads, canonicalLoadGraphHistories)
+import FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory, snapshotExecutableHook, unownedUpToDateDependency, mixedCandidateLoads, canonicalLoadGraphHistories, agentPageDisplayFinalizationHistory)
 import ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks, watchReplyWarmAuthorityChecks)
 import PhysicalExecutableEpochTest (exactInterfaceOwnerReuse, physicalExecutableEpoch, sourceSummaryContinuation)
 
@@ -35,6 +35,7 @@ tests = testGroup "source-boot"
   , testCase "snapshot executable hook" snapshotExecutableHook
   , testCase "mixed candidate load kinds" mixedCandidateLoads
   , testCase "canonical load graph histories" canonicalLoadGraphHistories
+  , testCase "Agent PageDisplay finalization history" agentPageDisplayFinalizationHistory
   , testCase "unowned up-to-date dependency" unownedUpToDateDependency
   , testCase "finalized Core" $ finalizedCoreChecks
   , testCase "finalized frontend once" $ finalizedFrontendOnce
