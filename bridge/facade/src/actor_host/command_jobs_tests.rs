@@ -1,5 +1,5 @@
 use super::command_test_support::TestCommands;
-use super::test_campaign::{original_tool_call, TestCampaign};
+use super::test_campaign::{original_tool_call, TestCampaign, COLD_DEBUG_CELL_SETTLEMENT_BUDGET};
 use super::tests::{dispatch_haskell_script, dispatch_lookup};
 use super::*;
 use exomonad_actor::command_jobs::{CommandBackendPurpose, CommandControl};
@@ -1654,8 +1654,23 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
                 };
                 let policy = campaign.root_installation.policy.clone();
                 let first = invocation();
-                let waiter = tokio::spawn(async move { policy.dispatch_json_boxed(first).await });
-                backend_request(campaign).await.supply(Ok(backend.clone()));
+                let mut waiter =
+                    tokio::spawn(async move { policy.dispatch_json_boxed(first).await });
+                let request = tokio::select! {
+                    result = &mut waiter => panic!(
+                        "command invocation settled before backend admission: {result:?}"
+                    ),
+                    request = campaign.next_deployment(
+                        "initial command backend",
+                        COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                        |event| match event {
+                            LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                            other => Err(other),
+                        },
+                    ) => request,
+                };
+                assert_eq!(request.purpose, CommandBackendPurpose::Command);
+                request.supply(Ok(backend.clone()));
                 tokio::time::timeout(Duration::from_secs(30), async {
                     while backend.executions() == 0 {
                         assert!(!waiter.is_finished(), "command call ended before execution");
@@ -1673,11 +1688,30 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
                 assert!(!backend.cancelled.load(std::sync::atomic::Ordering::Acquire));
                 backend.finish();
                 let second = TestCommands::completed("second");
-                backend_request(campaign).await.supply(Ok(second.clone()));
                 let suffix = TestCommands::completed("suffix");
-                backend_request(campaign).await.supply(Ok(suffix.clone()));
+                let policy = campaign.root_installation.policy.clone();
+                let retry = invocation();
+                let mut recovery =
+                    tokio::spawn(async move { policy.dispatch_json_boxed(retry).await });
+                for backend in [&second, &suffix] {
+                    let request = tokio::select! {
+                        result = &mut recovery => panic!(
+                            "transport retry settled before remaining command admission: {result:?}"
+                        ),
+                        request = campaign.next_deployment(
+                            "remaining command backend",
+                            COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                            |event| match event {
+                                LocalResidentDeployment::CommandBackend(request) => Ok(request),
+                                other => Err(other),
+                            },
+                        ) => request,
+                    };
+                    assert_eq!(request.purpose, CommandBackendPurpose::Command);
+                    request.supply(Ok(backend.clone()));
+                }
                 let policy = campaign.root_installation.policy.as_ref();
-                let recovered = policy.dispatch_json_boxed(invocation()).await.unwrap();
+                let recovered = recovery.await.unwrap().unwrap();
                 let repeated = policy.dispatch_json_boxed(invocation()).await.unwrap();
                 assert_eq!(
                     recovered, repeated,
