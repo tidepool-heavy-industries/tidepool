@@ -181,7 +181,7 @@ fn outputs<'a>(request: &'a ResponsesRequest, call: &'a str) -> impl Iterator<It
         .filter(move |item| item.0["type"] == "function_call_output" && item.0["call_id"] == call)
 }
 
-fn assert_value(item: &Item, call: &str, expected: &str) {
+fn assert_value(item: &Item, call: &str, expected: i64) {
     assert_eq!(item.0["type"], "function_call_output");
     assert_eq!(item.0["call_id"], call);
     let response: Value = serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap();
@@ -201,7 +201,9 @@ fn assert_value(item: &Item, call: &str, expected: &str) {
         receipt["status"],
         serde_json::to_value(WorkbenchItemStatus::Committed).unwrap()
     );
-    assert_eq!(receipt["output"].as_str().unwrap().trim(), expected);
+    let presented: Value = serde_json::from_str(receipt["output"].as_str().unwrap())
+        .expect("presentJson must retain a JSON value");
+    assert_eq!(presented, json!(expected));
 }
 
 fn operation(host: &HostedTestRuntime, request: &RequestId, call: &str) -> OperationId {
@@ -212,7 +214,7 @@ fn operation(host: &HostedTestRuntime, request: &RequestId, call: &str) -> Opera
         .expect("issued typed operation must have its original durable claim")
 }
 
-async fn completed(host: &HostedTestRuntime, operation: &OperationId, expected: &str) {
+async fn completed(host: &HostedTestRuntime, operation: &OperationId, expected: i64) {
     let result = tokio::time::timeout(Duration::from_secs(90), async {
         loop {
             match host.runtime.scheduler().output(operation).await.unwrap() {
@@ -437,11 +439,11 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     let new = operation(&host, &successor_request, NEW_CALL);
     assert_eq!(new.request, successor_request);
     assert_eq!(new.origin, old.origin);
-    completed(&host, &new, "Number 43").await;
+    completed(&host, &new, 43).await;
     assert_eq!(outputs(&after_new_call.request, OLD_CALL).count(), 0);
     // Retain the already-issued model request while the original Sleep settles.
     // The final answer then sees both jobs ready; their outputs enter later input.
-    completed(&host, &old, "Number 42").await;
+    completed(&host, &old, 42).await;
     after_new_call
         .reply
         .send(message_turn(
@@ -470,7 +472,7 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     .await;
     let final_request = issued(&mut receiver).await;
     assert_eq!(final_request.request.tools, declared);
-    for (call, expected) in [(OLD_CALL, "Number 42"), (NEW_CALL, "Number 43")] {
+    for (call, expected) in [(OLD_CALL, 42), (NEW_CALL, 43)] {
         let retained = outputs(&final_request.request, call).collect::<Vec<_>>();
         assert_eq!(
             retained.len(),
