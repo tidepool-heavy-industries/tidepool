@@ -28,6 +28,8 @@ struct TestHost {
     uncertain_retire: std::sync::atomic::AtomicBool,
     controls: std::sync::Mutex<Vec<HostControl>>,
     fail_retire: std::sync::atomic::AtomicBool,
+    retire_entered: tokio::sync::Notify,
+    retire_ack: std::sync::Mutex<Option<oneshot::Receiver<()>>>,
 }
 
 #[async_trait::async_trait]
@@ -51,6 +53,15 @@ impl HostActor for TestHost {
     }
 
     async fn control(&self, control: HostControl) -> Result<Value, HostControlError> {
+        if matches!(&control, HostControl::Retire) {
+            self.retire_entered.notify_one();
+            let acknowledgment = self.retire_ack.lock().unwrap().take();
+            if let Some(acknowledgment) = acknowledgment {
+                acknowledgment
+                    .await
+                    .map_err(|_| HostControlError::Unconfirmed("retirement owner lost".into()))?;
+            }
+        }
         let refuse_retire =
             matches!(&control, HostControl::Retire) && self.fail_retire.load(Ordering::Relaxed);
         self.controls
@@ -96,6 +107,8 @@ impl RoutingFixture {
             uncertain_retire: std::sync::atomic::AtomicBool::new(false),
             controls: std::sync::Mutex::new(Vec::new()),
             fail_retire: std::sync::atomic::AtomicBool::new(false),
+            retire_entered: tokio::sync::Notify::new(),
+            retire_ack: std::sync::Mutex::new(None),
         });
         let first_host = Arc::new(TestHost {
             identity: first_identity.clone(),
@@ -104,6 +117,8 @@ impl RoutingFixture {
             uncertain_retire: std::sync::atomic::AtomicBool::new(false),
             controls: std::sync::Mutex::new(Vec::new()),
             fail_retire: std::sync::atomic::AtomicBool::new(false),
+            retire_entered: tokio::sync::Notify::new(),
+            retire_ack: std::sync::Mutex::new(None),
         });
         let second_host = Arc::new(TestHost {
             identity: second_identity.clone(),
@@ -112,6 +127,8 @@ impl RoutingFixture {
             uncertain_retire: std::sync::atomic::AtomicBool::new(false),
             controls: std::sync::Mutex::new(Vec::new()),
             fail_retire: std::sync::atomic::AtomicBool::new(false),
+            retire_entered: tokio::sync::Notify::new(),
+            retire_ack: std::sync::Mutex::new(None),
         });
         let root = AgentPath("/root".into());
         let root_conversation = Arc::new(
@@ -531,6 +548,290 @@ async fn failed_control_acknowledgment_is_retained_as_unconfirmed() {
 }
 
 #[tokio::test]
+async fn pending_retirement_keeps_command_admission_live_and_never_reclaims_its_operation() {
+    for acknowledge_before_join in [false, true] {
+        let fixture = RoutingFixture::new();
+        let scratch = tempfile::tempdir().unwrap();
+        let bindings = command_bindings(&fixture, scratch.path());
+        let (_, control, _channel) = harness::server::server(scratch.path().into());
+        let mut tasks = BrowserCommandTasks::new();
+        let retiring = actor(1);
+        let accepting = actor(2);
+        let operation = new_operation();
+        let (acknowledge, acknowledged) = oneshot::channel();
+        *fixture.hosts[&retiring].retire_ack.lock().unwrap() = Some(acknowledged);
+        fixture
+            .store
+            .enqueue_embedded_command(
+                operation,
+                &HostCommand::Retire {
+                    target: fixture.hosts[&retiring].identity.clone(),
+                },
+            )
+            .unwrap();
+        let drain = |tasks: &mut BrowserCommandTasks| {
+            drain_embedded_browser_commands(
+                &fixture.store,
+                &control,
+                "run",
+                &fixture.nodes,
+                &fixture.live,
+                &fixture.projection,
+                &bindings,
+                &fixture.lifecycle,
+                tasks,
+            )
+            .unwrap();
+        };
+        drain(&mut tasks);
+        fixture.hosts[&retiring].retire_entered.notified().await;
+        let retained = fixture
+            .store
+            .embedded_command("run", operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            retained.state,
+            harness::store::EmbeddedCommandState::Dispatching
+        );
+        assert!(retained.receipt.is_none());
+        drain(&mut tasks);
+        assert_eq!(
+            tasks.len(),
+            1,
+            "health/wake retries cannot spawn another claimed control"
+        );
+
+        let input = new_operation();
+        fixture
+            .store
+            .enqueue_embedded_command(
+                input,
+                &HostCommand::Input {
+                    target: fixture.hosts[&accepting].identity.clone(),
+                    text: "independent input".into(),
+                },
+            )
+            .unwrap();
+        drain(&mut tasks);
+        let receipt = tokio::time::timeout(Duration::from_secs(1), tasks.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            receipt.outcome,
+            CommandReceiptOutcome::InputAdmitted { .. }
+        ));
+        assert_eq!(fixture.hosts[&accepting].wakes.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            tasks.len(),
+            1,
+            "retirement still awaits the independent release owner"
+        );
+        let join = application_supervisor::drain_browser_command_tasks(
+            &mut tasks,
+            &control,
+            Duration::from_secs(1),
+        );
+        tokio::pin!(join);
+        if !acknowledge_before_join {
+            assert!(futures_util::poll!(&mut join).is_pending());
+        }
+        acknowledge.send(()).unwrap();
+        assert_eq!(join.await, None);
+        let retained = fixture
+            .store
+            .embedded_command("run", operation)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            retained.receipt.unwrap().outcome,
+            CommandReceiptOutcome::ControlRequested {
+                control: CommandControl::Retire,
+                ..
+            }
+        ));
+        assert_eq!(fixture.hosts[&retiring].controls.lock().unwrap().len(), 1);
+    }
+}
+
+fn command_bindings(
+    fixture: &RoutingFixture,
+    root: &Path,
+) -> HashMap<ActorRef, embedded_harness::EmbeddedActorBinding> {
+    fixture
+        .conversations
+        .iter()
+        .map(|(actor, conversation)| {
+            let directory = root.join(actor.id.0.to_string());
+            std::fs::create_dir(&directory).unwrap();
+            let inbox = Arc::new(
+                ActorInbox::open(
+                    &tidepool_atomic_write::DirectoryAnchor::open_existing(&directory).unwrap(),
+                    "inbox.jsonl",
+                    "cursor.json",
+                )
+                .unwrap(),
+            );
+            (
+                *actor,
+                embedded_harness::EmbeddedActorBinding::new(
+                    fixture.hosts[actor].identity.clone(),
+                    inbox,
+                    "test-command-drain".into(),
+                    Some(conversation.clone()),
+                ),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn retirement_owner_loss_retains_uncertainty_without_control_replay() {
+    let fixture = RoutingFixture::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let bindings = command_bindings(&fixture, scratch.path());
+    let (_, control, _channel) = harness::server::server(scratch.path().into());
+    let mut tasks = BrowserCommandTasks::new();
+    let actor = actor(1);
+    let operation = new_operation();
+    let (acknowledge, acknowledged) = oneshot::channel();
+    *fixture.hosts[&actor].retire_ack.lock().unwrap() = Some(acknowledged);
+    fixture
+        .store
+        .enqueue_embedded_command(
+            operation,
+            &HostCommand::Retire {
+                target: fixture.hosts[&actor].identity.clone(),
+            },
+        )
+        .unwrap();
+    drain_embedded_browser_commands(
+        &fixture.store,
+        &control,
+        "run",
+        &fixture.nodes,
+        &fixture.live,
+        &fixture.projection,
+        &bindings,
+        &fixture.lifecycle,
+        &mut tasks,
+    )
+    .unwrap();
+    fixture.hosts[&actor].retire_entered.notified().await;
+    drop(acknowledge);
+    assert_eq!(
+        application_supervisor::drain_browser_command_tasks(
+            &mut tasks,
+            &control,
+            Duration::from_secs(1)
+        )
+        .await,
+        None
+    );
+    let retained = fixture
+        .store
+        .embedded_command("run", operation)
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        retained.receipt.unwrap().outcome,
+        CommandReceiptOutcome::Unconfirmed { .. }
+    ));
+    assert!(!fixture.lifecycle_rx.borrow().contains_key(&actor));
+    drain_embedded_browser_commands(
+        &fixture.store,
+        &control,
+        "run",
+        &fixture.nodes,
+        &fixture.live,
+        &fixture.projection,
+        &bindings,
+        &fixture.lifecycle,
+        &mut tasks,
+    )
+    .unwrap();
+    assert!(tasks.is_empty());
+    assert!(fixture.hosts[&actor].controls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn timed_out_command_observation_is_joined_and_does_not_fabricate_a_receipt() {
+    let fixture = RoutingFixture::new();
+    let scratch = tempfile::tempdir().unwrap();
+    let bindings = command_bindings(&fixture, scratch.path());
+    let (_, control, _channel) = harness::server::server(scratch.path().into());
+    let mut tasks = BrowserCommandTasks::new();
+    let actor = actor(1);
+    let operation = new_operation();
+    let (acknowledge, acknowledged) = oneshot::channel();
+    *fixture.hosts[&actor].retire_ack.lock().unwrap() = Some(acknowledged);
+    fixture
+        .store
+        .enqueue_embedded_command(
+            operation,
+            &HostCommand::Retire {
+                target: fixture.hosts[&actor].identity.clone(),
+            },
+        )
+        .unwrap();
+    drain_embedded_browser_commands(
+        &fixture.store,
+        &control,
+        "run",
+        &fixture.nodes,
+        &fixture.live,
+        &fixture.projection,
+        &bindings,
+        &fixture.lifecycle,
+        &mut tasks,
+    )
+    .unwrap();
+    fixture.hosts[&actor].retire_entered.notified().await;
+    assert!(application_supervisor::drain_browser_command_tasks(
+        &mut tasks,
+        &control,
+        Duration::ZERO
+    )
+    .await
+    .is_some());
+    assert!(tasks.is_empty());
+    assert!(
+        acknowledge.send(()).is_err(),
+        "cancelled observer was actually joined"
+    );
+    let retained = fixture
+        .store
+        .embedded_command("run", operation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        retained.state,
+        harness::store::EmbeddedCommandState::Dispatching
+    );
+    assert!(retained.receipt.is_none());
+    drain_embedded_browser_commands(
+        &fixture.store,
+        &control,
+        "run",
+        &fixture.nodes,
+        &fixture.live,
+        &fixture.projection,
+        &bindings,
+        &fixture.lifecycle,
+        &mut tasks,
+    )
+    .unwrap();
+    assert!(
+        tasks.is_empty(),
+        "uncertain claimed control cannot be replayed"
+    );
+}
+
+#[tokio::test]
 async fn durable_command_drain_runs_without_a_channel_hint_and_skips_claimed_work() {
     let fixture = RoutingFixture::new();
     let actor = actor(1);
@@ -575,6 +876,7 @@ async fn durable_command_drain_runs_without_a_channel_hint_and_skips_claimed_wor
     );
     let conversations = HashMap::from([(actor, binding)]);
     let (_, control, _channel) = harness::server::server(scratch.path().into());
+    let mut tasks = BrowserCommandTasks::new();
     for _ in 0..2 {
         drain_embedded_browser_commands(
             &fixture.store,
@@ -585,9 +887,18 @@ async fn durable_command_drain_runs_without_a_channel_hint_and_skips_claimed_wor
             &fixture.projection,
             &conversations,
             &fixture.lifecycle,
+            &mut tasks,
         )
-        .await
         .unwrap();
+        assert_eq!(
+            application_supervisor::drain_browser_command_tasks(
+                &mut tasks,
+                &control,
+                Duration::from_secs(1)
+            )
+            .await,
+            None
+        );
     }
     assert_eq!(
         fixture

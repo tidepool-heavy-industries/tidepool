@@ -1107,18 +1107,18 @@ fn embedded_root_attachment_error(
     clippy::too_many_arguments,
     reason = "compose the existing Store and actor authority owners"
 )]
-async fn dispatch_embedded_browser_command(
+fn prepare_embedded_browser_command(
     operation: harness::embedding::ClientOperationId,
     command: &harness::server::HostCommand,
-    store: &harness::store::Store,
+    store: &Arc<harness::store::Store>,
     run: &str,
     nodes: &[exomonad_actor::ActorGraphNode],
     live: &BTreeSet<ActorRef>,
     projection: &embedded_projection::EmbeddedProjection,
     conversation_for: impl Fn(ActorRef) -> Option<Arc<harness::embedding::Conversation>>,
     lifecycle: &embedded_projection::LifecycleSender,
-) -> Result<Option<harness::server::CommandReceipt>, String> {
-    use harness::{embedding::HostControlError, server::CommandReceiptOutcome};
+) -> Result<EmbeddedBrowserCommandDispatch, String> {
+    use harness::server::CommandReceiptOutcome;
 
     let command_run = &command.target().run;
     let retained = store
@@ -1131,7 +1131,7 @@ async fn dispatch_embedded_browser_command(
     // Retained observations outlive actor admission and projection retention.
     // Retry never consults a retired actor or sends another input wake.
     if let Some(receipt) = retained.receipt {
-        return Ok(Some(receipt));
+        return Ok(EmbeddedBrowserCommandDispatch::Settled(Some(receipt)));
     }
     let Some(_) = store
         .claim_embedded_command(command_run, operation)
@@ -1139,12 +1139,12 @@ async fn dispatch_embedded_browser_command(
     else {
         // Another delivery has already claimed this operation. In particular,
         // an uncertain control cannot be replayed against a later round.
-        return Ok(None);
+        return Ok(EmbeddedBrowserCommandDispatch::Settled(None));
     };
     let settle = |outcome| {
         store
             .settle_embedded_command(command_run, operation, outcome)
-            .map(Some)
+            .map(|receipt| EmbeddedBrowserCommandDispatch::Settled(Some(receipt)))
             .map_err(|error| error.to_string())
     };
     let target = command.target().clone();
@@ -1172,64 +1172,147 @@ async fn dispatch_embedded_browser_command(
         return refuse("target has no live model conversation".into());
     };
 
-    let control = match command {
-        harness::server::HostCommand::Input { text, .. } => {
-            return match conversation.command_input(operation, text).await {
-                Ok(receipt) => Ok(Some(receipt)),
-                Err(error) => {
-                    // A Store failure after the atomic admission commit must
-                    // not turn a real envelope into a refused operation.
-                    if let Some(receipt) = store
-                        .embedded_command(command_run, operation)
-                        .map_err(|error| error.to_string())?
-                        .and_then(|record| record.receipt)
-                    {
-                        Ok(Some(receipt))
-                    } else {
-                        settle(CommandReceiptOutcome::Unconfirmed {
-                            target,
-                            reason: error.to_string(),
-                        })
+    Ok(EmbeddedBrowserCommandDispatch::Admitted {
+        operation,
+        command: command.clone(),
+        store: store.clone(),
+        actor,
+        conversation,
+        lifecycle: lifecycle.clone(),
+    })
+}
+
+enum EmbeddedBrowserCommandDispatch {
+    Settled(Option<harness::server::CommandReceipt>),
+    Admitted {
+        operation: harness::embedding::ClientOperationId,
+        command: harness::server::HostCommand,
+        store: Arc<harness::store::Store>,
+        actor: ActorRef,
+        conversation: Arc<harness::embedding::Conversation>,
+        lifecycle: embedded_projection::LifecycleSender,
+    },
+}
+
+impl EmbeddedBrowserCommandDispatch {
+    async fn complete(self) -> Result<Option<harness::server::CommandReceipt>, String> {
+        use harness::{embedding::HostControlError, server::CommandReceiptOutcome};
+
+        let (operation, command, store, actor, conversation, lifecycle) = match self {
+            Self::Settled(receipt) => return Ok(receipt),
+            Self::Admitted {
+                operation,
+                command,
+                store,
+                actor,
+                conversation,
+                lifecycle,
+            } => (operation, command, store, actor, conversation, lifecycle),
+        };
+        let target = command.target().clone();
+        let command_run = &command.target().run;
+        let settle = |outcome| {
+            store
+                .settle_embedded_command(command_run, operation, outcome)
+                .map(Some)
+                .map_err(|error| error.to_string())
+        };
+        let refuse = |reason: String| {
+            settle(CommandReceiptOutcome::Refused {
+                target: Some(target.clone()),
+                reason,
+            })
+        };
+
+        let control = match &command {
+            harness::server::HostCommand::Input { text, .. } => {
+                return match conversation.command_input(operation, text).await {
+                    Ok(receipt) => Ok(Some(receipt)),
+                    Err(error) => {
+                        // A Store failure after the atomic admission commit must
+                        // not turn a real envelope into a refused operation.
+                        if let Some(receipt) = store
+                            .embedded_command(command_run, operation)
+                            .map_err(|error| error.to_string())?
+                            .and_then(|record| record.receipt)
+                        {
+                            Ok(Some(receipt))
+                        } else {
+                            settle(CommandReceiptOutcome::Unconfirmed {
+                                target,
+                                reason: error.to_string(),
+                            })
+                        }
                     }
-                }
-            };
-        }
-        harness::server::HostCommand::Interrupt { expected_round, .. } => {
-            harness::embedding::HostControl::Interrupt {
-                expected_round: *expected_round,
+                };
             }
-        }
-        harness::server::HostCommand::Retire { .. } => harness::embedding::HostControl::Retire,
-    };
-    match conversation.control(control).await {
-        Ok(_) => {
-            let control = match command {
-                harness::server::HostCommand::Retire { .. } => {
-                    lifecycle.publish(actor, harness::server::HostActorLifecycle::Retiring);
-                    harness::server::CommandControl::Retire
+            harness::server::HostCommand::Interrupt { expected_round, .. } => {
+                harness::embedding::HostControl::Interrupt {
+                    expected_round: *expected_round,
                 }
-                harness::server::HostCommand::Interrupt { .. } => {
-                    harness::server::CommandControl::Interrupt
-                }
-                harness::server::HostCommand::Input { .. } => {
-                    unreachable!("input returns its atomic receipt")
-                }
-            };
-            settle(CommandReceiptOutcome::ControlRequested { target, control })
-        }
-        Err(HostControlError::Refused(reason)) => refuse(reason),
-        Err(HostControlError::Unconfirmed(reason)) => {
-            settle(CommandReceiptOutcome::Unconfirmed { target, reason })
+            }
+            harness::server::HostCommand::Retire { .. } => harness::embedding::HostControl::Retire,
+        };
+        match conversation.control(control).await {
+            Ok(_) => {
+                let control = match &command {
+                    harness::server::HostCommand::Retire { .. } => {
+                        lifecycle.publish(actor, harness::server::HostActorLifecycle::Retiring);
+                        harness::server::CommandControl::Retire
+                    }
+                    harness::server::HostCommand::Interrupt { .. } => {
+                        harness::server::CommandControl::Interrupt
+                    }
+                    harness::server::HostCommand::Input { .. } => {
+                        unreachable!("input returns its atomic receipt")
+                    }
+                };
+                settle(CommandReceiptOutcome::ControlRequested { target, control })
+            }
+            Err(HostControlError::Refused(reason)) => refuse(reason),
+            Err(HostControlError::Unconfirmed(reason)) => {
+                settle(CommandReceiptOutcome::Unconfirmed { target, reason })
+            }
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_embedded_browser_command(
+    operation: harness::embedding::ClientOperationId,
+    command: &harness::server::HostCommand,
+    store: &Arc<harness::store::Store>,
+    run: &str,
+    nodes: &[exomonad_actor::ActorGraphNode],
+    live: &BTreeSet<ActorRef>,
+    projection: &embedded_projection::EmbeddedProjection,
+    conversation_for: impl Fn(ActorRef) -> Option<Arc<harness::embedding::Conversation>>,
+    lifecycle: &embedded_projection::LifecycleSender,
+) -> Result<Option<harness::server::CommandReceipt>, String> {
+    prepare_embedded_browser_command(
+        operation,
+        command,
+        store,
+        run,
+        nodes,
+        live,
+        projection,
+        conversation_for,
+        lifecycle,
+    )?
+    .complete()
+    .await
+}
+
+type BrowserCommandTasks = JoinSet<Result<Option<harness::server::CommandReceipt>, String>>;
 
 #[allow(
     clippy::too_many_arguments,
     reason = "drain through the existing Store and actor authority owners"
 )]
-async fn drain_embedded_browser_commands(
-    store: &harness::store::Store,
+fn drain_embedded_browser_commands(
+    store: &Arc<harness::store::Store>,
     control: &harness::server::ServerControl,
     run: &str,
     nodes: &[exomonad_actor::ActorGraphNode],
@@ -1237,6 +1320,7 @@ async fn drain_embedded_browser_commands(
     projection: &embedded_projection::EmbeddedProjection,
     conversations: &HashMap<ActorRef, embedded_harness::EmbeddedActorBinding>,
     lifecycle: &embedded_projection::LifecycleSender,
+    tasks: &mut BrowserCommandTasks,
 ) -> Result<(), String> {
     // The channel is a wake hint. Store rows survive the persist/enqueue gap
     // and are also drained by the existing host health tick.
@@ -1244,7 +1328,7 @@ async fn drain_embedded_browser_commands(
         .queued_embedded_commands(run)
         .map_err(|error| error.to_string())?
     {
-        if let Some(receipt) = dispatch_embedded_browser_command(
+        let dispatch = prepare_embedded_browser_command(
             record.operation_id,
             &record.command,
             store,
@@ -1259,10 +1343,17 @@ async fn drain_embedded_browser_commands(
                     .and_then(|binding| binding.conversation())
             },
             lifecycle,
-        )
-        .await?
-        {
-            control.publish_command_receipt(receipt);
+        )?;
+        match dispatch {
+            EmbeddedBrowserCommandDispatch::Settled(Some(receipt)) => {
+                control.publish_command_receipt(receipt);
+            }
+            EmbeddedBrowserCommandDispatch::Settled(None) => {}
+            admitted @ EmbeddedBrowserCommandDispatch::Admitted { .. } => {
+                // The sole supervisor must keep receiving native release events
+                // while this exact conversation awaits its retirement receipt.
+                tasks.spawn(admitted.complete());
+            }
         }
     }
     Ok(())

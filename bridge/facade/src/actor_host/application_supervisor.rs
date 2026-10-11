@@ -159,6 +159,7 @@ pub(super) async fn run_interactive_applications(
     let mut release_waiters: HashMap<ActorRef, Vec<Arc<exomonad_actor::ReleaseAwait>>> =
         HashMap::new();
     let mut notifications: JoinSet<(ActorRef, Result<(), String>)> = JoinSet::new();
+    let mut browser_commands = BrowserCommandTasks::new();
 
     let mut health = tokio::time::interval(Duration::from_secs(1));
     {
@@ -259,7 +260,8 @@ pub(super) async fn run_interactive_applications(
                         &service.runtime.store(), &service.control, &embedded_run,
                         &(host_graph)(), &live_actors, &embedded_projection,
                         &conversations, &embedded_lifecycle_tx,
-                    ).await {
+                        &mut browser_commands,
+                    ) {
                         break Some(format!("embedded browser command drain failed: {error}"));
                     }
                     if let Err(error) = embedded_projection.publish(
@@ -316,8 +318,14 @@ pub(super) async fn run_interactive_applications(
                     &store, &service.control, &embedded_run, &(host_graph)(),
                     &live_actors, &embedded_projection, &conversations,
                     &embedded_lifecycle_tx,
-                ).await {
+                    &mut browser_commands,
+                ) {
                     break Some(format!("embedded browser command drain failed: {error}"));
+                }
+            }
+            Some(result) = browser_commands.join_next(), if !browser_commands.is_empty() => {
+                if let Err(error) = observe_browser_command_join(result, &embedded_service.control) {
+                    break Some(error);
                 }
             }
             Some(result) = embedded_tasks.join_next_with_id(), if !embedded_tasks.is_empty() => {
@@ -1114,6 +1122,12 @@ pub(super) async fn run_interactive_applications(
         &mut release_waiters,
     )
     .await;
+    let browser_command_cleanup = drain_browser_command_tasks(
+        &mut browser_commands,
+        &embedded_service.control,
+        APPLICATION_SHUTDOWN_TIMEOUT,
+    )
+    .await;
     let embedded_service_cleanup = embedded_service
         .shutdown()
         .await
@@ -1154,6 +1168,7 @@ pub(super) async fn run_interactive_applications(
         earlier_embedded_cleanup,
         resident_cleanup.cleanup_failure,
         embedded_cleanup.cleanup_failure,
+        browser_command_cleanup,
         embedded_service_cleanup,
         notification_cleanup,
     ]
@@ -1185,6 +1200,56 @@ pub(super) async fn run_interactive_applications(
         (Some(error), Some(cleanup)) => Err(format!("{error}; cleanup: {cleanup}")),
         (Some(error), None) | (None, Some(error)) => Err(error),
         (None, None) => Ok(()),
+    }
+}
+
+fn observe_browser_command_join(
+    result: Result<Result<Option<harness::server::CommandReceipt>, String>, tokio::task::JoinError>,
+    control: &harness::server::ServerControl,
+) -> Result<(), String> {
+    let receipt =
+        result.map_err(|error| format!("embedded browser command task failed: {error}"))??;
+    if let Some(receipt) = receipt {
+        control.publish_command_receipt(receipt);
+    }
+    Ok(())
+}
+
+pub(super) async fn drain_browser_command_tasks(
+    tasks: &mut BrowserCommandTasks,
+    control: &harness::server::ServerControl,
+    timeout: Duration,
+) -> Option<String> {
+    match tokio::time::timeout(timeout, async {
+        let mut failure = None;
+        while let Some(result) = tasks.join_next().await {
+            if let Err(error) = observe_browser_command_join(result, control) {
+                failure.get_or_insert(error);
+            }
+        }
+        failure
+    })
+    .await
+    {
+        Ok(failure) => failure,
+        Err(_) => {
+            // Forest and Engine cleanup already ran with their original event
+            // consumer. Only these command observers remain; their durable
+            // claimed rows cannot be replayed or reported as confirmed.
+            tasks.abort_all();
+            let mut failure = "embedded browser command observation cleanup timed out".to_owned();
+            while let Some(result) = tasks.join_next().await {
+                match result {
+                    Err(error) if error.is_cancelled() => {}
+                    result => {
+                        if let Err(error) = observe_browser_command_join(result, control) {
+                            failure.push_str(&format!("; {error}"));
+                        }
+                    }
+                }
+            }
+            Some(failure)
+        }
     }
 }
 
