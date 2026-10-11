@@ -1383,23 +1383,13 @@ mod template_haskell_pin {
         assert_eq!(err.line, "notamodule garbage");
     }
 
-    /// `settled: true` reuses `session::turn`'s own scaffold — one
-    /// implementation, not a second — and byte-verifies both halves land:
-    /// the four resume imports before the real `default (Int, Double,
-    /// Text)` marker (NOT this module's own abbreviated `PRE`'s `"default
-    /// (Int)"`: `with_resume_import` matches the marker EXACTLY, so this
-    /// test deliberately uses a preamble shaped like a real one — built via
-    /// `tidepool_mcp::build_preamble` in production — rather than `PRE`,
-    /// to actually exercise the splice instead of silently falling back to
-    /// `preamble.len()` and appending imports after every declaration,
-    /// which is not valid Haskell), and `__prepared`/`__resume`/
-    /// `__applyEntry`/`__applyValue` after `result`.
+    /// Compose the production preamble and settled scaffold, preserving Haskell's
+    /// import-before-declaration ordering and the resume entry points.
     #[test]
     fn settled_true_splices_the_real_resume_scaffold() {
-        const REALISTIC_PRE: &str =
-            "module Expr where\nimport Control.Monad.Freer\ndefault (Int, Double, Text)\n";
+        let preamble = crate::preamble::build_preamble(&[], false);
         let src = TurnTemplate {
-            preamble: REALISTIC_PRE,
+            preamble: &preamble,
             effect_stack: STACK,
             code: CODE,
             settled: true,
