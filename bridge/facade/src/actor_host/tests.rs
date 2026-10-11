@@ -2820,6 +2820,13 @@ async fn forest_operator_survives_model_root_recovery() {
                     )
                     .await
                     .unwrap();
+                campaign
+                    .authority
+                    .install_grant(operator.identity().into(), ActorWorktreeGrant::Repository);
+                assert!(matches!(
+                    campaign.authority.grant(operator.identity().into()),
+                    ActorWorktreeGrant::Repository
+                ));
                 assert_eq!(
                     campaign
                         .forest
@@ -2880,6 +2887,8 @@ async fn forest_operator_survives_model_root_recovery() {
                     ) => child,
                 };
                 campaign.acknowledge_native_spawn(&child);
+                assert_eq!(child.launch_worktrees.len(), 1);
+                assert!(child.worktree_custody.is_some());
                 let requested = tokio::time::timeout(
                     test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
                     requested,
