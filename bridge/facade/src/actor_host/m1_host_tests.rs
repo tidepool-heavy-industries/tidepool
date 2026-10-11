@@ -604,34 +604,6 @@ struct RejectFirstRequest {
     reject_successor: tokio::sync::Notify,
 }
 
-struct AncestorOutputGate {
-    requests: Mutex<Vec<String>>,
-    entered: mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
-}
-
-impl exomonad_actor::JevBackend for AncestorOutputGate {
-    fn ask(
-        &self,
-        request: String,
-    ) -> futures_util::future::BoxFuture<'_, Result<String, exomonad_actor::JevCallFailure>> {
-        Box::pin(async move {
-            self.requests.lock().push(request);
-            let (release, held) = tokio::sync::oneshot::channel();
-            self.entered.send(release).map_err(|_| {
-                exomonad_actor::JevCallFailure::JevTransport(
-                    "ancestor output observer closed".into(),
-                )
-            })?;
-            held.await.map_err(|_| {
-                exomonad_actor::JevCallFailure::JevTransport(
-                    "ancestor output test abandoned the admitted handler".into(),
-                )
-            })?;
-            Ok("released".into())
-        })
-    }
-}
-
 #[async_trait]
 impl ResponsesTransport for RejectFirstRequest {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
@@ -724,16 +696,40 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
         reject_successor: tokio::sync::Notify::new(),
     });
     let host_transport: Arc<dyn ResponsesTransport> = transport.clone();
-    let (output_entered, mut pending_output) = mpsc::unbounded_channel();
-    let output_gate = Arc::new(AncestorOutputGate {
-        requests: Mutex::new(Vec::new()),
-        entered: output_entered,
-    });
     let fixture = HostedTestRuntime::start_configured(&settings, &host_transport, |config| {
-        config.jev = Some(output_gate.clone());
+        if tool_before_rejection {
+            super::test_campaign::configure_command_path(config);
+            let owner = exomonad_node::command_resources::CommandResources::delegated(
+                exomonad_node::command_resources::CommandResourcePolicy {
+                    general_bytes: 2 * exomonad_node::command_resources::GIB,
+                    protected_bytes: 0,
+                    swap_max_bytes: 0,
+                    ..Default::default()
+                },
+            )
+            .expect("the isolated test delegates production command resources");
+            config.command_resources =
+                Some(exomonad_node::command_resources::CommandResourceClient::local(owner));
+        }
     })
     .await
     .unwrap();
+    let release_path = if tool_before_rejection {
+        let fifo = fixture
+            .context
+            .config
+            .workspace
+            .join("ancestor-output-release");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            &fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        )
+        .unwrap();
+        Some(fifo)
+    } else {
+        None
+    };
     let target = browser_target(&fixture.context);
     let actor = fixture.context.actor.identity();
     let api = format!("http://{}/api", fixture.address);
@@ -766,64 +762,151 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
     assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
     let store = fixture.runtime.store();
     if tool_before_rejection {
-        tokio::time::timeout(
-            Duration::from_secs(30),
-            transport.successor_stalled.notified(),
-        )
-        .await
-        .expect("successor request did not start while tool was pending");
+        let operation = fixture
+            .while_host_running(tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    let claims = store
+                        .claims(&harness::model::CallId("before-rejection-cell".into()))
+                        .unwrap();
+                    if let [claim] = claims.as_slice() {
+                        return claim.operation.clone();
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }))
+            .await
+            .expect("host exited before admitting the original cell")
+            .expect("the original cell was not admitted");
+        let invocation = exomonad_tool::ToolInvocationContext {
+            origin: exomonad_tool::ToolInvocationOrigin::Model(
+                embedded_harness::original_operation(&target, &operation).unwrap(),
+            ),
+            call_id: operation.call.0.clone(),
+            namespace: None,
+        };
+        fixture
+            .while_operation_succeeds(
+                &operation,
+                tokio::time::timeout(Duration::from_secs(300), async {
+                    loop {
+                        if fixture
+                            .context
+                            .actor
+                            .hosted_workbench_waiting(&invocation)
+                            .is_some()
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }),
+            )
+            .await
+            .expect("the actual cell failed before arming its command completion wait")
+            .expect("the actual cell never armed its command completion wait");
+        fixture
+            .while_operation_succeeds(
+                &operation,
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    transport.successor_stalled.notified(),
+                ),
+            )
+            .await
+            .expect("the actual cell failed before successor preparation")
+            .expect("successor request did not start while the command was pending");
+        assert!(fixture
+            .context
+            .actor
+            .hosted_workbench_waiting(&invocation)
+            .is_some());
         assert!(!transport.requests.lock()[1].input.iter().any(|item| {
             item.0["type"] == "custom_tool_call_output"
                 && item.0["call_id"] == "before-rejection-cell"
         }));
-        let claims = store
-            .claims(&harness::model::CallId("before-rejection-cell".into()))
-            .unwrap();
-        assert_eq!(claims.len(), 1);
-        let release_output = fixture
+        let resources = fixture.context.config.command_resources.as_ref().unwrap();
+        fixture
             .while_operation_succeeds(
-                &claims[0].operation,
-                tokio::time::timeout(Duration::from_secs(300), pending_output.recv()),
+                &operation,
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        if resources.observation().await.unwrap().active == 1 {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }),
             )
             .await
-            .expect("the actual cell failed before entering its completion gate")
-            .expect("the actual cell never entered its completion gate")
-            .expect("the actual cell's completion gate closed");
-        assert_eq!(output_gate.requests.lock().len(), 1);
+            .expect("the actual cell failed before command resource admission")
+            .expect("the actual command was not admitted");
+        // A nonblocking write-only open succeeds only after the real child has
+        // opened its reader. The native command owner cancels that child if the
+        // test abandons the scenario before this rendezvous.
+        let writer = fixture
+            .while_operation_succeeds(
+                &operation,
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        match rustix::fs::openat(
+                            rustix::fs::CWD,
+                            release_path.as_ref().unwrap(),
+                            rustix::fs::OFlags::WRONLY
+                                | rustix::fs::OFlags::NONBLOCK
+                                | rustix::fs::OFlags::CLOEXEC,
+                            rustix::fs::Mode::empty(),
+                        ) {
+                            Ok(writer) => break writer,
+                            Err(rustix::io::Errno::NXIO) => {
+                                tokio::time::sleep(Duration::from_millis(10)).await
+                            }
+                            Err(error) => {
+                                panic!("the actual command release could not be opened: {error}")
+                            }
+                        }
+                    }
+                }),
+            )
+            .await
+            .expect("the actual cell failed before its command opened the reader")
+            .expect("the actual command never opened the reader");
         assert_eq!(
-            output_gate.requests.lock()[0],
-            "hold ancestor output until successor preparation"
+            rustix::io::write(&writer, b"released\n").unwrap(),
+            b"released\n".len()
         );
-        release_output
-            .send(())
-            .expect("the actual cell abandoned its completion gate");
-        tokio::time::timeout(Duration::from_secs(300), async {
-            loop {
-                let claims = store
-                    .claims(&harness::model::CallId("before-rejection-cell".into()))
-                    .unwrap();
-                if claims.first().is_some_and(|claim| {
-                    store
-                        .replay_output_operation(&claim.operation)
-                        .unwrap()
-                        .is_some_and(|item| {
-                            cell_output_matches(&item, "before-rejection-cell", "42")
-                        })
-                }) {
-                    assert_eq!(claims.len(), 1);
-                    assert_eq!(output_gate.requests.lock().len(), 1);
-                    assert!(!store
-                        .items(&claims[0].request)
-                        .unwrap()
-                        .iter()
-                        .any(|item| { item.0["type"] == "custom_tool_call_output" }));
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("tool did not settle before provider rejection");
+        drop(writer);
+        fixture
+            .while_operation_succeeds(
+                &operation,
+                tokio::time::timeout(Duration::from_secs(300), async {
+                    loop {
+                        let claims = store
+                            .claims(&harness::model::CallId("before-rejection-cell".into()))
+                            .unwrap();
+                        if claims.first().is_some_and(|claim| {
+                            store
+                                .replay_output_operation(&claim.operation)
+                                .unwrap()
+                                .is_some_and(|item| {
+                                    cell_output_matches(&item, "before-rejection-cell", "42")
+                                })
+                        }) {
+                            assert_eq!(claims.len(), 1);
+                            assert_eq!(resources.observation().await.unwrap().historical, 1);
+                            assert!(!store
+                                .items(&claims[0].request)
+                                .unwrap()
+                                .iter()
+                                .any(|item| { item.0["type"] == "custom_tool_call_output" }));
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }),
+            )
+            .await
+            .expect("the actual cell failed before settling its output")
+            .expect("tool did not settle before provider rejection");
         transport.reject_successor.notify_one();
     }
     let failed_head = tokio::time::timeout(Duration::from_secs(30), async {

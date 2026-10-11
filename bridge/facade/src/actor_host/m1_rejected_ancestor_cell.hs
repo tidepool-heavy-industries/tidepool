@@ -1,4 +1,4 @@
 _ <- do
-  Right response <- send (Tidepool.Effects.Core.JevAskWith "hold ancestor output until successor preparation")
-  True <- pure (response == "released")
+  result <- Cmd.run [bash|IFS= read -r release < ancestor-output-release && test "$release" = released|]
+  Nothing <- pure (Cmd.failure result)
   display (40 + 2 :: Int)
