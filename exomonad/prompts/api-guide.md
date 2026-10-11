@@ -155,7 +155,11 @@ to observe it. `Await` supports ordinary functor, applicative, and traversal
 composition; `eitherOf` chooses the first terminal branch, including failure,
 while an all-branches wait requires each branch to succeed. Settlement projections
 let collectors retain failures as values. Progress is an independent typed
-observation. Scope results keep callback and cleanup outcomes separate.
+observation. Scope results keep callback and cleanup outcomes separate. For
+agent replies, compose these typed waits in one Haskell program instead of
+issuing timed model yields to poll the request handles. Use `yield` to observe
+the enclosing Haskell tool call if it is pending, or another pending outer
+operation when that is the next result you need.
 
 `spawnSubagent context workspace (defaultSpawnOptions actualSpec)` returns
 `Either SpawnError AgentRef`. `request @Answer agent rawInput defaultRequestOptions`
@@ -252,8 +256,9 @@ supplies it. When the admitted notebook lists `Lookup`, use
 skills; load an installed skill from `.agents/skills/<name>/SKILL.md` first.
 
 ```haskell source=lookup
+import qualified Tidepool.Lookup.Tools as LookupTools
 topics <- LookupApi.lookupRaw (LookupApi.lookupRequest ["doc topics"])
-display (show topics)
+display (LookupTools.renderBatch topics)
 ```
 
 Hosted lookup may add up to four Jev-selected related declarations or

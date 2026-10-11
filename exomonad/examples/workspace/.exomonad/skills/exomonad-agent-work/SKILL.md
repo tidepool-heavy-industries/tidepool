@@ -13,15 +13,13 @@ optional ordinary text label, lifetime, and limits. A label is descriptive; it
 does not identify an actor, workspace, or group.
 
 A successful spawn returns an idle `AgentRef`. Spawn does not start inference.
-The first typed request or a human message activates it. Here `worker` is an
-`AgentRef`, the `AgentSpec` installs the child's tools and effects, `@Text`
-selects the reply type, and `input :: Text` is raw request input:
-
-```haskell
-Right pending <- request @Text worker input defaultRequestOptions
-Right reply <- await (result pending)
-display reply
-```
+The first typed request or a human message activates it. The compiled workspace
+recipe in [luna-agent-start.hs](../../checks/luna-agent-start.hs) uses the actual
+`workspaceAgentSpec`, selects the Luna model alias, and issues two typed Text
+requests. After both requests are issued, the authored cell can continue with
+other work or end; [luna-agent-settlement.hs](../../checks/luna-agent-settlement.hs)
+joins their typed settlements applicatively and keeps each branch's
+`ResponseFailure` distinct from an `AwaitError`.
 
 `requestWithProgress` uses independent progress and reply types when intermediate
 updates matter. A request carries raw typed input and request options; admission,
@@ -40,7 +38,12 @@ applicatively or traverse a collection; use `eitherOf` when the first terminal
 branch should decide, including a failure. An all-branches wait requires each
 branch to succeed. The watch owner retains immutable readiness decisions, so a
 losing branch cannot later change a selected result. Progress is an independent
-typed observation and does not replace the final reply.
+typed observation and does not replace the final reply. Keep child completion
+inside the authored Haskell wait instead of polling request handles with timed
+model yields. If the enclosing Haskell tool call is itself pending, `yield`
+observes that outer call; it does not replace the typed child settlement. Use
+`yield` for other pending outer operations when their result is the next thing
+needed too.
 
 Use `withScope` for a runtime-owned delimiter. The callback receives its opaque
 scope, and each resource joins only when its options explicitly use
