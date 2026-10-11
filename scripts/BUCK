@@ -94,7 +94,7 @@ sh_test(
 sh_test(
     name = "native_bundle_qualification_tests",
     test = "run-unittests.sh",
-    args = ["scripts.tests.test_native_bundle_qualification", "scripts.tests.test_buck_isolated_libtest", "scripts.tests.test_harness_usecase_perf_report", "scripts.tests.test_compiler_reuse_report", "scripts.tests.test_resident_performance_report"],
+    args = ["scripts.tests.test_native_bundle_qualification", "scripts.tests.test_buck_isolated_libtest", "scripts.tests.test_harness_usecase_perf_report", "scripts.tests.test_compiler_reuse_report", "scripts.tests.test_resident_performance_report", "scripts.tests.test_qualification_signal_lifetime"],
     env = {
         "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
         "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",

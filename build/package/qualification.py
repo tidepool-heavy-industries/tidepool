@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from enum import Enum
 import hashlib
 import importlib.util
@@ -352,10 +353,96 @@ def _forward_runner_signal(process, identity: dict | None, signum: int) -> str:
         return "forward_failed"
     return "forwarded"
 
+
+class _QualificationSignalOwner:
+    """Keep cancellation ownership through publication of the runner result."""
+
+    def __init__(self):
+        self.depth = 0
+        self.phase = "running"
+        self.process = None
+        self.runner_identity = None
+        self.receipt = None
+        self.receipt_path = None
+        self.dirty = False
+
+    def bind(self, receipt_path: Path, receipt: dict) -> None:
+        self.receipt_path = receipt_path
+        self.receipt = receipt
+        receipt["owner_state"] = self.phase
+
+    def runner_started(self, process, identity: dict | None) -> None:
+        self.process = process
+        self.runner_identity = identity
+
+    def request(self, signum: int) -> None:
+        event = {"signal": signum, "name": signal.Signals(signum).name,
+                 "forwarding_status": "pending"}
+        if self.receipt is not None:
+            self.receipt.setdefault("cancellation_requests", []).append(event)
+            self.dirty = True
+        if self.phase in ("reaped", "published"):
+            event["forwarding_status"] = "runner_already_exited"
+        elif self.process is not None:
+            event["forwarding_status"] = _forward_runner_signal(
+                self.process, self.runner_identity, signum)
+
+
+_active_qualification_signal_owner = None
+
+
+@contextmanager
+def qualification_signal_owner():
+    """Acquire the process signal owner, reusing it across nested API scopes."""
+    global _active_qualification_signal_owner
+    owner = _active_qualification_signal_owner
+    if owner is not None:
+        owner.depth += 1
+        try:
+            yield owner
+        finally:
+            owner.depth -= 1
+        return
+
+    owner = _QualificationSignalOwner()
+    owner.depth = 1
+    _active_qualification_signal_owner = owner
+    prior_handlers = {}
+
+    def forward(signum, _frame):
+        owner.request(signum)
+
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            prior_handlers[signum] = signal.signal(signum, forward)
+        yield owner
+    finally:
+        for signum, handler in prior_handlers.items():
+            signal.signal(signum, handler)
+        _active_qualification_signal_owner = None
+        if owner.dirty and owner.receipt_path is not None:
+            try:
+                write_private_json(owner.receipt_path, owner.receipt)
+                owner.dirty = False
+            except OSError:
+                # The runner receipt remains the best available record when a
+                # late cancellation cannot be persisted during scope cleanup.
+                pass
+
 def run_owned_qualification_runner(command: list[str], environment: dict, stdout, stderr,
                                    receipt_path: Path, descriptor_path: Path,
                                    descriptor: dict, cohort: str) -> tuple[subprocess.CompletedProcess, dict]:
     """Own the isolated runner until its retained result and cleanup are observable."""
+    with qualification_signal_owner() as signal_owner:
+        return _run_owned_qualification_runner(command, environment, stdout, stderr,
+                                               receipt_path, descriptor_path,
+                                               descriptor, cohort, signal_owner)
+
+
+def _run_owned_qualification_runner(command: list[str], environment: dict, stdout, stderr,
+                                    receipt_path: Path, descriptor_path: Path,
+                                    descriptor: dict, cohort: str,
+                                    signal_owner: _QualificationSignalOwner) -> tuple[subprocess.CompletedProcess, dict]:
     owner_pid = os.getpid()
     receipt = {
         "schema": 1,
@@ -370,6 +457,7 @@ def run_owned_qualification_runner(command: list[str], environment: dict, stdout
         "runner": None,
         "cancellation_requests": [],
         "runner_reaped": False,
+        "owner_state": "running",
     }
     os.chmod(receipt_path.parent, 0o700)
     write_private_json(receipt_path, receipt)
@@ -377,6 +465,7 @@ def run_owned_qualification_runner(command: list[str], environment: dict, stdout
     runner_identity = None
     cancellation_requests = receipt["cancellation_requests"]
     published_request_count = 0
+    signal_owner.bind(receipt_path, receipt)
 
     def publish_request_state():
         nonlocal published_request_count
@@ -384,15 +473,6 @@ def run_owned_qualification_runner(command: list[str], environment: dict, stdout
         write_private_json(receipt_path, receipt)
         published_request_count = generation
 
-    def forward(signum, _frame):
-        event = {"signal": signum, "name": signal.Signals(signum).name,
-                 "forwarding_status": "pending"}
-        cancellation_requests.append(event)
-        if process is not None:
-            event["forwarding_status"] = _forward_runner_signal(process, runner_identity, signum)
-
-    prior_handlers = {signum: signal.signal(signum, forward)
-                      for signum in (signal.SIGINT, signal.SIGTERM)}
     try:
         process = subprocess.Popen(command, env=environment, stdout=stdout, stderr=stderr,
                                    start_new_session=True)
@@ -401,6 +481,7 @@ def run_owned_qualification_runner(command: list[str], environment: dict, stdout
         except (OSError, ValueError):
             runner_identity = None
         receipt["runner"] = {"pid": process.pid, "start_identity": runner_identity}
+        signal_owner.runner_started(process, runner_identity)
         if runner_identity is None:
             # Keep ownership with this exact Popen child even if procfs could
             # not provide the stronger externally verifiable identity.
@@ -438,6 +519,8 @@ def run_owned_qualification_runner(command: list[str], environment: dict, stdout
                     publish_request_state()
         receipt["runner_reaped"] = True
         receipt["runner_exit_code"] = returncode
+        signal_owner.phase = "reaped"
+        receipt["owner_state"] = "reaped"
         confirmed_interruptions = [
             event for event in cancellation_requests
             if event["forwarding_status"] == "forwarded"
@@ -450,6 +533,8 @@ def run_owned_qualification_runner(command: list[str], environment: dict, stdout
         write_private_json(receipt_path, receipt)
         return subprocess.CompletedProcess(command, returncode), receipt
     except BaseException as error:
+        signal_owner.phase = "failed"
+        receipt["owner_state"] = "failed"
         receipt["status"] = "runner_spawn_or_wait_failed"
         receipt["error"] = f"{type(error).__name__}: {error}"
         if process is not None:
@@ -471,9 +556,6 @@ def run_owned_qualification_runner(command: list[str], environment: dict, stdout
         receipt["cancellation_requests"] = cancellation_requests
         write_private_json(receipt_path, receipt)
         raise
-    finally:
-        for signum, handler in prior_handlers.items():
-            signal.signal(signum, handler)
 
 def inventory(root: Path, excluded=()) -> dict:
     """Bind copied bytes and declared immutable closure references, including modes."""
@@ -1738,6 +1820,12 @@ def verify(path: Path) -> dict:
     return descriptor
 
 def run_cohort(args) -> int:
+    """Keep owner signal handling active through report publication."""
+    with qualification_signal_owner():
+        return _run_cohort(args)
+
+
+def _run_cohort(args) -> int:
     if 'TIDEPOOL_HOSTED_STARTUP_DIAGNOSTIC_SECONDS' in os.environ:
         raise ValueError('diagnostic startup overrides cannot qualify a frozen cohort')
     allowances = {name: getattr(args, name, None) for name in ('foreground_jobs', 'preparation_jobs')}
@@ -1908,10 +1996,35 @@ def run_cohort(args) -> int:
         confirmed_interruptions=owner_receipt.get("confirmed_interruptions", []),
         case_cleanup=case_cleanup,
         case_process_cleanup_status=case_process_cleanup_status,
-        report_path=str(output / "report.json"),
+        owner_state="reaped",
     )
-    write_json(output / "report.json", report)
-    write_private_json(output / "run-owner.json", owner_receipt)
+    try:
+        write_json(output / "report.json", report)
+    except (OSError, ValueError, TypeError) as error:
+        owner_receipt.pop("report_path", None)
+        owner_receipt["owner_state"] = "failed"
+        owner_receipt["report_publication"] = {
+            "status": "failed", "error": f"{type(error).__name__}: {error}"}
+        signal_owner = _active_qualification_signal_owner
+        if signal_owner is not None:
+            signal_owner.phase = "failed"
+        try:
+            write_private_json(output / "run-owner.json", owner_receipt)
+        except OSError:
+            pass
+        return result.returncode if result.returncode else 1
+    owner_receipt["report_path"] = str(output / "report.json")
+    owner_receipt["owner_state"] = "published"
+    signal_owner = _active_qualification_signal_owner
+    if signal_owner is not None:
+        signal_owner.phase = "published"
+    try:
+        write_private_json(output / "run-owner.json", owner_receipt)
+    except OSError as error:
+        owner_receipt["owner_state"] = "failed"
+        owner_receipt["receipt_publication"] = {
+            "status": "failed", "error": f"{type(error).__name__}: {error}"}
+        return result.returncode if result.returncode else 1
     return code
 
 
@@ -2203,4 +2316,7 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "run":
+        with qualification_signal_owner():
+            raise SystemExit(main())
     raise SystemExit(main())
