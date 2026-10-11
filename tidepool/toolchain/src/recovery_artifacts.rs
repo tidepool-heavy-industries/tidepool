@@ -3031,7 +3031,8 @@ mod tests {
     fn execution_source_sidecar_is_shared_and_verified_once() {
         let source = tempfile::tempdir().unwrap();
         let run = tempfile::tempdir().unwrap();
-        let (graph, owners) = crate::execution_source::test_graph(source.path());
+        let (graph, owners) =
+            crate::execution_source::test_graph_with_distinct_interfaces(source.path());
         let mut validation = PackageInterfaceValidation::default();
         let products = owners[..2]
             .iter()
@@ -3049,17 +3050,20 @@ mod tests {
                     &mut validation,
                 )
                 .unwrap();
-                CertifiedRecoveryProduct::from_certification(
-                    owner.clone(),
-                    b"iface".to_vec(),
-                    b"product".to_vec(),
-                    package_witness(
-                        &owner.unit,
-                        &owner.module,
-                        &owner.skinny_iface_sha256,
-                        vec![],
+                crate::certified_products::fixture_finalized_product(
+                    CertifiedRecoveryProduct::from_certification(
+                        owner.clone(),
+                        format!("{} iface", owner.module).into_bytes(),
+                        b"product".to_vec(),
+                        package_witness(
+                            &owner.unit,
+                            &owner.module,
+                            &owner.skinny_iface_sha256,
+                            vec![],
+                        ),
+                        seal,
                     ),
-                    seal,
+                    [7; 32],
                 )
                 .with_execution_source(graph.clone())
                 .unwrap()

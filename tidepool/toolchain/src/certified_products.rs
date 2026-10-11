@@ -16036,6 +16036,41 @@ pub(crate) mod tests {
             .unwrap(),
             Some(graph.digest())
         );
+        let draft = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
+            original.owner().clone(),
+            original.interface_bytes().to_vec(),
+            original.product_bytes().to_vec(),
+            original.package_imports_bytes().to_vec(),
+            original.certification_bytes().to_vec(),
+        )
+        .with_module_interface(original.module_interface().unwrap().clone())
+        .unwrap();
+        let groups = certified
+            .groups
+            .iter()
+            .filter(|group| group.owner() == original.owner())
+            .cloned()
+            .collect::<Vec<_>>();
+        let witness = decode_home_witness(original.certification_bytes()).unwrap();
+        assert!(
+            retain_original_native(
+                draft.clone(),
+                groups.clone(),
+                decode_home_witness(original.certification_bytes()).unwrap()
+            )
+            .is_err(),
+            "a sealed execution graph cannot be absent from a complete original"
+        );
+        let complete = retain_original_native(
+            draft.with_execution_source(Arc::clone(graph)).unwrap(),
+            groups,
+            witness,
+        )
+        .unwrap();
+        assert!(complete
+            .original_native()
+            .unwrap()
+            .matches_original(&complete));
         let context = Arc::new(
             baseline
                 .as_ref()

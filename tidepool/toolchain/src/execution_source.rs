@@ -515,6 +515,21 @@ pub(crate) struct ExecutionSourceGraphInput<'a> {
 pub(crate) fn test_graph(
     root: &Path,
 ) -> (Arc<CertifiedExecutionSourceGraph>, Vec<CachedHomeOwner>) {
+    test_graph_with_interfaces(root, |_| b"iface".to_vec())
+}
+
+#[cfg(test)]
+pub(crate) fn test_graph_with_distinct_interfaces(
+    root: &Path,
+) -> (Arc<CertifiedExecutionSourceGraph>, Vec<CachedHomeOwner>) {
+    test_graph_with_interfaces(root, |module| format!("{module} iface").into_bytes())
+}
+
+#[cfg(test)]
+fn test_graph_with_interfaces(
+    root: &Path,
+    interface_bytes: impl Fn(&str) -> Vec<u8>,
+) -> (Arc<CertifiedExecutionSourceGraph>, Vec<CachedHomeOwner>) {
     let source = "module Input where\nvalue = 1\n";
     let input = root.join("Input.hs");
     std::fs::write(&input, source).unwrap();
@@ -549,7 +564,7 @@ pub(crate) fn test_graph(
             unit: "main".into(),
             module: (*module).into(),
             module_version: ModuleVersion([index as u8 + 1; 32]),
-            skinny_iface_sha256: Sha256::digest(b"iface").into(),
+            skinny_iface_sha256: Sha256::digest(interface_bytes(module)).into(),
             product_sha256: Sha256::digest(b"product").into(),
         });
     }

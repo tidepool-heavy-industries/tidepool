@@ -2434,12 +2434,17 @@ impl ArtifactInventory {
         let mut closed_entries = cursor_projection.entries.clone();
         let mut issuing_ids = cursor_projection.issuing_ids.clone();
         for (id, entry) in &issuing_payloads {
-            if let Err(position) = closed_entries.binary_search_by(|old| {
+            match closed_entries.binary_search_by(|old| {
                 (&old.descriptor.owner, old.descriptor.id).cmp(&(&entry.descriptor.owner, *id))
             }) {
-                closed_entries.insert(position, Arc::clone(entry));
-                state.entry_handle_copies.fetch_add(1, Ordering::Relaxed);
+                Ok(position) => {
+                    closed_entries.set(position, Arc::clone(entry));
+                }
+                Err(position) => {
+                    closed_entries.insert(position, Arc::clone(entry));
+                }
             }
+            state.entry_handle_copies.fetch_add(1, Ordering::Relaxed);
             issuing_ids.insert(*id);
         }
         let projection = ViewReadProjection {
@@ -3350,8 +3355,8 @@ struct ViewReadCache {
     root_parent_visits: AtomicU64,
 }
 
-/// Live vertices never change payload or outgoing edges: admission checks reused
-/// vertices against the complete plan, and reclamation cannot remove a view's
+/// Live vertices never change payload or outgoing edges: private installation
+/// rejects conflicting incoming rows, and reclamation cannot remove a view's
 /// rooted closure. This read projection therefore needs no invalidation. Stable
 /// keys survive unrelated graph-slot reuse; entry handles copy no artifact bytes.
 /// Neither projection nor detached metadata retains a view or request
@@ -5800,6 +5805,81 @@ mod tests {
                 &selected
             )
             .is_err());
+    }
+
+    #[test]
+    fn bound_projection_rebinding_preserves_issuing_none_override() {
+        let cold = Arc::new(issued_native_groups(
+            "Original",
+            vec![(0, Vec::new())],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let ArtifactPayload::Original(product) = &cold.payload else {
+            unreachable!()
+        };
+        let mut fresh = (*cold).clone();
+        fresh.payload = ArtifactPayload::Original(product.clone().with_source_sha256([1; 32]));
+        let inventory = ArtifactInventory::default();
+        let cursor = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![Arc::new(fresh)],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let independent = ArtifactInventory::default();
+        let physical_entries = vec![cold.clone(), Arc::new(entry("Other", &[]))];
+        let physical = independent
+            .admit_shared_with_demand(
+                &independent.empty_view(),
+                physical_entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let physical = inventory
+            .recover_selection(
+                &inventory.empty_view(),
+                physical.entries(),
+                &physical.capture_graph_selection(),
+                &physical.binding_dependencies(),
+            )
+            .unwrap();
+        assert_ne!(
+            cursor.namespace()[&cold.descriptor.id],
+            physical.namespace()[&cold.descriptor.id]
+        );
+        let selected = bound_selection_for_entries(&physical, &physical_entries);
+        let mut fixed = inventory
+            .bind_segment(&physical, physical_entries, &selected)
+            .unwrap();
+        let imports = vec![issued_source(&cold, 0)];
+        let admitted = inventory
+            .admit_bound_target(
+                &mut fixed,
+                &cursor,
+                NativeArtifactDemand::CertifiedTargetImports(&imports),
+                vec![],
+                &selected,
+            )
+            .unwrap();
+        let uncached = ArtifactView {
+            lease: Arc::clone(&admitted.lease),
+            reads: Arc::new(ViewReadCache::default()),
+        };
+        let cached_entries = admitted.entries();
+        let raw_entries = uncached.entries();
+        for (cached, raw) in cached_entries.iter().zip(&raw_entries) {
+            assert!(cached.same_issuing_authority(raw));
+        }
+        let original = cached_entries
+            .iter()
+            .find(|entry| entry.descriptor.id == cold.descriptor.id)
+            .unwrap();
+        let ArtifactPayload::Original(product) = &original.payload else {
+            unreachable!()
+        };
+        assert_eq!(product.source_sha256(), None);
     }
 
     #[test]
