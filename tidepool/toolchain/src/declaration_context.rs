@@ -2757,6 +2757,41 @@ impl ExactProductAdmission<'_> {
             .merge(&inputs.projection)?;
         let imports = self.source.home_imports()?;
         let inherited = self.request.context().as_ref();
+        for (owner, original) in &self.source.selected_originals {
+            if self
+                .request
+                .compiler_inputs()
+                .metadata
+                .entries
+                .get(owner)
+                .and_then(|entry| canonical_source_interface(entry))
+                != Some(original.interface())
+            {
+                return Err(failure(
+                    "original instance source differs from selected canonical owner",
+                ));
+            }
+        }
+        // Shared source visibility omits mounted values; authenticate that
+        // projection before using the receipt's complete instance adjacency.
+        if !self.source.selected_originals.is_empty() {
+            crate::declaration_join::source_lexical_surface(
+                &self
+                    .source
+                    .selected_originals
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                &imports,
+                &inherited
+                    .lexical_graph()
+                    .iter()
+                    .filter(|node| !node.owner.module.starts_with("Tidepool.Session."))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                &artifacts.source_implementation_roles(),
+            )?;
+        }
         let exact_roots = self
             .source
             .exact_imports
@@ -2860,10 +2895,14 @@ impl ExactProductAdmission<'_> {
                 }
             }
         }
+        // Selected-original receipts authenticate complete compiler adjacency.
+        // Their shared lexical rows omit mounted session interfaces and cannot
+        // stand in for that original instance graph.
         let lexical = compose_lexical_nodes(
             inherited
                 .lexical_graph()
                 .iter()
+                .filter(|node| !self.source.selected_originals.contains_key(&node.owner))
                 .cloned()
                 .chain(scaffold.iter().cloned())
                 .chain(imports.iter().map(|(owner, imports)| ExactLexicalNode {
@@ -3961,6 +4000,23 @@ impl ExactCompilationRequest {
                 .iter()
                 .map(|(unit, module)| identity(unit, module))
                 .collect();
+            let source_less = entries
+                .iter()
+                .filter(|entry| match &entry.payload {
+                    ArtifactPayload::Interface(..) => true,
+                    ArtifactPayload::Canonical(interface) => matches!(
+                        interface.origin(),
+                        crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
+                    ),
+                    ArtifactPayload::Original(product) => product.module_interface().is_some_and(
+                        |interface| matches!(
+                            interface.origin(),
+                            crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
+                        ),
+                    ),
+                })
+                .map(|entry| entry.descriptor.owner.clone())
+                .collect();
             crate::execution_source::validate_source_selected_originals_with_validation(
                 claims,
                 selection_evidence,
@@ -3972,6 +4028,7 @@ impl ExactCompilationRequest {
                     fresh: &evidence,
                     roots: &source_selection_roots,
                     independent: &independent,
+                    source_less: &source_less,
                 },
                 validation,
             )?
@@ -11394,6 +11451,187 @@ mod tests {
         ]);
         write_receipt(&receipt, &value);
         (request, context, receipt)
+    }
+
+    #[test]
+    fn selected_original_instance_graph_keeps_mounted_value_without_public_lexical_edge() {
+        use crate::cache::{
+            DependencyEvidence, ImportQualifier, ModuleEvidence, ModuleImportEvidence,
+            ProductAvailability, ResolutionEvidence, SourceEvidence,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let (old_request, old_context, receipt) =
+            source_selected_receipt(directory.path(), false, None);
+        let mut admission = old_request
+            .validate_receipt(&receipt, None, &old_context)
+            .unwrap();
+        let historical = admission.selected_originals.clone();
+        let value_owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(1));
+        let mounted = identity("main", &value_owner.module_name());
+        let source_path = directory.path().join("A.hs");
+        let source = std::fs::read(&source_path).unwrap();
+        let product = crate::certified_products::fixture_source_finalized_product(
+            support_product_in_unit("main", "A").with_source_sha256(Sha256::digest(&source).into()),
+            [7; 32],
+            vec![crate::certified_products::CanonicalSourceImport {
+                qualifier: ImportQualifier::Unqualified,
+                module: mounted.module.clone(),
+                boot: false,
+                home_unit: Some("main".into()),
+            }],
+        );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .pop()
+            .unwrap()
+            .product;
+        let canonical = product.module_interface().unwrap().clone();
+        let value_evidence = support_product_in_unit("main", &mounted.module);
+        let value = Arc::new(
+            CertifiedValueInterface::from_checked_compilation(
+                [7; 32],
+                mounted.clone(),
+                value_evidence.interface_bytes().to_vec(),
+                value_evidence.package_imports_bytes().to_vec(),
+                vec![],
+            )
+            .unwrap(),
+        );
+        let shared = vec![ExactLexicalNode {
+            owner: identity("main", "A"),
+            imports: vec![],
+        }];
+        let context = Arc::new(
+            ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_checked_original_products([7; 32], &[product])
+                .unwrap()
+                .extend_with_value_interfaces(std::slice::from_ref(&value), shared.clone())
+                .unwrap(),
+        );
+        let inputs = crate::checked_cell::CheckedValueInputs::capture_raw(vec![(
+            value_owner,
+            Arc::from(value.interface().interface_bytes()),
+        )])
+        .unwrap();
+        let mut request = program_request(directory.path(), context.clone())
+            .with_checked_value_imports(inputs.import_authority());
+        request.producer_sha256 = [7; 32];
+        admission
+            .exact_imports
+            .get_mut(&identity("main", "Consumer"))
+            .unwrap()
+            .push(mounted.clone());
+        let evidence = DependencyEvidence {
+            version: 4,
+            cache_safe: true,
+            selection_complete: true,
+            sources: vec![SourceEvidence {
+                path: source_path.clone(),
+                sha256: sha256(&source),
+            }],
+            modules: vec![ModuleEvidence {
+                unit: "main".into(),
+                module: "A".into(),
+                boot: false,
+                source: source_path.clone(),
+                product: ProductAvailability::InterfaceOnly,
+                imports: vec![ModuleImportEvidence {
+                    qualifier: ImportQualifier::Unqualified,
+                    module: mounted.module.clone(),
+                    boot: false,
+                    selected: None,
+                }],
+            }],
+            resolutions: vec![ResolutionEvidence {
+                qualifier: ImportQualifier::Unqualified,
+                module: "A".into(),
+                boot: false,
+                selected: Some(source_path.clone()),
+                candidates: vec![source_path],
+            }],
+            packages: vec![],
+        };
+        let exact = context
+            .compiler_metadata_snapshot()
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|(owner, entry)| (owner, entry.descriptor.interface_sha256))
+            .collect();
+        let independent = BTreeSet::from([mounted.clone()]);
+        admission.selected_originals = crate::execution_source::validate_source_selected_originals(
+            vec![crate::execution_source::SourceSelectedOriginalClaim {
+                owner: identity("main", "A"),
+                certificate_sha256: Sha256::digest(canonical.certificate_bytes()).into(),
+                interface_sha256: canonical.interface_sha256(),
+                source_sha256: canonical.source_sha256(),
+            }],
+            &evidence,
+            crate::execution_source::SourceSelectionContext {
+                producer: [7; 32],
+                interfaces: &[canonical],
+                exact_interfaces: &exact,
+                include: &[directory.path().to_path_buf()],
+                fresh: &admission.evidence,
+                roots: &[(
+                    identity("main", "Consumer"),
+                    ImportQualifier::Unqualified,
+                    identity("main", "A"),
+                )],
+                independent: &independent,
+                source_less: &independent,
+            },
+        )
+        .unwrap();
+        let artifacts = context
+            .artifact_view()
+            .merge(&support_view(&[scaffold_native_fixture(
+                [7; 32], "main", "Consumer", 1,
+            )]))
+            .unwrap();
+        let original = ExactProductAdmission {
+            request: &request,
+            source: &admission,
+        }
+        .original_execution_fixture(&artifacts)
+        .unwrap();
+        assert_eq!(context.lexical_graph(), shared);
+        assert_eq!(
+            original
+                .lexical_graph()
+                .iter()
+                .find(|node| node.owner == identity("main", "A"))
+                .unwrap()
+                .imports,
+            vec![mounted]
+        );
+        assert!(matches!(
+            original.original_instance_environment(),
+            OriginalInstanceEnvironment::Complete { .. }
+        ));
+        let captured_request = request
+            .in_program_context(&directory.path().join("captured-inputs"), original.clone())
+            .unwrap();
+        assert!(
+            ExactProductAdmission {
+                request: &captured_request,
+                source: &admission
+            }
+            .original_execution_fixture(&artifacts)
+            .is_ok(),
+            "complete inherited instance graphs must project shared rows before comparison"
+        );
+        admission.selected_originals = historical;
+        assert!(
+            ExactProductAdmission {
+                request: &request,
+                source: &admission
+            }
+            .original_execution_fixture(&artifacts)
+            .is_err(),
+            "historical certificate cannot replace the selected owner"
+        );
+        assert_eq!(context.lexical_graph(), shared);
     }
 
     #[test]

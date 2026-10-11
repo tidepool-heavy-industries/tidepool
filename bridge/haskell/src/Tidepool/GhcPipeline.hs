@@ -73,7 +73,7 @@ import System.Process (waitForProcess, terminateProcess)
 import System.Timeout (timeout)
 import GHC.Iface.Make (mkIfaceTc, mkPartialIface, mkFullIface)
 import GHC.Iface.Recomp (MaybeValidated(..), checkOldIface)
-import GHC.Unit.Finder (initFinderCache)
+import GHC.Unit.Finder (initFinderCache, addHomeModuleToFinder)
 import GHC.Unit.Module.ModIface (set_mi_extra_decls, mi_iface_hash)
 import GHC.Unit.Module.Deps (imp_mods)
 import GHC.Unit.Finder (FindResult(Found), findImportedModule)
@@ -5681,7 +5681,8 @@ selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
                 , key `Set.member` selectedKeys
                 , key `Set.member` authoredOwners || not (permitsGeneratedScaffoldImport scaffold summary key imported)]
             relevant resolution = (dependencyResolutionQualifier resolution,dependencyResolutionModule resolution,
-              dependencyResolutionBoot resolution) `Set.member` relevantImports
+              dependencyResolutionBoot resolution) `Set.member`
+                (relevantImports `Set.difference` validatedOriginalExactImports validation)
         (sources,complete) <- liftIO (captureDependencySources selectedGraph)
         unless complete $ liftIO (throwIO (ExecutionSourceChangedDuring root CurrentSourceSelectionIncomplete))
         forM_ (filter relevant (dependencyResolutions current)) $ \resolution -> do
@@ -5696,7 +5697,9 @@ selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
               , dependencyResolutions=filter relevant (dependencyResolutions current)
               , dependencyPackages=Set.toAscList (Set.fromList
                   [dependencyImportName edge | node <- selectedModules, edge <- dependencyModuleImports node
-                  , isNothing (dependencyImportSelected edge)]) }
+                  , isNothing (dependencyImportSelected edge)
+                  , (dependencyImportQualifier edge,dependencyImportName edge,dependencyImportBoot edge)
+                      `Set.notMember` validatedOriginalExactImports validation]) }
             selected = SourceSelectedOriginals
               [(key,canonicalCertificateSha256 proof,exactSha256 (exactOwners Map.! key),canonicalSourceSha256 proof)
               | key <- Set.toAscList selectedKeys, let proof = scopeModuleInterfaceProofs admitted Map.! key] evidence
@@ -5706,6 +5709,7 @@ selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
 data ValidatedOriginalSources = ValidatedOriginalSources
   { validatedOriginalGraph :: ModuleGraph
   , validatedOriginalEvidence :: DependencyEvidence
+  , validatedOriginalExactImports :: Set.Set (DependencyQualifier,String,Bool)
   }
 
 -- Current source lookup authenticates canonical interfaces, never native
@@ -5739,6 +5743,19 @@ validateCurrentCanonicalSources admitted interfaces sourceGraph roots = do
   graph <- depanalSourceModules excluded
   env <- getSession
   current <- liftIO (dependencyEvidenceFor env ([],True) graph [])
+  -- Fresh downsweep excludes admitted source-less owners. Restore only those
+  -- verified exact locations after capturing ordinary source resolution;
+  -- their imports still have to match the original canonical adjacency.
+  let exactLocations = Map.fromList
+        [((exactUnit artifact,exactModule artifact),artifact)
+        | artifact <- [artifact | (artifact,_,_) <- scopeInterfaces admitted]
+            ++ scopeValueInterfaces admitted
+        , Map.notMember (exactUnit artifact,exactModule artifact) proofs
+        , exactUnit artifact == unitString (homeUnitId (hsc_home_unit env))]
+  liftIO $ forM_ (Map.elems exactLocations) $ \artifact ->
+    addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
+      (GWIB (mkModuleName (exactModule artifact)) NotBoot)
+      (ms_location (exactInterfaceSummary env artifact))
   let summaries = Map.fromList [(ownerKey (ms_mod summary),summary)
         | ModuleNode _ summary <- mgModSummaries' graph, ms_hsc_src summary == HsSrcFile]
       modules = Map.fromList [((dependencyModuleUnit node,dependencyModuleName node),node)
@@ -5760,7 +5777,7 @@ validateCurrentCanonicalSources admitted interfaces sourceGraph roots = do
   native <- liftIO (hydrateExactScope env interfaces)
   let nativeEnv = native {hsc_mod_graph=mapMG (\summary -> summary
         {ms_hspp_opts=canonicalizeDFlags (ms_hspp_opts summary)}) graph}
-  forM_ (Set.toAscList selected) $ \key -> do
+  exactImports <- fmap Set.unions $ forM (Set.toAscList selected) $ \key -> do
     proof <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key proofs)
     summary <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key summaries)
     node <- maybe (liftIO (throwIO (ExecutionSourceIncomplete key))) pure (Map.lookup key modules)
@@ -5813,8 +5830,11 @@ validateCurrentCanonicalSources admitted interfaces sourceGraph roots = do
       UpToDateItem _ -> pure ()
       OutOfDateItem reason _ -> liftIO (throwIO (ExecutionSourceChangedDuring key
         (OriginalInterfaceRecompileRequired (ExecutionSourceInterfaceReason reason))))
+    pure (Set.fromList [(qualifier,name,boot)
+      | (qualifier,name,boot,Just unit) <- currentImports
+      , Map.member (unit,name) exactLocations])
   setSession env {hsc_targets=hsc_targets initial}
-  pure (ValidatedOriginalSources graph current,selected)
+  pure (ValidatedOriginalSources graph current exactImports,selected)
 
 
 planExactExecutionLoad

@@ -58,6 +58,7 @@ pub(crate) struct SourceSelectionContext<'a> {
     pub(crate) fresh: &'a DependencyEvidence,
     pub(crate) roots: &'a [(ExactModuleIdentity, ImportQualifier, ExactModuleIdentity)],
     pub(crate) independent: &'a BTreeSet<ExactModuleIdentity>,
+    pub(crate) source_less: &'a BTreeSet<ExactModuleIdentity>,
 }
 
 // Resolution candidate paths have their own aggregate edge budget, independent
@@ -233,6 +234,19 @@ pub(crate) fn validate_source_selected_originals_with_validation(
         {
             return Err(refused("selected original source changed"));
         }
+        let exact_home = |edge: &ModuleImportEvidence| {
+            let owner = ExactModuleIdentity {
+                unit: key.unit.clone(),
+                module: edge.module.clone(),
+            };
+            edge.selected.is_none()
+                && !edge.boot
+                && (matches!(&edge.qualifier, ImportQualifier::Unqualified)
+                    || matches!(&edge.qualifier, ImportQualifier::ThisUnit(unit) if unit == &key.unit))
+                && context.source_less.contains(&owner)
+                && context.independent.contains(&owner)
+                && context.exact_interfaces.contains_key(&owner)
+        };
         let actual_imports = node
             .imports
             .iter()
@@ -240,7 +254,7 @@ pub(crate) fn validate_source_selected_originals_with_validation(
                 qualifier: edge.qualifier.clone(),
                 module: edge.module.clone(),
                 boot: edge.boot,
-                home_unit: edge.selected.as_ref().map(|_| key.unit.clone()),
+                home_unit: (edge.selected.is_some() || exact_home(edge)).then(|| key.unit.clone()),
             })
             .map(|edge| edge.key())
             .collect::<BTreeSet<_>>();
@@ -277,7 +291,15 @@ pub(crate) fn validate_source_selected_originals_with_validation(
             {
                 return Err(refused("duplicate or unsupported source import"));
             }
-            if edge.selected.is_some() {
+            if edge.selected.is_some()
+                && context.source_less.contains(&ExactModuleIdentity {
+                    unit: key.unit.clone(),
+                    module: edge.module.clone(),
+                })
+            {
+                return Err(refused("source-less exact import became fresh source"));
+            }
+            if edge.selected.is_some() || exact_home(edge) {
                 if !matches!(&edge.qualifier, ImportQualifier::Unqualified)
                     && !matches!(&edge.qualifier, ImportQualifier::ThisUnit(unit) if unit == &key.unit)
                 {
@@ -301,7 +323,11 @@ pub(crate) fn validate_source_selected_originals_with_validation(
                 }
                 packages.insert(edge.module.clone());
             }
-            record_resolution(&edge.qualifier, &edge.module, edge.selected.clone())?;
+            // Source-less exact imports resolve through admitted interface
+            // authority, independently of fresh source/package search rows.
+            if !exact_home(edge) {
+                record_resolution(&edge.qualifier, &edge.module, edge.selected.clone())?;
+            }
         }
         selected.insert(
             key,
@@ -870,6 +896,7 @@ mod tests {
         };
         let roots = [(consumer, ImportQualifier::Unqualified, owner.clone())];
         let independent = BTreeSet::new();
+        let source_less = BTreeSet::new();
         let context = || SourceSelectionContext {
             producer: [2; 32],
             interfaces: &interfaces,
@@ -878,6 +905,7 @@ mod tests {
             fresh: &fresh,
             roots: &roots,
             independent: &independent,
+            source_less: &source_less,
         };
         let claim = || SourceSelectedOriginalClaim {
             owner: owner.clone(),
@@ -1113,6 +1141,7 @@ mod tests {
         let roots = [(key("Consumer"), ImportQualifier::Unqualified, key("A"))];
         let includes = [root.path().to_path_buf()];
         let independent = BTreeSet::new();
+        let source_less = BTreeSet::new();
         let context = || SourceSelectionContext {
             producer: [2; 32],
             interfaces: &interfaces,
@@ -1121,6 +1150,7 @@ mod tests {
             fresh: &fresh,
             roots: &roots,
             independent: &independent,
+            source_less: &source_less,
         };
         let claims = || {
             interfaces
@@ -1284,6 +1314,7 @@ mod tests {
         let roots = [(key("Consumer"), ImportQualifier::Unqualified, key("A"))];
         let includes = [root.path().to_path_buf()];
         let independent = BTreeSet::new();
+        let source_less = BTreeSet::new();
         let context = || SourceSelectionContext {
             producer: [2; 32],
             interfaces: &interfaces,
@@ -1292,6 +1323,7 @@ mod tests {
             fresh: &fresh,
             roots: &roots,
             independent: &independent,
+            source_less: &source_less,
         };
         let claims = || {
             vec![SourceSelectedOriginalClaim {
@@ -1324,6 +1356,53 @@ mod tests {
             }
         )
         .is_ok());
+        let mut pathless = evidence.clone();
+        pathless.modules[0].imports[0].selected = None;
+        pathless.resolutions.pop();
+        let mut exact_home = exact.clone();
+        exact_home.insert(key("B"), [7; 32]);
+        let source_less = BTreeSet::from([key("B")]);
+        let admitted_context = || SourceSelectionContext {
+            exact_interfaces: &exact_home,
+            fresh: &without_b,
+            independent: &admitted,
+            source_less: &source_less,
+            ..context()
+        };
+        assert!(
+            validate_source_selected_originals(claims(), &pathless, admitted_context()).is_ok()
+        );
+        for refused_context in [
+            SourceSelectionContext {
+                exact_interfaces: &exact,
+                ..admitted_context()
+            },
+            SourceSelectionContext {
+                independent: &independent,
+                ..admitted_context()
+            },
+            SourceSelectionContext {
+                source_less: &independent,
+                ..admitted_context()
+            },
+        ] {
+            assert!(
+                validate_source_selected_originals(claims(), &pathless, refused_context).is_err()
+            );
+        }
+        assert!(
+            validate_source_selected_originals(claims(), &evidence, admitted_context()).is_err()
+        );
+        let mut packaged = pathless.clone();
+        packaged.packages.push("B".into());
+        assert!(
+            validate_source_selected_originals(claims(), &packaged, admitted_context()).is_err()
+        );
+        let mut qualified = pathless;
+        qualified.modules[0].imports[0].qualifier = ImportQualifier::OtherUnit("other".into());
+        assert!(
+            validate_source_selected_originals(claims(), &qualified, admitted_context()).is_err()
+        );
         let mut omitted = evidence.clone();
         omitted.modules[0].imports.clear();
         omitted.resolutions.pop();

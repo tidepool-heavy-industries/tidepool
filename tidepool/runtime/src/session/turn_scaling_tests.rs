@@ -2922,7 +2922,7 @@ fn following_declaration_retains_original_native_binding_inventory() {
         &images,
         (0, 0),
         "following_support_consumer",
-        "dependentThroughSupport",
+        "if dependentThroughSupport == 1 then pure () else error \"original support value changed\"",
         0,
         &ScalePublication::Ephemeral,
     );
@@ -2946,7 +2946,7 @@ fn following_declaration_retains_original_native_binding_inventory() {
         &images,
         (0, 0),
         "support_original_after_rebind",
-        "dependentThroughSupport",
+        "if dependentThroughSupport == 1 then pure () else error \"support followed rebound value\"",
         0,
         &ScalePublication::Ephemeral,
     );
