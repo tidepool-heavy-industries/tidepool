@@ -739,14 +739,17 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
         "import qualified Tidepool.Effects.Core as RecoveryEffects\nsend (RecoveryEffects.NotifyWith ({}, {}) \"counted-recovery-effect\") >> pure ()",
         target_id.id.0, target_id.incarnation.0
     );
+    let (invocation, completion) = test_campaign::original_tool_call(
+        exomonad_tool::OriginalOperation {
+            origin: exomonad_tool::ConversationOrigin::External {
+                thread_id: "retained-native-thread".into(),
+            },
+            request_id: "native-turn".into(),
+            call_id: "lost-recovery-call".into(),
+        },
+    );
     let request = ToolInvocation {
-        context: Some(ToolInvocationContext::external(
-            "retained-native-thread".into(),
-            "native-turn".into(),
-            "native-call".into(),
-            Some("lost-recovery-call".into()),
-            None,
-        )),
+        context: Some(invocation),
         name: exomonad_actor::HASKELL_TOOL.into(),
         arguments: exomonad_tool::ToolArguments::Raw(source),
     };
@@ -783,6 +786,7 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
     .unwrap()
     .unwrap();
     assert_eq!(retained["status"], "committed", "{retained:?}");
+    policy.complete_boxed(completion.clone()).await.unwrap();
     campaign
         .actor
         .shutdown(ActorTerminal {
@@ -872,6 +876,7 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
         replay, retained,
         "replay preserves the original execution receipt"
     );
+    successor_policy.complete_boxed(completion).await.unwrap();
     let mut altered = request;
     altered.arguments = exomonad_tool::ToolArguments::Raw("pure (99 :: Int)".into());
     let conflict = successor_policy
