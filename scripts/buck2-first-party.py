@@ -1599,6 +1599,8 @@ tidepool_buildscript_run(
         deps = dev_deps + ([":" + libraries[0]["name"]] if libraries else [])
         env, resources, worker = test_runtime_inputs(package_name, target["name"])
         extra = runtime_arguments(env, resources, worker)
+        if package_name == "exomonad-worktree" and target["name"] == "worktree":
+            extra += '\n    companion_executables = {"exomonad-view-helper": "//exomonad/node:view_helper_fixture"},'
         if package["name"] == "tidepool-atomic-write" and target["name"] == "strict_directory":
             extra = '    env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location :directory_fault_shared)"},'
         if package_name == "exomonad-node" and target["name"] == "overlay_rotation":

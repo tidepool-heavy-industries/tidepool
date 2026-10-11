@@ -188,6 +188,7 @@ tidepool_rust_isolated_test(
         "exomonad/worktree/tests/worktree_core.rs",
         "exomonad/worktree/tests/worktree_head.rs",
     ],
+    companion_executables = {"exomonad-view-helper": "//exomonad/node:view_helper_fixture"},
     resources = [
         ":binding_directory_fault_shared",
         ":journal_fault_shared",
