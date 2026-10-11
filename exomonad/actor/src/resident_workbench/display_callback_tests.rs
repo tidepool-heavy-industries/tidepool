@@ -42,6 +42,10 @@ impl DispatchEffect<CapturedOutput> for ImmediatePrintProbe {
 
 #[tokio::test]
 async fn expansion_fences_immediate_handler_before_callback_input() {
+    with_test_compiler_owner(expansion_fences_immediate_handler_with_compiler_owner()).await;
+}
+
+async fn expansion_fences_immediate_handler_with_compiler_owner() {
     tidepool_testing::eval_harness::require_extract();
     let surface = TestEffectSurface::minimal(&[tidepool_mcp::console_decl()]).unwrap();
     let source = ActorWorkbenchSource::new(surface.preamble(), surface.include_paths().to_vec());
@@ -168,7 +172,8 @@ async fn expansion_fences_immediate_handler_before_callback_input() {
         })
         .await
         .unwrap();
-    assert!(matches!(ordinary, ResidentOutcome::Completed { .. }));
+    assert!(matches!(ordinary, ResidentOutcome::Completed { output, .. }
+        if output == ["unauthorized callback output"]));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert_eq!(output.snapshot(), ["unauthorized callback output"]);
+    assert!(output.snapshot().is_empty());
 }
