@@ -15140,37 +15140,25 @@ mod tests {
         ));
 
         let settlement_owner = ActorRef::first(ActorId(9));
-        let blocked_send = tokio::spawn({
-            let sender = sender.clone();
-            async move {
-                sender
-                    .send(crate::LocalResidentDeployment::Retired {
-                        actor: settlement_owner,
-                        terminal: crate::ActorTerminal {
-                            kind: crate::ActorExitKind::Cancelled,
-                            summary: "settlement".into(),
-                            diagnostic: None,
-                        },
-                    })
-                    .await
-            }
-        });
-
-        // The channel is still full; the blocking send has not resolved.
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        assert!(
-            !blocked_send.is_finished(),
-            "send on a full channel must wait, not drop"
-        );
+        let mut blocked_send = Box::pin(sender.send(crate::LocalResidentDeployment::Retired {
+            actor: settlement_owner,
+            terminal: crate::ActorTerminal {
+                kind: crate::ActorExitKind::Cancelled,
+                summary: "settlement".into(),
+                diagnostic: None,
+            },
+        }));
+        std::future::poll_fn(|context| {
+            assert!(std::future::Future::poll(blocked_send.as_mut(), context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
 
         // Draining the filler frees capacity; the pending send now
         // completes and its value is delivered, never dropped.
         let drained = receiver.recv().await.expect("filler was queued");
         assert_eq!(drained.kind(), "Retired");
-        blocked_send
-            .await
-            .expect("task did not panic")
-            .expect("receiver was retained");
+        blocked_send.await.expect("receiver was retained");
         let delivered = receiver.recv().await.expect("settlement was queued");
         match delivered {
             crate::LocalResidentDeployment::Retired { actor, terminal } => {

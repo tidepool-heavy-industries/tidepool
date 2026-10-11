@@ -1899,13 +1899,15 @@ mod tests {
     async fn observation_is_repeatable_before_and_after_publication() {
         let retained = RetainedActorExit::new();
         let waiting = retained.clone();
-        let waiter = tokio::spawn(async move { waiting.wait().await });
-
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        assert!(!waiter.is_finished());
+        let mut waiter = Box::pin(waiting.wait());
+        std::future::poll_fn(|context| {
+            assert!(std::future::Future::poll(waiter.as_mut(), context).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
         retained.publish(completed("done")).expect("first publish");
 
-        assert_eq!(waiter.await.expect("wait task"), completed("done"));
+        assert_eq!(waiter.await, completed("done"));
         assert_eq!(retained.wait().await, completed("done"));
         assert_eq!(retained.get(), Some(completed("done")));
     }

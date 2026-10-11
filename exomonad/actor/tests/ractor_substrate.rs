@@ -22,23 +22,29 @@ struct ReadinessProbe;
 impl Actor for ReadinessProbe {
     type Msg = ();
     type State = ();
-    type Arguments = oneshot::Receiver<()>;
+    type Arguments = (oneshot::Sender<()>, oneshot::Receiver<()>);
 
     async fn pre_start(
         &self,
         _myself: RactorRef<Self::Msg>,
-        ready: Self::Arguments,
+        (entered, ready): Self::Arguments,
     ) -> Result<Self::State, ActorProcessingErr> {
+        entered
+            .send(())
+            .expect("test must observe entry to pre_start");
         ready.await.map_err(Into::into)
     }
 }
 
 #[tokio::test]
 async fn spawn_does_not_publish_before_pre_start_finishes() {
+    let (entered_tx, entered_rx) = oneshot::channel();
     let (ready_tx, ready_rx) = oneshot::channel();
-    let spawn = tokio::spawn(Actor::spawn(None, ReadinessProbe, ready_rx));
+    let spawn = tokio::spawn(Actor::spawn(None, ReadinessProbe, (entered_tx, ready_rx)));
 
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    entered_rx
+        .await
+        .expect("pre_start must announce entry before waiting for readiness");
     assert!(!spawn.is_finished());
 
     ready_tx.send(()).expect("readiness receiver must be live");

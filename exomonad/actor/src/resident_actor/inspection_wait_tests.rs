@@ -4,7 +4,7 @@ use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::{
-    CheckoutError, ModuleEnv, ResidentError, SessionError, SessionLib, registry::SlotKind,
+    registry::SlotKind, CheckoutError, ModuleEnv, ResidentError, SessionError, SessionLib,
 };
 
 type Registry = ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>;
@@ -57,13 +57,11 @@ fn fixture() -> (
 async fn unknown_session(request: InspectionRequest) {
     let mut owner = crate::CompilerPreparationOwner::new();
     let outcome = owner.scope(unknown_session_with_owner(request)).await;
-    assert!(
-        outcome
-            .cleanup
-            .wait_for_settlement(std::time::Duration::from_secs(5))
-            .await
-            .is_confirmed()
-    );
+    assert!(outcome
+        .cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await
+        .is_confirmed());
 }
 
 async fn unknown_session_with_owner(request: InspectionRequest) {
@@ -91,13 +89,11 @@ async fn unknown_session_with_owner(request: InspectionRequest) {
 async fn retired_scope(request: InspectionRequest) {
     let mut owner = crate::CompilerPreparationOwner::new();
     let outcome = owner.scope(retired_scope_with_owner(request)).await;
-    assert!(
-        outcome
-            .cleanup
-            .wait_for_settlement(std::time::Duration::from_secs(5))
-            .await
-            .is_confirmed()
-    );
+    assert!(outcome
+        .cleanup
+        .wait_for_settlement(std::time::Duration::from_secs(5))
+        .await
+        .is_confirmed());
 }
 
 async fn retired_scope_with_owner(request: InspectionRequest) {
