@@ -490,6 +490,9 @@ impl CertifiedValueInterface {
     pub fn interface(&self) -> &CertifiedJoinedInterface {
         &self.interface
     }
+    pub(crate) fn interface_bytes_owned(&self) -> Arc<[u8]> {
+        self.interface.interface_bytes.clone()
+    }
     pub fn requirements(&self) -> &[crate::declaration_join::ExactModuleIdentity] {
         &self.requirements
     }

@@ -1915,6 +1915,12 @@ impl ModuleCandidateOffer {
         // One host admission observes package bytes once across all original
         // outputs. The next admission starts a fresh filesystem observation.
         let mut validation = crate::recovery_artifacts::PackageInterfaceValidation::default();
+        let produced_outputs = values.capture_produced_types(
+            initial.producer_sha256,
+            planned,
+            0..planned.slots.len(),
+            &mut validation,
+        )?;
         let mut declarations = BTreeMap::new();
         let mut pending_segments = Vec::new();
         let mut outputs = BTreeMap::new();
@@ -1946,12 +1952,7 @@ impl ModuleCandidateOffer {
                         tidepool_repr::SessionModule::lib(tidepool_repr::Generation(generation))
                             .module_name(),
                     ];
-                let produced_types = values.capture_produced_types(
-                    initial.producer_sha256,
-                    planned,
-                    index..index,
-                    &mut validation,
-                )?;
+                let produced_types = produced_outputs.for_segment(index..index)?;
                 let original = effective
                     .admit_planned_declaration(
                         &segment_root,
@@ -2056,12 +2057,7 @@ impl ModuleCandidateOffer {
                 let segment_input = program_request
                     .in_program_context(&root.join("program-inputs"), context.clone())?;
                 let mut source_segment = segment_input.admit_program_segment(&segment_root)?;
-                let produced_types = values.capture_produced_types(
-                    initial.producer_sha256,
-                    planned,
-                    index..end,
-                    &mut validation,
-                )?;
+                let produced_types = produced_outputs.for_segment(index..end)?;
                 let segment_offer = self.program_offer(segment_input);
                 segment_offer.admit_segment_original_products(
                     &segment_root,
@@ -2101,8 +2097,12 @@ impl ModuleCandidateOffer {
                             ));
                         }
                     };
-                    context =
-                        self.admit_program_value(context, values.root(), generation, &output.turn)?;
+                    context = self.admit_program_value(
+                        context,
+                        generation,
+                        &output.turn,
+                        &item_produced_types,
+                    )?;
                     outputs.insert(index, output);
                     index += 1;
                 }
@@ -2196,6 +2196,7 @@ impl ModuleCandidateOffer {
                     .as_ref()
                     .expect("program output was sealed")
                     .pending_imports,
+                Some(&produced_outputs.for_segment(index..index + 1)?),
             )?;
             let next = completed.append(native.clone())?;
             let observation = CellProgramObservations {
@@ -2465,9 +2466,9 @@ impl ModuleCandidateOffer {
     fn admit_program_value(
         &self,
         context: Arc<crate::declaration_join::ExactDeclarationContext>,
-        root: &Path,
         generation: u64,
         turn: &[u8],
+        produced_types: &crate::checked_cell::ProducedValueTypeInterfaces,
     ) -> Result<Arc<crate::declaration_join::ExactDeclarationContext>, CompileError> {
         let value = crate::checked_cell::decode(turn)?;
         let record = crate::checked_cell::row(&value, 2)?;
@@ -2475,18 +2476,7 @@ impl ModuleCandidateOffer {
         if matches!(&fields[2], Value::Array(rows) if rows.is_empty()) {
             return Ok(context);
         }
-        let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
-        let path = root.join(owner.relative_hi_path());
-        let bytes = crate::checked_cell::read(&path, 32 << 20)?;
-        let interface = crate::checked_cell::certify_value_interface(
-            crate::artifact_inventory::CanonicalProducerIdentity::from_producer_bytes(
-                &self.producer,
-            )
-            .sha256(),
-            owner,
-            &path,
-            &bytes,
-        )?;
+        let interface = produced_types.current_interface(generation)?.clone();
         Ok(Arc::new(
             (*context)
                 .clone()
@@ -3523,6 +3513,7 @@ fn seal_turn_outputs_with_validation(
                             .expect("checked output has full original execution evidence"),
                         None,
                         &pending_imports,
+                        None,
                     )?,
                 )
             }

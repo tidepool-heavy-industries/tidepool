@@ -1089,9 +1089,51 @@ mod produced_type_selection_tests {
 struct ProducedValueTypeInterface {
     ordinal: usize,
     interface: Arc<crate::recovery_artifacts::CertifiedValueInterface>,
+    input: ValueInterfaceBytes,
 }
 
 impl ProducedValueTypeInterfaces {
+    /// Keep complete physical output custody private while selecting only the
+    /// current segment's mandatory outputs and preceding type evidence.
+    pub(crate) fn for_segment(
+        &self,
+        segment: std::ops::Range<usize>,
+    ) -> Result<Self, CompileError> {
+        if segment.start < self.selection.0.start
+            || segment.end > self.selection.0.end
+            || segment.start > segment.end
+        {
+            return Err(failure(
+                "produced type segment widens physical output selection",
+            ));
+        }
+        Ok(Self {
+            interfaces: self.interfaces.clone(),
+            selection: ProducedValueTypeSelection(segment),
+        })
+    }
+
+    fn output(
+        &self,
+        owner: tidepool_repr::SessionModule,
+    ) -> Result<&ProducedValueTypeInterface, CompileError> {
+        self.interfaces
+            .iter()
+            .find(|output| self.selection.requires(output.ordinal) && output.input.owner == owner)
+            .ok_or_else(|| failure("current item lacks its captured value interface"))
+    }
+
+    pub(crate) fn current_interface(
+        &self,
+        generation: u64,
+    ) -> Result<&Arc<crate::recovery_artifacts::CertifiedValueInterface>, CompileError> {
+        Ok(&self
+            .output(tidepool_repr::SessionModule::val(
+                tidepool_repr::Generation(generation),
+            ))?
+            .interface)
+    }
+
     pub(crate) fn owns_artifact(&self, artifact: crate::artifact_inventory::ArtifactId) -> bool {
         self.interfaces
             .iter()
@@ -1158,7 +1200,7 @@ pub struct CheckedInputWork {
 }
 
 /// Exact interface bytes are distinct from compiler-certified output authority.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ValueInterfaceBytes {
     owner: tidepool_repr::SessionModule,
     module: String,
@@ -1774,9 +1816,22 @@ impl CheckedValueInputs {
                         .ok_or_else(|| failure("produced type output accounting overflow"))?,
                 )
                 .map_err(|error| CompileError::CompilerEvidence(Box::new(error.into())))?;
+            let interface = captured.certify(producer, owner, None)?;
+            let bytes = interface.interface_bytes_owned();
+            let digest = hash(&bytes);
+            self.output_files_hashed.fetch_add(1, Ordering::Relaxed);
+            self.output_bytes_hashed
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
             interfaces.push(ProducedValueTypeInterface {
                 ordinal,
-                interface: captured.certify(producer, owner, None)?,
+                input: ValueInterfaceBytes {
+                    owner,
+                    module: owner.module_name(),
+                    bytes,
+                    path,
+                    digest,
+                },
+                interface,
             });
         }
         Ok(ProducedValueTypeInterfaces {
@@ -1968,12 +2023,41 @@ impl CheckedValueInputs {
         context: &Arc<crate::declaration_context::ExactDeclarationContext>,
         source_lexical: &[crate::declaration_join::ExactLexicalNode],
         original_execution: &crate::declaration_context::ExactDeclarationContext,
+        produced: Option<&ProducedValueTypeInterfaces>,
     ) -> Result<Arc<CheckedValueArtifact>, CompileError> {
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
-        let path = self.root().join(owner.relative_hi_path());
-        let bytes: Arc<[u8]> = read(&path, 32 * 1024 * 1024)?.into();
-        let digest = hash(&bytes);
-        let certificate = certify_value_interface(cell.producer, owner, &path, &bytes)?;
+        let (input, certificate) = match produced {
+            Some(produced) => {
+                let output = produced.output(owner)?;
+                if output.interface.interface().toolchain_identity_sha256() != cell.producer {
+                    return Err(failure("captured output has another producer"));
+                }
+                (output.input.clone(), output.interface.clone())
+            }
+            None => {
+                let path = self.root().join(owner.relative_hi_path());
+                let certificate = CapturedValueInterfaceOutput::capture(&path)?.certify(
+                    cell.producer,
+                    owner,
+                    None,
+                )?;
+                let bytes = certificate.interface_bytes_owned();
+                let digest = hash(&bytes);
+                self.output_files_hashed.fetch_add(1, Ordering::Relaxed);
+                self.output_bytes_hashed
+                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+                (
+                    ValueInterfaceBytes {
+                        owner,
+                        module: owner.module_name(),
+                        bytes,
+                        path,
+                        digest,
+                    },
+                    certificate,
+                )
+            }
+        };
         let context = (**context).clone().extend_with_value_interfaces(
             std::slice::from_ref(&certificate),
             context.lexical_graph().to_vec(),
@@ -2014,17 +2098,8 @@ impl CheckedValueInputs {
                 )?,
             )?;
         compiler_projection.validate(&compiler_artifact_view)?;
-        self.output_files_hashed.fetch_add(1, Ordering::Relaxed);
-        self.output_bytes_hashed
-            .fetch_add(bytes.len() as u64, Ordering::Relaxed);
         Ok(Arc::new(CheckedValueArtifact {
-            interface: ValueInterfaceBytes {
-                owner,
-                module: owner.module_name(),
-                digest,
-                bytes,
-                path,
-            },
+            interface: input,
             authority: (cell.producer, cell.receipt_digest),
             certified_interface: certificate,
             artifact_view,
@@ -3696,6 +3771,7 @@ impl CheckedItemOffer {
         original_execution: Arc<crate::declaration_context::ExactDeclarationContext>,
         program_entry: Option<&CheckedTypedEntry>,
         target_imports: &[crate::certified_products::PendingImportOwner],
+        produced: Option<&ProducedValueTypeInterfaces>,
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
         let receipt = decode(&read(root.join("checked-item.cbor"), 4 * 1024 * 1024)?)?;
         let fields = row(&receipt, if self.is_program { 9 } else { 8 })?;
@@ -3794,6 +3870,7 @@ impl CheckedItemOffer {
                 artifact_context,
                 source_lexical,
                 &original_execution,
+                produced,
             )?)
         } else {
             None
@@ -4888,6 +4965,14 @@ mod tests {
         original: &Arc<crate::declaration_context::ExactDeclarationContext>,
         demands_epoch: bool,
     ) -> Arc<super::CheckedValueArtifact> {
+        capture_test_value_from_output(original, demands_epoch, false)
+    }
+
+    fn capture_test_value_from_output(
+        original: &Arc<crate::declaration_context::ExactDeclarationContext>,
+        demands_epoch: bool,
+        reuse: bool,
+    ) -> Arc<super::CheckedValueArtifact> {
         use super::*;
         let producer = [2; 32];
         let inputs = CheckedValueInputs::capture_raw(vec![]).unwrap();
@@ -4938,10 +5023,70 @@ mod tests {
             typed_segments: vec![],
             value_inputs: inputs.clone(),
         };
+        let produced = reuse.then(|| {
+            let interface = CapturedValueInterfaceOutput::capture(&path)
+                .unwrap()
+                .certify(producer, owner, None)
+                .unwrap();
+            let bytes = interface.interface_bytes_owned();
+            let output = ProducedValueTypeInterface {
+                ordinal: 4,
+                input: ValueInterfaceBytes {
+                    owner,
+                    module: owner.module_name(),
+                    digest: hash(&bytes),
+                    bytes,
+                    path: path.clone(),
+                },
+                interface,
+            };
+            for output_path in [
+                &path,
+                &path.with_extension("hi.packages"),
+                &path.with_extension("hi.requirements"),
+            ] {
+                std::fs::remove_file(output_path).unwrap();
+            }
+            ProducedValueTypeInterfaces {
+                interfaces: vec![output].into(),
+                selection: ProducedValueTypeSelection(4..5),
+            }
+        });
         let captured = inputs
-            .capture_output(1, &cell, original, &[], original)
+            .capture_output(1, &cell, original, &[], original, produced.as_ref())
             .unwrap();
+        if let Some(produced) = produced {
+            let output = produced.output(owner).unwrap();
+            assert!(Arc::ptr_eq(captured.bytes_owned(), &output.input.bytes));
+            assert!(Arc::ptr_eq(
+                captured.certified_interface(),
+                &output.interface
+            ));
+            assert_eq!(
+                inputs.work().output_files_hashed,
+                0,
+                "final capture must add only contextual authority"
+            );
+        }
         captured
+    }
+
+    #[test]
+    fn final_value_capture_reuses_private_output_bytes_and_certificate_after_paths_are_removed() {
+        let context = Arc::new(
+            crate::declaration_context::ExactDeclarationContext::new(&[], &[], vec![]).unwrap(),
+        );
+        let ordinary = capture_test_value(&context, false);
+        let retained = capture_test_value_from_output(&context, false, true);
+        assert_eq!(
+            ordinary.certified_interface(),
+            retained.certified_interface()
+        );
+        assert_eq!(ordinary.bytes_owned(), retained.bytes_owned());
+        assert_eq!(
+            ordinary.artifact_view().capture_graph_selection(),
+            retained.artifact_view().capture_graph_selection()
+        );
     }
 
     fn check_captured_value_epoch_reattachment(demands_epoch: bool) {
