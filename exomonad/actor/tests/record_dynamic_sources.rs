@@ -104,7 +104,6 @@ async fn run_record_case(source: &str, discriminator: u32) {
         include_str!("record_dynamic_sources/schema.hs")
     );
     let templates = resident_workbench_templates(&preamble, "ActorEffects", "");
-    let templates = [templates[3].clone(), templates[5].clone()];
     let include_refs: Vec<_> = include.iter().map(std::path::PathBuf::as_path).collect();
     let session_root = tempfile::tempdir().unwrap();
     let lib = SessionLib::open(
@@ -140,14 +139,6 @@ async fn run_record_case(source: &str, discriminator: u32) {
         TurnResult::Expr { compiled, .. } => compiled,
         other => panic!("watcher should be an expression, got {other:?}"),
     };
-    machine.set_effect_execution(
-        EffectRunPolicy::SuspendAll,
-        LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-    );
-    let outcome = tidepool_testing::with_settlement(|settlement| {
-        machine.run_with_sites("record_dynamic_sources", compiled.code(), settlement)
-    })
-    .expect("first actor boundary");
     let descriptor = ActorDescriptor::new(
         "record-dynamic-sources",
         ActorPlacement {
@@ -156,6 +147,21 @@ async fn run_record_case(source: &str, discriminator: u32) {
             lexical_scope: ScopeId::ROOT,
         },
     );
+    machine
+        .set_actor_execution(
+            tidepool_runtime::session::SessionRunContext {
+                resource_scope: descriptor.placement().resource_scope,
+                lexical_scope: descriptor.placement().lexical_scope,
+                ..tidepool_runtime::session::SessionRunContext::ROOT
+            },
+            EffectRunPolicy::SuspendAll,
+            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+        )
+        .expect("initial policy actor placement");
+    let outcome = tidepool_testing::with_settlement(|settlement| {
+        machine.run_with_sites("record_dynamic_sources", compiled.code(), settlement)
+    })
+    .expect("first actor boundary");
     let (forest, mut deployments) = ResidentForest::new(
         ActorWorkbenchSource::new(preamble, include),
         session,
