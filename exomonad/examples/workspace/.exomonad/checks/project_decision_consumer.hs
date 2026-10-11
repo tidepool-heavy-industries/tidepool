@@ -11,7 +11,7 @@ reportProgress (WorkProgress [] remainingQuestions)
 let newer = semantics { questionDetails = (questionDetails semantics) { questionFinding = "A new owning consumer contradicts the earlier answer." } }
 let changedQuestions = raiseQuestion newer openQuestions
 inspectFull (map questionKey remainingQuestions == ["product-gate"], resolveQuestion acceptedDecision changedQuestions == changedQuestions, raiseQuestion semantics firstQuestions == firstQuestions, taskSource assignedWork == incorporatedHead)
-Right consumerAgent <- spawnSubagent (FreshCtx (taskContext assignedWork)) (ForkWorktree projectHead)
+consumerAgent <- either (error . T.pack . show) pure =<< spawnSubagent (FreshCtx (taskContext assignedWork)) (ForkWorktree projectHead)
   ((defaultSpawnOptions workspaceAgentSpec)
     { spawnModel = Just (Alias "executor"), spawnEffort = Just Medium
     , spawnInstructions = Just (projectPrompt "task"), spawnLabel = Just (taskName assignedWork) })

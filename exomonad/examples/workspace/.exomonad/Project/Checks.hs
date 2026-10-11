@@ -26,7 +26,9 @@ script :: Member RecipeCheck effects => CheckActor -> Text -> Eff effects ()
 script actor name = readFile actor (checkSource name) >>= void . turn actor
 
 -- The selected RSI actor uses the configured model and receives current source.
-checkImprovementSelection :: Member RecipeCheck effects => Eff effects ()
-checkImprovementSelection = do
+checkImprovementSelection :: Member RecipeCheck effects => Text -> Eff effects ()
+checkImprovementSelection expectedSource = do
   improver <- activation
-  check "requested RSI is an ordinary selected Astra" (checkModel improver == Just "gpt-6-astra" && "Current definitions:" `Text.isInfixOf` checkContext improver)
+  check "requested RSI is an ordinary selected Astra" (checkModel improver == Just "gpt-6-astra")
+  assertCell (checkActor improver) "requested RSI receives the incorporated source"
+    ("rsiSource sessionInput == " <> gitOidLiteral expectedSource)

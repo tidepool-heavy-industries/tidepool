@@ -34,7 +34,9 @@ collaboration = do
   void $ turn (checkActor reviewer) "state <- pollResponse revision"
   script (checkActor reviewer) "project_design_question"
   expert <- activation
-  check "the tagged Astra receives the repaired source and actual uncertainty" (checkModel expert == Just "gpt-6-astra" && revised `Text.isInfixOf` checkContext expert && "Does preparation preserve the boundary?" `Text.isInfixOf` checkContext expert)
+  check "the tagged specialist selects the configured Astra" (checkModel expert == Just "gpt-6-astra")
+  assertCell (checkActor expert) "the tagged Astra receives the repaired source and actual uncertainty"
+    ("questionSource sessionInput == " <> gitOidLiteral revised <> " && questionFinding sessionInput == \"Does preparation preserve the boundary?\"")
   amendment <- checkpoint (checkActor expert) "plans/feature.md" "Preparation retains the open product gate.\n" "clarify acceptance"
   void $ turn (checkActor expert) ("respond (AmendPlan (PlanAmendment " <> gitOidLiteral revised <> " " <> gitOidLiteral amendment <> " [\"plans/feature.md\"] \"retain the preparation gate\" [\"feature review\"] [\"boundary evidence\"]))")
   void $ turn (checkActor reviewer) "design <- pollResponse expert"
@@ -51,7 +53,7 @@ collaboration = do
   assertCell owner "coalesced attention retains both unresolved questions" "case observedQuestions of { ProgressUpdate _ progress -> map questionKey (workQuestions progress) == [\"semantics\",\"product-gate\"]; _ -> False }"
   -- A separate component progresses while this review awaits its owning decision.
   void $ turn owner ("let otherTask = task \"independent-consumer\" \"Inspect an independent consumer\" [\"consumer source\"] \"return exact findings\" " <> gitOidLiteral source
-    <> "\nRight otherAgent <- spawnSubagent (FreshCtx (taskContext otherTask)) (ForkWorktree projectHead) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just (taskName otherTask) })\nRight otherRequest <- request @Text otherAgent (taskContext otherTask) defaultRequestOptions")
+    <> "\notherAgent <- either (error . T.pack . show) pure =<< spawnSubagent (FreshCtx (taskContext otherTask)) (ForkWorktree projectHead) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just (taskName otherTask) })\nRight otherRequest <- request @Text otherAgent (taskContext otherTask) defaultRequestOptions")
   otherActor <- activation
   void $ turn (checkActor otherActor) "respond (\"independent work finished\" :: Text)"
   void $ turn owner "independent <- pollResponse otherRequest"
@@ -68,7 +70,8 @@ collaboration = do
   script (checkActor reviewer) "project_decision_consumer"
   assertCell (checkActor reviewer) "an old answer cannot clear a changed question or rewind the task source" "map questionKey remainingQuestions == [\"product-gate\"] && resolveQuestion acceptedDecision changedQuestions == changedQuestions && raiseQuestion semantics firstQuestions == firstQuestions && taskSource assignment == incorporatedHead"
   consumer <- activation
-  check "the fresh consumer receives the accepted decision and rationale" (amendment `Text.isInfixOf` checkContext consumer && "Preparation retains the boundary" `Text.isInfixOf` checkContext consumer && "Why:" `Text.isInfixOf` checkContext consumer)
+  assertCell (checkActor consumer) "the fresh consumer receives the accepted decision and rationale"
+    ("taskSource sessionInput == " <> gitOidLiteral amendment <> " && rationale sessionInput == \"Preserve the product boundary during preparation.\" && map decisionSource (acceptedDecisions sessionInput) == [" <> gitOidLiteral amendment <> "] && map decisionSummary (acceptedDecisions sessionInput) == [\"Preparation retains the boundary; visible UI acceptance remains separate.\"]")
   consumerHead <- git (checkActor consumer) ["rev-parse", "HEAD"]
   check "the fresh consumer starts at the incorporated decision source" (consumerHead == amendment)
   void $ turn owner "remaining <- pollProgress reviewQuestions"
@@ -93,5 +96,5 @@ collaboration = do
   assertCell (checkActor consumer) "an uncertain update cannot silently settle the waiting obligation" "case fenced of { Left ReplyUpdatePending -> True; _ -> False }"
   -- Feed this same repaired, accepted and incorporated work into the next-wave improvement.
   void $ turn owner "let ResponseReady reviewAnswer = accepted\nlet Produced (Accepted reviewed) = responseValue reviewAnswer\nlet delivered = Produced (Delivered reviewed (candidateCommit (reviewedCandidate reviewed)) [\"checked combined feature and plan\"]) :: Delivery\ninspectFull (deliverySummary delivered)"
-  void $ turn owner "later <- snapshot\nlet packet = RsiInput (candidateCommit (reviewedCandidate reviewed)) \"Human requested: improve decision handoffs from this completed preparation.\" [] before later [deliverySummary delivered, \"Retained repair, accepted amendment, fresh consumer and failed/unconfirmed steering were exercised; no live usage measured.\"]\nRight improvementAgent <- spawnSubagent (FreshCtx (rsiContext packet)) (ForkWorktree (atRef (GitRef (renderGitOid (rsiSource packet))))) ((defaultSpawnOptions workspaceAgentSpec) { spawnInstructions = Just (projectPrompt \"rsi\"), spawnLabel = Just \"workspace-style\" })\nRight (improvement, _) <- requestWithProgress @WorkProgress @(Outcome Candidate) improvementAgent packet defaultRequestOptions"
-  checkImprovementSelection
+  void $ turn owner "later <- snapshot\nlet packet = RsiInput (candidateCommit (reviewedCandidate reviewed)) \"Human requested: improve decision handoffs from this completed preparation.\" [] before later [deliverySummary delivered, \"Retained repair, accepted amendment, fresh consumer and failed/unconfirmed steering were exercised; no live usage measured.\"]\nimprovementAgent <- either (error . T.pack . show) pure =<< spawnSubagent (FreshCtx (rsiContext packet)) (ForkWorktree (atRef (GitRef (renderGitOid (rsiSource packet))))) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"planner\"), spawnInstructions = Just (projectPrompt \"rsi\"), spawnLabel = Just \"workspace-style\" })\nRight (improvement, _) <- requestWithProgress @WorkProgress @(Outcome Candidate) improvementAgent packet defaultRequestOptions"
+  checkImprovementSelection amendment
