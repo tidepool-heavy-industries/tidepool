@@ -1,9 +1,12 @@
-use super::test_campaign::{explicit_display_text, COLD_DEBUG_CELL_SETTLEMENT_BUDGET};
+use super::test_campaign::{
+    explicit_display_text, haskell_call, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+};
 use super::*;
 use async_trait::async_trait;
 use futures_util::FutureExt;
 use harness::{
     engine::ResponsesTransport,
+    item::ToolExecution,
     model::{AgentPath, CallId, ConversationIdentity, OperationId, RequestId},
     transport::{ResponsesRequest, ResponsesTurn, TransportError, Usage},
     turn::JobOutput,
@@ -37,24 +40,11 @@ enum HostedScenario {
     Captured(CapturedScenario),
 }
 
-#[derive(Clone, Copy)]
-enum CallMode {
-    Blocking,
-    Asynchronous,
-}
-
-fn haskell_call(call_id: &str, source: &str, mode: CallMode) -> harness::item::Item {
-    harness::item::Item(json!({
-        "type": "custom_tool_call", "call_id": call_id, "name": "haskell", "input": source,
-        "async": matches!(mode, CallMode::Asynchronous),
-    }))
-}
-
 enum RootStep {
     Tool {
         call_id: String,
         source: String,
-        mode: CallMode,
+        mode: ToolExecution,
     },
     Finish,
 }
@@ -283,9 +273,9 @@ impl CapturedHostTransport {
                         if self.scenario
                             == HostedScenario::Captured(CapturedScenario::ConcurrentNominalJoin)
                         {
-                            CallMode::Asynchronous
+                            ToolExecution::Asynchronous
                         } else {
-                            CallMode::Blocking
+                            ToolExecution::Synchronous
                         },
                     )]
                 }
@@ -817,7 +807,7 @@ async fn root_tool_call(
                     .send(RootStep::Tool {
                         call_id: call_id.into(),
                         source: source.into(),
-                        mode: CallMode::Blocking,
+                        mode: ToolExecution::Synchronous,
                     })
                     .unwrap();
                 loop {
@@ -2012,7 +2002,7 @@ impl ResponsesTransport for PreflightTransport {
                     .insert(call.clone(), operation)
                     .is_none());
                 self.changed.send_modify(|revision| *revision += 1);
-                vec![haskell_call(&call, &source, CallMode::Blocking)]
+                vec![haskell_call(&call, &source, ToolExecution::Synchronous)]
             }
             PreflightStep::InterruptStream => {
                 return Err(TransportError::IncompleteResponse(

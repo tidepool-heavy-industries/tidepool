@@ -6,6 +6,80 @@ use exomonad_tool::{
 };
 use serde_json::Value;
 
+/// Scripted invocations select execution separately from the installed tool's
+/// scheduling declaration. Pending-successor fixtures must opt into async work.
+pub(super) fn scripted_tool_call(
+    call_id: &str,
+    name: &str,
+    input: harness::item::ToolInput,
+    execution: harness::item::ToolExecution,
+) -> harness::item::Item {
+    let mut call = serde_json::json!({
+        "call_id": call_id,
+        "name": name,
+        "async": execution == harness::item::ToolExecution::Asynchronous,
+    });
+    match input {
+        harness::item::ToolInput::Custom(source) => {
+            call["type"] = serde_json::json!("custom_tool_call");
+            call["input"] = serde_json::json!(source);
+        }
+        harness::item::ToolInput::Function(arguments) => {
+            call["type"] = serde_json::json!("function_call");
+            call["arguments"] = serde_json::json!(serde_json::to_string(&arguments).unwrap());
+        }
+    }
+    harness::item::Item(call)
+}
+
+pub(super) fn haskell_call(
+    call_id: &str,
+    source: &str,
+    execution: harness::item::ToolExecution,
+) -> harness::item::Item {
+    scripted_tool_call(
+        call_id,
+        "haskell",
+        harness::item::ToolInput::Custom(source.into()),
+        execution,
+    )
+}
+
+#[test]
+fn scripted_calls_preserve_explicit_execution_modes_across_serde() {
+    use harness::item::{Item, ToolExecution, ToolInput};
+    for execution in [ToolExecution::Synchronous, ToolExecution::Asynchronous] {
+        for (name, input) in [
+            (
+                "haskell",
+                ToolInput::Custom("_ <- display (\"quoted λ\" :: Text)\n".into()),
+            ),
+            (
+                "probe",
+                ToolInput::Function(serde_json::json!({"number":40,"delay":60})),
+            ),
+        ] {
+            let item = match &input {
+                ToolInput::Custom(source) => haskell_call("fixture-call", source, execution),
+                ToolInput::Function(_) => {
+                    scripted_tool_call("fixture-call", name, input.clone(), execution)
+                }
+            };
+            assert_eq!(item.0["async"], execution == ToolExecution::Asynchronous);
+            let roundtrip: Item =
+                serde_json::from_slice(&serde_json::to_vec(&item).unwrap()).unwrap();
+            let call = roundtrip
+                .tool_call()
+                .unwrap()
+                .expect("emitted invocation is a real call");
+            assert_eq!(call.call_id.0, "fixture-call");
+            assert_eq!(call.name, name);
+            assert_eq!(call.input, input);
+            assert_eq!(call.execution, execution);
+        }
+    }
+}
+
 /// Find an operation in a scripted transcript whose call IDs are unique across
 /// retained history. Provider item IDs and visible text can mention the same ID.
 pub(super) fn transcript_tool_operation<'a>(

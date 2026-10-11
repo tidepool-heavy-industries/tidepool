@@ -1,9 +1,10 @@
 //! Request-owned installed handlers across actor reload and pending compaction.
 
+use super::test_campaign::scripted_tool_call;
 use super::*;
 use exomonad_actor::ResidentToolEndpoint;
 use harness::{
-    item::Item,
+    item::{Item, ToolExecution, ToolInput},
     model::{CallId, ConversationIdentity, OperationId, RequestId},
     store::ClaimState,
     transport::sse::StreamEvent,
@@ -161,13 +162,15 @@ async fn assert_pending(host: &HostedTestRuntime, operation: &OperationId, phase
     }
 }
 
-fn probe_turn(id: &str, call: &str, pause: u32) -> ResponsesTurn {
+fn probe_turn(id: &str, call: &str, pause: u32, execution: ToolExecution) -> ResponsesTurn {
     ResponsesTurn {
         response_id: id.into(),
-        items: vec![Item(json!({
-            "type":"function_call", "name":"probe", "call_id":call,
-            "arguments":serde_json::to_string(&json!({"number":40,"delay":pause})).unwrap()
-        }))],
+        items: vec![scripted_tool_call(
+            call,
+            "probe",
+            ToolInput::Function(json!({"number":40,"delay":pause})),
+            execution,
+        )],
         usage: Usage::default(),
     }
 }
@@ -342,7 +345,12 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     let compiled_after_reload = tidepool_extract_cmd::extract_spawn_count();
     first
         .reply
-        .send(probe_turn("old-issued-handler", OLD_CALL, 60))
+        .send(probe_turn(
+            "old-issued-handler",
+            OLD_CALL,
+            60,
+            ToolExecution::Asynchronous,
+        ))
         .unwrap();
 
     let before_compaction = issued(&mut receiver).await;
@@ -427,7 +435,12 @@ async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
         .all(|claim| claim.operation == old && claim.state == ClaimState::Pending));
     successor
         .reply
-        .send(probe_turn("new-installed-handler", NEW_CALL, 0))
+        .send(probe_turn(
+            "new-installed-handler",
+            NEW_CALL,
+            0,
+            ToolExecution::Synchronous,
+        ))
         .unwrap();
 
     let after_new_call = issued(&mut receiver).await;

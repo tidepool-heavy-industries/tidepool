@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use harness::{
     engine::ResponsesTransport,
+    item::ToolExecution,
     model::AgentPath,
     transport::{ResponsesRequest, ResponsesTurn, TransportError, Usage},
 };
@@ -14,6 +15,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use super::hosted_test_context::{cell_output_matches, HostedTestRuntime};
+use super::test_campaign::haskell_call;
 
 #[path = "m1_browser_process.rs"]
 mod browser_process;
@@ -85,12 +87,11 @@ impl ResponsesTransport for CancelRunningCellTransport {
     async fn create(&self, _request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let round = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
         let items = match round {
-            1 => vec![harness::item::Item(json!({
-                "type":"custom_tool_call",
-                "call_id":"host-cancel-cell",
-                "name":"haskell",
-                "input":"do { sleep (seconds 30); pure (99 :: Int) }"
-            }))],
+            1 => vec![haskell_call(
+                "host-cancel-cell",
+                "do { sleep (seconds 30); pure (99 :: Int) }",
+                ToolExecution::Asynchronous,
+            )],
             2 => {
                 self.successor.notify_one();
                 vec![harness::item::Item(json!({
@@ -118,12 +119,11 @@ impl ResponsesTransport for HostCellTransport {
         match round {
             1 => Ok(ResponsesTurn {
                 response_id: "host-cell".into(),
-                items: vec![harness::item::Item(json!({
-                    "type":"custom_tool_call",
-                    "call_id":"host-real-cell",
-                    "name":"haskell",
-                    "input":"_ <- display (40 + 2 :: Int)"
-                }))],
+                items: vec![haskell_call(
+                    "host-real-cell",
+                    "_ <- display (40 + 2 :: Int)",
+                    ToolExecution::Synchronous,
+                )],
                 usage: Usage::default(),
             }),
             2..=4 => {
@@ -615,10 +615,11 @@ impl ResponsesTransport for RejectFirstRequest {
         if self.tool_before_rejection && round == 1 {
             return Ok(ResponsesTurn {
                 response_id: "before-rejection-tool".into(),
-                items: vec![harness::item::Item(json!({
-                    "type":"custom_tool_call", "call_id":"before-rejection-cell",
-                    "async":true, "name":"haskell", "input":include_str!("m1_rejected_ancestor_cell.hs")
-                }))],
+                items: vec![haskell_call(
+                    "before-rejection-cell",
+                    include_str!("m1_rejected_ancestor_cell.hs"),
+                    ToolExecution::Asynchronous,
+                )],
                 usage: Usage::default(),
             });
         }

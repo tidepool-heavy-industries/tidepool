@@ -1,8 +1,9 @@
+use super::test_campaign::haskell_call;
 use super::*;
 use async_trait::async_trait;
 use harness::{
     engine::ResponsesTransport,
-    item::{Item, ToolKind},
+    item::{Item, ToolExecution, ToolKind},
     model::{AgentPath, CallId, ConversationIdentity, OperationId},
     store::ClaimState,
     transport::{ResponsesRequest, ResponsesTurn, TransportError, Usage},
@@ -172,12 +173,11 @@ impl ResponsesTransport for PendingCellTransport {
                 *self.declared_tools.lock().unwrap() = Some(request.tools.to_vec());
                 Ok(ResponsesTurn {
                     response_id: "m1-late-cell-start".into(),
-                    items: vec![harness::item::Item(json!({
-                        "type":"custom_tool_call",
-                        "call_id":CELL_CALL_ID,
-                        "name":"haskell",
-                        "input":"do { sleep (seconds 30); pure (40 + 2 :: Int) }"
-                    }))],
+                    items: vec![haskell_call(
+                        CELL_CALL_ID,
+                        "_ <- do { sleep (seconds 30); display (40 + 2 :: Int) }",
+                        ToolExecution::Asynchronous,
+                    )],
                     usage: Usage::default(),
                 })
             }

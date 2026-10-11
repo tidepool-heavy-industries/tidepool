@@ -1243,6 +1243,7 @@ def facade_test_cases(binary):
         }, ["//bridge/testing:haskell_test_fixtures", "//bridge/haskell:facade_embedded_sources"],
          False, False, 30),
         ("facade_browser_command_tests", [
+            "actor_host::test_campaign::scripted_calls_preserve_explicit_execution_modes_across_serde",
             "actor_host::embedded_command_tests::production_dispatch_admits_input_only_to_the_exact_actor",
             "actor_host::embedded_command_tests::production_dispatch_refuses_wrong_run_and_incarnation_before_admission",
             "actor_host::embedded_command_tests::production_dispatch_routes_interrupt_and_retire_to_their_exact_actors",
@@ -1288,8 +1289,13 @@ def facade_test_cases(binary):
         ("facade_host_raw_test", [prefix +
             "production_host_retains_http_haskell_commands_and_reconnects_without_replay"],
          host_env, host_paths, host_resources, True, False, 600),
+        ("facade_host_cancel_test", [prefix + "host_cancellation_stops_a_real_running_haskell_cell"],
+         host_env, host_paths, host_resources, True, False, 600),
         ("facade_rejected_ancestor_output_test", [prefix +
             "production_host_recovers_ancestor_tool_output_after_request_rejection"],
+         host_env, host_paths, host_resources, True, False, 600),
+        ("facade_request_reload_test", [prefix +
+            "m1_request_reload_tests::real_host_pins_typed_handler_across_reload_and_pending_compaction"],
          host_env, host_paths, host_resources, True, False, 600),
         ("facade_late_output_test", [prefix +
             "real_host_late_output_tests::real_host_retains_one_late_haskell_output_across_compaction"],
