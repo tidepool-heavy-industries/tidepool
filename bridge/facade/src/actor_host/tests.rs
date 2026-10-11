@@ -969,7 +969,7 @@ async fn actor_sources_capture_current_then_deliver_every_publication_and_settle
     assert!(
         rejected
             .to_string()
-            .contains("replacement removed a source"),
+            .contains("replacement removed a startup source"),
         "{rejected:?}"
     );
     let replaced = dispatch_haskell_script(
