@@ -335,6 +335,151 @@ def compiler_events(host_rows, daemon_rows):
     return dispatches, calls, submissions, services, queues, unidentified_queue_events
 
 
+def trace_capture_observation(environment, execution, host_rows, daemon_rows, host_path, daemon_path):
+    """Applied evidence comes from successful writer installation, not a requested label."""
+    requested = execution.get("trace_profile")
+    phase_requested = environment.get("campaign_trace_profile")
+    receipt = environment.get("campaign_trace_capture")
+    problems = []
+    if requested not in ("full", "minimal") or phase_requested != requested:
+        problems.append("missing_or_mismatched_profile_selection")
+    expected_spans = "none" if requested == "minimal" else "new_close"
+    if not isinstance(receipt, dict):
+        receipt = {}
+    expected = {"profile": requested, "span_events": expected_spans,
+                "filter_contract": 1, "writer": str(host_path)}
+    pid = receipt.get("process_id")
+    if (type(receipt.get("schema")) is not int or receipt.get("schema") != 1
+            or type(receipt.get("filter_contract")) is not int
+            or receipt.get("status") != "installed"
+            or type(pid) is not int or pid <= 0
+            or any(receipt.get(key) != value for key, value in expected.items())):
+        problems.append("host_capture_unverified")
+    host_receipts = [fields(row) for row in host_rows
+                     if row.get("target") == "tidepool::actor_host::startup"
+                     and fields(row).get("message") == "campaign trace profile applied"]
+    if (len(host_receipts) != 1 or type(host_receipts[0].get("filter_contract")) is not int
+            or host_receipts[0].get("process_id") != pid
+            or any(host_receipts[0].get(key) != value for key, value in expected.items())):
+        problems.append("host_applied_profile_missing_or_mismatched")
+    compiler_receipts, boots = [], []
+    for row in daemon_rows:
+        value = fields(row)
+        if (row.get("target") == "tidepool_extract_cmd::daemon"
+                and value.get("message") == "compiler trace profile applied"):
+            compiler_receipts.append(value)
+        if value.get("message") == "compiler daemon ready":
+            boots.append(value)
+    compiler_expected = {"profile": requested, "raw_detail": "off" if requested == "minimal" else "debug",
+                         "span_events": "close", "filter_contract": 1, "writer": str(daemon_path)}
+    if (len(compiler_receipts) != 1 or len(boots) != 1
+            or type(compiler_receipts[0].get("filter_contract")) is not int
+            or type(compiler_receipts[0].get("process_id")) is not int
+            or compiler_receipts[0].get("process_id", 0) <= 0
+            or type(boots[0].get("daemon_pid")) is not int
+            or compiler_receipts[0].get("process_id") != boots[0].get("daemon_pid")
+            or any(compiler_receipts[0].get(key) != value for key, value in compiler_expected.items())):
+        problems.append("compiler_applied_profile_missing_or_mismatched")
+    return {"status": "complete" if not problems else "unverified_or_partial",
+            "requested_profile": requested, "phase_requested_profile": phase_requested,
+            "host_installation": receipt or None, "host_applied_events": host_receipts,
+            "compiler_applied_events": compiler_receipts, "problems": problems}
+
+
+def native_call_requirement(cohort, name):
+    """The named workload owns applicability; observed rows cannot remove obligations."""
+    if name in ("environment", "activation"):
+        return 0, "lifecycle"
+    if cohort in ("harness-eight-phase", "notebook-a-a-b-a") and name in KNOWN_ROSTERS[cohort]:
+        return 1, None
+    if cohort in ("three-actor-capture", "two-children-concurrent"):
+        if name == "async-yield":
+            return 0, "engine_intrinsic"
+        if name == "host-cleanup":
+            return 0, "lifecycle"
+        if name == "children-concurrent-replies":
+            return 2, None
+        if name in KNOWN_ROSTERS[cohort]:
+            return 1, None
+    if cohort == "prepare-once-repeated-launch" and name in KNOWN_ROSTERS[cohort]:
+        return 0, "workspace_preparation" if name == "fresh-preparation" else "lifecycle"
+    return None, None
+
+
+def execution_observations(host_rows, phases, cohort, host_process_id):
+    """Join a call's eventual terminal across the whole stream, including parked calls."""
+    dispatches = {}
+    terminals = {}
+    for row in host_rows:
+        value = fields(row)
+        if (row.get("target") == "exomonad_actor::resident_tools"
+                and value.get("message") == "workbench cell dispatched to its actor"):
+            dispatches.setdefault(value.get("context_call_id"), []).append(value)
+        if row.get("target") == "exomonad_actor::call_timing" and value.get("message") == "call timing":
+            terminals.setdefault(value.get("execution"), []).append(value)
+    observations = []
+    seen_executions = set()
+    for phase in phases:
+        count, reason = native_call_requirement(cohort, phase["phase"])
+        if count == 0:
+            observations.append({"phase": phase["phase"], "status": "not_applicable", "reason": reason})
+            continue
+        problems, calls = [], []
+        call_ids = phase_call_ids(phase)
+        expected_actors = {call: phase.get("actor_id") for call in call_ids}
+        if count == 2:
+            replies = (phase.get("evidence") or {}).get("replies", [])
+            expected_actors = {reply.get("call_id"): reply.get("actor") for reply in replies
+                               if isinstance(reply, dict)} if isinstance(replies, list) else {}
+        if (count is None or len(call_ids) != count or set(expected_actors) != set(call_ids)
+                or any(not isinstance(actor, str) or re.fullmatch(r"[0-9]+@[0-9]+", actor) is None
+                       for actor in expected_actors.values())
+                or count == 2 and len(set(expected_actors.values())) != 2):
+            problems.append("missing_or_malformed_native_call_obligation")
+        for call_id in call_ids:
+            dispatched = dispatches.get(call_id, [])
+            call_problems = []
+            execution = dispatched[0].get("execution") if len(dispatched) == 1 else None
+            expected_actor = expected_actors.get(call_id)
+            if (len(dispatched) != 1 or not isinstance(execution, str) or not execution
+                    or dispatched[0].get("actor") != expected_actor):
+                call_problems.append("missing_ambiguous_or_mismatched_dispatch")
+            if execution is not None:
+                if execution in seen_executions:
+                    call_problems.append("execution_reused_by_distinct_calls")
+                seen_executions.add(execution)
+            rows = terminals.get(execution, []) if execution else []
+            terminal = rows[0] if len(rows) == 1 else {}
+            actor = nonnegative_integer(terminal.get("actor"))
+            incarnation = nonnegative_integer(terminal.get("incarnation"))
+            if len(rows) != 1 or actor is None or incarnation is None or f"{actor}@{incarnation}" != expected_actor:
+                call_problems.append("missing_ambiguous_or_mismatched_terminal")
+            counters = ("publication_attempts", "semantic_rebases", "metadata_restages")
+            timing_fields = ("start_ns", "end_ns", "wall_ns", "total_ms", "checkout_wait_ms",
+                             "checkout_hold_ms", "compile_ms", "compile_count", "jev_ms", "jev_count", "exec_ms")
+            if (any(nonnegative_integer(terminal.get(key)) is None for key in (*counters, *timing_fields))
+                    or terminal.get("clock_domain") != "actor_process_monotonic"
+                    or type(terminal.get("process_id")) is not int or terminal.get("process_id", 0) <= 0
+                    or terminal.get("process_id") != host_process_id
+                    or nonnegative_integer(terminal.get("end_ns")) is not None
+                       and nonnegative_integer(terminal.get("start_ns")) is not None
+                       and int(terminal["end_ns"]) < int(terminal["start_ns"])):
+                call_problems.append("incomplete_or_invalid_terminal_fields")
+            if terminal.get("outcome") not in ("Committed", "Replied"):
+                call_problems.append("unsuccessful_or_unknown_terminal_outcome")
+            calls.append({"call_id": call_id, "actor": expected_actor, "execution": execution,
+                          "terminal": terminal or None, "problems": call_problems,
+                          "status": "complete" if not call_problems else "partial_or_unknown"})
+            problems.extend(call_problems)
+        observations.append({"phase": phase["phase"], "expected_native_calls": count,
+                             "status": "complete" if not problems else "partial_or_unknown",
+                             "problems": problems, "calls": calls})
+    return {"status": "complete" if all(row["status"] in ("complete", "not_applicable")
+                                      for row in observations) else "partial_or_unknown",
+            "scope": "exact dispatch and eventual terminal across the whole retained stream; not phase-wall attribution",
+            "phases": observations}
+
+
 def runtime_cost_events(host_rows, phases):
     phase_by_call = {}
     for phase in phases:
@@ -454,6 +599,28 @@ def bound_native_demand_observations(host_rows):
     }
 
 
+def validation_summary(value):
+    """Admit the timing and optional counters issued by Tidepool.Timing."""
+    required = ("invocation_id", "worker_pid", "start_ns", "end_ns", "wall_ns", "cpu_ns")
+    if (not isinstance(value, dict) or value.get("schema") != 1
+            or any(type(value.get(name)) is not int or value[name] < 0 for name in required)
+            or value["end_ns"] < value["start_ns"]
+            or value["wall_ns"] != value["end_ns"] - value["start_ns"]
+            or value.get("outcome") not in ("success", "refused", "exception")
+            or value.get("clock_domain") != "ghc_monotonic_ns"
+            or not isinstance(value.get("counts"), dict)
+            or any(type(count) is not int or count < 0 for count in value["counts"].values())):
+        raise ValueError("invalid validation summary")
+    rts_fields = ("allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns")
+    supplied = [name for name in rts_fields if name in value]
+    scope = value.get("rts_scope")
+    if (scope not in (None, "unavailable", "process_delta")
+            or (supplied and scope != "process_delta")
+            or any(type(value[name]) is not int or value[name] < 0 for name in supplied)):
+        raise ValueError("invalid validation RTS counters or scope")
+    return value
+
+
 def owned_artifact_observations(host_rows, daemon_rows):
     """Retain owner facts; absent summaries never prove zero work or retention."""
     native_targets = {"tidepool_codegen::image_registry", "tidepool_codegen::prepared_compile",
@@ -487,15 +654,7 @@ def owned_artifact_observations(host_rows, daemon_rows):
         if not line.startswith("tidepool-validation "):
             continue
         try:
-            value = json.loads(line[len("tidepool-validation "):])
-            required = ("invocation_id", "worker_pid", "start_ns", "end_ns", "wall_ns", "cpu_ns")
-            if (not isinstance(value, dict) or value.get("schema") != 1
-                    or any(type(value.get(name)) is not int or value[name] < 0 for name in required)
-                    or value["end_ns"] < value["start_ns"]
-                    or value.get("outcome") not in ("success", "refused", "exception")
-                    or not isinstance(value.get("clock_domain"), str)
-                    or not isinstance(value.get("counts"), dict)):
-                raise ValueError("invalid validation summary")
+            value = validation_summary(json.loads(line[len("tidepool-validation "):]))
             if identity is None or (attr(row, "worker_pid") is not None
                                     and integer(attr(row, "worker_pid")) != value["worker_pid"]):
                 raise ValueError("validation lacks matching physical request/worker identity")
@@ -627,10 +786,10 @@ def analyze(record_path):
     environment = next((row for row in phases if row["phase"] == "environment"), None)
     if environment is None:
         raise ValueError("retained output has no environment phase")
-    trace_profile = environment.get("campaign_trace_profile", "full")
-    if trace_profile not in ("full", "minimal"):
+    trace_profile = environment.get("campaign_trace_profile")
+    if trace_profile is not None and trace_profile not in ("full", "minimal"):
         raise ValueError(f"unknown campaign trace profile: {trace_profile!r}")
-    if execution.get("trace_profile", "full") != trace_profile:
+    if execution.get("trace_profile") is not None and trace_profile is not None and execution["trace_profile"] != trace_profile:
         raise ValueError("runner and workload phase trace profiles do not match")
     phase_value = environment.get("phase_trace")
     if not isinstance(phase_value, str) or not phase_value:
@@ -668,6 +827,11 @@ def analyze(record_path):
     expected_roster = KNOWN_ROSTERS.get(cohort_name)
     if expected_roster is not None and tuple(roster) != expected_roster:
         raise ValueError(f"workload roster does not match declared cohort {cohort_name}")
+
+    capture_observation = trace_capture_observation(
+        environment, execution, host_rows, iter_jsonl(daemon_path), host_path, daemon_path)
+    execution_observation = execution_observations(
+        host_rows, phases, cohort_name, (capture_observation.get("host_installation") or {}).get("process_id"))
 
     assign_submission_phases(submissions, dispatches, phases, roster)
     services_by_identity = {}
@@ -861,7 +1025,9 @@ def analyze(record_path):
             if type(phase.get("scripted_response_hold_ns")) is not int or phase["scripted_response_hold_ns"] < 0:
                 invalid_fields.append("scripted_response_hold_ns")
         if "first_successor_ns" in phase and (
-                type(phase["first_successor_ns"]) is not int or phase["first_successor_ns"] < 0):
+                type(phase["first_successor_ns"]) is not int or phase["first_successor_ns"] < 0
+                or (type(phase.get("wall_ns")) is int
+                    and phase["first_successor_ns"] > phase["wall_ns"])):
             invalid_fields.append("first_successor_ns")
         if invalid_fields:
             invalid_phase_measurements.append({"phase": phase["phase"],
@@ -1011,10 +1177,14 @@ def analyze(record_path):
     report = {
         "schema": 1,
         "owned_artifact_observations": owner_observations,
+        "trace_capture": capture_observation,
+        "execution_observations": execution_observation,
         "trace_profile": {
             "name": trace_profile,
-            "fine_joins_and_attribution": "collected; see completeness fields" if trace_profile == "full"
-                else "bounded summaries and joins collected; per-file detail omitted; see completeness fields",
+            "fine_joins_and_attribution": "capture unverified; see completeness fields"
+                if capture_observation["status"] != "complete" else "collected; see completeness fields" if trace_profile == "full"
+                else "bounded summaries and joins collected; per-file detail omitted; see completeness fields" if trace_profile == "minimal"
+                else "unknown profile; see capture evidence",
         },
         "runner": {
             "test": record.get("test"), "passed": record.get("passed"),
@@ -1147,8 +1317,8 @@ def analyze(record_path):
         "phases": output_phases,
     }
     if trace_profile == "minimal":
-        # Minimal capture is an overhead control: phase timings and scripted
-        # outcomes remain measured, while event-level joins are unavailable.
+        # Minimal capture omits fine Harness runtime-cost details. Exact compiler
+        # and native execution joins retain their independent completeness.
         report["runner"]["diagnostic_evidence_complete"] = None
         report["runner"]["diagnostic_evidence_status"] = "not_collected_by_design"
         report["harness_runtime_cost_trace"] = {

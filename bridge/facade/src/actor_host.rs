@@ -3615,6 +3615,8 @@ fn compile_root(
     // bootstrap install (`PersistentSession::set_image_registry` holds it
     // for the first turn).
     let image_registry = Arc::clone(prepared.image_registry());
+    let display_owners = Arc::new(tidepool_runtime::session::ActivationDisplayOwners::default());
+    let child_display_owners = Arc::clone(&display_owners);
     let child_prepared_driver = Arc::clone(&prepared);
     let child_session_factory: exomonad_actor::ChildSessionFactory<
         ExomonadHandlerStack,
@@ -3663,6 +3665,7 @@ fn compile_root(
             DEFAULT_NURSERY_SIZE,
             Some(library),
         );
+        machine.set_activation_display_owners(Arc::clone(&child_display_owners));
         machine.set_catalog_selection(
             child_workspace_inputs
                 .as_ref()
@@ -3677,6 +3680,7 @@ fn compile_root(
         DEFAULT_NURSERY_SIZE,
         Some(library),
     );
+    machine.set_activation_display_owners(display_owners);
     machine.set_catalog_selection(
         config
             .workspace_inputs

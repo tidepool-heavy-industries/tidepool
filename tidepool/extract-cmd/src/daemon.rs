@@ -278,6 +278,46 @@ impl CapacityRefusal {
 }
 const BUSY_RETRY_DELAY: Duration = Duration::from_millis(25);
 const RAW_COMPILER_DETAIL_TARGET: &str = "tidepool_extract_cmd::daemon::compiler_detail";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompilerTraceProfile {
+    Minimal,
+    Full,
+}
+
+impl CompilerTraceProfile {
+    fn parse(value: Option<&str>) -> Result<Option<Self>, FrontendError> {
+        match value {
+            None => Ok(None),
+            Some("minimal") => Ok(Some(Self::Minimal)),
+            Some("full") => Ok(Some(Self::Full)),
+            Some(other) => Err(FrontendError::Daemon(format!(
+                "unsupported TIDEPOOL_TEST_TRACE_PROFILE {other:?}"
+            ))),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Full => "full",
+        }
+    }
+
+    fn raw_detail(self) -> &'static str {
+        match self {
+            Self::Minimal => "off",
+            Self::Full => "debug",
+        }
+    }
+}
+
+fn emit_compiler_trace_profile(profile: Option<CompilerTraceProfile>, writer: Option<&Path>) {
+    tracing::info!(target: "tidepool_extract_cmd::daemon", profile = profile.map(CompilerTraceProfile::name),
+        raw_detail = profile.map(CompilerTraceProfile::raw_detail), span_events = "close",
+        filter_contract = 1u64, writer = writer.map(|path| path.to_string_lossy().into_owned()),
+        process_id = std::process::id(), "compiler trace profile applied");
+}
 type WorkerResponse = (i32, Vec<u8>, Vec<u8>);
 
 fn pane_filter() -> tracing_subscriber::EnvFilter {
@@ -312,13 +352,6 @@ fn compiler_trace_filter(
     trace_profile: Option<&str>,
 ) -> tracing_subscriber::EnvFilter {
     let mut filter = tracing_subscriber::EnvFilter::new("info,tidepool_extract_cmd=debug");
-    if trace_profile == Some("minimal") {
-        filter = filter.add_directive(
-            format!("{RAW_COMPILER_DETAIL_TARGET}=off")
-                .parse()
-                .expect("static compiler detail target directive"),
-        );
-    }
     // The structured trace intentionally has its own stable defaults. Honor
     // only the standard RUST_LOG directive for this one high-volume target so
     // a matched A/B can disable raw compiler detail without losing request,
@@ -336,6 +369,17 @@ fn compiler_trace_filter(
         if let Ok(directive) = directive.parse() {
             filter = filter.add_directive(directive);
         }
+    }
+    // An explicit measurement profile owns its detail policy. Ambient
+    // RUST_LOG overrides remain available for ordinary daemon diagnostics.
+    if let Some(profile) =
+        CompilerTraceProfile::parse(trace_profile).expect("validated compiler trace profile")
+    {
+        filter = filter.add_directive(
+            format!("{RAW_COMPILER_DETAIL_TARGET}={}", profile.raw_detail())
+                .parse()
+                .expect("static compiler detail target directive"),
+        );
     }
     filter
 }
@@ -453,6 +497,8 @@ fn retained_trace_appender<W: Write + Send + 'static>(
 pub(crate) fn init_tracing(
     config: &DaemonConfig,
 ) -> Result<Option<tracing_appender::non_blocking::WorkerGuard>, FrontendError> {
+    let selected = std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").ok();
+    let profile = CompilerTraceProfile::parse(selected.as_deref())?;
     let detailed: Box<dyn Write + Send> = match &config.log_path {
         Some(path) => {
             let parent = path.parent().ok_or_else(|| {
@@ -486,16 +532,22 @@ pub(crate) fn init_tracing(
     };
     let detailed_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("debug"));
-    tracing_subscriber(
+    tracing_subscriber_with_trace_filter(
         Mutex::new(detailed),
         io::stderr,
         Mutex::new(trace),
         detailed_filter,
+        compiler_trace_filter(
+            std::env::var("RUST_LOG").ok().as_deref(),
+            profile.map(CompilerTraceProfile::name),
+        ),
     )
     .try_init()
     .map_err(|error| {
         FrontendError::Daemon(format!("could not initialize compiler tracing: {error}"))
     })?;
+    let writer = config.log_path.as_deref().map(trace_path);
+    emit_compiler_trace_profile(profile, writer.as_deref());
     Ok(guard)
 }
 
@@ -4910,6 +4962,63 @@ tidepool-reuse-error: witness failed\n";
         assert!(output.contains("tidepool-validation"));
         assert!(!output.contains("worker timing detail"));
         assert!(!output.contains("large payload"));
+    }
+
+    #[test]
+    fn selected_compiler_profiles_own_detail_policy_over_ambient_overrides() {
+        for profile in [CompilerTraceProfile::Minimal, CompilerTraceProfile::Full] {
+            let trace = CapturedWriter::default();
+            let contradictory = format!(
+                "{RAW_COMPILER_DETAIL_TARGET}={}",
+                if profile == CompilerTraceProfile::Minimal {
+                    "debug"
+                } else {
+                    "off"
+                }
+            );
+            let subscriber = tracing_subscriber_with_trace_filter(
+                CapturedWriter::default(),
+                CapturedWriter::default(),
+                trace.clone(),
+                tracing_subscriber::EnvFilter::new("off"),
+                compiler_trace_filter(Some(&contradictory), Some(profile.name())),
+            );
+            tracing::subscriber::with_default(subscriber, || {
+                emit_compiler_trace_profile(
+                    Some(profile),
+                    Some(Path::new("/owned/compiler.jsonl")),
+                );
+                identify_request(
+                    DaemonEpoch([3; 32]),
+                    AdmissionId(7),
+                    RequestOrdinal(2),
+                    Path::new("/owned/source"),
+                    &[],
+                );
+                log_compile_timing("owned", "digest", b"tidepool-validation {\"schema\":1,\"invocation_id\":2,\"worker_pid\":123,\"start_ns\":10,\"end_ns\":20,\"wall_ns\":10,\"cpu_ns\":9,\"clock_domain\":\"ghc_monotonic_ns\",\"outcome\":\"success\",\"counts\":{}}\ntidepool-timing-detail parent=prepared_recover phase=lookup ms=1\n");
+            });
+            let output = trace.text();
+            let rows = output
+                .lines()
+                .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                .collect::<Vec<_>>();
+            let receipt = rows
+                .iter()
+                .find(|row| row["fields"]["message"] == "compiler trace profile applied")
+                .unwrap();
+            assert_eq!(receipt["fields"]["profile"], profile.name());
+            assert_eq!(receipt["fields"]["raw_detail"], profile.raw_detail());
+            assert!(rows.iter().any(|row| row["fields"]["message"]
+                == "compiler request identified"
+                && row["fields"]["admission_id"] == 7
+                && row["fields"]["request_ordinal"] == 2));
+            assert!(output.contains("tidepool-validation"));
+            assert_eq!(
+                output.contains("tidepool-timing-detail"),
+                profile == CompilerTraceProfile::Full
+            );
+        }
+        assert!(CompilerTraceProfile::parse(Some("unknown")).is_err());
     }
 
     #[test]

@@ -2,6 +2,7 @@ import importlib.util
 import itertools
 import json
 from pathlib import Path
+import random
 import tempfile
 import unittest
 
@@ -9,6 +10,35 @@ SCRIPT = Path(__file__).resolve().parents[1] / "harness-usecase-perf-report.py"
 spec = importlib.util.spec_from_file_location("harness_usecase_perf_report", SCRIPT)
 reporter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(reporter)
+
+
+def check_shrinking_samples(samples, check):
+    """Shrink numeric inputs while preserving the generated fault or control."""
+    for sample in samples:
+        try:
+            check(sample)
+        except AssertionError:
+            smallest = sample
+            changed = True
+            while changed:
+                changed = False
+                for index, value in enumerate(smallest):
+                    if type(value) is not int or value <= 0:
+                        continue
+                    for reduced in sorted({0, value // 2}):
+                        candidate = (*smallest[:index], reduced, *smallest[index + 1:])
+                        try:
+                            check(candidate)
+                        except AssertionError:
+                            smallest = candidate
+                            changed = True
+                            break
+                    if changed:
+                        break
+            try:
+                check(smallest)
+            except AssertionError as error:
+                raise AssertionError(f"sample={sample!r}; minimized={smallest!r}: {error}") from error
 
 
 class HarnessUsecasePerfReportTests(unittest.TestCase):
@@ -36,6 +66,7 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         phase_records = [
             {"schema": 1, "phase": "environment", "workload_cohort": "harness-eight-phase",
              "workload_roster": list(reporter.EXPECTED_PHASES),
+             "campaign_trace_profile": trace_profile or "full",
              "prepared_root_entry_supplied": False,
              "host_trace": str(host_path), "compiler_trace": str(compiler_path),
              "phase_trace": str(phase_path),
@@ -120,7 +151,10 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
     def make_child_activation_case(self):
         record = self.make_complete_case("three-actor-capture")
         trace = self.root / "artifacts/host.jsonl"
-        rows = reporter.read_jsonl(trace)
+        retained = reporter.read_jsonl(trace)
+        rows = [next(row for row in retained if row["fields"].get("message") == message
+                     and (row["fields"].get("execution") == "exec-3" or message == "compiler request identified"))
+                for message in ("workbench cell dispatched to its actor", "call timing", "compiler request identified")]
         rows[0]["fields"]["actor"] = "1@1"
         origin = {"request": 11, "activation_actor": "2@1", "parent_actor": "1@1",
                   "parent_execution": "exec-3", "parent_attempt": "attempt-3"}
@@ -246,7 +280,177 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         if cohort == "three-actor-capture":
             payload["test"] = "actor_host::scripted_three_actor_performance::production_harness_three_actor_capture_phases"
         self.write_json(record, payload)
+        self.add_execution_capture(record)
         return record
+
+    def add_execution_capture(self, record):
+        """Complete fixture facts use the production dispatch and terminal record shape."""
+        phase_path = self.root / "artifacts/phases.jsonl"
+        host_path = self.root / "artifacts/host.jsonl"
+        daemon_path = self.root / "artifacts/compiler/compiler.jsonl"
+        phases = reporter.read_jsonl(phase_path)
+        profile = phases[0]["campaign_trace_profile"]
+        host = reporter.read_jsonl(host_path)
+        terminal_fields = {"actor": 1, "incarnation": 1, "process_id": 99,
+            "clock_domain": "actor_process_monotonic", "start_ns": 10, "end_ns": 30,
+            "wall_ns": 20, "total_ms": 0, "checkout_wait_ms": 0, "checkout_hold_ms": 0,
+            "compile_ms": 0, "compile_count": 0, "jev_ms": 0, "jev_count": 0, "exec_ms": 0,
+            "publication_attempts": 1, "semantic_rebases": 0, "metadata_restages": 0,
+            "outcome": "Committed"}
+        for row in host:
+            if row["fields"].get("message") == "call timing":
+                row["fields"] = {**terminal_fields, **row["fields"]}
+            if row["fields"].get("message") == "workbench cell dispatched to its actor":
+                row["fields"]["actor"] = "1@1"
+        existing_calls = {row["fields"].get("context_call_id") for row in host}
+        added = []
+        for phase in phases:
+            if phase["phase"] in ("environment", "activation", "async-yield", "host-cleanup",
+                                   "fresh-preparation", "launch-1", "launch-2", "launch-3"):
+                continue
+            phase["actor_id"] = "1@1"
+            calls = [phase["call_id"]]
+            if phase["phase"] == "children-concurrent-replies":
+                phase.pop("call_id", None)
+                calls = ["three-actor-child-alpha", "three-actor-child-beta"]
+                phase["call_ids"] = calls
+                phase["evidence"]["replies"] = [{"call_id": call, "actor": f"{index + 2}@1"}
+                                                  for index, call in enumerate(calls)]
+            for index, call in enumerate(calls):
+                if call in existing_calls:
+                    continue
+                execution = "execution-" + call
+                actor = index + 2 if len(calls) == 2 else 1
+                added.extend([{"target": "exomonad_actor::resident_tools", "fields": {
+                    "message": "workbench cell dispatched to its actor", "actor": f"{actor}@1",
+                    "execution": execution, "context_call_id": call}},
+                    {"target": "exomonad_actor::call_timing", "fields": {
+                        "message": "call timing", "execution": execution, **terminal_fields, "actor": actor}}])
+        receipt = {"schema": 1, "status": "installed", "profile": profile,
+            "span_events": "none" if profile == "minimal" else "new_close", "filter_contract": 1,
+            "writer": str(host_path), "process_id": 99}
+        phases[0]["campaign_trace_capture"] = receipt
+        applied = {key: value for key, value in receipt.items() if key not in ("schema", "status")}
+        applied["message"] = "campaign trace profile applied"
+        self.write_jsonl(host_path, [{"target": "tidepool::actor_host::startup", "fields": applied}, *added, *host])
+        daemon = reporter.read_jsonl(daemon_path)
+        applied_compiler = {"message": "compiler trace profile applied", "profile": profile,
+            "raw_detail": "off" if profile == "minimal" else "debug", "span_events": "close",
+            "filter_contract": 1, "writer": str(daemon_path), "process_id": 123}
+        self.write_jsonl(daemon_path, [*daemon[:1],
+            {"target": "tidepool_extract_cmd::daemon", "fields": applied_compiler},
+            {"target": "tidepool_extract_cmd::daemon", "fields": {
+                "message": "compiler daemon ready", "daemon_pid": 123}}, *daemon[1:]])
+        self.write_jsonl(phase_path, phases)
+
+    def test_applied_capture_requires_owner_receipts_and_actual_writers(self):
+        for profile in ("minimal", "full"):
+            record = self.make_complete_case(trace_profile=profile)
+            paths = [self.root / "artifacts/phases.jsonl", self.root / "artifacts/host.jsonl",
+                     self.root / "artifacts/compiler/compiler.jsonl"]
+            original = [reporter.read_jsonl(path) for path in paths]
+            self.assertEqual(reporter.analyze(record)["trace_capture"]["status"], "complete")
+            for mutation in ("missing_receipt", "existing_custom", "wrong_host_writer", "missing_host_event",
+                             "duplicate_host_event", "wrong_host_filter", "wrong_compiler_profile",
+                             "wrong_compiler_detail", "wrong_compiler_pid", "missing_compiler_boot",
+                             "boolean_schema", "boolean_filter", "boolean_compiler_filter"):
+                with self.subTest(profile=profile, mutation=mutation):
+                    phases, host, daemon = json.loads(json.dumps(original))
+                    receipt = phases[0]["campaign_trace_capture"]
+                    compiler = next(row["fields"] for row in daemon if row["fields"].get("message") == "compiler trace profile applied")
+                    if mutation == "boolean_schema": receipt["schema"] = True
+                    elif mutation == "boolean_filter": receipt["filter_contract"] = True
+                    elif mutation == "boolean_compiler_filter": compiler["filter_contract"] = True
+                    elif mutation == "missing_receipt": phases[0].pop("campaign_trace_capture")
+                    elif mutation == "existing_custom": receipt["status"] = "existing_unverified"
+                    elif mutation == "wrong_host_writer": receipt["writer"] = "/another/host.jsonl"
+                    elif mutation == "missing_host_event": host = [row for row in host if row["fields"].get("message") != "campaign trace profile applied"]
+                    elif mutation == "duplicate_host_event": host.append(host[0])
+                    elif mutation == "wrong_host_filter": receipt["filter_contract"] = 2
+                    elif mutation == "wrong_compiler_profile": compiler["profile"] = "full" if profile == "minimal" else "minimal"
+                    elif mutation == "wrong_compiler_detail": compiler["raw_detail"] = "debug" if profile == "minimal" else "off"
+                    elif mutation == "wrong_compiler_pid": compiler["process_id"] = 777
+                    elif mutation == "missing_compiler_boot": daemon = [row for row in daemon if row["fields"].get("message") != "compiler daemon ready"]
+                    for path, rows in zip(paths, (phases, host, daemon)): self.write_jsonl(path, rows)
+                    self.assertEqual(reporter.analyze(record)["trace_capture"]["status"], "unverified_or_partial")
+
+    def test_missing_profile_is_unknown_and_never_inferred_full(self):
+        record = self.make_complete_case()
+        phase_path = self.root / "artifacts/phases.jsonl"
+        rows = reporter.read_jsonl(phase_path)
+        rows[0].pop("campaign_trace_profile")
+        self.write_jsonl(phase_path, rows)
+        payload = json.loads(record.read_text())
+        payload["execution"].pop("trace_profile")
+        self.write_json(record, payload)
+        report = reporter.analyze(record)
+        self.assertIsNone(report["trace_profile"]["name"])
+        self.assertEqual(report["trace_capture"]["status"], "unverified_or_partial")
+
+    def test_execution_mutations_refuse_without_weakening_exact_compiler_joins(self):
+        record = self.make_complete_case()
+        host_path = self.root / "artifacts/host.jsonl"
+        original = reporter.read_jsonl(host_path)
+        original[-1]["fields"]["workload_phase"] = "reuse-retained"
+        for mutation in ("missing_dispatch", "duplicate_dispatch", "wrong_dispatch_actor", "missing_terminal",
+                         "duplicate_terminal", "wrong_terminal_actor", "missing_count", "cancelled", "error",
+                         "rejected", "reversed_clock", "execution_alias", "wrong_terminal_process"):
+            with self.subTest(mutation=mutation):
+                rows = json.loads(json.dumps(original))
+                dispatch = next(row for row in rows if row["fields"].get("message") == "workbench cell dispatched to its actor"
+                                and row["fields"].get("execution") == "exec-3")
+                terminal = next(row for row in rows if row["fields"].get("message") == "call timing"
+                                and row["fields"].get("execution") == "exec-3")
+                if mutation == "missing_dispatch": rows.remove(dispatch)
+                elif mutation == "duplicate_dispatch": rows.append(dispatch)
+                elif mutation == "wrong_dispatch_actor": dispatch["fields"]["actor"] = "2@1"
+                elif mutation == "missing_terminal": rows.remove(terminal)
+                elif mutation == "duplicate_terminal": rows.append(terminal)
+                elif mutation == "wrong_terminal_actor": terminal["fields"]["incarnation"] = 2
+                elif mutation == "wrong_terminal_process": terminal["fields"]["process_id"] = 777
+                elif mutation == "missing_count": terminal["fields"].pop("publication_attempts")
+                elif mutation in ("cancelled", "error", "rejected"): terminal["fields"]["outcome"] = mutation
+                elif mutation == "reversed_clock": terminal["fields"].update(start_ns=31, end_ns=30)
+                elif mutation == "execution_alias":
+                    next(row for row in rows if row["fields"].get("context_call_id") == "case-4")["fields"]["execution"] = "exec-3"
+                self.write_jsonl(host_path, rows)
+                report = reporter.analyze(record)
+                self.assertEqual(report["workload_request_service_joins"]["status"],
+                                 "partial_or_unknown" if mutation == "execution_alias" else "complete")
+                self.assertEqual(report["execution_observations"]["status"], "partial_or_unknown")
+
+    def test_terminal_count_mutations_preserve_unknown_instead_of_zero(self):
+        record = self.make_complete_case()
+        host_path = self.root / "artifacts/host.jsonl"
+        original = reporter.read_jsonl(host_path)
+        for field, invalid in itertools.product(("publication_attempts", "semantic_rebases", "metadata_restages"),
+                                                (None, -1, True, False, "invalid", 1.5)):
+            rows = json.loads(json.dumps(original))
+            terminal = next(row for row in rows if row["fields"].get("message") == "call timing"
+                            and row["fields"].get("execution") == "exec-3")
+            terminal["fields"][field] = invalid
+            self.write_jsonl(host_path, rows)
+            self.assertEqual(reporter.analyze(record)["execution_observations"]["status"], "partial_or_unknown")
+
+    def test_intrinsic_lifecycle_and_parked_terminal_applicability(self):
+        record = self.make_complete_case("three-actor-capture")
+        host_path = self.root / "artifacts/host.jsonl"
+        rows = reporter.read_jsonl(host_path)
+        parent = next(row for row in rows if row["fields"].get("message") == "call timing"
+                      and row["fields"].get("execution") == "exec-3")
+        rows.remove(parent)
+        parent["fields"].update(start_ns=10, end_ns=100_000, wall_ns=99_990)
+        self.write_jsonl(host_path, [*rows, parent])
+        observation = reporter.analyze(record)["execution_observations"]
+        self.assertEqual(observation["status"], "complete")
+        phases = {row["phase"]: row for row in observation["phases"]}
+        self.assertEqual(phases["async-yield"]["reason"], "engine_intrinsic")
+        self.assertEqual(phases["host-cleanup"]["status"], "not_applicable")
+        self.assertEqual(phases["root-fork-capture"]["status"], "complete")
+        record = self.make_complete_case("prepare-once-repeated-launch")
+        observation = reporter.analyze(record)["execution_observations"]
+        self.assertEqual(observation["status"], "complete")
+        self.assertTrue(all(row["status"] == "not_applicable" for row in observation["phases"]))
 
     def test_concurrent_phase_owns_each_exact_dispatch_once(self):
         phases = [{"phase": "both-children", "call_ids": ["alpha", "beta"]}]
@@ -264,7 +468,7 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         phase_path = self.root / "artifacts/phases.jsonl"
         phases = reporter.read_jsonl(phase_path)
         phase = next(row for row in phases if row["phase"] == "children-concurrent-replies")
-        phase.pop("call_id")
+        phase.pop("call_id", None)
         phase["call_ids"] = ["alpha", "beta"]
         self.write_jsonl(phase_path, phases)
         host_path = self.root / "artifacts/host.jsonl"
@@ -749,7 +953,10 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         next(phase for phase in phases if phase["phase"] == "child-alpha-reply")["logical_compiler_requests"] = 1
         self.write_jsonl(phase_path, phases)
         host_path = self.root / "artifacts/host.jsonl"
-        base = reporter.read_jsonl(host_path)
+        retained = reporter.read_jsonl(host_path)
+        base = [next(row for row in retained if row["fields"].get("message") == message
+                     and (row["fields"].get("execution") == "exec-3" or message == "compiler request identified"))
+                for message in ("workbench cell dispatched to its actor", "call timing", "compiler request identified")]
         base.append({"target": "exomonad_actor::resident_tools", "fields": {
             "message": "workbench cell dispatched to its actor", "context_call_id": "case-4",
             "execution": "exec-child"}})
@@ -798,7 +1005,8 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         validation = {"schema": 1, "invocation_id": 1, "worker_pid": 123,
                       "start_ns": 10, "end_ns": 20, "wall_ns": 10, "cpu_ns": 9,
                       "clock_domain": "ghc_monotonic_ns", "outcome": "success",
-                      "allocated_bytes": 400, "counts": {"observed_file_count": 8}}
+                      "rts_scope": "process_delta", "allocated_bytes": 400,
+                      "counts": {"observed_file_count": 8}}
         host = [{"target": "tidepool_codegen::prepared_compile", "fields": {
                     "message": "prepared compile", "process_id": 99, "image_instance": 7}},
                 *[{"target": "tidepool_codegen::image_install", "fields": {
@@ -843,6 +1051,152 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 self.assertIsNone(observe(0, invalid))
         self.assertIsNone(observe())
+
+    def observe_validation(self, validation):
+        identity = {"daemon_epoch": "epoch", "admission_id": 4, "request_ordinal": 1,
+                    "compile_request": "digest", "worker_pid": 123}
+        host = [{"target": "tidepool_codegen::prepared_compile", "fields": {
+                    "message": "prepared compile", "process_id": 99, "image_instance": 7}},
+                {"target": "tidepool_codegen::image_install", "fields": {
+                    "process_id": 99, "image_instance": 7, "outcome": "machine_published"}}]
+        daemon = [{"fields": {"message": "compiler request finished", "elapsed_ms": 2,
+                               "exit_code": 0}, "span": identity},
+                  {"fields": {"line": "tidepool-validation " + json.dumps(validation)},
+                   "span": identity}]
+        return reporter.owned_artifact_observations(host, daemon)
+
+    def validation_case(self, start=10, duration=10, resource=400):
+        return {"schema": 1, "invocation_id": 1, "worker_pid": 123,
+                "start_ns": start, "end_ns": start + duration, "wall_ns": duration,
+                "cpu_ns": resource, "clock_domain": "ghc_monotonic_ns", "outcome": "success",
+                "rts_scope": "process_delta", "allocated_bytes": resource,
+                "gc_cpu_ns": resource, "gc_elapsed_ns": resource,
+                "counts": {"observed_file_count": resource}}
+
+    def test_validation_summary_rejects_contradictory_duration_and_counter_scope(self):
+        for changes in ({"wall_ns": 999}, {"allocated_bytes": -400},
+                        {"rts_scope": "unavailable"}, {"rts_scope": None}):
+            with self.subTest(changes=changes):
+                result = self.observe_validation({**self.validation_case(), **changes})
+                self.assertEqual(result["status"], "partial_or_unknown")
+                self.assertTrue(result["problems"])
+                self.assertEqual(result["validation_events"], [])
+                self.assertEqual(result["validation_intervals"], [])
+
+    def test_validation_summary_preserves_unavailable_optional_counters(self):
+        for scope in (None, "unavailable", "process_delta"):
+            for outcome in ("success", "refused", "exception"):
+                value = self.validation_case()
+                value["outcome"] = outcome
+                for name in ("allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns"):
+                    value.pop(name)
+                if scope is None:
+                    value.pop("rts_scope")
+                else:
+                    value["rts_scope"] = scope
+                result = self.observe_validation(value)
+                self.assertEqual(result["status"], "observed")
+                self.assertEqual(result["validation_events"][0]["outcome"], outcome)
+                self.assertIsNone(result["validation_intervals"][0]["process_allocated_bytes_sum"])
+
+    def test_generated_validation_admission_preserves_owner_relations(self):
+        seed = 0xC10C
+        rng = random.Random(seed)
+        numbers = [(10**6, 10**5, 400), (0, 0, 0), (1, 1, 1), (2**63, 0, 2**64),
+                   *[(rng.randrange(10**12), rng.randrange(10**9), rng.randrange(10**12))
+                     for _ in range(48)]]
+        controls = ("measured", "unavailable", "absent", "refused", "exception")
+        faults = ("duration", "scope", "clock", "counts")
+        counter_faults = tuple((name, invalid) for name in
+                              ("allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns")
+                              for invalid in (-1, True, None, 1.5, "1"))
+
+        def check(sample):
+            start, duration, resource, mode = sample
+            value = self.validation_case(start, duration, resource)
+            if mode in ("unavailable", "absent"):
+                for name in ("allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns"):
+                    value.pop(name)
+                if mode == "absent":
+                    value.pop("rts_scope")
+                else:
+                    value["rts_scope"] = "unavailable"
+            elif mode in ("refused", "exception"):
+                value["outcome"] = mode
+            elif mode == "duration":
+                value["wall_ns"] = duration + 1
+            elif mode == "scope":
+                value["rts_scope"] = "unavailable"
+            elif mode == "clock":
+                value["clock_domain"] = "logger_arrival"
+            elif mode == "counts":
+                value["counts"]["observed_file_count"] = -1
+            elif isinstance(mode, tuple):
+                value[mode[0]] = mode[1]
+            result = self.observe_validation(value)
+            if mode in controls:
+                self.assertEqual(result["status"], "observed")
+                interval = result["validation_intervals"][0]
+                self.assertEqual(interval["wall_interval_union_ns"], duration)
+                self.assertEqual(interval["process_allocated_bytes_sum"],
+                                 None if mode in ("unavailable", "absent") else resource)
+            else:
+                self.assertEqual(result["status"], "partial_or_unknown")
+                self.assertTrue(result["problems"])
+                self.assertEqual(result["validation_events"], [])
+                self.assertEqual(result["validation_intervals"], [])
+
+        check_shrinking_samples(((*values, mode) for values in numbers
+                                 for mode in (*controls, *faults, *counter_faults)), check)
+
+    def test_phase_first_successor_cannot_follow_its_observed_terminal_output(self):
+        record = self.make_complete_case()
+        phase_path = self.root / "artifacts/phases.jsonl"
+        original = reporter.read_jsonl(phase_path)
+        for successor in (0, 1000, 1001):
+            phases = json.loads(json.dumps(original))
+            phases[2]["first_successor_ns"] = successor
+            self.write_jsonl(phase_path, phases)
+            result = reporter.analyze(record)
+            measurements = result["phase_measurements"]
+            self.assertEqual(measurements["status"],
+                             "complete" if successor <= 1000 else "partial_or_unknown")
+            if successor > 1000:
+                self.assertIn("first_successor_ns", measurements["invalid_records"][0]["invalid_fields"])
+            self.assertTrue(result["phases"][0]["completed"])
+        self.write_jsonl(phase_path, original)
+        result = reporter.analyze(record)
+        self.assertEqual(result["phase_measurements"]["status"], "complete")
+        self.assertIsNone(result["phases"][0]["first_successor_ns"])
+
+    def test_generated_phase_endpoint_ordering(self):
+        record = self.make_complete_case()
+        phase_path = self.root / "artifacts/phases.jsonl"
+        original = reporter.read_jsonl(phase_path)
+        seed = 0x51CCE55
+        rng = random.Random(seed)
+        durations = (10**12, 0, 1, 2**64, *(rng.randrange(10**12) for _ in range(24)))
+
+        def check(sample):
+            duration, fraction, mode = sample
+            phases = json.loads(json.dumps(original))
+            phase = phases[2]
+            phase["wall_ns"] = duration
+            if mode == "ordered":
+                phase["first_successor_ns"] = duration * fraction // 100
+            elif mode == "reversed":
+                phase["first_successor_ns"] = duration + fraction + 1
+            self.write_jsonl(phase_path, phases)
+            report = reporter.analyze(record)
+            self.assertEqual(report["phase_measurements"]["status"],
+                             "partial_or_unknown" if mode == "reversed" else "complete")
+            self.assertTrue(report["phases"][0]["completed"])
+            if mode == "absent":
+                self.assertIsNone(report["phases"][0]["first_successor_ns"])
+
+        check_shrinking_samples(((duration, fraction, mode) for duration in durations
+                                for fraction in (0, 1, 99, 100)
+                                for mode in ("ordered", "reversed", "absent")), check)
 
     def test_publication_summary_is_joined_to_its_unique_settlement(self):
         record = self.make_case()

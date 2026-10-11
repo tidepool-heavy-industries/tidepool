@@ -1219,7 +1219,7 @@ impl HostedTestRuntime {
         diagnostics_root_override: Option<std::path::PathBuf>,
         child_machines: HostedChildMachines,
     ) -> Result<Self, HostedStartupError> {
-        super::test_campaign::install_tracing();
+        super::test_campaign::ensure_campaign_tracing();
         let startup_policy = StartupPolicy::parse(
             std::env::var(STARTUP_DIAGNOSTIC_SECONDS)
                 .map(Some)

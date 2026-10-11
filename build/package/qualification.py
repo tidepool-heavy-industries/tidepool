@@ -1836,7 +1836,8 @@ def run_cohort(args) -> int:
     if "measurement_reporter" in cohort:
         measurement = analyze_harness_performance(
             descriptor, records, record_paths, cohort, behavioral_completed, args.descriptor.absolute(),
-            compiler_allowance_selection_confirmed=compiler_allowance_selection_confirmed)
+            compiler_allowance_selection_confirmed=compiler_allowance_selection_confirmed,
+            requested_trace_profile=trace_profile)
         measurement.setdefault("reporter", cohort["measurement_reporter"])
         write_json(output / "harness-usecase-perf-report.json", measurement)
     completed = behavioral_completed and compiler_allowance_selection_confirmed
@@ -1915,7 +1916,7 @@ def run_cohort(args) -> int:
 
 
 def analyze_harness_performance(descriptor, records, record_paths, cohort, behavioral_completed, descriptor_path,
-                                compiler_allowance_selection_confirmed=True):
+                                compiler_allowance_selection_confirmed=True, requested_trace_profile=None):
     # Runner records are adjacent to their artifact directories under tests/.
     if not records or len(records) != 1:
         return {"status": "refused", "completed": False,
@@ -1963,6 +1964,10 @@ def analyze_harness_performance(descriptor, records, record_paths, cohort, behav
     workload_matches = (expected_roster is not None and coverage.get("cohort") == expected_workload
                         and coverage.get("expected_order") == list(expected_roster))
     prerequisites = {
+        "trace_profile_selection_matches_owner": requested_trace_profile in ("full", "minimal")
+                                                 and execution.get("trace_profile") == requested_trace_profile,
+        "applied_trace_profile_confirmed": (report.get("trace_capture") or {}).get("status") == "complete",
+        "applicable_execution_observations_complete": (report.get("execution_observations") or {}).get("status") == "complete",
         "workload_contract_matches_selected_cohort": workload_matches,
         "resident_compiler_mode_matches_cohort": execution.get("compiler_mode") ==
                                                   cohort.get("compiler_mode") == "owned-resident",
@@ -1994,6 +1999,7 @@ def analyze_harness_performance(descriptor, records, record_paths, cohort, behav
         "descriptor": str(descriptor_path), "descriptor_sha256": sha256(descriptor_path),
         "source_oid": descriptor["source_oid"], "harness_revision": descriptor["harness_revision"],
         "profile": descriptor["profile"], "stdlib_mode": descriptor["stdlib_mode"],
+        "requested_trace_profile": requested_trace_profile,
         "startup_mode": descriptor["startup_mode"], "runner_record": str(runner_record_path),
         "runner_record_sha256": sha256(runner_record_path),
         "observed_input_mismatches": observed_input_mismatches,

@@ -5,6 +5,8 @@ import tempfile
 import hashlib
 import json
 import io
+import copy
+import random
 import sqlite3
 import tarfile
 from unittest.mock import Mock, patch
@@ -14,6 +16,20 @@ SPEC = importlib.util.spec_from_file_location(
 )
 REPORT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(REPORT)
+
+
+def shrink_readiness_history(history, fails):
+    """Keep the fixture's issued owners fixed while deleting added observations."""
+    reduced = list(history)
+    index = 0
+    while index < len(reduced):
+        candidate = reduced[:index] + reduced[index + 1:]
+        if fails(candidate):
+            reduced = candidate
+            index = 0
+        else:
+            index += 1
+    return reduced
 
 
 class ResidentPerformanceReport(unittest.TestCase):
@@ -146,6 +162,7 @@ class ResidentPerformanceReport(unittest.TestCase):
         for index in range(5):
             events.append({"fields": {
                 "message": "compiler daemon ready", "daemon_epoch": str(index),
+                "run_id": f"cold-{index}",
                 "producer": "f" * 64, "daemon_pid": 200 + index,
                 "executable": binary.name, "worker": binary.name,
             }})
@@ -308,6 +325,123 @@ class ResidentPerformanceReport(unittest.TestCase):
 
     def test_matched_resident_evidence_is_accepted(self):
         self.assertTrue(REPORT.analyze(*self.fixture())["accepted"])
+
+    def readiness_campaign(self, actors=False):
+        samples, events, manifest = self.actor_fixture() if actors else self.fixture()
+        for event in events:
+            if event["fields"].get("message") == "compiler daemon ready":
+                event["fields"].update(run_id="run", socket="/compiler.sock")
+        analyze = REPORT.analyze_actors if actors else REPORT.analyze
+
+        def accepted(additions):
+            history = ([event for before, event in additions if before] + events +
+                       [event for before, event in additions if not before])
+            result = analyze(samples, history, manifest)
+            return result["status"] == "measured" if actors else result["accepted"]
+        return events, accepted
+
+    def test_readiness_rebinding_is_invalid_in_either_order_for_both_analyzers(self):
+        changes = {"producer": "0" * 64, "daemon_pid": 999,
+                   "executable": "/other/frontend", "worker": "/other/worker",
+                   "run_id": "other-run", "socket": "/other/compiler.sock"}
+        for actors in (False, True):
+            events, accepted = self.readiness_campaign(actors)
+            for field, value in changes.items():
+                for replacement in (value, None):
+                    for before in (False, True):
+                        with self.subTest(actors=actors, field=field,
+                                          replacement=replacement, before=before):
+                            conflict = copy.deepcopy(events[0])
+                            if replacement is None:
+                                conflict["fields"].pop(field)
+                            else:
+                                conflict["fields"][field] = replacement
+                            self.assertFalse(accepted([(before, conflict)]))
+
+    def test_readiness_replay_preserves_owner_without_equating_observation_bytes(self):
+        for actors in (False, True):
+            events, accepted = self.readiness_campaign(actors)
+            replay = copy.deepcopy(events[0])
+            replay.update(timestamp="later observation")
+            replay["fields"]["available_mb"] = 999
+            distinct = copy.deepcopy(events[0])
+            distinct["fields"]["daemon_epoch"] = "another-epoch"
+            distinct["fields"]["daemon_pid"] = 999
+            for before in (False, True):
+                with self.subTest(actors=actors, before=before):
+                    self.assertTrue(accepted([(before, events[0]), (before, replay),
+                                              (before, distinct)]))
+
+    def test_readiness_histories_match_independent_owner_set_oracle(self):
+        seed = 20261011
+        owner_fields = ("producer", "daemon_pid", "executable", "worker", "run_id", "socket")
+        coverage = {"conflict": 0, "replay": 0, "distinct_epoch": 0, "before": 0, "after": 0}
+        field_coverage = dict.fromkeys(owner_fields, 0)
+        for actors in (False, True):
+            events, accepted = self.readiness_campaign(actors)
+            boots = [event for event in events
+                     if event["fields"].get("message") == "compiler daemon ready"]
+
+            def oracle(history):
+                owners = {}
+                for event in boots + [event for _, event in history]:
+                    row = event["fields"]
+                    owner = tuple(row.get(field) for field in owner_fields)
+                    owners.setdefault(row["daemon_epoch"], set()).add(owner)
+                return all(len(issued) == 1 for issued in owners.values())
+            rng = random.Random(seed)
+            for case in range(160):
+                history = []
+                for _ in range(rng.randrange(8)):
+                    event = copy.deepcopy(rng.choice(boots))
+                    kind = rng.choice(("conflict", "replay", "distinct_epoch"))
+                    if kind == "conflict":
+                        field = rng.choice(owner_fields)
+                        field_coverage[field] += 1
+                        value = event["fields"][field]
+                        if rng.randrange(2):
+                            event["fields"].pop(field)
+                        else:
+                            event["fields"][field] = (value + 100 if type(value) is int
+                                                      else value + "-other")
+                    elif kind == "distinct_epoch":
+                        event["fields"]["daemon_epoch"] += "-other"
+                    else:
+                        event["timestamp"] = "replayed"
+                    before = bool(rng.randrange(2))
+                    history.append((before, event))
+                    coverage[kind] += 1
+                    coverage["before" if before else "after"] += 1
+
+                def differs(candidate):
+                    return accepted(candidate) != oracle(candidate)
+                if differs(history):
+                    reduced = shrink_readiness_history(history, differs)
+                    self.fail(f"seed={seed} case={case} actors={actors} coverage={coverage} "
+                              f"field_coverage={field_coverage} "
+                              f"minimized_history={json.dumps(reduced, sort_keys=True)}")
+        self.assertTrue(all(coverage.values()), coverage)
+        self.assertTrue(all(field_coverage.values()), field_coverage)
+        print(f"readiness property seed={seed} fresh_histories=320 coverage={coverage} "
+              f"field_coverage={field_coverage}")
+
+    def test_readiness_requires_an_exact_epoch_in_both_analyzers(self):
+        for actors in (False, True):
+            events, accepted = self.readiness_campaign(actors)
+            for epoch in (None, "", " ", [], {}):
+                with self.subTest(actors=actors, epoch=epoch):
+                    invalid = copy.deepcopy(events[0])
+                    invalid["fields"]["daemon_epoch"] = epoch
+                    self.assertFalse(accepted([(True, invalid)]))
+
+    def test_readiness_history_shrinking_keeps_only_the_conflicting_observation(self):
+        original = {"daemon_epoch": "epoch", "producer": "original"}
+
+        def conflicts(history):
+            return len({original["producer"], *(row["producer"] for _, row in history)}) > 1
+        conflict = dict(original, producer="rebound")
+        history = [(True, original), (True, conflict), (False, original)]
+        self.assertEqual(shrink_readiness_history(history, conflicts), [(True, conflict)])
 
     def test_missing_worker_evidence_fails_even_with_fast_samples(self):
         samples, events, manifest = self.fixture()

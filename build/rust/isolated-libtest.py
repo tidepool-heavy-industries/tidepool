@@ -22,6 +22,8 @@ import uuid
 
 DEFAULT_TIMEOUT = 300
 DISCOVERY_TIMEOUT = 30
+# Bound how long a delegated pipe wait can defer its owner's cancellation stop.
+CANCELLATION_POLL_INTERVAL = 0.1
 OUTPUT_LIMIT = 4 << 20
 TRACE_LINE_LIMIT = 1 << 20
 TRACE_IDENTITY_LIMIT = 4096
@@ -55,6 +57,8 @@ INTERRUPT_SIGNAL = None
 class RunnerInterrupted(Exception):
     def __init__(self, signum):
         self.signum = signum
+        self.output = ''
+        self.stderr = ''
 
 
 def _signal_active_processes(signum, _frame):
@@ -95,8 +99,7 @@ def _register_process(process):
         ACTIVE_PROCESS_SNAPSHOT = tuple(ACTIVE_PROCESSES.values())
     if INTERRUPT_SIGNAL is not None:
         _kill_group(process.pid)
-        _kill_and_reap(process)
-        _unregister_process(process)
+        # execute owns stop-before-drain ordering for delegated pipe writers.
         raise RunnerInterrupted(INTERRUPT_SIGNAL)
 
 
@@ -112,8 +115,13 @@ def _kill_and_reap(process):
         _kill_group(process.pid)
     try:
         return process.communicate(timeout=5)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as error:
         # Do not wait indefinitely on inherited pipes from an escaped child.
+        stdout, stderr = error.output or '', error.stderr or ''
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode(errors='replace')
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors='replace')
         if process.stdout is not None:
             process.stdout.close()
         if process.stderr is not None:
@@ -121,8 +129,8 @@ def _kill_and_reap(process):
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            return '', ''
-        return '', ''
+            return stdout, stderr
+        return stdout, stderr
 
 
 # Only declared runtime selections, standard test campaign controls and
@@ -364,7 +372,25 @@ def execute(args, timeout, service_slice=None, service_record=None, environment=
             observer = threading.Thread(target=observe_delegated_admission,
                 args=(unit, service_record, observer_finished), daemon=True)
             observer.start()
-        stdout, stderr = process.communicate(timeout=timeout)
+        if unit is None:
+            stdout, stderr = process.communicate(timeout=timeout)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                if INTERRUPT_SIGNAL is not None:
+                    raise RunnerInterrupted(INTERRUPT_SIGNAL)
+                remaining = max(0, deadline - time.monotonic())
+                try:
+                    stdout, stderr = process.communicate(
+                        timeout=min(remaining, CANCELLATION_POLL_INTERVAL))
+                    break
+                except subprocess.TimeoutExpired:
+                    # communicate retains partial output across retries. The
+                    # service can hold its pipes after the client was killed.
+                    if INTERRUPT_SIGNAL is not None:
+                        raise RunnerInterrupted(INTERRUPT_SIGNAL)
+                    if time.monotonic() >= deadline:
+                        raise
         if unit is not None:
             # A successful --wait fences a queued start even when a fast
             # successful unit unloaded before InvocationID polling saw it.
@@ -373,28 +399,34 @@ def execute(args, timeout, service_slice=None, service_record=None, environment=
             service_record.update(launcher_wait_exit_code=process.returncode,
                                   manager_wait_success=process.returncode == 0)
     except subprocess.TimeoutExpired as error:
-        stdout, stderr = _kill_and_reap(process)
-        failure = subprocess.TimeoutExpired(
-            args, timeout, output=stdout or error.output, stderr=stderr or error.stderr
-        )
+        failure = error
     except BaseException as error:
-        _kill_and_reap(process)
         failure = error
     finally:
-        _unregister_process(process)
-        if unit is not None:
-            observer_finished.set()
-            if observer is not None:
-                observer.join(timeout=2)
-            service_record['admission_observer_stopped'] = observer is None or not observer.is_alive()
-            if (not service_record.get('manager_admission')
-                    and service_record.get('manager_wait_success') is not True):
-                # The polling observer can finish just before systemd retains
-                # a fast failed unit. Query once synchronously before stop or
-                # reset-failed can erase the exact invocation receipt.
-                observe_delegated_admission(unit, service_record,
-                                            observer_finished, final=True)
-            stop_delegated_service(unit, service_record)
+        try:
+            if unit is not None:
+                observer_finished.set()
+                if observer is not None:
+                    observer.join(timeout=2)
+                service_record['admission_observer_stopped'] = observer is None or not observer.is_alive()
+                if (not service_record.get('manager_admission')
+                        and service_record.get('manager_wait_success') is not True):
+                    # The polling observer can finish just before systemd retains
+                    # a fast failed unit. Query once synchronously before stop or
+                    # reset-failed can erase the exact invocation receipt.
+                    observe_delegated_admission(unit, service_record,
+                                                observer_finished, final=True)
+                stop_delegated_service(unit, service_record)
+            if failure is not None:
+                stdout, stderr = _kill_and_reap(process)
+                if isinstance(failure, subprocess.TimeoutExpired):
+                    failure = subprocess.TimeoutExpired(
+                        args, timeout, output=stdout or failure.output,
+                        stderr=stderr or failure.stderr)
+                elif isinstance(failure, RunnerInterrupted):
+                    failure.output, failure.stderr = stdout, stderr
+        finally:
+            _unregister_process(process)
     # Test leaders sometimes leave a detached same-group child after a passing
     # result. The process group remains the cleanup owner through this point.
     cleanup_confirmed = (confirm_process_group_cleanup(process.pid) if unit is None
@@ -1290,7 +1322,11 @@ def run_one(binary, name, ignored, timeout, record=None, service_slice=None,
         record['process_cleanup_status'] = process_cleanup_status(error, service_record)
         record.update(status='interrupted', interrupt_signal=error.signum,
                       process_execution_count=None, elapsed_ns=time.monotonic_ns() - started)
-        return finish(False, f'interrupted by signal {error.signum}', '')
+        record_actual_counts(record, terminal_summary(error.output), service_record is not None)
+        detail = f'interrupted by signal {error.signum}'
+        if error.output:
+            detail += f'\n{error.output}'
+        return finish(False, detail, error.stderr)
     except OSError as error:
         record['process_cleanup_status'] = process_cleanup_status(error, service_record)
         record.update(status='spawn_failed', elapsed_ns=time.monotonic_ns() - started)

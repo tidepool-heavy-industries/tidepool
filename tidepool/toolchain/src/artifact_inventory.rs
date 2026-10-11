@@ -7953,104 +7953,311 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct NativeHistoryModel {
+        roots: BTreeSet<ArtifactBindingNode>,
+        rows: BTreeSet<(ArtifactBindingNode, ArtifactBindingNode, ArtifactDependency)>,
+    }
+
+    impl NativeHistoryModel {
+        // The fixture authors one carrier and a group-7 binding to generation 4.
+        // Only opaque handle correspondence comes from issuance; roots and edges
+        // are defined here before observing the implementation's graph.
+        fn authored(
+            carrier: ArtifactBinding,
+            canonical: ArtifactBinding,
+            values: ArtifactBinding,
+            group: NativeGroupBinding,
+        ) -> Self {
+            let carrier = ArtifactBindingNode::Artifact(carrier);
+            let values = ArtifactBindingNode::Artifact(values);
+            let group = ArtifactBindingNode::Group(group);
+            Self {
+                roots: BTreeSet::from([carrier, values, group]),
+                rows: BTreeSet::from([
+                    (
+                        carrier,
+                        ArtifactBindingNode::Artifact(canonical),
+                        ArtifactDependency::Interface,
+                    ),
+                    (group, carrier, ArtifactDependency::Interface),
+                    (
+                        group,
+                        values,
+                        ArtifactDependency::NativeBinding {
+                            dependent_ordinal: 7,
+                            generation: 4,
+                            namespace: "value".into(),
+                            occurrence: "value".into(),
+                            record_parent: None,
+                        },
+                    ),
+                ]),
+            }
+        }
+
+        fn nodes(&self) -> BTreeSet<ArtifactBindingNode> {
+            let mut reached = self.roots.clone();
+            loop {
+                let next = self
+                    .rows
+                    .iter()
+                    .filter(|(source, _, _)| reached.contains(source))
+                    .map(|(_, target, _)| *target)
+                    .collect::<Vec<_>>();
+                let before = reached.len();
+                reached.extend(next);
+                if reached.len() == before {
+                    return reached;
+                }
+            }
+        }
+
+        fn check(&self, view: &ArtifactView) -> proptest::test_runner::TestCaseResult {
+            let graph = view.capture_graph_selection();
+            let actual_nodes = graph
+                .bindings
+                .iter()
+                .copied()
+                .map(ArtifactBindingNode::Artifact)
+                .chain(
+                    graph
+                        .native_groups
+                        .iter()
+                        .copied()
+                        .map(ArtifactBindingNode::Group),
+                )
+                .collect::<BTreeSet<_>>();
+            proptest::prop_assert_eq!(
+                graph.bindings.len() + graph.native_groups.len(),
+                actual_nodes.len()
+            );
+            proptest::prop_assert_eq!(actual_nodes, self.nodes(), "authored retained nodes");
+            proptest::prop_assert_eq!(
+                view.roots().iter().copied().collect::<BTreeSet<_>>(),
+                self.roots.clone(),
+                "authored live roots"
+            );
+            proptest::prop_assert!(
+                view.native_custody().is_empty(),
+                "fixture has no separate live byte custody"
+            );
+            proptest::prop_assert_eq!(graph.roots.len(), self.roots.len(), "authored root count");
+            proptest::prop_assert_eq!(
+                graph.roots.into_iter().collect::<BTreeSet<_>>(),
+                self.roots.clone(),
+                "authored exact roots"
+            );
+            proptest::prop_assert_eq!(
+                view.binding_dependencies()
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                self.rows.clone(),
+                "authored exact edges"
+            );
+            proptest::prop_assert!(
+                graph.native_custody.is_empty(),
+                "fixture has no separate byte-only custody"
+            );
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum NativeHistoryOp {
+        Narrow,
+        Readmit,
+        MergeOriginal,
+        Recover,
+        Add(u8, u8),
+        Retire(u8),
+        RefuseIncompleteEdges,
+        RemoveAbsent,
+    }
+
+    fn native_history_op() -> impl proptest::strategy::Strategy<Value = NativeHistoryOp> {
+        use proptest::strategy::Strategy;
+        (0u8..8, 0u8..2, 0u8..3).prop_map(|(operation, owner, variant)| match operation {
+            0 => NativeHistoryOp::Narrow,
+            1 => NativeHistoryOp::Readmit,
+            2 => NativeHistoryOp::MergeOriginal,
+            3 => NativeHistoryOp::Recover,
+            4 => NativeHistoryOp::Add(owner, variant),
+            5 => NativeHistoryOp::Retire(owner),
+            6 => NativeHistoryOp::RefuseIncompleteEdges,
+            _ => NativeHistoryOp::RemoveAbsent,
+        })
+    }
+
+    #[derive(Debug, Default)]
+    struct NativeHistoryCoverage {
+        operations: [usize; 8],
+        added_bindings: usize,
+        effective_retirements: usize,
+        retired_bindings: usize,
+        absent_retirements: usize,
+        incomplete_edge_refusals: usize,
+        peak_nodes: usize,
+    }
+
+    impl Drop for NativeHistoryCoverage {
+        fn drop(&mut self) {
+            eprintln!("exact_native_history coverage={self:?}");
+        }
+    }
+
     proptest::proptest! {
-        #![proptest_config(proptest::test_runner::Config {
-            cases: 64,
-            failure_persistence: Some(Box::new(proptest::test_runner::FileFailurePersistence::Direct(
-                "proptest-regressions/artifact_inventory_exact_native.txt",
-            ))),
-            ..proptest::test_runner::Config::default()
-        })]
+        #![proptest_config(proptest::test_runner::Config { cases: 64, ..Default::default() })]
 
         #[test]
         fn exact_native_binding_histories_preserve_typed_roots(
-            operations in proptest::collection::vec(0u8..5, 1..18),
+            generated in proptest::collection::vec(native_history_op(), 0..18),
         ) {
+            let mut coverage = NativeHistoryCoverage::default();
             let inventory = ArtifactInventory::default();
             let (native, values, next) = native_scope_fixture();
+            let old_values_id = values.descriptor.id;
             let new_child_id = next.descriptor.id;
-            let old = inventory.admit(
-                &inventory.empty_view(),
-                vec![native.clone(), values],
-            ).unwrap();
+            let ArtifactPayload::Original(product) = &native.payload else { unreachable!() };
+            let canonical_id = ArtifactEntry::canonical(product.module_interface().unwrap().clone()).descriptor.id;
+            proptest::prop_assert_ne!(old_values_id, new_child_id);
+            let old = inventory.admit(&inventory.empty_view(), vec![native.clone(), values]).unwrap();
+            let old_graph = old.capture_graph_selection();
+            proptest::prop_assert_eq!(old_graph.native_groups.len(), 1);
+            let old_group = old_graph.native_groups[0];
+            proptest::prop_assert_eq!(old_group.original_ordinal, 7);
+            let carrier = old.namespace()[&native.descriptor.id];
+            let canonical = old.namespace()[&canonical_id];
+            let old_values = old.namespace()[&old_values_id];
+            proptest::prop_assert_eq!(carrier.artifact, native.descriptor.id);
+            proptest::prop_assert_eq!(canonical.artifact, canonical_id);
+            proptest::prop_assert_eq!(old_values.artifact, old_values_id);
+            proptest::prop_assert_eq!(old_group.binding.artifact, native.descriptor.id);
+            let mut original_model = NativeHistoryModel::authored(carrier, canonical, old_values, old_group);
+            original_model.roots.insert(ArtifactBindingNode::Artifact(canonical));
+            original_model.check(&old)?;
             let original_facts = ExactArtifactSelection::capture(&old);
             let projection = CompilerInputProjection::from_issued_entries(&[
                 Arc::new(native.clone()), Arc::new(next.clone()),
             ]).unwrap();
-            let mut view = inventory.admit_shared_with_intent(
-                &old,
-                vec![Arc::new(native.clone()), Arc::new(next)],
-                NativeArtifactDemand::AllGroups,
-                ArtifactRootIntent::Projected(&projection, &[]),
-            ).unwrap();
+            let mut view = inventory.admit_shared_with_intent(&old,
+                vec![Arc::new(native.clone()), Arc::new(next)], NativeArtifactDemand::AllGroups,
+                ArtifactRootIntent::Projected(&projection, &[])).unwrap();
+            let current_graph = view.capture_graph_selection();
+            proptest::prop_assert_eq!(current_graph.native_groups.len(), 2);
+            let new_group = *current_graph.native_groups.iter().find(|group| **group != old_group).unwrap();
+            proptest::prop_assert_eq!(new_group.original_ordinal, 7);
+            proptest::prop_assert_eq!(new_group.binding.artifact, native.descriptor.id);
+            proptest::prop_assert_ne!(new_group.binding.selection, carrier.selection);
+            proptest::prop_assert_eq!(view.namespace()[&native.descriptor.id], carrier);
+            let mut model = original_model.clone();
+            let new_values = view.namespace()[&new_child_id];
+            proptest::prop_assert_eq!(new_values.artifact, new_child_id);
+            let new_facts = NativeHistoryModel::authored(carrier, canonical, new_values, new_group);
+            model.roots.extend(new_facts.roots);
+            model.rows.extend(new_facts.rows);
+            model.check(&view)?;
 
-            // Independent reference facts: a plain set of the issued rows and
-            // typed roots, traversed without inventory closure/reuse helpers.
-            let rows = view.binding_dependencies().into_iter().collect::<BTreeSet<_>>();
-            let roots = view.capture_graph_selection().roots.into_iter().collect::<BTreeSet<_>>();
-            let mut expected_nodes = roots.clone();
-            loop {
-                let next = rows.iter()
-                    .filter(|(source, _, _)| expected_nodes.contains(source))
-                    .map(|(_, target, _)| *target)
-                    .collect::<BTreeSet<_>>();
-                let before = expected_nodes.len();
-                expected_nodes.extend(next);
-                if expected_nodes.len() == before { break; }
-            }
-            for operation in operations {
-                view = match operation {
-                    0 => view.with_compiler_projection(&projection.interface_only()).unwrap(),
-                    1 => view.inventory().admit_shared_with_intent(
-                        &view,
-                        vec![Arc::new(native.clone())],
-                        NativeArtifactDemand::AllGroups,
-                        ArtifactRootIntent::Projected(&projection, &[]),
-                    ).unwrap(),
-                    2 => view.merge_selected(&old, &projection).unwrap(),
-                    3 => {
-                        let restored_inventory = ArtifactInventory::default();
-                        restored_inventory.recover_selection(
-                            &restored_inventory.empty_view(),
-                            view.entries(),
-                            &view.capture_graph_selection(),
-                            &view.binding_dependencies(),
-                        ).unwrap()
-                    },
-                    _ => view.support_without_owner(&ExactModuleIdentity {
-                        unit: "fixture".into(), module: "Unselected".into(),
-                    }).unwrap(),
+            // Separate payload variants share an owner and interface while their
+            // authored Core bytes differ. They never acquire a native group.
+            let extras = (0..2).map(|owner| {
+                let base = entry(&format!("Generated{owner}"), &[]);
+                let ArtifactPayload::Canonical(interface) = base.payload else { unreachable!() };
+                (0..3).map(|variant| ArtifactEntry::canonical(crate::certified_products::fixture_module_core(
+                    &interface, format!("generated {owner} variant {variant}").into_bytes())))
+                    .collect::<Vec<_>>()
+            }).collect::<Vec<_>>();
+            let extra_ids = extras.iter().flatten().map(|entry| entry.descriptor.id).collect::<BTreeSet<_>>();
+            proptest::prop_assert_eq!(extra_ids.len(), 6);
+            let mut operations = generated;
+            let middle = operations.len() / 2;
+            // Guided interacting history survives shrinking and forces two real
+            // retirements, multiple payload variants, refusal and cold recovery.
+            operations.splice(middle..middle, [NativeHistoryOp::Add(0, 0), NativeHistoryOp::Add(0, 1),
+                NativeHistoryOp::Add(1, 2), NativeHistoryOp::Retire(0),
+                NativeHistoryOp::RefuseIncompleteEdges, NativeHistoryOp::Recover, NativeHistoryOp::Retire(1)]);
+            for operation in &operations {
+                let index = match operation {
+                    NativeHistoryOp::Narrow => 0, NativeHistoryOp::Readmit => 1,
+                    NativeHistoryOp::MergeOriginal => 2, NativeHistoryOp::Recover => 3,
+                    NativeHistoryOp::Add(..) => 4, NativeHistoryOp::Retire(_) => 5,
+                    NativeHistoryOp::RefuseIncompleteEdges => 6, NativeHistoryOp::RemoveAbsent => 7,
                 };
-                let graph = view.capture_graph_selection();
-                let snapshot = view.selection_snapshot();
-                proptest::prop_assert_eq!(
-                    snapshot.roots.keys().copied().collect::<Vec<_>>(), view.roots().to_vec(),
-                );
-                proptest::prop_assert_eq!(
-                    snapshot.native_custody.keys().copied().collect::<Vec<_>>(), view.native_custody().to_vec(),
-                );
-                proptest::prop_assert_eq!(
-                    snapshot.namespace.values().copied().collect::<Vec<_>>(), graph.namespace.clone(),
-                );
-                let actual_nodes = graph.bindings.iter().copied().map(ArtifactBindingNode::Artifact)
-                    .chain(graph.native_groups.iter().copied().map(ArtifactBindingNode::Group))
-                    .collect::<BTreeSet<_>>();
-                proptest::prop_assert_eq!(&actual_nodes, &expected_nodes);
-                proptest::prop_assert_eq!(graph.roots.into_iter().collect::<BTreeSet<_>>(), roots.clone());
-                proptest::prop_assert_eq!(view.binding_dependencies().into_iter().collect::<BTreeSet<_>>(), rows.clone());
+                coverage.operations[index] += 1;
+                view = match *operation {
+                    NativeHistoryOp::Narrow => view.with_compiler_projection(&projection.interface_only()).unwrap(),
+                    NativeHistoryOp::Readmit => view.inventory().admit_shared_with_intent(&view,
+                        vec![Arc::new(native.clone())], NativeArtifactDemand::AllGroups,
+                        ArtifactRootIntent::Projected(&projection, &[])).unwrap(),
+                    NativeHistoryOp::MergeOriginal => view.merge_selected(&old, &projection).unwrap(),
+                    NativeHistoryOp::Recover => {
+                        let restored = ArtifactInventory::default();
+                        restored.recover_selection(&restored.empty_view(), view.entries(),
+                            &view.capture_graph_selection(), &view.binding_dependencies()).unwrap()
+                    },
+                    NativeHistoryOp::Add(owner, variant) => {
+                        let extra = extras[usize::from(owner)][usize::from(variant)].clone();
+                        let independent = ArtifactInventory::default();
+                        let packet = independent.admit(&independent.empty_view(), vec![extra.clone()]).unwrap();
+                        let binding = packet.namespace()[&extra.descriptor.id];
+                        proptest::prop_assert_eq!(binding.artifact, extra.descriptor.id);
+                        let packet_model = NativeHistoryModel {
+                            roots: BTreeSet::from([ArtifactBindingNode::Artifact(binding)]), rows: BTreeSet::new(),
+                        };
+                        packet_model.check(&packet)?;
+                        coverage.added_bindings += usize::from(model.roots.insert(ArtifactBindingNode::Artifact(binding)));
+                        view.merge_selected(&packet, &projection).unwrap()
+                    },
+                    NativeHistoryOp::Retire(owner) => {
+                        let ids = extras[usize::from(owner)].iter().map(|entry| entry.descriptor.id).collect::<BTreeSet<_>>();
+                        let before = model.roots.len();
+                        model.roots.retain(|node| match node {
+                            ArtifactBindingNode::Artifact(binding) => !ids.contains(&binding.artifact),
+                            ArtifactBindingNode::Group(_) => true,
+                        });
+                        let removed = before - model.roots.len();
+                        coverage.effective_retirements += usize::from(removed > 0);
+                        coverage.absent_retirements += usize::from(removed == 0);
+                        coverage.retired_bindings += removed;
+                        view.support_without_owner(&extras[usize::from(owner)][0].descriptor.owner).unwrap()
+                    },
+                    NativeHistoryOp::RefuseIncompleteEdges => {
+                        let refused = ArtifactInventory::default();
+                        let mut incomplete = model.rows.iter().cloned().collect::<Vec<_>>();
+                        incomplete.remove(0);
+                        proptest::prop_assert!(refused.recover_selection(&refused.empty_view(), view.entries(),
+                            &view.capture_graph_selection(), &incomplete).is_err());
+                        proptest::prop_assert_eq!(refused.node_count(), 0, "refused recovery published no graph");
+                        coverage.incomplete_edge_refusals += 1;
+                        view
+                    },
+                    NativeHistoryOp::RemoveAbsent => view.support_without_owner(&module("Absent")).unwrap(),
+                };
+                coverage.peak_nodes = coverage.peak_nodes.max(model.nodes().len());
+                model.check(&view).map_err(|error| proptest::test_runner::TestCaseError::fail(
+                    format!("history={operations:?}; {error}")))?;
                 let original = view.select_issued(vec![native.descriptor.id], &original_facts).unwrap();
-                proptest::prop_assert_eq!(original.capture_graph_selection(), old.capture_graph_selection());
-                let issued = view.inventory().admit_shared_with_intent(
-                    &view, vec![Arc::new(native.clone())], NativeArtifactDemand::AllGroups,
-                    ArtifactRootIntent::Projected(&projection, &[]),
-                ).unwrap();
+                original_model.check(&original)?;
+                // Root-only demand retains the old child as hidden support.
+                let hidden = original.select_roots(vec![native.descriptor.id]).unwrap();
+                let mut selected_model = original_model.clone();
+                selected_model.roots.remove(&ArtifactBindingNode::Artifact(old_values));
+                selected_model.roots.remove(&ArtifactBindingNode::Artifact(canonical));
+                selected_model.check(&hidden)?;
+                let issued = view.inventory().admit_shared_with_intent(&view, vec![Arc::new(native.clone())],
+                    NativeArtifactDemand::AllGroups, ArtifactRootIntent::Projected(&projection, &[])).unwrap();
                 let selected = issued.select_admission_roots(vec![native.descriptor.id]).unwrap();
+                let mut selected_model = NativeHistoryModel::authored(carrier, canonical, new_values, new_group);
+                selected_model.roots.remove(&ArtifactBindingNode::Artifact(new_values));
+                selected_model.check(&selected)?;
                 let requirements = selected.native_requirements_from_roots(&[
                     NativeRequirementRoot::Group { artifact: native.descriptor.id, original_ordinal: 7 },
                 ]).unwrap();
                 proptest::prop_assert_eq!(requirements.bindings.len(), 1);
                 proptest::prop_assert_eq!(requirements.bindings[0].artifact_id, new_child_id);
             }
+            proptest::prop_assert!(coverage.effective_retirements >= 2 && coverage.retired_bindings >= 3);
+            proptest::prop_assert!(coverage.incomplete_edge_refusals >= 1);
         }
     }
 

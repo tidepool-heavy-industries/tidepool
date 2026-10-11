@@ -41,6 +41,17 @@ pub struct ExactDeclarationContext {
     original_instance_environment: OriginalInstanceEnvironment,
 }
 
+/// Strict immutable observations retained once by the display issuer. Payload
+/// descriptors and dependency rows accompany the existing context semantics so
+/// a digest lookup is followed by equality of the actual authenticated facts.
+#[derive(Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct OriginalDisplayObservations {
+    semantics: Vec<u8>,
+    descriptors: Vec<crate::artifact_inventory::ArtifactDescriptor>,
+    dependencies: Vec<(ArtifactId, ArtifactId, ArtifactDependency)>,
+    native_groups: BTreeSet<NativeGroupKey>,
+}
+
 /// Value and lexical roots issue compiler selection; additional native carriers
 /// remain independently owned byte custody for future execution.
 pub(crate) struct RetainedValueSourceSurface {
@@ -4959,6 +4970,43 @@ impl ExactDeclarationContext {
         Ok(graph)
     }
 
+    /// The preview observes the complete original instance environment and
+    /// native availability, but cannot read a value-interface root that is
+    /// outside that environment, its input type, and every retained dependency.
+    /// Selection follows the issued artifact edges, including historical native
+    /// captures; a value dependency is never removed just because it is private.
+    pub(crate) fn original_display_projection(&self, input: &Self) -> Result<Self, CompileError> {
+        let graph = self.original_preview_interface_graph()?;
+        let mut context = self.clone().extend_interface_context(input)?;
+        let input_ids = input.artifact_view().artifact_ids();
+        let roots = context
+            .inventory
+            .entries()
+            .into_iter()
+            .filter(|entry| {
+                !matches!(
+                    entry.payload,
+                    ArtifactPayload::Interface(_, JoinedInterfaceRole::ValueInterface)
+                ) || graph.contains_key(&entry.descriptor.owner)
+                    || input_ids.contains(&entry.descriptor.id)
+                    || context
+                        .template_imports
+                        .as_ref()
+                        .is_some_and(|imports| imports.graph.contains_key(&entry.descriptor.owner))
+            })
+            .map(|entry| entry.descriptor.id)
+            .collect();
+        context.inventory = context.inventory.select_roots(roots)?;
+        context.compiler_projection = context.compiler_projection.within_view(&context.inventory);
+        let context = context.finish()?;
+        if context.original_preview_interface_graph()? != graph {
+            return Err(failure(
+                "display projection changed original instance evidence",
+            ));
+        }
+        Ok(context)
+    }
+
     fn interface_graph_for_roots(
         &self,
         mut pending: Vec<ExactModuleIdentity>,
@@ -5440,7 +5488,31 @@ impl ExactDeclarationContext {
         self.semantic_sha256_from_metadata(&self.inventory.metadata_snapshot())
     }
 
+    /// Immutable owner equality includes exact dependency edges. Equal payload
+    /// rows alone cannot substitute another binding's captured dependencies.
+    pub fn same_authenticated_context(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+            || (self == other
+                && self.inventory.metadata_snapshot().dependencies()
+                    == other.inventory.metadata_snapshot().dependencies())
+    }
+
     fn semantic_sha256_from_metadata(&self, metadata: &ArtifactMetadataSnapshot) -> [u8; 32] {
+        use sha2::Digest;
+        sha2::Sha256::digest(self.semantic_bytes_from_metadata(metadata)).into()
+    }
+
+    pub(crate) fn display_observations(&self) -> OriginalDisplayObservations {
+        let metadata = self.inventory.metadata_snapshot();
+        OriginalDisplayObservations {
+            semantics: self.semantic_bytes_from_metadata(&metadata),
+            descriptors: metadata.descriptors().into_iter().cloned().collect(),
+            dependencies: metadata.dependencies(),
+            native_groups: metadata.selected_native_groups,
+        }
+    }
+
+    fn semantic_bytes_from_metadata(&self, metadata: &ArtifactMetadataSnapshot) -> Vec<u8> {
         use sha2::Digest;
         let mut lexical = self.lexical.iter().collect::<Vec<_>>();
         lexical.sort_by_key(|node| &node.owner);
@@ -5571,7 +5643,7 @@ impl ExactDeclarationContext {
         let value = Value::Array(fields);
         let mut bytes = Vec::new();
         ciborium::ser::into_writer(&value, &mut bytes).expect("owned value encoding");
-        sha2::Sha256::digest(bytes).into()
+        bytes
     }
 
     pub(crate) fn validate_artifacts(

@@ -4086,6 +4086,7 @@ dependencies = [
  "tidepool-protocol",
  "tidepool-repr",
  "tidepool-runtime",
+ "tidepool-testing",
  "tidepool-toolchain",
 ]
 

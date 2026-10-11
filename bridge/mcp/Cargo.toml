@@ -25,6 +25,7 @@ tempfile.workspace = true
 tidepool-repr.workspace = true
 tidepool-effect.workspace = true
 tidepool-protocol.workspace = true
+tidepool-testing.workspace = true
 # For the effectful integration tests: a capturing Console handler decoded the
 # same way the production handler is (`bridge/facade/src/main.rs`).
 tidepool-bridge.workspace = true

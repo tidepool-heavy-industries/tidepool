@@ -21,11 +21,79 @@ pub struct ActivationPreviewSpecification {
     pub template_source: String,
 }
 
-/// Missing original code is a distinct result, not evidence of instance absence.
-pub enum ActivationPreviewSelection {
-    Ready(crate::artifacts::ModuleCandidateOffer),
-    OriginalDisplayEvidenceUnavailable,
+/// Compiler-issued display facts, independent of a particular mounted value.
+/// Its retained projection includes complete instance and negative evidence,
+/// canonical input type, package identity, and original native capture custody.
+#[derive(Clone, Debug)]
+pub struct OriginalDisplayContext {
+    identity: [u8; 32],
+    declarations: Arc<ExactDeclarationContext>,
+    witness: CanonicalInputTypeWitness,
+    observations: Arc<crate::declaration_context::OriginalDisplayObservations>,
+    input_context: Arc<ExactDeclarationContext>,
 }
+
+impl OriginalDisplayContext {
+    pub fn issue(
+        prototype: &ExactHostBindingPrototype,
+        original: &ExactDeclarationContext,
+    ) -> Result<Option<Arc<Self>>, CompileError> {
+        if !validate_original_display_context(prototype, original)? {
+            return Ok(None);
+        }
+        let declarations = Arc::new(original.original_display_projection(prototype.context())?);
+        let witness = prototype
+            .original_input_type()
+            .expect("validated live input")
+            .clone();
+        let observations = Arc::new(declarations.display_observations());
+        let encoded = serde_json::to_vec(&observations).expect("issued display observations");
+        use sha2::Digest;
+        let mut hash = sha2::Sha256::new();
+        hash.update(b"TPEXACTDISPLAYCONTEXT1");
+        hash.update((encoded.len() as u64).to_le_bytes());
+        hash.update(&encoded);
+        hash.update(witness.original_bytes());
+        Ok(Some(Arc::new(Self {
+            identity: hash.finalize().into(),
+            declarations,
+            witness,
+            observations,
+            input_context: prototype.context().clone(),
+        })))
+    }
+
+    pub fn identity(&self) -> [u8; 32] {
+        self.identity
+    }
+    pub fn declarations(&self) -> &Arc<ExactDeclarationContext> {
+        &self.declarations
+    }
+    pub fn matches_prototype(&self, prototype: &ExactHostBindingPrototype) -> bool {
+        prototype.producer() == self.declarations.toolchain_identity_sha256()
+            && self
+                .input_context
+                .same_authenticated_context(prototype.context())
+            && prototype.original_input_type().is_some_and(|witness| {
+                witness == &self.witness
+                    && witness.original_bytes() == self.witness.original_bytes()
+            })
+    }
+}
+
+impl PartialEq for OriginalDisplayContext {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+            || (self.observations == other.observations
+                && self.witness == other.witness
+                && self.witness.original_bytes() == other.witness.original_bytes()
+                && self
+                    .input_context
+                    .same_authenticated_context(&other.input_context)
+                && self.declarations == other.declarations)
+    }
+}
+impl Eq for OriginalDisplayContext {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActivationPreviewDisposition {
@@ -37,6 +105,7 @@ pub(crate) struct ActivationPreviewOffer {
     pub(crate) specification: ActivationPreviewSpecification,
     pub(crate) prototype: Arc<ExactHostBindingPrototype>,
     pub(crate) original_execution: Arc<ExactDeclarationContext>,
+    pub(crate) display_context: Arc<OriginalDisplayContext>,
 }
 
 impl ActivationPreviewOffer {
@@ -57,7 +126,9 @@ impl ActivationPreviewOffer {
             || spec.template_source.contains("{{TURN_STMT}}")
             || spec.template_source.contains("{{BINDERS}}")
             || self.prototype.original_input_type().is_none()
-            || spec.original_context_digest != self.original_execution.semantic_sha256()
+            || spec.original_context_digest != self.display_context.identity()
+            || !self.display_context.matches_prototype(&self.prototype)
+            || self.original_execution != *self.display_context.declarations()
         {
             return Err(failure(
                 "pure activation preview has another input or recipe",
@@ -147,7 +218,10 @@ impl ActivationPreviewOffer {
             .prototype
             .original_input_type()
             .expect("validated live input");
-        if &witness != original || witness.signature().names() != original.signature().names() {
+        if &witness != original
+            || witness.original_bytes() != original.original_bytes()
+            || witness.signature().names() != original.signature().names()
+        {
             return Err(failure(
                 "activation preview changed the original input type",
             ));
@@ -179,6 +253,7 @@ impl ActivationPreviewOffer {
                 artifact_context.compiler_input_projection().clone(),
             )?),
             original_execution: self.original_execution.clone(),
+            display_context: self.display_context.clone(),
         }))
     }
 }
@@ -267,6 +342,7 @@ pub struct ExactCompiledActivationPreview {
     disposition: ActivationPreviewDisposition,
     original_interfaces: Arc<ExactDeclarationContext>,
     original_execution: Arc<ExactDeclarationContext>,
+    display_context: Arc<OriginalDisplayContext>,
 }
 
 impl ExactCompiledActivationPreview {
@@ -285,6 +361,9 @@ impl ExactCompiledActivationPreview {
     }
     pub fn original_context_digest(&self) -> [u8; 32] {
         self.specification.original_context_digest
+    }
+    pub fn original_display_context(&self) -> &Arc<OriginalDisplayContext> {
+        &self.display_context
     }
     pub fn template_source(&self) -> &str {
         &self.specification.template_source

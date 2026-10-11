@@ -1954,7 +1954,7 @@ fn activation_authentication_follows_selected_native_sites_through_custody() {
     for (output, retained) in outputs.iter().zip(&reobserved) {
         let recomputed = CompiledProvenancePlan::build(&output.code())
             .unwrap()
-            .instantiate();
+            .instantiate(&source.display_owners);
         assert_eq!(
             retained, &recomputed,
             "retained plan agrees with fresh selected-fact recomputation"
@@ -2790,9 +2790,7 @@ fn ordinary_home_display_fixture(session: SessionId) -> InputFixture {
 #[test]
 fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_explicit_heap_inputs()
 {
-    use tidepool_toolchain::activation_preview::{
-        ActivationPreviewSelection, ActivationPreviewSpecification,
-    };
+    use tidepool_toolchain::activation_preview::ActivationPreviewSpecification;
     use tidepool_toolchain::artifacts::ModuleCandidateOffer;
     use tidepool_toolchain::certified_products::PendingImportOwner;
 
@@ -2875,11 +2873,11 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
         command.bind().unwrap(),
     )
     .unwrap();
-    let ActivationPreviewSelection::Ready(offer) = ModuleCandidateOffer::select_activation_preview(
+    let offer = ModuleCandidateOffer::select_activation_preview(
         &endpoint,
         &fixture.recipe.include,
         scratch.path(),
-        admission.exact_context().clone(),
+        admission.original_display_context().unwrap().clone(),
         admission.input_interface().prototype().clone(),
         ActivationPreviewSpecification {
             original_context_digest: admission.original_context_digest(),
@@ -2888,9 +2886,7 @@ fn activation_preview_keeps_original_display_with_retained_prefix_and_refuses_ex
         },
         admission.catalog_selection(),
     )
-    .unwrap() else {
-        panic!("original display environment must be available");
-    };
+    .unwrap();
     if let Some(root) = offer.checked_value_root() {
         command.session_root(root);
     }
@@ -2979,7 +2975,13 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
     assert!(input_types.lexical_graph().is_empty());
     let mounted = mount_original(&mut resident, owner, interface);
     let binding = mounted.binding();
-    let original_context = mounted.original_execution.clone();
+    let original_context = mounted
+        .renderer_owner
+        .display
+        .as_ref()
+        .unwrap()
+        .declarations()
+        .clone();
     let InputFixture {
         root: _session_root,
         recipe,
@@ -3003,7 +3005,7 @@ fn activation_preview_executes_original_ordinary_home_custom_display_after_reade
         .with_scoped_injection();
     let admission = resident.admit_activation_preview(mounted, view).unwrap();
     assert!(Arc::ptr_eq(
-        admission.exact_context().declarations(),
+        admission.original_display_context().unwrap().declarations(),
         &original_context
     ));
     let handles = resident.value_handle_count();
@@ -3175,6 +3177,303 @@ fn activation_preview_package_only_input_preserves_original_producer_and_renders
 }
 
 #[test]
+fn display_owner_shares_specialization_across_two_child_machines_after_parent_failure() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-display-two-children.hs"),
+        false,
+        SessionId(1840),
+    );
+    let owners = Arc::new(ActivationDisplayOwners::default());
+    let images = Arc::new(ImageRegistry::new());
+    let mut parent = fixture.fresh();
+    parent.set_activation_display_owners(owners.clone());
+    parent.set_image_registry(images.clone());
+    let mut reservation = fixture.start(&mut parent);
+    let mut children = Vec::new();
+    let mut child_roots = Vec::new();
+    let mut last_submission = None;
+    for index in 0..2 {
+        let submission = settle_request_reservation(&mut parent, reservation, index + 1);
+        let payload = parent
+            .live_payload_handle(submission.cont_id())
+            .unwrap()
+            .unwrap();
+        let parcel = parent.export_custody(payload).unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let mut child =
+            InputFixture::fresh_in(SessionId(1841 + index as u64), &root, &fixture.recipe);
+        child.set_activation_display_owners(owners.clone());
+        child.set_image_registry(images.clone());
+        let imported = child.import_parcel(parcel, RealmId::ROOT).unwrap();
+        let receiver = child
+            .retain_binding_custody("activationReceiver")
+            .unwrap()
+            .unwrap();
+        let hole = suspended(
+            tidepool_testing::with_settlement(|settlement| {
+                child.run_rooted_application(
+                    "sharedDisplayChild",
+                    &receiver,
+                    &imported,
+                    RealmId::ROOT,
+                    None,
+                    settlement,
+                )
+            })
+            .unwrap(),
+        );
+        let site = parked_site(&mut child, &hole);
+        let (input, interface) = issued_input(&mut child, &hole, site, fixture.recipe.clone());
+        let mounted = mount_original(&mut child, input, interface);
+        let view = child
+            .compile_view_in(ScopeId::ROOT)
+            .unwrap()
+            .with_scoped_injection();
+        let admission = child.admit_activation_preview(mounted, view).unwrap();
+        child_roots.push(root);
+        children.push((child, admission));
+        if index == 0 {
+            reservation = suspended(settle_request_submission(&mut parent, submission));
+        } else {
+            last_submission = Some(submission);
+            break;
+        }
+    }
+    assert!(Arc::ptr_eq(
+        &children[0].1.mounted.renderer_owner,
+        &children[1].1.mounted.renderer_owner
+    ));
+    let template = turn::assemble_activation_preview_module(512);
+    let before = tidepool_extract_cmd::extract_spawn_count();
+    let turn::ActivationPreviewCompilation::Ready(first) = compile_activation_preview(
+        children[0].1.clone(),
+        &template,
+        512,
+        &fixture.recipe.include,
+    )
+    .unwrap() else {
+        panic!("package input is renderable")
+    };
+    assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before + 1);
+    let renderer = Arc::downgrade(&first.renderer);
+    let failed = tidepool_testing::with_settlement(|settlement| {
+        parent.resume(last_submission.unwrap(), Ok::<(), ()>(()), settlement)
+    });
+    assert!(
+        failed.is_err(),
+        "parent continuation must really fail after dispatch"
+    );
+    drop(parent);
+    let turn::ActivationPreviewCompilation::Ready(second) = compile_activation_preview(
+        children[1].1.clone(),
+        &template,
+        512,
+        &fixture.recipe.include,
+    )
+    .unwrap() else {
+        panic!("second package input is renderable")
+    };
+    assert!(Arc::ptr_eq(&first.renderer, &second.renderer));
+    assert_eq!(
+        tidepool_extract_cmd::extract_spawn_count(),
+        before + 1,
+        "later child specializes no second renderer"
+    );
+    for (index, preview) in [first, second].into_iter().enumerate() {
+        let child = &mut children[index].0;
+        let ResidentOutcome::Completed { result, .. } =
+            tidepool_testing::with_settlement(|settlement| {
+                child.run_activation_preview(preview, settlement)
+            })
+            .unwrap()
+        else {
+            panic!("pure preview completes")
+        };
+        assert_eq!(
+            result.to_json(),
+            serde_json::json!([format!("{}", index + 41), false])
+        );
+    }
+    assert!(
+        renderer.upgrade().is_some(),
+        "child provenance retains native code"
+    );
+    drop(children);
+    assert!(
+        renderer.upgrade().is_none(),
+        "weak run index alone retains no code"
+    );
+    assert!(owners
+        .owners
+        .lock()
+        .buckets
+        .values()
+        .flatten()
+        .all(|owner| owner.upgrade().is_none()));
+}
+
+#[test]
+fn display_owner_preserves_checked_segment_capture_demand_across_value_prefix() {
+    let (root, recipe) = InputFixture::source_recipe(false);
+    let mut source = InputFixture::fresh_in(SessionId(1844), &root, &recipe);
+    let execution = Arc::new(source.begin_private_execution(ScopeId::ROOT).unwrap());
+    source
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    let checked = check_fixture_cell(
+        &mut source,
+        &recipe,
+        include_str!("fixtures/activation-display-value-prefix.hs"),
+        execution.clone(),
+        0,
+    );
+    let template = turn::assemble_activation_preview_module(512);
+    let mut previous: Option<Arc<RuntimeActivationPreviewAdmission>> = None;
+    let mut previous_renderer: Option<Arc<CompiledActivationRenderer>> = None;
+    for index in 0..3 {
+        let (bound, producer, reservation) = checked.compile_binding(&mut source, index);
+        if index == 1 {
+            let [binder] = bound.as_slice() else {
+                panic!("middle item binds one unrelated value")
+            };
+            assert!(matches!(
+                tidepool_testing::with_settlement(|settlement| source.run_bind_with_sites(
+                    "displayPrefix",
+                    producer.code(),
+                    binder,
+                    reservation.generation(),
+                    settlement,
+                ))
+                .unwrap(),
+                ResidentOutcome::Completed { .. }
+            ));
+            continue;
+        }
+        assert!(
+            bound.is_empty(),
+            "request statement has no native value binding"
+        );
+        let fixture = InputFixture {
+            root: tempfile::tempdir().unwrap(),
+            session: SessionId(1844),
+            recipe: recipe.clone(),
+            producer,
+        };
+        let reservation = fixture.start(&mut source);
+        let (submission, hole) = fixture.deliver(&mut source, reservation, index as i64 + 1);
+        let site = parked_site(&mut source, &hole);
+        let (input, interface) = issued_input(&mut source, &hole, site, recipe.clone());
+        let mounted = mount_original(&mut source, input, interface);
+        let view = source
+            .compile_view_in(execution.private_scope())
+            .unwrap()
+            .with_scoped_injection();
+        let admission = source.admit_activation_preview(mounted, view).unwrap();
+        if let Some(previous) = &previous {
+            assert_eq!(
+                admission
+                    .input_interface()
+                    .prototype()
+                    .original_input_type()
+                    .unwrap()
+                    .original_bytes(),
+                previous
+                    .input_interface()
+                    .prototype()
+                    .original_input_type()
+                    .unwrap()
+                    .original_bytes(),
+                "different values have the same full canonical input witness"
+            );
+            assert!(admission
+                .input_interface()
+                .prototype()
+                .context()
+                .same_authenticated_context(previous.input_interface().prototype().context()));
+            assert_ne!(
+                admission.original_execution_digest(),
+                previous.original_execution_digest(),
+                "the later item must have a broader actual original context"
+            );
+            let earlier = previous.original_display_context().unwrap().declarations();
+            let later = admission.original_display_context().unwrap().declarations();
+            assert_eq!(
+                earlier.artifact_view().descriptors(),
+                later.artifact_view().descriptors()
+            );
+            assert_eq!(
+                earlier.compiler_input_projection(),
+                later.compiler_input_projection()
+            );
+            assert_eq!(earlier.lexical_graph(), later.lexical_graph());
+            let earlier_edges = earlier
+                .artifact_view()
+                .dependencies()
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            let later_edges = later
+                .artifact_view()
+                .dependencies()
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert!(earlier_edges.is_subset(&later_edges));
+            let additional = later_edges.difference(&earlier_edges).collect::<Vec<_>>();
+            assert!(!additional.is_empty());
+            assert!(additional.iter().all(|(_, _, dependency)| matches!(
+                dependency,
+                tidepool_toolchain::artifact_inventory::ArtifactDependency::NativeGroup { .. }
+            )));
+            // Another checked target demands additional groups in the same
+            // immutable carrier. Those edges retain preferred exact capture
+            // choices even though the input type and compiler roles are equal.
+            assert_ne!(
+                admission.original_context_digest(),
+                previous.original_context_digest()
+            );
+            assert!(!Arc::ptr_eq(
+                &admission.mounted.renderer_owner,
+                &previous.mounted.renderer_owner
+            ));
+        }
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let turn::ActivationPreviewCompilation::Ready(preview) =
+            compile_activation_preview(admission.clone(), &template, 512, &recipe.include).unwrap()
+        else {
+            panic!("Int input renders")
+        };
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before + 1);
+        if let Some(previous) = &previous_renderer {
+            assert!(!Arc::ptr_eq(previous, &preview.renderer));
+        }
+        previous_renderer = Some(preview.renderer.clone());
+        let ResidentOutcome::Completed { result, .. } =
+            tidepool_testing::with_settlement(|settlement| {
+                source.run_activation_preview(preview, settlement)
+            })
+            .unwrap()
+        else {
+            panic!("pure preview completes")
+        };
+        assert_eq!(
+            result.to_json(),
+            serde_json::json!([format!("{}", index / 2 + 41), false])
+        );
+        previous = Some(admission);
+        assert!(matches!(
+            fixture.resume_activation(&mut source, hole),
+            ResidentOutcome::Completed { .. }
+        ));
+        assert!(matches!(
+            settle_request_submission(&mut source, submission),
+            ResidentOutcome::Completed { .. }
+        ));
+    }
+}
+
+#[test]
 fn activation_preview_earlier_output_ignores_later_display_instance() {
     let fixture = InputFixture::compile(
         include_str!("fixtures/activation-input-opaque.hs"),
@@ -3328,6 +3627,86 @@ fn execute_mounted_input_preview(
 }
 
 #[test]
+fn display_owner_preserves_later_family_evidence_without_a_new_display_dictionary() {
+    let fixture = InputFixture::compile(
+        include_str!("fixtures/activation-input-opaque.hs"),
+        true,
+        SessionId(1845),
+    );
+    let mut resident = fixture.fresh();
+    let reservation = fixture.start(&mut resident);
+    let (_, hole) = fixture.deliver(&mut resident, reservation, 1);
+    let site = parked_site(&mut resident, &hole);
+    let earlier = resident
+        .capture_activation_input(&hole, RealmId::ROOT, site)
+        .unwrap();
+    let recipe = Arc::new(InputRecipe {
+        preamble: format!(
+            "{{-# LANGUAGE TypeFamilies #-}}\n{}",
+            fixture.recipe.preamble
+        ),
+        row: fixture.recipe.row.clone(),
+        include: fixture.recipe.include.clone(),
+    });
+    let family_owner = publish_fixture_declaration(
+        &mut resident,
+        &recipe,
+        include_str!("fixtures/activation-display-later-family.hs"),
+        0,
+    );
+    let execution = Arc::new(resident.begin_private_execution(ScopeId::ROOT).unwrap());
+    resident
+        .set_run_context(SessionRunContext {
+            lexical_scope: execution.private_scope(),
+            ..SessionRunContext::ROOT
+        })
+        .unwrap();
+    let (bound, producer, _) = compile_checked_binding(
+        &mut resident,
+        &recipe,
+        include_str!("fixtures/activation-input-opaque.hs"),
+        execution,
+    );
+    assert!(bound.is_empty());
+    let later_fixture = InputFixture {
+        root: tempfile::tempdir().unwrap(),
+        session: fixture.session,
+        recipe: recipe.clone(),
+        producer,
+    };
+    let reservation = later_fixture.start(&mut resident);
+    let (_, hole) = later_fixture.deliver(&mut resident, reservation, 2);
+    let site = parked_site(&mut resident, &hole);
+    let later = resident
+        .capture_activation_input(&hole, RealmId::ROOT, site)
+        .unwrap();
+    assert_eq!(
+        earlier.input_type_witness.original_bytes(),
+        later.input_type_witness.original_bytes()
+    );
+    assert!(earlier
+        .original_execution
+        .recovery_products()
+        .iter()
+        .all(|product| product.owner().module != family_owner));
+    assert!(later
+        .original_execution
+        .recovery_products()
+        .iter()
+        .any(|product| product.owner().module == family_owner));
+    assert_ne!(earlier.renderer_owner.identity, later.renderer_owner.identity, "a new family environment changes the complete display observation even without another Display dictionary");
+    assert!(!Arc::ptr_eq(&earlier.renderer_owner, &later.renderer_owner));
+    resident.set_run_context(SessionRunContext::ROOT).unwrap();
+    for input in [earlier, later] {
+        let (owner, interface) = issued_captured_input(&mut resident, input, recipe.clone());
+        assert_eq!(
+            execute_mounted_input_preview(&mut resident, owner, interface, &recipe),
+            serde_json::json!(["<opaque>", false])
+        );
+    }
+}
+
+#[test]
 fn activation_preview_selected_original_dictionary_without_native_body_is_unavailable() {
     let (root, recipe) = InputFixture::source_recipe(true);
     let home = root.path().join("home");
@@ -3418,10 +3797,7 @@ fn activation_preview_selected_original_dictionary_without_native_body_is_unavai
 
 #[test]
 fn activation_preview_type_only_original_context_is_unavailable_before_instance_probe() {
-    use tidepool_toolchain::activation_preview::{
-        ActivationPreviewSelection, ActivationPreviewSpecification,
-    };
-    use tidepool_toolchain::declaration_join::ExactCompileContext;
+    use tidepool_toolchain::activation_preview::OriginalDisplayContext;
     let fixture = ordinary_home_display_fixture(SessionId(1740));
     let mut resident = fixture.fresh();
     let (owner, interface) = parked_input_owner(&fixture, &mut resident);
@@ -3439,36 +3815,16 @@ fn activation_preview_type_only_original_context_is_unavailable_before_instance_
         .unwrap()
         .with_scoped_injection();
     let admission = resident.admit_activation_preview(mounted, view).unwrap();
-    let command = tidepool_extract_cmd::ExtractCmd::new().unwrap();
-    let endpoint = tidepool_toolchain::toolchain::AdmittedCompilerEndpoint::from_bound(
-        command.bind().unwrap(),
-    )
-    .unwrap();
-    let scratch = tempfile::tempdir().unwrap();
     let submissions = tidepool_extract_cmd::extract_spawn_count();
     let roots = resident.persistent_roots_count();
     let visibility = resident
         .public_visibility_snapshot_in(ScopeId::ROOT)
         .unwrap();
-    let selected = tidepool_toolchain::artifacts::ModuleCandidateOffer::select_activation_preview(
-        &endpoint,
-        &fixture.recipe.include,
-        scratch.path(),
-        Arc::new(ExactCompileContext::new(type_only)),
-        admission.input_interface().prototype().clone(),
-        ActivationPreviewSpecification {
-            original_context_digest: admission.original_context_digest(),
-            budget: 512,
-            template_source: turn::assemble_activation_preview_module(512),
-        },
-        admission.catalog_selection(),
-    )
-    .expect("genuine type-only authority may report missing original instance evidence");
+    let selected =
+        OriginalDisplayContext::issue(admission.input_interface().prototype(), &type_only)
+            .expect("genuine type-only authority may report missing original instance evidence");
     assert!(
-        matches!(
-            selected,
-            ActivationPreviewSelection::OriginalDisplayEvidenceUnavailable
-        ),
+        matches!(selected, None),
         "type-only evidence cannot prove Opaque or select child display code"
     );
     assert_eq!(
@@ -3476,7 +3832,6 @@ fn activation_preview_type_only_original_context_is_unavailable_before_instance_
         submissions,
         "no incomplete instance solver was invoked"
     );
-    assert!(!scratch.path().join("turn.cbor").exists());
     assert_eq!(resident.persistent_roots_count(), roots);
     assert_eq!(
         resident

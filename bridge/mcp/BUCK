@@ -213,6 +213,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//bridge/protocol:tidepool_protocol",
+        "//bridge/testing:tidepool_testing",
         "//exomonad/tool:exomonad_tool",
         "//third-party/rust:blake3",
         "//third-party/rust:frunk",
@@ -306,6 +307,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//bridge/protocol:tidepool_protocol",
+        "//bridge/testing:tidepool_testing",
         "//exomonad/tool:exomonad_tool",
         "//third-party/rust:blake3",
         "//third-party/rust:frunk",
@@ -394,6 +396,7 @@ tidepool_rust_isolated_test(
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
         "//bridge/protocol:tidepool_protocol",
+        "//bridge/testing:tidepool_testing",
         "//exomonad/tool:exomonad_tool",
         "//third-party/rust:blake3",
         "//third-party/rust:frunk",

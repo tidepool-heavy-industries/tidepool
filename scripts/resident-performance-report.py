@@ -243,6 +243,25 @@ def fields(event):
     return merged
 
 
+def retain_daemon_readiness(ready, row, problems):
+    """An epoch retains one owner; replay may carry new observation metadata."""
+    epoch = row.get("daemon_epoch")
+    if not isinstance(epoch, str) or not epoch.strip():
+        problems.append("compiler daemon readiness has no exact epoch")
+        return
+    previous = ready.get(epoch)
+    if previous is None:
+        ready[epoch] = row
+        return
+    owner_fields = ("producer", "daemon_pid", "executable", "worker", "run_id", "socket")
+    changed = [name for name in owner_fields
+               if type(previous.get(name)) is not type(row.get(name))
+               or previous.get(name) != row.get(name)]
+    if changed:
+        problems.append(f"compiler daemon epoch {epoch} has conflicting readiness ownership: "
+                        + ", ".join(changed))
+
+
 def invocation_identity(epoch, record, problems, label):
     """Return the unique transport invocation; the digest remains payload identity."""
     if not isinstance(record, dict):
@@ -292,7 +311,7 @@ def analyze(samples, events, manifest):
     for event in events:
         row = fields(event)
         if row.get("message") == "compiler daemon ready":
-            ready[row.get("daemon_epoch")] = row
+            retain_daemon_readiness(ready, row, problems)
         if row.get("message") == "compiler job dequeued" and "queue_ms" in row:
             queue.append(row["queue_ms"])
             admission_key = (row.get("daemon_epoch"), row.get("admission_id"))
@@ -533,7 +552,7 @@ def analyze_actors(rows, events, manifest):
     for event in events:
         row = fields(event)
         if row.get("message") == "compiler daemon ready":
-            ready[row.get("daemon_epoch")] = row
+            retain_daemon_readiness(ready, row, problems)
         if row.get("message") == "compiler job dequeued":
             admissions.setdefault((row.get("daemon_epoch"), row.get("admission_id")), []).append(row)
         if row.get("message") in ("compiler request started", "compiler request finished",

@@ -17,11 +17,14 @@ fn inferred_cells_compile_without_an_implicit_row_alias() {
             expression,
             tidepool_runtime::session::ExpressionLift::Effectful,
         );
-        tidepool_runtime::compile_haskell(
-            &source,
-            "result",
-            &[&installed.core, &installed.orchestration, &stdlib],
-        )
+        tidepool_testing::with_settlement(|settlement| {
+            tidepool_runtime::compile_haskell(
+                &source,
+                "result",
+                &[&installed.core, &installed.orchestration, &stdlib],
+                settlement,
+            )
+        })
     };
     compile("pure (41 :: Int)").expect("ordinary cells infer their selected executable row");
     let error = compile("pure (41 :: M)").expect_err("M requires an authored declaration");
@@ -59,11 +62,14 @@ fn concurrent_selected_profiles_enforce_membership_with_stable_vocabulary() {
         );
         source.push('\n');
         source.push_str(include_str!("fixtures/selected-effects.hs"));
-        tidepool_runtime::compile_haskell(
-            &source,
-            "result",
-            &[&installed.core, &installed.orchestration, &stdlib],
-        )
+        tidepool_testing::with_settlement(|settlement| {
+            tidepool_runtime::compile_haskell(
+                &source,
+                "result",
+                &[&installed.core, &installed.orchestration, &stdlib],
+                settlement,
+            )
+        })
     };
     std::thread::scope(|scope| {
         let allowed = scope.spawn(|| compile("'[ContextReadWrite]", "readContext"));

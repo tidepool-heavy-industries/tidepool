@@ -3,7 +3,7 @@ pub(super) use super::test_campaign::{
     dispatch_structured_tool,
 };
 use super::*;
-use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
+use exomonad_tool::{ToolArguments, ToolInvocation};
 use exomonad_worktree::WorktreeSpec;
 use std::error::Error as _;
 

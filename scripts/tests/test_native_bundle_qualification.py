@@ -956,7 +956,8 @@ class NativeQualificationTests(unittest.TestCase):
                                       'artifacts_retained_after_success': retained}})
                     return subprocess.CompletedProcess(command, 0)
 
-                def measurement(*args, compiler_allowance_selection_confirmed):
+                def measurement(*args, compiler_allowance_selection_confirmed, requested_trace_profile):
+                    self.assertEqual(requested_trace_profile, "minimal")
                     self.assertTrue(compiler_allowance_selection_confirmed)
                     records = args[1]
                     paths = args[2]
@@ -1070,10 +1071,11 @@ class NativeQualificationTests(unittest.TestCase):
                                 'TIDEPOOL_COMPILER_DEPLOYMENT': '/frozen/compiler/compiler-deployment.json'},
             }
             fixture.add_owner_summaries()
+            fixture.add_execution_capture(runner_path)
             measured = qualification.analyze_harness_performance(
                 descriptor, [record], [runner_path],
                 qualification.cohorts()['harness-performance'],
-                True, descriptor_path)
+                True, descriptor_path, requested_trace_profile="full")
             self.assertEqual(measured['status'], 'qualified')
             self.assertTrue(measured['completed'])
             self.assertTrue(measured['qualification']['prerequisites']['prepared_frozen_root_entry_matches_descriptor'])
@@ -1084,7 +1086,7 @@ class NativeQualificationTests(unittest.TestCase):
             refused_match = qualification.analyze_harness_performance(
                 descriptor, [record], [runner_path],
                 qualification.cohorts()['harness-performance'],
-                True, descriptor_path)
+                True, descriptor_path, requested_trace_profile="full")
             self.assertEqual(refused_match['status'], 'partial')
             self.assertFalse(refused_match['qualification']['prerequisites']['prepared_frozen_root_entry_matches_descriptor'])
 
@@ -1102,6 +1104,10 @@ class NativeQualificationTests(unittest.TestCase):
             "excessive_compiler_grant": "compiler_job_grants_complete",
             "conflicting_owners": "workload_request_service_joins_complete",
             "wrong_compiler_mode": "resident_compiler_mode_matches_cohort",
+            "missing_applied_receipt": "applied_trace_profile_confirmed",
+            "custom_observer": "applied_trace_profile_confirmed",
+            "missing_terminal": "applicable_execution_observations_complete",
+            "wrong_requested_profile": "trace_profile_selection_matches_owner",
         }
         for mutation, refused_dimension in mutations.items():
             with self.subTest(mutation=mutation):
@@ -1111,7 +1117,17 @@ class NativeQualificationTests(unittest.TestCase):
                 runner_path = fixture.make_complete_case()
                 phase_path = fixture.root / "artifacts/phases.jsonl"
                 phases = reporter.read_jsonl(phase_path)
-                if mutation == "short_unknown_roster":
+                if mutation == "missing_applied_receipt":
+                    phases[0].pop("campaign_trace_capture")
+                elif mutation == "custom_observer":
+                    phases[0]["campaign_trace_capture"]["status"] = "existing_unverified"
+                elif mutation == "missing_terminal":
+                    host_path = fixture.root / "artifacts/host.jsonl"
+                    host = reporter.read_jsonl(host_path)
+                    fixture.write_jsonl(host_path, [row for row in host
+                        if not (row["fields"].get("message") == "call timing"
+                                and row["fields"].get("execution") == "exec-3")])
+                elif mutation == "short_unknown_roster":
                     phases[0].update(workload_cohort="typo-cohort", workload_roster=["reuse-retained"])
                     only_phase = next(phase for phase in phases if phase["phase"] == "reuse-retained")
                     only_phase["sequence"] = 0
@@ -1171,7 +1187,7 @@ class NativeQualificationTests(unittest.TestCase):
                     fixture.add_owner_summaries()
                 measured = qualification.analyze_harness_performance(
                     descriptor, [record], [runner_path], qualification.cohorts()["harness-performance"],
-                    True, descriptor_path)
+                    True, descriptor_path, requested_trace_profile="minimal" if mutation == "wrong_requested_profile" else "full")
                 self.assertEqual(measured["completed"], mutation in ("control", "capacity_capped_grant"))
                 self.assertTrue(measured["qualification"]["prerequisites"]["counted_behavior_passed"])
                 if refused_dimension:

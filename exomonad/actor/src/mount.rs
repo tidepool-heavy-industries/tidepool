@@ -950,6 +950,49 @@ mod source_authority_tests {
     use super::*;
     use std::sync::Arc;
 
+    #[test]
+    fn released_certified_facade_capture_refuses_all_retained_observations() {
+        use tidepool_runtime::session::{ModuleEnv, PersistentSession, SessionLib};
+
+        let root = tempfile::tempdir().unwrap();
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let mut lib = SessionLib::open(
+            SessionId(9921),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+        let recovery = crate::recovery::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement));
+        let mut session = PersistentSession::new(Some(lib), tidepool_runtime::DEFAULT_NURSERY_SIZE);
+        tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_in(ScopeId::ROOT, &["data Selected = Selected Int"], settlement)
+        })
+        .unwrap();
+        let surface = session
+            .exact_exports_in(ScopeId::ROOT, &["Selected"])
+            .unwrap();
+        let view = session.compile_view_in(ScopeId::ROOT).unwrap();
+        let facade =
+            tidepool_testing::with_settlement(|settlement| surface.materialize(&view, settlement))
+                .unwrap();
+        let projection = Arc::downgrade(facade.projection().unwrap());
+        let imports = ActorSourceImports::from_exact_facades([&facade]);
+        let retained = imports.clone();
+        assert_eq!(imports.declaration_projections().unwrap().len(), 1);
+        drop(facade);
+        assert!(projection.upgrade().is_some());
+        imports.release_capture();
+        assert!(projection.upgrade().is_none());
+        for observation in [&imports, &retained] {
+            assert!(matches!(
+                observation.declaration_projections(),
+                Err(ActorCompileViewError::ReleasedDeclarationCapture)
+            ));
+        }
+    }
+
     struct RetainedTree {
         _tree: Arc<tempfile::TempDir>,
         identities: Vec<String>,
