@@ -334,7 +334,9 @@ fn wire_program_with_bindings(
         array(expressions),
         array(bindings),
         uint(u64::from(entry)),
-        array([]),
+        // Canonical TypeGraph::default() encoding: version 1, no nodes or
+        // edges. An empty array here omits the required graph record.
+        array([uint(1), array([]), array([])]),
         array([]),
         // `constructor_replies`: none in this native fixture.
         array([]),
@@ -653,7 +655,9 @@ fn mixed_result_wire(binding_count: u8) -> Vec<u8> {
         array(expressions),
         array(bindings),
         uint(0),
-        array([]),
+        // Canonical TypeGraph::default() encoding: version 1, no nodes or
+        // edges. An empty array here omits the required graph record.
+        array([uint(1), array([]), array([])]),
         array([]),
         // `constructor_replies`: none in this native fixture.
         array([]),

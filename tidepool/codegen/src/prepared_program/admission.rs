@@ -454,7 +454,10 @@ mod tests {
             array(expressions),
             array(bindings),
             uint(0),
-            array([]),
+            // Canonical typed encoding of TypeGraph::default(): version 1,
+            // with no nodes or edges. The old empty array omitted the graph
+            // record itself and was rejected by the strict schema reader.
+            array([uint(1), array([]), array([])]),
             array([]),
             // `verb_sites`: none in a synthetic program.
             array([]),

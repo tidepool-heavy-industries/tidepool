@@ -12583,8 +12583,8 @@ mod tests {
         bindings.seed_detached_scope(&scopes, first, second);
         assert_eq!(
             bindings.lease_count(old),
-            2,
-            "the second capture must inherit the hidden dependency"
+            1,
+            "the second capture shares the inherited physical lease"
         );
         for scope in scopes.retire(original) {
             bindings.drain_scope(scope);
@@ -12681,21 +12681,25 @@ mod tests {
             .expect("same-scope alias");
         let source = scopes.mint_isolated();
         bindings.seed_detached_scope(&scopes, original, source);
-        assert_eq!(bindings.lease_count(value), 2);
+        assert_eq!(
+            bindings.lease_count(value),
+            1,
+            "the source capture shares the receiver's existing value lease"
+        );
         assert_eq!(bindings.lease_count(alias), 1);
 
         assert!(bindings.retain_scope_dependencies(&scopes, source, receiver));
         assert_eq!(
             bindings.lease_count(value),
-            2,
-            "receiver already owns the alias dependency"
+            1,
+            "receiver shares the existing value lease through the alias"
         );
         assert_eq!(bindings.lease_count(alias), 2);
         assert!(bindings.retain_scope_dependencies(&scopes, source, receiver));
         assert_eq!(
             bindings.lease_count(value),
-            2,
-            "repeat import remains balanced"
+            1,
+            "repeat import keeps the shared value lease balanced"
         );
         assert_eq!(bindings.lease_count(alias), 2);
 
