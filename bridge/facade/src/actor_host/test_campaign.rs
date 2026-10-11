@@ -3,7 +3,6 @@
 use super::*;
 use exomonad_tool::{
     ConversationOrigin, OriginalOperation, ToolArguments, ToolInvocation, ToolInvocationContext,
-    ToolInvocationOrigin,
 };
 use serde_json::Value;
 
@@ -33,11 +32,7 @@ pub(super) fn original_tool_call(
     ToolInvocationContext,
     tidepool_runtime::session::ContextCheckpointBoundary,
 ) {
-    let invocation = ToolInvocationContext {
-        call_id: operation.call_id.clone(),
-        origin: ToolInvocationOrigin::Model(operation.clone()),
-        namespace: None,
-    };
+    let invocation = ToolInvocationContext::original(operation.clone());
     (
         invocation,
         tidepool_runtime::session::ContextCheckpointBoundary::Hosted(operation),

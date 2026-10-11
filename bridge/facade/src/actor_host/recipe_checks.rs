@@ -5,7 +5,9 @@ use super::model_free::ModelFreeSession;
 use super::*;
 use crate::exomonad::workspace::FrozenWorkspace;
 use crate::generated::recipe_check::RecipeCheckReq;
-use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
+use exomonad_tool::{
+    ConversationOrigin, OriginalOperation, ToolArguments, ToolInvocation, ToolInvocationContext,
+};
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::future::Future;
@@ -301,15 +303,16 @@ impl Driver {
     async fn turn(&mut self, key: CheckActor, source: String) -> Result<String> {
         let endpoint = self.installation(key)?.policy.clone();
         let call_id = uuid::Uuid::new_v4().simple().to_string();
+        let operation = OriginalOperation {
+            origin: ConversationOrigin::External {
+                thread_id: "recipe-check".into(),
+            },
+            request_id: call_id.clone(),
+            call_id,
+        };
         let result = self
             .pump(endpoint.dispatch_boxed(ToolInvocation {
-                context: Some(ToolInvocationContext::external(
-                    "recipe-check".into(),
-                    call_id.clone(),
-                    call_id.clone(),
-                    Some(call_id.clone()),
-                    Some("haskell".into()),
-                )),
+                context: Some(ToolInvocationContext::original(operation.clone())),
                 name: exomonad_actor::HASKELL_TOOL.into(),
                 arguments: ToolArguments::Raw(source.clone()),
             }))
@@ -317,11 +320,7 @@ impl Driver {
         // Complete the actual admitting tool boundary before another actor is driven.
         let completion = self
             .pump(endpoint.complete_boxed(
-                tidepool_runtime::session::ContextCheckpointBoundary::external(
-                    "recipe-check".into(),
-                    call_id.clone(),
-                    call_id,
-                ),
+                tidepool_runtime::session::ContextCheckpointBoundary::Hosted(operation),
             ))
             .await?;
         let result = result.map_err(|error| {

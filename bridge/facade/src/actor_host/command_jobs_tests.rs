@@ -1,9 +1,11 @@
 use super::command_test_support::TestCommands;
-use super::test_campaign::TestCampaign;
+use super::test_campaign::{original_tool_call, TestCampaign};
 use super::tests::{dispatch_haskell_script, dispatch_lookup};
 use super::*;
 use exomonad_actor::command_jobs::{CommandBackendPurpose, CommandControl};
-use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
+use exomonad_tool::{
+    ConversationOrigin, OriginalOperation, ToolArguments, ToolInvocation, ToolInvocationContext,
+};
 use tidepool_bridge_effects::*;
 
 pub(super) async fn committed(campaign: &TestCampaign, source: &str) -> serde_json::Value {
@@ -1636,14 +1638,15 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
                 let backend = TestCommands::new();
                 *backend.stdout.lock() = "first".into();
                 let call_id = uuid::Uuid::new_v4().to_string();
+                let (context, boundary) = original_tool_call(OriginalOperation {
+                    origin: ConversationOrigin::External {
+                        thread_id: "disconnected-command-wait".into(),
+                    },
+                    request_id: call_id.clone(),
+                    call_id,
+                });
                 let invocation = || ToolInvocation {
-                    context: Some(ToolInvocationContext::external(
-                        "disconnected-command-wait".into(),
-                        call_id.clone(),
-                        call_id.clone(),
-                        Some(call_id.clone()),
-                        Some("haskell".into()),
-                    )),
+                    context: Some(context.clone()),
                     name: exomonad_actor::HASKELL_TOOL.into(),
                     arguments: ToolArguments::Raw(tidepool_testing::fixture_source(
                         "bridge/facade/src/actor_host/command_wait_continuation.hs",
@@ -1685,16 +1688,7 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
                     recovered.to_string().contains("suffix-resumed"),
                     "{recovered}"
                 );
-                policy
-                    .complete_boxed(
-                        tidepool_runtime::session::ContextCheckpointBoundary::external(
-                            "disconnected-command-wait".into(),
-                            call_id.clone(),
-                            call_id,
-                        ),
-                    )
-                    .await
-                    .unwrap();
+                policy.complete_boxed(boundary).await.unwrap();
                 let retained = committed(campaign, "Cmd.stdout (fst attempt)").await;
                 assert!(retained.to_string().contains("first"), "{retained}");
                 for backend in [&backend, &second, &suffix] {

@@ -949,11 +949,7 @@ impl From<ToolInvocationContext> for WorkbenchCallKey {
 
 impl WorkbenchCallKey {
     pub(crate) fn original(operation: &exomonad_tool::OriginalOperation) -> Self {
-        Self(ToolInvocationContext {
-            origin: exomonad_tool::ToolInvocationOrigin::Model(operation.clone()),
-            call_id: operation.call_id.clone(),
-            namespace: None,
-        })
+        Self(ToolInvocationContext::original(operation.clone()))
     }
 
     pub(crate) fn invocation(&self) -> &ToolInvocationContext {
@@ -1894,9 +1890,16 @@ mod tests {
             ..first.0.clone()
         });
         let boundary = ContextCheckpointBoundary::Hosted(original.clone());
-        let owner = WorkbenchCallKey::original(&original);
+        let owner = WorkbenchCallKey::from(ToolInvocationContext::original(original.clone()));
+        let namespaced = WorkbenchCallKey::from(ToolInvocationContext {
+            namespace: Some("haskell".into()),
+            ..ToolInvocationContext::original(original.clone())
+        });
         assert!(owner.is_original_invocation());
         assert!(owner.matches_boundary(&boundary));
+        assert!(!namespaced.is_original_invocation());
+        assert!(namespaced.matches_boundary(&boundary));
+        assert_ne!(owner, namespaced);
         assert!(!first.is_original_invocation());
         assert!(!second.is_original_invocation());
         assert_ne!(owner, first);

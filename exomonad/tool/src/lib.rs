@@ -266,6 +266,16 @@ pub struct ToolInvocationContext {
 }
 
 impl ToolInvocationContext {
+    /// Invoke the original operation itself, rather than a nested local call.
+    #[must_use]
+    pub fn original(operation: OriginalOperation) -> Self {
+        Self {
+            call_id: operation.call_id.clone(),
+            origin: ToolInvocationOrigin::Model(operation),
+            namespace: None,
+        }
+    }
+
     #[must_use]
     pub fn external(
         thread_id: String,
