@@ -23,11 +23,21 @@ use crate::{ActorSessionContext, ResidentActorRunner};
 
 use super::{ActorMachineRegistry, WorkbenchCompilationAuthority, WorkbenchPublicOwner};
 
-#[derive(Default)]
 struct PublicationGate {
+    pauses: usize,
     attempts: AtomicUsize,
     reached: tokio::sync::Notify,
     release: tokio::sync::Notify,
+}
+impl Default for PublicationGate {
+    fn default() -> Self {
+        Self {
+            pauses: 2,
+            attempts: AtomicUsize::new(0),
+            reached: Default::default(),
+            release: Default::default(),
+        }
+    }
 }
 
 tokio::task_local! {
@@ -38,7 +48,7 @@ pub(in crate::resident_actor) async fn before_publication_attempt() {
     let Ok(gate) = GATE.try_with(Arc::clone) else {
         return;
     };
-    if gate.attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+    if gate.attempts.fetch_add(1, Ordering::SeqCst) < gate.pauses {
         gate.reached.notify_one();
         gate.release.notified().await;
     }
@@ -331,6 +341,171 @@ async fn counted_publication_history() {
     assert_eq!(
         recovery.public_owner(&durable_owners[1]),
         unrelated_confirmed
+    );
+    checkout.restore_suspended(Vec::new());
+}
+
+#[tokio::test]
+async fn activation_metadata_retry_preserves_input_and_unrelated_public_owner() {
+    let mut compiler = crate::CompilerPreparationOwner::new();
+    let cleanup = compiler.cleanup();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        compiler.scope(activation_metadata_history()),
+    ))
+    .await;
+    assert!(cleanup
+        .wait_for_settlement(Duration::from_secs(5))
+        .await
+        .is_confirmed());
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+async fn activation_metadata_history() {
+    let mut recovery = None;
+    let (mut session, mut context, source, parked, _root) =
+        crate::resident_workbench::request_tests::activation_session_fixture(|lib| {
+            let fixture =
+                crate::recovery::recovery_test_fixture::RecoveryFixture::create(lib.include_dir());
+            tidepool_testing::with_settlement(|settlement| fixture.attach_root(lib, settlement));
+            recovery = Some(fixture);
+        });
+    let recovery = recovery.unwrap();
+    let mut inputs = Vec::new();
+    for (hole, input) in parked {
+        let _ = session.abort(hole.cont_id(), "retain original activation input".into());
+        inputs.push(input);
+    }
+    let input = inputs.remove(0);
+    let mut owners = Vec::new();
+    let mut durable_owners = Vec::new();
+    for name in ["activation-retry", "activation-unrelated"] {
+        let path = tidepool_repr::ActorPath::parse(&format!("root/{name}")).unwrap();
+        let durable = RecoveryPublicOwner::new(&path, context.actor.incarnation.0).unwrap();
+        let scope = session.mint_scope(ScopeId::ROOT).unwrap();
+        session
+            .initialize_durable_public_scope(durable.clone(), scope)
+            .unwrap();
+        let mut public = context.clone();
+        public.placement.lexical_scope = scope;
+        let descriptor = crate::ActorDescriptor::new(name, public.placement)
+            .with_actor_path(path)
+            .with_persistence_policy(crate::ActorPersistencePolicy::Durable);
+        let readiness = session.durable_public_readiness(&durable, scope).unwrap();
+        let owner = WorkbenchPublicOwner::issue(&public, &descriptor, Some(readiness)).unwrap();
+        owners.push((public, owner));
+        durable_owners.push(durable);
+    }
+    context = owners[0].0.clone();
+    let before_unrelated = recovery.public_owner(&durable_owners[1]);
+    let machines = Arc::new(ActorMachineRegistry::new());
+    machines.insert_idle(context.placement.session, Box::new(session));
+    let runner = ResidentActorRunner::new(Arc::clone(&machines), source);
+    let (mut private, authority) =
+        WorkbenchCompilationAuthority::admit(context.clone(), Default::default(), None, None)
+            .unwrap();
+    let execution = Arc::new(
+        runner
+            .begin_private_execution(
+                context.clone(),
+                Arc::clone(&owners[0].1),
+                PublicationDecision::new(),
+            )
+            .await
+            .unwrap(),
+    );
+    private.placement.lexical_scope = execution.private_scope;
+    let workbench = runner
+        .application_workbench()
+        .with_compilation_authority(authority)
+        .with_private_execution(Arc::clone(&execution));
+    let prepared = workbench
+        .mount_activation_input(private.clone(), input, None, "()".into(), None, vec![])
+        .await
+        .unwrap();
+    let original_binding = prepared.binding;
+    let requests = Arc::new(crate::request::RequestRegistry::default());
+    let requester = crate::ActorRef::first(crate::ActorId(context.actor.id.0 + 100));
+    let request = requests.reserve(requester, context.actor);
+    requests
+        .mark_queued(requester, context.actor, request)
+        .unwrap();
+    requests
+        .present_with_progress_type(context.actor, request, None)
+        .unwrap();
+    let gate = Arc::new(PublicationGate {
+        pauses: 1,
+        ..Default::default()
+    });
+    let timing = crate::call_timing::CallScope::new("activation-metadata", 1, 1);
+    let publishing = GATE.scope(
+        Arc::clone(&gate),
+        timing.run(runner.publish_activation_input(
+            private,
+            &prepared,
+            requests,
+            request,
+            crate::RetainedActorExit::default(),
+            None,
+        )),
+    );
+    tokio::pin!(publishing);
+    tokio::select! {
+        _ = &mut publishing => panic!("activation skipped staged retry barrier"),
+        _ = gate.reached.notified() => {}
+    }
+    let interfering_owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/activation-interference").unwrap(),
+        context.actor.incarnation.0,
+    )
+    .unwrap();
+    let next_identity = {
+        let mut checkout = machines.checkout_run(context.placement.session).unwrap();
+        let session = checkout.machine();
+        let next_identity = session.next_declaration_module();
+        let scope = session.mint_scope(ScopeId::ROOT).unwrap();
+        session
+            .initialize_durable_public_scope(interfering_owner.clone(), scope)
+            .unwrap();
+        assert_eq!(session.next_declaration_module(), next_identity);
+        checkout.restore_suspended(Vec::new());
+        next_identity
+    };
+    let interference_surface = recovery.public_owner(&interfering_owner);
+    gate.release.notify_one();
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(60), &mut publishing)
+            .await
+            .unwrap()
+            .unwrap(),
+        crate::resident_workbench::ActivationInputPublication::Published(_)
+    ));
+    assert_eq!(gate.attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        timing.compile_count(),
+        0,
+        "activation metadata retries register no compiler work"
+    );
+    assert_eq!(execution.decision.phase(), PublicationPhase::Published);
+    assert_eq!(recovery.public_owner(&durable_owners[1]), before_unrelated);
+    let mut checkout = machines.checkout_run(context.placement.session).unwrap();
+    assert_eq!(
+        checkout
+            .machine()
+            .current_binding_in(context.placement.lexical_scope, "sessionInput")
+            .unwrap()
+            .0,
+        original_binding
+    );
+    assert_eq!(
+        checkout.machine().next_declaration_module(),
+        next_identity,
+        "binding-only retry reserves no join"
+    );
+    assert_eq!(
+        recovery.public_owner(&interfering_owner),
+        interference_surface
     );
     checkout.restore_suspended(Vec::new());
 }

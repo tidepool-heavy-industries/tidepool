@@ -52,6 +52,8 @@ struct AuthoredWrite {
 /// The private scope keeps live roots owned until publication or abandonment.
 pub struct FinalExecutionIntent {
     owner_stamp: super::OwnerStamp,
+    library: uuid::Uuid,
+    private_view: [u8; 32],
     durable_owner: Option<RecoveryPublicOwner>,
     _private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
     admitted: PublicVisibilitySnapshot,
@@ -315,7 +317,7 @@ fn paired_version(base: &PublicManifestBase) -> String {
     let bytes = serde_json::to_vec(&serde_json::json!({
         "schema": "tidepool-paired-declaration-baseline-v3", "session": base.session.0,
         "owner": base.owner_stamp.owner.identity(), "epoch": base.owner_stamp.epoch,
-        "target": target,
+        "target": target, "library": base.semantic.library,
         "public": snapshot_digest(&base.semantic.expected_public), "private": snapshot_digest(&base.semantic.expected_private),
         "public_view": base.semantic.public_view, "private_view": base.semantic.private_view,
     })).expect("paired baseline contains serializable identities");
@@ -486,7 +488,9 @@ impl PersistentSession {
     ) -> Result<Arc<FinalExecutionIntent>, SessionError> {
         if !Arc::ptr_eq(&admission.owner, self.admission_owner())
             || admission.owner_epoch != self.admission_owner().epoch()
+            || !self.has_lib()
             || admission.view().session() != self.lib().session_id()
+            || admission.library != self.lib().compile_view_identity
             || self.binding_tip_id(admission.private_scope()) != Some(admission.binding_tip())
         {
             return Err(SessionError::StaleStagedDeclaration);
@@ -496,6 +500,8 @@ impl PersistentSession {
                 .public_visibility_snapshot_in(admission.private_scope())
                 .as_ref()
                 != Some(&intent.private)
+                || intent.library != self.lib().compile_view_identity
+                || self.compile_view_digest_in(intent.private.scope) != Some(intent.private_view)
             {
                 return Err(SessionError::StaleStagedDeclaration);
             }
@@ -692,6 +698,10 @@ impl PersistentSession {
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
         Ok(Arc::new(FinalExecutionIntent {
             owner_stamp: super::OwnerStamp::capture(self.admission_owner()),
+            library: lib.compile_view_identity,
+            private_view: self
+                .compile_view_digest_in(private_scope)
+                .ok_or(SessionError::StaleStagedDeclaration)?,
             durable_owner,
             _private_scope_lease: private_scope_lease,
             admitted: admitted.clone(),
@@ -773,7 +783,11 @@ impl PersistentSession {
         owner: Option<RecoveryPublicOwner>,
         intent: Arc<FinalExecutionIntent>,
     ) -> Result<CapturedDeclarationPublication, SessionError> {
-        if !intent.owner_stamp.matches(self.admission_owner()) {
+        if !intent.owner_stamp.matches(self.admission_owner())
+            || !self.has_lib()
+            || intent.library != self.lib().compile_view_identity
+            || self.compile_view_digest_in(intent.private.scope) != Some(intent.private_view)
+        {
             return Err(SessionError::StaleStagedDeclaration);
         }
         if intent.durable_owner != owner {
@@ -890,6 +904,9 @@ impl PersistentSession {
         }
         if !self.has_lib() {
             return Err(SessionError::MissingDeclarationLibrary);
+        }
+        if base.semantic.library != self.lib().compile_view_identity {
+            return Err(SessionError::StaleStagedDeclaration);
         }
         if self
             .public_visibility_snapshot_in(base.private_scope)

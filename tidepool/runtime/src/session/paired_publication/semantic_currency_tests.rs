@@ -223,6 +223,74 @@ fn declaration_rejection_baseline_refuses_retired_public_owner() {
     ));
 }
 
+#[test]
+fn library_replacement_under_same_runtime_owner_refuses_held_publication_and_intent() {
+    let root = tempfile::tempdir().unwrap();
+    let lib = SessionLib::open(
+        SessionId(9895),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap();
+    let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+    let public = session.mint_scope(ScopeId::ROOT).unwrap();
+    let admission = session.begin_private_execution(public).unwrap();
+    let intent = session
+        .freeze_execution_intent(&admission, vec![], vec![])
+        .unwrap();
+    let ExecutionPublication::Bindings(base) = session
+        .restage_ephemeral_execution_publication(intent.clone())
+        .unwrap()
+    else {
+        panic!("bindings")
+    };
+    let before_first_freeze = session.begin_private_execution(public).unwrap();
+    let certified = CertifiedPublication::Bindings(base.clone());
+    let ticket = base.clone().stage().unwrap();
+    let library = SessionLib::open(
+        SessionId(9895),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap();
+    *session.lib_mut() = library;
+    assert!(matches!(
+        session.freeze_execution_intent(&before_first_freeze, vec![], vec![]),
+        Err(SessionError::StaleStagedDeclaration)
+    ));
+    assert!(matches!(
+        session.compile_view_for_execution(&before_first_freeze),
+        Err(SessionError::StaleStagedDeclaration)
+    ));
+    assert!(matches!(
+        session
+            .attempt_public_manifest(ticket, &PublicationDecision::new())
+            .unwrap(),
+        PublicationAttempt::Settled(PublicManifestCommit::Refused { .. })
+    ));
+    assert!(matches!(
+        session.restage_publication_metadata(certified).unwrap(),
+        PublicationAttempt::Settled(PublicManifestCommit::Refused { .. })
+    ));
+    assert!(matches!(
+        session.restage_ephemeral_execution_publication(intent),
+        Err(SessionError::StaleStagedDeclaration)
+    ));
+    assert!(matches!(
+        session.declaration_baseline_is_current(&base),
+        Err(SessionError::StaleStagedDeclaration)
+    ));
+    let _removed_library = session.take_lib().unwrap();
+    assert!(matches!(
+        session.freeze_execution_intent(&before_first_freeze, vec![], vec![]),
+        Err(SessionError::StaleStagedDeclaration)
+    ));
+    assert!(matches!(
+        session.compile_view_for_execution(&before_first_freeze),
+        Err(SessionError::StaleStagedDeclaration)
+    ));
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config { cases: 32, ..proptest::test_runner::Config::default() })]
     #[test]

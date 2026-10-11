@@ -139,6 +139,7 @@ impl NativeSetupInputInventory {
 /// Its scope retains exact binding and native shares through the existing
 /// binding-store owner; completion must retire that scope once.
 pub struct PrivateExecutionAdmission {
+    pub(super) library: uuid::Uuid,
     pub(super) owner: Arc<RuntimeAdmissionOwner>,
     pub(super) owner_epoch: u64,
     pub(super) durable_owner: Option<super::RecoveryPublicOwner>,
@@ -2272,6 +2273,7 @@ impl PersistentSession {
             .binding_tip_id(private_scope)
             .expect("detached scope captures a binding tip");
         let prepared = PrivateExecutionAdmission {
+            library: self.lib().compile_view_identity,
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
             durable_owner,
@@ -2993,7 +2995,9 @@ impl PersistentSession {
     ) -> Result<SessionCompileView, SessionError> {
         if !Arc::ptr_eq(&execution.owner, self.admission_owner())
             || execution.owner_epoch != self.admission_owner().epoch()
+            || !self.has_lib()
             || execution.view().session() != self.lib().session_id()
+            || execution.library != self.lib().compile_view_identity
             || self.binding_tip_id(execution.private_scope()) != Some(execution.binding_tip())
         {
             return Err(SessionError::StaleStagedDeclaration);

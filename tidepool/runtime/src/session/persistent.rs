@@ -3079,6 +3079,7 @@ impl PersistentSession {
             .as_ref()
             .ok_or(SessionError::MissingDeclarationLibrary)?;
         let semantic = super::PublicationSemanticBase {
+            library: lib.compile_view_identity,
             expected_public,
             expected_private,
             public_view: self
@@ -3146,6 +3147,10 @@ impl PersistentSession {
         if !old.owner_stamp.matches(self.admission_owner())
             || !self.scopes.is_live(old.public_scope)
             || !self.scopes.is_live(old.private_scope)
+            || self
+                .lib
+                .as_ref()
+                .is_none_or(|lib| lib.compile_view_identity != old.semantic.library)
         {
             return Ok(super::PublicationAttempt::Settled(
                 PublicManifestCommit::Refused {
@@ -3195,6 +3200,10 @@ impl PersistentSession {
         if !ticket.owner_stamp.matches(self.admission_owner())
             || !self.scopes.is_live(ticket.public_scope)
             || !self.scopes.is_live(ticket.private_scope)
+            || self
+                .lib
+                .as_ref()
+                .is_none_or(|lib| lib.compile_view_identity != ticket.semantic.library)
         {
             return Ok(super::PublicationAttempt::Settled(
                 PublicManifestCommit::Refused {

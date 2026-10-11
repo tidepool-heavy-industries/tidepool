@@ -37,7 +37,7 @@ pub(crate) mod invocation_work;
 mod jev_form_runtime_tests;
 mod owned_workbench;
 #[cfg(test)]
-pub(crate) async fn before_private_publication_attempt() {
+pub(crate) async fn before_publication_attempt() {
     owned_workbench::counting_publication_tests::before_publication_attempt().await;
 }
 

@@ -7870,6 +7870,8 @@ where
             .await
             .map_err(ResidentActorWorkbenchError::Join)?
             .map_err(ResidentError::Session)?;
+            #[cfg(test)]
+            crate::resident_actor::before_publication_attempt().await;
             crate::call_timing::publication_attempt(ticket.reserved_generation());
             let native_resources = resources.clone();
             let native_requests = requests.clone();
@@ -8131,7 +8133,7 @@ where
             match prepared {
                 PreparedExecutionPublication::Manifest(ticket) => {
                     #[cfg(test)]
-                    crate::resident_actor::before_private_publication_attempt().await;
+                    crate::resident_actor::before_publication_attempt().await;
                     crate::call_timing::publication_attempt(ticket.reserved_generation());
                     let decision = execution.decision.clone();
                     let outcome = self
@@ -8193,7 +8195,10 @@ where
                         })?;
                     match outcome {
                         tidepool_runtime::session::DeclarationPublicationRejection::Stale => {
-                            continue
+                            crate::call_timing::publication_retry(
+                                crate::call_timing::PublicationRetryReason::Semantic,
+                            );
+                            continue;
                         }
                         tidepool_runtime::session::DeclarationPublicationRejection::Rejected {
                             reason,

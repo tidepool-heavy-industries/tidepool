@@ -516,6 +516,7 @@ impl OwnerStamp {
 /// Exact relevant visibility and scoped compiler commitments; allocation is excluded.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PublicationSemanticBase {
+    library: uuid::Uuid,
     expected_public: PublicVisibilitySnapshot,
     expected_private: PublicVisibilitySnapshot,
     public_view: [u8; 32],
