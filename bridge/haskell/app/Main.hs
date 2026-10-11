@@ -207,12 +207,15 @@ data RecoveryCaches = RecoveryCaches
 scopeRecoveryCaches :: CompilerScope -> RecoveryCaches
 scopeRecoveryCaches scope = RecoveryCaches (scopedRecoveryCaches scope) (scopedExecutor scope) (pure Nothing)
 
--- | Serve one typed request. Stdout contains exactly one diagnostics document;
--- stderr is the human-readable channel.
+-- | Serve one typed request, or answer the role probe before compiler setup.
+-- For requests, stdout contains exactly one diagnostics document; stderr is
+-- the human-readable channel.
 main :: IO ()
 main = do
   rawWorkerRequest <- getArgs
-  if rawWorkerRequest == ["--print-worker-request-flag"]
+  if rawWorkerRequest == ["--print-tidepool-role-v1"]
+    then putStrLn "tidepool-extractor-role-v1 worker" >> exitWith ExitSuccess
+  else if rawWorkerRequest == ["--print-worker-request-flag"]
     then putStrLn workerRequestFlag >> exitWith ExitSuccess
   else if rawWorkerRequest == ["--worker-loop-v2"]
     then do

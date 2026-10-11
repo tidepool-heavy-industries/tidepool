@@ -21,6 +21,12 @@ const OWNED_COMPILER_ENV: [&str; 6] = [
 const USAGE: &str = "Usage: tidepool-extract [OPTIONS] <file.hs> ...";
 
 pub fn run(args: Vec<OsString>) -> Result<u8, FrontendError> {
+    if args.as_slice() == [OsString::from(crate::EXTRACTOR_ROLE_PROBE_FLAG)] {
+        io::stdout()
+            .write_all(crate::EXTRACTOR_FRONTEND_ROLE_RESPONSE)
+            .map_err(FrontendError::Io)?;
+        return Ok(0);
+    }
     crate::process::current_process_dies_with_parent().map_err(FrontendError::Io)?;
     if args.is_empty() {
         return Err(FrontendError::Usage(USAGE.to_owned()));

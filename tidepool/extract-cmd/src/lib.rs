@@ -21,6 +21,13 @@ use std::process::Output;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+/// Exact argument used by the versioned extractor-role probe.
+pub const EXTRACTOR_ROLE_PROBE_FLAG: &str = "--print-tidepool-role-v1";
+/// Exact successful stdout response identifying the Rust CLI frontend.
+pub const EXTRACTOR_FRONTEND_ROLE_RESPONSE: &[u8] = b"tidepool-extractor-role-v1 frontend\n";
+/// Exact successful stdout response identifying the Haskell compiler worker.
+pub const EXTRACTOR_WORKER_ROLE_RESPONSE: &[u8] = b"tidepool-extractor-role-v1 worker\n";
+
 mod daemon;
 pub mod diagnostics;
 mod endpoint;
@@ -146,15 +153,15 @@ pub fn reset_extract_spawn_count() {
     EXTRACT_SPAWNS.store(0, Ordering::SeqCst);
 }
 
-/// Run the extractor's no-input role probe through the process-boundary owner.
+/// Run the extractor's versioned role probe through the process-boundary owner.
 ///
 /// A probe performs no compilation and therefore does not increment
-/// [`extract_spawn_count`]. Callers interpret the returned banner according to
-/// their own frontend/worker compatibility policy.
+/// [`extract_spawn_count`]. It captures stdout for the caller's exact protocol
+/// check and keeps stderr separate from machine identity.
 pub fn probe_binary(path: &Path) -> std::io::Result<Output> {
     process::command(path)
+        .arg(EXTRACTOR_ROLE_PROBE_FLAG)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
         .output()
 }
 
@@ -1205,6 +1212,33 @@ mod tests {
         let run = endpoint.execute(&cmd).unwrap();
         assert!(!run.success());
         assert_eq!(extract_spawn_count(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn role_probe_does_not_count_as_a_compiler_spawn() {
+        let _state = PROCESS_STATE.lock().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "tidepool-extract-cmd-role-probe-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake-extract");
+        std::fs::write(
+            &fake,
+            b"#!/bin/sh\ntest \"$1\" = --print-tidepool-role-v1 || exit 4\nprintf 'tidepool-extractor-role-v1 worker\\n'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        reset_extract_spawn_count();
+        let output = probe_binary(&fake).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, EXTRACTOR_WORKER_ROLE_RESPONSE);
+        assert_eq!(extract_spawn_count(), 0);
 
         std::fs::remove_dir_all(&dir).ok();
     }

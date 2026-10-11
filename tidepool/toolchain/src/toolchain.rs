@@ -156,7 +156,7 @@ pub const ENV_HANDSHAKE: &str = "TIDEPOOL_TOOLCHAIN_HANDSHAKE";
 /// The deploy command every skew message points at.
 const REDEPLOY: &str = "scripts/redeploy.sh";
 
-/// The executable role identified by a no-input Tidepool extractor probe.
+/// The executable role identified by the versioned Tidepool extractor probe.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExtractBinaryRole {
     Frontend,
@@ -164,12 +164,12 @@ pub enum ExtractBinaryRole {
     Unknown,
 }
 
-/// Classify the stable no-input response of an extractor executable.
+/// Classify the exact machine response on stdout from an extractor executable.
 #[must_use]
-pub fn classify_extract_binary(stderr: &[u8]) -> ExtractBinaryRole {
-    if stderr.starts_with(b"Usage: tidepool-extract [") {
+pub fn classify_extract_binary(stdout: &[u8]) -> ExtractBinaryRole {
+    if stdout == tidepool_extract_cmd::EXTRACTOR_FRONTEND_ROLE_RESPONSE {
         ExtractBinaryRole::Frontend
-    } else if stderr.starts_with(b"worker requires") {
+    } else if stdout == tidepool_extract_cmd::EXTRACTOR_WORKER_ROLE_RESPONSE {
         ExtractBinaryRole::Worker
     } else {
         ExtractBinaryRole::Unknown
@@ -181,7 +181,13 @@ pub fn classify_extract_binary(stderr: &[u8]) -> ExtractBinaryRole {
 #[must_use]
 pub fn probe_extract_binary(path: &Path) -> ExtractBinaryRole {
     tidepool_extract_cmd::probe_binary(path)
-        .map(|output| classify_extract_binary(&output.stderr))
+        .map(|output| {
+            if output.status.success() {
+                classify_extract_binary(&output.stdout)
+            } else {
+                ExtractBinaryRole::Unknown
+            }
+        })
         .unwrap_or(ExtractBinaryRole::Unknown)
 }
 
@@ -1227,17 +1233,62 @@ mod tests {
     #[test]
     fn extractor_roles_are_not_interchangeable() {
         assert_eq!(
-            classify_extract_binary(b"Usage: tidepool-extract [OPTIONS] <file.hs> ...\n"),
+            classify_extract_binary(tidepool_extract_cmd::EXTRACTOR_FRONTEND_ROLE_RESPONSE),
             ExtractBinaryRole::Frontend
         );
         assert_eq!(
-            classify_extract_binary(b"worker requires exactly one versioned request\n"),
+            classify_extract_binary(tidepool_extract_cmd::EXTRACTOR_WORKER_ROLE_RESPONSE),
             ExtractBinaryRole::Worker
+        );
+        assert_eq!(
+            classify_extract_binary(b"tidepool-extractor-role-v2 frontend\n"),
+            ExtractBinaryRole::Unknown
+        );
+        assert_eq!(
+            classify_extract_binary(b"diagnostic\ntidepool-extractor-role-v1 worker\n"),
+            ExtractBinaryRole::Unknown
+        );
+        assert_eq!(
+            classify_extract_binary(
+                b"tidepool-extractor-role-v1 frontend\ntidepool-extractor-role-v1 worker\n"
+            ),
+            ExtractBinaryRole::Unknown
         );
         assert_eq!(
             classify_extract_binary(b"Usage: tidepool-extract-bin [OPTIONS]\n"),
             ExtractBinaryRole::Unknown
         );
+        assert_eq!(
+            classify_extract_binary(b"worker requires exactly one versioned request\n"),
+            ExtractBinaryRole::Unknown
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extractor_role_probe_requires_success_and_exact_stdout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        fn probe_script(body: &str) -> (tempfile::TempDir, PathBuf) {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("probe");
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).unwrap();
+            (root, path)
+        }
+
+        let (_root, path) = probe_script(
+            "test \"$1\" = --print-tidepool-role-v1 || exit 4; printf 'tidepool-extractor-role-v1 worker\\n'; printf 'worker requires a versioned request\\n' >&2",
+        );
+        assert_eq!(probe_extract_binary(&path), ExtractBinaryRole::Worker);
+
+        let (_root, path) = probe_script("printf 'tidepool-extractor-role-v1 frontend\\n'; exit 2");
+        assert_eq!(probe_extract_binary(&path), ExtractBinaryRole::Unknown);
+
+        let (_root, path) = probe_script("printf 'tidepool-extractor-role-v1 frontend\\nextra\\n'");
+        assert_eq!(probe_extract_binary(&path), ExtractBinaryRole::Unknown);
     }
 
     fn test_producer_identity(path: &Path) -> String {
