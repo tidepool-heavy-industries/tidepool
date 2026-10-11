@@ -130,7 +130,7 @@ impl PartialEq for OriginalFacts {
             && self.bytes.product_bytes == other.bytes.product_bytes
             && self.bytes.certification_bytes == other.bytes.certification_bytes
             && self.bytes.execution_source == other.bytes.execution_source
-            && self.canonical == other.canonical
+            && (Arc::ptr_eq(&self.canonical, &other.canonical) || self.canonical == other.canonical)
     }
 }
 impl Eq for OriginalFacts {}
@@ -177,6 +177,22 @@ impl CertifiedRecoveryProduct {
             .map(|interface| interface.with_facts(Arc::clone(&facts.canonical)));
         self.state = OriginalState::Complete(facts);
         self
+    }
+
+    pub(crate) fn with_canonical_facts(
+        self,
+        canonical: Arc<crate::certified_products::CanonicalFacts>,
+    ) -> Self {
+        let facts = self.facts().expect("complete original owner");
+        if Arc::ptr_eq(&facts.canonical, &canonical) {
+            return self;
+        }
+        let normalized = Arc::new(OriginalFacts {
+            bytes: Arc::clone(&facts.bytes),
+            canonical,
+            native: Arc::clone(&facts.native),
+        });
+        self.with_facts(normalized)
     }
 
     pub(crate) fn from_certification(
@@ -342,7 +358,10 @@ impl CertifiedRecoveryProduct {
         mut self,
         witness: Arc<crate::certified_products::OriginalNativeWitness>,
     ) -> Result<Self, RecoveryArtifactError> {
-        if !witness.matches_original(&self) {
+        if !witness.matches_original(&self)
+            || witness.execution_source_digest()
+                != self.execution_source().map(|graph| graph.digest())
+        {
             return Err(RecoveryArtifactError::InvalidReference);
         }
         let canonical = self
@@ -431,6 +450,8 @@ pub struct JoinedInterfaceBytes {
     module: String,
     interface_bytes: Arc<[u8]>,
     package_imports_bytes: Arc<[u8]>,
+    lexical_descriptor: crate::artifact_inventory::ArtifactDescriptor,
+    value_descriptor: crate::artifact_inventory::ArtifactDescriptor,
 }
 
 impl PartialEq for CertifiedJoinedInterface {
@@ -483,6 +504,23 @@ impl CertifiedJoinedInterface {
             Path::new("owned-join.hi.packages"),
             validation,
         )?;
+        let package_digest = Sha256::digest(&package_imports_bytes).into();
+        let make_descriptor = |kind| {
+            crate::artifact_inventory::joined_descriptor(
+                kind,
+                crate::declaration_join::ExactModuleIdentity {
+                    unit: unit.clone(),
+                    module: module.clone(),
+                },
+                producer,
+                digest,
+                package_digest,
+            )
+        };
+        let lexical_descriptor =
+            make_descriptor(crate::artifact_inventory::ArtifactKind::LexicalJoin);
+        let value_descriptor =
+            make_descriptor(crate::artifact_inventory::ArtifactKind::ValueInterface);
         Ok(Self {
             facts: Arc::new(JoinedInterfaceBytes {
                 toolchain_identity_sha256: producer,
@@ -490,8 +528,21 @@ impl CertifiedJoinedInterface {
                 module,
                 interface_bytes: interface_bytes.into(),
                 package_imports_bytes: package_imports_bytes.into(),
+                lexical_descriptor,
+                value_descriptor,
             }),
         })
+    }
+    pub(crate) fn descriptor(
+        &self,
+        role: crate::artifact_inventory::JoinedInterfaceRole,
+    ) -> &crate::artifact_inventory::ArtifactDescriptor {
+        match role {
+            crate::artifact_inventory::JoinedInterfaceRole::LexicalJoin => &self.lexical_descriptor,
+            crate::artifact_inventory::JoinedInterfaceRole::ValueInterface => {
+                &self.value_descriptor
+            }
+        }
     }
     pub fn unit(&self) -> &str {
         &self.unit
@@ -511,13 +562,7 @@ impl CertifiedJoinedInterface {
     /// Immutable payload identity for the lexical join role. A value interface
     /// has its own role identity through `CertifiedValueInterface::artifact_id`.
     pub fn artifact_id(&self) -> crate::artifact_inventory::ArtifactId {
-        crate::artifact_inventory::ArtifactEntry::interface(
-            self.clone(),
-            crate::artifact_inventory::JoinedInterfaceRole::LexicalJoin,
-            Vec::new(),
-        )
-        .descriptor
-        .id
+        self.lexical_descriptor.id
     }
     pub fn materialize(&self, root: &Path) -> Result<RecoveryJoinRef, RecoveryArtifactError> {
         self.materialize_with_work(root, &mut RecoveryArtifactWork::default())
@@ -609,13 +654,7 @@ impl CertifiedValueInterface {
         &self.requirements
     }
     pub fn artifact_id(&self) -> crate::artifact_inventory::ArtifactId {
-        crate::artifact_inventory::ArtifactEntry::interface(
-            self.interface.clone(),
-            crate::artifact_inventory::JoinedInterfaceRole::ValueInterface,
-            self.requirements.clone(),
-        )
-        .descriptor
-        .id
+        self.interface.value_descriptor.id
     }
     pub fn materialize(
         &self,

@@ -1313,18 +1313,7 @@ impl ArtifactEntry {
     ) -> Self {
         requirements.sort();
         requirements.dedup();
-        let descriptor = descriptor(
-            role.artifact_kind(),
-            ExactModuleIdentity {
-                unit: interface.unit().into(),
-                module: interface.module().into(),
-            },
-            interface.toolchain_identity_sha256(),
-            digest(interface.interface_bytes()),
-            None,
-            digest(interface.package_imports_bytes()),
-            None,
-        );
+        let descriptor = interface.descriptor(role).clone();
         Self {
             descriptor,
             facts: ArtifactFactsHandle::Joined(Arc::new(JoinedFacts {
@@ -1441,6 +1430,16 @@ pub(crate) fn restore_recovery_interface_dependencies(
     Ok(())
 }
 
+pub(crate) fn joined_descriptor(
+    kind: ArtifactKind,
+    owner: ExactModuleIdentity,
+    producer: [u8; 32],
+    interface: [u8; 32],
+    packages: [u8; 32],
+) -> ArtifactDescriptor {
+    descriptor(kind, owner, producer, interface, None, packages, None)
+}
+
 fn descriptor(
     kind: ArtifactKind,
     owner: ExactModuleIdentity,
@@ -1544,6 +1543,34 @@ impl InventoryState {
                 },
             ));
         }
+        if self
+            .payloads
+            .get(&entry.descriptor.id)
+            .is_some_and(|resident| resident.facts.same_owner(&entry.facts))
+        {
+            self.canonical_hits.fetch_add(1, Ordering::Relaxed);
+            return Ok(entry);
+        }
+        let entry = if let ArtifactPayload::Original(product) = &entry.payload {
+            let interface = product
+                .module_interface()
+                .expect("complete canonical companion");
+            let normalized =
+                self.canonicalize(Arc::new(ArtifactEntry::canonical(interface.clone())))?;
+            let ArtifactFactsHandle::Canonical(canonical) = &normalized.facts else {
+                unreachable!()
+            };
+            if Arc::ptr_eq(interface.facts(), canonical) {
+                entry
+            } else {
+                let product = product.clone().with_canonical_facts(Arc::clone(canonical));
+                Arc::new(entry.adopt_facts(ArtifactFactsHandle::Original(Arc::clone(
+                    product.facts().unwrap(),
+                ))))
+            }
+        } else {
+            entry
+        };
         let Some(existing) = self.payloads.get(&entry.descriptor.id) else {
             return Ok(entry);
         };
@@ -1936,6 +1963,9 @@ pub(crate) struct BoundArtifactSelection {
     view: ArtifactView,
     entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     owners: SelectedOwners,
+    captured_facts: BTreeMap<ArtifactId, ArtifactFactsHandle>,
+    bindings: BTreeMap<ArtifactId, ArtifactBinding>,
+    materializations: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
     groups: BTreeMap<NativeGroupKey, BTreeSet<NativeGroupBinding>>,
 }
 
@@ -2051,6 +2081,10 @@ impl ArtifactInventory {
         entries: Vec<Arc<ArtifactEntry>>,
         selection: &crate::certified_products::CertifiedSourceSelection,
     ) -> Result<BoundArtifactSelection, CompileError> {
+        let captured_facts = entries
+            .iter()
+            .map(|entry| (entry.descriptor.id, entry.facts.clone()))
+            .collect();
         let view = self.admit_certified_with_demand(
             parent,
             entries,
@@ -2104,11 +2138,21 @@ impl ArtifactInventory {
             }
         }
         groups.extend(qualified);
+        let nodes = &view.read_projection(&state).nodes;
+        let bindings = entries
+            .keys()
+            .map(|id| Ok((*id, view.resolve_binding(*id, nodes)?)))
+            .collect::<Result<_, CompileError>>()?;
         drop(state);
+        let mut materializations = Vec::new();
+        view.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
         Ok(BoundArtifactSelection {
             view,
             entries,
             owners,
+            captured_facts,
+            bindings,
+            materializations,
             groups,
         })
     }
@@ -2126,12 +2170,17 @@ impl ArtifactInventory {
         {
             return Err(failure("bound target belongs to another inventory"));
         }
-        let mut allowed_values = cursor.artifact_ids().into_iter().collect::<BTreeSet<_>>();
+        let mut allowed_values = cursor.namespace().keys().copied().collect::<BTreeSet<_>>();
         for entry in visible_values {
             let Some(issued) = fixed.entries.get(&entry.descriptor.id) else {
                 return Err(failure("visible output was not captured by this segment"));
             };
-            if !issued.facts.same_owner(&entry.facts) {
+            if !issued.facts.same_owner(&entry.facts)
+                && !fixed
+                    .captured_facts
+                    .get(&entry.descriptor.id)
+                    .is_some_and(|captured| captured.same_owner(&entry.facts))
+            {
                 return Err(failure("visible output has another immutable owner"));
             }
             allowed_values.insert(entry.descriptor.id);
@@ -2172,17 +2221,11 @@ impl ArtifactInventory {
         let namespace_ids = selection
             .artifact_ids_from_entries(&visible_entries)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
-        let mut materialization_parents = Vec::new();
-        let mut seen_materializations = BTreeSet::new();
-        cursor
-            .collect_materializations(&mut materialization_parents, &mut seen_materializations)?;
-        fixed
-            .view
-            .collect_materializations(&mut materialization_parents, &mut seen_materializations)?;
+        let mut materialization_parents = fixed.materializations.clone();
+        cursor.collect_cached_materializations(&mut materialization_parents)?;
         let mut state = self.0.lock().expect("inventory lock");
         let cursor_projection = cursor.read_projection(&state);
         let cursor_nodes = &cursor_projection.nodes;
-        let fixed_nodes = &fixed.view.read_projection(&state).nodes;
         let mut planned =
             BTreeMap::<NativeGroupKey, BTreeSet<(LogicalNodeKey, ArtifactDependency)>>::new();
         let mut pending = demanded.iter().copied().collect::<Vec<_>>();
@@ -2268,9 +2311,12 @@ impl ArtifactInventory {
                        scope: ArtifactSelectionId|
          -> Result<InventoryNodeKey, CompileError> {
             Ok(match key {
-                LogicalNodeKey::Artifact(id) => {
-                    InventoryNodeKey::Artifact(fixed.view.resolve_binding(id, fixed_nodes)?)
-                }
+                LogicalNodeKey::Artifact(id) => InventoryNodeKey::Artifact(
+                    *fixed
+                        .bindings
+                        .get(&id)
+                        .ok_or_else(|| failure("artifact is outside bound custody"))?,
+                ),
                 LogicalNodeKey::Group(group) => match fixed.groups.get(&group) {
                     Some(issued) if issued.len() == 1 => {
                         InventoryNodeKey::Group(*issued.first().unwrap())
@@ -2316,7 +2362,15 @@ impl ArtifactInventory {
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let namespace = namespace_ids
             .iter()
-            .map(|id| Ok((*id, fixed.view.resolve_binding(*id, fixed_nodes)?)))
+            .map(|id| {
+                Ok((
+                    *id,
+                    *fixed
+                        .bindings
+                        .get(id)
+                        .ok_or_else(|| failure("namespace is outside bound custody"))?,
+                ))
+            })
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let new_roots = namespace
             .values()
@@ -2331,12 +2385,13 @@ impl ArtifactInventory {
             .collect::<BTreeSet<_>>();
         // Only new closure is examined. Existing cursor rows have already been
         // issued; future output custody cannot become a visible item dependency.
-        let mut reachable_new = BTreeSet::new();
+        let mut reachable_new = imbl::OrdSet::new();
         let mut pending_nodes = new_roots.iter().copied().collect::<Vec<_>>();
         while let Some(node) = pending_nodes.pop() {
-            if cursor_nodes.contains(&node) || !reachable_new.insert(node) {
+            if cursor_nodes.contains(&node) || reachable_new.insert(node).is_some() {
                 continue;
             }
+            state.graph_visits.fetch_add(1, Ordering::Relaxed);
             if fixed.entries[&node.artifact()].descriptor.kind == ArtifactKind::ValueInterface
                 && !allowed_values.contains(&node.artifact())
             {
@@ -2374,6 +2429,25 @@ impl ArtifactInventory {
             .filter(|node| !state.indices.contains_key(node))
             .count();
         let reused_count = reused.len() + bound.len() - issued_count;
+        let mut closed_nodes = cursor_projection.nodes.clone();
+        closed_nodes.extend(reachable_new.iter().copied());
+        let mut closed_entries = cursor_projection.entries.clone();
+        let mut issuing_ids = cursor_projection.issuing_ids.clone();
+        for (id, entry) in &issuing_payloads {
+            if let Err(position) = closed_entries.binary_search_by(|old| {
+                (&old.descriptor.owner, old.descriptor.id).cmp(&(&entry.descriptor.owner, *id))
+            }) {
+                closed_entries.insert(position, Arc::clone(entry));
+                state.entry_handle_copies.fetch_add(1, Ordering::Relaxed);
+            }
+            issuing_ids.insert(*id);
+        }
+        let projection = ViewReadProjection {
+            nodes: closed_nodes,
+            entries: closed_entries,
+            issuing_ids,
+            dependencies: OnceLock::new(),
+        };
         commit.commit(&mut state);
         scope_proof::install(&mut state, prepared_proofs);
         for root in &roots {
@@ -2415,6 +2489,8 @@ impl ArtifactInventory {
             state.canonical_comparisons.load(Ordering::Relaxed),
             state.canonical_bytes_offered.load(Ordering::Relaxed),
             state.installed_binding_rows.load(Ordering::Relaxed),
+            state.graph_visits.load(Ordering::Relaxed),
+            state.entry_handle_copies.load(Ordering::Relaxed),
         );
         drop(state);
         if !issued_groups.is_empty() {
@@ -2438,8 +2514,9 @@ impl ArtifactInventory {
                 );
             }
         }
-        tracing::debug!(target: "exomonad_harness::timing", phase = "products.bound_native_demand", issued_native_groups = issued_count, reused_native_groups = reused_count, canonical_hits_total = totals.0, canonical_comparisons_total = totals.1, canonical_bytes_offered_total = totals.2, installed_binding_rows_total = totals.3, "bound native demand inventory observation");
-        Ok(ArtifactView::new(ViewLease {
+        tracing::debug!(target: "exomonad_harness::timing", phase = "products.bound_native_demand", issued_native_groups = issued_count, reused_native_groups = reused_count, canonical_hits_total = totals.0, canonical_comparisons_total = totals.1, canonical_bytes_offered_total = totals.2, installed_binding_rows_total = totals.3, graph_visits_total = totals.4, entry_handle_copies_total = totals.5, "bound native demand inventory observation");
+        let inherited_materializations = materialization_parents.clone();
+        let view = ArtifactView::new(ViewLease {
             selection: snapshot,
             inventory: self.clone(),
             roots,
@@ -2448,7 +2525,17 @@ impl ArtifactInventory {
             issuing_payloads,
             materialization_parents,
             materialization: Mutex::new(BTreeMap::new()),
-        }))
+        });
+        view.reads
+            .read_projection
+            .set(projection)
+            .ok()
+            .expect("fresh bound projection");
+        let _ = view
+            .reads
+            .inherited_materializations
+            .set(inherited_materializations);
+        Ok(view)
     }
 
     /// The compiler-role owner supplies the exact namespace before adding
@@ -2648,9 +2735,9 @@ impl ArtifactInventory {
             }
             ArtifactRootIntent::SuppliedArtifacts => None,
         };
-        let mut required_groups = BTreeMap::<LogicalNodeKey, BTreeSet<InventoryNodeKey>>::new();
+        let mut required_groups = BTreeMap::<LogicalNodeKey, imbl::OrdSet<InventoryNodeKey>>::new();
         let mut required_artifact_targets =
-            BTreeMap::<ArtifactId, BTreeSet<InventoryNodeKey>>::new();
+            BTreeMap::<ArtifactId, imbl::OrdSet<InventoryNodeKey>>::new();
         for NativeOriginalRequirement {
             original,
             selection,
@@ -3257,6 +3344,8 @@ struct ViewReadCache {
     canonical_roots: OnceLock<Vec<InventoryNodeKey>>,
     canonical_native_custody: OnceLock<Vec<ArtifactBinding>>,
     read_projection: OnceLock<ViewReadProjection>,
+    inherited_materializations:
+        OnceLock<Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>>,
     #[cfg(test)]
     root_parent_visits: AtomicU64,
 }
@@ -3268,9 +3357,9 @@ struct ViewReadCache {
 /// Neither projection nor detached metadata retains a view or request
 /// materialization. Selected handles preserve their exact original custody.
 struct ViewReadProjection {
-    nodes: BTreeSet<InventoryNodeKey>,
-    entries: Vec<Arc<ArtifactEntry>>,
-    issuing_ids: BTreeSet<ArtifactId>,
+    nodes: imbl::OrdSet<InventoryNodeKey>,
+    entries: imbl::Vector<Arc<ArtifactEntry>>,
+    issuing_ids: imbl::OrdSet<ArtifactId>,
     dependencies: OnceLock<Vec<(ArtifactId, ArtifactId, ArtifactDependency)>>,
 }
 impl ViewLease {
@@ -3370,7 +3459,7 @@ impl Drop for ViewLease {
             })
             .collect::<Vec<_>>();
         let retained = admitted_closure(&state, survivors.into_iter());
-        for id in candidates.difference(&retained) {
+        for id in candidates.iter().filter(|id| !retained.contains(*id)) {
             let index = state.indices.remove(id).expect("indexed artifact");
             state.graph.remove_node(index);
             state.reclaimed_nodes += 1;
@@ -3393,16 +3482,16 @@ impl Drop for ViewLease {
 fn admitted_closure(
     state: &InventoryState,
     roots: impl Iterator<Item = InventoryNodeKey>,
-) -> BTreeSet<InventoryNodeKey> {
+) -> imbl::OrdSet<InventoryNodeKey> {
     let mut pending = roots.collect::<Vec<_>>();
-    let mut seen = BTreeSet::new();
+    let mut seen = imbl::OrdSet::new();
     while let Some(id) = pending.pop() {
         // Planned seeds are validated by the admission solver, not represented
         // as retained vertices until its complete atomic plan is committed.
         let Some(index) = state.indices.get(&id) else {
             continue;
         };
-        if seen.insert(id) {
+        if seen.insert(id).is_none() {
             state.graph_visits.fetch_add(1, Ordering::Relaxed);
             pending.extend(
                 state
@@ -3417,7 +3506,7 @@ fn admitted_closure(
 
 fn validate_issued_selection(
     state: &InventoryState,
-    owned: &BTreeSet<InventoryNodeKey>,
+    owned: &imbl::OrdSet<InventoryNodeKey>,
     graph: &ArtifactGraphSelection,
 ) -> Result<(), CompileError> {
     let expected = graph
@@ -3432,7 +3521,7 @@ fn validate_issued_selection(
                 .copied()
                 .map(InventoryNodeKey::Group),
         )
-        .collect::<BTreeSet<_>>();
+        .collect::<imbl::OrdSet<_>>();
     let seeds = graph.roots.iter().copied().chain(
         graph
             .native_custody
@@ -3462,7 +3551,7 @@ fn validate_issued_selection(
     }
     Ok(())
 }
-fn artifact_ids(nodes: &BTreeSet<InventoryNodeKey>) -> BTreeSet<ArtifactId> {
+fn artifact_ids(nodes: &imbl::OrdSet<InventoryNodeKey>) -> BTreeSet<ArtifactId> {
     nodes
         .iter()
         .filter_map(|key| match key {
@@ -3471,7 +3560,7 @@ fn artifact_ids(nodes: &BTreeSet<InventoryNodeKey>) -> BTreeSet<ArtifactId> {
         })
         .collect()
 }
-fn native_groups(nodes: &BTreeSet<InventoryNodeKey>) -> BTreeSet<NativeGroupKey> {
+fn native_groups(nodes: &imbl::OrdSet<InventoryNodeKey>) -> BTreeSet<NativeGroupKey> {
     nodes
         .iter()
         .filter_map(|key| match key {
@@ -3487,7 +3576,7 @@ fn native_groups(nodes: &BTreeSet<InventoryNodeKey>) -> BTreeSet<NativeGroupKey>
 /// binding. The group and carrier have independent issuing scopes.
 fn resolve_group_binding(
     state: &InventoryState,
-    owned: &BTreeSet<InventoryNodeKey>,
+    owned: &imbl::OrdSet<InventoryNodeKey>,
     carrier: ArtifactBinding,
     ordinal: u32,
 ) -> Result<NativeGroupBinding, CompileError> {
@@ -3525,7 +3614,7 @@ fn resolve_group_binding(
 
 fn projected_dependencies(
     state: &InventoryState,
-    nodes: &BTreeSet<InventoryNodeKey>,
+    nodes: &imbl::OrdSet<InventoryNodeKey>,
 ) -> Vec<(ArtifactId, ArtifactId, ArtifactDependency)> {
     let mut dependencies = BTreeSet::new();
     for key in nodes {
@@ -3694,7 +3783,7 @@ impl ArtifactView {
             ViewReadProjection {
                 issuing_ids: custody.keys().copied().collect(),
                 nodes,
-                entries,
+                entries: entries.into_iter().collect(),
                 dependencies: OnceLock::new(),
             }
         })
@@ -3738,6 +3827,39 @@ impl ArtifactView {
         let materialization = Arc::new(prepare(parents)?);
         retained.insert(key, Arc::clone(&materialization));
         Ok(materialization)
+    }
+
+    fn collect_cached_materializations(
+        &self,
+        materializations: &mut Vec<
+            Arc<crate::declaration_context::RetainedArtifactMaterialization>,
+        >,
+    ) -> Result<(), CompileError> {
+        if self.reads.inherited_materializations.get().is_none() {
+            let mut inherited = self.lease.materialization_parents.clone();
+            let mut visited = BTreeSet::new();
+            for parent in &self.lease.parents {
+                parent.collect_materializations(&mut inherited, &mut visited)?;
+            }
+            let _ = self.reads.inherited_materializations.set(inherited);
+        }
+        let own = self.lease.lock_materialization()?;
+        for materialization in self
+            .reads
+            .inherited_materializations
+            .get()
+            .unwrap()
+            .iter()
+            .chain(own.values())
+        {
+            if !materializations
+                .iter()
+                .any(|old| Arc::ptr_eq(old, materialization))
+            {
+                materializations.push(Arc::clone(materialization));
+            }
+        }
+        Ok(())
     }
 
     fn collect_materializations(
@@ -4202,7 +4324,7 @@ impl ArtifactView {
     fn resolve_binding(
         &self,
         id: ArtifactId,
-        owned: &BTreeSet<InventoryNodeKey>,
+        owned: &imbl::OrdSet<InventoryNodeKey>,
     ) -> Result<ArtifactBinding, CompileError> {
         if let Some(binding) = self.lease.selection.namespace.get(&id) {
             if owned.contains(&InventoryNodeKey::Artifact(*binding)) {
@@ -4787,7 +4909,12 @@ impl ArtifactView {
     pub(crate) fn entries(&self) -> Vec<Arc<ArtifactEntry>> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         state.view_queries.fetch_add(1, Ordering::Relaxed);
-        let entries = self.read_projection(&state).entries.clone();
+        let entries = self
+            .read_projection(&state)
+            .entries
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
         state
             .entry_handle_copies
             .fetch_add(entries.len() as u64, Ordering::Relaxed);
@@ -5269,6 +5396,412 @@ mod tests {
             .is_err());
     }
 
+    fn bound_selection_for_entries(
+        view: &ArtifactView,
+        entries: &[Arc<ArtifactEntry>],
+    ) -> crate::certified_products::CertifiedSourceSelection {
+        let projection = CompilerInputProjection::from_issued_entries(entries).unwrap();
+        crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+            &projection,
+            &view.metadata_snapshot(),
+            &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn bound_native_demand_reuses_exact_groups_and_issues_only_new_closure() {
+        for count in [2, 32, 128] {
+            let inventory = ArtifactInventory::default();
+            let helper = Arc::new(issued_native_groups(
+                "Helper",
+                vec![(7, Vec::new())],
+                &[],
+                &BTreeMap::new(),
+            ));
+            let consumer = Arc::new(issued_native_groups(
+                "Consumer",
+                (0..count)
+                    .map(|ordinal| (ordinal, vec![issued_source(&helper, 7)]))
+                    .collect(),
+                &[&helper],
+                &BTreeMap::new(),
+            ));
+            let entries = vec![helper.clone(), consumer.clone()];
+            let available = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    entries.clone(),
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let selected = bound_selection_for_entries(&available, &entries);
+            let mut fixed = inventory
+                .bind_segment(&available, entries, &selected)
+                .unwrap();
+            let imports = vec![issued_source(&consumer, 0)];
+            let before = inventory.metrics();
+            let first = inventory
+                .admit_bound_target(
+                    &mut fixed,
+                    &inventory.empty_view(),
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &selected,
+                )
+                .unwrap();
+            assert_eq!(
+                inventory.metrics().installed_binding_rows - before.installed_binding_rows,
+                2
+            );
+            let groups = first.capture_graph_selection().native_groups;
+            assert_eq!(groups.len(), 2);
+            let consumer_group = *groups
+                .iter()
+                .find(|group| group.binding.artifact == consumer.descriptor.id)
+                .unwrap();
+            let carrier = first
+                .binding_dependencies()
+                .into_iter()
+                .find_map(|(from, to, edge)| match (from, to, edge) {
+                    (
+                        ArtifactBindingNode::Group(group),
+                        ArtifactBindingNode::Artifact(carrier),
+                        ArtifactDependency::Interface,
+                    ) if group == consumer_group => Some(carrier),
+                    _ => None,
+                })
+                .unwrap();
+            assert_ne!(carrier.selection, consumer_group.binding.selection);
+            let before = inventory.metrics();
+            let examined = inventory
+                .0
+                .lock()
+                .unwrap()
+                .native_requirement_rows_examined
+                .load(Ordering::Relaxed);
+            let repeated = inventory
+                .admit_bound_target(
+                    &mut fixed,
+                    &first,
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &selected,
+                )
+                .unwrap();
+            assert_eq!(repeated.capture_graph_selection().native_groups, groups);
+            assert_eq!(
+                inventory.metrics().installed_binding_rows,
+                before.installed_binding_rows
+            );
+            assert_eq!(
+                inventory.metrics().canonical_comparisons,
+                before.canonical_comparisons
+            );
+            assert_eq!(
+                inventory
+                    .0
+                    .lock()
+                    .unwrap()
+                    .native_requirement_rows_examined
+                    .load(Ordering::Relaxed),
+                examined
+            );
+            let imports = vec![issued_source(&consumer, 1)];
+            let next = inventory
+                .admit_bound_target(
+                    &mut fixed,
+                    &repeated,
+                    NativeArtifactDemand::CertifiedTargetImports(&imports),
+                    vec![],
+                    &selected,
+                )
+                .unwrap();
+            assert_eq!(
+                inventory.metrics().installed_binding_rows - before.installed_binding_rows,
+                1
+            );
+            assert!(next
+                .capture_graph_selection()
+                .native_groups
+                .contains(&consumer_group));
+            assert_eq!(next.capture_graph_selection().native_groups.len(), 3);
+        }
+    }
+
+    #[test]
+    fn bound_native_demand_refuses_future_type_without_mutating_demand_or_cache() {
+        use crate::certified_products::PendingImportOwner;
+        let inventory = ArtifactInventory::default();
+        let interface = crate::certified_products::fixture_module_interface(
+            [2; 32],
+            "fixture",
+            "ValFuture",
+            BTreeMap::new(),
+        );
+        let value = Arc::new(ArtifactEntry::interface(
+            CertifiedJoinedInterface::from_certification(
+                [2; 32],
+                "fixture".into(),
+                "ValFuture".into(),
+                interface.interface_bytes().to_vec(),
+                interface.package_imports_bytes().to_vec(),
+            )
+            .unwrap(),
+            JoinedInterfaceRole::ValueInterface,
+            vec![],
+        ));
+        let consumer = Arc::new(issued_native_groups(
+            "Consumer",
+            vec![
+                (0, Vec::new()),
+                (
+                    1,
+                    vec![PendingImportOwner::Retained {
+                        identity: tidepool_repr::execution_schema::testing::identity(
+                            "ValFuture",
+                            "value",
+                        ),
+                        generation: 9,
+                    }],
+                ),
+            ],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let entries = vec![consumer.clone(), value.clone()];
+        let available = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let all = bound_selection_for_entries(&available, &entries);
+        let current = bound_selection_for_entries(&available, &[consumer.clone()]);
+        let mut fixed = inventory.bind_segment(&available, entries, &all).unwrap();
+        let first_imports = vec![issued_source(&consumer, 0)];
+        let cursor = inventory
+            .admit_bound_target(
+                &mut fixed,
+                &inventory.empty_view(),
+                NativeArtifactDemand::CertifiedTargetImports(&first_imports),
+                vec![],
+                &current,
+            )
+            .unwrap();
+        assert!(!cursor.artifact_ids().contains(&value.descriptor.id));
+        let before = inventory.metrics();
+        let cache_before = fixed.groups.clone();
+        let future_imports = vec![issued_source(&consumer, 1)];
+        assert!(inventory
+            .admit_bound_target(
+                &mut fixed,
+                &cursor,
+                NativeArtifactDemand::CertifiedTargetImports(&future_imports),
+                vec![],
+                &current
+            )
+            .is_err());
+        assert_eq!(fixed.groups, cache_before);
+        assert_eq!(
+            inventory.metrics().installed_binding_rows,
+            before.installed_binding_rows
+        );
+        assert_eq!(cursor.selected_native_groups().len(), 1);
+        let next = inventory
+            .admit_bound_target(
+                &mut fixed,
+                &cursor,
+                NativeArtifactDemand::CertifiedTargetImports(&future_imports),
+                vec![value.clone()],
+                &all,
+            )
+            .unwrap();
+        assert!(next.artifact_ids().contains(&value.descriptor.id));
+        assert_eq!(next.selected_native_groups().len(), 2);
+    }
+
+    #[test]
+    fn bound_monotone_group_history_only_visits_new_closure() {
+        for count in [2, 32, 128] {
+            let inventory = ArtifactInventory::default();
+            let consumer = Arc::new(issued_native_groups(
+                "Consumer",
+                (0..count).map(|ordinal| (ordinal, Vec::new())).collect(),
+                &[],
+                &BTreeMap::new(),
+            ));
+            let entries = vec![consumer.clone()];
+            let available = inventory
+                .admit_shared_with_demand(
+                    &inventory.empty_view(),
+                    entries.clone(),
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let selected = bound_selection_for_entries(&available, &entries);
+            let mut fixed = inventory
+                .bind_segment(&available, entries, &selected)
+                .unwrap();
+            let mut cursor = inventory.empty_view();
+            for ordinal in 0..count {
+                let imports = vec![issued_source(&consumer, ordinal)];
+                let before = inventory.metrics();
+                cursor = inventory
+                    .admit_bound_target(
+                        &mut fixed,
+                        &cursor,
+                        NativeArtifactDemand::CertifiedTargetImports(&imports),
+                        vec![],
+                        &selected,
+                    )
+                    .unwrap();
+                let after = inventory.metrics();
+                assert_eq!(
+                    after.installed_binding_rows - before.installed_binding_rows,
+                    1
+                );
+                if ordinal > 0 {
+                    assert_eq!(
+                        after.graph_visits - before.graph_visits,
+                        1,
+                        "history {count}, ordinal {ordinal}"
+                    );
+                    assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 0);
+                }
+                let before = inventory.metrics();
+                cursor = inventory
+                    .admit_bound_target(
+                        &mut fixed,
+                        &cursor,
+                        NativeArtifactDemand::CertifiedTargetImports(&imports),
+                        vec![],
+                        &selected,
+                    )
+                    .unwrap();
+                let after = inventory.metrics();
+                assert_eq!(after.graph_visits, before.graph_visits);
+                assert_eq!(after.entry_handle_copies, before.entry_handle_copies);
+                assert_eq!(after.canonical_comparisons, before.canonical_comparisons);
+            }
+            drop(fixed);
+            drop(available);
+            assert_eq!(cursor.selected_native_groups().len(), count as usize);
+            assert_eq!(cursor.artifact_ids().len(), 2);
+            drop(cursor);
+            assert_eq!(inventory.node_count(), 0);
+        }
+    }
+
+    #[test]
+    fn original_companion_adopts_existing_canonical_owner_once() {
+        let inventory = ArtifactInventory::default();
+        let first = issued_native_groups("Original", vec![(0, Vec::new())], &[], &BTreeMap::new());
+        let independent =
+            issued_native_groups("Original", vec![(0, Vec::new())], &[], &BTreeMap::new());
+        let ArtifactPayload::Original(first_product) = &first.payload else {
+            unreachable!()
+        };
+        let canonical = Arc::new(ArtifactEntry::canonical(
+            first_product.module_interface().unwrap().clone(),
+        ));
+        let standalone = inventory
+            .admit_shared(&inventory.empty_view(), vec![canonical.clone()])
+            .unwrap();
+        let view = inventory.admit(&standalone, vec![independent]).unwrap();
+        let owner = view
+            .entries()
+            .into_iter()
+            .find(|entry| entry.descriptor.id == first.descriptor.id)
+            .unwrap();
+        let ArtifactPayload::Original(product) = &owner.payload else {
+            unreachable!()
+        };
+        let ArtifactFactsHandle::Canonical(facts) = &canonical.facts else {
+            unreachable!()
+        };
+        assert!(Arc::ptr_eq(
+            product.module_interface().unwrap().facts(),
+            facts
+        ));
+        assert!(product.original_native().unwrap().matches_original(product));
+        let before = inventory.metrics();
+        inventory.admit_shared(&view, vec![owner]).unwrap();
+        let after = inventory.metrics();
+        assert_eq!(after.canonical_comparisons, before.canonical_comparisons);
+        assert_eq!(
+            after.canonical_bytes_offered,
+            before.canonical_bytes_offered
+        );
+    }
+
+    #[test]
+    fn bound_visibility_accepts_captured_owner_after_independent_canonicalization() {
+        let inventory = ArtifactInventory::default();
+        let interface = crate::certified_products::fixture_module_interface(
+            [2; 32],
+            "fixture",
+            "Value",
+            BTreeMap::new(),
+        );
+        let make_value = || {
+            Arc::new(ArtifactEntry::interface(
+                CertifiedJoinedInterface::from_certification(
+                    [2; 32],
+                    "fixture".into(),
+                    "Value".into(),
+                    interface.interface_bytes().to_vec(),
+                    interface.package_imports_bytes().to_vec(),
+                )
+                .unwrap(),
+                JoinedInterfaceRole::ValueInterface,
+                vec![],
+            ))
+        };
+        let resident = make_value();
+        let captured = make_value();
+        let outsider = make_value();
+        let available = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![resident.clone()],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let selected = bound_selection_for_entries(&available, &[captured.clone()]);
+        let mut fixed = inventory
+            .bind_segment(&available, vec![captured.clone()], &selected)
+            .unwrap();
+        assert!(fixed.entries[&captured.descriptor.id]
+            .facts
+            .same_owner(&resident.facts));
+        let before = inventory.metrics();
+        let cursor = inventory
+            .admit_bound_target(
+                &mut fixed,
+                &inventory.empty_view(),
+                NativeArtifactDemand::ScopeInterfaces,
+                vec![captured],
+                &selected,
+            )
+            .unwrap();
+        assert_eq!(
+            inventory.metrics().canonical_comparisons,
+            before.canonical_comparisons
+        );
+        assert_eq!(cursor.artifact_ids(), vec![resident.descriptor.id]);
+        assert!(inventory
+            .admit_bound_target(
+                &mut fixed,
+                &cursor,
+                NativeArtifactDemand::ScopeInterfaces,
+                vec![outsider],
+                &selected
+            )
+            .is_err());
+    }
+
     #[test]
     fn known_canonical_reuse_compares_no_payloads_and_independent_equal_ingress_adopts_owner() {
         let inventory = ArtifactInventory::default();
@@ -5349,7 +5882,6 @@ mod tests {
         assert_ne!(identity.sha256(), raw);
         assert_eq!(identity.hex(), format!("{:x}", Sha256::digest(raw)));
     }
-    use tidepool_repr::execution_schema::{CachedHomeOwner, ModuleVersion};
     fn module(name: &str) -> ExactModuleIdentity {
         ExactModuleIdentity {
             unit: "unit".into(),
@@ -8687,30 +9219,28 @@ mod tests {
         let unrelated = inventory
             .admit(&empty, vec![entry("Unrelated", &[])])
             .unwrap();
-        // A warm read projection cannot replace reused-edge validation during
-        // admission. The corrupted edge below violates the live-view invariant.
-        retained.metadata_snapshot();
-        // Exercise the owning admission guard against a corrupted reused graph.
-        let mut state = inventory.0.lock().unwrap();
-        let source = state.indices[&InventoryNodeKey::Artifact(
+        let state = inventory.0.lock().unwrap();
+        let source = InventoryNodeKey::Artifact(
             retained
                 .resolve_binding(
                     consumer.descriptor.id,
                     &retained.read_projection(&state).nodes,
                 )
                 .unwrap(),
-        )];
-        let target = state.indices[&unrelated.lease.roots[0]];
-        state
+        );
+        let target = unrelated.lease.roots[0];
+        let mut edges = state
             .graph
-            .add_edge(source, target, ArtifactDependency::Interface);
+            .edges(state.indices[&source])
+            .map(|edge| (state.graph[edge.target()], edge.weight().clone()))
+            .collect::<BTreeSet<_>>();
+        edges.insert((target, ArtifactDependency::Interface));
+        let plan = BTreeMap::from([(source, edges)]);
+        let entries = state.payloads.clone();
+        assert!(
+            matches!(BindingCommit::prepare(&state, &entries, &plan), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::MetadataConflict { artifact } if artifact == consumer.descriptor.id))
+        );
         drop(state);
-        assert!(matches!(
-            inventory.admit(&retained, vec![consumer.clone()]),
-            Err(CompileError::ArtifactInventory(error))
-                if matches!(error.failure, ArtifactInventoryFailure::MetadataConflict { artifact }
-                    if artifact == consumer.descriptor.id)
-        ));
         assert_eq!(inventory.node_count(), 3);
         drop(retained);
         drop(unrelated);

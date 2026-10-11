@@ -936,7 +936,6 @@ struct ReadHistoryCensus {
     initialized_read_projection_views: usize,
     projection_node_items: usize,
     projection_entry_items: usize,
-    projection_entry_capacity_items: usize,
     initialized_dependency_vectors: usize,
     dependency_rows: usize,
     dependency_capacity_rows: usize,
@@ -952,7 +951,6 @@ struct ReadHistoryCensus {
     parent_link_vec_reserved_bytes: usize,
     materialization_parent_vec_reserved_bytes: usize,
     canonical_root_vec_reserved_bytes: usize,
-    read_entry_vec_reserved_bytes: usize,
     dependency_vec_reserved_bytes: usize,
     exact_vec_reserved_bytes: usize,
     size_inventory_node_key: usize,
@@ -1001,7 +999,6 @@ fn read_history_census(
         initialized_read_projection_views: 0,
         projection_node_items: 0,
         projection_entry_items: 0,
-        projection_entry_capacity_items: 0,
         initialized_dependency_vectors: 0,
         dependency_rows: 0,
         dependency_capacity_rows: 0,
@@ -1019,7 +1016,6 @@ fn read_history_census(
         parent_link_vec_reserved_bytes: 0,
         materialization_parent_vec_reserved_bytes: 0,
         canonical_root_vec_reserved_bytes: 0,
-        read_entry_vec_reserved_bytes: 0,
         dependency_vec_reserved_bytes: 0,
         exact_vec_reserved_bytes: 0,
         size_inventory_node_key: std::mem::size_of::<InventoryNodeKey>(),
@@ -1061,9 +1057,8 @@ fn read_history_census(
             census.projection_node_key_payload_bytes +=
                 projection.nodes.len() * std::mem::size_of::<InventoryNodeKey>();
             census.projection_entry_items += projection.entries.len();
-            census.projection_entry_capacity_items += projection.entries.capacity();
-            census.read_entry_vec_reserved_bytes +=
-                projection.entries.capacity() * std::mem::size_of::<Arc<ArtifactEntry>>();
+            // Persistent entry vectors share tree pages. Their logical lengths
+            // are counted above; this census makes no reserved-byte claim.
             if let Some(dependencies) = projection.dependencies.get() {
                 census.initialized_dependency_vectors += 1;
                 census.dependency_rows += dependencies.len();
@@ -1073,14 +1068,12 @@ fn read_history_census(
             }
         }
     }
-    census.btree_key_payload_bytes_lower_bound = census.index_map_key_payload_bytes
-        + census.root_registry_key_payload_bytes
-        + census.projection_node_key_payload_bytes;
+    census.btree_key_payload_bytes_lower_bound =
+        census.index_map_key_payload_bytes + census.root_registry_key_payload_bytes;
     census.exact_vec_reserved_bytes = census.local_root_vec_reserved_bytes
         + census.parent_link_vec_reserved_bytes
         + census.materialization_parent_vec_reserved_bytes
         + census.canonical_root_vec_reserved_bytes
-        + census.read_entry_vec_reserved_bytes
         + census.dependency_vec_reserved_bytes;
     census
 }

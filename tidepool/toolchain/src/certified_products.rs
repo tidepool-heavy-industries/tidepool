@@ -327,6 +327,10 @@ pub(crate) struct CertifiedSegmentOriginals {
     package_availability: BTreeMap<(String, String), PackageInterfaceWitness>,
     artifact_entries: Arc<[Arc<crate::artifact_inventory::ArtifactEntry>]>,
     value_entries: Arc<[Arc<crate::artifact_inventory::ArtifactEntry>]>,
+    value_entry_index: BTreeMap<
+        crate::artifact_inventory::ArtifactId,
+        Arc<crate::artifact_inventory::ArtifactEntry>,
+    >,
     original_sources: Arc<AvailableOriginalSources>,
 }
 
@@ -456,8 +460,13 @@ impl CertifiedSegmentOriginals {
                 ),
             ));
         }
+        let value_entry_index = value_entries
+            .iter()
+            .map(|entry| (entry.descriptor.id, Arc::clone(entry)))
+            .collect();
         Ok(Self {
             artifact_entries: artifact_entries.into(),
+            value_entry_index,
             value_entries: value_entries.into(),
             original_sources,
             package_availability,
@@ -500,11 +509,9 @@ impl CertifiedSegmentOriginals {
         &'a self,
         values: &'a [crate::recovery_artifacts::CertifiedValueInterface],
     ) -> impl Iterator<Item = &'a Arc<crate::artifact_inventory::ArtifactEntry>> {
-        self.value_entries.iter().filter(move |entry| {
-            values
-                .iter()
-                .any(|value| value.artifact_id() == entry.descriptor.id)
-        })
+        values
+            .iter()
+            .filter_map(move |value| self.value_entry_index.get(&value.artifact_id()))
     }
 
     pub(crate) fn select_item(
@@ -850,6 +857,10 @@ impl OriginalNativeWitness {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn execution_source_digest(&self) -> Option<[u8; 32]> {
+        self.execution_source_sha256
     }
 
     pub(crate) fn matches_original(
@@ -8153,13 +8164,11 @@ pub(crate) fn certify_products_with_validation(
                 let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_finalized_certification(
                     owner, product_bytes.to_vec(), certification, binding,
                 ).with_source_sha256(source_sha);
-                let product = retain_original_native(product, original, witness)?;
-                match execution_source {
-                    Some(graph) => product
-                        .with_execution_source_with_validation(Arc::clone(graph), validation)
-                        .map_err(|_| CertificationError::Mismatch("execution source owner")),
-                    None => Ok(product),
-                }
+                let product = match execution_source {
+                    Some(graph) => product.with_execution_source_with_validation(Arc::clone(graph), validation).map_err(|_| CertificationError::Mismatch("execution source owner"))?,
+                    None => product,
+                };
+                retain_original_native(product, original, witness)
             },
         )
         .collect::<CertResult<Vec<_>>>()?;

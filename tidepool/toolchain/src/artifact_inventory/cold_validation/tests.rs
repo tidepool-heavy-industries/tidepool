@@ -95,7 +95,7 @@ fn transitive_oracle(
                 );
             }
         }
-        let selected = artifact_ids(&reachable)
+        let selected = artifact_ids(&reachable.iter().copied().collect())
             .iter()
             .map(|id| {
                 entries
