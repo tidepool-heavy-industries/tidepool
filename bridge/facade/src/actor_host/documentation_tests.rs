@@ -3280,6 +3280,16 @@ async fn recipe_restart_reinstalls_the_unbound_conversation_service() {
 #[tokio::test(flavor = "multi_thread")]
 async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
     let repository = recipe_workspace(Some(&["Project.CollaborationChecks.collaboration"]));
+    // Expose the modules used by this recipe's notebook cells. The full authored
+    // import set is qualified separately by the source-only gate.
+    crate::exomonad::edit_fixture_project_config(&repository.path().join(".exomonad"), |project| {
+        project.haskell.modules = vec![
+            "Exomonad.Contrib.Types".into(),
+            "Project.Work".into(),
+            "Project.Observe".into(),
+        ];
+    });
+    super::test_campaign::commit_workspace(repository.path());
     let work = repository
         .path()
         .join(".exomonad/checks/project_decision_consumer.hs");
@@ -3287,12 +3297,10 @@ async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
     crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap();
-    let broken = original.replacen(
-        "resolveQuestion acceptedDecision changedQuestions == changedQuestions",
-        "resolveQuestion acceptedDecision changedQuestions /= changedQuestions",
-        1,
+    let broken = format!(
+        "{original}\n{}",
+        include_str!("fixtures/recipe_decision_consumer_stale_question.hs"),
     );
-    assert_ne!(broken, original, "fixture no longer matches replaced text");
     std::fs::write(&work, broken).unwrap();
     // This candidate fixture is data, not a compiled module; it still compiles,
     // and the running selected worker must expose its defect.

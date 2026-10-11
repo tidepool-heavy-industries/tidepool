@@ -252,6 +252,7 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/notebook_lookup_agent_spec.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6e6f7465626f6f6b5f6c6f6f6b75705f6167656e745f737065632e6873",
         "bridge/facade/src/actor_host/fixtures/project/Types.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f70726f6a6563742f54797065732e6873",
         "bridge/facade/src/actor_host/fixtures/project/Work.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f70726f6a6563742f576f726b2e6873",
+        "bridge/facade/src/actor_host/fixtures/recipe_decision_consumer_stale_question.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636970655f6465636973696f6e5f636f6e73756d65725f7374616c655f7175657374696f6e2e6873",
         "bridge/facade/src/actor_host/fixtures/recipe_unbound_restart.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636970655f756e626f756e645f726573746172742e6873",
         "bridge/facade/src/actor_host/fixtures/request_reload_agent_spec.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f726571756573745f72656c6f61645f6167656e745f737065632e6873",
         "bridge/facade/src/actor_host/fixtures/retained_handler_agent_spec.hs": "//bridge/facade:haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f72657461696e65645f68616e646c65725f6167656e745f737065632e6873",

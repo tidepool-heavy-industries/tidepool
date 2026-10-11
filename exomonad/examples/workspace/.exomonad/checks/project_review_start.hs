@@ -1,4 +1,4 @@
 initialState <- pollResponse worker
 let ResponseReady initialAnswer = initialState
 let Produced initialCandidate = responseValue initialAnswer
-(reviewer, reviewQuestions) <- reviewCandidate task (RetainedImplementer (responseActor worker)) initialCandidate
+Right (reviewer, reviewQuestions) <- reviewCandidate work (RetainedImplementer (responseActor worker)) initialCandidate
