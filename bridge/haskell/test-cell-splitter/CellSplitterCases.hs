@@ -109,10 +109,11 @@ requestValidationChecks :: IO ()
 requestValidationChecks = do
   certificationRequestValidation
   checkingSourceRequestRoundTrip
+  portableOutputRequestValidation
   requestShapeValidation
   requestOperationAdmission
   requestFieldOrdering
-  putStrLn "request validation: 5 groups passed (certification, source-check round-trip, mode shapes, operation admission, field ordering)"
+  putStrLn "request validation: 6 groups passed (certification, source-check round-trip, portable output, mode shapes, operation admission, field ordering)"
 
 generatedScaffoldIdentityChecks :: IO ()
 generatedScaffoldIdentityChecks = do
@@ -953,7 +954,7 @@ checkingSourceRequestRoundTrip = do
       assertEqual "no product output" Nothing (requestOutDir request)
       assertEqual "no cell rewriting" False (requestCell request)
     other -> fail ("checking source request round trip failed: " ++ show other)
-  case workerRequestFromArgv ["--worker-request-v16", payload] of
+  case workerRequestFromArgv ["--worker-request-v18", payload] of
     Left _ -> pure ()
     other -> fail ("retired request protocol accepted: " ++ show other)
   let retiredPayload = take 14 payload ++ "36" ++ drop 16 payload
@@ -967,6 +968,29 @@ checkingSourceRequestRoundTrip = do
     case workerRequestFromArgv [singleFlag, retiredField] of
       Left message | "retired field tag" `isInfixOf` message -> pure ()
       other -> fail ("retired fold/type-pin field accepted: " ++ show other)
+
+portableOutputRequestValidation :: IO ()
+portableOutputRequestValidation = do
+  let valid = [Input "Fixture.hs", Targets ["first", "second"], OutputDir "out", PortableOutput]
+      admit fields = case workerRequestFromArgv (workerArgv fields) of
+        Right (Just request) -> pure (request, admitRequestOperation request)
+        other -> fail ("portable request failed to decode: " ++ show other)
+  (decoded, accepted) <- admit valid
+  assertEqual "portable intent survives typed transport" True (requestPortableOutput decoded)
+  assertEqual "portable source operation" (Right SourceOperation) accepted
+  forM_ [Turn, Cell, CellPlan, CheckSource, Classify, ModuleCandidates "scope"
+    , SessionArtifacts "scope", CertifyHomeProducts, TargetModuleOnly, InjectVal "Binding"
+    , BindGen 1, SessionRoot "session", SessionIncarnation "1"] $ \conflict -> do
+    case workerRequestFromArgv (workerArgv (valid ++ [conflict])) of
+      Left _ -> pure ()
+      Right (Just request) -> case admitRequestOperation request of
+        Left _ -> pure ()
+        Right operation -> fail ("portable request accepted conflicting mode: " ++ show operation)
+      other -> fail ("portable conflicting request has no decoded operation: " ++ show other)
+  forM_ [[Input "Fixture.hs", Targets ["first"], PortableOutput]
+    , [Input "Fixture.hs", OutputDir "out", PortableOutput]] $ \fields -> do
+    (_, refused) <- admit fields
+    assertEqual "portable output needs targets and output" (Left InvalidPortableOutputShape) refused
 
 certificationRequestValidation :: IO ()
 certificationRequestValidation = do

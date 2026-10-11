@@ -42,6 +42,7 @@ tests = testGroup "cell-splitter"
   , testCase "cellProgramStateChecks" cellProgramStateChecks
   , testCase "certificationRequestValidation" certificationRequestValidation
   , testCase "checkingSourceRequestRoundTrip" checkingSourceRequestRoundTrip
+  , testCase "portableOutputRequestValidation" portableOutputRequestValidation
   , testCase "requestOperationAdmission" requestOperationAdmission
   , testCase "requestShapeValidation" requestShapeValidation
   , testCase "requestFieldOrdering" requestFieldOrdering

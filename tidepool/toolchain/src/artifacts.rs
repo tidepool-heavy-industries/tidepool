@@ -4586,6 +4586,15 @@ fn compile_invocation_inner(
         .output_dir(output_owner.path())
         .targets(inv.targets)
         .includes(inv.include);
+    if matches!(
+        &policy,
+        CompilationPolicy::BuildAction {
+            export: BuildActionExport::PreparedFixture { .. },
+            ..
+        }
+    ) {
+        cmd.portable_output();
+    }
     if let Some(root) = session_root {
         cmd.session_root(root).certify_home_products();
     }

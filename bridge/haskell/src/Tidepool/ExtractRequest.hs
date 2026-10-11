@@ -73,6 +73,7 @@ data RequestField
   | RetainedGeneration SymbolIdentity Word64
   | ActivationPreview
   | InspectionStrict
+  | PortableOutput
   deriving (Eq, Show)
 
 -- | A decoded compiler-worker invocation. This is the Haskell boundary's
@@ -126,6 +127,7 @@ data WorkerRequest = WorkerRequest
   -- | A turn that also writes its target's prepared-STG program from the
   -- same compile, linked against 'requestRetainedGenerations'.
   , requestActivationPreview :: Bool
+  , requestPortableOutput :: Bool
   , requestInspectionStrict :: Bool
   }
   deriving (Eq, Show)
@@ -146,6 +148,7 @@ data RequestOperation
 
 data RequestShapeError
   = InvalidSourceCheckShape
+  | InvalidPortableOutputShape
   | InvalidCellPlanShape
   | IncompleteDeclarationOperation
   | ConflictingRequestOperations
@@ -162,6 +165,7 @@ admitRequestOperation args
   | requestCheckSource args && not validSourceCheck = Left InvalidSourceCheckShape
   | requestCellPlan args && not validCellPlan = Left InvalidCellPlanShape
   | requestActivationPreview args && not (requestTurn args) = Left PreviewRequiresTurn
+  | requestPortableOutput args && not validPortableOutput = Left InvalidPortableOutputShape
   | otherwise = do
       declaration <- case (requestDeclarationJoin args, requestDeclarationJoinOut args) of
         (Nothing, Nothing) -> Right []
@@ -183,6 +187,13 @@ admitRequestOperation args
       , (requestCellPlan args, CellPlanOperation)
       , (requestCheckSource args, SourceCheckOperation)
       ] , selected]
+    validPortableOutput = length (requestFiles args) == 1
+      && present (requestOutDir args) && (present (requestTarget args) || not (null (requestTargets args)))
+      && null operations && not hasSessionScope
+      && not (present (requestSessionIncarnation args)) && not (present (requestBindGen args))
+      && not (present (requestModuleCandidates args)) && not (requestCertifyHomeProducts args)
+      && not (present (requestDeclarationJoin args)) && not (present (requestDeclarationJoinOut args))
+      && not (requestTargetModuleOnly args) && Map.null (requestRetainedGenerations args)
     validSourceCheck = length (requestFiles args) == 1 && not (requestCell args)
       && not (requestCellPlan args) && not (requestTurn args) && not (requestClassify args)
       && null (requestInspections args) && not hasSessionScope
@@ -248,6 +259,7 @@ emptyWorkerRequest = WorkerRequest
   , requestInspectTypeBatch = Nothing
   , requestRetainedGenerations = Map.empty
   , requestActivationPreview = False
+  , requestPortableOutput = False
   , requestInspectionStrict = False
   }
 
@@ -351,9 +363,10 @@ requestFromFields = finish . foldl' apply emptyWorkerRequest
             Map.insert identity generation (requestRetainedGenerations request) }
       ActivationPreview -> request { requestActivationPreview = True }
       InspectionStrict -> request { requestInspectionStrict = True }
+      PortableOutput -> request { requestPortableOutput = True }
 
 workerRequestFlag :: String
-workerRequestFlag = "--worker-request-v18"
+workerRequestFlag = "--worker-request-v19"
 
 workerArgv :: [RequestField] -> [String]
 workerArgv fields = [workerRequestFlag, encodeHex (encodeRequest fields)]
@@ -402,7 +415,7 @@ type Parser a = BS.ByteString -> Either String (a, BS.ByteString)
 decodeRequest :: BS.ByteString -> Either String (CompileWorkload, Int, Int, [RequestField])
 decodeRequest bytes = do
   let (magic, body) = BS.splitAt 8 bytes
-  if magic /= "TPREQ018"
+  if magic /= "TPREQ019"
     then Left "worker request: unsupported magic or version"
     else do
       (workloadTag, afterWorkload) <- pWord8 body
@@ -422,7 +435,7 @@ decodeRequest bytes = do
         else Left "worker request: trailing bytes"
 
 encodeRequest :: [RequestField] -> BS.ByteString
-encodeRequest fields = "TPREQ018" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
+encodeRequest fields = "TPREQ019" <> BS.singleton 0 <> putU32 1 <> putU32 1 <> putU32 (length fields) <> BS.concat (map encodeField fields)
 
 encodeField :: RequestField -> BS.ByteString
 encodeField field = case field of
@@ -467,6 +480,7 @@ encodeField field = case field of
   InspectTypeBatch value -> taggedText 40 value
   ActivationPreview -> BS.singleton 41
   InspectionStrict -> BS.singleton 42
+  PortableOutput -> BS.singleton 53
   InspectScopeBrowse -> BS.singleton 43
 
 encodeSymbolIdentity :: SymbolIdentity -> BS.ByteString
@@ -579,6 +593,7 @@ pField bytes = do
     40 -> mapParser InspectTypeBatch pText rest
     41 -> Right (ActivationPreview, rest)
     42 -> Right (InspectionStrict, rest)
+    53 -> Right (PortableOutput, rest)
     43 -> Right (InspectScopeBrowse, rest)
     45 -> retired tag
     _  -> Left ("worker request: unknown field tag " ++ show tag)

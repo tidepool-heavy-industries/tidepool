@@ -1270,6 +1270,8 @@ rust_filegroup(
     name = "prepared_fixture_sources",
     mapped_srcs = {
         "Cargo.toml": "tidepool/toolchain/Cargo.toml",
+        "tests/fixtures/PortableFixture.hs": "tidepool/toolchain/tests/fixtures/PortableFixture.hs",
+        "tests/fixtures/PortableSupport.hs": "tidepool/toolchain/tests/fixtures/PortableSupport.hs",
         "tests/prepared_fixture.rs": "tidepool/toolchain/tests/prepared_fixture.rs",
     },
     visibility = ["PUBLIC"],
@@ -1421,6 +1423,8 @@ filegroup(
         "tidepool/toolchain/src/turn_observations.rs": "src/turn_observations.rs",
         "tidepool/toolchain/tests/check_source_worker.rs": "tests/check_source_worker.rs",
         "tidepool/toolchain/tests/declaration_join_worker.rs": "tests/declaration_join_worker.rs",
+        "tidepool/toolchain/tests/fixtures/PortableFixture.hs": "tests/fixtures/PortableFixture.hs",
+        "tidepool/toolchain/tests/fixtures/PortableSupport.hs": "tests/fixtures/PortableSupport.hs",
         "tidepool/toolchain/tests/fixtures/check-source/CheckConsumer.hs": "tests/fixtures/check-source/CheckConsumer.hs",
         "tidepool/toolchain/tests/fixtures/check-source/CheckDependency.hs": "tests/fixtures/check-source/CheckDependency.hs",
         "tidepool/toolchain/tests/fixtures/check-source/CheckMiddle.hs": "tests/fixtures/check-source/CheckMiddle.hs",

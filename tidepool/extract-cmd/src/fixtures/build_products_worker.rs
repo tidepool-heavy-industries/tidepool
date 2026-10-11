@@ -67,10 +67,10 @@ fn main() {
         std::process::exit(args[4].parse().unwrap());
     }
     if args.get(1).map(String::as_str) == Some("--print-worker-request-flag") {
-        println!("--worker-request-v18");
+        println!("--worker-request-v19");
         return;
     }
-    if args.get(1).map(String::as_str) == Some("--worker-request-v18") {
+    if args.get(1).map(String::as_str) == Some("--worker-request-v19") {
         std::io::stdout()
             .write_all(&request(args[2].as_bytes()))
             .unwrap();

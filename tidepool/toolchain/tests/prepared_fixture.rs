@@ -302,3 +302,80 @@ fn build_fixture_obeys_ordered_source_roots_and_refuses_partial_target_sets() {
     // The test owns this failed action and has observed the child exit.
     std::fs::remove_dir_all(retained).unwrap();
 }
+
+#[test]
+fn build_fixture_closes_home_helpers_without_exporting_native_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("PortableFixture.hs");
+    std::fs::write(&source, include_str!("fixtures/PortableFixture.hs")).unwrap();
+    std::fs::write(
+        root.path().join("PortableSupport.hs"),
+        include_str!("fixtures/PortableSupport.hs"),
+    )
+    .unwrap();
+    let ordinary = root.path().join("ordinary");
+    require_success(
+        Command::new(configured("TIDEPOOL_EXTRACT"))
+            .current_dir(root.path())
+            .arg(&source)
+            .arg("--output-dir")
+            .arg(&ordinary)
+            .args(["--targets", "first,second", "--include"])
+            .arg(root.path())
+            .output()
+            .unwrap(),
+    );
+    for target in ["first", "second"] {
+        let prepared = PreparedArtifact::parse(
+            std::fs::read(ordinary.join(format!("{target}.prepared.cbor"))).unwrap(),
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        assert!(
+            prepared
+                .prepared()
+                .globals()
+                .iter()
+                .any(|global| global.identity.unit == "main"),
+            "ordinary extraction must exercise a real native-original import"
+        );
+    }
+    let output = root.path().join("portable");
+    require_success(
+        compiler(
+            &source,
+            &output,
+            &["first", "second"],
+            &[root.path().to_path_buf()],
+        )
+        .output()
+        .unwrap(),
+    );
+    assert_eq!(
+        names(&output),
+        [
+            "first.asks.json",
+            "first.prepared.cbor",
+            "meta.cbor",
+            "second.asks.json",
+            "second.prepared.cbor"
+        ]
+    );
+    for target in ["first", "second"] {
+        let prepared = PreparedArtifact::parse(
+            std::fs::read(output.join(format!("{target}.prepared.cbor"))).unwrap(),
+            DecodeLimits::default(),
+        )
+        .unwrap();
+        assert!(!prepared
+            .prepared()
+            .globals()
+            .iter()
+            .any(|global| global.identity.unit == "main"));
+        tidepool_repr::execution_schema::link_program(
+            prepared.prepared().clone(),
+            &tidepool_repr::execution_schema::MachineImports::default(),
+        )
+        .expect("portable source closure links without native products");
+    }
+}

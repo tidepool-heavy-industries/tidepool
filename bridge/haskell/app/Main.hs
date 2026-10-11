@@ -587,7 +587,9 @@ processFile compiler caches timing args path = do
           targets@(_ : _) -> targets
           [] -> maybe [] pure mTarget
     originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared outDir
-    (preparedArtifacts, productContext) <- prepareArtifacts originalInterfaces outDir caches prepared preparedTargets
+    (preparedArtifacts, productContext) <- prepareArtifactsWithIntent
+      (if requestPortableOutput args then PortableExecutable else NativeOriginals)
+      originalInterfaces outDir caches prepared preparedTargets
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args) []
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
@@ -628,15 +630,29 @@ data PreparedArtifact = PreparedArtifact
 prepareArtifacts :: OriginalInterfaceArtifacts -> FilePath -> RecoveryCaches -> PreparedPipelineResult
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifacts = prepareArtifactsWithProjection requireProjection
+prepareArtifacts = prepareArtifactsWithIntent NativeOriginals
+
+data PreparedOutputIntent = NativeOriginals | PortableExecutable deriving (Eq)
+
+prepareArtifactsWithIntent :: PreparedOutputIntent -> OriginalInterfaceArtifacts -> FilePath -> RecoveryCaches -> PreparedPipelineResult
+  -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
+  -> IO ([PreparedArtifact], Maybe PreparedProductContext)
+prepareArtifactsWithIntent intent = prepareArtifactsWithProjectionIntent intent requireProjection
 
 prepareArtifactsWithProjection
   :: (forall a. Either ProjectionError a -> IO a)
   -> OriginalInterfaceArtifacts -> FilePath -> RecoveryCaches -> PreparedPipelineResult
   -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
   -> IO ([PreparedArtifact], Maybe PreparedProductContext)
-prepareArtifactsWithProjection _ _ _ _ _ [] _ _ _ = pure ([], Nothing)
-prepareArtifactsWithProjection project originalInterfaces outDir caches prepared targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings = do
+prepareArtifactsWithProjection = prepareArtifactsWithProjectionIntent NativeOriginals
+
+prepareArtifactsWithProjectionIntent
+  :: PreparedOutputIntent -> (forall a. Either ProjectionError a -> IO a)
+  -> OriginalInterfaceArtifacts -> FilePath -> RecoveryCaches -> PreparedPipelineResult
+  -> [String] -> [String] -> Map.Map SymbolIdentity Word64 -> [HostBindingRepresentation]
+  -> IO ([PreparedArtifact], Maybe PreparedProductContext)
+prepareArtifactsWithProjectionIntent _ _ _ _ _ _ [] _ _ _ = pure ([], Nothing)
+prepareArtifactsWithProjectionIntent intent project originalInterfaces outDir caches prepared targets@(firstTarget : _) auxiliaryRoots retainedGenerations hostBindings = do
   recoveryCaches <- acquireRecoveryCaches caches
   timing <- readTimingEnabled
   let result = pprPipelineResult prepared
@@ -683,7 +699,9 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
   let products = preparedProductInventory productContext
       roots = Set.fromList (map (projectionEntry . contextFor) targets
         ++ projectionAuxiliaryRoots firstContext)
-      originalBindings = currentOriginalBindingsExcept inventory roots
+      originalBindings = case intent of
+        NativeOriginals -> currentOriginalBindingsExcept inventory roots
+        PortableExecutable -> Map.empty
       withOriginals context = context {projectionCurrentOriginals = originalBindings}
       admittedOriginalBinders = Set.union externalOriginalBinders (currentOriginalBinders inventory)
   let originalProducts =
@@ -733,6 +751,12 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
       (Map.lookup (projectionEntry context) candidatesByTarget)
     (program,constructors) <- project (finalizePreparedCandidate candidate)
     reportRecoveryResiduals target (closureFailures recovered)
+    when (intent == PortableExecutable) $ do
+      let homeUnit = T.pack (unitString (moduleUnit targetModule))
+          unresolvedHome = [Execution.globalIdentity global | global <- programGlobals program
+            , symbolUnit (Execution.globalIdentity global) == homeUnit]
+      unless (null unresolvedHome) $
+        fail ("portable output has unresolved home imports: " ++ show unresolvedHome)
     let defined = Set.fromList
           [identity | group <- programBindings program
           , Execution.TopBinding identity _ <- case group of

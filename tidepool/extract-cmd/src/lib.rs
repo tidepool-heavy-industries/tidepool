@@ -667,6 +667,12 @@ impl ExtractCmd {
 
     /// Require executable products for every home module in this compile.
     /// Used by authored declaration certification, including empty modules.
+    /// Export the source target's complete portable executable closure.
+    pub fn portable_output(&mut self) -> &mut Self {
+        self.request.portable_output();
+        self
+    }
+
     pub fn certify_home_products(&mut self) -> &mut Self {
         self.request.certify_home_products();
         self

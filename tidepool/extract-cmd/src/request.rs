@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v18";
-const MAGIC: &[u8; 8] = b"TPREQ018";
+pub(crate) const WORKER_REQUEST_FLAG: &str = "--worker-request-v19";
+const MAGIC: &[u8; 8] = b"TPREQ019";
 
 /// A probe flag deliberately outside the versioned request grammar above: it
 /// asks a worker binary to print the request flag it was built against and
@@ -145,6 +145,7 @@ enum Field {
     /// Inspection source failures reject the whole request with structured
     /// diagnostics instead of becoming per-query `Rejected` results.
     InspectionStrict,
+    PortableOutput,
 }
 
 /// A versioned, typed request for the Haskell compiler worker.
@@ -279,6 +280,35 @@ impl ExtractRequest {
                 "compiler request selects conflicting operations",
             ));
         }
+        if has(|field| matches!(field, Field::PortableOutput))
+            && (mode != RequestMode::Source
+                || self
+                    .fields
+                    .iter()
+                    .filter(|field| matches!(field, Field::Input(_)))
+                    .count()
+                    != 1
+                || !has(|field| matches!(field, Field::OutputDir(_)))
+                || !has(|field| matches!(field, Field::Target(_) | Field::Targets(_)))
+                || has(|field| {
+                    matches!(
+                        field,
+                        Field::SessionRoot(_)
+                            | Field::SessionIncarnation(_)
+                            | Field::SessionArtifacts(_)
+                            | Field::InjectVal(_)
+                            | Field::RetainedGeneration(_, _)
+                            | Field::BindGen(_)
+                            | Field::ModuleCandidates(_)
+                            | Field::CertifyHomeProducts
+                            | Field::TargetModuleOnly
+                    )
+                }))
+        {
+            return Err(CliError::new(
+                "portable output requires fresh source targets without retained authority",
+            ));
+        }
         Ok(mode)
     }
 
@@ -309,6 +339,7 @@ impl ExtractRequest {
                         .fields
                         .push(Field::Targets(raw.split(',').map(str::to_owned).collect()));
                 }
+                Some("--portable-output") => request.portable_output(),
                 Some("--target-module-only") => request.fields.push(Field::TargetModuleOnly),
                 Some("--include") => request.include(value(&mut args, "--include")?),
                 Some("--turn") => request.turn(),
@@ -478,6 +509,7 @@ impl ExtractRequest {
                 40 => Field::InspectTypeBatch(PathBuf::from(decoder.os_string()?)),
                 41 => Field::ActivationPreview,
                 42 => Field::InspectionStrict,
+                53 => Field::PortableOutput,
                 45 => return Err(ProtocolError::RetiredFieldTag(45)),
                 other => return Err(ProtocolError::UnknownFieldTag(other)),
             };
@@ -794,6 +826,10 @@ impl ExtractRequest {
         self.fields.push(Field::InspectTypeBatch(value.to_owned()));
     }
 
+    pub(crate) fn portable_output(&mut self) {
+        self.fields.push(Field::PortableOutput);
+    }
+
     pub(crate) fn inspection_strict(&mut self) {
         self.fields.push(Field::InspectionStrict);
     }
@@ -887,6 +923,7 @@ impl ExtractRequest {
                 ),
                 Field::ActivationPreview => flags.push("--activation-preview".into()),
                 Field::InspectionStrict => flags.push("--inspection-strict".into()),
+                Field::PortableOutput => flags.push("--portable-output".into()),
             }
         }
         inputs.extend(flags);
@@ -1167,6 +1204,7 @@ fn encode_field(out: &mut Vec<u8>, field: &Field) {
         }
         Field::ActivationPreview => out.push(41),
         Field::InspectionStrict => out.push(42),
+        Field::PortableOutput => out.push(53),
     }
 }
 
@@ -1465,6 +1503,58 @@ mod tests {
     }
 
     #[test]
+    fn portable_output_round_trips_and_refuses_retained_modes() {
+        let mut request = ExtractRequest::default();
+        request.input("Fixture.hs");
+        request.output_dir("out");
+        request.targets(["first", "second"]);
+        request.portable_output();
+        assert_eq!(request.admitted_mode().unwrap(), RequestMode::Source);
+        let decoded = ExtractRequest::decode(&request.encode()).unwrap();
+        assert_eq!(decoded.cli_argv(), request.cli_argv());
+        assert_eq!(decoded.admitted_mode().unwrap(), RequestMode::Source);
+        for conflicting in [
+            Field::Turn,
+            Field::Cell,
+            Field::CellPlan,
+            Field::CheckSource,
+            Field::Classify,
+            Field::ModuleCandidates("scope".into()),
+            Field::SessionArtifacts("scope".into()),
+            Field::CertifyHomeProducts,
+            Field::TargetModuleOnly,
+            Field::InjectVal("Binding".into()),
+            Field::BindGen(1),
+            Field::SessionRoot("session".into()),
+            Field::SessionIncarnation("1".into()),
+        ] {
+            let mut invalid = request.clone();
+            invalid.fields.push(conflicting);
+            assert!(invalid.admitted_mode().is_err());
+            assert!(ExtractRequest::decode(&invalid.encode())
+                .unwrap()
+                .admitted_mode()
+                .is_err());
+        }
+        for missing in [
+            Field::OutputDir("out".into()),
+            Field::Targets(vec!["first".into(), "second".into()]),
+        ] {
+            let mut invalid = request.clone();
+            invalid
+                .fields
+                .retain(|field| std::mem::discriminant(field) != std::mem::discriminant(&missing));
+            assert!(invalid.admitted_mode().is_err());
+        }
+        assert_eq!(
+            ExtractRequest::from_cli(&request.cli_argv())
+                .unwrap()
+                .cli_argv(),
+            request.cli_argv()
+        );
+    }
+
+    #[test]
     fn module_candidates_round_trip() {
         let mut request = ExtractRequest::default();
         request.input("Expr.hs");
@@ -1657,6 +1747,7 @@ mod tests {
             "--worker-request-v10",
             "--worker-request-v11",
             "--worker-request-v12",
+            "--worker-request-v18",
         ] {
             assert_eq!(
                 ExtractRequest::decode_worker_argv(&[flag.into(), payload.clone()]).unwrap_err(),
@@ -1685,6 +1776,7 @@ mod tests {
             b"TPREQ015",
             b"TPREQ016",
             b"TPREQ017",
+            b"TPREQ018",
         ] {
             let mut request = magic.to_vec();
             request.extend_from_slice(&0u32.to_le_bytes());
