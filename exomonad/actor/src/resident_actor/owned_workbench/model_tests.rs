@@ -85,11 +85,6 @@ fn execution_with_id(
         crate::ActorWorkbenchSource::new("", Vec::new()),
         None,
     );
-    let cleanup = workbench.continuation_cleanup_owner(
-        context.clone(),
-        "model test execution abandoned".into(),
-        resources.clone(),
-    );
     let request = WorkbenchRequest::from_cell_input("pure ()")
         .with_execution_id(WorkbenchExecutionId::from_digest(digest));
     let reservation_owner = RequestReservationOwner::Workbench {
@@ -97,6 +92,17 @@ fn execution_with_id(
         attempt: crate::request::WorkbenchReservationAttempt::fresh(),
     };
     let invocation_work = InvocationWork::new(context.actor, reservation_owner.clone());
+    let control = crate::WorkbenchExecutionControl::untracked();
+    let cleanup = workbench
+        .continuation_cleanup_owner(
+            context.clone(),
+            "model test execution abandoned".into(),
+            resources.clone(),
+        )
+        .with_compiler_owner(crate::resident_workbench::CompilerCloseOwner::Invocation {
+            work: invocation_work.clone(),
+            control: Some(control.clone()),
+        });
     OwnedExecution {
         state: Box::new(WorkbenchExecutionState {
             cell_span: cell_execution_span(&context, &request),
@@ -105,7 +111,7 @@ fn execution_with_id(
                 park_effects: true,
                 context,
                 public_visibility: None,
-                control: Some(crate::WorkbenchExecutionControl::untracked()),
+                control: Some(control),
                 model: Some(model),
                 context_binding: None,
                 installed_tools: None,
@@ -129,6 +135,139 @@ fn execution_with_id(
         observation: Default::default(),
         retirement: crate::RetainedActorExit::new(),
     }
+}
+
+#[tokio::test]
+async fn blocking_source_check_keeps_exact_execution_owner_on_error_and_unwind() {
+    use crate::resident_workbench::CompilerCloseOwner;
+    use crate::termination::CompilerWorkClose;
+
+    for unwind in [false, true] {
+        let owned = execution(Arc::new(ModelOwner::default()));
+        let original_work = owned.state.effects.invocation_work.clone();
+        let original_control = owned.state.effects.control.clone().unwrap();
+        let unrelated = crate::WorkbenchExecutionControl::untracked();
+        let expected_control = original_control.clone();
+        let running = CompilerCloseOwner::Hosted(unrelated.clone())
+            .scope(async {
+                owned.spawn_blocking(move || {
+                    let CompilerCloseOwner::Invocation { work, control } =
+                        CompilerCloseOwner::current().unwrap()
+                    else {
+                        panic!("source checking must use the admitted invocation owner")
+                    };
+                    assert!(Arc::ptr_eq(&work, &original_work));
+                    assert!(Arc::ptr_eq(&control.unwrap(), &expected_control));
+                    crate::ActorCompilerCloseOwner::current()
+                        .unwrap()
+                        .run(|_| {
+                            if unwind {
+                                panic!("source checker unwind")
+                            }
+                            Err::<(), _>("source checker rejection")
+                        })
+                        .unwrap()
+                })
+            })
+            .await;
+        match running.await {
+            Err(error) if unwind => assert!(error.is_panic()),
+            Ok(outcome) if !unwind => {
+                assert_eq!(outcome.action, Err("source checker rejection"));
+                assert_eq!(
+                    outcome.close,
+                    tidepool_runtime::CompilerTransactionClose::NotStarted
+                );
+            }
+            _ => panic!("source action must retain its error or unwind"),
+        }
+        assert_eq!(
+            original_control.compiler_close_observations(),
+            vec![CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::NotStarted
+            )]
+        );
+        assert!(unrelated.compiler_close_observations().is_empty());
+        assert!(crate::ActorCompilerCloseOwner::current().is_err());
+    }
+}
+
+#[tokio::test]
+async fn blocking_source_check_keeps_cancellation_and_close_after_waiter_disposal() {
+    use crate::termination::CompilerWorkClose;
+
+    let owned = execution(Arc::new(ModelOwner::default()));
+    let control = owned.state.effects.control.clone().unwrap();
+    let (entered, observed) = tokio::sync::oneshot::channel();
+    let (release, proceed) = std::sync::mpsc::channel();
+    let (settled, settlement) = tokio::sync::oneshot::channel();
+    let running = owned.spawn_blocking(move || {
+        let outcome = crate::ActorCompilerCloseOwner::current()
+            .unwrap()
+            .run(|_| {
+                entered.send(()).unwrap();
+                proceed
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .unwrap();
+                tidepool_extract_cmd::compiler_host_checkpoint()
+            })
+            .unwrap();
+        settled.send(outcome).unwrap();
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        control.compiler_close_observations(),
+        vec![CompilerWorkClose::Pending]
+    );
+    drop(running);
+    drop(owned);
+    assert!(control.request_cancellation());
+    release.send(()).unwrap();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), settlement)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        outcome.action.unwrap_err().kind(),
+        std::io::ErrorKind::Interrupted
+    );
+    assert_eq!(
+        outcome.close,
+        tidepool_runtime::CompilerTransactionClose::NotStarted
+    );
+    assert_eq!(
+        control.compiler_close_observations(),
+        vec![CompilerWorkClose::Settled(
+            tidepool_runtime::CompilerTransactionClose::NotStarted
+        )]
+    );
+}
+
+#[tokio::test]
+async fn blocking_source_check_refuses_closed_execution_before_native_admission() {
+    let owned = execution(Arc::new(ModelOwner::default()));
+    let control = owned.state.effects.control.clone().unwrap();
+    assert!(control.request_cancellation());
+    owned.state.effects.invocation_work.close();
+    let attempted = Arc::new(AtomicUsize::new(0));
+    let native = attempted.clone();
+    let result = owned
+        .spawn_blocking(move || {
+            crate::ActorCompilerCloseOwner::current().unwrap().run(|_| {
+                native.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(ResidentActorWorkbenchError::CompilerCleanupAdmissionClosed)
+    ));
+    assert_eq!(attempted.load(Ordering::SeqCst), 0);
+    assert_eq!(control.compiler_close_observations(), Vec::new());
 }
 
 /// The first owned step prepares cells before `execute_workbench` is called.

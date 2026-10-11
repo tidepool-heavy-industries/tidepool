@@ -116,15 +116,16 @@ where
                         .as_ref()
                         .expect("reload cancellation owner")
                         .publication_decision();
-                    tidepool_runtime::spawn_blocking_in_span(move || {
-                        prepare_helpers(layers, actor, checked, receipt, &publication)
-                    })
-                    .await
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "reload source owner failed: {error}"
-                        ))
-                    })
+                    owned
+                        .spawn_blocking(move || {
+                            prepare_helpers(layers, actor, checked, receipt, &publication)
+                        })
+                        .await
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "reload source owner failed: {error}"
+                            ))
+                        })
                 })
             },
             move |behavior, _kernel, owned, prepared| {
@@ -218,20 +219,24 @@ where
                     {
                         return Ok(Err(crate::SourceLayerReload::Cancelled));
                     }
-                    tidepool_runtime::spawn_blocking_in_span(move || {
-                        let layers = layers.ok_or_else(|| {
-                            crate::SourceLayerReload::Unavailable(
-                                "this host installs no source layers".into(),
+                    owned
+                        .spawn_blocking(move || {
+                            let layers = layers.ok_or_else(|| {
+                                crate::SourceLayerReload::Unavailable(
+                                    "this host installs no source layers".into(),
+                                )
+                            })?;
+                            layers.stage_spec_reload(
+                                tidepool_repr::PrincipalId::from(actor),
+                                &checked,
                             )
-                        })?;
-                        layers.stage_spec_reload(tidepool_repr::PrincipalId::from(actor), &checked)
-                    })
-                    .await
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::ActorProtocol(format!(
-                            "reload source owner failed: {error}"
-                        ))
-                    })
+                        })
+                        .await
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::ActorProtocol(format!(
+                                "reload source owner failed: {error}"
+                            ))
+                        })
                 })
             },
             move |behavior, _kernel, owned, staged| match staged {

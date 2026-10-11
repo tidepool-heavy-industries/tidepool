@@ -544,6 +544,17 @@ where
 }
 
 impl<H, O> OwnedExecution<H, O> {
+    /// Blocking source checks keep the admitted execution's cleanup authority.
+    fn spawn_blocking<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce() -> T + Send + 'static,
+    ) -> tokio::task::JoinHandle<T> {
+        let (timing, cleanup) = self.scopes();
+        tidepool_runtime::spawn_blocking_in_span(move || {
+            timing.sync_scope(|| cleanup.sync_scope(operation))
+        })
+    }
+
     fn expire_after_tool(&mut self) {
         if let Some(stamp) = self
             .state
