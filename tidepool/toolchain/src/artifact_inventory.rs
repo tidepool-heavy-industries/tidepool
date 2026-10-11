@@ -1969,6 +1969,48 @@ pub(crate) struct BoundArtifactSelection {
     groups: BTreeMap<NativeGroupKey, BTreeSet<NativeGroupBinding>>,
 }
 
+impl BoundArtifactSelection {
+    fn target_groups(
+        &self,
+        imports: &[crate::certified_products::PendingImportOwner],
+    ) -> Result<BTreeSet<NativeGroupKey>, CompileError> {
+        let mut groups = BTreeSet::new();
+        for import in imports {
+            let crate::certified_products::PendingImportOwner::Source {
+                owner,
+                original_ordinal,
+                binder,
+            } = import
+            else {
+                continue;
+            };
+            let id = self
+                .owners
+                .native
+                .get(&NativeOwnerKey::from_owner(owner))
+                .ok_or_else(|| failure("certified target native membership"))?;
+            let entry = &self.entries[id];
+            let ArtifactPayload::Original(product) = &entry.payload else {
+                return Err(failure("certified target native membership"));
+            };
+            if product.owner() != owner
+                || !crate::certified_products::authenticates_original_native_entry(
+                    product,
+                    *original_ordinal,
+                    binder,
+                )
+            {
+                return Err(failure("certified target native membership"));
+            }
+            groups.insert(NativeGroupKey {
+                artifact: *id,
+                original_ordinal: *original_ordinal,
+            });
+        }
+        Ok(groups)
+    }
+}
+
 /// A run/context family owns one inventory, without a global registry.
 #[derive(Clone, Default)]
 pub struct ArtifactInventory(Arc<Mutex<InventoryState>>);
@@ -2185,7 +2227,6 @@ impl ArtifactInventory {
             }
             allowed_values.insert(entry.descriptor.id);
         }
-        let entries = fixed.entries.values().cloned().collect::<Vec<_>>();
         let demanded = match demand {
             NativeArtifactDemand::ScopeInterfaces => BTreeSet::new(),
             NativeArtifactDemand::AllGroups => fixed
@@ -2202,24 +2243,16 @@ impl ArtifactInventory {
                 })
                 .collect(),
             NativeArtifactDemand::VerifiedTarget { entry, imports } => {
-                let mut groups = certified_target_source_groups(&entries, imports)?;
+                let mut groups = fixed.target_groups(imports)?;
                 groups.insert(entry.native_group_key());
                 groups
             }
             NativeArtifactDemand::CertifiedTargetImports(imports) => {
-                certified_target_source_groups(&entries, imports)?
+                fixed.target_groups(imports)?
             }
         };
-        let visible_entries = fixed
-            .entries
-            .iter()
-            .filter(|(id, entry)| {
-                entry.descriptor.kind != ArtifactKind::ValueInterface || allowed_values.contains(id)
-            })
-            .map(|(id, entry)| (*id, Arc::clone(entry)))
-            .collect::<BTreeMap<_, _>>();
         let namespace_ids = selection
-            .artifact_ids_from_entries(&visible_entries)
+            .artifact_ids_from_bound_entries(&fixed.entries, &fixed.owners.native, &allowed_values)
             .map_err(|error| CompileError::CompilerEvidence(Box::new(error)))?;
         let mut materialization_parents = fixed.materializations.clone();
         cursor.collect_cached_materializations(&mut materialization_parents)?;
@@ -3026,7 +3059,9 @@ impl ArtifactInventory {
                         .filter(|key| planned.contains_key(key)),
                 )
                 .map(resolve)
-                .filter(|node| !parent_nodes.contains(node))
+                .filter(|node| {
+                    matches!(node, InventoryNodeKey::Group(_)) || !parent_nodes.contains(node)
+                })
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect()

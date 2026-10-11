@@ -2494,31 +2494,81 @@ impl CertifiedSourceSelection {
             Arc<crate::artifact_inventory::ArtifactEntry>,
         >,
     ) -> CertResult<BTreeSet<crate::artifact_inventory::ArtifactId>> {
-        use crate::artifact_inventory::ArtifactPayload;
+        let mut native = BTreeMap::new();
+        let mut ambiguous = BTreeSet::new();
+        for (id, entry) in entries {
+            if let crate::artifact_inventory::ArtifactPayload::Original(product) = &entry.payload {
+                let key = crate::artifact_inventory::NativeOwnerKey::from_owner(product.owner());
+                if native.insert(key.clone(), *id).is_some() {
+                    ambiguous.insert(key);
+                }
+            }
+        }
+        if self
+            .visible_modules()
+            .filter_map(|(_, selected)| selected.native())
+            .any(|selected| {
+                ambiguous.contains(&crate::artifact_inventory::NativeOwnerKey::from_owner(
+                    &selected.owner,
+                ))
+            })
+        {
+            return Err(CertificationError::Mismatch(
+                "ambiguous issued compiler native artifact",
+            ));
+        }
+        self.artifact_ids_with_owners(entries, &native, None)
+    }
+
+    pub(crate) fn artifact_ids_from_bound_entries(
+        &self,
+        entries: &BTreeMap<
+            crate::artifact_inventory::ArtifactId,
+            Arc<crate::artifact_inventory::ArtifactEntry>,
+        >,
+        native: &BTreeMap<
+            crate::artifact_inventory::NativeOwnerKey,
+            crate::artifact_inventory::ArtifactId,
+        >,
+        allowed_values: &BTreeSet<crate::artifact_inventory::ArtifactId>,
+    ) -> CertResult<BTreeSet<crate::artifact_inventory::ArtifactId>> {
+        self.artifact_ids_with_owners(entries, native, Some(allowed_values))
+    }
+
+    fn artifact_ids_with_owners(
+        &self,
+        entries: &BTreeMap<
+            crate::artifact_inventory::ArtifactId,
+            Arc<crate::artifact_inventory::ArtifactEntry>,
+        >,
+        native: &BTreeMap<
+            crate::artifact_inventory::NativeOwnerKey,
+            crate::artifact_inventory::ArtifactId,
+        >,
+        allowed_values: Option<&BTreeSet<crate::artifact_inventory::ArtifactId>>,
+    ) -> CertResult<BTreeSet<crate::artifact_inventory::ArtifactId>> {
+        use crate::artifact_inventory::{ArtifactKind, ArtifactPayload, NativeOwnerKey};
         let mut ids = BTreeSet::new();
         for (_, selected) in self.visible_modules() {
             let interface = selected.interface();
-            if !entries
-                .get(&interface)
-                .is_some_and(|entry| !matches!(entry.payload, ArtifactPayload::Original(_)))
-            {
+            if !entries.get(&interface).is_some_and(|entry| {
+                !matches!(entry.payload, ArtifactPayload::Original(_))
+                    && (entry.descriptor.kind != ArtifactKind::ValueInterface
+                        || allowed_values.is_none_or(|allowed| allowed.contains(&interface)))
+            }) {
                 return Err(CertificationError::Mismatch(
                     "issued compiler interface artifact",
                 ));
             }
             ids.insert(interface);
-            if let Some(native) = selected.native() {
-                let mut matching = entries.iter().filter(|(_, entry)| {
-                    matches!(&entry.payload,
-                    ArtifactPayload::Original(product) if product.owner() == &native.owner)
-                });
-                let (id, _) = matching.next().ok_or(CertificationError::Mismatch(
-                    "issued compiler native artifact",
-                ))?;
-                if matching.next().is_some() {
-                    return Err(CertificationError::Mismatch(
-                        "ambiguous issued compiler native artifact",
-                    ));
+            if let Some(selected_native) = selected.native() {
+                let id = native
+                    .get(&NativeOwnerKey::from_owner(&selected_native.owner))
+                    .ok_or(CertificationError::Mismatch(
+                        "issued compiler native artifact",
+                    ))?;
+                if !entries.get(id).is_some_and(|entry| matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == &selected_native.owner)) {
+                    return Err(CertificationError::Mismatch("issued compiler native artifact"));
                 }
                 ids.insert(*id);
             }
