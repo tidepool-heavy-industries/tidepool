@@ -6060,13 +6060,22 @@ where
                 Ok(operation) => return operation.await,
                 Err(boundary) => boundary,
             };
-        // Keep each interpreter branch in its own future. A child can execute
-        // an effect during Ractor startup on the caller's poll stack; embedding
-        // every branch here makes that ordinary nesting exhaust a debug stack.
-        let operation: futures_util::future::BoxFuture<
-            '_,
-            Result<ResidentOutcome, ResidentActorWorkbenchError>,
-        > = match boundary {
+        self.prepare_actor_effect(kernel, context, effect_owner, ancestry, boundary)
+            .await
+    }
+
+    fn prepare_actor_effect<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        context: &'a ActorSessionContext,
+        effect_owner: CurrentEffectOwner<'a>,
+        ancestry: &'a crate::CallAncestry,
+        boundary: ResidentActorBoundary,
+    ) -> futures_util::future::BoxFuture<'a, Result<ResidentOutcome, ResidentActorWorkbenchError>>
+    {
+        // Construct branch futures before entering their async driver. Nested
+        // child startup must not retain this construction frame while polling.
+        match boundary {
             ResidentActorBoundary::ScopeResumed { outcome } => Box::pin(async move { Ok(outcome) }),
             ResidentActorBoundary::ScopeRun {
                 continuation,
@@ -7114,8 +7123,7 @@ where
                     other.operation()
                 )))
             }),
-        };
-        operation.await
+        }
     }
 
     async fn stabilize_program(
