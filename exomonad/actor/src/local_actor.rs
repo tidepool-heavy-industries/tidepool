@@ -105,8 +105,8 @@ pub(crate) enum ExitAuthority<'a> {
     /// ownership of every child already moved to the successor.
     Own { children: &'a [LocalActorRef] },
     /// The direct supervisor publishes on behalf of a child whose task is
-    /// gone or was killed (W3, W4). No cleanup proof is retained; the
-    /// child's `cleanup()` stays `None`.
+    /// gone or was killed (W3, W4). This publication issues no cleanup
+    /// evidence; the child's task owner may separately retain uncertainty.
     SupervisorForced,
     /// The actor lost the task that owned its behavior. It can report failed
     /// execution and unconfirmed cleanup, but cannot run behavior shutdown.
@@ -7974,6 +7974,15 @@ mod tests {
 
     #[tokio::test]
     async fn cleanup_child_force_and_terminal_only_never_confirm() {
+        let terminal_only = RetainedActorExit::new();
+        publish_exit(
+            &terminal_only,
+            &ActorTerminal::new(ActorExitKind::Cancelled, "forced terminal"),
+            ExitAuthority::SupervisorForced,
+        );
+        assert!(terminal_only.get().is_some());
+        assert!(terminal_only.cleanup().is_none());
+
         let fixture = behavior(false);
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
         let (reply, receiver) = tokio::sync::oneshot::channel();
@@ -8014,10 +8023,18 @@ mod tests {
         task.await.unwrap();
         // best-effort: draining the paired oneshot; its value isn't asserted here.
         receiver.await.ok();
-        assert!(
-            actor.terminal().cleanup().is_none(),
-            "forced terminal must not manufacture component proof"
-        );
+        let cleanup = actor
+            .terminal()
+            .cleanup()
+            .expect("task owner retains uncertainty");
+        assert_eq!(cleanup.actor, actor.identity());
+        for component in [&cleanup.hook, &cleanup.realm, &cleanup.children] {
+            assert!(
+                matches!(component, crate::CleanupComponentOutcome::Unconfirmed(_)),
+                "forced task loss must not manufacture component confirmation: {component:?}"
+            );
+        }
+        assert!(!cleanup.is_confirmed());
         let observed = actor
             .shutdown_with_cleanup(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
