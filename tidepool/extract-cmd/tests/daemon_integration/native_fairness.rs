@@ -423,8 +423,8 @@ fn sample_memory(pids: &[u64], sampling: &std::sync::atomic::AtomicBool) -> Valu
     }
     json!({"status":if samples > 0 && failures == 0 {"observed"} else {"partial_or_unknown"},
         "samples":samples,"failed_samples":failures,"sample_interval_ms":5,
-        "sampled_aggregate_worker_peak_kib":aggregate_peak_kib,
-        "sampled_individual_worker_peak_kib":individual_peak_kib,
+        "sampled_aggregate_worker_peak_kib":(samples > 0).then_some(aggregate_peak_kib),
+        "sampled_individual_worker_peak_kib":(samples > 0).then_some(individual_peak_kib),
         "scope":"both original compiler workers; excludes daemon and client; sampled RSS, not process/cgroup peak"})
 }
 
@@ -480,4 +480,13 @@ fn concurrency_report_distinguishes_overlap_from_grant_width_and_incomplete_trac
         observed_concurrency(&rows[..3])["status"],
         "partial_or_unknown"
     );
+}
+
+#[test]
+fn unsampled_worker_memory_is_unknown() {
+    let disabled = std::sync::atomic::AtomicBool::new(false);
+    let report = sample_memory(&[0], &disabled);
+    assert_eq!(report["status"], "partial_or_unknown");
+    assert!(report["sampled_aggregate_worker_peak_kib"].is_null());
+    assert!(report["sampled_individual_worker_peak_kib"].is_null());
 }
