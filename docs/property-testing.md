@@ -105,6 +105,15 @@ or publishes it. Keep logical model identities independent of returned productio
 handles; assert required uniqueness before recording their correspondence so an
 ID collision cannot overwrite the oracle's own state.
 
+Model each observable identity separately. Equal immutable payloads can have
+different issuing scopes, dependency bindings and selected roots. A node retained
+as a hidden dependency is not yet an explicitly selected root; storage custody
+is not executable demand. Generate histories that change one of these facts
+while keeping the others equal. An oracle that collapses them can both report
+false failures and miss real authority changes. If issuance supplies opaque
+handles, use them only for checked identity correspondence, never to derive the
+expected edges, selection or reachability from production output.
+
 Useful maintained examples are:
 
 - `tidepool/runtime/src/session/binding_table.rs`: incremental membership,
@@ -135,6 +144,17 @@ operation was admitted and is pending; a sleep or ignored setup result does not
 prove that. A refusal test must reach the intended boundary rather than fail
 earlier because its supposedly valid fixture is malformed. Observe the setup without consuming the event whose
 ordering the test needs to explore.
+
+Build positive fixtures through the owning issuers and installed capabilities;
+reserve malformed or incomplete construction for explicit refusal controls.
+For asynchronous tests, distinguish an admitted operation, a suspended
+continuation, provider-permitted waiting, terminal completion and released
+resources. A pending future alone does not establish all of them. Use the
+existing typed progress/terminal observers, fail promptly on an unexpected
+terminal result, and give controlled gates an abandonment path that settles
+their owner when an assertion fails. Separate the cold compilation budget from
+the bound on the transition being tested; extending one must not weaken the
+other.
 
 Measure generated behavior: shared owners, successful mutations, terminal
 transitions, refusals, depth, sizes and relevant operation combinations. Keep
