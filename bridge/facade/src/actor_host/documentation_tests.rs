@@ -4145,7 +4145,7 @@ async fn selected_nominal_capture_excludes_ambient_sibling_from_native_notebook(
         let reply = dispatch_haskell_script(target.policy.as_ref(), "case sessionInput of SelectedNominal value -> respond value").await;
         assert_eq!(reply["status"], "replied", "{reply}");
         let original = displayed(campaign, root.as_ref(),
-            "let waitMembrane = do { observed <- pollResponse membraneResponse; case observed of { ResponseReady result -> pure result; ResponseUnavailable failure -> error (show failure); _ -> sleep (milliseconds 1) >> waitMembrane } }\nresult <- waitMembrane\n_ <- display (case AmbientNominal 42 of AmbientNominal value -> value)").await;
+            "let waitMembrane = do { observed <- pollResponse membraneResponse; case observed of { ResponseReady result -> pure result; ResponseUnavailable failure -> error (T.pack (show failure)); _ -> sleep (milliseconds 1) >> waitMembrane } }\nresult <- waitMembrane\n_ <- display (case AmbientNominal 42 of AmbientNominal value -> value)").await;
         assert_eq!(explicit_display_texts(&original), vec!["42"], "{original}");
     })).await;
 }
