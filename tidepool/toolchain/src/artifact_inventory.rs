@@ -1964,12 +1964,20 @@ pub(crate) struct BoundArtifactSelection {
     entries: BTreeMap<ArtifactId, Arc<ArtifactEntry>>,
     owners: SelectedOwners,
     captured_facts: BTreeMap<ArtifactId, ArtifactFactsHandle>,
-    bindings: BTreeMap<ArtifactId, ArtifactBinding>,
     materializations: Vec<Arc<crate::declaration_context::RetainedArtifactMaterialization>>,
     groups: BTreeMap<NativeGroupKey, BTreeSet<NativeGroupBinding>>,
 }
 
 impl BoundArtifactSelection {
+    fn resolve_binding(
+        &self,
+        id: ArtifactId,
+        state: &InventoryState,
+    ) -> Result<ArtifactBinding, CompileError> {
+        self.view
+            .resolve_binding(id, &self.view.read_projection(state).nodes)
+    }
+
     fn target_groups(
         &self,
         imports: &[crate::certified_products::PendingImportOwner],
@@ -2169,7 +2177,13 @@ impl ArtifactInventory {
         // Availability by itself leaves ambiguity intact until demand.
         let mut qualified = BTreeMap::<NativeGroupKey, BTreeSet<NativeGroupBinding>>::new();
         for requirement in selection.native_original_requirements() {
-            for group in &requirement.selection.graph_selection().native_groups {
+            for root in &requirement.selection.graph_selection().roots {
+                let ArtifactBindingNode::Group(group) = root else {
+                    continue;
+                };
+                if group.binding.artifact != requirement.original {
+                    continue;
+                }
                 qualified
                     .entry(NativeGroupKey {
                         artifact: group.binding.artifact,
@@ -2180,11 +2194,6 @@ impl ArtifactInventory {
             }
         }
         groups.extend(qualified);
-        let nodes = &view.read_projection(&state).nodes;
-        let bindings = entries
-            .keys()
-            .map(|id| Ok((*id, view.resolve_binding(*id, nodes)?)))
-            .collect::<Result<_, CompileError>>()?;
         drop(state);
         let mut materializations = Vec::new();
         view.collect_materializations(&mut materializations, &mut BTreeSet::new())?;
@@ -2193,7 +2202,6 @@ impl ArtifactInventory {
             entries,
             owners,
             captured_facts,
-            bindings,
             materializations,
             groups,
         })
@@ -2349,12 +2357,9 @@ impl ArtifactInventory {
                        scope: ArtifactSelectionId|
          -> Result<InventoryNodeKey, CompileError> {
             Ok(match key {
-                LogicalNodeKey::Artifact(id) => InventoryNodeKey::Artifact(
-                    *fixed
-                        .bindings
-                        .get(&id)
-                        .ok_or_else(|| failure("artifact is outside bound custody"))?,
-                ),
+                LogicalNodeKey::Artifact(id) => {
+                    InventoryNodeKey::Artifact(fixed.resolve_binding(id, &state)?)
+                }
                 LogicalNodeKey::Group(group) => match fixed.groups.get(&group) {
                     Some(issued) if issued.len() == 1 => {
                         InventoryNodeKey::Group(*issued.first().unwrap())
@@ -2364,7 +2369,7 @@ impl ArtifactInventory {
                             ArtifactInventoryFailure::BindingAmbiguity {
                                 artifact: group.artifact,
                             },
-                        ))
+                        ));
                     }
                     None => LogicalNodeKey::Group(group).bind(scope),
                 },
@@ -2400,15 +2405,7 @@ impl ArtifactInventory {
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let namespace = namespace_ids
             .iter()
-            .map(|id| {
-                Ok((
-                    *id,
-                    *fixed
-                        .bindings
-                        .get(id)
-                        .ok_or_else(|| failure("namespace is outside bound custody"))?,
-                ))
-            })
+            .map(|id| Ok((*id, fixed.resolve_binding(*id, &state)?)))
             .collect::<Result<BTreeMap<_, _>, CompileError>>()?;
         let new_roots = namespace
             .values()
@@ -2785,6 +2782,8 @@ impl ArtifactInventory {
         let requirements = root_intent.native_original_requirements();
         let mut required_groups =
             BTreeMap::<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>::new();
+        let mut required_roots =
+            BTreeMap::<NativeGroupKey, imbl::OrdSet<NativeGroupBinding>>::new();
         for NativeOriginalRequirement {
             original,
             selection,
@@ -2810,17 +2809,37 @@ impl ArtifactInventory {
                 };
                 required_groups.entry(key).or_default().insert(*group);
             }
+            for root in &graph.roots {
+                let ArtifactBindingNode::Group(group) = root else {
+                    continue;
+                };
+                if group.binding.artifact == *original {
+                    required_roots
+                        .entry(NativeGroupKey {
+                            artifact: *original,
+                            original_ordinal: group.original_ordinal,
+                        })
+                        .or_default()
+                        .insert(*group);
+                }
+            }
         }
         let mut prebound = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
+        let mut historical_groups = BTreeSet::new();
         for (group, issued) in &required_groups {
-            if issued.len() != 1 {
+            let choices = required_roots.get(group).unwrap_or(issued);
+            if choices.len() != 1 {
+                if !required_roots.contains_key(group) && !groups.contains(group) {
+                    historical_groups.insert(*group);
+                    continue;
+                }
                 return Err(admission_failure(
                     ArtifactInventoryFailure::BindingAmbiguity {
                         artifact: group.artifact,
                     },
                 ));
             }
-            prebound.insert(*group, *issued.iter().next().unwrap());
+            prebound.insert(*group, *choices.iter().next().unwrap());
         }
         // Traverse the union once. Exact handles distinguish independently
         // issued children with the same payload; the demanding group gives
@@ -2903,7 +2922,8 @@ impl ArtifactInventory {
                         || required_groups.contains_key(group))
             });
         }
-        let (planned, closed_groups) = owners.planned_edges(&state, &selected, &selected_groups)?;
+        let (mut planned, closed_groups) =
+            owners.planned_edges(&state, &selected, &selected_groups)?;
         if exact && closed_groups != selected_groups {
             return Err(failure(
                 "recovered native group closure differs from certified demand",
@@ -2936,6 +2956,29 @@ impl ArtifactInventory {
             }
             LogicalNodeKey::Artifact(_) => None,
         };
+        // Historical descendants retain their issuer's exact edges. Only a
+        // selected root can qualify one of several handles for new execution.
+        for (key, edges) in &planned {
+            if prebound_node(key).is_some()
+                || matches!(key, LogicalNodeKey::Group(group) if historical_groups.contains(group))
+            {
+                continue;
+            }
+            for (target, _) in edges {
+                if let LogicalNodeKey::Group(group) = target {
+                    if historical_groups.contains(group) {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::BindingAmbiguity {
+                                artifact: group.artifact,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        planned.retain(|key, _| {
+            !matches!(key, LogicalNodeKey::Group(group) if historical_groups.contains(group))
+        });
         // Reuse inherited bindings only while their entire qualified outgoing
         // edge set matches the newly issued namespace. Changes propagate through
         // parents; unrelated inherited vertices are never rebound or orphaned.
@@ -8605,6 +8648,230 @@ mod tests {
             );
             assert_eq!(inventory.node_count(), nodes);
             assert_eq!(ambiguous.capture_graph_selection(), graph);
+        }
+    }
+
+    #[test]
+    fn independent_native_roots_keep_overlapping_exact_descendant_bindings() {
+        for count in [1, 3] {
+            let helper = Arc::new(issued_native_groups(
+                "SharedNative",
+                (7..7 + count).map(|ordinal| (ordinal, vec![])).collect(),
+                &[],
+                &BTreeMap::new(),
+            ));
+            let originals = ["NativeLeft", "NativeRight"].map(|name| {
+                Arc::new(issued_native_groups(
+                    name,
+                    vec![(
+                        7,
+                        (7..7 + count)
+                            .map(|ordinal| issued_source(&helper, ordinal))
+                            .collect(),
+                    )],
+                    &[&helper],
+                    &BTreeMap::new(),
+                ))
+            });
+            let sources = originals.each_ref().map(|original| {
+                let inventory = ArtifactInventory::default();
+                inventory
+                    .admit_shared(
+                        &inventory.empty_view(),
+                        vec![helper.clone(), original.clone()],
+                    )
+                    .unwrap()
+            });
+            let requirements = std::array::from_fn::<_, 2, _>(|index| {
+                NativeOriginalRequirement::from_selected_view(
+                    originals[index].descriptor.id,
+                    &sources[index],
+                )
+                .unwrap()
+                .unwrap()
+            });
+            let interfaces = CompilerInputProjection::from_issued_entries(&[
+                helper.clone(),
+                originals[0].clone(),
+                originals[1].clone(),
+            ])
+            .unwrap()
+            .interface_only();
+            let projection = interfaces
+                .merge(&CompilerInputProjection::from_issued_entries(&originals).unwrap())
+                .unwrap();
+            let model = ExactNativeClosureModel {
+                groups: sources
+                    .iter()
+                    .flat_map(|view| view.capture_graph_selection().native_groups)
+                    .collect(),
+                rows: sources
+                    .iter()
+                    .flat_map(ArtifactView::binding_dependencies)
+                    .collect(),
+            };
+            assert_eq!(
+                model
+                    .groups
+                    .iter()
+                    .filter(|group| group.binding.artifact == helper.descriptor.id)
+                    .count(),
+                2 * count as usize
+            );
+            for reverse in [false, true] {
+                let first = usize::from(reverse);
+                let joined = sources[first]
+                    .merge_selected(&sources[1 - first], &interfaces)
+                    .unwrap();
+                let selected = joined
+                    .inventory()
+                    .admit_projected_with_native_requirements(
+                        &joined,
+                        originals.to_vec(),
+                        &projection,
+                        &requirements,
+                    )
+                    .unwrap();
+                model.check(&selected).unwrap();
+                let recovered_inventory = ArtifactInventory::default();
+                let recovered = recovered_inventory
+                    .recover_selection(
+                        &recovered_inventory.empty_view(),
+                        selected.entries(),
+                        &selected.capture_graph_selection(),
+                        &selected.binding_dependencies(),
+                    )
+                    .unwrap();
+                model.check(&recovered).unwrap();
+                let mut certified =
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        &projection,
+                        &recovered.metadata_snapshot(),
+                        &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+                    )
+                    .unwrap();
+                certified
+                    .with_native_original_requirements(
+                        &recovered.metadata_snapshot(),
+                        &requirements,
+                    )
+                    .unwrap();
+                let mut bound = recovered_inventory
+                    .bind_segment(&recovered, vec![], &certified)
+                    .unwrap();
+                let imports = originals
+                    .each_ref()
+                    .map(|original| issued_source(original, 7));
+                let target = recovered_inventory
+                    .admit_bound_target(
+                        &mut bound,
+                        &recovered,
+                        NativeArtifactDemand::CertifiedTargetImports(&imports),
+                        vec![],
+                        &certified,
+                    )
+                    .unwrap();
+                model.check(&target).unwrap();
+                let helper_imports = [issued_source(&helper, 7)];
+                let before_bound_graph = recovered.capture_graph_selection();
+                let before_bound_nodes = recovered_inventory.node_count();
+                assert!(matches!(recovered_inventory.admit_bound_target(
+                    &mut bound, &recovered,
+                    NativeArtifactDemand::CertifiedTargetImports(&helper_imports),
+                    vec![], &certified,
+                ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                    ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == helper.descriptor.id)));
+                assert_eq!(recovered_inventory.node_count(), before_bound_nodes);
+                assert_eq!(recovered.capture_graph_selection(), before_bound_graph);
+
+                let helper_projection = projection
+                    .merge(
+                        &CompilerInputProjection::from_issued_entries(&[helper.clone()]).unwrap(),
+                    )
+                    .unwrap();
+                let mut helper_requirements = requirements.to_vec();
+                helper_requirements.push(
+                    NativeOriginalRequirement::from_selected_view(
+                        helper.descriptor.id,
+                        &sources[first],
+                    )
+                    .unwrap()
+                    .unwrap(),
+                );
+                let chosen = joined
+                    .inventory()
+                    .admit_projected_with_native_requirements(
+                        &joined,
+                        vec![helper.clone()],
+                        &helper_projection,
+                        &helper_requirements,
+                    )
+                    .unwrap();
+                model.check(&chosen).unwrap();
+                let mut chosen_certified =
+                    crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                        &helper_projection,
+                        &chosen.metadata_snapshot(),
+                        &crate::recovery_artifacts::PackageInterfaceValidation::default().inventory,
+                    )
+                    .unwrap();
+                chosen_certified
+                    .with_native_original_requirements(
+                        &chosen.metadata_snapshot(),
+                        &helper_requirements,
+                    )
+                    .unwrap();
+                let mut chosen_bound = chosen
+                    .inventory()
+                    .bind_segment(&chosen, vec![], &chosen_certified)
+                    .unwrap();
+                let direct = chosen
+                    .inventory()
+                    .admit_bound_target(
+                        &mut chosen_bound,
+                        &chosen,
+                        NativeArtifactDemand::CertifiedTargetImports(&helper_imports),
+                        vec![],
+                        &chosen_certified,
+                    )
+                    .unwrap();
+                model.check(&direct).unwrap();
+
+                let fresh = Arc::new(issued_native_groups(
+                    "FreshRoot",
+                    vec![(7, vec![issued_source(&helper, 7)])],
+                    &[&helper],
+                    &BTreeMap::new(),
+                ));
+                let fresh_projection = projection
+                    .merge(&CompilerInputProjection::from_issued_entries(&[fresh.clone()]).unwrap())
+                    .unwrap();
+                let before_graph = selected.capture_graph_selection();
+                let before_nodes = selected.inventory().node_count();
+                assert!(matches!(selected.inventory().admit_shared_with_intent(
+                &selected, vec![fresh], NativeArtifactDemand::AllGroups,
+                ArtifactRootIntent::Projected(&fresh_projection, &requirements),
+            ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == helper.descriptor.id)));
+                assert_eq!(selected.inventory().node_count(), before_nodes);
+                assert_eq!(selected.capture_graph_selection(), before_graph);
+                let conflicts = sources.each_ref().map(|view| {
+                    NativeOriginalRequirement::from_selected_view(helper.descriptor.id, view)
+                        .unwrap()
+                        .unwrap()
+                });
+                let helper_projection = interfaces
+                    .merge(
+                        &CompilerInputProjection::from_issued_entries(&[helper.clone()]).unwrap(),
+                    )
+                    .unwrap();
+                assert!(
+                    matches!(joined.inventory().admit_projected_with_native_requirements(
+                &joined, vec![helper.clone()], &helper_projection, &conflicts,
+            ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == helper.descriptor.id))
+                );
+            }
         }
     }
 
