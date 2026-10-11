@@ -5854,7 +5854,7 @@ mod tests {
                     );
                     assert_eq!(after.entry_handle_copies - before.entry_handle_copies, 0);
                 }
-                let before = inventory.metrics();
+                let before_reads = inventory.metrics();
                 // Availability and executable demand keep independent caches;
                 // both read orders reuse the closure already admitted above.
                 if ordinal % 2 == 0 {
@@ -5864,11 +5864,12 @@ mod tests {
                     fixed.view.entries();
                     fixed.view.selected_native_groups();
                 }
-                assert_eq!(inventory.metrics().graph_visits, before.graph_visits);
+                assert_eq!(inventory.metrics().graph_visits, before_reads.graph_visits);
                 assert_eq!(
                     fixed.view.selected_native_groups().len(),
                     ordinal as usize + 1
                 );
+                let before = inventory.metrics();
                 cursor = inventory
                     .admit_bound_target(
                         &mut fixed,
