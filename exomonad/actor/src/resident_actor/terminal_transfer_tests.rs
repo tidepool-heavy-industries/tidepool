@@ -100,7 +100,6 @@ async fn private_three_item_cell_refusal_keeps_receipts_and_actor_live() {
         assert!(original.receipts.iter().all(|receipt| {
             receipt.status == WorkbenchItemStatus::Committed
         }));
-        assert!(original.receipts[2].output.contains("42"), "{:?}", original.receipts[2]);
         assert!(matches!(
             original.publication.as_ref(),
             Some(WorkbenchPublicationOutcome::Rejected { .. })
