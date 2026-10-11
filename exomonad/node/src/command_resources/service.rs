@@ -10,8 +10,8 @@ const WAIT_WINDOW: Duration = Duration::from_secs(20);
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 enum Request {
-    Policy,
-    Observe,
+    Policy {},
+    Observe {},
     Directory {
         actor: String,
     },
@@ -47,7 +47,7 @@ enum Request {
         actor: String,
         id: String,
     },
-    ActorAdmission,
+    ActorAdmission {},
 }
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "result", content = "value", rename_all = "snake_case")]
@@ -87,7 +87,7 @@ pub async fn serve(listener: UnixListener, owner: Arc<CommandResources>) -> std:
         tokio::spawn(async move {
             let request = tokio::time::timeout(IO_TIMEOUT, receive::<Request>(&mut stream)).await;
             let Ok(Ok(request)) = request else { return };
-            if matches!(request, Request::ActorAdmission) {
+            if matches!(request, Request::ActorAdmission {}) {
                 match owner.admit_actor().await {
                     Ok(_reservation) => {
                         if send(&mut stream, &Response::ActorAdmitted).await.is_ok() {
@@ -106,8 +106,8 @@ pub async fn serve(listener: UnixListener, owner: Arc<CommandResources>) -> std:
                 return;
             }
             let result = match request {
-                Request::Policy => Ok(Response::Policy(owner.policy().clone())),
-                Request::Observe => Ok(Response::Observation(owner.observation())),
+                Request::Policy {} => Ok(Response::Policy(owner.policy().clone())),
+                Request::Observe {} => Ok(Response::Observation(owner.observation())),
                 Request::Directory { actor } => {
                     owner.actor_directory(&actor).map(Response::Directory)
                 }
@@ -132,7 +132,7 @@ pub async fn serve(listener: UnixListener, owner: Arc<CommandResources>) -> std:
                 Request::Acknowledge { actor, id } => owner
                     .acknowledge(&actor, &id)
                     .map(|()| Response::Acknowledged),
-                Request::ActorAdmission => unreachable!("startup lease handled above"),
+                Request::ActorAdmission {} => unreachable!("startup lease handled above"),
             };
             let response = result.unwrap_or_else(|error| Response::Error(error.to_string()));
             // best-effort: the client may already have disconnected or timed out.
@@ -162,7 +162,7 @@ impl CommandResourceClient {
             return Err(io_error("invalid resource run identity"));
         }
         let client = Arc::new(Self::Remote { socket, run });
-        match client.rpc(Request::Policy).await? {
+        match client.rpc(Request::Policy {}).await? {
             Response::Policy(actual) if actual == *policy => {
                 let observation = client.observation().await?;
                 tracing::info!(
@@ -235,7 +235,7 @@ impl CommandResourceClient {
         if let Self::Local(owner) = self {
             return Ok(owner.observation());
         }
-        match self.rpc(Request::Observe).await? {
+        match self.rpc(Request::Observe {}).await? {
             Response::Observation(observation) => Ok(observation),
             _ => Err(io_error("invalid command resource observation response")),
         }
@@ -360,7 +360,7 @@ impl CommandResourceClient {
             Self::Local(owner) => owner.admit_actor().await.map(StartupLease::Local),
             Self::Remote { socket, .. } => {
                 let mut stream = UnixStream::connect(socket).await?;
-                send(&mut stream, &Request::ActorAdmission).await?;
+                send(&mut stream, &Request::ActorAdmission {}).await?;
                 match receive(&mut stream).await? {
                     Response::ActorAdmitted => Ok(StartupLease::Remote(stream)),
                     Response::Error(error) => Err(io_error(error)),
@@ -375,4 +375,60 @@ impl CommandResourceClient {
 pub enum StartupLease {
     Local(ActorStartReservation),
     Remote(UnixStream),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn empty_requests_refuse_surplus_fields_before_resource_dispatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("resources.sock");
+        let owner = Arc::new(super::super::tests::owner(directory.path()));
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(serve(listener, owner.clone()));
+        for operation in ["policy", "observe", "actor_admission"] {
+            let valid = serde_json::json!({"operation": operation});
+            let request: Request = serde_json::from_value(valid.clone()).unwrap();
+            assert_eq!(serde_json::to_value(request).unwrap(), valid);
+            let mut stream = UnixStream::connect(&socket).await.unwrap();
+            send(&mut stream, &valid).await.unwrap();
+            let response: Response = receive(&mut stream).await.unwrap();
+            match (operation, response) {
+                ("policy", Response::Policy(policy)) => assert_eq!(policy, *owner.policy()),
+                ("observe", Response::Observation(_)) => {}
+                // The test owner has no real actor slice, so valid admission reaches
+                // the authority and reports its unavailable cgroup boundary.
+                ("actor_admission", Response::Error(_)) => {}
+                _ => panic!("valid request did not reach its resource authority"),
+            }
+            drop(stream);
+            for field in ["foreign", "actor", "id", "bytes", "", "λ"] {
+                for value in [
+                    serde_json::Value::Null,
+                    serde_json::json!(true),
+                    serde_json::json!(1),
+                    serde_json::json!("extra"),
+                    serde_json::json!([]),
+                    serde_json::json!({}),
+                ] {
+                    let mut invalid = valid.clone();
+                    invalid[field] = value;
+                    let mut stream = UnixStream::connect(&socket).await.unwrap();
+                    send(&mut stream, &invalid).await.unwrap();
+                    let result = tokio::time::timeout(Duration::from_secs(2), stream.read_u8())
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        result.unwrap_err().kind(),
+                        std::io::ErrorKind::UnexpectedEof
+                    );
+                    assert_eq!(*owner.actor_starts.lock(), 0);
+                }
+            }
+        }
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+    }
 }
