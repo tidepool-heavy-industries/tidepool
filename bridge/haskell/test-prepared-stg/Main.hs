@@ -13,7 +13,7 @@ import Data.List (isInfixOf, nub, sort)
 import Data.String (fromString)
 import Data.Set qualified as Set
 import Data.Text qualified as Text
-import Data.Text.IO qualified as TextIO
+import Data.Text.Encoding qualified as TextEncoding
 import GHC (moduleNameString, mkModuleName, ModSummary(ms_location), ms_mod_name)
 import GHC.Driver.Env (HscEnv(..), hsc_mod_graph, hscUpdateHPT)
 import GHC.Unit.Module.Graph (ModuleGraphNode(..), mgModSummaries')
@@ -47,7 +47,7 @@ import Tidepool.SiteClassifier
   ( SiteFailure(..), classifySiteOccurrence, isNospecVar, stripNospecSpine )
 import GHC.Unit.Types (moduleName)
 import System.Directory
-  ( createDirectory, createDirectoryIfMissing, getTemporaryDirectory, makeAbsolute, removeFile, removePathForcibly )
+  ( copyFile, createDirectory, createDirectoryIfMissing, getTemporaryDirectory, makeAbsolute, removeFile, removePathForcibly )
 import System.IO (openTempFile, hClose)
 import System.Environment (getEnv)
 import System.Mem.StableName (StableName, makeStableName)
@@ -224,12 +224,12 @@ verifyJsonDependencyAuthority dir = do
     trustedAuthority
   verifyJsonLayoutDemand trustedOwner trusted
   verifyNominalJsonConstructorDemand dir
-  source <- readFile "lib/Tidepool/Aeson/Scientific.hs"
+  source <- readUtf8Source "lib/Tidepool/Aeson/Scientific.hs"
   let shadow = Text.replace "coefficient (Scientific c _) = c"
-        "coefficient (Scientific c _) = c + 1" (Text.pack source)
-  assert (shadow /= Text.pack source) "Scientific shadow fixture did not change semantics"
+        "coefficient (Scientific c _) = c + 1" source
+  assert (shadow /= source) "Scientific shadow fixture did not change semantics"
   createDirectoryIfMissing True shadowDirectory
-  writeFile (shadowDirectory </> "Scientific.hs") (Text.unpack shadow)
+  writeUtf8Source (shadowDirectory </> "Scientific.hs") shadow
   substituted <- runPipelineSelected PreparedStg fixture
     [shadowRoot, "test-prepared-stg", "lib"]
   substitutedAuthority <- resolveJsonAuthority (prHscEnv (pprPipelineResult substituted))
@@ -879,10 +879,10 @@ tests = testGroup "prepared-stg-pipeline"
 writeTypedPreparationFixture :: FilePath -> IO FilePath
 writeTypedPreparationFixture dir = do
   writeRequestSiteFixture dir
-  readFile "test-prepared-stg/site-fixtures/TypedPreparationActor.hs" >>=
-    writeFile (dir </> "Tidepool" </> "Actor.hs")
-  mapM_ (\name -> readFile ("test-prepared-stg/site-fixtures" </> name ++ ".hs")
-      >>= writeFile (dir </> name ++ ".hs"))
+  copyFile "test-prepared-stg/site-fixtures/TypedPreparationActor.hs"
+    (dir </> "Tidepool" </> "Actor.hs")
+  mapM_ (\name -> copyFile ("test-prepared-stg/site-fixtures" </> name ++ ".hs")
+      (dir </> name ++ ".hs"))
     ["TypedPreparationOwner", "TypedPreparationPlain", "TypedPreparationEntry"]
   pure (dir </> "TypedPreparationEntry.hs")
 
@@ -1013,7 +1013,7 @@ verifyTypedPreparationCacheLifetime dir = do
 writeTypedPreparationNextCell :: FilePath -> IO FilePath
 writeTypedPreparationNextCell dir = do
   let path = dir </> "TypedPreparationNextCell.hs"
-  readFile "test-prepared-stg/site-fixtures/TypedPreparationNextCell.hs" >>= writeFile path
+  copyFile "test-prepared-stg/site-fixtures/TypedPreparationNextCell.hs" path
   pure path
 
 -- The resolver sees real defining interfaces in each history. A prior product
@@ -1050,12 +1050,12 @@ verifySiteDependencyHistories dir = do
     restored <- compile PreparedStg mempty GeneralCompile Nothing source [] Nothing
     assertMatch "restored original sibling authority" restored original True
     let carrierPath = presentDir </> "Tidepool" </> "Internal" </> "RequestSite.hs"
-    carrier <- TextIO.readFile carrierPath
+    carrier <- readUtf8Source carrierPath
     let replacedCarrier = Text.replace "(RequestSite, requestSiteIdentity)"
           "(RequestSite, requestSiteIdentity, replacementVersion)" carrier
     assert (replacedCarrier /= carrier) "carrier replacement control did not alter the authentic export"
-    writeFile carrierPath (Text.unpack replacedCarrier
-      ++ "\nreplacementVersion :: Int\nreplacementVersion = 31\n")
+    writeUtf8Source carrierPath (replacedCarrier
+      <> Text.pack "\nreplacementVersion :: Int\nreplacementVersion = 31\n")
     changedCarrier <- compile PreparedStg mempty GeneralCompile Nothing source [] Nothing
     assertMatch "globally queried nominal owner replacement" changedCarrier original False
     assert (length (pmYieldSites (preparedFixtureOwner "TypedPreparationOwner" changedCarrier)) == 1)
@@ -1082,8 +1082,8 @@ verifySiteDependencyHistories dir = do
         && not (preparedSiteDependenciesEquivalent unavailable unavailable))
       "partial current home details authorized an older imported declaration"
   absentSource <- writeTypedPreparationFixture absentDir
-  readFile "test-prepared-stg/site-fixtures/TypedPreparationActorWithoutSibling.hs" >>=
-    writeFile (absentDir </> "Tidepool" </> "Actor.hs")
+  copyFile "test-prepared-stg/site-fixtures/TypedPreparationActorWithoutSibling.hs"
+    (absentDir </> "Tidepool" </> "Actor.hs")
   withResidentPipelineSelected [absentDir] $ \compile -> do
     missing <- compile PreparedStg mempty GeneralCompile Nothing absentSource [] Nothing
     let rejected = preparedFixtureOwner "TypedPreparationOwner" missing
@@ -1091,8 +1091,8 @@ verifySiteDependencyHistories dir = do
         && any (isInfixOf "missing generated site-aware sibling" . srMessage) (pmSiteRejections rejected))
       "absent sibling control did not retain the typed preparation rejection"
     assertMatch "proven absent original sibling" missing rejected True
-    readFile "test-prepared-stg/site-fixtures/TypedPreparationActor.hs" >>=
-      writeFile (absentDir </> "Tidepool" </> "Actor.hs")
+    copyFile "test-prepared-stg/site-fixtures/TypedPreparationActor.hs"
+      (absentDir </> "Tidepool" </> "Actor.hs")
     available <- compile PreparedStg mempty GeneralCompile Nothing absentSource [] Nothing
     assertMatch "absent sibling becomes present" available rejected False
     let issued = preparedFixtureOwner "TypedPreparationOwner" available
@@ -1403,9 +1403,9 @@ fullMain = do
               length changedSites))
 
       -- Use the production forall/dictionary shape with an open effect row.
-      readFile "test-prepared-stg/site-fixtures/Core.hs" >>= writeFile effects
+      copyFile "test-prepared-stg/site-fixtures/Core.hs" effects
       let constrainedTarget = dir </> "ConstrainedSites.hs"
-      readFile "test-prepared-stg/site-fixtures/ConstrainedSites.hs" >>= writeFile constrainedTarget
+      copyFile "test-prepared-stg/site-fixtures/ConstrainedSites.hs" constrainedTarget
       constrained <- runPipelineSelected PreparedStg constrainedTarget [dir]
       let (_, constrainedSites) = preparedEvidence "ConstrainedSites" constrained
       assert (length constrainedSites == 5 && all ((/= 0) . ysSite) constrainedSites)
@@ -1465,5 +1465,15 @@ fullMain = do
 writeRequestSiteFixture :: FilePath -> IO ()
 writeRequestSiteFixture dir = do
   createDirectoryIfMissing True (dir </> "Tidepool" </> "Internal")
-  readFile "lib/Tidepool/Internal/RequestSite.hs" >>=
-    writeFile (dir </> "Tidepool" </> "Internal" </> "RequestSite.hs")
+  copyFile "lib/Tidepool/Internal/RequestSite.hs"
+    (dir </> "Tidepool" </> "Internal" </> "RequestSite.hs")
+
+-- Fixture source has the same UTF-8 contract as the compiler input.
+readUtf8Source :: FilePath -> IO Text.Text
+readUtf8Source path = do
+  bytes <- BS.readFile path
+  either (ioError . userError . ((path ++ ": invalid UTF-8: ") ++) . show)
+    pure (TextEncoding.decodeUtf8' bytes)
+
+writeUtf8Source :: FilePath -> Text.Text -> IO ()
+writeUtf8Source path = BS.writeFile path . TextEncoding.encodeUtf8
