@@ -2,6 +2,7 @@ import importlib.util
 import itertools
 import json
 from pathlib import Path
+import random
 import tempfile
 import unittest
 
@@ -9,6 +10,35 @@ SCRIPT = Path(__file__).resolve().parents[1] / "harness-usecase-perf-report.py"
 spec = importlib.util.spec_from_file_location("harness_usecase_perf_report", SCRIPT)
 reporter = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(reporter)
+
+
+def check_shrinking_samples(samples, check):
+    """Shrink numeric inputs while preserving the generated fault or control."""
+    for sample in samples:
+        try:
+            check(sample)
+        except AssertionError:
+            smallest = sample
+            changed = True
+            while changed:
+                changed = False
+                for index, value in enumerate(smallest):
+                    if type(value) is not int or value <= 0:
+                        continue
+                    for reduced in sorted({0, value // 2}):
+                        candidate = (*smallest[:index], reduced, *smallest[index + 1:])
+                        try:
+                            check(candidate)
+                        except AssertionError:
+                            smallest = candidate
+                            changed = True
+                            break
+                    if changed:
+                        break
+            try:
+                check(smallest)
+            except AssertionError as error:
+                raise AssertionError(f"sample={sample!r}; minimized={smallest!r}: {error}") from error
 
 
 class HarnessUsecasePerfReportTests(unittest.TestCase):
@@ -798,7 +828,8 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
         validation = {"schema": 1, "invocation_id": 1, "worker_pid": 123,
                       "start_ns": 10, "end_ns": 20, "wall_ns": 10, "cpu_ns": 9,
                       "clock_domain": "ghc_monotonic_ns", "outcome": "success",
-                      "allocated_bytes": 400, "counts": {"observed_file_count": 8}}
+                      "rts_scope": "process_delta", "allocated_bytes": 400,
+                      "counts": {"observed_file_count": 8}}
         host = [{"target": "tidepool_codegen::prepared_compile", "fields": {
                     "message": "prepared compile", "process_id": 99, "image_instance": 7}},
                 *[{"target": "tidepool_codegen::image_install", "fields": {
@@ -843,6 +874,152 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
             with self.subTest(invalid=invalid):
                 self.assertIsNone(observe(0, invalid))
         self.assertIsNone(observe())
+
+    def observe_validation(self, validation):
+        identity = {"daemon_epoch": "epoch", "admission_id": 4, "request_ordinal": 1,
+                    "compile_request": "digest", "worker_pid": 123}
+        host = [{"target": "tidepool_codegen::prepared_compile", "fields": {
+                    "message": "prepared compile", "process_id": 99, "image_instance": 7}},
+                {"target": "tidepool_codegen::image_install", "fields": {
+                    "process_id": 99, "image_instance": 7, "outcome": "machine_published"}}]
+        daemon = [{"fields": {"message": "compiler request finished", "elapsed_ms": 2,
+                               "exit_code": 0}, "span": identity},
+                  {"fields": {"line": "tidepool-validation " + json.dumps(validation)},
+                   "span": identity}]
+        return reporter.owned_artifact_observations(host, daemon)
+
+    def validation_case(self, start=10, duration=10, resource=400):
+        return {"schema": 1, "invocation_id": 1, "worker_pid": 123,
+                "start_ns": start, "end_ns": start + duration, "wall_ns": duration,
+                "cpu_ns": resource, "clock_domain": "ghc_monotonic_ns", "outcome": "success",
+                "rts_scope": "process_delta", "allocated_bytes": resource,
+                "gc_cpu_ns": resource, "gc_elapsed_ns": resource,
+                "counts": {"observed_file_count": resource}}
+
+    def test_validation_summary_rejects_contradictory_duration_and_counter_scope(self):
+        for changes in ({"wall_ns": 999}, {"allocated_bytes": -400},
+                        {"rts_scope": "unavailable"}, {"rts_scope": None}):
+            with self.subTest(changes=changes):
+                result = self.observe_validation({**self.validation_case(), **changes})
+                self.assertEqual(result["status"], "partial_or_unknown")
+                self.assertTrue(result["problems"])
+                self.assertEqual(result["validation_events"], [])
+                self.assertEqual(result["validation_intervals"], [])
+
+    def test_validation_summary_preserves_unavailable_optional_counters(self):
+        for scope in (None, "unavailable", "process_delta"):
+            for outcome in ("success", "refused", "exception"):
+                value = self.validation_case()
+                value["outcome"] = outcome
+                for name in ("allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns"):
+                    value.pop(name)
+                if scope is None:
+                    value.pop("rts_scope")
+                else:
+                    value["rts_scope"] = scope
+                result = self.observe_validation(value)
+                self.assertEqual(result["status"], "observed")
+                self.assertEqual(result["validation_events"][0]["outcome"], outcome)
+                self.assertIsNone(result["validation_intervals"][0]["process_allocated_bytes_sum"])
+
+    def test_generated_validation_admission_preserves_owner_relations(self):
+        seed = 0xC10C
+        rng = random.Random(seed)
+        numbers = [(10**6, 10**5, 400), (0, 0, 0), (1, 1, 1), (2**63, 0, 2**64),
+                   *[(rng.randrange(10**12), rng.randrange(10**9), rng.randrange(10**12))
+                     for _ in range(48)]]
+        controls = ("measured", "unavailable", "absent", "refused", "exception")
+        faults = ("duration", "scope", "clock", "counts")
+        counter_faults = tuple((name, invalid) for name in
+                              ("allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns")
+                              for invalid in (-1, True, None, 1.5, "1"))
+
+        def check(sample):
+            start, duration, resource, mode = sample
+            value = self.validation_case(start, duration, resource)
+            if mode in ("unavailable", "absent"):
+                for name in ("allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns"):
+                    value.pop(name)
+                if mode == "absent":
+                    value.pop("rts_scope")
+                else:
+                    value["rts_scope"] = "unavailable"
+            elif mode in ("refused", "exception"):
+                value["outcome"] = mode
+            elif mode == "duration":
+                value["wall_ns"] = duration + 1
+            elif mode == "scope":
+                value["rts_scope"] = "unavailable"
+            elif mode == "clock":
+                value["clock_domain"] = "logger_arrival"
+            elif mode == "counts":
+                value["counts"]["observed_file_count"] = -1
+            elif isinstance(mode, tuple):
+                value[mode[0]] = mode[1]
+            result = self.observe_validation(value)
+            if mode in controls:
+                self.assertEqual(result["status"], "observed")
+                interval = result["validation_intervals"][0]
+                self.assertEqual(interval["wall_interval_union_ns"], duration)
+                self.assertEqual(interval["process_allocated_bytes_sum"],
+                                 None if mode in ("unavailable", "absent") else resource)
+            else:
+                self.assertEqual(result["status"], "partial_or_unknown")
+                self.assertTrue(result["problems"])
+                self.assertEqual(result["validation_events"], [])
+                self.assertEqual(result["validation_intervals"], [])
+
+        check_shrinking_samples(((*values, mode) for values in numbers
+                                 for mode in (*controls, *faults, *counter_faults)), check)
+
+    def test_phase_first_successor_cannot_follow_its_observed_terminal_output(self):
+        record = self.make_complete_case()
+        phase_path = self.root / "artifacts/phases.jsonl"
+        original = reporter.read_jsonl(phase_path)
+        for successor in (0, 1000, 1001):
+            phases = json.loads(json.dumps(original))
+            phases[2]["first_successor_ns"] = successor
+            self.write_jsonl(phase_path, phases)
+            result = reporter.analyze(record)
+            measurements = result["phase_measurements"]
+            self.assertEqual(measurements["status"],
+                             "complete" if successor <= 1000 else "partial_or_unknown")
+            if successor > 1000:
+                self.assertIn("first_successor_ns", measurements["invalid_records"][0]["invalid_fields"])
+            self.assertTrue(result["phases"][0]["completed"])
+        self.write_jsonl(phase_path, original)
+        result = reporter.analyze(record)
+        self.assertEqual(result["phase_measurements"]["status"], "complete")
+        self.assertIsNone(result["phases"][0]["first_successor_ns"])
+
+    def test_generated_phase_endpoint_ordering(self):
+        record = self.make_complete_case()
+        phase_path = self.root / "artifacts/phases.jsonl"
+        original = reporter.read_jsonl(phase_path)
+        seed = 0x51CCE55
+        rng = random.Random(seed)
+        durations = (10**12, 0, 1, 2**64, *(rng.randrange(10**12) for _ in range(24)))
+
+        def check(sample):
+            duration, fraction, mode = sample
+            phases = json.loads(json.dumps(original))
+            phase = phases[2]
+            phase["wall_ns"] = duration
+            if mode == "ordered":
+                phase["first_successor_ns"] = duration * fraction // 100
+            elif mode == "reversed":
+                phase["first_successor_ns"] = duration + fraction + 1
+            self.write_jsonl(phase_path, phases)
+            report = reporter.analyze(record)
+            self.assertEqual(report["phase_measurements"]["status"],
+                             "partial_or_unknown" if mode == "reversed" else "complete")
+            self.assertTrue(report["phases"][0]["completed"])
+            if mode == "absent":
+                self.assertIsNone(report["phases"][0]["first_successor_ns"])
+
+        check_shrinking_samples(((duration, fraction, mode) for duration in durations
+                                for fraction in (0, 1, 99, 100)
+                                for mode in ("ordered", "reversed", "absent")), check)
 
     def test_publication_summary_is_joined_to_its_unique_settlement(self):
         record = self.make_case()

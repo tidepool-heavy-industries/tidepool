@@ -454,6 +454,28 @@ def bound_native_demand_observations(host_rows):
     }
 
 
+def validation_summary(value):
+    """Admit the timing and optional counters issued by Tidepool.Timing."""
+    required = ("invocation_id", "worker_pid", "start_ns", "end_ns", "wall_ns", "cpu_ns")
+    if (not isinstance(value, dict) or value.get("schema") != 1
+            or any(type(value.get(name)) is not int or value[name] < 0 for name in required)
+            or value["end_ns"] < value["start_ns"]
+            or value["wall_ns"] != value["end_ns"] - value["start_ns"]
+            or value.get("outcome") not in ("success", "refused", "exception")
+            or value.get("clock_domain") != "ghc_monotonic_ns"
+            or not isinstance(value.get("counts"), dict)
+            or any(type(count) is not int or count < 0 for count in value["counts"].values())):
+        raise ValueError("invalid validation summary")
+    rts_fields = ("allocated_bytes", "gc_cpu_ns", "gc_elapsed_ns")
+    supplied = [name for name in rts_fields if name in value]
+    scope = value.get("rts_scope")
+    if (scope not in (None, "unavailable", "process_delta")
+            or (supplied and scope != "process_delta")
+            or any(type(value[name]) is not int or value[name] < 0 for name in supplied)):
+        raise ValueError("invalid validation RTS counters or scope")
+    return value
+
+
 def owned_artifact_observations(host_rows, daemon_rows):
     """Retain owner facts; absent summaries never prove zero work or retention."""
     native_targets = {"tidepool_codegen::image_registry", "tidepool_codegen::prepared_compile",
@@ -487,15 +509,7 @@ def owned_artifact_observations(host_rows, daemon_rows):
         if not line.startswith("tidepool-validation "):
             continue
         try:
-            value = json.loads(line[len("tidepool-validation "):])
-            required = ("invocation_id", "worker_pid", "start_ns", "end_ns", "wall_ns", "cpu_ns")
-            if (not isinstance(value, dict) or value.get("schema") != 1
-                    or any(type(value.get(name)) is not int or value[name] < 0 for name in required)
-                    or value["end_ns"] < value["start_ns"]
-                    or value.get("outcome") not in ("success", "refused", "exception")
-                    or not isinstance(value.get("clock_domain"), str)
-                    or not isinstance(value.get("counts"), dict)):
-                raise ValueError("invalid validation summary")
+            value = validation_summary(json.loads(line[len("tidepool-validation "):]))
             if identity is None or (attr(row, "worker_pid") is not None
                                     and integer(attr(row, "worker_pid")) != value["worker_pid"]):
                 raise ValueError("validation lacks matching physical request/worker identity")
@@ -861,7 +875,9 @@ def analyze(record_path):
             if type(phase.get("scripted_response_hold_ns")) is not int or phase["scripted_response_hold_ns"] < 0:
                 invalid_fields.append("scripted_response_hold_ns")
         if "first_successor_ns" in phase and (
-                type(phase["first_successor_ns"]) is not int or phase["first_successor_ns"] < 0):
+                type(phase["first_successor_ns"]) is not int or phase["first_successor_ns"] < 0
+                or (type(phase.get("wall_ns")) is int
+                    and phase["first_successor_ns"] > phase["wall_ns"])):
             invalid_fields.append("first_successor_ns")
         if invalid_fields:
             invalid_phase_measurements.append({"phase": phase["phase"],
