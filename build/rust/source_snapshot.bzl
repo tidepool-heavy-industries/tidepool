@@ -3,6 +3,10 @@
 def _snapshot_impl(ctx):
     output = ctx.actions.declare_output("source-inputs", dir = True)
     command = cmd_args([ctx.attrs.python[RunInfo], ctx.attrs.driver, "--output", output.as_output()])
+    if ctx.attrs.reject_symlinks:
+        command.add("--reject-symlinks")
+    for name in ctx.attrs.exclude_names:
+        command.add("--exclude-name", name)
     for tree, prefix in ctx.attrs.trees:
         outputs = tree[DefaultInfo].default_outputs
         if len(outputs) != 1:
@@ -15,6 +19,8 @@ native_source_snapshot = rule(
     impl = _snapshot_impl,
     attrs = {
         "trees": attrs.list(attrs.tuple(attrs.dep(), attrs.string())),
+        "exclude_names": attrs.list(attrs.string(), default = []),
+        "reject_symlinks": attrs.bool(default = False),
         "driver": attrs.source(default = "//build/rust:source_snapshot_driver"),
         "python": attrs.exec_dep(default = "toolchains//:python", providers = [RunInfo]),
     },

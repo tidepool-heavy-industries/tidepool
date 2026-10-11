@@ -1,5 +1,6 @@
 load(":authored_sources.bzl", "declare_authored_haskell_sources")
-load("@prelude//:rules.bzl", "export_file", "filegroup")
+load("//build/rust:source_snapshot.bzl", "native_source_snapshot")
+load("@prelude//:rules.bzl", "export_file", "filegroup", "sh_test")
 
 export_file(
     name = "facade_agent_spec",
@@ -43,18 +44,78 @@ filegroup(
     visibility = ["PUBLIC"],
 )
 
+# Directory inputs retain hidden and extensionless authored files. Filter through
+# the shared snapshot owner; Buck globs omit nested hidden paths.
+filegroup(
+    name = "authored_workspace_tree",
+    srcs = {source: source for source in ["flake.nix", "flake.lock", ".exomonad"]},
+)
+
+filegroup(
+    name = "authored_exomonad_tree",
+    srcs = {".exomonad": ".exomonad"},
+)
+
+native_source_snapshot(
+    name = "authored_workspace_snapshot",
+    trees = [(":authored_exomonad_tree", "")],
+    reject_symlinks = True,
+    # Match workspace::copy_authored at every directory depth, case-sensitively.
+    exclude_names = ["logs", "sessions", "runtime", "build", ".git", "dist-newstyle", "target"],
+)
+
+filegroup(
+    name = "authored_workspace_inputs",
+    srcs = dict(
+        {"": ":authored_workspace_snapshot"},
+        **{source: source for source in ["flake.nix", "flake.lock"]},
+    ),
+    visibility = ["PUBLIC"],
+)
+
 # Compile-time inputs for the facade's published-example tests.
 filegroup(
     name = "facade_test_sources",
-    srcs = {source: source for source in glob(["flake.nix", "flake.lock", ".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/**/*.json", ".exomonad/config.toml"])},
+    srcs = {"": ":authored_workspace_inputs"},
     visibility = ["PUBLIC"],
 )
 
 filegroup(
     name = "qualification_inputs",
-    srcs = {"exomonad/examples/workspace/" + source: source for source in glob(["BUCK", "*.bzl", "flake.nix", ".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/**/*.toml", ".exomonad/**/*.json", ".exomonad/**/*.nix"])},
+    srcs = dict(
+        {"exomonad/examples/workspace": ":authored_workspace_inputs"},
+        **{"exomonad/examples/workspace/" + source: source for source in glob(["BUCK", "*.bzl", "test-authored-inputs.sh", "test_authored_inputs.py"])},
+    ),
     visibility = ["PUBLIC"],
 )
+
+native_source_snapshot(
+    name = "authored_workspace_test_snapshot",
+    trees = [(":qualification_inputs", "")],
+)
+
+sh_test(
+    name = "authored_workspace_input_tests",
+    test = "test-authored-inputs.sh",
+    env = {
+        "PYTHON": "$(exe toolchains//:python)",
+        "TEST_SOURCE": "$(location :authored_workspace_input_test_source)",
+        "AUTHORED_TREE": "$(location :authored_workspace_tree)",
+        "FACADE_TREE": "$(location :facade_test_sources)",
+        "QUALIFICATION_TREE": "$(location :authored_workspace_test_snapshot)/exomonad/examples/workspace",
+        "PATH": read_root_config("nix", "action_path"),
+    },
+    resources = [
+        "toolchains//:python",
+        ":authored_workspace_input_test_source",
+        ":authored_workspace_tree",
+        ":facade_test_sources",
+        ":authored_workspace_test_snapshot",
+    ],
+    visibility = ["PUBLIC"],
+)
+
+export_file(name = "authored_workspace_input_test_source", src = "test_authored_inputs.py")
 
 # Cabal component resources include authored source and adjacent runtime data.
 declare_authored_haskell_sources(glob([
