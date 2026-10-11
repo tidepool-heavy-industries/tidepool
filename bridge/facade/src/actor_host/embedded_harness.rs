@@ -1551,6 +1551,13 @@ impl InvocationCompletionSource for UneditedInvocationCompletion {
 
 #[async_trait::async_trait]
 impl CancellationOwner for EmbeddedDispatcher {
+    fn cancellation_wait(&self) -> harness::provider::CancellationWait {
+        // The exact native operation retains its execution and cleanup owner.
+        // Cancellation joins that terminal; actor loss settles the observation
+        // as unconfirmed, including original provider-boundary finalization.
+        harness::provider::CancellationWait::OwnerSettlement
+    }
+
     async fn cancel(
         &self,
         operation: &OperationId,

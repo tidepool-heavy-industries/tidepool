@@ -2488,6 +2488,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_native_observer_rejoins_exact_operation_and_observes_actor_loss() {
+        for lose_first_observer in [false, true] {
+            let (send, _received) = tokio::sync::mpsc::unbounded_channel();
+            let (address, actor_task) = ractor::Actor::spawn(None, WorkbenchCollector, send)
+                .await
+                .unwrap();
+            let terminal = crate::RetainedActorExit::new();
+            let actor = crate::LocalActorRef::new(address.clone(), terminal.clone());
+            let client = ResidentToolClient::local(actor.clone());
+            let invocation = ToolInvocationContext::external(
+                "thread".into(),
+                "turn".into(),
+                "call".into(),
+                Some("call".into()),
+                None,
+            );
+            let control = WorkbenchExecutionControl::new(Some(invocation.clone().into()));
+            actor
+                .hosted_cell()
+                .publish_provider_transport(actor.identity(), control.clone());
+            actor.hosted_cell().accept(&control);
+            control.arm_sleep();
+            let execution = control.execution_id(actor.identity());
+            {
+                let observer = client.cancel_workbench(invocation.clone());
+                tokio::pin!(observer);
+                assert!(futures_util::poll!(&mut observer).is_pending());
+                assert!(control.cancellation_requested());
+                assert!(control.terminal_reply().is_none());
+                if !lose_first_observer {
+                    terminal
+                        .publish(crate::ActorTerminal {
+                            kind: crate::ActorExitKind::Failed,
+                            summary: "native owner lost".into(),
+                            diagnostic: None,
+                        })
+                        .unwrap();
+                    assert!(matches!(observer.await.unwrap(),
+                        WorkbenchCancellationOutcome::Unconfirmed { execution: observed } if observed == execution));
+                }
+            }
+            if lose_first_observer {
+                let observer = client.cancel_workbench(invocation.clone());
+                tokio::pin!(observer);
+                assert!(futures_util::poll!(&mut observer).is_pending());
+                terminal
+                    .publish(crate::ActorTerminal {
+                        kind: crate::ActorExitKind::Failed,
+                        summary: "native owner lost".into(),
+                        diagnostic: None,
+                    })
+                    .unwrap();
+                assert!(matches!(observer.await.unwrap(),
+                    WorkbenchCancellationOutcome::Unconfirmed { execution: observed } if observed == execution));
+            }
+            actor.hosted_cell().finalization_owner_lost();
+            let retained = client.retained_operation(invocation).unwrap();
+            assert!(matches!(
+                retained.finalization(),
+                HostedOperationFinalization::Settled(Err(_))
+            ));
+            assert!(
+                control.terminal_reply().is_none(),
+                "owner loss cannot fabricate successful cleanup"
+            );
+            address.stop(None);
+            actor_task.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn sealed_cell_cancellation_waits_for_exact_owner_reply_without_mutating_cutoff() {
         let (send, mut received) = tokio::sync::mpsc::unbounded_channel();
         let (address, actor_task) = ractor::Actor::spawn(None, WorkbenchCollector, send)
