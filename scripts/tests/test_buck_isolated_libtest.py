@@ -2553,8 +2553,6 @@ class IsolatedLibtestTests(unittest.TestCase):
             self.assertTrue(child_pid_file.exists(), 'selected test process never started')
             child_pid = int(child_pid_file.read_text())
             os.kill(helper.pid, signal.SIGTERM)
-            time.sleep(0.01)
-            os.kill(helper.pid, signal.SIGTERM)
             stdout, stderr = helper.communicate(timeout=5)
             self.assertEqual(helper.returncode, 128 + signal.SIGTERM, (stdout, stderr))
             self.assertIn('interrupted by signal', stderr)
