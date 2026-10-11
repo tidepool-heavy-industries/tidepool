@@ -14,7 +14,9 @@ actors may read a shared watch, but that read cannot acknowledge the owner's
 notice. Status and overview reads never change this acknowledgment.
 
 Command jobs retain their identity, starting source, live status, terminal outcome
-and cleanup independently of presentation or waiter lifetime. Stream output is
+and cleanup independently of presentation or waiter lifetime. Any observer can
+await terminal completion and read retained cleanup; only the exact owner can
+probe backend cleanup or control the command. Stream output is
 paged from the bytes still retained by the job. `observe` and its completion-notifying
 variants do not detach; invocation cleanup is an ownership operation, not a transfer
 or revocation of borrowed observation authority. Pages identify gaps,

@@ -803,18 +803,15 @@ impl CommandJobs {
         Ok(self.shared(id)?.command.clone())
     }
 
-    /// Wait for the job to finish and return its result, confirming cleanup
-    /// with the backend as the job's owner would. A job whose execution ended
-    /// without a terminal status reports an unconfirmed outcome.
+    /// Wait for terminal completion and return the retained result. Observers
+    /// read retained cleanup; only the exact owner asks the backend to confirm
+    /// it. A job without a terminal status reports an unconfirmed outcome.
     pub(crate) async fn finished(
         &self,
         caller: ActorRef,
         id: &str,
     ) -> Result<CommandResult, CommandError> {
         let shared = self.shared(id)?;
-        if shared.owner() != caller {
-            return Err(CommandError::CommandUnauthorized);
-        }
         self.wait(caller, id, -1).await?;
         match shared.status(caller, id).await {
             CommandStatus::CommandFinished(result) => Ok(result),

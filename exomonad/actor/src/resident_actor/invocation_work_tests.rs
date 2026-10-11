@@ -1190,6 +1190,9 @@ async fn explicit_projection_release_removes_actor_callback_membership() {
 
 struct PendingBackend {
     cancellations: AtomicUsize,
+    cleanup_probes: AtomicUsize,
+    result: Mutex<CommandResult>,
+    cleanup_answer: Mutex<CommandCleanup>,
     finish: tokio::sync::Semaphore,
     cancel_entered: tokio::sync::Semaphore,
     cancel_gate: Mutex<Option<Arc<tokio::sync::Semaphore>>>,
@@ -1199,6 +1202,12 @@ impl Default for PendingBackend {
     fn default() -> Self {
         Self {
             cancellations: AtomicUsize::new(0),
+            cleanup_probes: AtomicUsize::new(0),
+            result: Mutex::new(CommandResult {
+                outcome: CommandOutcome::CommandExited(0),
+                cleanup: CommandCleanup::CommandClean,
+            }),
+            cleanup_answer: Mutex::new(CommandCleanup::CommandClean),
             finish: tokio::sync::Semaphore::new(0),
             cancel_entered: tokio::sync::Semaphore::new(0),
             cancel_gate: Mutex::new(None),
@@ -1215,10 +1224,7 @@ impl CommandBackend for PendingBackend {
     ) -> BoxFuture<'a, CommandResult> {
         Box::pin(async move {
             self.finish.acquire().await.unwrap().forget();
-            CommandResult {
-                outcome: CommandOutcome::CommandExited(0),
-                cleanup: CommandCleanup::CommandClean,
-            }
+            self.result.lock().clone()
         })
     }
 
@@ -1258,7 +1264,10 @@ impl CommandBackend for PendingBackend {
     }
 
     fn cleanup<'a>(&'a self, _: &'a str) -> BoxFuture<'a, CommandCleanup> {
-        Box::pin(async { CommandCleanup::CommandClean })
+        Box::pin(async {
+            self.cleanup_probes.fetch_add(1, Ordering::SeqCst);
+            self.cleanup_answer.lock().clone()
+        })
     }
 }
 
@@ -1319,32 +1328,96 @@ async fn owned_command_detach_survives_cleanup_and_borrowed_detach_is_unauthoriz
 }
 
 #[tokio::test]
-async fn foreign_actor_cannot_wait_for_command_cleanup() {
-    let fixture = Fixture::start().await;
-    let owner = fixture.actor.identity();
-    let jobs = &fixture.environment.commands;
-    let (job, backend) = fixture.pending_command().await;
-    let foreign = ActorRef {
-        incarnation: crate::Incarnation(owner.incarnation.0 + 1),
-        ..owner
-    };
-
-    assert_eq!(
-        jobs.finished(foreign, &job).await.unwrap_err(),
-        CommandError::CommandUnauthorized
-    );
-    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
-    assert!(!matches!(
-        jobs.status(owner, &job).await.unwrap(),
-        CommandStatus::CommandFinished(_)
-    ));
-
-    backend.finish.add_permits(1);
-    assert_eq!(
-        jobs.finished(owner, &job).await.unwrap().cleanup,
-        CommandCleanup::CommandClean
-    );
-    fixture.finish().await;
+async fn foreign_await_reads_retained_result_without_cleanup_or_control_authority() {
+    for initial_cleanup in [
+        CommandCleanup::CommandRetained,
+        CommandCleanup::CommandCleanupUnknown("execution cleanup unknown".into()),
+    ] {
+        let fixture = Fixture::start().await;
+        let owner = fixture.actor.identity();
+        let jobs = &fixture.environment.commands;
+        let (job, backend) = fixture.pending_command().await;
+        let original = CommandResult {
+            outcome: CommandOutcome::CommandExited(17),
+            cleanup: initial_cleanup,
+        };
+        *backend.result.lock() = original.clone();
+        *backend.cleanup_answer.lock() =
+            CommandCleanup::CommandCleanupUnknown("owner probe unknown".into());
+        let cleanup_owner = jobs.cleanup_owner(owner, &job).unwrap();
+        let foreigners = [
+            ActorRef::first(crate::ActorId(owner.id.0 + 100)),
+            ActorRef {
+                incarnation: crate::Incarnation(owner.incarnation.0 + 1),
+                ..owner
+            },
+        ];
+        for foreign in foreigners {
+            let awaiting = jobs.finished(foreign, &job);
+            tokio::pin!(awaiting);
+            assert!(matches!(
+                futures_util::poll!(awaiting.as_mut()),
+                std::task::Poll::Pending
+            ));
+            assert_eq!(
+                jobs.control(foreign, &job, CommandControl::Cancel).await,
+                Err(CommandError::CommandUnauthorized)
+            );
+            for operation in [
+                CommandControl::Input("unaccepted".into()),
+                CommandControl::InputAndClose("unaccepted".into()),
+                CommandControl::CloseInput,
+            ] {
+                assert!(matches!(
+                    jobs.control(foreign, &job, operation).await,
+                    Err(CommandError::CommandInputRejected(_))
+                ));
+            }
+        }
+        assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 0);
+        assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
+        backend.finish.add_permits(1);
+        for foreign in foreigners {
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), jobs.finished(foreign, &job))
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                original
+            );
+        }
+        assert_eq!(
+            backend.cleanup_probes.load(Ordering::SeqCst),
+            0,
+            "foreign completion reads never probe cleanup"
+        );
+        let uncertain = jobs.finished(owner, &job).await.unwrap();
+        assert_eq!(uncertain.outcome, original.outcome);
+        assert_eq!(uncertain.cleanup, *backend.cleanup_answer.lock());
+        assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 1);
+        for foreign in foreigners {
+            assert_eq!(jobs.finished(foreign, &job).await.unwrap(), uncertain);
+        }
+        assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 1);
+        *backend.cleanup_answer.lock() = CommandCleanup::CommandClean;
+        let confirmed = jobs.finished(owner, &job).await.unwrap();
+        assert_eq!(confirmed.outcome, original.outcome);
+        assert_eq!(confirmed.cleanup, CommandCleanup::CommandClean);
+        assert_eq!(backend.cleanup_probes.load(Ordering::SeqCst), 2);
+        for foreign in foreigners {
+            assert_eq!(jobs.finished(foreign, &job).await.unwrap(), confirmed);
+        }
+        assert_eq!(jobs.finished(owner, &job).await.unwrap(), confirmed);
+        assert_eq!(
+            backend.cleanup_probes.load(Ordering::SeqCst),
+            2,
+            "confirmed cleanup is retained proof"
+        );
+        assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
+        assert_eq!(jobs.owner(&job).unwrap(), owner);
+        assert_eq!(jobs.cleanup_owner(owner, &job).unwrap(), cleanup_owner);
+        fixture.finish().await;
+    }
 }
 
 #[tokio::test(start_paused = true)]
