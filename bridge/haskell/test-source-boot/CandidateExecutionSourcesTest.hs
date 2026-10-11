@@ -53,17 +53,19 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
     Nothing source [work] Nothing
   originalFixture <- capturePreparedFixture work original
   sourceScopePath <- writeExecutionScope work originalFixture ["ExecutionReexportFacade"]
-  originalScope <- readExactScope sourceScopePath >>= either fail pure
+  originalScope <- readExactScope sourceScopePath >>= either (\reason -> fail ("initial original scope: " ++ reason)) pure
   emptyExecution <- scopeVariant originalScope
     (replaceScopeCodecAcquisition FreshCodecInputs
-      . replaceScopeCodecField ScopeCodecExecution TNull) >>= either fail pure
+      . replaceScopeCodecField ScopeCodecExecution TNull) >>= either (\reason -> fail ("withheld source execution scope: " ++ reason)) pure
   -- Budget policies consume genuinely admitted original owners. Alter only
   -- the graph envelope; no synthetic interface/Core authority is constructed.
   case scopeExecutionGraphs originalScope of
     graph:_ -> do
       let oversized = graph {executionGraphBody=captureArtifactBytes (BS.replicate (executionSourceGraphBytesLimit+1) 0)}
           offeredBudget = oversized : tail (scopeExecutionGraphs originalScope)
-          references = scopeExecutionOwners originalScope
+          references = [reference {executionRefGraph = if executionRefGraph reference == executionGraphSha256 graph
+                then executionGraphSha256 oversized else executionRefGraph reference}
+              | reference <- scopeExecutionOwners originalScope]
       bounded <- either (fail . show) pure
         (extendExactExecutionSourcesWithinBudget offeredBudget references emptyExecution)
       unless (isNothing bounded && case extendExactExecutionSources offeredBudget references emptyExecution of
@@ -89,7 +91,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
   -- The same production-issued compilation supplies interface closure, native
   -- owner selection and lexical adjacency; no checked-purpose grant is forged.
   crossoverScopePath <- writeGenuineExecutionScope [helperName] [helperName] work originalFixture
-  crossoverExact <- readExactScope crossoverScopePath >>= either fail pure
+  crossoverExact <- readExactScope crossoverScopePath >>= either (\reason -> fail ("protected helper crossover scope: " ++ reason)) pure
   let helperKey = ("main",helperName)
       helperCandidates = [candidate | candidate <- offered, candidateModule candidate == helperName]
       helperNative = [identity | identity <- scopeExecutionNativeOwners crossoverExact
@@ -99,14 +101,16 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
     _ -> fail "original offer lacks exactly one helper identity"
   let originalHelper = candidateOriginalIdentity helperCandidate
   helperGraphNode <- case candidateExecutionSources helperCandidate of
-    Just (graphs,reference) -> either (fail . show) pure
+    Just (graphs,reference) -> either (\failure -> fail (show failure ++ " reference=" ++ show reference
+        ++ " graph owners=" ++ show [(executionGraphSha256 graph,executionGraphOwners graph) | graph <- graphs])) pure
       (executionSourceOriginalNode graphs (executionRefIdentity reference) (executionRefGraph reference))
     Nothing -> fail "original helper candidate lacks its authenticated graph binding"
   importerCandidate <- case [candidate | candidate <- offered, candidateModule candidate == "MetadataQuoter"] of
     [candidate] -> pure candidate
     _ -> fail "original offer lacks exactly one importer"
   importerGraphNode <- case candidateExecutionSources importerCandidate of
-    Just (graphs,reference) -> either (fail . show) pure
+    Just (graphs,reference) -> either (\failure -> fail (show failure ++ " reference=" ++ show reference
+        ++ " graph owners=" ++ show [(executionGraphSha256 graph,executionGraphOwners graph) | graph <- graphs])) pure
       (executionSourceOriginalNode graphs (executionRefIdentity reference) (executionRefGraph reference))
     Nothing -> fail "original importer candidate lacks its authenticated graph binding"
   let importerGraph = executionNodeGraph importerGraphNode
@@ -317,7 +321,7 @@ candidateExecutionSourcesTest = withTiming $ withScratch $ \work -> do
     TList fields -> pure (fields !! 7)
     _ -> fail "production original scope has another current envelope"
   parcel <- case offerTerm of
-    TList [_,_,_,_,_,value,_] -> pure value
+    TList [TString "TPMCAN",TString "11",_,_,_,value,_,_] -> pure value
     _ -> fail "production candidate offer has another current envelope"
   (_,unofferedScopeFixture) <- readScopeCodecFixture unofferedScopePath
   unofferedOriginals <- case scopeCodecField ScopeCodecExecution unofferedScopeFixture of

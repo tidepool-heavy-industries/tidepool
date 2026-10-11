@@ -29,11 +29,11 @@ observeInt = pollProgress
 
 {-# OPAQUE awaitOne #-}
 awaitOne :: Progress ProgressNote -> Await (ProgressState ProgressNote)
-awaitOne stream = awaitProgressAfter stream (ProgressCursor 0)
+awaitOne stream = after stream (ProgressCursor 0)
 
 {-# OPAQUE awaitMany #-}
 awaitMany :: Progress ProgressNote -> Await [ProgressState ProgressNote]
-awaitMany stream = awaitAnyProgress [(stream, ProgressCursor 0)]
+awaitMany stream = traverse (\(value, cursor) -> after value cursor) [(stream, ProgressCursor 0)]
 
 {-# OPAQUE source #-}
 source :: Progress ProgressNote -> Source Protocol
@@ -49,7 +49,7 @@ rawObserve = ObserveProgressWith (error "unavailable carrier") 1
 
 {-# OPAQUE rawWatch #-}
 rawWatch :: Watches (ProgressState ProgressNote)
-rawWatch = ObserveWatchProgressWith (error "unavailable carrier") 1 1 0
+rawWatch = ObserveWatchProgressWith (error "unavailable carrier") 1 [0] 0 0
 
 {-# OPAQUE bareRaw #-}
 bareRaw :: RequestSite '[ProgressNote] (ProgressState ProgressNote) -> Int -> Replies (ProgressState ProgressNote)
@@ -74,11 +74,11 @@ copiedObserver = pollProgressSited (error "unavailable carrier")
 
 {-# OPAQUE copiedWatch #-}
 copiedWatch :: Progress ProgressNote -> Await (ProgressState ProgressNote)
-copiedWatch stream = awaitProgressAfterSited (error "unavailable carrier") stream (ProgressCursor 0)
+copiedWatch stream = afterSited (error "unavailable carrier") stream (ProgressCursor 0)
 
 {-# OPAQUE copiedMany #-}
 copiedMany :: Progress ProgressNote -> Await [ProgressState ProgressNote]
-copiedMany stream = awaitAnyProgressSited (error "unavailable carrier") [(stream, ProgressCursor 0)]
+copiedMany stream = traverse (\(value, cursor) -> afterSited (error "unavailable carrier") value cursor) [(stream, ProgressCursor 0)]
 
 {-# OPAQUE copiedSource #-}
 copiedSource :: Progress ProgressNote -> Source Protocol

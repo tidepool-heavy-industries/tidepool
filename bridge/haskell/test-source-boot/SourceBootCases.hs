@@ -668,12 +668,13 @@ exactScopeBinders = withScratch $ \work -> do
 
 checkedValueTypeClosure :: FilePath -> IO ()
 checkedValueTypeClosure effects = withScratch $ \work -> do
+  includes <- traverse canonicalizePath [work,"lib",effects]
   let producerPath = work </> "MetadataBashTarget.hs"
       consumerPath = work </> "CheckedCommandConsumer.hs"
   copyFile "test-source-boot/fixtures/MetadataBashTarget.hs" producerPath
   copyFile "test-source-boot/fixtures/CheckedCommandConsumer.hs" consumerPath
   prepared <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
-    Nothing producerPath [work,"lib",effects] Nothing
+    Nothing producerPath includes Nothing
   let result = pprPipelineResult prepared
       environment = prHscEnv result
   binders <- mkBoundBinders ["cmd"] 7 work result
@@ -726,13 +727,13 @@ checkedValueTypeClosure effects = withScratch $ \work -> do
   identifier <- case binders of
     [binder] -> pure (bbVarId binder)
     _ -> fail "checked command has another binder inventory"
-  withResidentPipelineSelected [work,"lib",effects] $ \compile ->
+  withResidentPipelineSelected includes $ \compile ->
     forM_ [(value,GeneralCompile),(alias,CheckedItemCompile [] Nothing
         [CompletedValueImport "main" "Tidepool.Session.Val.G7" aliasPath (digest valueBytes) [("cmd",identifier)]])]
       $ \(input,purpose) -> do
-        capture <- admitCheckedScope base [work,"lib",effects] [input]
+        capture <- admitCheckedScope base includes [input]
         checked <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose capture)
-          (Just scope {ssExactScope=Just (scopeManifestPath capture)}) consumerPath [work,"lib",effects] Nothing
+          (Just scope {ssExactScope=Just (scopeManifestPath capture)}) consumerPath includes Nothing
         unless (fmap renderType (crResultType checked) == Just "Command") $
           fail "dependency-ordered command value injection changed its captured type"
   putStrLn "checked command value: complete type closure, delayed injection and missing/changed-owner refusal passed"
@@ -2017,10 +2018,10 @@ exactRetainedQuoter = withTiming $ withScratch $ \work -> do
           refused <- try (void (compile CheckedEnvironment Set.empty GeneralCompile
             (Just scope) target [work] Nothing)) :: IO (Either IOException ())
           unless (case refused of
-            Left reason -> isUserError reason && canonicalCorePath core `isInfixOf` ioeGetErrorString reason
-              && "admitted defining Core changed during capture" `isInfixOf` ioeGetErrorString reason
+            Left reason -> isUserError reason
+              && "exact input differs from its selected seal" `isInfixOf` ioeGetErrorString reason
             Right _ -> False) $
-            fail "retained compiler execution did not refuse corrupted authenticated Core bytes"
+            fail ("retained compiler execution changed its corrupted Core refusal: " ++ show refused)
     -- Both certificate descriptors are genuine; only this negative association
     -- places the dependency's certificate under the helper's exact owner.
     let wrongOwner (TList fields)
@@ -2705,7 +2706,7 @@ originalConstructorMetadataClosure effects = withTiming $ withScratch $ \work ->
   -- Each prepared module retains siblings it defines, rather than imports.
   -- Resolve the real defining Id from this compilation's prepared owners.
   sibling <- maybe (fail "site closure control lacks the actual typed currentRequest sibling") pure
-    (Map.lookup "currentRequest" (Map.unions (map pmSitedSiblings modules)))
+    (Map.lookup "Tidepool.Agent.Reply.Internal.currentRequest" (Map.unions (map pmSitedSiblings modules)))
   let actualFloatedOrdinals = [fromIntegral ordinal
         | (ordinal,(binding,_)) <- zip [0 :: Int ..] (pmBindings requestPrepared)
         , any ((`Set.notMember` pmOriginalTopNames requestPrepared) . varName) (topBinders binding)
@@ -5398,10 +5399,10 @@ exactLegacyValueIsolation = withTiming $ withScratch $ \work -> do
     refuse scope {ssRoot=alternate}
     seed
     _ <- compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile GeneralCompile admitted)
-      (Just scope) target [work] Nothing
+      (Just scope {ssExactScope=Just (scopeManifestPath admitted)}) target [work] Nothing
     (authenticated,authenticatedDiagnostics) <- captureDiagnostics $
       compile (PreparedProducts Nothing) Set.empty (ExactScopeCompile GeneralCompile admitted)
-        (Just scope {ssRoot=alternate}) target [work] Nothing
+        (Just scope {ssRoot=alternate,ssExactScope=Just (scopeManifestPath admitted)}) target [work] Nothing
     unless (hasIntResultLiteral 42 (prBinds (pprPipelineResult authenticated))
         && counterValues "transaction_reused_source_products" authenticatedDiagnostics == [1]) $
       fail "authenticated checked values lost reuse or consumed the unsealed replacement root"
@@ -5816,11 +5817,15 @@ exactBashMetadata effects = withTiming $ withScratch $ \work -> do
     normal <- compile CheckedEnvironment Set.empty GeneralCompile Nothing target [] Nothing
     (checked, diagnostics) <- captureDiagnostics $
       compile CheckedEnvironment Set.empty GeneralCompile (Just scope) target [] Nothing
+    let bashLinkable = hm_linkable <$> lookupHpt (hsc_HPT (crHscEnv checked)) (mkModuleName "Tidepool.QQ.Bash")
     unless (fmap renderType (crResultType checked) == Just "Command"
         && fmap renderType (crResultType normal) == fmap renderType (crResultType checked)
-        && "tidepool-checked-dependency-executable module=Tidepool.QQ.Bash bytecode=True object=False" `elem` lines diagnostics
-        && "tidepool-checked-loaded-source module=Tidepool.QQ.Bash" `elem` lines diagnostics) $
-      fail "exact bash metadata lost GHC load bytecode or signature parity"
+        && maybe False (\linkable -> isJust (homeMod_bytecode linkable)
+          && isNothing (homeMod_object linkable)) bashLinkable
+        && "tidepool-checked-reused-source module=Tidepool.QQ.Bash" `elem` lines diagnostics) $
+      fail ("exact bash metadata lost GHC load bytecode or signature parity: normal="
+        ++ show (fmap renderType (crResultType normal)) ++ " exact="
+        ++ show (fmap renderType (crResultType checked)) ++ " diagnostics=" ++ diagnostics)
     native <- compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [] Nothing
     unless (fmap renderType (prResultType (pprPipelineResult native)) == Just "Command"
         && not (dependencyCacheSafe (preparedFreshDependencies native))

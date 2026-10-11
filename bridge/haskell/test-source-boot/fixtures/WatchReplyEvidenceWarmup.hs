@@ -2,12 +2,12 @@
 module WatchReplyEvidence where
 
 import Data.Text (Text)
-import Tidepool.Agent.Watch.Internal (Watches(..))
+import Tidepool.Agent.Watch.Internal (Watches(..), AwaitPlan(..), AwaitNode(..))
 
 {-# OPAQUE registerSingle #-}
 registerSingle :: Text -> Watches Int
-registerSingle label = RegisterWatchWith label []
+registerSingle label = RegisterWatchWith label (AwaitPlan [ReadyNode] 0)
 
 {-# OPAQUE registerGrouped #-}
 registerGrouped :: Text -> Watches Int
-registerGrouped label = RegisterWatchGroupsWith label []
+registerGrouped label = RegisterWatchWith label (AwaitPlan [ReadyNode, ReadyNode, AllNode 0 1] 2)

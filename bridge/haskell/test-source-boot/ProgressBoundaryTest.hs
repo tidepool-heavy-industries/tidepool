@@ -101,7 +101,7 @@ progressBoundaryChecks effects = bracket scratch removeDirectoryRecursive $ \wor
   forM_ (pprModules result) $ \owner ->
     forM_ (pmSiteRejections owner) $ \rejection ->
       unless (getOccString (srBinder rejection) `notElem`
-          ["reportRequestProgressSited", "pollProgressSited", "awaitProgressAfterSited", "awaitAnyProgressSited", "installSource", "attachSource"]) $
+          ["reportRequestProgressSited", "pollProgressSited", "afterSited", "installSource", "attachSource"]) $
         fail "trusted progress forwarding implementation was rejected"
   putStrLn "progress boundary: concrete direct/watch/source evidence; raw, copied Sited and open references refused"
  where
@@ -145,7 +145,7 @@ watchReplyEvidenceWith warmup effects work = do
     result <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile Nothing target includes Nothing
     rows <- retainWatchReplyEvidence work result
     forM_ rows $ \(occurrence, targetRows, originalRows) -> do
-      unless (any (== [True]) targetRows) $
+      unless (all (== [True]) targetRows) $
         fail ("watch target lacks its closed Int reply row: " ++ T.unpack occurrence)
       unless (any (== [True]) originalRows) $
         fail ("watch native original lacks its closed Int reply row: " ++ T.unpack occurrence)
@@ -182,7 +182,7 @@ retainWatchReplyEvidence work result = do
       pure wire
     let originalBodies = [projectedBody group | (owner, Right groups) <- outcomes
           , moduleNameString (moduleName owner) == "Tidepool.Agent.Watch.Internal", group <- groups]
-    forM ["RegisterWatchWith", "RegisterWatchGroupsWith"] $ \occurrence -> do
+    forM ["RegisterWatchWith"] $ \occurrence -> do
       let targetRows = [replyRows occurrence (programConstructors wire) (programTypes wire)
             (programConstructorReplies wire) | wire <- targets]
           originalRows = [replyRows occurrence (projectedConstructors body) (projectedTypes body)
