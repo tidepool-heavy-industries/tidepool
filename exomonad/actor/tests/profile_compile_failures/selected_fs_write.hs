@@ -1,10 +1,10 @@
 ActorDefinition
-  { label = "invalid-read-only-writer"
-  , effectProfile = ReadOnly
+  { label = "invalid-selected-writer"
+  , effectProfile = Selected (knownEffects @'[])
   , initialization = \() -> pure ()
   , behavior = \() () ->
       (writeFile "forbidden.txt" "must not typecheck" >> pure ()
-        :: Eff (ReadOnlyEffects Maybe) ())
+        :: Eff '[ActorLocal Maybe] ())
   , onShutdown = const (pure ())
   }
   `seq` pure ()

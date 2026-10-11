@@ -21,6 +21,7 @@ use tidepool_bridge_derive::FromHaskell;
               that exists only here and is never reused"
 )]
 pub enum ActorKernelReq {
+    ActorPublishExitWith(tidepool_bridge::HaskellValue, i64),
     ActorInstallShutdownWith(i64, tidepool_bridge::HaskellValue),
     ActorReadyWith,
     ActorReplyWith(i64, tidepool_bridge::HaskellValue),

@@ -3559,7 +3559,8 @@ fn explicit_display_texts(reply: &serde_json::Value) -> Vec<&str> {
         .as_array()
         .unwrap()
         .iter()
-        .flat_map(|item| item["operations"].as_array().unwrap())
+        .filter_map(|item| item["operations"].as_array())
+        .flatten()
         .filter_map(|operation| operation.get("display"))
         .map(|display| display["text"].as_str().unwrap())
         .collect()
@@ -4058,4 +4059,34 @@ async fn hosted_parser_rejection_preserves_authored_diagnostics_without_publicat
         })
     })
     .await;
+}
+
+#[tokio::test]
+async fn narrow_parent_forwards_one_request_with_exact_child_effects() {
+    let campaign = TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
+        let root = campaign.root_installation.policy.clone();
+        let (setup, target) = campaign.dispatch_native_spawn_setup(
+            "forwarding request target installation",
+            include_str!("fixtures/narrow_parent_forwarding.hs"),
+            Duration::from_secs(240),
+        ).await;
+        assert_eq!(setup["status"], "committed", "{setup}");
+        campaign.next_deployment(
+            "forwarding request target activation", Duration::from_secs(120),
+            |event| match event {
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == target.actor.identity() => Ok(()),
+                other => Err(other),
+            },
+        ).await;
+        let reply = dispatch_haskell_script(target.policy.as_ref(), "respond sessionInput").await;
+        assert_eq!(reply["status"], "replied", "{reply}");
+        let observed = displayed(campaign, root.as_ref(),
+            "let waitForwarding = do { observed <- R.forwardingExit forwarding; case observed of { Nothing -> sleep (milliseconds 1) >> waitForwarding; Just settled -> pure settled } }\nexit <- waitForwarding\ncount <- R.call (forwardCount (R.client sink)) ()\n_ <- display (count == 1)\n_ <- display (case exit of { Actor.Completed () -> True; _ -> False })").await;
+        assert_eq!(explicit_display_texts(&observed), vec!["True", "True"], "{observed}");
+        let repeated = displayed(campaign, root.as_ref(),
+            "countAgain <- R.call (forwardCount (R.client sink)) ()\n_ <- display (countAgain == 1)").await;
+        assert_eq!(explicit_display_texts(&repeated), vec!["True"], "{repeated}");
+    })).await;
 }

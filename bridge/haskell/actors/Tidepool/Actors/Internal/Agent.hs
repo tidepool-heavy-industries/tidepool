@@ -47,7 +47,7 @@ import Tidepool.Agent.Reply.Internal
   , ResponseResult (..), ExecutionReceipt (..), WorktreeEvidence (..)
   )
 import Tidepool.Agent.Ref.Internal
-  ( AgentRef (..), AgentProtocol (..), agentIdentity, agentBoundWorktree, internalAgentRef )
+  ( AgentRef (..), AgentProtocol (..), AgentRequestEffects, agentIdentity, agentBoundWorktree, internalAgentRef )
 import Tidepool.Agent.Watch.Internal (WatchId (..))
 import Tidepool.Agent.Session (requestSessionSited, publishResponse, publishProgressResponse)
 import Tidepool.View.Types (View(..))
@@ -82,7 +82,7 @@ installRequestReceiverSited
 installRequestReceiverSited site = send
   (Core.AgentToolsInstallReceiverWith site agentRequestDriver)
 
-agentRequestDriver :: Int -> Eff (Actor.ReadOnlyEffects AgentProtocol) ()
+agentRequestDriver :: Int -> Eff AgentRequestEffects ()
 agentRequestDriver _ = Actor.serve @() @AgentProtocol ()
   (\() (RunRequest action) -> action >> pure ((), ()))
 
@@ -257,7 +257,7 @@ requestWithProgressIntoSited site agent input options retain = do
 requestConfiguredSited
   :: forall result input extra effs. Member Replies effs
   => RequestSite (input ': extra) result
-  -> (Int -> ResponseResult result -> Eff (Actor.ReadOnlyEffects AgentProtocol) ())
+  -> (Int -> ResponseResult result -> Eff AgentRequestEffects ())
   -> AgentRef -> input -> RequestOptions
   -> (Request result -> Eff effs ())
   -> Eff effs (Either RequestError (Request result))

@@ -2,10 +2,10 @@ let childDefinition :: ActorDefinition Int Maybe Int
     childDefinition =
       ActorDefinition
         { label = "spawned-by-tool"
-        , effectProfile = ReadOnly
+        , effectProfile = Selected (knownEffects @'[])
         , initialization = \seed -> pure seed
         , behavior = \_ initial ->
-            (pure initial :: Eff (ReadOnlyEffects Maybe) Int)
+            (pure initial :: Eff '[ActorLocal Maybe] Int)
         , onShutdown = const (error "authored shutdown hook failure")
         }
 

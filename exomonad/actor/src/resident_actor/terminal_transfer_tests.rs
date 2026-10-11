@@ -50,6 +50,7 @@ async fn run_native_reply_case(case: NativeReplyCase) {
     eprintln!("native terminal fixture: setup started");
     let declarations = [
         tidepool_mcp::agent_tools_decl(),
+        tidepool_mcp::agent_launch_decl(),
         tidepool_mcp::agent_session_decl(),
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_kernel_decl(),
@@ -64,13 +65,9 @@ async fn run_native_reply_case(case: NativeReplyCase) {
     let include = crate::resident_workbench::request_tests::fixture_include_roots(&effects);
     let mut preamble = tidepool_mcp::build_notebook_preamble(&declarations, false);
     for import in [
-        "qualified Tidepool.Actor as Mailbox",
         "Tidepool.Agent.Reply (Replies, retainRequest)",
-        "Tidepool.Agent.Watch (Watches)",
-        "Tidepool.Agent.Ref.Internal (AgentProtocol(..))",
+        "Tidepool.Actors.Exomonad (request, defaultRequestOptions)",
         "Tidepool.Effects.Core (WorkerLifetime(..))",
-        "qualified Tidepool.Agent.Ref.Internal as AgentRef",
-        "qualified Tidepool.Actors.Internal.Agent as Agents",
     ] {
         preamble = insert_preamble_imports(&preamble, import);
     }
@@ -97,6 +94,7 @@ async fn run_native_reply_case(case: NativeReplyCase) {
             "terminal-transfer-requester".into(),
             crate::ActorCapabilities::default().with_effect_keys(vec![
                 crate::ActorEffectKey::Actor,
+                crate::ActorEffectKey::AgentLaunch,
                 crate::ActorEffectKey::Replies,
             ]),
         )
@@ -105,9 +103,22 @@ async fn run_native_reply_case(case: NativeReplyCase) {
     let setup_source = tidepool_testing::fixture_source(
         "exomonad/actor/src/resident_actor/terminal_transfer_setup.hs",
     );
-    let setup = execute(&requester, &setup_source, None)
-        .await
-        .expect("native receiving child admitted");
+    let setup = execute(&requester, &setup_source, None);
+    tokio::pin!(setup);
+    let setup = loop {
+        tokio::select! {
+            result = &mut setup => break result.expect("native receiving child admitted"),
+            event = deployments.recv() => match event.expect("spawn attachment deployment") {
+                LocalResidentDeployment::PolicyInstalled(installation) => {
+                    installation.spawn_admission.as_ref()
+                        .expect("public spawn admission")
+                        .acknowledge(installation.actor.identity())
+                        .expect("attach exact spawned receiver");
+                }
+                other => panic!("unexpected receiver setup deployment: {}", other.kind()),
+            }
+        }
+    };
     assert_eq!(setup.status, WorkbenchRunStatus::Committed, "{setup:?}");
     eprintln!(
         "native terminal fixture: setup committed elapsed_ms={}",
@@ -166,18 +177,10 @@ async fn run_native_reply_case(case: NativeReplyCase) {
                 .await
                 .expect("native readiness deployment");
             match event {
-                LocalResidentDeployment::PolicyInstalled(installation)
-                    if installation.actor.identity() == target =>
+                LocalResidentDeployment::SessionReady { activation }
+                    if activation.id.actor() == target =>
                 {
-                    assert_eq!(
-                        installation
-                            .runtime_observation
-                            .snapshot()
-                            .request_activation
-                            .expect("initial typed activation")
-                            .request,
-                        request,
-                    );
+                    assert_eq!(activation.request, request);
                     break;
                 }
                 LocalResidentDeployment::ChildExited { notice }

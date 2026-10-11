@@ -36,8 +36,6 @@ module Tidepool.Actor
   , withSources
   , stateful
   , EffectProfile (..)
-  , ReadOnlyEffects
-  , ReadWriteEffects
   , ShutdownReason (..)
   , startActor
   , startActorSited
@@ -91,8 +89,6 @@ import Tidepool.Actor.Internal
   , ActorRef (..)
   , EffectProfile (..)
   , profileCode
-  , ReadOnlyEffects
-  , ReadWriteEffects
   , ShutdownReason (..)
   )
 import Tidepool.Effects.Core

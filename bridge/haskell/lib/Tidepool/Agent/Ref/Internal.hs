@@ -7,6 +7,7 @@
 module Tidepool.Agent.Ref.Internal
   ( AgentRef (..)
   , AgentProtocol (..)
+  , AgentRequestEffects
   , agentIdentity
   , agentAddressText
   , agentBoundWorktree
@@ -26,13 +27,15 @@ import Tidepool.Effects.Core
   , Notifications, Console, Sleep, WorktreeHandle
   )
 
+-- | The native request receiver carries its own implementation effects,
+-- independently of the actor's selected notebook effects.
+type AgentRequestEffects =
+  '[ ActorLocal AgentProtocol, AgentTools, AgentSession, Actor, FsRead
+   , Worktree, Notifications, Console, Sleep
+   ]
+
 data AgentProtocol result where
-  RunRequest
-    :: Eff
-      '[ ActorLocal AgentProtocol, AgentTools, AgentSession, Actor, FsRead
-       , Worktree, Notifications, Console, Sleep
-       ] ()
-    -> AgentProtocol ()
+  RunRequest :: Eff AgentRequestEffects () -> AgentProtocol ()
 
 data AgentRef = AgentRef
   (ActorRef AgentProtocol ())

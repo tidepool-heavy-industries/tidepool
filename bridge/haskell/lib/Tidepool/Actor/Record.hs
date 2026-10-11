@@ -58,6 +58,7 @@ import Tidepool.Agent.Reply.Internal
 import qualified Tidepool.Agent.Reply.Internal as AgentReply
 import Tidepool.Effects.Core (Actor, ActorLocal, ActorInputOrigin (..))
 import qualified Tidepool.Effects.Core as Core
+import Tidepool.Effects.Row (knownEffects)
 import qualified Tidepool.Internal.ActorRef as Internal
 import Tidepool.Internal.RequestSite (RequestSite)
 
@@ -467,7 +468,7 @@ forwardResultSited site response endpoint = Forwarding <$> Actor.startUnitActor 
   (Actor.withSources [Source.settlementSourceSited site response (\value -> Forward value ())]
     Actor.ActorDefinition
       { Actor.label = "forward-result"
-      , Actor.effectProfile = Actor.ReadOnly
+      , Actor.effectProfile = Actor.Selected (knownEffects @'[Actor])
       , Actor.initialization = pure
       , Actor.behavior = \() () -> Actor.receive (\(Forward value reply) -> do
           send endpoint value

@@ -28,5 +28,7 @@ pub enum AgentSessionReq {
         Option<String>,
         Vec<(String, String, String)>,
     ),
+    AgentSessionPublishResponseWith(i64, i64, tidepool_bridge::HaskellValue),
+    AgentSessionPublishProgressResponseWith(i64, i64, tidepool_bridge::HaskellValue),
     AgentAttachWith(Option<String>),
 }
