@@ -17,7 +17,7 @@ pub struct PendingPublishedSourceOriginals {
     admitted: PublicVisibilitySnapshot,
     view_digest: [u8; 32],
     context: Arc<ExactDeclarationContext>,
-    selection: Arc<PublishedSourceOriginalSelection>,
+    selections: Vec<Arc<PublishedSourceOriginalSelection>>,
 }
 
 static_assertions::assert_not_impl_any!(PendingPublishedSourceOriginals: Clone, Copy);
@@ -30,6 +30,14 @@ impl PersistentSession {
         scope: ScopeId,
         selection: Arc<PublishedSourceOriginalSelection>,
     ) -> Result<PendingPublishedSourceOriginals, SessionError> {
+        self.stage_published_source_original_selections_in(scope, vec![selection])
+    }
+
+    pub fn stage_published_source_original_selections_in(
+        &mut self,
+        scope: ScopeId,
+        selections: Vec<Arc<PublishedSourceOriginalSelection>>,
+    ) -> Result<PendingPublishedSourceOriginals, SessionError> {
         let admitted = self
             .public_visibility_snapshot_in(scope)
             .ok_or(SessionError::StaleStagedDeclaration)?;
@@ -37,18 +45,20 @@ impl PersistentSession {
             .compile_view_digest_in(scope)
             .ok_or(SessionError::StaleStagedDeclaration)?;
         let base = self.lib().current_exact_context_in(scope);
-        let context = match base {
+        let mut context = match base {
             Some(base) => (*base).clone(),
             None => ExactDeclarationContext::new(&[], &[], Vec::new())?,
+        };
+        for selection in &selections {
+            context = context.with_published_source_originals(selection)?;
         }
-        .with_published_source_originals(&selection)?;
         Ok(PendingPublishedSourceOriginals {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
             admitted,
             view_digest,
             context: Arc::new(context),
-            selection,
+            selections,
         })
     }
 
@@ -70,8 +80,10 @@ impl PersistentSession {
         let tip = pending.admitted.declaration_tip;
         self.lib_mut()
             .set_published_source_context_in(scope, tip, pending.context);
-        self.lib_mut()
-            .retain_published_source_selection_in(scope, pending.selection);
+        for selection in pending.selections {
+            self.lib_mut()
+                .retain_published_source_selection_in(scope, selection);
+        }
         self.commit_public_visibility_advance(scope, epoch);
         Ok(())
     }

@@ -770,7 +770,7 @@ impl From<Arc<ExactDeclarationContext>> for ExactCompileContext {
 }
 
 const EXACT_SCOPE_BYTES_LIMIT: usize = 4 << 20;
-const EXACT_SCOPE_SCHEMA_VERSION: &str = "13";
+const EXACT_SCOPE_SCHEMA_VERSION: &str = "14";
 const EXACT_SCOPE_SCHEMA_FIELDS: usize = 11;
 const EXACT_SCOPE_GRAPHS_LIMIT: usize = 4096;
 

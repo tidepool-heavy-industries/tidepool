@@ -4,7 +4,7 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublishedSourceOriginalSelection {
     context: Arc<ExactDeclarationContext>,
     revision: String,
@@ -31,6 +31,20 @@ impl ExactDeclarationContext {
     ) -> Result<Vec<ArtifactId>, CompileError> {
         let metadata = self.inventory.metadata_snapshot();
         let roles = self.compiler_projection.roles();
+        let issued = roles
+            .iter()
+            .find_map(|role| match role {
+                CompilerInputRole::PublishedSourceOriginal {
+                    original: selected,
+                    selection,
+                    ..
+                } if *selected == original => Some(selection.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                crate::artifact_inventory::ExactArtifactSelection::capture(&self.inventory)
+            });
+        let issuer = self.inventory.select_issued(vec![original], &issued)?;
         let mut roots = BTreeSet::from([original]);
         for node in self.published_lexical_closure(root)? {
             let role = roles
@@ -45,6 +59,14 @@ impl ExactDeclarationContext {
                     failure("published lexical import loses its selected canonical interface")
                 })?;
             roots.insert(role.interface());
+            // Completed source selection follows the issuer's compiler namespace,
+            // independently of the executable groups demanded so far.
+            if let Some(dependency) = role
+                .original()
+                .filter(|id| issuer.contains_namespace_artifact(*id))
+            {
+                roots.insert(dependency);
+            }
         }
         Ok(roots.into_iter().collect())
     }
@@ -134,7 +156,7 @@ impl ExactDeclarationContext {
             }
         }
         let bytes = serde_json::to_vec(&(
-            "published-source-original2",
+            "published-source-original3",
             self.producer,
             root,
             interface,
@@ -228,6 +250,65 @@ impl ExactDeclarationContext {
             .collect()
     }
 
+    pub(crate) fn published_source_original_selections_for_target(
+        &self,
+        groups: &BTreeSet<crate::artifact_inventory::NativeGroupBinding>,
+        imports: &[crate::certified_products::PendingImportOwner],
+    ) -> Result<Vec<Arc<PublishedSourceOriginalSelection>>, CompileError> {
+        let publications = self.published_source_original_selections()?;
+        if publications.is_empty() {
+            return Ok(publications);
+        }
+        let compiler = self.compiler_metadata_snapshot()?;
+        let mut lexical = BTreeSet::new();
+        for import in imports {
+            if let crate::certified_products::PendingImportOwner::Source { owner, .. } = import {
+                let root = ExactModuleIdentity {
+                    unit: owner.unit.clone(),
+                    module: owner.module.clone(),
+                };
+                // Historical native imports may retain a different completed
+                // source than the compiler namespace selects for this module.
+                // Only the selected full source identity admits a lexical walk.
+                if !compiler.entries.get(&root).is_some_and(|entry| {
+                    matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == owner)
+                }) {
+                    continue;
+                }
+                lexical.extend(
+                    self.published_lexical_closure(&root)?
+                        .into_iter()
+                        .map(|node| node.owner),
+                );
+            }
+        }
+        Ok(publications
+            .into_iter()
+            .filter(|selection| {
+                let issuer = selection.context.artifact_view();
+                let roles = selection.context.compiler_input_roles();
+                let originals = roles
+                    .iter()
+                    .filter_map(CompilerInputRole::original)
+                    .collect::<BTreeSet<_>>();
+                let root_original = roles
+                    .iter()
+                    .find(|role| role.is_published_source_original())
+                    .and_then(CompilerInputRole::original);
+                let native_root = root_original.is_some_and(|original| {
+                    groups
+                        .iter()
+                        .any(|group| group.binding.artifact == original)
+                });
+                (lexical.contains(selection.public_root()) || native_root)
+                    && groups
+                        .iter()
+                        .filter(|group| originals.contains(&group.binding.artifact))
+                        .all(|group| issuer.contains_issued_native_group(*group))
+            })
+            .collect())
+    }
+
     fn published_context_for_root(
         &self,
         root: &ExactModuleIdentity,
@@ -241,7 +322,7 @@ impl ExactDeclarationContext {
                 Some(CompilerInputRole::PublishedSourceOriginal { selection, .. }) => {
                     self.inventory.select_issued(roots, selection)?
                 }
-                _ => self.inventory.select_roots(roots)?,
+                _ => self.inventory.select_publication_roots(original, roots)?,
             };
         let ids = inventory
             .descriptors()
@@ -249,11 +330,19 @@ impl ExactDeclarationContext {
             .map(|row| row.id)
             .collect::<BTreeSet<_>>();
         let metadata = self.inventory.metadata_snapshot();
+        let lexical = self.published_lexical_closure(root)?;
+        let owners = lexical
+            .iter()
+            .map(|node| &node.owner)
+            .collect::<BTreeSet<_>>();
         let roles = self
             .compiler_projection
             .roles()
             .into_iter()
-            .filter(|role| ids.contains(&role.interface()))
+            .filter(|role| {
+                ids.contains(&role.interface())
+                    && owners.contains(&metadata.artifacts[&role.interface()].descriptor.owner)
+            })
             .map(|role| {
                 let owner = &metadata.artifacts[&role.interface()].descriptor.owner;
                 if owner == root && role.is_published_source_original() {
@@ -402,6 +491,29 @@ impl ExactDeclarationContext {
                     else {
                         return Err(failure("published scope loses native original"));
                     };
+                    let context = self.published_context_for_root(owner, original)?;
+                    let selected = context.compiler_metadata_snapshot()?;
+                    let dependencies = context
+                        .compiler_projection
+                        .roles()
+                        .into_iter()
+                        .filter_map(|role| {
+                            let original = role.original()?;
+                            let entry = &selected.artifacts[&original];
+                            if &entry.descriptor.owner == owner {
+                                return None;
+                            }
+                            let ArtifactPayload::Original(product) = &entry.payload else {
+                                return None;
+                            };
+                            Some(Value::Array(vec![
+                                text(&entry.descriptor.owner.unit),
+                                text(&entry.descriptor.owner.module),
+                                text(hex(&entry.descriptor.interface_sha256)),
+                                text(hex(&product.owner().product_sha256)),
+                            ]))
+                        })
+                        .collect();
                     Ok(Value::Array(vec![
                         text(&owner.unit),
                         text(&owner.module),
@@ -412,6 +524,7 @@ impl ExactDeclarationContext {
                         text(revision),
                         text(input),
                         text(hex(&selection)),
+                        Value::Array(dependencies),
                     ]))
                 })
                 .collect::<Result<Vec<_>, CompileError>>()?,
@@ -483,6 +596,12 @@ mod tests {
             "Helper",
             vec![(7, vec![source(&leaf, 7, "entry")])],
             2,
+            helper_requirements.clone(),
+        );
+        let future = native(
+            "Helper",
+            vec![(7, vec![source(&leaf, 7, "entry")])],
+            3,
             helper_requirements,
         );
         let root = native(
@@ -587,19 +706,27 @@ mod tests {
                 .artifact_view()
                 .artifact_ids()
                 .contains(&leaf.descriptor.id));
-            assert!(!published
-                .artifact_view()
-                .artifact_ids()
-                .contains(&current.descriptor.id));
+            assert_eq!(
+                published
+                    .artifact_view()
+                    .artifact_ids()
+                    .contains(&current.descriptor.id),
+                current_original_role
+            );
             assert_eq!(
                 published.artifact_view().selected_native_groups(),
                 BTreeSet::from([early])
             );
-            assert!(matches!(
-                published.compiler_metadata_snapshot().unwrap().entries[&old.descriptor.owner]
-                    .payload,
-                ArtifactPayload::Canonical(_)
-            ));
+            let helper_selected =
+                &published.compiler_metadata_snapshot().unwrap().entries[&old.descriptor.owner];
+            if current_original_role {
+                assert_eq!(helper_selected.descriptor.id, current.descriptor.id);
+            } else {
+                assert!(matches!(
+                    helper_selected.payload,
+                    ArtifactPayload::Canonical(_)
+                ));
+            }
             assert!(matches!(
                 published.compiler_metadata_snapshot().unwrap().entries[&leaf.descriptor.owner]
                     .payload,
@@ -659,6 +786,73 @@ mod tests {
                 published.semantic_sha256(),
                 "publication keeps its original selection independently of later demand"
             );
+            let ambient = inventory
+                .admit_shared_with_demand(
+                    &admitted,
+                    vec![future.clone()],
+                    NativeArtifactDemand::ScopeInterfaces,
+                )
+                .unwrap();
+            let with_ambient = ExactDeclarationContext::from_authenticated_execution(
+                producer,
+                &ambient,
+                published.compiler_projection.clone(),
+                published.lexical.to_vec(),
+                root.descriptor.owner.clone(),
+                &[root.descriptor.owner.clone()],
+            )
+            .unwrap();
+            let frozen = with_ambient.published_source_original_selections().unwrap();
+            assert_eq!(
+                frozen[0].context().semantic_sha256(),
+                published.semantic_sha256()
+            );
+            assert!(!frozen[0]
+                .context()
+                .artifact_view()
+                .artifact_ids()
+                .contains(&future.descriptor.id));
+            let mut replaced = published.compiler_input_roles();
+            let future_role = CompilerInputProjection::from_issued_entries(&[future.clone()])
+                .unwrap()
+                .roles()
+                .remove(0);
+            let position = replaced
+                .iter()
+                .position(|role| role.interface() == helper_interface.descriptor.id)
+                .unwrap();
+            replaced[position] = future_role;
+            let replacement =
+                CompilerInputProjection::restore(&ambient, &replaced).and_then(|projection| {
+                    ExactDeclarationContext::from_authenticated_execution(
+                        producer,
+                        &ambient,
+                        projection,
+                        published.lexical.to_vec(),
+                        root.descriptor.owner.clone(),
+                        &[root.descriptor.owner.clone()],
+                    )
+                });
+            if current_original_role {
+                assert!(
+                    replacement.is_err(),
+                    "later compiler namespace replacement cannot rewrite the publication issuer"
+                );
+            } else {
+                let reopened = replacement
+                    .unwrap()
+                    .published_source_original_selections()
+                    .unwrap();
+                assert_eq!(
+                    reopened[0].context().semantic_sha256(),
+                    published.semantic_sha256()
+                );
+                assert!(!reopened[0]
+                    .context()
+                    .artifact_view()
+                    .artifact_ids()
+                    .contains(&future.descriptor.id));
+            }
             let recovery_scratch = tempfile::tempdir().unwrap();
             let (published_products, published_interfaces) = published
                 .materialize_recovery_products_and_interfaces(recovery_scratch.path())

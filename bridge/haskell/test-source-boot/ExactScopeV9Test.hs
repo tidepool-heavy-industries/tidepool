@@ -100,7 +100,7 @@ exactScopeChecksFor kind manifest = do
               (replace 1 (TString (T.pack path)) role))
         BS.writeFile path bytes
         refuse manifest expected (evidence replacement)
-  forM_ ["2","4","6","7","8","9","10","11","12"] $ \version ->
+  forM_ ["2","4","6","7","8","9","10","11","12","13"] $ \version ->
     refuse manifest "unsupported exact scope" (scopeCodecTerm (replaceScopeCodecField ScopeCodecVersion (TString version) fixture))
   forM_ [8,9] $ \count ->
     refuse manifest "unsupported exact scope" (TList (take count fields))

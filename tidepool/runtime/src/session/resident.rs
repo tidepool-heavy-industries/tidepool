@@ -66,6 +66,7 @@ enum ResidentResumeInput {
 pub struct ProgramProvenance {
     sites: BTreeMap<u64, YieldSite>,
     fresh_completion_sites: std::collections::BTreeSet<u64>,
+    source_originals: Vec<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
     native_sites: tidepool_toolchain::checked_cell::SelectedNativeSites,
     // Authentication follows the original compiler bundle through owned roots.
     // Public metadata construction alone cannot authorize a host input mount.
@@ -78,6 +79,7 @@ pub struct ProgramProvenance {
 pub(super) struct CompiledProvenancePlan {
     sites: BTreeMap<u64, YieldSite>,
     fresh_completion_sites: std::collections::BTreeSet<u64>,
+    source_originals: Vec<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
     native_sites: tidepool_toolchain::checked_cell::SelectedNativeSites,
     authenticated_inputs: BTreeMap<
         u64,
@@ -99,6 +101,13 @@ impl CompiledProvenancePlan {
             ..Self::default()
         };
         let certification = code.certification.as_ref().as_ref();
+        if let Some(certification) = certification {
+            if let TurnPurpose::Execution { execution, .. }
+            | TurnPurpose::HostPrototype(execution) = certification.purpose()
+            {
+                provenance.source_originals = execution.selected_source_originals().to_vec();
+            }
+        }
         let original_contexts = if let Some(certification) = certification {
             let original = match certification.purpose() {
                 TurnPurpose::Execution { execution, .. }
@@ -270,6 +279,7 @@ impl CompiledProvenancePlan {
         Arc::new(ProgramProvenance {
             sites: self.sites.clone(),
             fresh_completion_sites: self.fresh_completion_sites.clone(),
+            source_originals: self.source_originals.clone(),
             native_sites: self.native_sites.clone(),
             authenticated_inputs: self
                 .authenticated_inputs
@@ -610,6 +620,11 @@ impl ProgramProvenance {
                 .entry(*site)
                 .and_modify(|previous| previous.execution.merge(&interfaces.execution))
                 .or_insert_with(|| interfaces.clone());
+        }
+        for source in &other.source_originals {
+            if !self.source_originals.contains(source) {
+                self.source_originals.push(source.clone());
+            }
         }
         self.native_sites = native_sites;
         self.fresh_completion_sites
@@ -1668,6 +1683,14 @@ impl RootCustody {
     #[must_use]
     pub fn provenance(&self) -> &ProgramProvenance {
         &self.provenance
+    }
+
+    /// Source selections follow their issuing compiler through live installers.
+    /// Site metadata and native inventory alone cannot issue a source selection.
+    pub fn published_source_original_selections(
+        &self,
+    ) -> &[Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>] {
+        &self.provenance.source_originals
     }
 
     fn checked_handle(&self, cleanup: &Arc<CustodyCleanup>) -> Result<ValueHandle, ResidentError> {
@@ -3468,6 +3491,16 @@ where
         Ok(self
             .state
             .stage_published_source_originals_in(scope, selection)?)
+    }
+
+    pub fn stage_published_source_original_selections_in(
+        &mut self,
+        scope: ScopeId,
+        selections: Vec<Arc<tidepool_toolchain::artifacts::PublishedSourceOriginalSelection>>,
+    ) -> Result<super::PendingPublishedSourceOriginals, ResidentError> {
+        Ok(self
+            .state
+            .stage_published_source_original_selections_in(scope, selections)?)
     }
 
     pub fn publish_source_originals(
@@ -11307,6 +11340,7 @@ mod compiled_provenance_plan_tests {
                 let observation = plan.instantiate(&Arc::default());
                 prop_assert_eq!(&observation.sites, &expected);
                 prop_assert!(observation.authenticated_inputs.is_empty());
+                prop_assert!(observation.source_originals.is_empty());
                 prop_assert!(observation.fresh_completion_sites.is_empty());
             }
         }

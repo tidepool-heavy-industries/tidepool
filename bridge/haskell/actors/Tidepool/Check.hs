@@ -6,7 +6,7 @@
 -- --recipes@ installs this effect; checked actors keep their normal capabilities.
 module Tidepool.Check
   ( RecipeCheck, CheckActor, Activation (..)
-  , root, turn, activation, git, writeFile, readFile
+  , root, turn, refuseCell, activation, git, writeFile, readFile
   , present, notPresented, unconfirmed, check, restart
   , assertThat, assertEventually, assertEventuallyBy, assertCell, awaitCell, awaitCellBy
   , output, literal, gitOidLiteral, checkpoint
@@ -44,6 +44,14 @@ turn (CheckActor actor) source = do
       -- trying to recover a Haskell exception from that machine.
       check ("Resident check turn failed: " <> encoded) False
       error "RecipeAssert returned after a failed assertion"
+
+-- | Confirm a resident compiler refusal without treating it as a failed recipe.
+refuseCell :: Member RecipeCheck effects => CheckActor -> Text -> Text -> Eff effects ()
+refuseCell (CheckActor actor) label source = do
+  encoded <- send (RecipeTurn actor source)
+  check (label <> ": " <> encoded) (case eitherDecode encoded of
+    Right (Object fields) -> KeyMap.lookup "status" fields == Just (String "rejected")
+    _ -> False)
 
 activation :: Member RecipeCheck effects => Eff effects Activation
 activation = do

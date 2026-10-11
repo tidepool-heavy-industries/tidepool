@@ -27,7 +27,7 @@ skills :: Member RecipeCheck effects => Eff effects ()
 skills = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
-  void $ turn owner "let input = \"typed skill request\" :: Text\nRight worker <- spawnSubagent (FreshCtx \"Reply to one typed request.\") SameDir ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"skill-example\" })"
+  void $ turn owner "let privateSkillNotebook = True\nlet input = \"typed skill request\" :: Text\nRight worker <- spawnSubagent (FreshCtx \"Reply to one typed request.\") SameDir ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"skill-example\" })"
   requestExample <- exampleBody owner "exomonad-agent-work" 0
   -- The model-free recipe drives the reply after request admission, before
   -- executing the published example's blocking await.
@@ -35,6 +35,8 @@ skills = do
   void $ turn owner requestSource
   worker <- activation
   check "typed request activates the explicitly spawned Luna worker" (checkModel worker == Just "gpt-6-luna")
+  refuseCell (checkActor worker) "fresh skill worker does not inherit parent notebook declarations"
+    "privateSkillNotebook"
   assertCell (checkActor worker) "the worker receives the typed skill request"
     "(sessionInput :: Text) == \"typed skill request\""
   void $ turn (checkActor worker)
@@ -121,13 +123,13 @@ checkNotebookForms owner = do
     "(== 1) <$> R.call (noteCount (R.client tally)) ()"
 
   -- Execute the authoring forms, then inspect their actual typed bindings.
-  void $ example owner "exomonad-workbench" 8
+  void $ example owner "exomonad-workbench" 7
   assertCell owner "text: a signature beside its equation installs both forms of binding"
     "map severity [1,3] == [\"low\",\"high\"] && inline 7 == \"work 7\""
-  void $ example owner "exomonad-workbench" 9
+  void $ example owner "exomonad-workbench" 8
   assertCell owner "an annotated literal settles an otherwise ambiguous encodable field"
     "state == object [\"owned_path\" .= (\"src/app.rs\" :: Text), \"changed\" .= (2 :: Int)]"
-  void $ example owner "exomonad-workbench" 10
+  void $ example owner "exomonad-workbench" 9
   assertCell owner "branch and ref identities round-trip through their constructors"
     "(case onto of BranchName b -> b) == \"integration/tags\" && (case from of GitRef ref -> ref) == \"exomonad/integration\""
 

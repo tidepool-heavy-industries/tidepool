@@ -5266,18 +5266,35 @@ where
                                 pending,
                             )
                         }
-                        (None, Some(installer)) => (
-                            session.run_rooted_entry_borrowed(
-                                "agent_spec_installer",
-                                &installer,
-                                0,
-                                context.placement.resource_scope,
-                                None,
-                                settlement,
-                            ),
-                            Vec::new(),
-                            None,
-                        ),
+                        (None, Some(installer)) => {
+                            let selections =
+                                installer.published_source_original_selections().to_vec();
+                            let pending = if matches!(
+                                purpose,
+                                ToolInstallationPurpose::InitialTools
+                                    | ToolInstallationPurpose::SpawnApplication
+                            ) && !selections.is_empty()
+                            {
+                                Some(session.stage_published_source_original_selections_in(
+                                    public_scope,
+                                    selections,
+                                )?)
+                            } else {
+                                None
+                            };
+                            (
+                                session.run_rooted_entry_borrowed(
+                                    "agent_spec_installer",
+                                    &installer,
+                                    0,
+                                    context.placement.resource_scope,
+                                    None,
+                                    settlement,
+                                ),
+                                Vec::new(),
+                                pending,
+                            )
+                        }
                         _ => unreachable!("one installation producer"),
                     };
                     let step = start_fragment_settlement(

@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 module Tidepool.ExactScope
-  ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeProducts, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence
+  ( ExactScope, scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeProducts, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence
   , extendExactScopeInputs, extendExactScopeGeneration, extendCheckedValueScope, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..)
   , CheckedCellAdmission(..), CheckedCellPurpose(..), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , ActivationPreviewAdmission(..), scopeActivationPreview
@@ -121,6 +121,7 @@ data ExactScope = ExactScope
   -- they are never serialized as baseline lexical authority.
   , ownedScopeSourceSelectedOwners :: Set.Set (String,String)
   , ownedScopePublishedSourceOriginals :: Set.Set (String,String)
+  , ownedScopeSourceOriginalDependencies :: Set.Set (String,String)
   } deriving (Eq, Show)
 
 -- Ordinary accessors expose facts without exporting record-update labels.
@@ -159,6 +160,10 @@ scopeSourceSelectedOwners = ownedScopeSourceSelectedOwners
 
 scopePublishedSourceOriginals :: ExactScope -> Set.Set (String,String)
 scopePublishedSourceOriginals = ownedScopePublishedSourceOriginals
+
+scopeCompletedSourceOriginals :: ExactScope -> Set.Set (String,String)
+scopeCompletedSourceOriginals scope = ownedScopePublishedSourceOriginals scope
+  `Set.union` ownedScopeSourceOriginalDependencies scope
 
 -- One checked purpose owns its admission and ordered search inputs. Native
 -- request-type evidence is an independent wrapper, not another checked stage.
@@ -1261,12 +1266,12 @@ readExactScopeWithOwner (ExactInputOwner retentionLimit state) path = modifyMVar
            inputs = AdmittedScopeInputs order admitted roots census Nothing
            sha = digest bytes
            scope = ExactScope path sha producer semantic inputs lexical selectedProducts graphs references
-             purpose types Set.empty (Set.fromList published)
+             purpose types Set.empty (Set.fromList (map fst published)) (Set.fromList (concatMap snd published))
        forM_ (scopeValueInterfaces scope) $ \iface -> do
          _ <- readVerified (exactPath iface) (32 * 1024 * 1024) (exactSha256 iface)
          pure ()
        validateInputClosure producer inputs selectedProducts
-       forM_ published $ \owner -> case Map.lookup owner evidence of
+       forM_ (map fst published ++ concatMap snd published) $ \owner -> case Map.lookup owner evidence of
          Just (ModuleInterfaceEvidence proof) | isSourceOriginal (canonicalOrigin proof) -> pure ()
          _ -> fail "published original lacks its canonical source owner"
        validatePreviewOriginalTarget scope evidence
@@ -1938,7 +1943,7 @@ reserveCompilationDirectory parent transaction = attempt (0 :: Int)
 data OfferedScope = OfferedScope String String [(ExactIfaceArtifact,FilePath,String)]
   [((String,String),[(String,String)])] [ExactProduct] [ExecutionSourceRef]
   ExactScopePurpose (Maybe (RequestHelperRecipe,RequestTypeSignatures))
-  [(String,String)]
+  [((String,String),[(String,String)])]
 
 validateOwnedInputImages :: OfferedScope -> [(String,FilePath)]
   -> [((String,String),ParsedInterfaceEvidence)] -> [OfferedNativeProduct]
@@ -1982,7 +1987,7 @@ decodeScope = do
   count <- decodeListLen
   magic <- string
   version <- string
-  unless (magic == "TPEXACTSCOPE" && version == "13" && count == 11)
+  unless (magic == "TPEXACTSCOPE" && version == "14" && count == 11)
     (fail "unsupported exact scope")
   semantic <- digestField
   producer <- digestField
@@ -2081,7 +2086,7 @@ decodeScope = do
       (uncurry decodePurpose) purpose
     pure (requestTypes, admission)
   published <- bounded 4096 $ do
-    array 7
+    array 8
     root <- (,) <$> nonempty <*> nonempty
     interfaceSha <- digestField
     productSha <- digestField
@@ -2093,8 +2098,20 @@ decodeScope = do
         && originalIfaceSha256 originalProduct == interfaceSha
         && originalProductSha256 originalProduct == productSha) products)
       (fail "published source selection differs from exact original custody")
-    pure root
-  unique "published source roots" published
+    dependencies <- bounded 4096 $ do
+      array 4
+      owner <- (,) <$> nonempty <*> nonempty
+      interface <- digestField
+      product <- digestField
+      unless (owner /= root && owner `elem` selected && any (\original ->
+        (originalUnit original,originalModule original) == owner
+          && originalIfaceSha256 original == interface
+          && originalProductSha256 original == product) products)
+        (fail "completed source dependency differs from selected original custody")
+      pure owner
+    unique "completed source dependencies" dependencies
+    pure (root,dependencies)
+  unique "published source roots" (map fst published)
   acquisition <- decodeInputAcquisition
   pure (OfferedScope producer semantic interfaces lexical products executionOwners
     checkedPurpose requestTypes published, descriptors, interfaceEvidence, nativeProducts,acquisition)

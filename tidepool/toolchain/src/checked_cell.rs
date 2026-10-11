@@ -2607,6 +2607,7 @@ pub struct ExactCompiledItem {
     admission: CheckedExecutionAdmission,
     settled_values: CheckedSettledValues,
     typed_entry: Option<SealedTypedEntry>,
+    source_originals: Vec<Arc<crate::artifacts::PublishedSourceOriginalSelection>>,
 }
 
 #[derive(Debug)]
@@ -2922,6 +2923,14 @@ impl CheckedTypedEntry {
 impl ExactCompiledItem {
     pub fn typed_entry(&self) -> Option<&CheckedTypedEntry> {
         self.typed_entry.as_ref().map(|issued| &issued.entry)
+    }
+
+    /// Existing publications selected by this target's authenticated lexical
+    /// imports or exact native entry, independently of its yield-site count.
+    pub fn selected_source_originals(
+        &self,
+    ) -> &[Arc<crate::artifacts::PublishedSourceOriginalSelection>] {
+        &self.source_originals
     }
 
     /// Exact native-site selection sealed with this typed target. The original
@@ -3865,6 +3874,7 @@ impl CheckedItemOffer {
             bound_binders,
             authenticated_sites,
             typed_entry,
+            source_originals,
             has_interface,
             ..
         } = output;
@@ -3904,6 +3914,7 @@ impl CheckedItemOffer {
             },
             settled_values: self.settled_values.clone(),
             typed_entry,
+            source_originals,
         }))
     }
 }
@@ -3922,6 +3933,7 @@ pub(crate) struct PreparedCheckedItemOutput {
     bound_binders: Vec<Value>,
     authenticated_sites: [u8; 32],
     typed_entry: Option<SealedTypedEntry>,
+    source_originals: Vec<Arc<crate::artifacts::PublishedSourceOriginalSelection>>,
     has_interface: bool,
 }
 
@@ -4030,6 +4042,11 @@ impl PreparedCheckedItemOutput {
             }
             _ => return Err(failure("compiled turn kind differs from checked item")),
         };
+        let groups = original_execution
+            .artifact_view()
+            .native_groups_for_target(typed_entry.as_ref(), target_imports)?;
+        let source_originals = original_execution
+            .published_source_original_selections_for_target(&groups, target_imports)?;
         let typed_entry = typed_entry
             .map(|entry| {
                 let native_sites = original_execution
@@ -4052,6 +4069,7 @@ impl PreparedCheckedItemOutput {
             bound_binders,
             authenticated_sites,
             typed_entry,
+            source_originals,
             has_interface: !expected_binders.is_empty(),
         })
     }

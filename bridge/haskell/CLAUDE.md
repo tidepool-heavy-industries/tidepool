@@ -66,9 +66,11 @@ qualification.
 
 ## Exact-scope transport
 
-Exact-scope manifests use strict `TPEXACTSCOPE` version 13 with eleven fields. The final
+Exact-scope manifests use strict `TPEXACTSCOPE` version 14 with eleven fields. The final
 fields contain an execution parcel or null, a compiler-purpose authorization
-or null, the exact published source selection roots, and an input acquisition.
+or null, the exact published source selection roots with their issued dependency originals, and an input acquisition.
+Each publication row keeps its public root separate from dependency interface/product pairs.
+Normal requests reuse this completed selection; reload inspection still validates current source.
 Acquisition is `["fresh-files"]` or `["continue-originals", arenaDescriptors, images]`. Each arena descriptor binds a canonical absolute `/proc/<owner-pid>/fd/<fd>` endpoint and sealed extent; parts select the table index and bounded offset, with their existing positive length. Cold reads verify all four memfd seals, extent, range and SHA on the same opened FD. The host retains the actual files through compiler close; a replacement worker can capture them independently. Durable recovery and exported fixtures use authenticated files, never process endpoints. Each image
 binds the compiler producer, unit/module and ordered kind/SHA/length facts;
 receiving logical paths and authenticated issuing origins are provenance bound

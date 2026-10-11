@@ -256,7 +256,7 @@ import Tidepool.ExactHydration
   , GeneratedScaffoldRecipe, generatedScaffoldRecipe, captureGeneratedScaffoldTarget
   , noGeneratedScaffoldImports, readGeneratedScaffoldImportAuthority, permitsGeneratedScaffoldImport, installExactLexicalGraphWithScaffold )
 import Tidepool.ExactScope
-  ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
+  ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopeCompletedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
   , scopeAvailableOriginalProducts
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
   , ActivationPreviewAdmission(..), scopeActivationPreview
@@ -5564,7 +5564,8 @@ checkedRecipeOriginal admitted = do
   pure original
 
 -- Explicit authored imports demand current canonical source proof even for a
--- captured lexical owner. An issued published root retains its completed original;
+-- captured lexical owner. An issued published root and its selected original
+-- dependencies retain the same completed products;
 -- reload inspection separately demands current proof for the entire original scope.
 -- Available retained requirements alone never create a source demand.
 selectCurrentSourceOriginals
@@ -5580,7 +5581,7 @@ selectCurrentSourceOriginals admitted completed intents recipe sourceGraph = do
       reloadInspection = case scopePurpose admitted of
         ExactReloadInspectionPurpose{} -> True
         _ -> False
-      publishedOwners = if reloadInspection then Set.empty else scopePublishedSourceOriginals admitted
+      publishedOwners = if reloadInspection then Set.empty else scopeCompletedSourceOriginals admitted
       checkedOwners = Set.fromList [(exactUnit artifact,exactModule artifact)
         | artifact <- scopeValueInterfaces admitted]
       sourceSummaries = [summary | ModuleNode _ summary <- mgModSummaries' sourceGraph]

@@ -4274,20 +4274,12 @@ impl ArtifactView {
         entry: &crate::checked_cell::CheckedTypedEntry,
         imports: &[crate::certified_products::PendingImportOwner],
     ) -> Result<crate::checked_cell::SelectedNativeSites, CompileError> {
-        let mut roots = certified_target_source_groups(&self.entries(), imports)?;
-        roots.insert(entry.native_group_key());
-        let roots = roots
-            .into_iter()
-            .map(|key| NativeRequirementRoot::Group {
-                artifact: key.artifact,
-                original_ordinal: key.original_ordinal,
-            })
-            .collect::<Vec<_>>();
-        let (_, groups) = self.native_requirements_with_groups_from_roots(&roots)?;
+        let groups = self.native_groups_for_target(Some(entry), imports)?;
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let mut sites = crate::checked_cell::SelectedNativeSites::default();
         for key in groups {
-            let ArtifactPayload::Original(product) = &state.payloads[&key.artifact].payload else {
+            let ArtifactPayload::Original(product) = &state.payloads[&key.binding.artifact].payload
+            else {
                 return Err(failure("selected native group lacks original payload"));
             };
             let original = crate::certified_products::original_native_group_definitions(
@@ -4302,10 +4294,49 @@ impl ArtifactView {
         Ok(sites)
     }
 
+    pub(crate) fn native_groups_for_target(
+        &self,
+        entry: Option<&crate::checked_cell::CheckedTypedEntry>,
+        imports: &[crate::certified_products::PendingImportOwner],
+    ) -> Result<BTreeSet<NativeGroupBinding>, CompileError> {
+        let mut roots = certified_target_source_groups(&self.entries(), imports)?;
+        if let Some(entry) = entry {
+            roots.insert(entry.native_group_key());
+        }
+        let roots = roots
+            .into_iter()
+            .map(|key| NativeRequirementRoot::Group {
+                artifact: key.artifact,
+                original_ordinal: key.original_ordinal,
+            })
+            .collect::<Vec<_>>();
+        Ok(self
+            .native_requirements_with_group_bindings_from_roots(&roots)?
+            .1)
+    }
+
     fn native_requirements_with_groups_from_roots(
         &self,
         roots: &[NativeRequirementRoot],
     ) -> Result<(NativeRequirements, BTreeSet<NativeGroupKey>), CompileError> {
+        let (requirements, groups) =
+            self.native_requirements_with_group_bindings_from_roots(roots)?;
+        Ok((
+            requirements,
+            groups
+                .into_iter()
+                .map(|group| NativeGroupKey {
+                    artifact: group.binding.artifact,
+                    original_ordinal: group.original_ordinal,
+                })
+                .collect(),
+        ))
+    }
+
+    fn native_requirements_with_group_bindings_from_roots(
+        &self,
+        roots: &[NativeRequirementRoot],
+    ) -> Result<(NativeRequirements, BTreeSet<NativeGroupBinding>), CompileError> {
         let state = self.lease.inventory.0.lock().expect("inventory lock");
         let owned = &self.read_projection(&state).nodes;
         let mut pending = Vec::new();
@@ -4403,12 +4434,89 @@ impl ArtifactView {
                 bindings: requirements.into_iter().collect(),
                 packages: packages.into_iter().collect(),
             },
-            seen.into_iter()
-                .map(|group| NativeGroupKey {
-                    artifact: group.binding.artifact,
-                    original_ordinal: group.original_ordinal,
-                })
-                .collect(),
+            seen,
+        ))
+    }
+
+    pub(crate) fn contains_issued_native_group(&self, group: NativeGroupBinding) -> bool {
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        self.read_projection(&state)
+            .nodes
+            .contains(&InventoryNodeKey::Group(group))
+    }
+
+    pub(crate) fn select_publication_roots(
+        &self,
+        original: ArtifactId,
+        roots: Vec<ArtifactId>,
+    ) -> Result<Self, CompileError> {
+        let ids = roots.into_iter().collect::<BTreeSet<_>>();
+        let namespace = self.namespace();
+        let mut selected = ids
+            .iter()
+            .map(|id| {
+                namespace
+                    .get(id)
+                    .copied()
+                    .map(InventoryNodeKey::Artifact)
+                    .ok_or_else(|| {
+                        failure("published compiler root lacks issued namespace binding")
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        selected.extend(self.roots().iter().copied().filter(|node| {
+            matches!(node,
+            InventoryNodeKey::Group(group) if group.binding.artifact == original)
+        }));
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &self.read_projection(&state).nodes;
+        let initial = artifact_ids(&admitted_closure(&state, selected.iter().copied()));
+        let native_owners = artifact_ids(owned)
+            .into_iter()
+            .filter_map(|id| {
+                let ArtifactPayload::Original(product) = &state.payloads[&id].payload else {
+                    return None;
+                };
+                Some((NativeOwnerKey::from_owner(product.owner()), id))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut retained_ids = initial.clone();
+        let mut pending = initial.iter().copied().collect::<Vec<_>>();
+        while let Some(id) = pending.pop() {
+            for required in state.payloads[&id].native_owners.values() {
+                if let Some(required_id) = native_owners.get(required).copied() {
+                    if retained_ids.insert(required_id) {
+                        pending.push(required_id);
+                    }
+                }
+            }
+        }
+        let mut custody = retained_ids
+            .difference(&initial)
+            .map(|id| {
+                self.resolve_binding(*id, owned)
+                    .map(InventoryNodeKey::Artifact)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        custody.extend(self.roots().iter().copied().filter(|node| matches!(node,
+            InventoryNodeKey::Group(group) if group.binding.artifact != original && ids.contains(&group.binding.artifact))));
+        if !selected.iter().any(|node| matches!(node, InventoryNodeKey::Group(group) if group.binding.artifact == original)) {
+            let carrier = namespace[&original];
+            let ordinals = owned.iter().filter_map(|node| match node {
+                InventoryNodeKey::Group(group) if group.binding.artifact == original => Some(group.original_ordinal),
+                _ => None,
+            }).collect::<BTreeSet<_>>();
+            for ordinal in ordinals {
+                custody.push(InventoryNodeKey::Group(resolve_group_binding(&state, owned, carrier, ordinal)?));
+            }
+        }
+
+        drop(state);
+        self.retain_projected_materializations(self.lease.inventory.retain(
+            selected,
+            custody,
+            Vec::new(),
+            Vec::new(),
         ))
     }
 
@@ -5187,7 +5295,7 @@ impl ArtifactView {
                 Some(_) => {
                     return Err(admission_failure(
                         ArtifactInventoryFailure::NativeOwnerAmbiguity { owner },
-                    ))
+                    ));
                 }
                 None => interfaces.get(&owner).copied(),
             };
@@ -6918,7 +7026,12 @@ mod tests {
                     ))),
                 }
             });
-        eprintln!("equal payload admission: configured={configured}, callbacks={}, completed={}, operation_counts={:?}; each case covers ambiguity, foreign inventory, missing dependency and release", callbacks.get(), completed.get(), operations.get());
+        eprintln!(
+            "equal payload admission: configured={configured}, callbacks={}, completed={}, operation_counts={:?}; each case covers ambiguity, foreign inventory, missing dependency and release",
+            callbacks.get(),
+            completed.get(),
+            operations.get()
+        );
         result.unwrap();
     }
 
@@ -7732,10 +7845,12 @@ mod tests {
                     .unwrap();
                 assert_eq!(repeated.artifact_view().capture_graph_selection(), graph);
                 assert_eq!(graph.native_groups, expected);
-                assert!(expected_edges.iter().all(|edge| following
-                    .artifact_view()
-                    .binding_dependencies()
-                    .contains(edge)));
+                assert!(expected_edges.iter().all(|edge| {
+                    following
+                        .artifact_view()
+                        .binding_dependencies()
+                        .contains(edge)
+                }));
                 assert!(!following
                     .compiler_input_roles()
                     .iter()
@@ -7888,7 +8003,9 @@ mod tests {
                         observations.push(true);
                     }
                     Err(error) => {
-                        eprintln!("native_closure hidden_interfaces={hidden_interfaces} projected={projected}: {error:?}");
+                        eprintln!(
+                            "native_closure hidden_interfaces={hidden_interfaces} projected={projected}: {error:?}"
+                        );
                         observations.push(false);
                     }
                 }
@@ -8865,6 +8982,109 @@ mod tests {
             "distinct group issuers retain the same exact carrier"
         );
         let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        let publications = issuers
+            .iter()
+            .enumerate()
+            .map(|(index, issuer)| {
+                ExactDeclarationContext::from_authenticated_execution(
+                    producer.sha256(),
+                    issuer,
+                    projection.clone(),
+                    vec![
+                        crate::declaration_join::ExactLexicalNode {
+                            owner: originals[index].descriptor.owner.clone(),
+                            imports: vec![helper.descriptor.owner.clone()],
+                        },
+                        crate::declaration_join::ExactLexicalNode {
+                            owner: helper.descriptor.owner.clone(),
+                            imports: vec![],
+                        },
+                    ],
+                    originals[index].descriptor.owner.clone(),
+                    &[
+                        originals[index].descriptor.owner.clone(),
+                        helper.descriptor.owner.clone(),
+                    ],
+                )
+                .unwrap()
+                .issue_published_source_original("issuer", "input", &helper.descriptor.owner)
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for publication in &publications {
+            let imports = [issued_source(&helper, 7)];
+            let groups = publication
+                .context()
+                .artifact_view()
+                .native_groups_for_target(None, &imports)
+                .unwrap();
+            assert!(!groups.is_empty());
+            assert_eq!(
+                publication
+                    .context()
+                    .published_source_original_selections_for_target(&groups, &imports,)
+                    .unwrap()
+                    .len(),
+                1,
+                "an authenticated source root retains its issued compilation policy",
+            );
+            assert!(
+                publication
+                    .context()
+                    .published_source_original_selections_for_target(&BTreeSet::new(), &[])
+                    .unwrap()
+                    .is_empty(),
+                "an unrelated publication is not selected by ambient availability",
+            );
+        }
+        for (index, issuer) in issuers.iter().enumerate() {
+            let actual = issuer
+                .native_groups_for_target(None, &[issued_source(&originals[index], 7)])
+                .unwrap();
+            let helper_group = *actual
+                .iter()
+                .find(|group| group.binding.artifact == helper.descriptor.id)
+                .unwrap();
+            assert!(issuer.contains_issued_native_group(helper_group));
+            assert_eq!(
+                publications[index]
+                    .context()
+                    .published_source_original_selections_for_target(&actual, &[])
+                    .unwrap()
+                    .len(),
+                1
+            );
+            assert!(publications[1 - index]
+                .context()
+                .published_source_original_selections_for_target(&actual, &[])
+                .unwrap()
+                .is_empty());
+            let mixed = actual
+                .iter()
+                .copied()
+                .chain(helper_groups.iter().copied())
+                .collect();
+            assert!(publications[index]
+                .context()
+                .published_source_original_selections_for_target(&mixed, &[])
+                .unwrap()
+                .is_empty());
+
+            assert!(!issuers[1 - index].contains_issued_native_group(helper_group));
+            let narrowed = issuer
+                .select_publication_roots(
+                    originals[index].descriptor.id,
+                    vec![originals[index].descriptor.id],
+                )
+                .unwrap();
+            assert!(narrowed.contains_issued_native_group(helper_group));
+            assert!(!narrowed.contains_issued_native_group(
+                *helper_groups
+                    .iter()
+                    .find(|other| **other != helper_group)
+                    .unwrap()
+            ));
+        }
         for reverse in [false, true] {
             let first = usize::from(reverse);
             let joined = issuers[first]
@@ -8911,9 +9131,11 @@ mod tests {
                 .check(&retained)
                 .expect("retention preserves issuing groups");
             assert_eq!(retained.roots(), joined.roots());
-            assert!(helper_groups.iter().all(|group| retained
-                .custody_roots()
-                .contains(&InventoryNodeKey::Group(*group))));
+            assert!(helper_groups.iter().all(|group| {
+                retained
+                    .custody_roots()
+                    .contains(&InventoryNodeKey::Group(*group))
+            }));
             let generated = Arc::new(entry("RecaptureScaffold", &[]));
             let scaffold = inventory
                 .admit_shared(&inventory.empty_view(), vec![generated.clone()])
@@ -9723,6 +9945,140 @@ mod tests {
     }
 
     #[test]
+    fn historical_source_import_does_not_select_current_publication_by_module_name() {
+        use crate::declaration_context::ExactDeclarationContext;
+        let old = Arc::new(issued_native_groups(
+            "SourceEpoch",
+            vec![(7, vec![])],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let raw = crate::certified_products::tests::original_groups_fixture(
+            "SourceEpoch",
+            vec![(7, vec![])],
+            2,
+            &BTreeMap::new(),
+        );
+        let raw = crate::certified_products::fixture_finalized_product_with_requirements(
+            raw,
+            [2; 32],
+            Some(BTreeMap::new()),
+        );
+        let new = Arc::new(
+            ArtifactEntry::original(
+                [2; 32],
+                crate::certified_products::tests::recovered_witness_fixtures(&[raw])
+                    .remove(0)
+                    .product,
+            )
+            .unwrap(),
+        );
+        assert_eq!(old.descriptor.owner, new.descriptor.owner);
+        assert_ne!(old.descriptor.id, new.descriptor.id);
+        let (ArtifactPayload::Original(old_product), ArtifactPayload::Original(new_product)) =
+            (&old.payload, &new.payload)
+        else {
+            unreachable!()
+        };
+        assert_ne!(old_product.owner(), new_product.owner());
+        let inventory = ArtifactInventory::default();
+        let old_view = inventory
+            .admit(&inventory.empty_view(), vec![(*old).clone()])
+            .unwrap();
+        let target = Arc::new(ArtifactEntry::canonical(
+            crate::certified_products::fixture_module_interface(
+                [2; 32],
+                "fixture",
+                "SourceEpochTarget",
+                BTreeMap::new(),
+            ),
+        ));
+        let issuer_inventory = inventory.clone();
+        let issuer = issuer_inventory
+            .admit(
+                &issuer_inventory.empty_view(),
+                vec![(*new).clone(), (*target).clone()],
+            )
+            .unwrap();
+        let projection =
+            CompilerInputProjection::from_issued_entries(&[new.clone(), target.clone()]).unwrap();
+        let context = ExactDeclarationContext::from_authenticated_execution(
+            [2; 32],
+            &issuer,
+            projection.clone(),
+            vec![
+                crate::declaration_join::ExactLexicalNode {
+                    owner: target.descriptor.owner.clone(),
+                    imports: vec![new.descriptor.owner.clone()],
+                },
+                crate::declaration_join::ExactLexicalNode {
+                    owner: new.descriptor.owner.clone(),
+                    imports: vec![],
+                },
+            ],
+            target.descriptor.owner.clone(),
+            &[
+                target.descriptor.owner.clone(),
+                new.descriptor.owner.clone(),
+            ],
+        )
+        .unwrap();
+        let publication = context
+            .issue_published_source_original("revision", "input", &new.descriptor.owner)
+            .unwrap();
+        let published = publication.context();
+        let available = old_view
+            .merge_selected(
+                published.artifact_view(),
+                published.compiler_input_projection(),
+            )
+            .unwrap();
+        let current = available
+            .retain_original_custody(published.artifact_view())
+            .unwrap();
+        let current = ExactDeclarationContext::from_authenticated_execution(
+            [2; 32],
+            &current,
+            publication.context().compiler_input_projection().clone(),
+            context.lexical_graph().to_vec(),
+            new.descriptor.owner.clone(),
+            &[new.descriptor.owner.clone()],
+        )
+        .unwrap();
+        let historical_imports = [issued_source(&old, 7)];
+        let historical_groups = current
+            .artifact_view()
+            .native_groups_for_target(None, &historical_imports)
+            .unwrap();
+        assert!(!historical_groups.is_empty());
+        assert!(historical_groups
+            .iter()
+            .any(|group| group.binding.artifact == old.descriptor.id));
+        assert!(current
+            .published_source_original_selections_for_target(
+                &historical_groups,
+                &historical_imports
+            )
+            .unwrap()
+            .is_empty());
+        let selected_imports = [issued_source(&new, 7)];
+        let selected_groups = current
+            .artifact_view()
+            .native_groups_for_target(None, &selected_imports)
+            .unwrap();
+        assert_eq!(
+            current
+                .published_source_original_selections_for_target(
+                    &selected_groups,
+                    &selected_imports
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn certified_namespace_retains_and_reopens_historical_native_custody() {
         let inventory = ArtifactInventory::default();
         let old_native =
@@ -10227,8 +10583,12 @@ mod tests {
                 .iter()
                 .map(|plan| serde_json::to_vec(plan.as_ref()).unwrap().len())
                 .sum::<usize>();
-            eprintln!("binding-plan-history generation={generation} live_bindings={} plans={} unique_witness_nodes={} unique_witness_bytes={unique_witness_bytes}",
-                graph.bindings.len(), graph.selections.len(), plan_sizes.iter().sum::<usize>());
+            eprintln!(
+                "binding-plan-history generation={generation} live_bindings={} plans={} unique_witness_nodes={} unique_witness_bytes={unique_witness_bytes}",
+                graph.bindings.len(),
+                graph.selections.len(),
+                plan_sizes.iter().sum::<usize>()
+            );
             let restored_inventory = ArtifactInventory::default();
             let restored = restored_inventory
                 .recover_selection(
@@ -10322,7 +10682,11 @@ mod tests {
             let ArtifactPayload::Original(product) = &selected.payload else {
                 unreachable!()
             };
-            eprintln!("independent admission: expected_source={expected:?}, actual_source={:?}, equals_fresh_product={}", product.source_sha256(), product == fresh_product);
+            eprintln!(
+                "independent admission: expected_source={expected:?}, actual_source={:?}, equals_fresh_product={}",
+                product.source_sha256(),
+                product == fresh_product
+            );
             observations.push((expected, product.source_sha256()));
             let old_entries = old.entries();
             let ArtifactPayload::Original(old_product) = &old_entries
@@ -10360,7 +10724,12 @@ mod tests {
                 .unwrap();
             assert_eq!(source_of(&selected.merge(&fresh_again).unwrap()), expected);
         }
-        assert!(observations.iter().all(|(expected, actual)| expected == actual), "unrelated retained artifacts cannot replace a receiving source witness: {observations:?}");
+        assert!(
+            observations
+                .iter()
+                .all(|(expected, actual)| expected == actual),
+            "unrelated retained artifacts cannot replace a receiving source witness: {observations:?}"
+        );
     }
 
     proptest::proptest! {

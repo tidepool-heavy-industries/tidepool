@@ -14,7 +14,7 @@ enum Operation {
     Compose,
     Recover,
     Reopen,
-    NormalizeSelection,
+    DuplicateSelection,
     AlterSelection(u8),
 }
 
@@ -25,23 +25,79 @@ fn operations() -> impl Strategy<Value = Vec<Operation>> {
             2 => Just(Operation::Compose),
             2 => Just(Operation::Recover),
             1 => Just(Operation::Reopen),
-            1 => (0u8..6).prop_map(Operation::AlterSelection),
+            1 => (0u8..7).prop_map(Operation::AlterSelection),
         ],
         0..24,
     )
 }
 
-fn fixture(initial: usize) -> (Arc<ArtifactEntry>, Arc<PublishedSourceOriginalSelection>) {
+fn fixture(
+    initial: usize,
+) -> (
+    Arc<ArtifactEntry>,
+    Arc<ArtifactEntry>,
+    Arc<PublishedSourceOriginalSelection>,
+) {
     let producer = [2; 32];
+    let helper = Arc::new(
+        ArtifactEntry::original(
+            producer,
+            crate::certified_products::tests::recovered_witness_fixtures(&[
+                crate::certified_products::fixture_finalized_product(
+                    crate::certified_products::tests::original_groups_fixture_with_interface(
+                        "HistoryHelper",
+                        vec![(7, vec![])],
+                        1,
+                        &BTreeMap::new(),
+                        b"HistoryHelper interface".to_vec(),
+                    ),
+                    producer,
+                ),
+            ])
+            .remove(0)
+            .product,
+        )
+        .unwrap(),
+    );
+    let ArtifactPayload::Original(helper_product) = &helper.payload else {
+        unreachable!()
+    };
+    let helper_import = PendingImportOwner::Source {
+        owner: helper_product.owner().clone(),
+        original_ordinal: 7,
+        binder: SymbolIdentity {
+            unit: "fixture".into(),
+            module: "HistoryHelper".into(),
+            namespace: "value".into(),
+            occurrence: "entry_7".into(),
+            record_parent: None,
+        },
+    };
     let product = crate::certified_products::tests::recovered_witness_fixtures(&[
-        crate::certified_products::fixture_finalized_product(
+        crate::certified_products::fixture_finalized_product_with_requirements(
             crate::certified_products::tests::original_groups_fixture(
                 "HistoryRoot",
-                ORDINALS.iter().map(|ordinal| (*ordinal, vec![])).collect(),
+                ORDINALS
+                    .iter()
+                    .map(|ordinal| {
+                        (
+                            *ordinal,
+                            if *ordinal == 3 {
+                                vec![]
+                            } else {
+                                vec![helper_import.clone()]
+                            },
+                        )
+                    })
+                    .collect(),
                 1,
                 &BTreeMap::new(),
             ),
             producer,
+            Some(BTreeMap::from([(
+                ("fixture".into(), "HistoryHelper".into()),
+                helper.descriptor.interface_sha256,
+            )])),
         ),
     ])
     .remove(0)
@@ -59,17 +115,27 @@ fn fixture(initial: usize) -> (Arc<ArtifactEntry>, Arc<PublishedSourceOriginalSe
     let view = inventory
         .admit_recovery_selection(
             &inventory.empty_view(),
-            vec![root.clone(), target.clone()],
-            &BTreeSet::from([NativeGroupKey {
+            vec![root.clone(), helper.clone(), target.clone()],
+            &std::iter::once(NativeGroupKey {
                 artifact: root.descriptor.id,
                 original_ordinal: ORDINALS[initial],
-            }]),
+            })
+            .chain((initial != 0).then_some(NativeGroupKey {
+                artifact: helper.descriptor.id,
+                original_ordinal: 7,
+            }))
+            .collect(),
         )
         .unwrap();
     let issued = ExactDeclarationContext::from_authenticated_execution(
         producer,
         &view,
-        CompilerInputProjection::from_issued_entries(&[root.clone(), target.clone()]).unwrap(),
+        CompilerInputProjection::from_issued_entries(&[
+            root.clone(),
+            helper.clone(),
+            target.clone(),
+        ])
+        .unwrap(),
         vec![
             ExactLexicalNode {
                 owner: target.descriptor.owner.clone(),
@@ -77,6 +143,10 @@ fn fixture(initial: usize) -> (Arc<ArtifactEntry>, Arc<PublishedSourceOriginalSe
             },
             ExactLexicalNode {
                 owner: root.descriptor.owner.clone(),
+                imports: vec![helper.descriptor.owner.clone()],
+            },
+            ExactLexicalNode {
+                owner: helper.descriptor.owner.clone(),
                 imports: vec![],
             },
         ],
@@ -84,6 +154,7 @@ fn fixture(initial: usize) -> (Arc<ArtifactEntry>, Arc<PublishedSourceOriginalSe
         &[
             target.descriptor.owner.clone(),
             root.descriptor.owner.clone(),
+            helper.descriptor.owner.clone(),
         ],
     )
     .unwrap();
@@ -94,7 +165,7 @@ fn fixture(initial: usize) -> (Arc<ArtifactEntry>, Arc<PublishedSourceOriginalSe
             &root.descriptor.owner,
         )
         .unwrap();
-    (root, publication)
+    (root, helper, publication)
 }
 
 fn continued_context(
@@ -165,19 +236,24 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
     let mut runner = proptest::test_runner::TestRunner::new(config);
     let callbacks = std::cell::Cell::new(0usize);
     let observed: [std::cell::Cell<usize>; 5] = std::array::from_fn(|_| std::cell::Cell::new(0));
-    let refusals: [std::cell::Cell<usize>; 6] = std::array::from_fn(|_| std::cell::Cell::new(0));
-    let normalizations = std::cell::Cell::new(0usize);
+    let refusals: [std::cell::Cell<usize>; 7] = std::array::from_fn(|_| std::cell::Cell::new(0));
+    let duplicate_refusals = std::cell::Cell::new(0usize);
     let result = runner.run(&(0..ORDINALS.len(), operations()), |(initial, history)| {
         callbacks.set(callbacks.get() + 1);
-        let (root, publication) = fixture(initial);
+        let (root, helper, publication) = fixture(initial);
         let original = publication.context();
         let expected_publication = original.semantic_sha256();
         let expected_roles = original.compiler_input_roles();
         let expected_artifacts = original.artifact_view().artifact_ids();
-        let initial_groups = BTreeSet::from([NativeGroupKey {
+        let initial_groups = std::iter::once(NativeGroupKey {
             artifact: root.descriptor.id,
             original_ordinal: ORDINALS[initial],
-        }]);
+        })
+        .chain((initial != 0).then_some(NativeGroupKey {
+            artifact: helper.descriptor.id,
+            original_ordinal: 7,
+        }))
+        .collect::<BTreeSet<_>>();
         let mut demanded = BTreeSet::from([ORDINALS[initial]]);
         let mut context = original.as_ref().clone();
         // Every history reaches the causal interaction, even after shrinking:
@@ -189,9 +265,9 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 Operation::Compose,
                 Operation::Recover,
                 Operation::Reopen,
-                Operation::NormalizeSelection,
+                Operation::DuplicateSelection,
             ])
-            .chain((0..6).map(Operation::AlterSelection));
+            .chain((0..7).map(Operation::AlterSelection));
         for operation in history {
             match operation {
                 Operation::Demand(index) => {
@@ -217,10 +293,18 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         .admit_shared_with_demand(
                             context.artifact_view(),
                             vec![root.clone()],
-                            NativeArtifactDemand::CertifiedTargetImports(&[import]),
+                            NativeArtifactDemand::CertifiedTargetImports(&[import.clone()]),
                         )
                         .unwrap();
                     context = continued_context(&context, &view, &root).unwrap();
+                    let imports = [import];
+                    let groups = context.artifact_view().native_groups_for_target(None, &imports).unwrap();
+                    let issuer_originals = expected_roles.iter().filter_map(CompilerInputRole::original).collect::<BTreeSet<_>>();
+                    let issued_groups = groups.iter().filter(|group| issuer_originals.contains(&group.binding.artifact))
+                        .all(|group| original.artifact_view().contains_issued_native_group(*group));
+                    let selected = context.published_source_original_selections_for_target(&groups, &imports).unwrap();
+                    prop_assert_eq!(selected.len(), usize::from(issued_groups),
+                        "later ordinal {} preserves policy only for exact issuer-owned groups: {:?}", ordinal, groups);
                     demanded.insert(ordinal);
                 }
                 Operation::Compose => {
@@ -262,6 +346,19 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                 Operation::AlterSelection(partition) => {
                     observed[4].set(observed[4].get() + 1);
                     let issued_roles = context.compiler_input_roles();
+                    if partition == 6 {
+                        let mut altered = issued_roles.clone();
+                        let dependency = altered
+                            .iter_mut()
+                            .find(|role| role.original() == Some(helper.descriptor.id))
+                            .unwrap();
+                        *dependency = CompilerInputRole::InterfaceOnly {
+                            interface: dependency.interface(),
+                        };
+                        prop_assert!(restored(&context, &altered).is_err());
+                        refusals[6].set(refusals[6].get() + 1);
+                        continue;
+                    }
                     let published = issued_roles
                         .iter()
                         .position(CompilerInputRole::is_published_source_original)
@@ -295,14 +392,12 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                     }
                     prop_assert_ne!(&roles[published], &issued);
                     let altered: Vec<CompilerInputRole> = serde_json::from_value(roles).unwrap();
-                    prop_assert_ne!(&altered, &issued_roles);
                     prop_assert!(restored(&context, &altered).is_err());
                     refusals[usize::from(partition)]
                         .set(refusals[usize::from(partition)].get() + 1);
                 }
-                Operation::NormalizeSelection => {
-                    // Embedded publication rows describe a set of selected nodes.
-                    // Repetition changes the encoding, not the issued selection.
+                Operation::DuplicateSelection => {
+                    // Semantic equality does not admit a noncanonical wire selection.
                     let issued_roles = context.compiler_input_roles();
                     let published = issued_roles
                         .iter()
@@ -314,25 +409,9 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         .unwrap();
                     bindings.push(bindings[0].clone());
                     let repeated: Vec<CompilerInputRole> = serde_json::from_value(roles).unwrap();
-                    prop_assert_ne!(&repeated, &issued_roles);
-                    let normalized = restored(&context, &repeated).unwrap();
-                    let reopened = normalized.published_source_original_selections().unwrap();
-                    prop_assert_eq!(reopened.len(), 1);
-                    let expected = publication.context();
-                    let actual = reopened[0].context();
-                    prop_assert_eq!(
-                        actual.artifact_view().capture_graph_selection().namespace,
-                        expected.artifact_view().capture_graph_selection().namespace
-                    );
-                    prop_assert_eq!(
-                        actual.artifact_view().selected_native_groups(),
-                        expected.artifact_view().selected_native_groups()
-                    );
-                    prop_assert_eq!(
-                        actual.artifact_view().binding_dependencies(),
-                        expected.artifact_view().binding_dependencies()
-                    );
-                    normalizations.set(normalizations.get() + 1);
+                    prop_assert_eq!(&repeated, &issued_roles);
+                    prop_assert!(restored(&context, &repeated).is_err());
+                    duplicate_refusals.set(duplicate_refusals.get() + 1);
                 }
             }
             prop_assert_eq!(context.compiler_input_roles(), expected_roles.clone());
@@ -349,7 +428,32 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
                         artifact: root.descriptor.id,
                         original_ordinal: *ordinal,
                     })
+                    .chain(
+                        demanded
+                            .iter()
+                            .any(|ordinal| *ordinal != 3)
+                            .then_some(NativeGroupKey {
+                                artifact: helper.descriptor.id,
+                                original_ordinal: 7
+                            })
+                    )
                     .collect::<BTreeSet<_>>()
+            );
+            let Value::Array(rows) = context.published_scope_value().unwrap() else {
+                unreachable!()
+            };
+            let Value::Array(row) = &rows[0] else {
+                unreachable!()
+            };
+            let Value::Array(dependencies) = &row[7] else {
+                unreachable!()
+            };
+            prop_assert_eq!(dependencies.len(), 1);
+            prop_assert_eq!(
+                context.compiler_metadata_snapshot().unwrap().entries[&helper.descriptor.owner]
+                    .descriptor
+                    .id,
+                helper.descriptor.id
             );
         }
         prop_assert!(demanded.len() >= 2);
@@ -365,20 +469,21 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
         observed[4].get()
     );
     eprintln!(
-        "publication refusal cases missing_groups={} unissued_group={} missing_bindings={} wrong_binding_scope={} wrong_namespace={} wrong_digest={}",
+        "publication refusal cases missing_groups={} unissued_group={} missing_bindings={} wrong_binding_scope={} wrong_namespace={} wrong_digest={} changed_dependency_role={}",
         refusals[0].get(),
         refusals[1].get(),
         refusals[2].get(),
         refusals[3].get(),
         refusals[4].get(),
-        refusals[5].get()
+        refusals[5].get(),
+        refusals[6].get()
     );
     eprintln!(
-        "publication duplicate-row normalizations={}",
-        normalizations.get()
+        "publication duplicate-row refusals={}",
+        duplicate_refusals.get()
     );
     result.unwrap();
-    assert!(normalizations.get() >= configured_cases as usize);
+    assert!(duplicate_refusals.get() >= configured_cases as usize);
     assert!(refusals
         .iter()
         .all(|count| count.get() >= configured_cases as usize));
@@ -386,7 +491,7 @@ fn generated_publication_support_and_recovery_preserve_issuer_selection() {
 
 #[test]
 fn published_role_refuses_missing_issuer_selection() {
-    let (_, publication) = fixture(0);
+    let (_, _, publication) = fixture(0);
     let mut roles = serde_json::to_value(publication.context().compiler_input_roles()).unwrap();
     roles[0].as_object_mut().unwrap().remove("selection");
     assert!(
