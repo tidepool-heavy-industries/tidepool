@@ -105,8 +105,6 @@ pub(crate) struct ActorStartRequest {
     pub label: String,
     pub profile: ActorEffectProfileWire,
     pub workspace: Option<tidepool_bridge_effects::WtWorkspaceHandle>,
-    pub session_id: tidepool_repr::SessionId,
-    pub parent_actor: crate::ActorRef,
 }
 
 #[derive(tidepool_bridge_derive::FromHaskell)]
@@ -206,11 +204,9 @@ pub(crate) struct CapturedChildLaunch {
     pub exit_destination: Option<std::sync::Arc<crate::owned_result::RequestResultDestination>>,
 }
 
-/// Selected compiler interface and its original implementation closure captured
-/// before the parent checkout is released. The descriptor retains the same
-/// capsule through protected compilation on the fresh child session.
+/// Allocator floors captured before the parent checkout is released.
+/// The descriptor separately retains the selected compiler interfaces.
 pub(crate) struct ChildSessionSeed {
-    pub facade: Option<MaterializedFacade>,
     pub val_generation: Generation,
     pub declaration_high_water: Option<Generation>,
 }
@@ -244,6 +240,8 @@ pub enum ActorStartCaptureError {
     },
     #[error("actor start has no live declaration plane")]
     NoCompileView,
+    #[error(transparent)]
+    CompileView(#[from] crate::ActorCompileViewError),
     #[error("requested model must be a nonempty model identifier")]
     InvalidModel,
 }
@@ -258,14 +256,16 @@ impl ResidentActorStart {
         parent_hole: ResidentHole,
         request: &HaskellValue,
         table: &DataConTable,
-        session_id: tidepool_repr::SessionId,
-        parent_actor: crate::ActorRef,
+        actor_context: &crate::ActorSessionContext,
+        base_include: &[std::path::PathBuf],
         settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
     ) -> Result<Self, ActorStartCaptureError>
     where
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
+        let session_id = actor_context.placement.session;
+        let parent_actor = actor_context.actor;
         let (label, site, profile, workspace) = match ActorReq::from_value(request, table)? {
             ActorReq::ActorStartWith(label, site, _, profile, workspace) => {
                 (label, site, profile, workspace)
@@ -288,9 +288,9 @@ impl ResidentActorStart {
                 label,
                 profile,
                 workspace,
-                session_id,
-                parent_actor,
             },
+            actor_context,
+            base_include,
             settlement,
         )?;
         captured.child.exit_destination = Some(destination);
@@ -309,14 +309,16 @@ impl ResidentActorStart {
         instructions: Option<String>,
         lifetime: WorkerLifetime,
         limits: Option<(i64, i64)>,
-        session_id: tidepool_repr::SessionId,
-        parent_actor: crate::ActorRef,
+        actor_context: &crate::ActorSessionContext,
+        base_include: &[std::path::PathBuf],
         settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
     ) -> Result<Self, ActorStartCaptureError>
     where
         H: DispatchEffect<O> + Send,
         O: OutputSink + Sync,
     {
+        let session_id = actor_context.placement.session;
+        let parent_actor = actor_context.actor;
         if model.as_ref().is_some_and(|model| {
             model.value().is_empty() || model.value().chars().any(char::is_whitespace)
         }) {
@@ -329,15 +331,20 @@ impl ResidentActorStart {
             .ok_or(ActorStartCaptureError::MissingEntry)?;
         // Only the explicit installer closure's exact dependencies cross a
         // fresh context boundary; ambient parent lexical bindings do not.
-        let facade = materialize_entry_facade(session, entry.provenance(), settlement)?;
-        if facade.is_some() && declaration_high_water.is_none() {
+        let facades = materialize_entry_facades(
+            session,
+            entry.provenance(),
+            actor_context,
+            base_include,
+            settlement,
+        )?;
+        if !facades.is_empty() && declaration_high_water.is_none() {
             return Err(ActorStartCaptureError::NoCompileView);
         }
         let keys: Vec<_> = effects.into_iter().map(Into::into).collect();
         let fresh = matches!(&context, SpawnContextWire::FreshSpawn(_));
         let independent_machine = fresh && !keys.contains(&crate::ActorEffectKey::RepoEvent);
         let seed = independent_machine.then(|| ChildSessionSeed {
-            facade: facade.clone(),
             val_generation: session.val_gen(),
             declaration_high_water,
         });
@@ -364,7 +371,7 @@ impl ResidentActorStart {
         .with_capabilities(crate::ActorCapabilities::default().with_effect_keys(keys))
         .with_creator(parent_actor)
         .with_checkpoint_token(checkpoint)
-        .with_source_imports(crate::ActorSourceImports::from_exact_facades(facade.iter()))
+        .with_source_imports(crate::ActorSourceImports::from_exact_facades(&facades))
         .with_model(model)
         .with_fork_effort(effort)
         .with_instructions(instructions)
@@ -391,6 +398,8 @@ impl ResidentActorStart {
         session: &mut ResidentSession<H, O>,
         parent_hole: ResidentHole,
         request: ActorStartRequest,
+        actor_context: &crate::ActorSessionContext,
+        base_include: &[std::path::PathBuf],
         settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
     ) -> Result<Self, ActorStartCaptureError>
     where
@@ -401,9 +410,9 @@ impl ResidentActorStart {
             label,
             profile,
             workspace,
-            session_id,
-            parent_actor,
         } = request;
+        let session_id = actor_context.placement.session;
+        let parent_actor = actor_context.actor;
         let effects = profile.resolve();
         let capabilities = crate::ActorCapabilities::default()
             .with_effect_keys(effects.into_iter().map(Into::into).collect());
@@ -412,15 +421,20 @@ impl ResidentActorStart {
         let entry = session
             .live_payload_handle_owned_by(parent_hole.cont_id(), child_realm)?
             .ok_or(ActorStartCaptureError::MissingEntry)?;
-        let facade = materialize_entry_facade(session, entry.provenance(), settlement)?;
-        if facade.is_some() && declaration_high_water.is_none() {
+        let facades = materialize_entry_facades(
+            session,
+            entry.provenance(),
+            actor_context,
+            base_include,
+            settlement,
+        )?;
+        if !facades.is_empty() && declaration_high_water.is_none() {
             return Err(ActorStartCaptureError::NoCompileView);
         }
         let independent_machine = !capabilities
             .effect_keys()
             .contains(&crate::ActorEffectKey::RepoEvent);
         let seed = independent_machine.then(|| ChildSessionSeed {
-            facade: facade.clone(),
             val_generation: session.val_gen(),
             declaration_high_water,
         });
@@ -443,7 +457,7 @@ impl ResidentActorStart {
         .with_capabilities(capabilities)
         .with_creator(parent_actor)
         .with_supervisor_parent(parent_actor)
-        .with_source_imports(crate::ActorSourceImports::from_exact_facades(facade.iter()));
+        .with_source_imports(crate::ActorSourceImports::from_exact_facades(&facades));
         Ok(Self {
             parent_hole,
             child: CapturedChildLaunch {
@@ -460,105 +474,212 @@ impl ResidentActorStart {
     }
 }
 
-fn materialize_entry_facade<H, O>(
+fn materialize_entry_facades<H, O>(
     session: &ResidentSession<H, O>,
     provenance: &tidepool_runtime::session::ProgramProvenance,
+    context: &crate::ActorSessionContext,
+    base_include: &[std::path::PathBuf],
     settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
-) -> Result<Option<MaterializedFacade>, ActorStartCaptureError>
+) -> Result<Vec<MaterializedFacade>, ActorStartCaptureError>
 where
     H: DispatchEffect<O> + Send,
     O: OutputSink + Sync,
 {
-    let heads = facade_heads(provenance);
-    let scope = session.run_context().lexical_scope;
-    let names: Vec<_> = heads.iter().map(String::as_str).collect();
-    let surface = session.exact_exports_in_namespace(
-        scope,
-        tidepool_toolchain::declaration_join::ExportNamespace::Type,
-        &names,
-    )?;
-    validate_head_incarnations(surface.declarations()?, provenance, &heads)?;
-    // A child with no declaration exports needs no module or source import.
-    // Its executable entry and type-site provenance remain owned by custody.
-    if surface.items().is_empty() {
-        return Ok(None);
+    use tidepool_toolchain::declaration_join::{ExportIdentity, ExportNamespace};
+    // Acquire once: parent release refuses new observations but cannot revoke
+    // immutable custody already acquired for this unpublished launch.
+    let mut inherited = context.source_imports.exact_facades()?;
+    inherited.sort_by_key(MaterializedFacade::module_name);
+    let rooted = rooted_incarnations(provenance)?;
+    if rooted.is_empty() {
+        return Ok(Vec::new());
     }
+    let scope = session.run_context().lexical_scope;
     let view = session
         .compile_view_in(scope)
         .ok_or(ActorStartCaptureError::NoCompileView)?;
-    Ok(Some(surface.materialize(&view, settlement)?))
-}
-
-fn validate_head_incarnations(
-    declarations: &[tidepool_toolchain::declaration_join::DeclarationExport],
-    provenance: &tidepool_runtime::session::ProgramProvenance,
-    selected: &BTreeSet<String>,
-) -> Result<(), ActorStartCaptureError> {
-    use tidepool_toolchain::declaration_join::ExportNamespace;
-    let mut rooted: std::collections::BTreeMap<String, BTreeSet<tidepool_runtime::NominalHead>> =
-        std::collections::BTreeMap::new();
-    for site in provenance.sites() {
-        for head in site
-            .heads
-            .iter()
-            .chain(site.inputs.iter().flat_map(|input| input.heads.iter()))
-            .filter(|head| head.module.starts_with("Tidepool.Session.Lib.G"))
-        {
-            if selected.contains(&head.name) {
-                rooted
-                    .entry(head.name.clone())
-                    .or_default()
-                    .insert(head.clone());
+    let projections = inherited
+        .iter()
+        .map(|facade| {
+            facade
+                .projection()
+                .cloned()
+                .ok_or(tidepool_runtime::session::ExactFacadeError::UncertifiedSelection)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let inputs = tidepool_runtime::session::RuntimeCompileInputs::new(None, projections)
+        .map_err(tidepool_runtime::session::SessionError::Compile)?;
+    let actor_view = context.compile_view_with_inputs(view.clone(), inputs)?;
+    let include = actor_view.include_paths(base_include);
+    let mut local = Vec::new();
+    let mut selections: std::collections::BTreeMap<usize, Vec<ExportIdentity>> = Default::default();
+    for (name, expected) in rooted {
+        let wanted = ExportIdentity {
+            unit: expected.unit.clone(),
+            module: expected.module.clone(),
+            namespace: ExportNamespace::Type,
+            occurrence: name.clone(),
+            record_parent: None,
+        };
+        match session.exact_exports_in_namespace(scope, ExportNamespace::Type, &[&name]) {
+            Ok(surface) => {
+                let actual = surface
+                    .declarations()?
+                    .first()
+                    .ok_or(tidepool_runtime::session::ExactExportError::UncertifiedExports)?;
+                validate_original_head(&expected, &actual.head)?;
+                local.push(name);
             }
+            Err(tidepool_runtime::session::ExactExportError::UnknownExport { .. }) => {
+                let selected_name = &name;
+                let candidates = inherited
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(index, facade)| {
+                        facade.projection().into_iter().flat_map(move |projection| {
+                            projection
+                                .receipt()
+                                .exports()
+                                .iter()
+                                .filter(|export| {
+                                    export.head.namespace == ExportNamespace::Type
+                                        && export.head.occurrence == *selected_name
+                                })
+                                .map(move |export| (index, export))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let identities: BTreeSet<_> = candidates
+                    .iter()
+                    .map(|(_, export)| tidepool_runtime::NominalHead {
+                        unit: export.head.unit.clone(),
+                        module: export.head.module.clone(),
+                        name: export.head.occurrence.clone(),
+                    })
+                    .collect();
+                if identities.len() > 1 {
+                    return Err(ActorStartCaptureError::AmbiguousIncarnation {
+                        head: name,
+                        identities: identities.into_iter().collect(),
+                    });
+                }
+                let Some((index, actual)) = candidates.first() else {
+                    return Err(tidepool_runtime::session::ExactExportError::UnknownExport {
+                        scope,
+                        name,
+                    }
+                    .into());
+                };
+                validate_original_head(&expected, &actual.head)?;
+                if candidates.iter().any(|(_, other)| *other != *actual) {
+                    return Err(
+                        tidepool_runtime::session::ExactExportError::UncertifiedExports.into(),
+                    );
+                }
+                selections.entry(*index).or_default().push(wanted);
+            }
+            Err(error) => return Err(error.into()),
         }
     }
+    let mut facades = Vec::new();
+    if !local.is_empty() {
+        let names = local.iter().map(String::as_str).collect::<Vec<_>>();
+        let surface = session.exact_exports_in_namespace(scope, ExportNamespace::Type, &names)?;
+        facades.push(surface.materialize(&view, settlement)?);
+    }
+    for (index, selected) in selections {
+        if let Some(facade) = inherited[index].select_exact_exports(
+            &selected,
+            &include,
+            actor_view.session_root(),
+            settlement,
+        )? {
+            facades.push(facade);
+        }
+    }
+    Ok(facades)
+}
 
-    for (head, identities) in rooted {
-        if identities.len() != 1 {
-            return Err(ActorStartCaptureError::AmbiguousIncarnation {
-                head,
-                identities: identities.into_iter().collect(),
-            });
-        }
-        let expected = identities.into_iter().next().expect("one rooted identity");
-        let actual = declarations
-            .iter()
-            .find(|export| {
-                export.head.namespace == ExportNamespace::Type && export.head.occurrence == head
-            })
-            .ok_or(tidepool_runtime::session::ExactExportError::UncertifiedExports)?;
-        if actual.head.unit != expected.unit
-            || actual.head.module != expected.module
-            || actual.head.occurrence != expected.name
-        {
-            return Err(ActorStartCaptureError::ShadowDrift {
-                head,
-                expected,
-                actual: actual.head.clone(),
-            });
-        }
+fn rooted_incarnations(
+    provenance: &tidepool_runtime::session::ProgramProvenance,
+) -> Result<std::collections::BTreeMap<String, tidepool_runtime::NominalHead>, ActorStartCaptureError>
+{
+    let mut rooted: std::collections::BTreeMap<String, BTreeSet<tidepool_runtime::NominalHead>> =
+        Default::default();
+    for head in provenance
+        .sites()
+        .iter()
+        .flat_map(|site| {
+            site.heads
+                .iter()
+                .chain(site.inputs.iter().flat_map(|input| input.heads.iter()))
+        })
+        .filter(|head| head.module.starts_with("Tidepool.Session.Lib.G"))
+    {
+        rooted
+            .entry(head.name.clone())
+            .or_default()
+            .insert(head.clone());
+    }
+    rooted
+        .into_iter()
+        .map(|(head, identities)| {
+            if identities.len() != 1 {
+                Err(ActorStartCaptureError::AmbiguousIncarnation {
+                    head,
+                    identities: identities.into_iter().collect(),
+                })
+            } else {
+                Ok((
+                    head,
+                    identities.into_iter().next().expect("one rooted identity"),
+                ))
+            }
+        })
+        .collect()
+}
+
+fn validate_original_head(
+    expected: &tidepool_runtime::NominalHead,
+    actual: &tidepool_toolchain::declaration_join::ExportIdentity,
+) -> Result<(), ActorStartCaptureError> {
+    use tidepool_toolchain::declaration_join::ExportNamespace;
+    if actual.unit != expected.unit
+        || actual.module != expected.module
+        || actual.occurrence != expected.name
+        || actual.namespace != ExportNamespace::Type
+        || actual.record_parent.is_some()
+    {
+        return Err(ActorStartCaptureError::ShadowDrift {
+            head: expected.name.clone(),
+            expected: expected.clone(),
+            actual: actual.clone(),
+        });
     }
     Ok(())
 }
 
-fn facade_heads(provenance: &tidepool_runtime::session::ProgramProvenance) -> BTreeSet<String> {
-    let mut heads = BTreeSet::new();
-    for site in provenance.sites() {
-        for head in site
-            .heads
+#[cfg(test)]
+fn validate_head_incarnations(
+    declarations: &[tidepool_toolchain::declaration_join::DeclarationExport],
+    provenance: &tidepool_runtime::session::ProgramProvenance,
+) -> Result<(), ActorStartCaptureError> {
+    for (head, expected) in rooted_incarnations(provenance)? {
+        let actual = declarations
             .iter()
-            .chain(site.inputs.iter().flat_map(|input| input.heads.iter()))
-        {
-            if head.module.starts_with("Tidepool.Session.Lib.G") {
-                heads.insert(head.name.clone());
-            }
-        }
+            .find(|export| {
+                export.head.namespace == tidepool_toolchain::declaration_join::ExportNamespace::Type
+                    && export.head.occurrence == head
+            })
+            .ok_or(tidepool_runtime::session::ExactExportError::UncertifiedExports)?;
+        validate_original_head(&expected, &actual.head)?;
     }
-    heads
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use tidepool_codegen::suspension::RealmId;
 
     proptest::proptest! {
         #[test]
@@ -609,6 +730,24 @@ mod tests {
         }
 
         #[test]
+        fn rooted_nominal_references_converge_only_for_the_same_original(
+            copies in 1usize..12,
+            foreign in proptest::prelude::any::<bool>(),
+            generation in 1u64..100,
+        ) {
+            let first = original_nominal();
+            let mut heads = vec![first.clone(); copies];
+            let mut other = first;
+            if foreign { other.unit = "foreign".into(); }
+            other.module = format!("Tidepool.Session.Lib.G{generation}");
+            heads.push(other.clone());
+            let same = !foreign && generation == 1;
+            let result = super::rooted_incarnations(&nominal_provenance(heads));
+            proptest::prop_assert_eq!(result.is_ok(), same);
+            if let Ok(rooted) = result { proptest::prop_assert_eq!(rooted.len(), 1); }
+        }
+
+        #[test]
         fn selected_profiles_preserve_exact_keys_and_parent_refusal(
             selected in proptest::collection::vec(0usize..5, 0..9),
             allowed in proptest::prelude::any::<u8>(),
@@ -640,22 +779,385 @@ mod tests {
     }
 
     #[test]
-    fn empty_provenance_requires_no_child_facade() {
-        let (session, root) = facade_selection_fixture();
-        let facade = tidepool_testing::with_settlement(|settlement| {
-            super::materialize_entry_facade(
-                &session,
-                &tidepool_runtime::session::ProgramProvenance::default(),
+    fn inherited_and_local_capture_preserves_originals_refuses_shadow_and_released_owner() {
+        use tidepool_codegen::scope::ScopeId;
+        use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+        use tidepool_runtime::session::{ModuleEnv, SessionLib, SessionRunContext};
+        let root = tempfile::tempdir().unwrap();
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[]).unwrap();
+        let mut lib = SessionLib::open(
+            tidepool_repr::SessionId(17),
+            root.path(),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+        let recovery = crate::recovery::recovery_test_fixture::RecoveryFixture::create(root.path());
+        tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement));
+        let mut session = tidepool_runtime::session::ResidentSession::unbootstrapped(
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(lib),
+        );
+        tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_in(
+                ScopeId::ROOT,
+                &[
+                    "data Inherited = Inherited Int",
+                    "data Withheld = Withheld Int",
+                ],
                 settlement,
             )
         })
         .unwrap();
-        assert!(facade.is_none());
+        let surface = session
+            .exact_exports_in(ScopeId::ROOT, &["Inherited", "Withheld"])
+            .unwrap();
+        let original = surface
+            .declarations()
+            .unwrap()
+            .iter()
+            .find(|export| export.head.occurrence == "Inherited")
+            .unwrap()
+            .head
+            .clone();
+        let facade = tidepool_testing::with_settlement(|settlement| {
+            surface.materialize(&session.compile_view_in(ScopeId::ROOT).unwrap(), settlement)
+        })
+        .unwrap();
+        let ceiling = session
+            .declaration_generation_high_water()
+            .unwrap()
+            .unwrap();
+        drop(session);
+        let child_id = tidepool_repr::SessionId(18);
+        let mut child_lib = SessionLib::open(
+            child_id,
+            root.path().join("child"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+        tidepool_testing::with_settlement(|settlement| {
+            recovery.attach(
+                &mut child_lib,
+                tidepool_runtime::session::RecoveryDomainId::Session(child_id),
+                settlement,
+            )
+        });
+        let mut session = tidepool_runtime::session::ResidentSession::unbootstrapped(
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(child_lib),
+        );
+        session
+            .initialize_captured_declaration_high_water(ceiling)
+            .unwrap();
+        let scope = ScopeId::ROOT;
+        let mut context = selection_context();
+        context.placement.session = child_id;
+        context.source_imports = crate::ActorSourceImports::from_exact_facades([&facade, &facade]);
+        session
+            .set_actor_execution(
+                SessionRunContext::ROOT,
+                EffectRunPolicy::HandleOrSuspend,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .unwrap();
+        assert!(session
+            .compile_view_in(scope)
+            .unwrap()
+            .library_import_module()
+            .is_none());
         assert_eq!(
-            crate::ActorSourceImports::from_exact_facades(facade.iter()),
+            session.declaration_generation_high_water().unwrap(),
+            Some(ceiling)
+        );
+        let inherited_head = tidepool_runtime::NominalHead {
+            unit: original.unit.clone(),
+            module: original.module.clone(),
+            name: original.occurrence.clone(),
+        };
+        let inherited = nominal_provenance(vec![inherited_head.clone(), inherited_head.clone()]);
+        let selected = tidepool_testing::with_settlement(|settlement| {
+            super::materialize_entry_facades(
+                &session,
+                &inherited,
+                &context,
+                effects.include_paths(),
+                settlement,
+            )
+        })
+        .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0].projection().unwrap().receipt().exports().len(),
+            1
+        );
+        assert_eq!(
+            selected[0].projection().unwrap().receipt().exports()[0].head,
+            original
+        );
+        let local_generation = tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_in(scope, &["data Local = Local Int"], settlement)
+        })
+        .unwrap();
+        let local = session
+            .exact_exports_in(scope, &["Local"])
+            .unwrap()
+            .declarations()
+            .unwrap()[0]
+            .head
+            .clone();
+        assert!(local_generation > ceiling);
+        let mixed = nominal_provenance(vec![
+            inherited_head.clone(),
+            tidepool_runtime::NominalHead {
+                unit: local.unit.clone(),
+                module: local.module.clone(),
+                name: local.occurrence.clone(),
+            },
+        ]);
+        let selected = tidepool_testing::with_settlement(|settlement| {
+            super::materialize_entry_facades(
+                &session,
+                &mixed,
+                &context,
+                effects.include_paths(),
+                settlement,
+            )
+        })
+        .unwrap();
+        let actual = selected
+            .iter()
+            .flat_map(|facade| {
+                facade
+                    .projection()
+                    .unwrap()
+                    .receipt()
+                    .exports()
+                    .iter()
+                    .map(|export| export.head.clone())
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual, [original, local].into_iter().collect());
+        let independent = crate::ActorSourceImports::from_exact_facades(&selected);
+        let grandchild_id = tidepool_repr::SessionId(19);
+        let mut grandchild_lib = SessionLib::open(
+            grandchild_id,
+            root.path().join("grandchild"),
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap()
+        .with_validation_include(effects.include_paths().to_vec());
+        tidepool_testing::with_settlement(|settlement| {
+            recovery.attach(
+                &mut grandchild_lib,
+                tidepool_runtime::session::RecoveryDomainId::Session(grandchild_id),
+                settlement,
+            )
+        });
+        let mut grandchild = tidepool_runtime::session::ResidentSession::unbootstrapped(
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(grandchild_lib),
+        );
+        grandchild
+            .initialize_captured_declaration_high_water(
+                session
+                    .declaration_generation_high_water()
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+        let mut descendant = context.clone();
+        descendant.placement.session = grandchild_id;
+        descendant.source_imports = independent;
+        assert!(matches!(
+            descendant.compile_view(session.compile_view_in(scope).unwrap()),
+            Err(crate::ActorCompileViewError::WrongSession { .. })
+        ));
+        use std::sync::Arc;
+        use tidepool_runtime::session::{turn, TemplateSelector};
+        use tidepool_toolchain::checked_cell::CheckedCellSpecification;
+        let execution = Arc::new(grandchild.begin_private_execution(scope).unwrap());
+        let private_scope = execution.private_scope();
+        assert!(matches!(
+            descendant.compile_view(grandchild.compile_view_for_execution(&execution).unwrap()),
+            Err(crate::ActorCompileViewError::WrongLexicalScope { .. })
+        ));
+        grandchild
+            .set_run_context(SessionRunContext {
+                lexical_scope: private_scope,
+                ..SessionRunContext::ROOT
+            })
+            .unwrap();
+        descendant.placement.lexical_scope = private_scope;
+        let view = descendant
+            .compile_view(grandchild.compile_view_for_execution(&execution).unwrap())
+            .unwrap();
+        let imports = view.turn_imports();
+        let templates = tidepool_runtime::session::resident_workbench_templates(
+            effects.preamble(),
+            "'[]",
+            &imports,
+        );
+        let specification = Arc::new(CheckedCellSpecification {
+            admission_digest: [0; 32],
+            cell_source: "mixedAnswer <- pure (case (Inherited 20, Local 22) of (Inherited x, Local y) -> x + y)".into(),
+            template_source: tidepool_runtime::session::resident_cell_check_template(
+                effects.preamble(), "'[]", &imports,
+            ),
+            turn_templates: templates.iter().map(|template| {
+                let kind = match template.kind {
+                    TemplateSelector::Decl => "decl",
+                    TemplateSelector::Bind => "bind",
+                    TemplateSelector::BindDiscard => "binddiscard",
+                    TemplateSelector::Expr => "expr",
+                };
+                (kind.into(), template.source.clone())
+            }).collect(),
+            injected_modules: Vec::new(),
+            reserved_declaration_modules: Vec::new(),
+        });
+        let includes = view.include_paths(effects.include_paths());
+        let plan = tidepool_testing::with_settlement(|settlement| {
+            tidepool_toolchain::artifacts::parse_cell_plan(
+                specification.clone(),
+                &includes,
+                settlement,
+            )
+        })
+        .unwrap();
+        let admission = grandchild
+            .admit_planned_cell_for_execution(
+                execution,
+                plan,
+                specification.clone(),
+                specification.specification_digest(),
+                [0; 32],
+                includes,
+                Some(view.compile_inputs().clone()),
+            )
+            .unwrap();
+        let (checked, program) = tidepool_testing::with_settlement(|settlement| {
+            turn::compile_cell_program_admitted(admission.clone(), settlement)
+        })
+        .unwrap();
+        let prefix = grandchild
+            .begin_cell_program(admission, program)
+            .unwrap()
+            .unwrap();
+        let item = grandchild
+            .admit_checked_item(prefix, checked.checked_item(0).unwrap())
+            .unwrap();
+        let turn::TurnResult::Bind {
+            bound, compiled, ..
+        } = turn::consume_cell_program_item(item.clone()).unwrap()
+        else {
+            panic!("mixed consumer must be a checked bind")
+        };
+        let tidepool_runtime::session::ResidentOutcome::Completed { result, .. } =
+            tidepool_testing::with_settlement(|settlement| {
+                grandchild.run_bind_with_sites(
+                    "mixedAnswer",
+                    compiled.code(),
+                    &bound[0],
+                    item.generation(),
+                    settlement,
+                )
+            })
+            .unwrap()
+        else {
+            panic!("mixed consumer must complete")
+        };
+        assert_eq!(result.to_json(), serde_json::json!(42));
+
+        tidepool_testing::with_settlement(|settlement| {
+            session.define_scoped_in(scope, &["data Inherited = Inherited Bool"], settlement)
+        })
+        .unwrap();
+        assert!(matches!(
+            tidepool_testing::with_settlement(|settlement| super::materialize_entry_facades(
+                &session,
+                &inherited,
+                &context,
+                effects.include_paths(),
+                settlement
+            )),
+            Err(super::ActorStartCaptureError::ShadowDrift { .. })
+        ));
+        let shadow = tidepool_testing::with_settlement(|settlement| {
+            session
+                .exact_exports_in(scope, &["Inherited"])
+                .unwrap()
+                .materialize(&session.compile_view_in(scope).unwrap(), settlement)
+        })
+        .unwrap();
+        let mut ambiguous = descendant.clone();
+        ambiguous.placement.lexical_scope = scope;
+        ambiguous.source_imports =
+            crate::ActorSourceImports::from_exact_facades([&facade, &shadow]);
+        grandchild.set_run_context(SessionRunContext::ROOT).unwrap();
+        assert!(matches!(
+            tidepool_testing::with_settlement(|settlement| super::materialize_entry_facades(
+                &grandchild,
+                &inherited,
+                &ambiguous,
+                effects.include_paths(),
+                settlement,
+            )),
+            Err(super::ActorStartCaptureError::AmbiguousIncarnation { .. })
+        ));
+        context.source_imports.release_capture();
+        assert!(matches!(
+            tidepool_testing::with_settlement(|settlement| super::materialize_entry_facades(
+                &session,
+                &mixed,
+                &context,
+                effects.include_paths(),
+                settlement
+            )),
+            Err(super::ActorStartCaptureError::CompileView(
+                crate::ActorCompileViewError::ReleasedDeclarationCapture
+            ))
+        ));
+    }
+
+    #[test]
+    fn empty_provenance_requires_no_child_facade() {
+        let (session, root) = facade_selection_fixture();
+        let facade = tidepool_testing::with_settlement(|settlement| {
+            super::materialize_entry_facades(
+                &session,
+                &tidepool_runtime::session::ProgramProvenance::default(),
+                &selection_context(),
+                &[],
+                settlement,
+            )
+        })
+        .unwrap();
+        assert!(facade.is_empty());
+        assert_eq!(
+            crate::ActorSourceImports::from_exact_facades(&facade),
             crate::ActorSourceImports::default()
         );
         assert!(!root.path().join("Tidepool/Actor/Surface").exists());
+    }
+
+    fn selection_context() -> crate::ActorSessionContext {
+        crate::ActorDescriptor::new(
+            "selection fixture",
+            crate::ActorPlacement {
+                session: tidepool_repr::SessionId(17),
+                resource_scope: RealmId::ROOT,
+                lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+            },
+        )
+        .session_context(crate::ActorRef::first(crate::ActorId(17)))
     }
 
     fn facade_selection_fixture() -> (
@@ -703,7 +1205,7 @@ mod tests {
         ])
         .unwrap();
         assert!(
-            matches!(tidepool_testing::with_settlement(|settlement| super::materialize_entry_facade(&session, &provenance, settlement)),
+            matches!(tidepool_testing::with_settlement(|settlement| super::materialize_entry_facades(&session, &provenance, &selection_context(), &[], settlement)),
             Err(super::ActorStartCaptureError::ExactExports(
                 tidepool_runtime::session::ExactExportError::UnknownExport { name, .. },
             )) if name == "Missing")
@@ -758,18 +1260,15 @@ mod tests {
     #[test]
     fn facade_nominal_identity_preserves_original_owner_after_join() {
         let provenance = nominal_provenance(vec![original_nominal()]);
-        let selected = super::facade_heads(&provenance);
         // The facade's current wrapper generation is deliberately not an input
         // to validation: the compiler export retains its original G1 owner.
-        super::validate_head_incarnations(&[original_declaration()], &provenance, &selected)
-            .unwrap();
+        super::validate_head_incarnations(&[original_declaration()], &provenance).unwrap();
     }
 
     #[test]
     fn facade_nominal_identity_refuses_unit_module_namespace_and_ambiguity_drift() {
         use tidepool_toolchain::declaration_join::ExportNamespace;
         let provenance = nominal_provenance(vec![original_nominal()]);
-        let selected = super::facade_heads(&provenance);
         for foreign_unit in [false, true] {
             let mut actual = original_declaration();
             if foreign_unit {
@@ -778,14 +1277,14 @@ mod tests {
                 actual.head.module = "Tidepool.Session.Lib.G9".into();
             }
             assert!(matches!(
-                super::validate_head_incarnations(&[actual], &provenance, &selected),
+                super::validate_head_incarnations(&[actual], &provenance),
                 Err(super::ActorStartCaptureError::ShadowDrift { .. })
             ));
         }
         let mut value = original_declaration();
         value.head.namespace = ExportNamespace::Value;
         assert!(matches!(
-            super::validate_head_incarnations(&[value], &provenance, &selected),
+            super::validate_head_incarnations(&[value], &provenance),
             Err(super::ActorStartCaptureError::ExactExports(
                 tidepool_runtime::session::ExactExportError::UncertifiedExports
             ))
@@ -794,7 +1293,7 @@ mod tests {
         other.unit = "foreign".into();
         let ambiguous = nominal_provenance(vec![original_nominal(), other]);
         assert!(matches!(
-            super::validate_head_incarnations(&[original_declaration()], &ambiguous, &selected),
+            super::validate_head_incarnations(&[original_declaration()], &ambiguous),
             Err(super::ActorStartCaptureError::AmbiguousIncarnation { .. })
         ));
     }

@@ -3583,18 +3583,6 @@ impl ResidentRequest {
     }
 }
 
-/// Materialize the source-only facade variant in a fresh child session. Issued
-/// interfaces are materialized by their protected compiler admission instead.
-fn write_seed_source(path: &std::path::Path, source: &str) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            format!("child session seed directory {}: {error}", parent.display())
-        })?;
-    }
-    tidepool_atomic_write::write_best_effort(path, source.as_bytes())
-        .map_err(|error| format!("child session seed file {}: {error}", error.path.display()))
-}
-
 impl<H, O> ResidentActorRunner<H, O> {
     #[cfg(test)]
     pub(crate) fn machines_for_test(&self) -> &Arc<ActorMachineRegistry<H, O>> {
@@ -3729,12 +3717,9 @@ impl<H, O> ResidentActorRunner<H, O> {
     /// SAME realm `transfer_custody` will later import the entry under, not
     /// a second one of this call's own minting nothing afterward would use.
     ///
-    /// An eligible launch retains `crate::start::ChildSessionSeed` through
-    /// bootstrap, including its selected issued interface and original
-    /// implementation closure. Certified projections become compiler inputs
-    /// through the descriptor, then the existing protected
-    /// admission materializes that same closure; no authored Lib source is copied.
-    /// Legacy source facades alone copy their regenerable source artifact.
+    /// The descriptor retains selected issued interfaces and their original
+    /// implementation closure through protected compilation. The seed carries
+    /// only allocator floors; no authored declaration source is copied.
     /// Both identity allocators advance past the captured parent counters without
     /// installing any additional lexical roots.
     ///
@@ -3765,13 +3750,7 @@ impl<H, O> ResidentActorRunner<H, O> {
             .clone()
             .ok_or_else(|| "no child bootstrap program installed".to_string())?;
         let source_layer = source_layer.to_vec();
-        let seed = seed.map(|seed| {
-            (
-                seed.facade.clone(),
-                seed.val_generation,
-                seed.declaration_high_water,
-            )
-        });
+        let seed = seed.map(|seed| (seed.val_generation, seed.declaration_high_water));
         let image_registry = self.access.image_registry.clone();
         // The blocking task owns only an unregistered session. Cancellation
         // drops its eventual result, so it cannot register an orphan after the
@@ -3794,23 +3773,7 @@ impl<H, O> ResidentActorRunner<H, O> {
                         tidepool_effect::LivePayloadPolicy::HASKELL_EFFECT_VALUE,
                     )
                     .map_err(|error| format!("child session bootstrap context: {error}"))?;
-                if let Some((facade, val_generation, declaration_high_water)) = seed {
-                    let root = machine
-                        .compile_view_in(tidepool_codegen::scope::ScopeId::ROOT)
-                        .ok_or_else(|| {
-                            "child session has no compile view for inherited source seeding"
-                                .to_string()
-                        })?
-                        .session_root()
-                        .to_path_buf();
-                    if let Some(facade) = facade {
-                        if let Some((_, source)) = facade.source_artifact() {
-                            write_seed_source(
-                                &root.join(facade.identity().relative_hs_path()),
-                                source,
-                            )?;
-                        }
-                    }
+                if let Some((val_generation, declaration_high_water)) = seed {
                     machine.set_val_gen(val_generation);
                     if let Some(high_water) = declaration_high_water {
                         machine
@@ -8475,7 +8438,7 @@ where
         };
 
         self.access
-            .with_compiler_machine(context, move |session, context, _, settlement| {
+            .with_compiler_machine(context, move |session, context, source, settlement| {
                 let decoded = ResidentRequest::decode(&request, session.data_con_table())?;
                 if matches!(mode, BoundaryCapture::Replacement)
                     && !matches!(&decoded, ResidentRequest::ActorLocal(
@@ -8567,7 +8530,7 @@ where
                         ),
                     ) => crate::ResidentActorStart::capture_spawn(
                         session, hole, spawn_context, workspace, effects, label, model,
-                        effort, instructions, lifetime, limits, context.placement.session, context.actor, settlement).map(ResidentActorBoundary::Start)
+                        effort, instructions, lifetime, limits, context, &source.base_include, settlement).map(ResidentActorBoundary::Start)
                         .map_err(ResidentActorWorkbenchError::StartCapture),
                     ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckpointWith(name)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::Checkpoint { continuation: hole, name })),
                     ResidentRequest::AgentLaunch(crate::generated::agent_launch::AgentLaunchReq::AgentLaunchCheckCheckpointWith(token)) => Ok(ResidentActorBoundary::ContextCheckpoint(ContextCheckpointBoundary::CheckCheckpoint { continuation: hole, token })),
@@ -8697,8 +8660,8 @@ where
                             hole,
                             &request,
                             &table,
-                            context.placement.session,
-                            context.actor, settlement)
+                            context,
+                            &source.base_include, settlement)
                         .map(ResidentActorBoundary::Start)
                         .map_err(ResidentActorWorkbenchError::StartCapture)
                     }
@@ -8753,8 +8716,8 @@ where
                             hole,
                             &request,
                             &table,
-                            context.placement.session,
-                            context.actor, settlement)
+                            context,
+                            &source.base_include, settlement)
                         .map(|candidate| ResidentActorBoundary::Replace { target, candidate })
                         .map_err(ResidentActorWorkbenchError::StartCapture)
                     }

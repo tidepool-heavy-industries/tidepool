@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tidepool_repr::{SessionId, SessionModule};
-use tidepool_toolchain::declaration_join::DeclarationExport;
+use tidepool_toolchain::declaration_join::{
+    DeclarationExport, ExactModuleIdentity, ExportIdentity,
+};
 
 use super::lexical_projection::{issue_projection, DeclarationProjectionBaseline};
 use super::{CertifiedDeclarationProjection, ExportItem, SessionCompileView};
@@ -206,6 +208,64 @@ pub struct MaterializedFacade {
     artifact: FacadeArtifact,
 }
 impl MaterializedFacade {
+    /// Narrow this issued interface by original identities. The selected groups
+    /// and implementation closure come from this owner, never caller evidence.
+    pub fn select_exact_exports(
+        &self,
+        selected: &[ExportIdentity],
+        includes: &[PathBuf],
+        root: &Path,
+        settlement: &mut dyn FnMut(crate::CompilerTransactionClose),
+    ) -> Result<Option<Self>, ExactFacadeError> {
+        let inherited = self
+            .projection()
+            .ok_or(ExactFacadeError::UncertifiedSelection)?;
+        let wanted: std::collections::BTreeSet<_> = selected.iter().collect();
+        if wanted.is_empty() {
+            return Ok(None);
+        }
+        let exports = wanted
+            .into_iter()
+            .map(|head| {
+                inherited
+                    .receipt()
+                    .exports()
+                    .iter()
+                    .find(|export| &export.head == head)
+                    .cloned()
+                    .ok_or_else(|| ExactFacadeError::UnselectedExport(head.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if exports == inherited.receipt().exports() {
+            return Ok(Some(self.clone()));
+        }
+        let owner = ExactModuleIdentity {
+            unit: inherited.receipt().reserved().unit.clone(),
+            module: inherited.module_name().to_owned(),
+        };
+        let surface = super::render::AdmittedDeclarationSurface {
+            roots: vec![owner.clone()],
+            lexical: inherited.context().lexical_graph().to_vec(),
+        };
+        let projection = issue_projection(
+            inherited.context(),
+            &owner,
+            &surface,
+            &exports,
+            inherited.receipt().instances(),
+            inherited.receipt().family_closure(),
+            includes,
+            root,
+            settlement,
+        )?;
+        Ok(Some(Self {
+            identity: FacadeIdentity {
+                digest: projection.receipt().expected_public_version().to_owned(),
+            },
+            artifact: FacadeArtifact::Certified(projection),
+        }))
+    }
+
     pub fn identity(&self) -> &FacadeIdentity {
         &self.identity
     }
@@ -228,6 +288,10 @@ impl MaterializedFacade {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExactFacadeError {
+    #[error("facade selection requires compiler-certified original identities")]
+    UncertifiedSelection,
+    #[error("declaration {0:?} was not selected by this facade owner")]
+    UnselectedExport(ExportIdentity),
     #[error(transparent)]
     Projection(#[from] super::SessionError),
     #[error("exact export surface belongs to session {surface}, not compile view {view}")]
@@ -342,7 +406,17 @@ mod tests {
                 }));
         }
         assert!(inherited.receipt().instances().families.len() >= 2);
-        let reused = facade.clone();
+        let all = inherited
+            .receipt()
+            .exports()
+            .iter()
+            .map(|export| export.head.clone())
+            .collect::<Vec<_>>();
+        let reused = tidepool_testing::with_settlement(|settlement| {
+            facade.select_exact_exports(&all, &[], root.path(), settlement)
+        })
+        .unwrap()
+        .unwrap();
         assert!(Arc::ptr_eq(inherited, reused.projection().unwrap()));
         let selected = full_surface
             .declarations()
@@ -365,25 +439,22 @@ mod tests {
             unit: inherited.receipt().reserved().unit.clone(),
             module: inherited.module_name().to_owned(),
         };
-        let surface = super::super::render::AdmittedDeclarationSurface {
-            roots: vec![inherited_owner.clone()],
-            lexical: inherited.context().lexical_graph().to_vec(),
-        };
         let include = view.include_paths(effects.include_paths());
-        let narrowed = tidepool_testing::with_settlement(|settlement| {
-            issue_projection(
-                inherited.context(),
-                &inherited_owner,
-                &surface,
-                &selected,
-                inherited.receipt().instances(),
-                inherited.receipt().family_closure(),
-                &include,
-                root.path(),
-                settlement,
-            )
+        let wanted = selected
+            .iter()
+            .map(|export| export.head.clone())
+            .collect::<Vec<_>>();
+        let narrowed_facade = tidepool_testing::with_settlement(|settlement| {
+            facade.select_exact_exports(&wanted, &include, root.path(), settlement)
         })
+        .unwrap()
         .unwrap();
+        let narrowed = narrowed_facade.projection().unwrap();
+        let mut wrong = wanted[0].clone();
+        wrong.unit = "foreign".into();
+        assert!(matches!(tidepool_testing::with_settlement(|settlement| {
+            facade.select_exact_exports(&[wrong.clone()], &include, root.path(), settlement)
+        }), Err(ExactFacadeError::UnselectedExport(identity)) if identity == wrong));
         assert_eq!(narrowed.receipt().exports(), selected);
         assert_eq!(
             narrowed.receipt().instances(),
