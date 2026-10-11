@@ -42,11 +42,8 @@
 //!    `WorktreeId`, `GitOid`, `Vec<GitOid>`, `String`, `String`, `i64`,
 //!    `Vec<String>`.
 //!
-//! Goldens live under `tests/goldens/durable/`, one file per sample, pinned
-//! byte-for-byte via `serde_json::to_string_pretty`. Regenerate (only after a
-//! deliberate, reviewed change to one of the types above) with
-//! `EXOMONAD_REGEN_WORKTREE_GOLDENS=1 cargo test -p exomonad-worktree
-//! --test durable_formats`.
+//! Goldens are immutable declared inputs under `tests/goldens/durable/`.
+//! Serialization is compared byte-for-byte before semantic round trips.
 //!
 //! ## Checked and found NOT durable
 //!
@@ -83,7 +80,7 @@
 //!   Class-D golden — a golden would misrepresent it as an on-disk durable
 //!   format when grep shows it is not one here.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use exomonad_worktree::testing::binding_row;
 use exomonad_worktree::{
@@ -92,57 +89,12 @@ use exomonad_worktree::{
     WorktreeId, WorktreeOrigin, WorktreeReceipt, WorktreeRecordStatus,
 };
 
-// --- golden plumbing, mirroring bridge/handlers/tests/bridged_records.rs --
-
-fn goldens_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/durable")
-}
-
-const REGEN_VAR: &str = "EXOMONAD_REGEN_WORKTREE_GOLDENS";
-
-/// Serialize `value` with `serde_json::to_string_pretty`, assert it matches
-/// the committed golden `name` byte-for-byte, and return the JSON so the
-/// caller can also round-trip it. Regenerate with `EXOMONAD_REGEN_WORKTREE_GOLDENS=1`.
-fn assert_golden<T: serde::Serialize>(name: &str, value: &T) -> String {
+/// Compare serialization with a declared immutable golden, retaining the JSON
+/// for the caller's semantic round trip.
+fn assert_golden<T: serde::Serialize>(name: &str, expected: &str, value: &T) -> String {
     let json = serde_json::to_string_pretty(value)
         .unwrap_or_else(|e| panic!("failed to serialize golden {name}: {e}"));
-    let path = goldens_dir().join(name);
-    let regen = std::env::var_os(REGEN_VAR).is_some();
-    let current = std::fs::read_to_string(&path).ok();
-    if regen || current.is_none() {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap_or_else(|e| {
-                panic!(
-                    "failed to create {} for golden {name}: {e}",
-                    parent.display()
-                )
-            });
-        }
-        std::fs::write(&path, &json).unwrap_or_else(|e| {
-            panic!("failed to write golden {} at {}: {e}", name, path.display())
-        });
-        if current.as_deref() != Some(json.as_str()) && !regen {
-            panic!(
-                "golden {} did not exist yet at {} — wrote it, re-run the test \
-                 (or set {REGEN_VAR}=1 if this was a deliberate format change)",
-                name,
-                path.display()
-            );
-        }
-        return json;
-    }
-    assert_eq!(
-        current.unwrap(),
-        json,
-        "durable-format golden {} at {} drifted from the live type's \
-         serde_json::to_string_pretty output — this means the Worktree \
-         migration (or some other change) moved a byte of an on-disk \
-         durable format. If this is a deliberate, reviewed change, \
-         regenerate with {REGEN_VAR}=1 cargo test -p exomonad-worktree \
-         --test durable_formats",
-        name,
-        path.display()
-    );
+    assert_eq!(expected, json, "durable-format golden {name} changed");
     json
 }
 
@@ -398,7 +350,11 @@ fn journal_entries() -> Vec<ObservationBatch> {
 #[test]
 fn worktree_receipt_provisional_golden_round_trips() {
     let sample = receipt_provisional();
-    let json = assert_golden("worktree_receipt_provisional.json", &sample);
+    let json = assert_golden(
+        "worktree_receipt_provisional.json",
+        include_str!("goldens/durable/worktree_receipt_provisional.json"),
+        &sample,
+    );
     let back: WorktreeReceipt = serde_json::from_str(&json).unwrap_or_else(|e| {
         panic!("WorktreeReceipt failed to deserialize from worktree_receipt_provisional.json: {e}")
     });
@@ -414,7 +370,11 @@ fn worktree_receipt_provisional_golden_round_trips() {
 #[test]
 fn worktree_receipt_source_checkout_golden_round_trips() {
     let sample = receipt_source_checkout();
-    let json = assert_golden("worktree_receipt_source_checkout.json", &sample);
+    let json = assert_golden(
+        "worktree_receipt_source_checkout.json",
+        include_str!("goldens/durable/worktree_receipt_source_checkout.json"),
+        &sample,
+    );
     let back: WorktreeReceipt = serde_json::from_str(&json).unwrap_or_else(|error| {
         panic!("WorktreeReceipt failed to deserialize from source-checkout golden: {error}")
     });
@@ -427,7 +387,11 @@ fn mounted_worktree_receipt_golden_round_trips() {
         status: WorktreeRecordStatus::Mounted,
         ..receipt_finalized_worktree_origin()
     };
-    let json = assert_golden("worktree_receipt_mounted.json", &sample);
+    let json = assert_golden(
+        "worktree_receipt_mounted.json",
+        include_str!("goldens/durable/worktree_receipt_mounted.json"),
+        &sample,
+    );
     assert_eq!(
         serde_json::from_str::<WorktreeReceipt>(&json).unwrap(),
         sample
@@ -446,7 +410,11 @@ fn retained_worktree_receipt_golden_round_trips() {
         status: WorktreeRecordStatus::Retained,
         ..receipt_finalized_worktree_origin()
     };
-    let json = assert_golden("worktree_receipt_retained.json", &sample);
+    let json = assert_golden(
+        "worktree_receipt_retained.json",
+        include_str!("goldens/durable/worktree_receipt_retained.json"),
+        &sample,
+    );
     assert_eq!(
         serde_json::from_str::<WorktreeReceipt>(&json).unwrap(),
         sample
@@ -456,7 +424,11 @@ fn retained_worktree_receipt_golden_round_trips() {
 #[test]
 fn worktree_receipt_finalized_ref_origin_golden_round_trips() {
     let sample = receipt_finalized_ref_origin();
-    let json = assert_golden("worktree_receipt_finalized_ref_origin.json", &sample);
+    let json = assert_golden(
+        "worktree_receipt_finalized_ref_origin.json",
+        include_str!("goldens/durable/worktree_receipt_finalized_ref_origin.json"),
+        &sample,
+    );
     let back: WorktreeReceipt = serde_json::from_str(&json).unwrap_or_else(|e| {
         panic!(
             "WorktreeReceipt failed to deserialize from worktree_receipt_finalized_ref_origin.json: {e}"
@@ -472,7 +444,11 @@ fn worktree_receipt_finalized_ref_origin_golden_round_trips() {
 #[test]
 fn worktree_receipt_finalized_worktree_origin_golden_round_trips() {
     let sample = receipt_finalized_worktree_origin();
-    let json = assert_golden("worktree_receipt_finalized_worktree_origin.json", &sample);
+    let json = assert_golden(
+        "worktree_receipt_finalized_worktree_origin.json",
+        include_str!("goldens/durable/worktree_receipt_finalized_worktree_origin.json"),
+        &sample,
+    );
     let back: WorktreeReceipt = serde_json::from_str(&json).unwrap_or_else(|e| {
         panic!(
             "WorktreeReceipt failed to deserialize from worktree_receipt_finalized_worktree_origin.json: {e}"
@@ -488,7 +464,11 @@ fn worktree_receipt_finalized_worktree_origin_golden_round_trips() {
 #[test]
 fn binding_rows_golden_round_trips() {
     let sample = binding_rows();
-    let json = assert_golden("binding_rows.json", &sample);
+    let json = assert_golden(
+        "binding_rows.json",
+        include_str!("goldens/durable/binding_rows.json"),
+        &sample,
+    );
     let back: Vec<Binding> = serde_json::from_str(&json).unwrap_or_else(|e| {
         panic!("Vec<Binding> failed to deserialize from binding_rows.json: {e}")
     });
@@ -502,7 +482,11 @@ fn binding_rows_golden_round_trips() {
 #[test]
 fn journal_entries_golden_round_trips() {
     let sample = journal_entries();
-    let json = assert_golden("journal_entries.json", &sample);
+    let json = assert_golden(
+        "journal_entries.json",
+        include_str!("goldens/durable/journal_entries.json"),
+        &sample,
+    );
     let back: Vec<ObservationBatch> = serde_json::from_str(&json).unwrap_or_else(|e| {
         panic!("Vec<ObservationBatch> failed to deserialize from journal_entries.json: {e}")
     });
@@ -513,10 +497,7 @@ fn journal_entries_golden_round_trips() {
     );
 }
 
-// --- Layer 2: independent hardcoded pins. A blind regen (assert_golden's
-// --- "file missing, write it" path) cannot launder a field-name or
-// --- variant-tag change past these — they are typed directly into the test
-// --- source, never read from a golden file. ---------------------------------
+// Independent field and variant expectations complement the byte goldens.
 
 #[test]
 fn worktree_receipt_field_shape_is_pinned_inline() {
