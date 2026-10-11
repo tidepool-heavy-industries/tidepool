@@ -199,6 +199,30 @@ fn semantic_change_between_metadata_retry_and_refresh_retains_execution_intent()
     assert_eq!(decision.phase(), PublicationPhase::Running);
 }
 
+#[test]
+fn declaration_rejection_baseline_refuses_retired_public_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let lib = SessionLib::open(
+        SessionId(9894),
+        root.path(),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap();
+    let mut session = PersistentSession::new(Some(lib), 1024 * 1024);
+    let public = session.mint_scope(ScopeId::ROOT).unwrap();
+    let private = session.mint_detached_scope(public).unwrap();
+    let base = session
+        .snapshot_publication_target(None, public, private, vec![], vec![])
+        .unwrap();
+    assert!(session.declaration_baseline_is_current(&base).unwrap());
+    session.retire_scope(public);
+    assert!(session.scope_tree().is_live(private));
+    assert!(matches!(
+        session.declaration_baseline_is_current(&base),
+        Err(SessionError::StaleStagedDeclaration)
+    ));
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config { cases: 32, ..proptest::test_runner::Config::default() })]
     #[test]

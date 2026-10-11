@@ -882,7 +882,10 @@ impl PersistentSession {
         &self,
         base: &PublicManifestBase,
     ) -> Result<bool, SessionError> {
-        if !base.owner_stamp.matches(self.admission_owner()) {
+        if !base.owner_stamp.matches(self.admission_owner())
+            || !self.scopes.is_live(base.public_scope)
+            || !self.scopes.is_live(base.private_scope)
+        {
             return Err(SessionError::StaleStagedDeclaration);
         }
         if !self.has_lib() {
