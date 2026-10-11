@@ -758,8 +758,9 @@ impl PreparedCellProgram {
         cancellation.checkpoint()?;
         for (offer, segment) in pending_segments {
             cancellation.checkpoint()?;
-            offer.publish_segment_original_products(&segment, &mut validation)?;
+            offer.publish_segment_original_products(&segment, &mut validation, cancellation)?;
         }
+        cancellation.checkpoint()?;
         Ok(program)
     }
 }
@@ -2530,7 +2531,9 @@ impl ModuleCandidateOffer {
         &self,
         segment: &crate::declaration_context::ExactProgramSegmentAdmission,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+        cancellation: &tidepool_extract_cmd::HostAdmissionCancellation,
     ) -> Result<(), CompileError> {
+        cancellation.checkpoint()?;
         let request = segment.physical_request();
         let originals = segment.original_products(request, &validation.inventory)?;
         let source = segment
@@ -2566,10 +2569,13 @@ impl ModuleCandidateOffer {
                 },
                 originals.recovery_products(),
             );
-            module_candidates::publish_prepared(publication);
+            cancellation.checkpoint()?;
+            module_candidates::publish_prepared(publication)?;
         } else {
+            cancellation.checkpoint()?;
             module_candidates::record_exact_context_publication_skip(originals.raw().products());
         }
+        cancellation.checkpoint()?;
         module_candidates::record_deployment_acceptance(
             self.selected.as_deref(),
             originals.receipt(),
@@ -3777,7 +3783,7 @@ fn seal_turn_outputs_with_validation(
             ),
             &certified.recovery_products,
         );
-        module_candidates::publish_prepared(publication);
+        module_candidates::publish_prepared(publication)?;
     } else if source_segment.is_none() && publication == OriginalOutputPublication::Transaction {
         module_candidates::record_exact_context_publication_skip(fresh_products.products());
     }
@@ -5279,7 +5285,7 @@ fn compile_invocation_inner(
             )
         {
             if let Some(publication) = publication {
-                module_candidates::publish_prepared(publication);
+                module_candidates::publish_prepared(publication)?;
             }
         } else if exact_request.is_some() {
             module_candidates::record_exact_context_publication_skip(

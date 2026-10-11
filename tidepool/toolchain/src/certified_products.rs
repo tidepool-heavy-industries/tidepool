@@ -14096,7 +14096,7 @@ pub(crate) mod tests {
             version_origin,
             &original.recovery_products,
         );
-        publish_prepared(publication);
+        publish_prepared(publication).unwrap();
         let scratch = root.path().join("offer");
         let selected = select(&producer, &include, &scratch).unwrap();
         let bundle = selected
@@ -14429,7 +14429,7 @@ pub(crate) mod tests {
                     CandidateVersionOrigin::Ordinary,
                     &issued.recovery_products,
                 );
-                publish_prepared(publication);
+                publish_prepared(publication).unwrap();
                 let fixture =
                     select(&producer, &include, &root.path().join("two-owner-offer")).unwrap();
                 assert_eq!(fixture.by_owner.len(), 2);
@@ -15802,7 +15802,7 @@ pub(crate) mod tests {
                     },
                     &certified.recovery_products,
                 );
-                publish_prepared(publication);
+                publish_prepared(publication).unwrap();
                 let candidate =
                     select(&producer, &include, &directory.join("cached-offer")).unwrap();
                 let bundle = &candidate.by_owner[&("main".into(), "Fresh".into())];

@@ -16,6 +16,47 @@ mod inventory;
 mod product_decode_observer;
 #[cfg(test)]
 mod protected_native_availability_tests;
+#[cfg(test)]
+mod publication_observer {
+    use std::cell::RefCell;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) enum Stage {
+        BeforeOwner,
+        BeforeInterface,
+        Completed,
+    }
+
+    type Observer = Box<dyn FnMut(Stage)>;
+
+    thread_local! {
+        static OBSERVER: RefCell<Option<Observer>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn observe(stage: Stage) {
+        OBSERVER.with_borrow_mut(|observer| {
+            if let Some(observer) = observer {
+                observer(stage);
+            }
+        });
+    }
+
+    pub(super) fn with_observer<T>(
+        observer: impl FnMut(Stage) + 'static,
+        action: impl FnOnce() -> T,
+    ) -> T {
+        struct Restore(Option<Observer>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                OBSERVER.with_borrow_mut(|observer| *observer = self.0.take());
+            }
+        }
+        let _restore =
+            Restore(OBSERVER.with_borrow_mut(|active| active.replace(Box::new(observer))));
+        action()
+    }
+}
+
 pub(crate) mod shared_evidence;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1295,7 +1336,8 @@ fn eligible_records_with_report(
 }
 
 /// Persist each eligible ordinary source module in its own bounded record.
-pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) {
+pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) -> std::io::Result<()> {
+    crate::host_work::checkpoint()?;
     let start = std::time::Instant::now();
     let owners = prepared.records.len();
     let mut encoded_bytes = 0u64;
@@ -1305,24 +1347,28 @@ pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) {
     if !prepared.records.is_empty()
         && shared_evidence::publish(&producer_dir, prepared.evidence).is_none()
     {
-        return;
+        return crate::host_work::checkpoint();
     }
     if !prepared.graphs.is_empty() {
         if fs::create_dir_all(&producer_dir).is_err() {
-            return;
+            return crate::host_work::checkpoint();
         }
         for (digest, graph) in &prepared.graphs {
+            crate::host_work::checkpoint()?;
             if tidepool_atomic_write::write_best_effort(
                 &graph_path(&producer_dir, digest),
                 graph.bytes(),
             )
             .is_err()
             {
-                return;
+                return crate::host_work::checkpoint();
             }
         }
     }
     for mut record in prepared.records {
+        #[cfg(test)]
+        publication_observer::observe(publication_observer::Stage::BeforeOwner);
+        crate::host_work::checkpoint()?;
         let group_rows = prepared.group_counts[&(record.unit.clone(), record.module.clone())];
         let mut report = |encoded_payload_bytes, disposition| {
             diagnostics.report_owner(
@@ -1348,13 +1394,21 @@ pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) {
             report(None, PublicationDisposition::ProductOwnerRejected);
             continue;
         };
-        record.data.module_interface = crate::recovery_artifacts::materialize_module_interface(
+        #[cfg(test)]
+        publication_observer::observe(publication_observer::Stage::BeforeInterface);
+        record.data.module_interface = match crate::recovery_artifacts::materialize_module_interface(
             &producer_dir,
             interface,
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
             crate::recovery_artifacts::MaterializationMode::Scratch,
-        )
-        .ok();
+        ) {
+            Ok(interface) => Some(interface),
+            Err(
+                crate::recovery_artifacts::RecoveryArtifactError::Io(error)
+                | crate::recovery_artifacts::RecoveryArtifactError::Unreadable { error, .. },
+            ) if error.kind() == std::io::ErrorKind::Interrupted => return Err(error),
+            Err(_) => None,
+        };
         if record.module_interface.is_none() {
             report(None, PublicationDisposition::WriteRejected);
             continue;
@@ -1366,6 +1420,7 @@ pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) {
                 continue;
             }
         };
+        crate::host_work::checkpoint()?;
         encoded_bytes += bytes.len() as u64;
         let header_bytes = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
         let payload_bytes = bytes.len() - 12 - header_bytes;
@@ -1396,7 +1451,11 @@ pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) {
                 PublicationDisposition::WriteRejected
             };
         report(Some(payload_bytes), disposition);
+        crate::host_work::checkpoint()?;
     }
+    #[cfg(test)]
+    publication_observer::observe(publication_observer::Stage::Completed);
+    crate::host_work::checkpoint()?;
     crate::timing::record_stage_with_owners(
         crate::timing::NO_NODE,
         crate::timing::NO_ROUND,
@@ -1405,6 +1464,7 @@ pub(crate) fn publish_prepared(prepared: PreparedPublication<'_>) {
         encoded_bytes,
         owners,
     );
+    Ok(())
 }
 
 fn version_hash(record: &RecordData) -> [u8; 32] {
@@ -5091,7 +5151,7 @@ pub(crate) mod tests {
                 &[],
             );
             assert_eq!(publication.records.len(), 1);
-            publish_prepared(publication);
+            publish_prepared(publication).unwrap();
         };
         publish(&importer);
         let mut expected = Vec::new();
@@ -5749,7 +5809,7 @@ pub(crate) mod tests {
             CandidateVersionOrigin::Ordinary,
             &[],
         );
-        publish_prepared(publication);
+        publish_prepared(publication).unwrap();
         let selected = select_in(root.path(), scratch.path()).unwrap();
         assert!(selected
             .by_owner
@@ -5893,7 +5953,7 @@ pub(crate) mod tests {
         record
     }
 
-    fn publish_query_fixture(record: &Record) {
+    fn prepare_query_fixture(record: &Record) -> PreparedPublication<'_> {
         let certified = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
             computed_owner(record),
             record.interface.clone(),
@@ -5919,7 +5979,88 @@ pub(crate) mod tests {
             &[certified],
         );
         assert_eq!(prepared.records.len(), 1);
-        publish_prepared(prepared);
+        prepared
+    }
+
+    fn publish_query_fixture(record: &Record) {
+        publish_prepared(prepare_query_fixture(record)).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn publication_cancellation_refuses_interface_and_final_handoff_without_removing_written_records(
+    ) {
+        use publication_observer::Stage;
+        use tidepool_extract_cmd::{
+            with_compiler_transaction_cancellable, CompilerTransactionCancellation,
+            CompilerTransactionClose,
+        };
+        for stage in [Stage::BeforeInterface, Stage::Completed] {
+            let root = tempfile::tempdir().unwrap();
+            let record = query_fixture_record(root.path(), "Library", 0);
+            for entry in fs::read_dir(fixture_record_dir(root.path())).unwrap() {
+                fs::remove_file(entry.unwrap().path()).unwrap();
+            }
+            unsafe {
+                std::env::set_var("TIDEPOOL_COMPILE_CACHE_DIR", root.path());
+            }
+            let cancellation = CompilerTransactionCancellation::new();
+            let stop = cancellation.clone();
+            let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let observed = reached.clone();
+            let spawns = tidepool_extract_cmd::extract_spawn_count();
+            let result = publication_observer::with_observer(
+                move |actual| {
+                    if actual == stage {
+                        observed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        stop.cancel();
+                    }
+                },
+                || {
+                    with_compiler_transaction_cancellable(
+                        cancellation,
+                        |_| {},
+                        || publish_prepared(prepare_query_fixture(&record)),
+                    )
+                },
+            );
+            assert!(reached.load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(
+                result.action.unwrap_err().kind(),
+                std::io::ErrorKind::Interrupted
+            );
+            assert_eq!(result.close, CompilerTransactionClose::NotStarted);
+            let written = fs::read_dir(fixture_record_dir(root.path()))
+                .unwrap()
+                .map(|entry| read_record_path(&entry.unwrap().path()).unwrap())
+                .collect::<Vec<_>>();
+            if stage == Stage::Completed {
+                assert_eq!(
+                    written.len(),
+                    1,
+                    "final cancellation preserves the atomic write"
+                );
+                assert_eq!(computed_owner(&written[0]), computed_owner(&record));
+                assert_eq!(written[0].products, record.products);
+            } else {
+                assert!(
+                    written.is_empty(),
+                    "interrupted interface materialization publishes no record"
+                );
+            }
+            publish_query_fixture(&record);
+            assert_eq!(
+                fs::read_dir(fixture_record_dir(root.path()))
+                    .unwrap()
+                    .count(),
+                1
+            );
+            assert_eq!(
+                tidepool_extract_cmd::extract_spawn_count(),
+                spawns,
+                "publication retry must not rerun the physical compiler request"
+            );
+        }
     }
 
     #[derive(Clone, Copy, Debug, Default)]
