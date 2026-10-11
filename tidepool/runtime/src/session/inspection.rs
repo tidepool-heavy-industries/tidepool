@@ -369,14 +369,7 @@ impl AdmittedInspectionInputs {
 
     fn matches_request(&self, request: &InspectionRequest<'_>) -> bool {
         request.session_root == self.view.session_root()
-            && request
-                .exact_context
-                .as_ref()
-                .map(|context| context.declarations().semantic_sha256())
-                == self
-                    .view
-                    .exact_declaration_context()
-                    .map(|context| context.semantic_sha256())
+            && request.exact_context == self.view.exact_compile_context()
             && request.inject_modules == self.view.injected_module_names()
     }
 }
