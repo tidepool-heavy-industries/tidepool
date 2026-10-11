@@ -216,23 +216,48 @@ impl CompilerCloseOwner {
 
 /// Direct fixtures supply the existing lifecycle owner explicitly.
 #[cfg(test)]
-async fn with_test_compiler_owner<T>(operation: impl std::future::Future<Output = T>) -> T {
-    let mut owner = crate::CompilerPreparationOwner::new();
-    let cleanup = owner.cleanup();
-    let result =
-        futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(owner.scope(operation)))
-            .await;
-    let observation = cleanup
-        .wait_for_settlement(std::time::Duration::from_secs(5))
+fn with_test_compiler_owner<T>(
+    operation: impl std::future::Future<Output = T>,
+) -> impl std::future::Future<Output = T> {
+    // Allocate before building the wrapper so its initial state does not retain
+    // the operation inline through each owner and unwind boundary.
+    let operation = Box::pin(operation);
+    async move {
+        let mut owner = crate::CompilerPreparationOwner::new();
+        let cleanup = owner.cleanup();
+        let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+            owner.scope(operation),
+        ))
         .await;
-    assert!(
-        observation.is_confirmed(),
-        "compiler cleanup: {observation:?}"
-    );
-    match result {
-        Ok(outcome) => outcome.action,
-        Err(panic) => std::panic::resume_unwind(panic),
+        let observation = cleanup
+            .wait_for_settlement(std::time::Duration::from_secs(5))
+            .await;
+        assert!(
+            observation.is_confirmed(),
+            "compiler cleanup: {observation:?}"
+        );
+        match result {
+            Ok(outcome) => outcome.action,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn compiler_owner_wrapper_size_does_not_scale_with_operation_state() {
+    fn operation<const N: usize>() -> impl std::future::Future<Output = ()> {
+        let payload = [0_u8; N];
+        async move {
+            std::hint::black_box(payload);
+        }
+    }
+    let small = operation::<1>();
+    let large = operation::<65536>();
+    assert!(std::mem::size_of_val(&large) > std::mem::size_of_val(&small));
+    let small = with_test_compiler_owner(small);
+    let large = with_test_compiler_owner(large);
+    assert_eq!(std::mem::size_of_val(&large), std::mem::size_of_val(&small));
 }
 
 pub(crate) fn with_invocation_cancellation<T>(
