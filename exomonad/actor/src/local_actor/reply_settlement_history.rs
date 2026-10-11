@@ -6,7 +6,7 @@ use super::*;
 use crate::request::{RequestRegistry, ResponseFailure, ResponseObservation, WatchObservation};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, FileFailurePersistence, TestRunner};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse, WorkbenchRunStatus};
@@ -300,6 +300,8 @@ struct Coverage {
     dropped_inputs: Arc<AtomicUsize>,
     immediate_resumes: usize,
     deferred_resumes: usize,
+    fixture_preparation: std::time::Duration,
+    history_execution: std::time::Duration,
 }
 
 fn send_workbench(
@@ -348,8 +350,7 @@ fn check_observation(
     }
 }
 
-async fn run_history(history: &History, coverage: &mut Coverage) {
-    crate::request::test_support::fresh_history();
+async fn run_history(history: &History, coverage: &mut Coverage, phase: &Cell<&str>) {
     coverage.replay_callbacks += 1;
     let registry = Arc::new(RequestRegistry::default());
     let request_slot = Arc::new(parking_lot::Mutex::new(None));
@@ -360,6 +361,7 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
     let mailbox_calls = Arc::new(AtomicUsize::new(0));
     let (sibling_release, sibling) = oneshot::channel();
     let sibling_entered = Arc::new(Notify::new());
+    phase.set("actor startup");
     let (actor, task) = spawn_local_actor(
         None,
         ReplyDriver {
@@ -400,6 +402,7 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
             reply: sibling_send.into(),
         })
         .unwrap();
+    phase.set("sibling dispatch");
     sibling_entered.notified().await;
     let mut sibling_release = Some(sibling_release);
     let mut sibling_reply = Some(sibling_reply);
@@ -414,6 +417,7 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
         coverage.deferred_resumes += 1;
     }
     let control = crate::WorkbenchExecutionControl::untracked();
+    phase.set("reply dispatch");
     let reply = send_workbench(&actor, Some(control.clone()))
         .await
         .unwrap()
@@ -450,6 +454,7 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
             WorkbenchRunStatus::Committed
         );
     }
+    phase.set("continuation dispatch");
     entered.notified().await;
     assert_eq!(resumes.load(Ordering::SeqCst), 1);
     assert!(
@@ -470,6 +475,7 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
 
     // The operation interpreter lives outside the behavior: expected readiness
     // comes from acknowledged workflow facts, never its registry state table.
+    phase.set("before-settlement observations");
     for operation in &history.before {
         read_operation(
             *operation,
@@ -491,6 +497,7 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
         ),
         "observations and refused duplicates cannot settle the held watch"
     );
+    phase.set("continuation settlement");
     match history.completion {
         Completion::Success | Completion::Failure => {
             let successful = matches!(history.completion, Completion::Success);
@@ -520,10 +527,12 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
     // This pre-existing call precedes the queued shutdown. Its refused
     // duplicate may finish after the continuation, without replacing the
     // request's first settlement or opening an ordinary mailbox receiver.
+    phase.set("queued duplicate completion");
     assert_eq!(
         late_reply.await.unwrap().unwrap().status,
         WorkbenchRunStatus::Committed
     );
+    phase.set("after-settlement observations");
     for operation in &history.after {
         read_operation(
             *operation,
@@ -541,6 +550,7 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
     // register_watch requires success for its singleton dependency; failure
     // is Unavailable. Only an explicit allow-failure watch collects failures
     // into Ready, which is a different request observation contract.
+    phase.set("watch subscriptions");
     for subscription in subscriptions {
         let observed = subscription.wait().await.unwrap();
         match history.completion {
@@ -589,6 +599,7 @@ async fn run_history(history: &History, coverage: &mut Coverage) {
         assert!(shutdown.cleanup.is_confirmed());
         check_observation(&registry, owner, request, Some(history.completion));
     }
+    phase.set("actor retirement");
     task.await.unwrap();
     assert_eq!(
         mailbox_calls.load(Ordering::SeqCst),
@@ -814,18 +825,28 @@ fn replay(
     coverage: &mut Coverage,
 ) -> Result<(), proptest::test_runner::TestCaseError> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Compiler-issued fixture preparation is synchronous and may be cold.
+        // The deadline bounds actor progress after its inputs are ready.
+        let preparation_started = std::time::Instant::now();
+        crate::request::test_support::fresh_history();
+        coverage.fixture_preparation += preparation_started.elapsed();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
+        let phase = Cell::new("history entry");
+        let execution_started = std::time::Instant::now();
         runtime.block_on(async {
             tokio::time::timeout(
                 std::time::Duration::from_secs(5),
-                run_history(history, coverage),
+                run_history(history, coverage, &phase),
             )
             .await
-            .expect("acknowledged reply history must complete");
+            .unwrap_or_else(|_| {
+                panic!("acknowledged reply history must complete: {}", phase.get())
+            });
         });
+        coverage.history_execution += execution_started.elapsed();
     }))
     .map_err(|panic| {
         let detail = panic
