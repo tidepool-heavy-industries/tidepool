@@ -530,6 +530,28 @@ impl HostedTestDiagnostics {
         )
     }
 
+    /// Capture live ownership before cleanup changes the observation. Keep this
+    /// diagnostic bounded; omitted actors are explicit rather than silently lost.
+    pub(super) fn report_host_graph(
+        root: &std::path::Path,
+        nodes: &[exomonad_actor::ActorGraphNode],
+    ) -> Result<(), String> {
+        let retained = nodes
+            .iter()
+            .take(64)
+            .map(|node| format!("{node:?}").chars().take(2048).collect::<String>())
+            .collect::<Vec<_>>();
+        let bytes = serde_json::to_vec_pretty(&json!({
+            "schema": 1,
+            "total_actors": nodes.len(),
+            "omitted_actors": nodes.len() - retained.len(),
+            "actors": retained,
+        }))
+        .map_err(|error| error.to_string())?;
+        tidepool_atomic_write::write_durable(&root.join("host-graph-before-cleanup.json"), &bytes)
+            .map_err(|error| error.to_string())
+    }
+
     fn write_report(root: &std::path::Path, report: &serde_json::Value) -> Result<(), String> {
         let bytes = serde_json::to_vec_pretty(report).map_err(|error| error.to_string())?;
         tidepool_atomic_write::write_durable(&root.join("hosted-outcome.json"), &bytes)
@@ -888,21 +910,10 @@ impl HostedTestRuntime {
                     }
                 ) && matches!(cleanup, CleanupOutcome::Unknown)
                 {
-                    let graph = self
-                        .context
-                        .forest
-                        .inspect_host_graph()
-                        .into_iter()
-                        .take(64)
-                        .map(|node| format!("{node:?}").chars().take(2048).collect::<String>())
-                        .collect::<Vec<_>>();
-                    let bytes =
-                        serde_json::to_vec_pretty(&graph).map_err(|error| error.to_string())?;
-                    tidepool_atomic_write::write_durable(
-                        &diagnostics.root.join("host-graph-before-cleanup.json"),
-                        &bytes,
-                    )
-                    .map_err(|error| error.to_string())?;
+                    HostedTestDiagnostics::report_host_graph(
+                        &diagnostics.root,
+                        &self.context.forest.inspect_host_graph(),
+                    )?;
                 }
                 Ok(())
             },
