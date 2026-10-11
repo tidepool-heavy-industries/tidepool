@@ -9,6 +9,8 @@ pub fn agent_session_decl() -> crate::EffectDecl {
         prompt_card: Some("Typed agent RPC: a request binds `sessionInput`, `sessionReply` and `respond` to your assignment and result types. Use local records and sums so replies compose with functions, joins and actor transitions; lookup exposes the current type. A typed reply settles this request, while acceptance and incorporation belong to its recipient."),
         constructors: &[
             "AgentSessionWith :: RequestSite (input ': extra) output -> input -> Int -> Maybe Text -> [(Text, Text, Text)] -> AgentSession output",
+            "AgentSessionPublishResponseWith :: Int -> RequestSite '[input, response] siteReply -> response -> AgentSession ()",
+            "AgentSessionPublishProgressResponseWith :: Int -> RequestSite '[input, progress, response] siteReply -> response -> AgentSession ()",
             "AgentAttachWith :: Maybe Text -> AgentSession ()",
         ],
         type_defs: &[],

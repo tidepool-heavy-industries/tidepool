@@ -1286,6 +1286,20 @@ def facade_test_cases(binary):
         ("facade_recipe_source_capture_test", [
             "exomonad::workspace::source_capture_tests::background_command_recipe_capture_records_seven_cells_without_validating_assertions",
         ], capture_recipe_env, {}, capture_recipe_resources, True, False, 600),
+        ("facade_narrow_parent_forwarding_test", [
+            "actor_host::documentation_tests::narrow_parent_forwards_one_request_with_exact_child_effects",
+        ], host_env, host_paths, host_resources, True, False, 600),
+        ("facade_exact_actor_effects_tests", ["actor_host::tests::" + name for name in (
+            "haskell_mailbox_preserves_state_and_opaque_replies_across_calls",
+            "haskell_actor_sends_normal_steering_without_a_native_session",
+            "stateful_actor_drains_accepted_messages_into_its_retained_exit",
+            "stateful_handler_failure_after_effect_pauses_without_replay_or_closing_mailbox",
+            "lifecycle_sources_follow_replacement_and_capture_retained_exit",
+            "stateful_replacement_preserves_owned_children",
+            "stateful_replacement_rejects_changed_state_and_protocol_types",
+            "actor_sources_capture_current_then_deliver_every_publication_and_settlement",
+            "record_actor_explains_invalid_state_shapes",
+        )], host_env, host_paths, host_resources, True, False, 600),
         ("facade_host_raw_test", [prefix +
             "production_host_retains_http_haskell_commands_and_reconnects_without_replay"],
          host_env, host_paths, host_resources, True, False, 600),

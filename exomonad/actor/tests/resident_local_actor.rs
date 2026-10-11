@@ -1794,6 +1794,7 @@ async fn resident_cleanup_case(fail_hook: bool) {
         &tidepool_mcp::build_preamble(&declarations, false),
         "Tidepool.Agent.Contract",
     );
+    let preamble = insert_preamble_imports(&preamble, "Tidepool.Effects.Row (knownEffects)");
     let preamble = format!(
         "{preamble}\
          type ActorEffects = '[AgentTools, Actor]\n\

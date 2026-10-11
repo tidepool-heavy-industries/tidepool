@@ -8,5 +8,5 @@ let collectorDefinition = withSources
       , settlementSource answer (\result -> case result of
           Right receipt -> (responseValue receipt, ())
           Left _ -> error "unexpected failed request")
-      ] (stateful "ordered-source-collector" ReadOnly (\values (value, reply) -> pure (reply, value : values)) :: ActorDefinition [Int] ((,) Int) [Int])
+      ] (stateful "ordered-source-collector" (Selected (knownEffects @'[])) (\values (value, reply) -> pure (reply, value : values)) :: ActorDefinition [Int] ((,) Int) [Int])
 collector <- startActor collectorDefinition []

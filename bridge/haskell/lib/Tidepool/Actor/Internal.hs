@@ -14,8 +14,6 @@ module Tidepool.Actor.Internal
   ( ActorRef (..)
   , EffectProfile (..)
   , profileCode
-  , ReadOnlyEffects
-  , ReadWriteEffects
   , ShutdownReason (..)
   , ActorDefinition (..)
   , pattern ActorDefinition
@@ -41,47 +39,19 @@ import Tidepool.Effects.Core
   , ActorEffectProfile (..)
   , ActorCallStatus (..)
   , ActorLocal
-  , AgentSession
-  , AgentTools
-  , Console
-  , FsRead
-  , FsWrite
-  , Notifications
-  , Sleep
-  , Worktree
   , WorkspaceHandle
   )
 import Tidepool.Internal.ActorRef (ActorRef (..))
 import Tidepool.Actor.Source (Source)
 import Tidepool.Effects.Row (Effects, effectKeys)
 
--- | Experimental named profiles for resident Haskell effect rows. The witness
--- fixes the child row, while Rust independently validates spawn attenuation
--- and principal- or grant-sensitive operations. These profiles do not
--- sandbox native tools belonging to an attached coding-agent process.
+-- | The witness fixes the child's exact available effects. Rust independently
+-- checks attenuation and concrete resource grants.
 data EffectProfile (protocol :: Type -> Type) effs where
-  ReadOnly :: EffectProfile protocol (ReadOnlyEffects protocol)
-  ReadWrite :: EffectProfile protocol (ReadWriteEffects protocol)
   Selected :: Effects effects -> EffectProfile protocol (ActorLocal protocol ': effects)
 
 profileCode :: EffectProfile protocol effects -> ActorEffectProfile
-profileCode ReadWrite = ActorReadWriteProfile
-profileCode ReadOnly = ActorReadOnlyProfile
 profileCode (Selected effects) = ActorSelectedProfile (effectKeys effects)
-
-type ReadOnlyEffects protocol =
-  '[ ActorLocal protocol
-   , AgentTools
-   , AgentSession
-   , Actor
-   , FsRead
-   , Worktree
-   , Notifications
-   , Console
-   , Sleep
-   ]
-
-type ReadWriteEffects protocol = FsWrite ': ReadOnlyEffects protocol
 
 -- | Typed reason supplied to an actor's cooperative shutdown hook. Detailed
 -- diagnostics remain runtime metadata; cleanup policy branches on lifecycle

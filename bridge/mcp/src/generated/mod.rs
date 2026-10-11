@@ -70,6 +70,8 @@ pub use worktree_registry::*;
 
 pub(crate) const CORE_IMPORTS: &[&str] = &[
     "import Tidepool.Duration (Duration)",
+    "import Tidepool.Internal.ActorExit (ActorExit)",
+    "import Tidepool.Internal.ActorRef (ActorRef)",
     "import Tidepool.Internal.RequestSite (RequestSite)",
 ];
 
@@ -208,8 +210,6 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
         "Actor",
         &[
             "ActorEffectProfile",
-            "ActorReadWriteProfile",
-            "ActorReadOnlyProfile",
             "ActorSelectedProfile",
             "ActorTerminalStatus",
             "ActorCompletedStatus",
@@ -238,6 +238,7 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "ActorFinished",
             "ActorFailed",
             "ActorCancelled",
+            "ActorPublishExitWith",
             "ActorInstallShutdownWith",
             "ActorReadyWith",
             "ActorReplyWith",
@@ -603,7 +604,15 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "AgentToolsReplyWith",
         ],
     ),
-    ("AgentSession", &["AgentSessionWith", "AgentAttachWith"]),
+    (
+        "AgentSession",
+        &[
+            "AgentSessionWith",
+            "AgentSessionPublishResponseWith",
+            "AgentSessionPublishProgressResponseWith",
+            "AgentAttachWith",
+        ],
+    ),
     (
         "ModelCall",
         &[
@@ -728,6 +737,7 @@ pub(crate) const AUTHORED_HIDING_IMPORTS: &[&str] = &[
     "ActorDrainWith",
     "ActorReplaceWith",
     "ActorLifecycle(..)",
+    "ActorPublishExitWith",
     "ActorInstallShutdownWith",
     "ActorReadyWith",
     "ActorReplyWith",
@@ -828,6 +838,8 @@ pub(crate) const AUTHORED_HIDING_IMPORTS: &[&str] = &[
     "AgentToolsAwaitWith",
     "AgentToolsReplyWith",
     "AgentSessionWith",
+    "AgentSessionPublishResponseWith",
+    "AgentSessionPublishProgressResponseWith",
     "AgentAttachWith",
     "ModelStartWith",
     "ModelResumeWith",
