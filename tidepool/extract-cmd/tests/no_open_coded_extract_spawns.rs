@@ -45,12 +45,10 @@ const EXTRACT_FLAGS: &[&str] = &[
 ];
 
 fn workspace_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("tidepool-extract-cmd sits under the Tidepool source root")
-        .parent()
-        .expect("Tidepool source root sits under the workspace root")
-        .to_path_buf()
+    PathBuf::from(
+        std::env::var_os("TIDEPOOL_WORKSPACE_SOURCE_ROOT")
+            .expect("declared workspace source snapshot"),
+    )
 }
 
 /// The `members = [...]` list from the workspace manifest, so a new crate is
@@ -81,11 +79,11 @@ fn workspace_members(root: &Path) -> Vec<PathBuf> {
 }
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
+    let entries = std::fs::read_dir(dir).unwrap_or_else(|error| {
+        panic!("source directory {} is unreadable: {error}", dir.display())
+    });
+    for entry in entries {
+        let path = entry.expect("read source directory entry").path();
         if path.is_dir() {
             rust_files(&path, out);
         } else if path.extension().is_some_and(|e| e == "rs") {
@@ -122,7 +120,7 @@ fn open_coded_markers(source: &str) -> Vec<&'static str> {
 #[test]
 fn no_workspace_crate_open_codes_an_extract_spawn() {
     let root = workspace_root();
-    let this_crate = root.join("tidepool-extract-cmd");
+    let this_crate = root.join("tidepool/extract-cmd");
     let allowed: BTreeSet<PathBuf> = ALLOWLIST.iter().map(|(p, _)| root.join(p)).collect();
 
     let mut scanned = 0usize;

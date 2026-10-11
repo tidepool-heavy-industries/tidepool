@@ -15,6 +15,7 @@ categories = ["compilers"]
 [[bin]]
 name = "tidepool"
 path = "src/main.rs"
+test = false
 
 [[bin]]
 name = "exomonad"
@@ -23,10 +24,12 @@ path = "src/bin/exomonad.rs"
 [[bin]]
 name = "exomonad-view-helper"
 path = "src/bin/exomonad-view-helper.rs"
+test = false
 
 [[bin]]
 name = "tidepool-compile-report"
 path = "src/bin/tidepool-compile-report.rs"
+test = false
 
 [dependencies]
 async-trait = "0.1"

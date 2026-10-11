@@ -103,19 +103,13 @@
           "test_build": "//bridge/facade:exomonad_unit_tests_binary"
         },
         "exomonad-view-helper": {
-          "build": "//bridge/facade:exomonad-view-helper",
-          "test": "//bridge/facade:exomonad-view-helper_unit_tests",
-          "test_build": "//bridge/facade:exomonad-view-helper_unit_tests_binary"
+          "build": "//bridge/facade:exomonad-view-helper"
         },
         "tidepool": {
-          "build": "//bridge/facade:tidepool_bin",
-          "test": "//bridge/facade:tidepool_bin_unit_tests",
-          "test_build": "//bridge/facade:tidepool_bin_unit_tests_binary"
+          "build": "//bridge/facade:tidepool_bin"
         },
         "tidepool-compile-report": {
-          "build": "//bridge/facade:tidepool-compile-report",
-          "test": "//bridge/facade:tidepool-compile-report_unit_tests",
-          "test_build": "//bridge/facade:tidepool-compile-report_unit_tests_binary"
+          "build": "//bridge/facade:tidepool-compile-report"
         }
       },
       "directory": "bridge/facade",
@@ -276,9 +270,7 @@
     "tidepool-extract-cmd": {
       "binaries": {
         "tidepool-extract": {
-          "build": "//tidepool/extract-cmd:tidepool-extract",
-          "test": "//tidepool/extract-cmd:tidepool-extract_unit_tests",
-          "test_build": "//tidepool/extract-cmd:tidepool-extract_unit_tests_binary"
+          "build": "//tidepool/extract-cmd:tidepool-extract"
         }
       },
       "directory": "tidepool/extract-cmd",
@@ -373,9 +365,7 @@
     "tidepool-mcp": {
       "binaries": {
         "tidepool-effects-gen": {
-          "build": "//bridge/mcp:tidepool_effects_gen",
-          "test": "//bridge/mcp:tidepool_effects_gen_unit_tests",
-          "test_build": "//bridge/mcp:tidepool_effects_gen_unit_tests_binary"
+          "build": "//bridge/mcp:tidepool_effects_gen"
         }
       },
       "directory": "bridge/mcp",

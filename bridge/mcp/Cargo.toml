@@ -10,6 +10,11 @@ rust-version.workspace = true
 description = "Effect declarations, Haskell source assembly, and validation for Tidepool"
 readme = "../../README.md"
 
+[[bin]]
+name = "tidepool-effects-gen"
+path = "src/bin/tidepool-effects-gen.rs"
+test = false
+
 [dependencies]
 exomonad-tool.workspace = true
 tidepool-atomic-write.workspace = true

@@ -12,6 +12,7 @@ description = "The one builder for `tidepool-extract` invocations: binary resolu
 [[bin]]
 name = "tidepool-extract"
 path = "src/main.rs"
+test = false
 
 # Endpoint identity is captured beside the process boundary.  A strong digest
 # is required because returning mutable producer paths would recreate the

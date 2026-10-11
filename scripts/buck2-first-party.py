@@ -648,6 +648,9 @@ PREPARED_FIXTURE_RESOURCES = {
 def test_runtime_inputs(package_name, target_name, unit=False):
     env, resources, worker = {}, [], False
     fixture_names = []
+    if package_name == "tidepool-extract-cmd" and target_name == "no_open_coded_extract_spawns":
+        env["TIDEPOOL_WORKSPACE_SOURCE_ROOT"] = "$(location //build/rust:native_qualification_sources)"
+        resources.append("//build/rust:native_qualification_sources")
     if package_name == "tidepool-bignum" and target_name == "show_double_oracle":
         env["TIDEPOOL_GHC"] = "$(exe toolchains//:ghc)"
         env["TIDEPOOL_DOUBLE_ORACLE_SOURCE"] = "$(location :show_double_oracle_source)"
@@ -768,6 +771,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
 # runner as declared resources. LD_LIBRARY_PATH here names one declared
 # runtime-libraries directory; scalar controls stay in ordinary env.
 NATIVE_RESOURCE_ENV_KEYS = (
+    "TIDEPOOL_WORKSPACE_SOURCE_ROOT",
     "PATH",
     "EXOMONAD_BINDING_DIRECTORY_FAULT_LIBRARY",
     "EXOMONAD_INBOX_DIRECTORY_FAULT_LIBRARY",
