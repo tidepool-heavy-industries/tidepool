@@ -65,7 +65,7 @@ pub(super) struct EmbeddedProjection {
     // so a terminal actor remains linked to its exact history head in the snapshot.
     // Cold restart cannot reconstruct these associations from logical paths alone.
     conversations: HashMap<ActorRef, ConversationObservation>,
-    published_actors: Option<Vec<HostActorProjection>>,
+    published_actors: Option<watch::Sender<Vec<HostActorProjection>>>,
 }
 
 struct ConversationObservation {
@@ -253,13 +253,20 @@ impl EmbeddedProjection {
             head_for,
             history_finished_for,
         )?;
-        if self.published_actors.as_ref() != Some(&actors) {
+        if let Some(published) = &self.published_actors {
+            published.send_if_modified(|previous| {
+                if *previous == actors {
+                    return false;
+                }
+                previous.clone_from(&actors);
+                true
+            });
+        } else {
+            let (published, actors) = watch::channel(actors.clone());
             observation
-                .send(super::ActorHostReadiness::ActorsObserved {
-                    actors: actors.clone(),
-                })
+                .send(super::ActorHostReadiness::ActorsObserved { actors })
                 .ok();
-            self.published_actors = Some(actors.clone());
+            self.published_actors = Some(published);
         }
         control.update_host_projection(run.to_owned(), actors, conversations);
         Ok(())
@@ -344,13 +351,14 @@ mod tests {
                 )
                 .unwrap();
         }
-        let super::super::ActorHostReadiness::ActorsObserved { actors } =
+        let super::super::ActorHostReadiness::ActorsObserved { mut actors } =
             received.try_recv().unwrap()
         else {
             panic!("the projection must publish its typed actor observation");
         };
-        assert_eq!(actors[0].lifecycle, HostActorLifecycle::Waiting);
-        assert_eq!(actors[0].inference, Some(HostInferenceState::Idle));
+        assert_eq!(actors.borrow()[0].lifecycle, HostActorLifecycle::Waiting);
+        assert_eq!(actors.borrow()[0].inference, Some(HostInferenceState::Idle));
+        assert!(!actors.has_changed().unwrap());
         assert!(received.try_recv().is_err());
         let block = harness::embedding::InferenceBlock {
             request: harness::model::RequestId("retained-head".into()),
@@ -374,14 +382,14 @@ mod tests {
                 |_| false,
             )
             .unwrap();
-        let super::super::ActorHostReadiness::ActorsObserved { actors } =
-            received.try_recv().unwrap()
-        else {
-            panic!("an inference block must be observable without actor retirement");
-        };
-        assert_eq!(actors[0].lifecycle, HostActorLifecycle::Waiting);
+        assert!(received.try_recv().is_err());
+        assert!(actors.has_changed().unwrap());
         assert_eq!(
-            actors[0].inference,
+            actors.borrow_and_update()[0].lifecycle,
+            HostActorLifecycle::Waiting
+        );
+        assert_eq!(
+            actors.borrow()[0].inference,
             Some(HostInferenceState::Blocked { block })
         );
         root.terminal = Some(ActorTerminal {
@@ -402,11 +410,9 @@ mod tests {
                 |_| true,
             )
             .unwrap();
-        let super::super::ActorHostReadiness::ActorsObserved { actors } =
-            received.try_recv().unwrap()
-        else {
-            panic!("actor failure must remain observable while the browser stays ready");
-        };
+        assert!(received.try_recv().is_err());
+        assert!(actors.has_changed().unwrap());
+        let actors = actors.borrow_and_update();
         assert_eq!(actors[0].lifecycle, HostActorLifecycle::Lost);
         assert_eq!(actors[0].inference, None);
         assert_eq!(
