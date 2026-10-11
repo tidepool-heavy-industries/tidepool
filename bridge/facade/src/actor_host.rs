@@ -1230,34 +1230,47 @@ impl EmbeddedBrowserCommandDispatch {
             })
         };
 
-        let control = match &command {
+        let atomic_receipt = match &command {
             harness::server::HostCommand::Input { text, .. } => {
-                return match conversation.command_input(operation, text).await {
-                    Ok(receipt) => Ok(Some(receipt)),
-                    Err(error) => {
-                        // A Store failure after the atomic admission commit must
-                        // not turn a real envelope into a refused operation.
-                        if let Some(receipt) = store
-                            .embedded_command(command_run, operation)
-                            .map_err(|error| error.to_string())?
-                            .and_then(|record| record.receipt)
-                        {
-                            Ok(Some(receipt))
-                        } else {
-                            settle(CommandReceiptOutcome::Unconfirmed {
-                                target,
-                                reason: error.to_string(),
-                            })
-                        }
-                    }
-                };
+                Some(conversation.command_input(operation, text).await)
             }
+            harness::server::HostCommand::Recover { .. } => {
+                Some(conversation.command_recover(operation).await)
+            }
+            _ => None,
+        };
+        if let Some(result) = atomic_receipt {
+            return match result {
+                Ok(receipt) => Ok(Some(receipt)),
+                Err(error) => {
+                    // Observation cannot turn a committed input or recovery
+                    // authorization into a refusal after its atomic transition.
+                    if let Some(receipt) = store
+                        .embedded_command(command_run, operation)
+                        .map_err(|error| error.to_string())?
+                        .and_then(|record| record.receipt)
+                    {
+                        Ok(Some(receipt))
+                    } else {
+                        settle(CommandReceiptOutcome::Unconfirmed {
+                            target,
+                            reason: error.to_string(),
+                        })
+                    }
+                }
+            };
+        }
+        let control = match &command {
             harness::server::HostCommand::Interrupt { expected_round, .. } => {
                 harness::embedding::HostControl::Interrupt {
                     expected_round: *expected_round,
                 }
             }
             harness::server::HostCommand::Retire { .. } => harness::embedding::HostControl::Retire,
+            harness::server::HostCommand::Input { .. }
+            | harness::server::HostCommand::Recover { .. } => {
+                unreachable!("atomic commands return their retained receipt")
+            }
         };
         match conversation.control(control).await {
             Ok(_) => {
@@ -1269,8 +1282,9 @@ impl EmbeddedBrowserCommandDispatch {
                     harness::server::HostCommand::Interrupt { .. } => {
                         harness::server::CommandControl::Interrupt
                     }
-                    harness::server::HostCommand::Input { .. } => {
-                        unreachable!("input returns its atomic receipt")
+                    harness::server::HostCommand::Input { .. }
+                    | harness::server::HostCommand::Recover { .. } => {
+                        unreachable!("atomic commands return their retained receipt")
                     }
                 };
                 settle(CommandReceiptOutcome::ControlRequested { target, control })

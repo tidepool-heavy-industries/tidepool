@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use exomonad_actor::{ActorExitKind, ActorGraphNode, ActorRef, ActorWorkbenchPosture};
 use harness::{
-    embedding::{EmbeddedRoundId, HostIdentity},
+    embedding::{EmbeddedRoundId, HostIdentity, HostInferenceState},
     model::AgentPath,
     server::{HostActorKind, HostActorLifecycle, HostActorProjection, ServerControl},
 };
@@ -72,6 +72,7 @@ struct ConversationObservation {
     identity: HostIdentity,
     head: Option<String>,
     frozen: bool,
+    inference: Option<HostInferenceState>,
 }
 
 impl EmbeddedProjection {
@@ -82,6 +83,7 @@ impl EmbeddedProjection {
                 identity: identity.clone(),
                 head: None,
                 frozen: false,
+                inference: None,
             });
     }
 
@@ -153,29 +155,31 @@ impl EmbeddedProjection {
                 HostActorLifecycle::Retired | HostActorLifecycle::Lost
             );
             let observation = self.conversations.get_mut(&node.actor);
-            let (conversation, model_head_request) = if let Some(observation) = observation {
-                if !observation.frozen {
-                    match head_for(&observation.identity) {
-                        Ok(head) => {
-                            if head.is_some() {
-                                observation.head = head;
+            let (conversation, model_head_request, inference) =
+                if let Some(observation) = observation {
+                    if !observation.frozen {
+                        match head_for(&observation.identity) {
+                            Ok(head) => {
+                                if head.is_some() {
+                                    observation.head = head;
+                                }
                             }
+                            Err(harness::store::StoreError::InvalidEmbeddedBinding) => {
+                                observation.frozen = true;
+                            }
+                            Err(error) => return Err(error),
                         }
-                        Err(harness::store::StoreError::InvalidEmbeddedBinding) => {
-                            observation.frozen = true;
-                        }
-                        Err(error) => return Err(error),
+                        // Kernel retirement can precede the driver committing its last request.
+                        observation.frozen |= terminal && history_finished_for(node.actor);
                     }
-                    // Kernel retirement can precede the driver committing its last request.
-                    observation.frozen |= terminal && history_finished_for(node.actor);
-                }
-                (
-                    Some(observation.identity.actor.0.clone()),
-                    observation.head.clone(),
-                )
-            } else {
-                (None, None)
-            };
+                    (
+                        Some(observation.identity.actor.0.clone()),
+                        observation.head.clone(),
+                        observation.inference.clone(),
+                    )
+                } else {
+                    (None, None, None)
+                };
             actors.push(HostActorProjection {
                 identity,
                 output_origin: Some(harness::store::actor_output::ActorOutputOrigin {
@@ -193,6 +197,7 @@ impl EmbeddedProjection {
                     HostActorKind::Workflow
                 },
                 lifecycle,
+                inference,
                 active_round: if matches!(
                     lifecycle,
                     HostActorLifecycle::Retired | HostActorLifecycle::Lost
@@ -224,8 +229,22 @@ impl EmbeddedProjection {
         states: &LifecycleState,
         active_round_for: impl Fn(ActorRef) -> Option<EmbeddedRoundId>,
         head_for: impl Fn(&HostIdentity) -> Result<Option<String>, harness::store::StoreError>,
+        inference_for: impl Fn(&HostIdentity) -> Result<HostInferenceState, harness::store::StoreError>,
         history_finished_for: impl Fn(ActorRef) -> bool,
     ) -> Result<(), harness::store::StoreError> {
+        for node in nodes {
+            if let Some(observation) = self.conversations.get_mut(&node.actor) {
+                observation.inference = if node.terminal.is_some() || observation.frozen {
+                    None
+                } else {
+                    match inference_for(&observation.identity) {
+                        Ok(inference) => Some(inference),
+                        Err(harness::store::StoreError::InvalidEmbeddedBinding) => None,
+                        Err(error) => return Err(error),
+                    }
+                };
+            }
+        }
         let (actors, conversations) = self.projection(
             run,
             nodes,
@@ -320,6 +339,7 @@ mod tests {
                     &LifecycleState::default(),
                     |_| None,
                     |_| Ok(Some("retained-head".into())),
+                    |_| Ok(HostInferenceState::Idle),
                     |_| false,
                 )
                 .unwrap();
@@ -330,7 +350,40 @@ mod tests {
             panic!("the projection must publish its typed actor observation");
         };
         assert_eq!(actors[0].lifecycle, HostActorLifecycle::Waiting);
+        assert_eq!(actors[0].inference, Some(HostInferenceState::Idle));
         assert!(received.try_recv().is_err());
+        let block = harness::embedding::InferenceBlock {
+            request: harness::model::RequestId("retained-head".into()),
+            generation: 1,
+            reason: harness::embedding::InferenceBlockReason::ContinuityUnproven,
+        };
+        projection
+            .publish(
+                &control,
+                &observations,
+                "run",
+                &[root.clone()],
+                &LifecycleState::default(),
+                |_| None,
+                |_| Ok(Some("retained-head".into())),
+                |_| {
+                    Ok(HostInferenceState::Blocked {
+                        block: block.clone(),
+                    })
+                },
+                |_| false,
+            )
+            .unwrap();
+        let super::super::ActorHostReadiness::ActorsObserved { actors } =
+            received.try_recv().unwrap()
+        else {
+            panic!("an inference block must be observable without actor retirement");
+        };
+        assert_eq!(actors[0].lifecycle, HostActorLifecycle::Waiting);
+        assert_eq!(
+            actors[0].inference,
+            Some(HostInferenceState::Blocked { block })
+        );
         root.terminal = Some(ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "runtime failed".into(),
@@ -345,6 +398,7 @@ mod tests {
                 &LifecycleState::default(),
                 |_| None,
                 |_| Ok(Some("retained-head".into())),
+                |_| Ok(HostInferenceState::Idle),
                 |_| true,
             )
             .unwrap();
@@ -354,6 +408,7 @@ mod tests {
             panic!("actor failure must remain observable while the browser stays ready");
         };
         assert_eq!(actors[0].lifecycle, HostActorLifecycle::Lost);
+        assert_eq!(actors[0].inference, None);
         assert_eq!(
             actors[0].model_head_request.as_deref(),
             Some("retained-head")

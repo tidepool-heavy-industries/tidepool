@@ -758,6 +758,7 @@ pub struct RunStatus {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recovered_actors: Vec<RecoveredActorObservation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Latest host-owned observation; the run phase determines host liveness.
     pub actors: Vec<harness::server::HostActorProjection>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lost_state: Vec<String>,

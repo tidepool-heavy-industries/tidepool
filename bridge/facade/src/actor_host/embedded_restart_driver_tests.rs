@@ -59,6 +59,30 @@ async fn wait_head(host: &HostedTestRuntime, previous: Option<&RequestId>) -> Re
     .expect("production driver must settle its actual durable round")
 }
 
+async fn command_receipt(
+    host: &HostedTestRuntime,
+    run: &str,
+    operation: harness::embedding::ClientOperationId,
+) -> harness::server::CommandReceiptOutcome {
+    host.while_host_running(tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(receipt) = host
+                .runtime
+                .store()
+                .embedded_command(run, operation)
+                .unwrap()
+                .and_then(|record| record.receipt)
+            {
+                return receipt.outcome;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }))
+    .await
+    .expect("host must remain available until its exact command settles")
+    .expect("the browser command must settle its durable receipt")
+}
+
 #[tokio::test]
 async fn driver_reopens_retained_final_without_provider_then_waits_for_explicit_input() {
     let files = tempfile::tempdir().unwrap();
@@ -175,6 +199,21 @@ fn final_turn() -> ResponsesTurn {
 
 #[async_trait::async_trait]
 impl ResponsesTransport for InterruptedStream {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         panic!("the production driver must use streamed dispatch");
     }
@@ -193,7 +232,7 @@ impl ResponsesTransport for InterruptedStream {
         if self.emit_call {
             let event = response
                 .accept(
-                    &json!({"type":"response.output_item.done", "item": {
+                    &json!({"type":"response.output_item.done", "output_index":0, "item": {
                         "type":"custom_tool_call", "call_id":"effect-before-eof", "name":"haskell",
                         "input": tidepool_testing::fixture_source("bridge/facade/src/actor_host/restart_effect_once.hs"),
                     }})
@@ -241,7 +280,7 @@ impl ResponsesTransport for InterruptedStream {
 }
 
 #[tokio::test]
-async fn driver_retains_actor_after_eof_and_explicit_input_never_redispatches_admitted_call() {
+async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches_admitted_call() {
     for emit_call in [false, true] {
         let files = tempfile::tempdir().unwrap();
         let settings = hosted_test_settings(&files, 1);
@@ -353,7 +392,48 @@ async fn driver_retains_actor_after_eof_and_explicit_input_never_redispatches_ad
             .input("explicit-next", "operator", "continue explicitly")
             .await
             .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "ordinary input must not release the durable inference block"
+        );
+        let harness::embedding::HostInferenceState::Blocked { block } = host
+            .runtime
+            .store()
+            .embedded_inference_state(conversation.identity())
+            .unwrap()
+        else {
+            panic!("the actual reopened interruption must remain blocked");
+        };
+        let operation_id = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
+        let command = harness::server::HostCommand::Recover {
+            target: conversation.identity().clone(),
+            expected_block: block,
+            mode: harness::embedding::RecoveryMode::Exact,
+        };
+        host.http_command(operation_id, command.clone())
+            .await
+            .unwrap();
+        assert!(matches!(
+            command_receipt(&host, &conversation.identity().run, operation_id).await,
+            harness::server::CommandReceiptOutcome::RecoveryAuthorized { .. }
+        ));
         let successor = wait_head(&host, None).await;
+        host.http_command(operation_id, command.clone())
+            .await
+            .unwrap();
+        let stale_operation = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
+        host.http_command(stale_operation, command).await.unwrap();
+        assert!(matches!(
+            command_receipt(&host, &conversation.identity().run, stale_operation).await,
+            harness::server::CommandReceiptOutcome::Refused { .. }
+        ));
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "retrying recovery must only return its retained receipt"
+        );
         assert_eq!(
             host.runtime
                 .store()
@@ -396,4 +476,98 @@ async fn driver_retains_actor_after_eof_and_explicit_input_never_redispatches_ad
         drop(conversation);
         host.stop().await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn blocked_actor_can_be_retired_through_its_browser_owner_without_inference() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider_calls = Arc::clone(&calls);
+    let host = HostedTestRuntime::start_with_factory(
+        &settings,
+        |_| {},
+        move |runtime, _| {
+            Arc::new(InterruptedStream {
+                runtime: Arc::downgrade(runtime),
+                inputs: Arc::new(Mutex::new(Vec::new())),
+                calls: Arc::clone(&provider_calls),
+                emit_call: false,
+            })
+        },
+    )
+    .await
+    .unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            host.http_input("interrupt this model round").await.unwrap();
+            let conversation = host
+                .context
+                .binding(host.context.actor.identity())
+                .unwrap()
+                .conversation()
+                .unwrap();
+            host.while_host_running(host.context.while_root_live(
+                "inference block",
+                tokio::time::timeout(Duration::from_secs(30), async {
+                    loop {
+                        if matches!(
+                            host.runtime
+                                .store()
+                                .embedded_inference_state(conversation.identity())
+                                .unwrap(),
+                            harness::embedding::HostInferenceState::Blocked { .. }
+                        ) && conversation.active_round().is_none()
+                        {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+            host.http_input("this remains queued while inference is blocked")
+                .await
+                .unwrap();
+            let interrupted = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
+            host.http_command(
+                interrupted,
+                harness::server::HostCommand::Interrupt {
+                    target: conversation.identity().clone(),
+                    expected_round: harness::embedding::EmbeddedRoundId(uuid::Uuid::new_v4()),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                command_receipt(host, &conversation.identity().run, interrupted).await,
+                harness::server::CommandReceiptOutcome::Refused { .. }
+            ));
+            let retire = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
+            host.http_command(
+                retire,
+                harness::server::HostCommand::Retire {
+                    target: conversation.identity().clone(),
+                },
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                command_receipt(host, &conversation.identity().run, retire).await,
+                harness::server::CommandReceiptOutcome::ControlRequested {
+                    control: harness::server::CommandControl::Retire,
+                    ..
+                }
+            ));
+            assert_eq!(
+                host.context.actor.terminal().get().unwrap().kind,
+                exomonad_actor::ActorExitKind::Cancelled
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        })
+    })
+    .await;
 }

@@ -122,6 +122,10 @@ pub(super) struct TestResponsesTransport(Arc<dyn harness::engine::ResponsesTrans
 #[cfg(test)]
 #[async_trait::async_trait]
 impl harness::engine::ResponsesTransport for TestResponsesTransport {
+    fn response_contract(&self) -> Result<(ResponsesRoute, ResponsesProtocol), TransportError> {
+        self.0.response_contract()
+    }
+
     async fn create(
         &self,
         request: harness::transport::ResponsesRequest,
@@ -157,6 +161,26 @@ pub(super) struct EmbeddedActor {
 }
 
 impl EmbeddedService {
+    pub(super) fn projection_target(
+        &self,
+        model: String,
+    ) -> Result<harness::context::ContextProjectionTarget, String> {
+        use harness::engine::ResponsesTransport;
+        #[cfg(test)]
+        let contract = match &self.test_transport {
+            Some(transport) => transport.response_contract(),
+            None => responses_client(&self.settings).response_contract(),
+        };
+        #[cfg(not(test))]
+        let contract = responses_client(&self.settings).response_contract();
+        let (route, protocol) = contract.map_err(|error| error.to_string())?;
+        Ok(harness::context::ContextProjectionTarget {
+            model,
+            route,
+            protocol,
+        })
+    }
+
     /// Bind the browser and open the sole run Store before admitting an actor.
     pub(super) async fn prepare_owned(
         run_root: &Path,
@@ -184,6 +208,10 @@ impl EmbeddedService {
         runtime
             .store()
             .recover_embedded_command_claims(&super::runtime_namespace(run_root))
+            .map_err(|error| error.to_string())?;
+        runtime
+            .store()
+            .recover_embedded_inference_after_host_loss(&super::runtime_namespace(run_root))
             .map_err(|error| error.to_string())?;
         let server_config = ServerConfig::new(settings.asset_root.clone())
             .with_history_store(runtime.store())
@@ -356,6 +384,7 @@ pub(super) async fn attach_actor(
 
 pub(super) async fn attach_checkpoint_actor(
     runtime: &EmbeddedHarnessRuntime,
+    projection_target: harness::context::ContextProjectionTarget,
     attachment: super::provider_attachment::ProviderAttachment,
     run_root: &Path,
     installation: LocalResidentInstallation,
@@ -383,7 +412,14 @@ pub(super) async fn attach_checkpoint_actor(
     };
     let policy = Arc::new(EmbeddedPolicyInstallation::from_installation(&installation));
     let embedded = runtime
-        .attach_checkpoint(attachment, identity, &installation, policy, captured)
+        .attach_checkpoint(
+            attachment,
+            identity,
+            &installation,
+            policy,
+            captured,
+            &projection_target,
+        )
         .map_err(|error| error.to_string())?;
     if let Some(input) = initial_input.filter(|_| runtime.admit_initial_input(actor)) {
         embedded
@@ -649,6 +685,31 @@ where
         if *cancellation.borrow() {
             return Ok(());
         }
+        let recovery_changed = round_control.recovery_changed();
+        tokio::pin!(recovery_changed);
+        recovery_changed.as_mut().enable();
+        let inference = store
+            .embedded_inference_state(conversation.identity())
+            .map_err(harness::engine::EngineError::from)?;
+        if matches!(
+            inference,
+            harness::embedding::HostInferenceState::Blocked { .. }
+        ) {
+            lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
+            tokio::select! {
+                biased;
+                changed = cancellation.changed() => {
+                    if changed.is_err() || *cancellation.borrow() { return Ok(()); }
+                }
+                () = &mut recovery_changed => {}
+                wake = incoming.recv() => if wake.is_none() { return Ok(()); },
+            }
+            continue;
+        }
+        let authorized_recovery = matches!(
+            inference,
+            harness::embedding::HostInferenceState::Recovering { .. }
+        );
         // Wakes are hints. A prior Engine round may have returned while a
         // forwarded hint remained in its receiver; the Store is authoritative.
         let frontier = store
@@ -661,7 +722,8 @@ where
             .map(|envelope| harness::mailbox::DurableMailboxWake {
                 envelope_id: envelope.id,
             });
-        if first.is_none()
+        if !authorized_recovery
+            && first.is_none()
             && (frontier.pending_interruption.is_some() || frontier.pending_head.is_none())
         {
             tokio::select! {
@@ -669,6 +731,7 @@ where
                 changed = cancellation.changed() => {
                     if changed.is_err() || *cancellation.borrow() { return Ok(()); }
                 }
+                () = &mut recovery_changed => {}
                 wake = incoming.recv() => if wake.is_none() { return Ok(()); },
             }
             continue;
@@ -680,7 +743,8 @@ where
                 .send(first)
                 .map_err(|_| "embedded Engine wake receiver closed")?;
         }
-        let recovering_this_round = recovering || frontier.pending_head.is_some();
+        let recovering_this_round =
+            authorized_recovery || recovering || frontier.pending_head.is_some();
         let mut lifetime_stopped = false;
         let round = round_control
             .begin()
@@ -754,12 +818,35 @@ where
                 head_request,
                 cause,
             }) => {
-                // Engine has confirmed cleanup and retained this pending head.
-                // A stream failure alone never authorizes another provider
-                // request. Durable explicit input triggers existing recovery,
-                // which reconciles retained claims without dispatching them.
-                tracing::warn!(?actor, ?head_request, %cause, "embedded provider round interrupted; awaiting explicit input");
+                if !matches!(
+                    store.embedded_inference_state(conversation.identity())
+                        .map_err(harness::engine::EngineError::from)?,
+                    harness::embedding::HostInferenceState::Blocked { block }
+                        if block.request == head_request
+                ) {
+                    return Err(
+                        "interrupted provider round lacks its exact durable inference block".into(),
+                    );
+                }
+                tracing::warn!(?actor, ?head_request, %cause, "embedded provider round interrupted; awaiting explicit recovery");
                 observed_round.fail(exomonad_model::ProviderFailure::TransportFailed);
+                recovering = true;
+                lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
+                continue;
+            }
+            Err(harness::engine::EngineError::InferenceBlocked { block }) => {
+                if !matches!(
+                    store.embedded_inference_state(conversation.identity())
+                        .map_err(harness::engine::EngineError::from)?,
+                    harness::embedding::HostInferenceState::Blocked { block: retained }
+                        if retained == block
+                ) {
+                    return Err("provider refusal lacks its exact durable inference block".into());
+                }
+                observed_round.fail(exomonad_model::ProviderFailure::Other(format!(
+                    "{:?}",
+                    block.reason
+                )));
                 recovering = true;
                 lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
                 continue;
