@@ -1669,7 +1669,7 @@ where
             .native_start
             .take()
             .expect("one captured native advance");
-        let runner = self.environment.runner.clone();
+        let environment = self.environment.clone();
         Self::owned_step_task(
             owned,
             move |owned| {
@@ -1678,18 +1678,18 @@ where
                     .workbench
                     .as_ref()
                     .expect("native advance retains original admitted workbench");
-                let green = owned
+                let execution = &mut owned
                     .state
                     .cursor
                     .running
                     .as_mut()
-                    .and_then(|current| current.green.as_mut());
+                    .expect("original fragment execution")
+                    .execution;
                 Box::pin(async move {
-                    let advance = advance_fragment(workbench, &runner, context, request);
-                    match green {
-                        Some(green) => green.progress_while(advance).await,
-                        None => advance.await,
-                    }
+                    execution
+                        .native(&environment, &context)
+                        .advance_fragment(workbench, request)
+                        .await
                 })
             },
             |_behavior, _kernel, mut owned, result| {
@@ -1751,18 +1751,11 @@ where
                                     .expect("display owns its fragment"),
                                 remaining: &mut cursor.unit.display_remaining,
                             };
-                            let preparation = prepare_actor_display_boundary(
-                                &environment,
-                                &context,
-                                boundary,
-                                allowance,
-                                operation,
-                                Some(receipt),
-                            );
-                            let prepared = match current.green.as_mut() {
-                                Some(green) => green.progress_while(preparation).await,
-                                None => preparation.await,
-                            };
+                            let prepared = current
+                                .execution
+                                .native(&environment, &context)
+                                .prepare_display(boundary, allowance, operation, Some(receipt))
+                                .await;
                             if let Ok((_, Some(display))) = &prepared {
                                 let cursor = &mut owned.state.cursor;
                                 let current =
@@ -2096,7 +2089,7 @@ where
             .cursor
             .running
             .as_ref()
-            .is_some_and(|current| current.green.is_some())
+            .is_some_and(|current| current.execution.has_green())
         {
             let (wait, receipt) = green_notebook::EffectReceipt::split(pending);
             let control = owned
@@ -2104,8 +2097,7 @@ where
                 .cursor
                 .running
                 .as_ref()
-                .and_then(|current| current.green.as_ref())
-                .and_then(green::GreenInvocation::active_wait_control)
+                .and_then(|current| current.execution.active_wait_control())
                 .unwrap_or(control);
             // Each child's expiry claim is independent. Whole-cell cancellation
             // is still observed by the original owned Green task.
@@ -2128,14 +2120,10 @@ where
                 .as_mut()
                 .expect("async original fragment");
             current.inflight_effect = None;
-            current
-                .green
-                .as_mut()
-                .expect("async frontiers")
-                .enqueue_frontier(
-                    std::mem::take(&mut current.scopes),
-                    Box::pin(async move { receipt.attach(operation.await) }),
-                );
+            current.execution.enqueue_frontier(
+                std::mem::take(&mut current.scopes),
+                Box::pin(async move { receipt.attach(operation.await) }),
+            );
             return self.owned_green_task(owned);
         }
         let observed_child = pending.wait.observe_after_resume();
@@ -2252,22 +2240,20 @@ where
                         .control
                         .clone()
                         .expect("original async cancellation owner");
-                    let green = owned
+                    let execution = &mut owned
                         .state
                         .cursor
                         .running
                         .as_mut()
                         .expect("original async fragment")
-                        .green
-                        .as_mut()
-                        .expect("async frontiers");
+                        .execution;
                     tokio::select! {
                         biased;
                         () = control.wait_for_cancellation() => {
-                            green.cancel_parent();
+                            execution.cancel_parent();
                             Err(ResidentActorWorkbenchError::InvocationCancelled)
                         }
-                        ready = green.next() => ready,
+                        ready = execution.next() => ready,
                     }
                 })
             },

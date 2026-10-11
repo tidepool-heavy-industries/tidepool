@@ -1783,17 +1783,53 @@ async fn resident_await_watch_case(case: WatchCase) {
     }
 }
 
+#[tokio::test]
+async fn compiled_tool_replies_and_finishes_with_unjoined_green_children() {
+    resident_cleanup_case_mode(false, true).await;
+}
+
 async fn resident_cleanup_case(fail_hook: bool) {
+    resident_cleanup_case_mode(fail_hook, false).await;
+}
+
+async fn bounded_compiled_policy_call(
+    endpoint: &dyn exomonad_actor::ResidentToolEndpoint,
+    name: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        endpoint.dispatch_json_boxed(ToolInvocation {
+            context: None,
+            name: name.into(),
+            arguments: ToolArguments::Structured(arguments),
+        }),
+    )
+    .await
+    .expect("compiled tool makes progress after policy preparation")
+    .expect("compiled tool reply")
+}
+
+async fn resident_cleanup_case_mode(fail_hook: bool, unjoined_green: bool) {
     eval_harness::require_extract();
 
-    let session = support::process_unique_session(if fail_hook { 178 } else { 177 });
-    let declarations = [
+    let session = support::process_unique_session(if unjoined_green {
+        176
+    } else if fail_hook {
+        178
+    } else {
+        177
+    });
+    let mut declarations = vec![
         tidepool_mcp::agent_tools_decl(),
         tidepool_mcp::actor_decl(),
         tidepool_mcp::actor_kernel_decl(),
         tidepool_mcp::actor_local_decl(),
         tidepool_mcp::fs_read_decl(),
     ];
+    if unjoined_green {
+        declarations.push(tidepool_mcp::green_decl());
+    }
     let effects = tidepool_mcp::ensure_effects_module(&declarations).expect("actor effects");
     let mut include = effects.include_paths().to_vec();
     include.push(eval_harness::prelude_path());
@@ -1802,9 +1838,19 @@ async fn resident_cleanup_case(fail_hook: bool) {
         "Tidepool.Agent.Contract",
     );
     let preamble = insert_preamble_imports(&preamble, "Tidepool.Effects.Row (knownEffects)");
+    let preamble = if unjoined_green {
+        insert_preamble_imports(&preamble, "qualified Tidepool.Async as Async")
+    } else {
+        preamble
+    };
+    let actor_effects = if unjoined_green {
+        "'[AgentTools, Actor, Green]"
+    } else {
+        "'[AgentTools, Actor]"
+    };
     let preamble = format!(
         "{preamble}\
-         type ActorEffects = '[AgentTools, Actor]\n\
+         type ActorEffects = {actor_effects}\n\
          data EchoInput = EchoInput {{ value :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
          data EchoOutput = EchoOutput {{ doubled :: Int }} deriving (Generic, ToJSON, JsonSchema)\n\
          data SpawnInput = SpawnInput {{ seed :: Int }} deriving (Generic, FromJSON, JsonSchema)\n\
@@ -1833,7 +1879,9 @@ async fn resident_cleanup_case(fail_hook: bool) {
             HaskellTurnRequest {
                 exact_context: None,
                 session_id: None,
-                turn_text: if fail_hook {
+                turn_text: if unjoined_green {
+                    include_str!("resident_local_actor/green_reply_policy.hs")
+                } else if fail_hook {
                     include_str!("resident_local_actor/policy_failed_hook.hs")
                 } else {
                     include_str!("resident_local_actor/policy.hs")
@@ -1967,6 +2015,68 @@ async fn resident_cleanup_case(fail_hook: bool) {
     assert_eq!(sibling_installation.actor.identity(), sibling.identity());
     assert_eq!(sibling_installation.supervisor_parent, None);
     assert_eq!(sibling_installation.context_parent, None);
+
+    if unjoined_green {
+        assert_eq!(
+            bounded_compiled_policy_call(
+                policy.as_ref(),
+                "double_value",
+                serde_json::json!({"value": 6})
+            )
+            .await,
+            serde_json::json!({"doubled": 12})
+        );
+        assert_eq!(
+            bounded_compiled_policy_call(policy.as_ref(), "current_value", serde_json::json!({}))
+                .await,
+            serde_json::json!({"current": 0}),
+            "reply continuation reaches another tool admission despite an unjoined child"
+        );
+        assert_eq!(
+            bounded_compiled_policy_call(
+                policy.as_ref(),
+                "finish_value",
+                serde_json::json!({"confirm": true})
+            )
+            .await,
+            serde_json::json!({"current": 0})
+        );
+        task.await.expect("completed parent task");
+        assert_eq!(
+            actor.terminal().wait().await.kind,
+            exomonad_actor::ActorExitKind::Completed
+        );
+        assert!(actor
+            .terminal()
+            .cleanup()
+            .expect("original parent cleanup")
+            .is_confirmed());
+        assert_eq!(
+            bounded_compiled_policy_call(
+                sibling_installation.policy.as_ref(),
+                "finish_value",
+                serde_json::json!({"confirm": true})
+            )
+            .await,
+            serde_json::json!({"current": 0})
+        );
+        sibling_task.await.expect("completed sibling task");
+        assert_eq!(
+            sibling.terminal().wait().await.kind,
+            exomonad_actor::ActorExitKind::Completed
+        );
+        assert!(sibling
+            .terminal()
+            .cleanup()
+            .expect("original sibling cleanup")
+            .is_confirmed());
+        assert!(forest
+            .shutdown()
+            .await
+            .iter()
+            .all(exomonad_actor::ForestRootShutdown::is_confirmed));
+        return;
+    }
 
     let changed = sibling_installation
         .policy

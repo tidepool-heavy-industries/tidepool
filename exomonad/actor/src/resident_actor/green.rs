@@ -110,6 +110,317 @@ impl<A> Default for GreenInvocation<A> {
     }
 }
 
+/// Owns every retained frontier for one admitted invocation. Native execution
+/// always borrows this owner, including the ordinary invocation without Green.
+pub(super) struct InvocationExecution<A> {
+    green: Option<GreenInvocation<A>>,
+}
+
+impl<A> Default for InvocationExecution<A> {
+    fn default() -> Self {
+        Self { green: None }
+    }
+}
+
+impl<A: Send + 'static> InvocationExecution<A> {
+    #[cfg(test)]
+    pub(super) fn from_green(green: GreenInvocation<A>) -> Self {
+        Self { green: Some(green) }
+    }
+    #[cfg(test)]
+    pub(super) async fn test_drive<T>(&mut self, operation: impl Future<Output = T>) -> T {
+        self.drive(operation).await
+    }
+    pub(super) fn has_green(&self) -> bool {
+        self.green.is_some()
+    }
+    pub(super) fn active_work(&self) -> Option<Arc<InvocationWork>> {
+        self.green.as_ref().and_then(GreenInvocation::active_work)
+    }
+    pub(super) fn active_realm(&self) -> Option<RealmId> {
+        self.green.as_ref().and_then(GreenInvocation::active_realm)
+    }
+    pub(super) fn active_wait_control(&self) -> Option<Arc<crate::WorkbenchExecutionControl>> {
+        self.green
+            .as_ref()
+            .and_then(GreenInvocation::active_wait_control)
+    }
+    pub(super) fn cancel_parent(&mut self) {
+        if let Some(green) = &mut self.green {
+            green.cancel_parent();
+        }
+    }
+    pub(super) fn enqueue_frontier(
+        &mut self,
+        scopes: Vec<scopes::ScopeFrame>,
+        future: BoxFuture<'static, (Result<ResidentOutcome, ResidentActorWorkbenchError>, A)>,
+    ) {
+        self.green
+            .as_mut()
+            .expect("issued Green invocation")
+            .enqueue_frontier(scopes, future);
+    }
+    pub(super) async fn next(&mut self) -> Result<Completion<A>, ResidentActorWorkbenchError> {
+        self.green
+            .as_mut()
+            .expect("issued Green invocation")
+            .next()
+            .await
+    }
+    pub(super) fn prepare<H, O>(
+        &mut self,
+        behavior: &mut ResidentKernelBehavior<H, O>,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        owner: &CurrentEffectOwner<'_>,
+        scopes: &mut Vec<scopes::ScopeFrame>,
+        boundary: GreenBoundary,
+    ) -> Result<GreenAdvance, ResidentActorWorkbenchError>
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        behavior.prepare_green_operation(
+            kernel,
+            context,
+            owner,
+            self.green.get_or_insert_with(Default::default),
+            scopes,
+            boundary,
+        )
+    }
+    pub(super) fn apply<H, O>(
+        &mut self,
+        behavior: &ResidentKernelBehavior<H, O>,
+        context: &ActorSessionContext,
+        completion: Completion<A>,
+    ) -> Result<Option<Completion<A>>, ResidentActorWorkbenchError>
+    where
+        H: DispatchEffect<O> + Send + 'static,
+        O: OutputSink + Sync + 'static,
+    {
+        behavior.apply_green_frontier(
+            context,
+            self.green.as_mut().expect("issued Green invocation"),
+            completion,
+        )
+    }
+    pub(super) fn native<'a, H, O>(
+        &'a mut self,
+        environment: &'a ResidentEnvironment<H, O>,
+        context: &ActorSessionContext,
+    ) -> NativeExecution<'a, H, O, A> {
+        NativeExecution {
+            invocation: self,
+            environment,
+            context: context.clone(),
+        }
+    }
+    // Ready completions remain in MaybeDone until the original scheduler selects
+    // them. Dropping this await never detaches or transfers frontier ownership.
+    async fn drive<T>(&mut self, operation: impl Future<Output = T>) -> T {
+        tokio::pin!(operation);
+        poll_fn(|cx| {
+            if let Some(green) = &mut self.green {
+                for pending in &mut green.pending {
+                    let _ = Pin::new(&mut pending.future).poll(cx);
+                }
+            }
+            operation.as_mut().poll(cx)
+        })
+        .await
+    }
+}
+
+/// The invocation's advancing capability. The runner and generic polling
+/// implementation are private; consumers submit named native operations.
+pub(super) struct NativeExecution<'a, H, O, A> {
+    invocation: &'a mut InvocationExecution<A>,
+    environment: &'a ResidentEnvironment<H, O>,
+    context: ActorSessionContext,
+}
+
+impl<H, O, A> NativeExecution<'_, H, O, A>
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+    A: Send + 'static,
+{
+    pub(super) async fn resume_tool_invocation(
+        &mut self,
+        hole: ResidentHole,
+        name: String,
+        arguments: serde_json::Value,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.invocation
+            .drive(self.environment.runner.resume_tool_invocation(
+                self.context.clone(),
+                hole,
+                name,
+                arguments,
+            ))
+            .await
+    }
+    pub(super) async fn finish_scope(
+        &mut self,
+        kernel: &KernelContext,
+        frame: scopes::ScopeFrame,
+        body: Result<(), tidepool_bridge_effects::ScopeFailure>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.invocation
+            .drive(scopes::finish_scope(
+                self.environment.clone(),
+                kernel.clone(),
+                self.context.clone(),
+                frame,
+                body,
+            ))
+            .await
+    }
+    pub(super) async fn capture_boundary(
+        &mut self,
+        outcome: ResidentOutcome,
+        realm: RealmId,
+    ) -> Result<ResidentActorBoundary, ResidentActorWorkbenchError> {
+        self.invocation
+            .drive(
+                self.environment
+                    .runner
+                    .capture_boundary(self.context.clone(), outcome, realm),
+            )
+            .await
+    }
+    pub(super) async fn resume_unit(
+        &mut self,
+        hole: ResidentHole,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.invocation
+            .drive(
+                self.environment
+                    .runner
+                    .resume_unit(self.context.clone(), hole),
+            )
+            .await
+    }
+    pub(super) async fn resume_reply_rejection(
+        &mut self,
+        hole: ResidentHole,
+        error: crate::ReplyError,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.invocation
+            .drive(self.environment.runner.resume_reply_rejection(
+                self.context.clone(),
+                hole,
+                error,
+            ))
+            .await
+    }
+    pub(super) async fn resolve_command(
+        &mut self,
+        behavior: &mut ResidentKernelBehavior<H, O>,
+        kernel: &KernelContext,
+        hole: ResidentHole,
+        request: crate::generated::commands::CommandsReq,
+        work: Option<&InvocationWork>,
+    ) -> commands::CommandResolution {
+        self.invocation
+            .drive(behavior.resolve_command(kernel, &self.context, hole, request, work))
+            .await
+    }
+    pub(super) async fn prepare_command_presentation(
+        &mut self,
+        workbench: &crate::ResidentActorWorkbench<H, O>,
+        request: command_presentation::CommandPresentationRequest,
+        permitted: bool,
+    ) -> Result<command_presentation::PreparedCommandPresentation, ResidentActorWorkbenchError>
+    {
+        self.invocation
+            .drive(command_presentation::prepare(
+                &self.environment.commands,
+                &self.context,
+                workbench,
+                request,
+                permitted,
+            ))
+            .await
+    }
+    pub(super) async fn resume_value<T: tidepool_bridge::ToHaskell + Send + 'static>(
+        &mut self,
+        hole: ResidentHole,
+        value: T,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.invocation
+            .drive(
+                self.environment
+                    .runner
+                    .resume_value(self.context.clone(), hole, value),
+            )
+            .await
+    }
+    pub(super) async fn run_scope_callback(
+        &mut self,
+        callback: RootCustody,
+        realm: RealmId,
+        token: i64,
+        work: Arc<InvocationWork>,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.invocation
+            .drive(self.environment.runner.run_owned_scope_callback(
+                self.context.clone(),
+                callback,
+                realm,
+                token,
+                work,
+            ))
+            .await
+    }
+    pub(super) async fn advance_fragment(
+        &mut self,
+        workbench: &crate::ResidentActorWorkbench<H, O>,
+        request: owned_workbench::WorkbenchFragmentRequest,
+    ) -> Result<owned_workbench::WorkbenchFragmentAdvance, ResidentActorWorkbenchError> {
+        self.invocation
+            .drive(owned_workbench::advance_fragment(
+                workbench,
+                &self.environment.runner,
+                self.context.clone(),
+                request,
+            ))
+            .await
+    }
+    pub(super) async fn prepare_display(
+        &mut self,
+        boundary: ResidentActorBoundary,
+        allowance: i64,
+        operation: Option<WorkbenchOperationId>,
+        receipt: Option<DisplayReceiptSubmission<'_>>,
+    ) -> Result<(ResidentActorBoundary, Option<WorkbenchDisplayOutput>), ResidentActorWorkbenchError>
+    {
+        self.invocation
+            .drive(prepare_actor_display_boundary(
+                self.environment,
+                &self.context,
+                boundary,
+                allowance,
+                operation,
+                receipt,
+            ))
+            .await
+    }
+    pub(super) async fn resolve_effect(
+        &mut self,
+        behavior: &mut ResidentKernelBehavior<H, O>,
+        kernel: &KernelContext,
+        owner: CurrentEffectOwner<'_>,
+        ancestry: &crate::CallAncestry,
+        boundary: ResidentActorBoundary,
+    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.invocation
+            .drive(behavior.resolve_effect(kernel, &self.context, owner, ancestry, boundary))
+            .await
+    }
+}
+
 impl<A: Send + 'static> GreenInvocation<A> {
     pub(super) fn active_work(&self) -> Option<Arc<InvocationWork>> {
         self.threads
@@ -209,23 +520,6 @@ impl<A: Send + 'static> GreenInvocation<A> {
                 }
             }
             Poll::Pending
-        })
-        .await
-    }
-
-    /// A parked frontier may own the FIFO position needed by a native advance.
-    /// Keep polling both under this invocation; ready frontiers retain their
-    /// completion until `next` selects them, without resuming a thread early.
-    pub(super) async fn progress_while<T>(
-        &mut self,
-        operation: impl std::future::Future<Output = T>,
-    ) -> T {
-        tokio::pin!(operation);
-        poll_fn(|cx| {
-            for pending in &mut self.pending {
-                let _ = Pin::new(&mut pending.future).poll(cx);
-            }
-            operation.as_mut().poll(cx)
         })
         .await
     }

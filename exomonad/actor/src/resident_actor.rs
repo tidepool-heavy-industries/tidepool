@@ -3093,7 +3093,7 @@ struct WorkbenchFragmentExecution {
     fragment: Option<ResidentWorkbenchFragment>,
     outcome: Option<ResidentOutcome>,
     scopes: Vec<scopes::ScopeFrame>,
-    green: Option<green::GreenInvocation<green_notebook::EffectCompletion>>,
+    execution: green::InvocationExecution<green_notebook::EffectCompletion>,
 }
 
 impl WorkbenchFragmentExecution {
@@ -3107,7 +3107,7 @@ impl WorkbenchFragmentExecution {
             fragment: Some(fragment),
             outcome: Some(outcome.into()),
             scopes: Vec::new(),
-            green: None,
+            execution: Default::default(),
         }
     }
 }
@@ -8522,13 +8522,11 @@ where
             if !execution_state.park_effects {
                 if let Some(request) = current.native_start.take() {
                     current.native_result = Some(
-                        owned_workbench::advance_fragment(
-                            workbench,
-                            &self.environment.runner,
-                            context.clone(),
-                            request,
-                        )
-                        .await,
+                        current
+                            .execution
+                            .native(&self.environment, context)
+                            .advance_fragment(workbench, request)
+                            .await,
                     );
                 }
             }
@@ -8581,11 +8579,7 @@ where
                             continue;
                         }
                         None if !current.scopes.is_empty()
-                            || current
-                                .green
-                                .as_ref()
-                                .and_then(green::GreenInvocation::active_realm)
-                                .is_some() =>
+                            || current.execution.active_realm().is_some() =>
                         {
                             owned_workbench::WorkbenchFragmentRequest::Scoped {
                                 fragment: current
@@ -8597,12 +8591,7 @@ where
                                     .scopes
                                     .last()
                                     .map(|scope| scope.realm)
-                                    .or_else(|| {
-                                        current
-                                            .green
-                                            .as_ref()
-                                            .and_then(green::GreenInvocation::active_realm)
-                                    })
+                                    .or_else(|| current.execution.active_realm())
                                     .expect("active native resource scope"),
                             }
                         }
@@ -8628,13 +8617,11 @@ where
                         }
                         continue;
                     }
-                    owned_workbench::advance_fragment(
-                        workbench,
-                        &self.environment.runner,
-                        context.clone(),
-                        request,
-                    )
-                    .await?
+                    current
+                        .execution
+                        .native(&self.environment, context)
+                        .advance_fragment(workbench, request)
+                        .await?
                 }
             };
             match native {
@@ -8668,19 +8655,12 @@ where
                         .scopes
                         .last()
                         .map(|frame| frame.work.clone())
-                        .or_else(|| {
-                            current
-                                .green
-                                .as_ref()
-                                .and_then(green::GreenInvocation::active_work)
-                        }) {
+                        .or_else(|| current.execution.active_work())
+                    {
                         Some(work) => CurrentEffectOwner::Scoped {
                             base: Box::new(CurrentEffectOwner::Workbench(execution_state)),
                             scope: work,
-                            wait_control: current
-                                .green
-                                .as_ref()
-                                .and_then(green::GreenInvocation::active_wait_control),
+                            wait_control: current.execution.active_wait_control(),
                         },
                         None => CurrentEffectOwner::Workbench(execution_state),
                     };
@@ -8701,11 +8681,7 @@ where
                             );
                         }
                         ResidentActorBoundary::Completed
-                            if current
-                                .green
-                                .as_ref()
-                                .and_then(green::GreenInvocation::active_realm)
-                                .is_some()
+                            if current.execution.active_realm().is_some()
                                 && current.scopes.is_empty() =>
                         {
                             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -8919,9 +8895,10 @@ where
                         });
                         return Ok(FragmentAdvance::ParkEffect);
                     }
-                    let (boundary, mut display) = self
-                        .prepare_display_boundary(
-                            context,
+                    let (boundary, mut display) = current
+                        .execution
+                        .native(&self.environment, context)
+                        .prepare_display(
                             boundary,
                             display_character_allowance(*unit.display_remaining),
                             unit.execution.map(|execution| WorkbenchOperationId {
@@ -9067,13 +9044,10 @@ where
                                     return Ok(FragmentAdvance::ParkNative);
                                 }
                                 current.outcome = Some(
-                                    self.environment
-                                        .runner
-                                        .resume_reply_rejection(
-                                            context.clone(),
-                                            attempt.continuation,
-                                            error,
-                                        )
+                                    current
+                                        .execution
+                                        .native(&self.environment, context)
+                                        .resume_reply_rejection(attempt.continuation, error)
                                         .await?,
                                 );
                                 continue;
@@ -9149,10 +9123,10 @@ where
                                         return Ok(FragmentAdvance::ParkNative);
                                     }
                                     current.outcome = Some(
-                                        self.environment
-                                            .runner
+                                        current
+                                            .execution
+                                            .native(&self.environment, context)
                                             .resume_reply_rejection(
-                                                context.clone(),
                                                 acknowledgement.continuation,
                                                 error,
                                             )
@@ -9198,24 +9172,25 @@ where
                                 _ => None,
                             };
                             if let Some((job, presentation)) = presentation {
-                                let prepared = command_presentation::prepare(
-                                    &self.environment.commands,
-                                    context,
-                                    workbench,
-                                    command_presentation::CommandPresentationRequest {
-                                        job,
-                                        presentation,
-                                        summarize: !unit.named_tool
-                                            && next_fragment.summarizes_bound_commands(),
-                                        named_tool: unit.named_tool,
-                                        display_remaining: *unit.display_remaining,
-                                    },
-                                    self.descriptor
-                                        .capabilities()
-                                        .effect_keys()
-                                        .contains(&crate::ActorEffectKey::Commands),
-                                )
-                                .await?;
+                                let prepared = current
+                                    .execution
+                                    .native(&self.environment, context)
+                                    .prepare_command_presentation(
+                                        workbench,
+                                        command_presentation::CommandPresentationRequest {
+                                            job,
+                                            presentation,
+                                            summarize: !unit.named_tool
+                                                && next_fragment.summarizes_bound_commands(),
+                                            named_tool: unit.named_tool,
+                                            display_remaining: *unit.display_remaining,
+                                        },
+                                        self.descriptor
+                                            .capabilities()
+                                            .effect_keys()
+                                            .contains(&crate::ActorEffectKey::Commands),
+                                    )
+                                    .await?;
                                 prepared.apply(
                                     &self.environment.commands,
                                     context.actor,
@@ -9231,10 +9206,13 @@ where
                                     request,
                                 } => {
                                     let exec_started = std::time::Instant::now();
-                                    let resolved = self
+                                    let environment = self.environment.clone();
+                                    let resolved = current
+                                        .execution
+                                        .native(&environment, context)
                                         .resolve_command(
+                                            self,
                                             kernel,
-                                            context,
                                             continuation,
                                             request,
                                             Some(execution_state.invocation_work.as_ref()),
@@ -9257,17 +9235,18 @@ where
                                 }
                                 boundary => {
                                     let ancestry = crate::CallAncestry::begin(context.actor);
-                                    let operation = self.resolve_effect(
-                                        kernel,
-                                        context,
-                                        effect_owner.clone(),
-                                        &ancestry,
-                                        boundary,
-                                    );
-                                    let outcome = match current.green.as_mut() {
-                                        Some(green) => green.progress_while(operation).await,
-                                        None => operation.await,
-                                    };
+                                    let environment = self.environment.clone();
+                                    let outcome = current
+                                        .execution
+                                        .native(&environment, context)
+                                        .resolve_effect(
+                                            self,
+                                            kernel,
+                                            effect_owner.clone(),
+                                            &ancestry,
+                                            boundary,
+                                        )
+                                        .await;
                                     (outcome, None)
                                 }
                             };
@@ -11750,15 +11729,9 @@ where
                 })?;
             let mut cursor =
                 green_tool::ToolCursor::new(work, control, self.checkpoint_publication.clone());
-            let mut outcome = self
-                .environment
-                .runner
-                .resume_tool_invocation(
-                    context.clone(),
-                    awaiting.continuation,
-                    invocation.name,
-                    arguments,
-                )
+            let mut outcome = cursor
+                .native(&self.environment, &context)
+                .resume_tool_invocation(awaiting.continuation, invocation.name, arguments)
                 .await
                 .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
             let mut result = None;
@@ -11768,11 +11741,8 @@ where
                     .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                 let realm = cursor.realm(context.placement.resource_scope);
                 let boundary = cursor
-                    .progress_while(self.environment.runner.capture_boundary(
-                        context.clone(),
-                        outcome,
-                        realm,
-                    ))
+                    .native(&self.environment, &context)
+                    .capture_boundary(outcome, realm)
                     .await
                     .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                 if !cursor.is_main_terminal()
@@ -11799,11 +11769,8 @@ where
                             });
                         }
                         outcome = cursor
-                            .progress_while(
-                                self.environment
-                                    .runner
-                                    .resume_unit(context.clone(), reply.continuation),
-                            )
+                            .native(&self.environment, &context)
+                            .resume_unit(reply.continuation)
                             .await
                             .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                     }

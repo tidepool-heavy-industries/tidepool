@@ -1,15 +1,15 @@
 //! Exclusive tool protocol around the shared native invocation cursor.
-use super::green::{GreenAdvance, GreenInvocation};
+use super::green::{GreenAdvance, InvocationExecution};
 use super::*;
 use tidepool_bridge_effects::{CleanupError, ScopeFailure};
 
 #[derive(Default)]
-struct ToolEffectCompletion {
+pub(super) struct ToolEffectCompletion {
     observed_child: Option<ActorRef>,
 }
 
 pub(super) struct ToolCursor {
-    green: Option<GreenInvocation<ToolEffectCompletion>>,
+    execution: InvocationExecution<ToolEffectCompletion>,
     scopes: Vec<scopes::ScopeFrame>,
     work: Arc<InvocationWork>,
     control: Arc<crate::WorkbenchExecutionControl>,
@@ -23,7 +23,7 @@ impl ToolCursor {
         publication: CheckpointPublication,
     ) -> Self {
         Self {
-            green: None,
+            execution: Default::default(),
             scopes: Vec::new(),
             work,
             control,
@@ -31,31 +31,23 @@ impl ToolCursor {
         }
     }
 
-    pub(super) async fn progress_while<T>(
-        &mut self,
-        operation: impl std::future::Future<Output = T>,
-    ) -> T {
-        match &mut self.green {
-            Some(green) => green.progress_while(operation).await,
-            None => operation.await,
-        }
+    pub(super) fn native<'a, H, O>(
+        &'a mut self,
+        environment: &'a ResidentEnvironment<H, O>,
+        context: &ActorSessionContext,
+    ) -> super::green::NativeExecution<'a, H, O, ToolEffectCompletion> {
+        self.execution.native(environment, context)
     }
-
     pub(super) fn realm(&self, actor_realm: RealmId) -> RealmId {
         self.scopes
             .last()
             .map(|frame| frame.realm)
-            .or_else(|| self.green.as_ref().and_then(GreenInvocation::active_realm))
+            .or_else(|| self.execution.active_realm())
             .unwrap_or(actor_realm)
     }
 
     pub(super) fn is_main_terminal(&self) -> bool {
-        self.scopes.is_empty()
-            && self
-                .green
-                .as_ref()
-                .and_then(GreenInvocation::active_work)
-                .is_none()
+        self.scopes.is_empty() && self.execution.active_work().is_none()
     }
 
     pub(super) fn check_admission(
@@ -77,9 +69,7 @@ impl ToolCursor {
         };
         if let Some(error) = error {
             self.work.close();
-            if let Some(green) = &mut self.green {
-                green.cancel_parent();
-            }
+            self.execution.cancel_parent();
             return Err(error);
         }
         Ok(())
@@ -95,15 +85,12 @@ impl ToolCursor {
             .scopes
             .last()
             .map(|frame| frame.work.clone())
-            .or_else(|| self.green.as_ref().and_then(GreenInvocation::active_work));
+            .or_else(|| self.execution.active_work());
         match scope {
             Some(scope) => CurrentEffectOwner::Scoped {
                 base: Box::new(base),
                 scope,
-                wait_control: self
-                    .green
-                    .as_ref()
-                    .and_then(GreenInvocation::active_wait_control),
+                wait_control: self.execution.active_wait_control(),
             },
             None => base,
         }
@@ -126,12 +113,11 @@ where
         let owner = cursor.owner();
         match boundary {
             ResidentActorBoundary::Green(boundary) => {
-                let green = cursor.green.get_or_insert_with(Default::default);
-                match self.prepare_green_operation(
+                match cursor.execution.prepare(
+                    self,
                     kernel,
                     context,
                     &owner,
-                    green,
                     &mut cursor.scopes,
                     boundary,
                 )? {
@@ -141,14 +127,10 @@ where
                         token,
                         work,
                     } => {
-                        return green
-                            .progress_while(self.environment.runner.run_owned_scope_callback(
-                                context.clone(),
-                                callback,
-                                realm,
-                                token,
-                                work,
-                            ))
+                        return cursor
+                            .execution
+                            .native(&self.environment, context)
+                            .run_scope_callback(callback, realm, token, work)
                             .await;
                     }
                     GreenAdvance::Wait => {}
@@ -162,14 +144,15 @@ where
                     Ok(scope) => scope,
                     Err(detail) => {
                         return cursor
-                            .progress_while(self.environment.runner.resume_value(
-                                context.clone(),
+                            .execution
+                            .native(&self.environment, context)
+                            .resume_value(
                                 continuation,
                                 (
                                     Err::<(), _>(ScopeFailure::ScopeRejected(detail)),
                                     Ok::<(), CleanupError>(()),
                                 ),
-                            ))
+                            )
                             .await
                     }
                 };
@@ -180,13 +163,9 @@ where
                     realm,
                 });
                 return cursor
-                    .progress_while(self.environment.runner.run_owned_scope_callback(
-                        context.clone(),
-                        callback,
-                        realm,
-                        token,
-                        work,
-                    ))
+                    .execution
+                    .native(&self.environment, context)
+                    .run_scope_callback(callback, realm, token, work)
                     .await;
             }
             ResidentActorBoundary::ScopeDone {
@@ -206,6 +185,13 @@ where
                     ))
                 };
                 drop(continuation);
+                if !cursor.execution.has_green() {
+                    return cursor
+                        .execution
+                        .native(&self.environment, context)
+                        .finish_scope(kernel, frame, body)
+                        .await;
+                }
                 let operation = scopes::finish_scope(
                     self.environment.clone(),
                     kernel.clone(),
@@ -213,19 +199,19 @@ where
                     frame,
                     body,
                 );
-                match &mut cursor.green {
-                    Some(green) => green.enqueue_frontier(
-                        std::mem::take(&mut cursor.scopes),
-                        Box::pin(async move { (operation.await, ToolEffectCompletion::default()) }),
-                    ),
-                    None => return operation.await,
-                }
+                cursor.execution.enqueue_frontier(
+                    std::mem::take(&mut cursor.scopes),
+                    Box::pin(async move { (operation.await, ToolEffectCompletion::default()) }),
+                );
             }
-            boundary if cursor.green.is_none() => {
-                return self
+            boundary if !cursor.execution.has_green() => {
+                let environment = self.environment.clone();
+                return cursor
+                    .execution
+                    .native(&environment, context)
                     .resolve_effect(
+                        self,
                         kernel,
-                        context,
                         owner,
                         &crate::CallAncestry::begin(context.actor),
                         boundary,
@@ -235,13 +221,9 @@ where
             boundary => {
                 let boundary = prepare_execution_effect(context, &owner, boundary);
                 let (boundary, _) = cursor
-                    .progress_while(self.prepare_display_boundary(
-                        context,
-                        boundary,
-                        DEFAULT_DISPLAY_CHARACTER_ALLOWANCE,
-                        None,
-                        None,
-                    ))
+                    .execution
+                    .native(&self.environment, context)
+                    .prepare_display(boundary, DEFAULT_DISPLAY_CHARACTER_ALLOWANCE, None, None)
                     .await?;
                 match self.prepare_invocation_wait(kernel, context, &owner, boundary)? {
                     Ok(wait) => {
@@ -266,36 +248,34 @@ where
                             work,
                             owner.model(),
                         );
-                        cursor
-                            .green
-                            .as_mut()
-                            .expect("tool async cursor")
-                            .enqueue_frontier(
-                                std::mem::take(&mut cursor.scopes),
-                                Box::pin(async move {
-                                    let result = operation.await;
-                                    let outcome = if result.retained_job_binding.is_some() {
-                                        Err(ResidentActorWorkbenchError::ActorProtocol(
-                                            "notebook command binding reached the tool frontier"
-                                                .into(),
-                                        ))
-                                    } else {
-                                        result.outcome
-                                    };
-                                    (outcome, ToolEffectCompletion { observed_child })
-                                }),
-                            );
+                        cursor.execution.enqueue_frontier(
+                            std::mem::take(&mut cursor.scopes),
+                            Box::pin(async move {
+                                let result = operation.await;
+                                let outcome = if result.retained_job_binding.is_some() {
+                                    Err(ResidentActorWorkbenchError::ActorProtocol(
+                                        "notebook command binding reached the tool frontier".into(),
+                                    ))
+                                } else {
+                                    result.outcome
+                                };
+                                (outcome, ToolEffectCompletion { observed_child })
+                            }),
+                        );
                     }
                     Err(boundary) => {
                         // Actor protocol transitions stay under the original exclusive tool owner.
+                        let environment = self.environment.clone();
                         return cursor
-                            .progress_while(self.resolve_effect(
+                            .execution
+                            .native(&environment, context)
+                            .resolve_effect(
+                                self,
                                 kernel,
-                                context,
                                 owner,
                                 &crate::CallAncestry::begin(context.actor),
                                 boundary,
-                            ))
+                            )
                             .await;
                     }
                 }
@@ -313,20 +293,20 @@ where
         loop {
             cursor.check_admission(kernel)?;
             let retirement = kernel.retained_exit();
-            let green = cursor.green.as_mut().expect("tool async cursor");
+            let execution = &mut cursor.execution;
             let completion = tokio::select! {
                 biased;
                 () = cursor.control.wait_for_cancellation() => {
-                    cursor.work.close(); green.cancel_parent();
+                    cursor.work.close(); execution.cancel_parent();
                     return Err(ResidentActorWorkbenchError::InvocationCancelled);
                 }
                 terminal = retirement.wait_requested_shutdown() => {
-                    cursor.work.close(); green.cancel_parent();
+                    cursor.work.close(); execution.cancel_parent();
                     return Err(ResidentActorWorkbenchError::RetiredBeforeAdmission(terminal));
                 }
-                completion = green.next() => completion?,
+                completion = execution.next() => completion?,
             };
-            if let Some(mut frontier) = self.apply_green_frontier(context, green, completion)? {
+            if let Some(mut frontier) = execution.apply(self, context, completion)? {
                 cursor.scopes = frontier.scopes;
                 let result = frontier.result.take().expect("ready native tool frontier");
                 if result.is_ok()
@@ -403,7 +383,7 @@ mod tests {
         assert!(machines.insert_idle(session, Box::new(())).is_none());
         let (machine, held) = machines.checkout_run(session).unwrap().into_parts();
         let queued_machines = machines.clone();
-        let mut green = GreenInvocation::default();
+        let mut green = super::green::GreenInvocation::default();
         green.enqueue_frontier(
             Vec::new(),
             Box::pin(async move {
@@ -423,7 +403,7 @@ mod tests {
             futures_util::poll!(Box::pin(green.next())),
             std::task::Poll::Pending
         ));
-        cursor.green = Some(green);
+        cursor.execution = super::green::InvocationExecution::from_green(green);
         assert!(
             cursor.is_main_terminal(),
             "main terminal does not release retained frontiers"
@@ -437,14 +417,14 @@ mod tests {
         machines.settle_suspended(held, machine, Vec::new());
         let checkout = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            cursor.progress_while(resume),
+            cursor.execution.test_drive(resume),
         )
         .await
         .expect("retained frontier releases FIFO before main reply continuation")
         .unwrap();
         let (machine, receipt) = checkout.into_parts();
         machines.settle_suspended(receipt, machine, Vec::new());
-        let completion = cursor.green.as_mut().unwrap().next().await.unwrap();
+        let completion = cursor.execution.next().await.unwrap();
         assert!(matches!(
             completion.result,
             Some(Err(ResidentActorWorkbenchError::InvocationCancelled))
