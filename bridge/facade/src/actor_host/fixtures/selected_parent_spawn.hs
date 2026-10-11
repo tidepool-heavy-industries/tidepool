@@ -3,6 +3,7 @@ import qualified Tidepool.Actors.Spawn as Spawn
 import qualified Tidepool.Agent.Contract as Contract
 import qualified Tidepool.Agent.Watch as Await
 import Tidepool.Agent.Reply (Replies)
+import Tidepool.Effects.Core (Actor, AgentLaunch, Watches, Commands, SpawnError(..))
 import Tidepool.Effects.Row (knownEffects)
 let selectedLeaf :: Actor.ActorDefinition () Maybe Int
     selectedLeaf = Actor.ActorDefinition

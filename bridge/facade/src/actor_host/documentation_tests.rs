@@ -1919,12 +1919,15 @@ async fn work_actor_consumes_later_progress_without_rearming() {
         .commit_empty("workspace program")
         .unwrap();
     let root = campaign.root_installation.policy.clone();
-    committed(
-        root.as_ref(),
+    let (setup, producer) = campaign.dispatch_native_spawn_setup(
+        "progress routing producer installation",
         &tidepool_testing::fixture_source(".exomonad/workspace/checks/progress-route-producer.hs"),
-    )
-    .await;
-    let (producer, _producer_binding) = next_project_worker(campaign).await;
+        Duration::from_secs(240),
+    ).await;
+    assert_eq!(setup["status"], "committed", "{setup}");
+    campaign.await_native_activation(
+        producer.actor.identity(), "progress routing producer request", Duration::from_secs(240),
+    ).await;
     committed(
         root.as_ref(),
         &tidepool_testing::fixture_source(".exomonad/workspace/checks/progress-route.hs"),
