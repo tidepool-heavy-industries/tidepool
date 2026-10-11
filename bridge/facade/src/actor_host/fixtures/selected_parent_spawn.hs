@@ -3,7 +3,7 @@ import qualified Tidepool.Actors.Spawn as Spawn
 import qualified Tidepool.Agent.Contract as Contract
 import qualified Tidepool.Agent.Watch as Await
 import Tidepool.Agent.Reply (Replies)
-import Tidepool.Effects.Core (Actor, AgentLaunch, Watches, Commands, SpawnError(..))
+import Tidepool.Effects.Core (Actor, AgentLaunch, Commands)
 import Tidepool.Effects.Row (knownEffects)
 let selectedLeaf :: Actor.ActorDefinition () Maybe Int
     selectedLeaf = Actor.ActorDefinition
@@ -15,7 +15,7 @@ let selectedLeaf :: Actor.ActorDefinition () Maybe Int
     selectedParent :: Actor.ActorDefinition () Maybe Bool
     selectedParent = Actor.ActorDefinition
       { Actor.label = "selected-launch-parent"
-      , Actor.effectProfile = Actor.Selected (knownEffects @'[Actor, AgentLaunch, Replies, Watches])
+      , Actor.effectProfile = Actor.Selected (knownEffects @'[Actor, AgentLaunch, Replies, Await.Watches])
       , Actor.initialization = \() -> do
           leaf <- Actor.startActor selectedLeaf ()
           leafExit <- Actor.awaitExit leaf
@@ -36,8 +36,8 @@ let selectedLeaf :: Actor.ActorDefinition () Maybe Int
             Right admitted -> pure admitted
           reply <- Await.await (Await.result pending)
           pure ((case leafExit of { Actor.Completed 42 -> True; _ -> False })
-            && (case wider of { Left (SpawnRefused _) -> True; _ -> False })
-            && (case duplicate of { Left (SpawnRefused _) -> True; _ -> False })
+            && (case wider of { Left (Spawn.SpawnRefused _) -> True; _ -> False })
+            && (case duplicate of { Left (Spawn.SpawnRefused _) -> True; _ -> False })
             && reply == Right 42)
       , Actor.onShutdown = \_ -> pure () }
 selectedOwner <- Actor.startActor selectedParent ()
