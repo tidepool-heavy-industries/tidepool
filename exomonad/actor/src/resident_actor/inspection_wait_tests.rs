@@ -4,7 +4,7 @@ use tidepool_codegen::scope::ScopeId;
 use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::{
-    registry::SlotKind, CheckoutError, ModuleEnv, ResidentError, SessionError, SessionLib,
+    CheckoutError, ModuleEnv, ResidentError, SessionError, SessionLib, registry::SlotKind,
 };
 
 type Registry = ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>;
@@ -55,16 +55,31 @@ fn fixture() -> (
 }
 
 async fn unknown_session(request: InspectionRequest) {
+    let mut owner = crate::CompilerPreparationOwner::new();
+    let outcome = owner.scope(unknown_session_with_owner(request)).await;
+    assert!(
+        outcome
+            .cleanup
+            .wait_for_settlement(std::time::Duration::from_secs(5))
+            .await
+            .is_confirmed()
+    );
+}
+
+async fn unknown_session_with_owner(request: InspectionRequest) {
     let (machines, workbench, other, _, _root) = fixture();
     let missing = SessionId(12);
     let before = machines.peek(other, ResidentSession::run_context).unwrap();
     let error = inspect(&workbench, context(missing, ScopeId::ROOT), request)
         .await
         .unwrap_err();
-    assert!(matches!(
-        error,
-        ResidentActorWorkbenchError::Checkout(CheckoutError::Unknown(id)) if id == missing
-    ));
+    assert!(
+        matches!(
+            error,
+            ResidentActorWorkbenchError::Checkout(CheckoutError::Unknown(id)) if id == missing
+        ),
+        "unexpected inspection refusal: {error:?}"
+    );
     assert_eq!(machines.kind(missing), None);
     assert_eq!(machines.kind(other), Some(SlotKind::Idle));
     assert_eq!(
@@ -74,6 +89,18 @@ async fn unknown_session(request: InspectionRequest) {
 }
 
 async fn retired_scope(request: InspectionRequest) {
+    let mut owner = crate::CompilerPreparationOwner::new();
+    let outcome = owner.scope(retired_scope_with_owner(request)).await;
+    assert!(
+        outcome
+            .cleanup
+            .wait_for_settlement(std::time::Duration::from_secs(5))
+            .await
+            .is_confirmed()
+    );
+}
+
+async fn retired_scope_with_owner(request: InspectionRequest) {
     let (machines, workbench, session, retired, _root) = fixture();
     let before = machines
         .peek(session, ResidentSession::run_context)
@@ -81,11 +108,14 @@ async fn retired_scope(request: InspectionRequest) {
     let error = inspect(&workbench, context(session, retired), request)
         .await
         .unwrap_err();
-    assert!(matches!(
-        error,
-        ResidentActorWorkbenchError::Resident(ResidentError::Session(SessionError::DeadScope(scope)))
-            if scope == retired
-    ));
+    assert!(
+        matches!(
+            error,
+            ResidentActorWorkbenchError::Resident(ResidentError::Session(SessionError::DeadScope(scope)))
+                if scope == retired
+        ),
+        "unexpected inspection refusal: {error:?}"
+    );
     assert_eq!(machines.kind(session), Some(SlotKind::Idle));
     assert_eq!(
         machines.peek(session, ResidentSession::run_context),
@@ -102,6 +132,31 @@ async fn retired_scope(request: InspectionRequest) {
     .unwrap();
     assert!(matches!(result, InspectionResult::Live(bindings) if bindings.is_empty()));
     assert_eq!(machines.kind(session), Some(SlotKind::Idle));
+}
+
+#[tokio::test]
+async fn compiler_inspection_requires_cleanup_owner_before_checkout() {
+    for request in [InspectionRequest::Recovery, InspectionRequest::Bindings] {
+        let (machines, workbench, session, _, _root) = fixture();
+        let before = machines
+            .peek(session, ResidentSession::run_context)
+            .unwrap();
+        let error = inspect(&workbench, context(session, ScopeId::ROOT), request)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ResidentActorWorkbenchError::CompilerCleanupOwnerUnavailable
+            ),
+            "unexpected inspection refusal: {error:?}"
+        );
+        assert_eq!(machines.kind(session), Some(SlotKind::Idle));
+        assert_eq!(
+            machines.peek(session, ResidentSession::run_context),
+            Some(before)
+        );
+    }
 }
 
 #[tokio::test]
