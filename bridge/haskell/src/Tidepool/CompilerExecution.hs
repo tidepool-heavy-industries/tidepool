@@ -5,7 +5,8 @@
 module Tidepool.CompilerExecution
   ( CompilerExecutionGrant, compilerExecutionGrant, serialCompilerExecutionGrant
   , compilerModuleJobs
-  , CompilerExecutor, withCompilerExecutor, runCompilerTasks, runCompilerWorklist, runCompilerWorklistWithStarted, dependencyClosedReuse
+  , CompilerExecutor, withCompilerExecutor, runCompilerTasks, runCompilerWorklist, runCompilerWorklistWithStarted
+  , runCompilerWorklistWithAttempt, runCompilerTasksWithAttempt, dependencyClosedReuse
   ) where
 
 import Control.Concurrent (forkFinally, killThread)
@@ -18,6 +19,8 @@ import Control.Exception
 import Control.Monad (forM_, when)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import Data.Word (Word64)
+import Tidepool.Timing (TaskAttempt(..), newTimingRequestIdentity)
 
 -- | Positive, explicitly admitted module jobs. Ordinary callers stay serial
 -- until the enclosing owner supplies a qualified allocation.
@@ -39,13 +42,14 @@ compilerModuleJobs (CompilerExecutionGrant jobs) = jobs
 -- settles queued work too, so a task cancelled before a worker starts it cannot
 -- leave a waiter behind. The closed flag fences later submissions.
 data ExecutorState = ExecutorState Bool Int (Map.Map Int (SomeException -> IO ()))
-data CompilerExecutor = CompilerExecutor (Chan (IO ())) (MVar ExecutorState)
+data CompilerExecutor = CompilerExecutor Word64 (Chan (IO ())) (MVar ExecutorState)
 
 withCompilerExecutor :: CompilerExecutionGrant -> (CompilerExecutor -> IO a) -> IO a
 withCompilerExecutor grant use = mask $ \restore -> do
   queue <- newChan
   state <- newMVar (ExecutorState False 0 Map.empty)
-  let executor = CompilerExecutor queue state
+  identity <- newTimingRequestIdentity
+  let executor = CompilerExecutor identity queue state
       worker = readChan queue >>= id >> worker
       start = do
         done <- newEmptyMVar
@@ -82,7 +86,20 @@ runCompilerWorklist executor action completed inputs =
 
 runCompilerWorklistWithStarted :: CompilerExecutor -> (input -> IO output)
   -> (input -> IO ()) -> (input -> output -> IO [input]) -> [input] -> IO [output]
-runCompilerWorklistWithStarted (CompilerExecutor queue state) action started completed inputs = mask $ \restore -> do
+runCompilerWorklistWithStarted executor action =
+  runCompilerWorklistWithAttempt executor (\_ -> action)
+
+runCompilerTasksWithAttempt :: CompilerExecutor -> (TaskAttempt -> input -> IO output)
+  -> (input -> output -> IO ()) -> [input] -> IO [output]
+runCompilerTasksWithAttempt executor action completed =
+  runCompilerWorklistWithAttempt executor action (const (pure ()))
+    (\input output -> completed input output >> pure [])
+
+-- The existing submission key identifies an execution, independently of its
+-- input owner and completion arrival. Repeated work retains separate attempts.
+runCompilerWorklistWithAttempt :: CompilerExecutor -> (TaskAttempt -> input -> IO output)
+  -> (input -> IO ()) -> (input -> output -> IO [input]) -> [input] -> IO [output]
+runCompilerWorklistWithAttempt (CompilerExecutor executorId queue state) action started completed inputs = mask $ \restore -> do
   events <- newChan
   let submit first tasks = forM_ (zip [first..] tasks) $ \(ordinal, input) -> do
         result <- newEmptyMVar
@@ -95,7 +112,7 @@ runCompilerWorklistWithStarted (CompilerExecutor queue state) action started com
               (Map.insert next (settle . Left) pending), next)
         writeChan queue $ mask $ \run -> do
           writeChan events (Left input)
-          outcome <- try (run (action input))
+          outcome <- try (run (action (TaskAttempt executorId key) input))
           modifyMVar_ state $ \(ExecutorState closed next pending) ->
             pure (ExecutorState closed next (Map.delete key pending))
           settle outcome

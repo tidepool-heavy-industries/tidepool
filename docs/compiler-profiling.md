@@ -162,11 +162,13 @@ qualify a frontend work total, even if an earlier cycle completed. Successful
 output alone supplies no reuse evidence. Capture truncation and recovery errors
 remain report errors alongside any individually completed requests.
 Legacy count and flat-timer aggregates require one successful request terminal
-and diagnostic rows strictly between the unique start and that terminal. Before
-start, after terminal, missing-terminal and duplicate-terminal histories leave
-these quantities unknown. The shared reuse report retains indexed raw legacy
-observations and their boundary status; it does not present an incomplete
-subtotal as a full request count.
+and exact physical-request correlation. Buffered delivery before the start or
+after the terminal remains inspectable through its boundary status. Missing or
+duplicate terminals, conflicting observations and failed requests leave these
+quantities unknown. Repeated untimestamped totals are diagnostic cycle
+observations rather than evidence of duplicate execution. The shared reuse
+report retains each raw observation without presenting a partial subtotal as a
+full request count.
 
 `source_frontend_work_items` counts actual completed stage work items, not a
 whole-request cache status. `activation_preview_frontends` is a separate
@@ -185,6 +187,10 @@ not add child counters to parent counters or manufacture request resource
 totals. Explicit `unavailable` RTS counters and GC gauges become null in JSON
 and `UNKNOWN` in the readable counter view while available wall/CPU measurements
 are retained. Required timing fields still reject nonnumeric values.
+Task overlap uses actual execution/task-attempt identity, cycle and prepared
+unit component facts. It counts tasks and distinct module owners separately;
+concurrent components of one owner are valid. A duplicate exact execution is
+incomplete evidence. Historical overlaps lacking identity remain unknown.
 Missing RTS fields are unknown; allocation counters can lag until a GC
 accounting boundary. Request RSS observations select worker samples inside the
 union of its completed resource spans, count each sample once and explicitly

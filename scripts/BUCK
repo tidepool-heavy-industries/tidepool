@@ -10,6 +10,8 @@ filegroup(
 export_file(name = "embedded_web_provenance_script", src = "embedded_web_provenance.py", visibility = ["PUBLIC"])
 
 export_file(name = "probe_opacity_checker", src = "probe-opacity-check.py", visibility = ["PUBLIC"])
+export_file(name = "compiler_reuse_report", src = "compiler-reuse-report.py", visibility = ["PUBLIC"])
+export_file(name = "compiler_reuse_report_test_source", src = "tests/test_compiler_reuse_report.py", visibility = ["PUBLIC"])
 
 filegroup(
     name = "script_test_sources",
@@ -60,6 +62,19 @@ sh_test(
         "PATH": "$(location toolchains//:test_tools)/bin:" + read_root_config("nix", "action_path"),
     },
     resources = [":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure", "toolchains//:test_tools"],
+    visibility = ["PUBLIC"],
+)
+
+sh_test(
+    name = "compiler_reuse_report_tests",
+    test = "run-unittests.sh",
+    args = ["scripts.tests.test_compiler_reuse_report"],
+    env = {
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
+        "PATH": read_root_config("nix", "action_path"),
+    },
+    resources = [":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure"],
     visibility = ["PUBLIC"],
 )
 

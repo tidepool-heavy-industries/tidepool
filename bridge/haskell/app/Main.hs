@@ -65,7 +65,7 @@ import Tidepool.CompilerExecution (CompilerExecutor, compilerExecutionGrant, ser
 import GHC.Conc (getNumCapabilities, setNumCapabilities)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces
-  , pprPackageImports, pprAcceptedCandidates, PreparedSegmentProductsResult(..), CheckedEnvironmentResult(..)
+  , pprPackageImports, pprAcceptedCandidates, pprReuseContext, PreparedSegmentProductsResult(..), CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements, retainProgramSourceImports
   , withProgramSourceImports, CompilePurpose(..), withSourceImportIntents, prBinds, prTyCons, prHscEnv
   , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope(..), CompilerRecoveryCaches(..)
@@ -75,7 +75,7 @@ import Tidepool.GhcPipeline
 import Tidepool.ExecutionEncode (encodeWireProgram, moduleProductInput, moduleProductBytes)
 import Tidepool.CompilerProducts
   ( CertifiedOriginalProducts, certifiedOriginalProducts, certifiedFinalizedArtifacts
-  , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProductsWithCache
+  , certifiedRetainedOriginals, certifiedRetainedNativeVersions, PreparedProductContext, prepareOriginalProductsWithCacheAndReuse
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , requireOriginalExecutableGlobals, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept, currentReconciledOriginalProducts
@@ -95,7 +95,7 @@ import qualified Tidepool.EffectSchema
 import Tidepool.PreparedStg
   ( pmModule, pmYieldSites )
 import Tidepool.PreparedRecovery
-  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithDemand
+  ( RecoveryFailure, RecoveredClosure(..), newPreparedRecoveryWithDemandAndReuse
   , preparedRecoveryClosure, requirePreparedRecoveryPublication )
 import Tidepool.ModuleCandidates (ModuleCandidate(..), CandidateGroup(..))
 import Tidepool.CompileInput (writeCompileInputProof)
@@ -668,7 +668,7 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
         case acquired of
           Just worklist -> prepareOriginalProductsWithWorklist worklist
             hscEnv exactScope interfaces (contextFor firstTarget) externalOriginalBinders modules
-          Nothing -> prepareOriginalProductsWithCache
+          Nothing -> prepareOriginalProductsWithCacheAndReuse (Just (pprReuseContext prepared))
             (compilerPreparedBodies recoveryCaches) (Just (compilerOriginalProjections recoveryCaches)) executor
             hscEnv exactScope interfaces (contextFor firstTarget) externalOriginalBinders modules
   (originalModules,rawProductContext) <- timePhase timing "prepared_original_demand" $
@@ -719,7 +719,7 @@ prepareArtifactsWithProjection project originalInterfaces outDir caches prepared
           when (preparedRootIdentity identifier /= identity) $
             ioError (userError "package recovery root differs from canonical original global")
           pure identifier
-  recover <- newPreparedRecoveryWithDemand (recoveryExecutor caches) demandPackages
+  recover <- newPreparedRecoveryWithDemandAndReuse (Just (pprReuseContext prepared)) (recoveryExecutor caches) demandPackages
     hscEnv (compilerFatIface recoveryCaches) (compilerOwnerIface recoveryCaches)
     (compilerPreparedBodies recoveryCaches) (withOriginals (contextFor firstTarget)) originalModules []
   artifacts <- forM targets $ \target -> do

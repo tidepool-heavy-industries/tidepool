@@ -70,7 +70,14 @@ request ordinal and compile-request digest. The digest identifies payload bytes,
 not a unique invocation. The existing admission identifies the owning transport
 transaction; its `transaction` field records whether it spans requests. Worker
 `cycle` and `purpose` come from the actual compile owner and pass through completion
-inputs. They are observations and never cache validity. Missing linkage remains
+inputs and the prepared result. Original-product fallback and recovery retain that
+issuing cycle; their actual completion owner emits the stage terminal. A native
+compile result alone does not prove original recovery or projection completed.
+They are observations and never cache validity. The `prepared_body`,
+`original_recovery` and `raw_projection` reuse decisions cover source lowering
+and the original-product worklist. Later imported package component recovery has
+separately identified task timing spans; these stage counts do not account its
+entire closure or infer package cache decisions. Missing linkage remains
 incomplete; the reporter does not guess a worker or join by digest alone.
 
 ```sh
@@ -87,21 +94,33 @@ admission, ordinal, and matching compile-request digest. Trace subscribers may
 write those already-correlated events after the worker terminal; the report
 retains their `terminal_order` while still requiring one successful request
 terminal and each applicable stage completion. Timestamps or row order alone
-never qualify an event. Duplicate event rows, missing linkage, pre-start events,
-or missing/duplicate request terminals keep evidence incomplete. Legacy counts
+never qualify an event. Duplicate exact event rows, missing linkage, or
+missing/duplicate request terminals keep evidence incomplete. Legacy counts
 and compile summaries remain diagnostic data, never substitutes for a completed
 stage. Indexed `legacy_observations` retain count and flat-timer rows;
-`boundary_status` qualifies each against the request's start and sole terminal.
-`legacy_status` qualifies aggregates only for one successful request with no
-invalid legacy boundary observations. Missing, duplicate, pre-start or
-post-terminal legacy boundaries leave aggregates empty/unknown, including when a
-valid earlier observation would otherwise supply a misleading partial subtotal.
+`boundary_status` records delivery relative to the request. Exact physical
+identity also permits buffered legacy delivery outside the start/terminal rows.
+`legacy_status` requires one successful request and unambiguous observations.
+Repeated untimestamped totals can belong to separate cycles and are retained;
+only an identical timestamped observation proves a duplicate. Failed, cancelled
+and unterminated requests keep request-wide stage and legacy totals unknown.
 Timers lacking interval boundaries (including legacy lowering)
 are preserved as nonexclusive totals; do not sum overlapping phases. Queue time
 belongs to admission and is not additive across requests sharing a transaction.
 The current `lowering` owner times `hscDesugar` plus `hscSimplify`; it is not
 aggregate native lowering. `prepared_stg` separately owns CorePrep, coreToStg and
 stg2stg. Raw phase names remain intact and parent/child totals are not added.
+
+Task spans retain the compile cycle, an execution ID issued by the span owner,
+and executor/task-attempt IDs when the compiler executor issued the task. Prepared
+unit spans carry their actual `PreparedUnitKey` version, issuing context and
+component roster. Source GHC spans use the real module/source fingerprint and
+`compile` parent. Task overlap counts concurrent attempts separately from distinct
+module owners. Distinct components of one module may execute concurrently; exact
+execution duplication is refused. An executor attempt cannot be replayed under
+another cycle or owner lineage. Historical overlapping tasks without attempt
+identity remain unknown. Resource counters are process-wide and are never added
+across overlapping tasks.
 
 `resident-performance-report.py` also includes `compile_reuse`; repeat
 `--require-reuse-stage STAGE` to make missing stage evidence fail its gate. No

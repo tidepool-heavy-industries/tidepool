@@ -15,7 +15,7 @@ module Tidepool.CompilerProducts
   , prepareCompilerProjectionContext, prepareCompilerProjectionContextForEnvironment, exactProgramProductVersionFromDigest
   , OriginalProjectionCollector, newOriginalProjectionCollector, observeOriginalProjection
   , prepareOriginalProductsWithCollector
-  , prepareOriginalProductsWithCache
+  , prepareOriginalProductsWithCache, prepareOriginalProductsWithCacheAndReuse
   , OriginalProductWorklist, observeOriginalProjectionWithRecovery, prepareOriginalProductsWithWorklist
   , CurrentOriginalInventory, admitCurrentOriginalProducts, preparedCurrentOriginalInventory
   , preparedProductInventory, currentOriginalBinders, currentOriginalBindingsExcept
@@ -111,14 +111,14 @@ import Tidepool.PreparedTime (resolveTimeAuthority)
 import Tidepool.PreparedStg
   ( PreparedModule, pmModule, pmSitedSiblings, runPreparedModuleTask
   , PreparedBodyCache, PreparedBodyReuse(..), newPreparedBodyCache, newPreparedOriginalModuleTaskPreparer )
-import Tidepool.CompilerExecution (CompilerExecutor, withCompilerExecutor, serialCompilerExecutionGrant, runCompilerTasks)
+import Tidepool.CompilerExecution (CompilerExecutor, withCompilerExecutor, serialCompilerExecutionGrant, runCompilerTasks, runCompilerTasksWithAttempt)
 import Tidepool.HomeProducts
   ( AdmittedFinalizedOriginal, admittedOriginalModule
   , admittedOriginalProof, admittedOriginalInterface, originalVersionLookup, originalVersionSeal )
 import Tidepool.FinalizedModule (finalizedHomeModInfo)
 import GHC.Unit.Home.ModInfo (hm_iface)
 import Tidepool.Timing
-  ( readTimingEnabled, timePhase, timeDetailPhase, timeModuleDetailPhase, emitCount
+  ( readTimingEnabled, timePhase, timeDetailPhase, timeTaskDetailPhase, TaskOwner(..), TaskComponent(..), emitCount
   , ReuseContext, ReuseModule(..), ReuseStage(..), ReuseDecision(..), ReuseReason(..)
   , ReuseVersionKind(..), emitReuse, emitReuseComplete )
 
@@ -358,7 +358,16 @@ prepareOriginalProductsWithCache
   :: PreparedBodyCache -> Maybe OriginalProjectionCollector -> CompilerExecutor
   -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
   -> Set.Set SymbolIdentity -> [PreparedModule] -> IO ([PreparedModule],PreparedProductContext)
-prepareOriginalProductsWithCache cache collector = prepareOriginalProductsUsingCollector collector (Just cache)
+prepareOriginalProductsWithCache = prepareOriginalProductsWithCacheAndReuse Nothing
+
+-- The fallback retains the issuing compile cycle. Its worklist finish owns
+-- the body/recovery/projection terminals, just as an acquired observer does.
+prepareOriginalProductsWithCacheAndReuse
+  :: Maybe ReuseContext -> PreparedBodyCache -> Maybe OriginalProjectionCollector -> CompilerExecutor
+  -> HscEnv -> Maybe ExactScope -> Map.Map ModuleName ModIface -> ProjectionContext
+  -> Set.Set SymbolIdentity -> [PreparedModule] -> IO ([PreparedModule],PreparedProductContext)
+prepareOriginalProductsWithCacheAndReuse reuse cache collector executor =
+  prepareOriginalProductsUsingCollectorWithReuse collector (Just cache) executor reuse
 
 -- The coordinator owns incorporation and demand discovery. Workers publish
 -- only immutable raw leaves through the existing projection cache. This driver
@@ -466,10 +475,13 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
               pure ready
           prepare siblings owner
       lower selected prepared = do
-        (hit,raw) <- timeModuleDetailPhase timing "prepared_graph" "raw_projection_task_service"
-          (pmModule prepared) $
-          projectCachedOriginalHomeModuleProducts completedRaw env selected context prepared
         let version = ownerVersion selected (pmModule prepared)
+            versionStamp = case version of
+              Just (ReuseModule _ _ _ stamp) -> Just stamp
+              _ -> Nothing
+        (hit,raw) <- timeTaskDetailPhase timing "prepared_graph" "raw_projection_task_service" reuse Nothing
+          (TaskOwner (pmModule prepared) versionStamp Nothing WholeModuleTask) $
+          projectCachedOriginalHomeModuleProducts completedRaw env selected context prepared
         report RawProjection (if hit then ReuseHit else ReuseMiss)
           (if hit then Matched else Recovery) version (if hit then Just 0 else Nothing)
         unless hit (report RawProjection ReuseWork Recovery version Nothing)
@@ -528,9 +540,14 @@ newOriginalProductWorklist completedRaw cache executor reuse env exact interface
         modifyIORef' reuseRef (\(hits,lowered) ->
           (hits + fromIntegral (length [() | (_,PreparedBodyReused,_) <- Map.elems acquired]),
            lowered + fromIntegral (length [() | (_,observation,_) <- Map.elems acquired, observation /= PreparedBodyReused])))
-        _ <- runCompilerTasks executor
-          (\(owner,task) -> do
-            original <- runPreparedModuleTask task
+        _ <- runCompilerTasksWithAttempt executor
+          (\attempt (owner,task) -> do
+            let versionStamp = case ownerVersion selected owner of
+                  Just (ReuseModule _ _ _ stamp) -> Just stamp
+                  _ -> Nothing
+            original <- timeTaskDetailPhase timing "prepared_graph" "prepared_stg_task_service"
+              reuse (Just attempt) (TaskOwner owner versionStamp Nothing WholeModuleTask)
+              (runPreparedModuleTask task)
             case Map.lookup owner acquired of
               Just (_,observation,_) | observation /= PreparedBodyReused ->
                 report PreparedBody ReuseWork

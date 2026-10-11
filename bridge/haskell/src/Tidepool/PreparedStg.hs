@@ -19,6 +19,7 @@ module Tidepool.PreparedStg
   , newPreparedBodyPreparer, newPreparedBodyTaskPreparer, PreparedBodyTask, runPreparedBodyTask
   , PreparedComponents, PreparedComponentTask, newPreparedComponentUnitsPreparer
   , runPreparedComponentTask, PreparedUnitKey, PreparedUnitTask
+  , runPreparedUnitTaskWithTiming
   , preparedUnitTaskKey, preparedComponentTaskKnown, preparedComponentTaskPending
   , runPreparedUnitTask, finishPreparedComponentTask, preparedComponentUnitRows, preparedUnitIsSite
   , preparedComponentModules, preparedComponentVersion, validatePreparedComponents
@@ -39,7 +40,7 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Word (Word32, Word64)
-import Data.Unique (Unique)
+import Data.Unique (Unique, hashUnique)
 import System.Environment (lookupEnv)
 import GHC.Core.Lint (displayLintResults)
 import GHC.Core (CoreBind, Bind(..), bindersOfBinds)
@@ -98,11 +99,12 @@ import Tidepool.HomeProducts
   ( OriginalVersion, originalVersionOwner, originalVersionInRecoveryScope, AdmittedFinalizedOriginal
   , admittedOriginalModule, admittedOriginalLocation, admitOriginalRecoveryScope
   , recoverAdmittedFinalizedOriginalWithPrevious )
-import Tidepool.Timing (readTimingEnabled, timePhase, timeModuleDetailPhase, emitCount)
+import Tidepool.Timing (readTimingEnabled, timePhase, timeModuleDetailPhase, emitCount
+  , ReuseContext, TaskAttempt, TaskComponent(..), TaskOwner(..), timeTaskDetailPhase)
 import Tidepool.TypePolicy (TypeGraph, emptyTypeGraph)
 import Tidepool.FatIface
   ( ExactInterfaceFailure(..), readExactInterface
-  , FatOriginalVersion, fatOriginalOwner, FatIfaceComponent, fatComponentVersion
+  , FatOriginalVersion, fatOriginalOwner, fatOriginalFingerprints, FatIfaceComponent, fatComponentVersion
   , fatComponentOrdinals, fatComponentOrdinal, fatComponentBindings, fatComponentAllBinders
   , FatIfaceSelection, fatSelectionVersion, fatSelectionComponents
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
@@ -585,7 +587,20 @@ preparedUnitIsSite (PreparedUnitKey _ _ SiteComponents{}) = True
 preparedUnitIsSite _ = False
 
 runPreparedUnitTask :: PreparedUnitTask -> IO (Either RecoveredModuleFailure PreparedModule)
-runPreparedUnitTask (PreparedUnitTask _ action) = action
+runPreparedUnitTask = runPreparedUnitTaskWithTiming Nothing Nothing
+
+runPreparedUnitTaskWithTiming :: Maybe ReuseContext -> Maybe TaskAttempt -> PreparedUnitTask
+  -> IO (Either RecoveredModuleFailure PreparedModule)
+runPreparedUnitTaskWithTiming context attempt (PreparedUnitTask (PreparedUnitKey version issuer unit) action) = do
+  timing <- readTimingEnabled
+  let (interface,core) = fatOriginalFingerprints version
+      component = case unit of
+        OriginalComponent ordinal -> OriginalComponentTask ordinal
+        ConstructorWorkers -> ConstructorWorkersTask
+        SiteComponents ordinals -> SiteComponentsTask ordinals
+      owner = TaskOwner (fatOriginalOwner version) (Just (show interface ++ ":" ++ show core))
+        (Just (fromIntegral (hashUnique issuer))) component
+  timeTaskDetailPhase timing "prepared_graph" "prepared_stg_task_service" context attempt owner action
 
 finishPreparedComponentTask :: PreparedComponentTask -> Map PreparedUnitKey PreparedModule
   -> Either RecoveredModuleFailure PreparedComponents
@@ -1051,4 +1066,4 @@ acquireBindingsWithScope workers timing subsetScope entries hscEnv thisModule lo
         Nothing -> ioError (userError ("recovered external entry absent from declaring interface: "
           ++ showSDocUnsafe (ppr reference)))
   pure $ PreparedModuleTask $
-    timeModuleDetailPhase timing "prepared_graph" "prepared_stg_task_service" thisModule lower
+    timeModuleDetailPhase timing "prepared_graph" "prepared_stg_service" thisModule lower

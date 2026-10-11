@@ -11,6 +11,7 @@ module Tidepool.Timing
   , timePhase
   , timeDetailPhase
   , timeModuleDetailPhase
+  , TaskAttempt(..), TaskComponent(..), TaskOwner(..), timeTaskDetailPhase
   , ResourceTimingStart
   , beginResourceTiming
   , endResourceTiming
@@ -39,6 +40,7 @@ module Tidepool.Timing
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Exception (SomeException, evaluate, try, throwIO)
 import Data.List (intercalate)
+import Data.IORef (IORef, newIORef, atomicModifyIORef')
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTime, getMonotonicTimeNSec)
 import GHC.Fingerprint.Type (Fingerprint)
@@ -48,6 +50,7 @@ import qualified GHC.Stats as RTS
 import System.IO (hPutStrLn, stderr)
 import System.CPUTime (getCPUTime)
 import System.Environment (lookupEnv)
+import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.Process (getProcessID)
 import Tidepool.Json (jsonString)
 
@@ -228,6 +231,35 @@ timeModuleDetailPhase True parent name owner act = do
   endResourceTimingWithOwner start parent name (Just owner)
   pure result
 
+-- Executor identity and submission ordinal come from the existing executor
+-- owner; a module's component and version come from its acquired typed input.
+data TaskAttempt = TaskAttempt Word64 Int
+data TaskComponent = WholeModuleTask | OriginalComponentTask Int
+  | ConstructorWorkersTask | SiteComponentsTask [Int]
+data TaskOwner = TaskOwner Module (Maybe String) (Maybe Word64) TaskComponent
+
+timeTaskDetailPhase :: MonadIO m => Bool -> String -> String -> Maybe ReuseContext
+  -> Maybe TaskAttempt -> TaskOwner -> m a -> m a
+timeTaskDetailPhase False _ _ _ _ _ action = action
+timeTaskDetailPhase True parent name context attempt (TaskOwner owner version issuer component) action = do
+  execution <- liftIO newTimingRequestIdentity
+  start <- beginResourceTiming True
+  result <- action
+  let componentName = case component of
+        WholeModuleTask -> "module"
+        OriginalComponentTask ordinal -> "original:" ++ show ordinal
+        ConstructorWorkersTask -> "constructor_workers"
+        SiteComponentsTask ordinals -> "sites:" ++ intercalate "," (map show ordinals)
+      metadata = maybe "" (\(ReuseContext cycleId _) -> " cycle=" ++ show cycleId) context
+        ++ " execution_id=" ++ show execution
+        ++ maybe "" (\(TaskAttempt executor ordinal) ->
+          " executor_id=" ++ show executor ++ " task_attempt=" ++ show ordinal) attempt
+        ++ maybe "" (\value -> " owner_version=" ++ value) version
+        ++ maybe "" (\value -> " owner_context=" ++ show value) issuer
+        ++ " owner_component=" ++ componentName
+  endResourceTimingWithMetadata start parent name (Just owner) metadata
+  pure result
+
 -- A token brackets existing wall timers whose setup spans several statements.
 -- Keep its constructor private so all resource spans use the same clock and
 -- counter ordering. Nothing performs no counter reads when timing is disabled.
@@ -245,8 +277,11 @@ endResourceTiming :: MonadIO m => Maybe ResourceTimingStart -> String -> String 
 endResourceTiming start parent name = endResourceTimingWithOwner start parent name Nothing
 
 endResourceTimingWithOwner :: MonadIO m => Maybe ResourceTimingStart -> String -> String -> Maybe Module -> m ()
-endResourceTimingWithOwner Nothing _ _ _ = pure ()
-endResourceTimingWithOwner (Just (ResourceTimingStart wall0 cpu0 rts0)) parent name owner = do
+endResourceTimingWithOwner start parent name owner = endResourceTimingWithMetadata start parent name owner ""
+
+endResourceTimingWithMetadata :: MonadIO m => Maybe ResourceTimingStart -> String -> String -> Maybe Module -> String -> m ()
+endResourceTimingWithMetadata Nothing _ _ _ _ = pure ()
+endResourceTimingWithMetadata (Just (ResourceTimingStart wall0 cpu0 rts0)) parent name owner metadata = do
   rts1 <- liftIO readRtsStats
   cpu1 <- liftIO getCPUTime
   wall1 <- liftIO getMonotonicTimeNSec
@@ -258,7 +293,7 @@ endResourceTimingWithOwner (Just (ResourceTimingStart wall0 cpu0 rts0)) parent n
     ++ " cpu_ns=" ++ show ((cpu1 - cpu0) `div` 1000)
     ++ maybe "" (\actual -> " owner_unit=" ++ unitString (moduleUnit actual)
       ++ " owner_module=" ++ moduleNameString (moduleName actual)) owner
-    ++ renderRtsDelta rts0 rts1)
+    ++ metadata ++ renderRtsDelta rts0 rts1)
 
 -- | Time @act@ without emitting anything — for a phase whose wall clock is
 -- the SUM of several non-contiguous sub-steps (e.g. once per module in a
@@ -371,11 +406,18 @@ data InterfaceReuse
   | MemoMiss
   | MemoDisabled
 
--- | A process-local identity for one compiler cycle. Compiler requests are
--- serialized, so their monotonic start stamps distinguish direct requests and
--- resident transactions without adding diagnostic identity to the protocol.
+-- One process-local issuer serves cycles, invocations and task spans. Clock
+-- resolution cannot make concurrent issuance reuse an identity.
+{-# NOINLINE timingIdentity #-}
+timingIdentity :: IORef Word64
+timingIdentity = unsafePerformIO (newIORef 0)
+
 newTimingRequestIdentity :: IO Word64
-newTimingRequestIdentity = getMonotonicTimeNSec
+newTimingRequestIdentity = do
+  observed <- getMonotonicTimeNSec
+  atomicModifyIORef' timingIdentity $ \previous ->
+    let issued = max observed (previous + 1)
+    in (issued,issued)
 
 -- | Measure one @mkIfaceTc@ call. Wall time comes from the monotonic clock and
 -- CPU time is process CPU. Allocation and GC counters are process-wide deltas

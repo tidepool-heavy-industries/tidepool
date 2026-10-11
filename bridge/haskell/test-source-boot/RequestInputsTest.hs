@@ -1,11 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
 
-module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, validationTimingControl, freshOutputSealSetLaws) where
+module RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws) where
 
 import Control.Exception (AsyncException(ThreadKilled), IOException, SomeException, bracket, bracketOnError, onException, fromException, throwIO, try)
 import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
 import Control.Monad (foldM, forM, forM_, unless, void, when)
+import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Internal as BSI
 import Data.IORef (IORef, newIORef, modifyIORef', readIORef)
@@ -35,7 +36,8 @@ import GHC.Unit.Module (mkModule, mkModuleName)
 import GHC.Unit.Module.Location (ml_hi_file)
 import GHC.Unit.Types (stringToUnit, GenWithIsBoot(..))
 import Language.Haskell.Syntax.ImpExp (IsBootInterface(..))
-import Tidepool.Binders (analyzeCellWithFlags, cellPlanPrologue)
+import Tidepool.Binders (analyzeCellWithFlags, cellPlanPrologue, analyzeOrderedCellWithFlags
+  , prepareTypedSegmentSource, preparedTypedSegmentPlan, preparedTypedSegmentSource, preparedTypedSegmentOperations)
 import Tidepool.DependencyEvidence
   ( DependencyEvidence(..), DependencySource(..), DependencyResolution(..) )
 import Tidepool.ExactHydration (ExactIfaceArtifact(..))
@@ -52,6 +54,7 @@ import Tidepool.ExactScope
 import Tidepool.FatIface (readExactInterface)
 import Tidepool.GhcPipeline
   ( PipelineSelection(..), CompilePurpose(..), pprPipelineResult, prHscEnv, runPipelineSessionSelected
+  , pprReuseContext, pprModules, pprProductInterfaces, preparedSegmentProducts
   , preparedExactCompilation, preparedFreshDependencies, withSourceImportIntents )
 import Tidepool.PackageWitness (PackageImportRoot(..), PackageImportEvidence(..), decodeCapturedPackageImports)
 import Tidepool.ArtifactBytes
@@ -62,7 +65,12 @@ import Tidepool.Test.GenuineCandidate (writeGenuineMetadataScope, writeGenuineCa
 import Tidepool.ModuleCandidates (readModuleCandidates, candidateModule, candidateGroups, candidateExecutionSource)
 import Tidepool.Test.CandidateCodec (CandidateCodecCase(..), writeCandidateCodecFixture)
 import Tidepool.Test.FixturePacket (PacketProducer(..), newPacketDirectory, runPacketProducer)
-import Tidepool.Timing (readSummaryTimingEnabled, withValidationTiming)
+import Tidepool.Timing (readSummaryTimingEnabled, withValidationTiming, TaskAttempt(..), newTimingRequestIdentity)
+import Tidepool.CompilerExecution (compilerExecutionGrant, withCompilerExecutor, runCompilerTasksWithAttempt)
+import Tidepool.CompilerProducts (prepareCompilerProjectionContext, prepareOriginalProductsWithCacheAndReuse)
+import Tidepool.PreparedStg (newPreparedBodyCache)
+import Tidepool.SessionArtifacts (prepareTypedSegmentSessionBindings, typedSegmentSessionEnvironment
+  , typedSegmentSessionGlobals, typedSegmentSessionInterfaces)
 import Codec.CBOR.Term (Term(..), encodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
 import SourceBootCases (admitCheckedScope, counterValues)
@@ -410,6 +418,79 @@ validationTimingControl = do
         && all ("\"invocation_id\":" `isInfixOf`) allRows
         && "\"observed_file_count\":3" `isInfixOf` acceptedLog)
       (fail ("validation timing summary lost a bounded field or terminal outcome: " ++ show allRows))
+
+-- Feed actual owner-emitted diagnostics into the declared consumer. This
+-- fixture deliberately executes two cycles in one physical request history;
+-- parser controls derive from those events rather than copied wire examples.
+compilerTimingRoundtrip :: IO ()
+compilerTimingRoundtrip = withTiming $ withScratch $ \work -> do
+  forM_ ["CanonicalSource.hs","CanonicalDependency.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  grant <- either fail pure (compilerExecutionGrant 2)
+  (_,diagnostics) <- captureDiagnostics $ withCompilerExecutor grant $ \executor -> do
+    let finishFallback owner prepared = do
+          cache <- newPreparedBodyCache
+          context <- prepareCompilerProjectionContext prepared Map.empty
+            (mkModule (stringToUnit "main") (mkModuleName owner)) "__original_projection" [] Nothing
+          void $ prepareOriginalProductsWithCacheAndReuse (Just (pprReuseContext prepared))
+            cache Nothing executor (prHscEnv (pprPipelineResult prepared)) Nothing
+            (pprProductInterfaces prepared) context Set.empty (pprModules prepared)
+    plain <- runPipelineSessionSelected
+      (WithCompilerExecution grant executor (PreparedProducts Nothing)) Set.empty CertifyHomeProductsCompile
+      Nothing (work </> "CanonicalSource.hs") [work] Nothing
+    finishFallback "CanonicalSource" plain
+    effects <- lookupEnv "TIDEPOOL_TEST_EFFECTS_DIR" >>= maybe (fail "missing declared effects") pure
+    prelude <- lookupEnv "TIDEPOOL_PRELUDE_DIR" >>= maybe (fail "missing declared prelude") pure
+    template <- readFile "test-source-boot/fixtures/TelemetryTypedTemplate.hs"
+    let body = "let telemetryValue = (42 :: Int)"
+    ordered <- analyzeOrderedCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult plain)))
+      template body >>= either (fail . show) pure
+    source <- either fail pure (prepareTypedSegmentSource template ordered (digest (BS8.pack body)) [(0,1,Nothing)])
+    let path = work </> "TelemetryTyped.hs"
+        plan = preparedTypedSegmentPlan source
+        prepare environment admissions segment = do
+          batch <- prepareTypedSegmentSessionBindings environment admissions segment (work </> "typed-stage")
+          pure (typedSegmentSessionEnvironment batch, typedSegmentSessionGlobals batch,
+            typedSegmentSessionInterfaces batch)
+    writeFile path (preparedTypedSegmentSource source)
+    typed <- runPipelineSessionSelected
+      (WithCompilerExecution grant executor
+        (WithTypedSegmentPreparation prepare (PreparedSegmentProducts plan Nothing))) Set.empty
+      (TypedSegmentCompile plan (preparedTypedSegmentOperations source) GeneralCompile)
+      Nothing path [work,effects,prelude] Nothing
+    finishFallback "TelemetryTyped" (preparedSegmentProducts typed)
+  let logPath = work </> "producer.log"
+  writeFile logPath diagnostics
+  python <- lookupEnv "TIDEPOOL_TEST_PYTHON" >>= maybe (fail "missing declared Python") pure
+  reporter <- lookupEnv "TIDEPOOL_TEST_REUSE_REPORT" >>= maybe (fail "missing declared reuse reporter") pure
+  checks <- lookupEnv "TIDEPOOL_TEST_REUSE_REPORT_TESTS" >>= maybe (fail "missing declared reuse checks") pure
+  callProcess python [checks,"--producer-log",logPath,"--reporter",reporter]
+
+compilerTaskAttemptHistories :: IO ()
+compilerTaskAttemptHistories = do
+  grant <- either fail pure (compilerExecutionGrant 3)
+  result <- quickCheckWithResult stdArgs {maxSuccess=100,maxSize=8,replay=Just (mkQCGen 710117,0)} $
+    forAllShrink (resize 8 (listOf (chooseInt (0,5)))) shrink $ \batches -> ioProperty $ do
+      withCompilerExecutor grant $ \executor -> do
+        attempts <- fmap concat $ forM batches $ \count ->
+          runCompilerTasksWithAttempt executor
+            (\(TaskAttempt issuer ordinal) input -> pure (issuer,ordinal,input))
+            (\_ _ -> pure ()) (replicate count "same-owned-input")
+        later <- withCompilerExecutor grant $ \other -> runCompilerTasksWithAttempt other
+          (\(TaskAttempt issuer ordinal) _ -> pure (issuer,ordinal))
+          (\_ _ -> pure ()) [()]
+        issued <- runCompilerTasksWithAttempt executor
+          (\_ _ -> newTimingRequestIdentity) (\_ _ -> pure ()) (replicate 30 ())
+        let ordinals = [ordinal | (_,ordinal,_) <- attempts]
+            issuers = nub [issuer | (issuer,_,_) <- attempts]
+            otherIssuer = fst (head later)
+        pure $ counterexample (show (batches,attempts,later)) $
+          length (nub issued) == length issued
+          && ordinals == [0 .. sum batches - 1]
+          && length issuers <= 1
+          && otherIssuer `notElem` issuers
+          && all (\(_,_,input) -> input == "same-owned-input") attempts
+  unless (isSuccess result) (fail "compiler task attempt histories reused an execution identity")
 
 -- This fault injector invokes the actual libtest binary. It never derives
 -- success from rendered test output; receipt mutations use independently known

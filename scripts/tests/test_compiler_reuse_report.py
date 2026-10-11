@@ -1,4 +1,5 @@
 import importlib.util
+from importlib.machinery import SourceFileLoader
 from contextlib import redirect_stdout
 import io
 import json
@@ -6,9 +7,15 @@ from pathlib import Path
 import unittest
 import tempfile
 import hashlib
+import copy
+import random
+import re
+import sys
 from unittest.mock import patch
 
-SPEC = importlib.util.spec_from_file_location('compiler_reuse', Path(__file__).parents[1] / 'compiler-reuse-report.py')
+REPORT_PATH = (Path(sys.argv[sys.argv.index('--reporter') + 1]) if '--reporter' in sys.argv else
+               Path(__file__).parents[1] / 'compiler-reuse-report.py')
+SPEC = importlib.util.spec_from_loader('compiler_reuse', SourceFileLoader('compiler_reuse', str(REPORT_PATH)))
 REPORT = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(REPORT)
 
@@ -161,7 +168,7 @@ class ReuseEvidenceControls(unittest.TestCase):
 
 
     def test_legacy_totals_need_one_terminal_and_do_not_hide_partial_subtotals(self):
-        for terminal in ('missing', 'duplicate', 'after'):
+        for terminal in ('missing', 'duplicate'):
             with self.subTest(terminal=terminal):
                 rows = trace(completed([packet()]))
                 diagnostic = {'fields': {'line': 'tidepool-count name=activation_preview_frontends count=1'}, 'span': rows[0]['span']}
@@ -318,8 +325,10 @@ class ReuseEvidenceControls(unittest.TestCase):
         same_owner = REPORT.analyze(with_detail_lines([
             timing_detail(start=10, end=30, owner_module='Shared'),
             timing_detail(phase='raw_projection_task_service', start=20, end=40, owner_module='Shared')]))['requests'][0]['task_overlap']
-        self.assertEqual(same_owner['maximum_simultaneous_tasks'], 1)
-        self.assertEqual(same_owner['overlapping_wall_ns'], 0)
+        self.assertEqual(same_owner['maximum_simultaneous_tasks'], 2)
+        self.assertEqual(same_owner['maximum_simultaneous_distinct_owners'], 1)
+        self.assertEqual(same_owner['overlapping_wall_ns'], 10)
+        self.assertEqual(same_owner['overlapping_wall_ns_distinct_owners'], 0)
         self.assertNotIn('cpu_ns', overlap)
         self.assertNotIn('allocated_bytes', overlap)
 
@@ -332,12 +341,12 @@ class ReuseEvidenceControls(unittest.TestCase):
         self.assertEqual(len(overlap['qualified_spans']), 1)
         self.assertEqual(overlap['maximum_simultaneous_tasks'], 1)
 
-    def test_actual_source_phase_overlap_requires_its_ghc_load_parent(self):
+    def test_actual_source_phase_overlap_requires_its_compile_parent(self):
         for phase in ('source_frontend_task_service', 'source_finalization_task_service'):
             with self.subTest(phase=phase):
-                lines = [timing_detail(phase=phase, parent='ghc_load', start=10, end=30,
+                lines = [timing_detail(phase=phase, parent='compile', start=10, end=30,
                                        owner_module='First'),
-                         timing_detail(phase=phase, parent='ghc_load', start=20, end=40,
+                         timing_detail(phase=phase, parent='compile', start=20, end=40,
                                        owner_module='Second')]
                 overlap = REPORT.analyze(with_detail_lines(lines))['requests'][0]['task_overlap']
                 self.assertEqual(overlap['by_phase'][phase]['maximum_simultaneous_distinct_owners'], 2)
@@ -396,12 +405,103 @@ class ReuseEvidenceControls(unittest.TestCase):
         self.assertEqual(overlap['status'], 'UNKNOWN')
         self.assertTrue(any('duplicate task interval rows' in problem for problem in overlap['problems']))
 
-    def test_same_owner_overlapping_intervals_within_one_phase_are_unknown(self):
+    def test_same_owner_distinct_component_tasks_can_overlap(self):
         overlap = REPORT.analyze(with_detail_lines([
-            timing_detail(start=10, end=30, owner_module='Repeated'),
-            timing_detail(start=20, end=40, owner_module='Repeated')]))['requests'][0]['task_overlap']
+            timing_detail(start=10, end=30, owner_module='Repeated', executor_id=99, task_attempt=0),
+            timing_detail(start=20, end=40, owner_module='Repeated', executor_id=99, task_attempt=1)]))['requests'][0]['task_overlap']
+        self.assertEqual(overlap['status'], 'observed')
+        self.assertEqual(overlap['maximum_simultaneous_tasks'], 2)
+        self.assertEqual(overlap['maximum_simultaneous_distinct_owners'], 1)
+
+    def test_repeated_legacy_cycle_totals_are_not_duplicate_executions(self):
+        lines = ['tidepool-timing phase=typecheck ms=0',
+                 'tidepool-count name=activation_preview_frontends count=1',
+                 'tidepool-compile-summary modules=2 typecheck_modules=2']
+        rows = trace(completed([packet()]))
+        rows[1:1] = [{'fields': {'line': line}, 'span': rows[0]['span']}
+                     for line in lines + lines]
+        request = REPORT.analyze(rows)['requests'][0]
+        self.assertEqual(request['status'], 'observed')
+        self.assertEqual(request['legacy_counts']['activation_preview_frontends'], 2)
+        self.assertEqual(request['phases_ms']['typecheck'], [0, 0])
+        stamped = 'tidepool-count name=activation_preview_frontends count=1 count_ns=999'
+        rows[1:1] = [{'fields': {'line': stamped}, 'span': rows[0]['span']}] * 2
+        self.assertEqual(REPORT.analyze(rows)['requests'][0]['legacy_status'], 'UNKNOWN')
+
+    def test_duplicate_execution_with_changed_interval_remains_unknown(self):
+        overlap = REPORT.analyze(with_detail_lines([
+            timing_detail(start=10, end=20, executor_id=99, task_attempt=1),
+            timing_detail(start=30, end=40, executor_id=99, task_attempt=1)]))['requests'][0]['task_overlap']
         self.assertEqual(overlap['status'], 'UNKNOWN')
-        self.assertTrue(any('overlapping intervals for owner' in problem for problem in overlap['problems']))
+        self.assertTrue(any('duplicate task execution' in problem for problem in overlap['problems']))
+
+    def test_sweep_matches_independent_discrete_histories(self):
+        rng = random.Random(631121)
+        for case in range(200):
+            spans = [(rng.randrange(12), rng.randrange(13), rng.randrange(3)) for _ in range(rng.randrange(1, 12))]
+            spans = [(min(start, end), max(start, end), owner) for start, end, owner in spans]
+            lines = [timing_detail(start=start, end=end, owner_module=f'M{owner}', executor_id=99,
+                                   task_attempt=index, owner_component=f'original:{index}')
+                     for index, (start, end, owner) in enumerate(spans)]
+            rng.shuffle(lines)
+            result = REPORT.analyze(with_detail_lines(lines))['requests'][0]['task_overlap']
+            tasks = [sum(start <= point < end for start, end, _ in spans) for point in range(13)]
+            owners = [len({owner for start, end, owner in spans if start <= point < end}) for point in range(13)]
+            with self.subTest(case=case):
+                self.assertEqual(result['status'], 'observed')
+                self.assertEqual(result['maximum_simultaneous_tasks'], max(tasks))
+                self.assertEqual(result['maximum_simultaneous_distinct_owners'], max(owners))
+                self.assertEqual(result['overlapping_wall_ns'], sum(value >= 2 for value in tasks))
+                self.assertEqual(result['overlapping_wall_ns_distinct_owners'], sum(value >= 2 for value in owners))
+                self.assertNotIn('allocated_bytes', result)
+
+    def test_exact_execution_cannot_replay_under_another_cycle_or_owner(self):
+        for identity in ('executor_id=99 task_attempt=1', 'execution_id=99'):
+            first = timing_detail('prepared_stg_task_service', 10, 30)
+            first += ' cycle=7 ' + identity + ' owner_component=original:0 owner_version=sealed'
+            for changed in ('cycle=8', 'owner_module=Other', 'owner_component=original:1'):
+                second = first.replace('start_ns=10', 'start_ns=40').replace('end_ns=30', 'end_ns=60')
+                name = changed.split('=')[0]
+                second = ' '.join(token for token in second.split() if not token.startswith(name + '='))
+                second += ' ' + changed
+                rows = trace([])
+                rows[1:1] = [{'fields': {'line': detail}, 'span': rows[0]['span']} for detail in (first,second)]
+                overlap = REPORT.analyze(rows)['requests'][0]['task_overlap']
+                self.assertEqual(overlap['status'], 'UNKNOWN', (identity,changed,overlap))
+                self.assertTrue(any('lineage' in problem for problem in overlap['problems']))
+
+    def test_dual_execution_ids_cannot_be_rebound_independently(self):
+        first = timing_detail(start=10, end=30, executor_id=99, task_attempt=1, execution_id=101, cycle=7)
+        for name, value in (('executor_id',100), ('task_attempt',2), ('execution_id',102)):
+            second = first.replace('start_ns=10', 'start_ns=40').replace('end_ns=30', 'end_ns=60')
+            second = re.sub(r' ' + name + r'=[0-9]+', ' ' + name + '=' + str(value), second)
+            overlap = REPORT.analyze(with_detail_lines([first,second]))['requests'][0]['task_overlap']
+            self.assertEqual(overlap['status'], 'UNKNOWN', (name,overlap))
+            self.assertTrue(any('duplicate task execution' in problem for problem in overlap['problems']))
+
+    def test_task_cycle_must_match_observed_compile_owner(self):
+        rows = trace(completed([packet('work')]))
+        rows[1:1] = [{'fields': {'line': timing_detail(cycle=88, execution_id=11)}, 'span': rows[0]['span']}]
+        overlap = REPORT.analyze(rows)['requests'][0]['task_overlap']
+        self.assertEqual(overlap['status'], 'UNKNOWN')
+        self.assertTrue(any('compile owner' in problem for problem in overlap['problems']))
+
+    def test_cancelled_failed_and_worker_death_histories_have_no_request_totals(self):
+        for terminal in ('missing', 'compiler request failed', 'compiler request abandoned by client'):
+            rows = trace(completed([packet('work')]))
+            if terminal == 'missing':
+                rows.pop()
+            else:
+                rows[-1]['fields'].update(message=terminal, exit_code=1)
+            stage = REPORT.analyze(rows)['requests'][0]['stages']['source_frontend']
+            self.assertEqual(stage['status'], 'UNKNOWN')
+            self.assertIsNone(stage['counts'])
+
+    def test_missing_projection_selection_remains_unknown(self):
+        result = REPORT.analyze(trace(completed([packet('work')])))
+        for stage in ('original_recovery', 'raw_projection'):
+            self.assertEqual(result['requests'][0]['stages'][stage]['status'], 'UNKNOWN')
+            self.assertIsNone(result['requests'][0]['stages'][stage]['counts'])
 
     def test_buffered_task_timing_detail_joins_by_physical_identity(self):
         rows = trace([])
@@ -640,5 +740,76 @@ class ReuseEvidenceControls(unittest.TestCase):
                 REPORT.analyze_workload(manifest, report)
 
 
+def producer_roundtrip(path):
+    """Exercise the consumer with freshly emitted Haskell owner records."""
+    lines = Path(path).read_text().splitlines()
+    span = {'daemon_epoch': 'producer-roundtrip', 'worker_pid': 123, 'admission_id': 1,
+            'request_ordinal': 1, 'compile_request': hashlib.sha256(Path(path).read_bytes()).hexdigest()}
+    diagnostics = [{'fields': {'line': line}, 'span': span} for line in lines]
+    start = {'fields': {'message': 'compiler request started'}, 'span': span}
+    terminal = {'fields': {'message': 'compiler request finished', 'exit_code': 0}, 'span': span}
+    rows = [start, *diagnostics, terminal]
+    result = REPORT.analyze(rows)
+    assert result['status'] == 'observed', result['problems']
+    request = result['requests'][0]
+    assert len(request['cycles']) == 2, request['cycles']
+    assert {cycle['purpose'] for cycle in request['cycles']} == {'certify_home_products', 'typed_segment'}, request['cycles']
+    assert request['stages']['source_frontend']['status'] == 'observed'
+    assert request['stages']['original_recovery']['status'] == 'observed'
+    assert request['stages']['raw_projection']['status'] == 'observed'
+    assert request['task_overlap']['status'] == 'observed', request['task_overlap']['problems']
+    tasks = request['task_overlap']['qualified_spans']
+    assert tasks and all('cycle' in task and 'owner_version' in task for task in tasks), tasks
+    assert any('executor_id' in task and 'task_attempt' in task for task in tasks), tasks
+    issued_cycles = {cycle['cycle'] for cycle in request['cycles']}
+    assert all(task['cycle'] in issued_cycles for task in tasks), tasks
+    wrong_cycle = copy.deepcopy(rows)
+    task_row = next(row for row in wrong_cycle if REPORT.parse_timing_detail(row.get('fields', {}).get('line', '')))
+    task_row['fields']['line'] = re.sub(r' cycle=[0-9]+', ' cycle=0', task_row['fields']['line'])
+    assert REPORT.analyze(wrong_cycle)['requests'][0]['task_overlap']['status'] == 'UNKNOWN'
+    expected = request['stages']
+    rng = random.Random(7158)
+    for _ in range(100):
+        shuffled = copy.deepcopy(diagnostics)
+        rng.shuffle(shuffled)
+        reordered = REPORT.analyze([terminal, *shuffled, start])
+        assert reordered['status'] == 'observed', reordered['problems']
+        assert reordered['requests'][0]['stages'] == expected
+    for message in ('compiler request failed', 'compiler request abandoned by client', None):
+        altered = copy.deepcopy(terminal)
+        altered['fields'].update(message=message, exit_code=1)
+        invalid = REPORT.analyze([start, *diagnostics, *([altered] if message else [])])
+        assert invalid['status'] == 'incomplete'
+        assert invalid['requests'][0]['stages']['source_frontend']['counts'] is None
+    source_terminal = next(row for row in diagnostics if row['fields']['line'].startswith(REPORT.PREFIX)
+                           and json.loads(row['fields']['line'][len(REPORT.PREFIX):]).get('stage') == 'source_frontend'
+                           and json.loads(row['fields']['line'][len(REPORT.PREFIX):]).get('decision') == 'complete')
+    missing = REPORT.analyze([start, *[row for row in diagnostics if row is not source_terminal], terminal])
+    assert missing['requests'][0]['stages']['source_frontend']['counts'] is None
+    duplicate = REPORT.analyze([*rows, source_terminal])
+    assert duplicate['status'] == 'incomplete'
+    assert duplicate['requests'][0]['stages']['source_frontend']['counts'] is None
+    for stage in ('prepared_body', 'original_recovery', 'raw_projection'):
+        product_terminal = next(row for row in diagnostics if row['fields']['line'].startswith(REPORT.PREFIX)
+                                and json.loads(row['fields']['line'][len(REPORT.PREFIX):]).get('stage') == stage
+                                and json.loads(row['fields']['line'][len(REPORT.PREFIX):]).get('decision') == 'complete')
+        duplicate = REPORT.analyze([*rows, product_terminal])
+        assert duplicate['status'] == 'incomplete'
+        assert duplicate['requests'][0]['stages'][stage]['counts'] is None
+        missing = REPORT.analyze([start, *[row for row in diagnostics if row is not product_terminal], terminal])
+        assert missing['requests'][0]['stages'][stage]['counts'] is None
+    # Retain the genuine producer stream in the counted runner's output. This
+    # bounds evidence independently of the parser's accepted event vocabulary.
+    assert Path(path).stat().st_size <= 16 * 1024 * 1024, 'producer fixture exceeded capture budget'
+    print('producer diagnostics begin')
+    for line in lines:
+        print(line)
+    print('producer diagnostics end')
+    print(f'producer roundtrip: {len(diagnostics)} emitted rows; 2 cycles; 100 reordered histories; missing/duplicate/cancelled/dead controls passed')
+
+
 if __name__ == '__main__':
-    unittest.main()
+    if '--producer-log' in sys.argv:
+        producer_roundtrip(sys.argv[sys.argv.index('--producer-log') + 1])
+    else:
+        unittest.main()

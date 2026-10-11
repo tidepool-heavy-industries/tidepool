@@ -9,7 +9,7 @@
 module Tidepool.FatIface
   ( FatIfaceCache, newFatIfaceCache, copyFatIfaceCache, mergeFatIfaceCaches, selectFatIfaceCaches, evictFatIfaceMatching
   , FatIfaceLookup(..), FatIfaceMissing(..), lookupFatIfaceExact, lookupFatIfaceBodies
-  , FatOriginalVersion, fatOriginalOwner
+  , FatOriginalVersion, fatOriginalOwner, fatOriginalFingerprints
   , FatIfaceComponent, fatComponentVersion, fatComponentOrdinals
   , fatComponentBindings, fatComponentAllBinders, fatComponentOrdinal
   , FatIfaceSelection, fatSelectionVersion, fatSelectionComponents
@@ -98,6 +98,9 @@ data FatOriginalVersion = FatOriginalVersion !Module !Fingerprint !Fingerprint
 
 fatOriginalOwner :: FatOriginalVersion -> Module
 fatOriginalOwner (FatOriginalVersion owner _ _) = owner
+
+fatOriginalFingerprints :: FatOriginalVersion -> (Fingerprint, Fingerprint)
+fatOriginalFingerprints (FatOriginalVersion _ interface core) = (interface, core)
 
 -- | One canonical undirected connected component of private references in an
 -- original fat interface. Bindings retain their authoritative original group

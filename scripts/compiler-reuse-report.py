@@ -21,8 +21,8 @@ KEY_FIELDS = ('daemon_epoch', 'worker_pid', 'admission_id', 'request_ordinal')
 PREFIX = 'tidepool-reuse '
 TASK_PARENTS = {'prepared_stg_task_service': 'prepared_graph',
                 'raw_projection_task_service': 'prepared_graph',
-                'source_frontend_task_service': 'ghc_load',
-                'source_finalization_task_service': 'ghc_load'}
+                'source_frontend_task_service': 'compile',
+                'source_finalization_task_service': 'compile'}
 TASK_PHASES = set(TASK_PARENTS)
 
 
@@ -68,8 +68,9 @@ def validate_event(event):
         if not image and (not all(text(value) for value in owner) or owner[2] not in KINDS):
             raise ValueError('incomplete exact owner identity')
     if event['decision'] in ('complete', 'not_applicable'):
-        expected_reason = 'stage_complete' if event['decision'] == 'complete' else 'check_only'
-        if (event['reason'] != expected_reason or event['items'] != 0 or any(owner)
+        applicable = event['reason'] == 'check_only' and event['stage'] in CHECK_ONLY_STAGES
+        if ((event['reason'] != 'stage_complete' if event['decision'] == 'complete' else not applicable)
+                or event['items'] != 0 or any(owner)
                 or event['bytes'] is not None
                 or (event['decision'] == 'not_applicable' and event['stage'] not in CHECK_ONLY_STAGES)):
             raise ValueError('invalid stage terminal observation')
@@ -102,7 +103,8 @@ def parse_timing_detail(line):
     expected_parent = TASK_PARENTS[selected_phase]
     if parsed.get('parent') != expected_parent:
         problems.append(f"task phase parent must be '{expected_parent}'")
-    for key in ('ms', 'start_ns', 'end_ns', 'wall_ns', 'cpu_ns'):
+    for key in ('ms', 'start_ns', 'end_ns', 'wall_ns', 'cpu_ns', 'cycle', 'executor_id', 'task_attempt',
+                'execution_id', 'owner_context'):
         value = parsed.get(key)
         if value is None:
             continue
@@ -112,6 +114,10 @@ def parse_timing_detail(line):
             problems.append(f'timing field {key} is not a nonnegative integer')
     if 'wall_ns' not in parsed:
         problems.append('task phase lacks wall_ns')
+    if ('executor_id' in parsed) != ('task_attempt' in parsed):
+        problems.append('task phase has incomplete executor attempt identity')
+    if 'owner_component' in parsed and not text(parsed['owner_component'], 65536):
+        problems.append('task phase has invalid owner component')
     if type(parsed.get('start_ns')) is int and type(parsed.get('end_ns')) is int:
         if parsed['end_ns'] < parsed['start_ns']:
             problems.append('task phase has invalid interval endpoints')
@@ -121,7 +127,7 @@ def parse_timing_detail(line):
     return parsed
 
 
-def task_overlap(details):
+def task_overlap(details, known_cycles=None):
     """Report overlap among qualified task spans; never sum resource deltas."""
     selected = [detail for detail in details if detail['parsed'].get('phase') in TASK_PHASES]
     intervals, problems = [], []
@@ -130,6 +136,8 @@ def task_overlap(details):
         problems.extend(f"row {detail['row']}: {problem}" for problem in parsed.get('_problems', []))
         if detail.get('_boundary_problem'):
             problems.append(f"row {detail['row']}: {detail['_boundary_problem']}")
+        if known_cycles and 'cycle' in parsed and parsed['cycle'] not in known_cycles:
+            problems.append(f"row {detail['row']}: task span cycle was not observed by compile owner")
         owner_unit, owner_module = parsed.get('owner_unit'), parsed.get('owner_module')
         start, end = parsed.get('start_ns'), parsed.get('end_ns')
         if not text(owner_unit) or not text(owner_module):
@@ -140,26 +148,47 @@ def task_overlap(details):
             continue
         intervals.append({'row': detail['row'], 'phase': parsed['phase'],
                           'owner_unit': owner_unit, 'owner_module': owner_module,
-                          'start_ns': start, 'end_ns': end})
+                          'start_ns': start, 'end_ns': end,
+                          **{name: parsed[name] for name in ('cycle', 'executor_id', 'task_attempt', 'execution_id',
+                              'owner_version', 'owner_context', 'owner_component') if name in parsed}})
     interval_keys = {}
     for span in intervals:
-        key = (span['phase'], span['owner_unit'], span['owner_module'], span['start_ns'], span['end_ns'])
+        key = (span['phase'], span['owner_unit'], span['owner_module'], span['start_ns'], span['end_ns'],
+               span.get('cycle'), span.get('executor_id'), span.get('task_attempt'), span.get('execution_id'),
+               span.get('owner_version'), span.get('owner_context'), span.get('owner_component'))
         interval_keys.setdefault(key, []).append(span['row'])
     for rows in interval_keys.values():
         if len(rows) > 1:
             problems.append(f'duplicate task interval rows: {", ".join(map(str, rows))}')
+    execution_rows, lineages = {}, {}
+    for span in intervals:
+        lineage = tuple(span.get(name) for name in ('cycle', 'owner_unit', 'owner_module',
+                                                   'owner_version', 'owner_context', 'owner_component'))
+        if 'executor_id' in span and 'task_attempt' in span:
+            identity = ('executor', span['executor_id'], span['task_attempt'])
+            execution_rows.setdefault((*identity, span['phase']), []).append(span['row'])
+            lineages.setdefault(identity, set()).add(lineage)
+        if 'execution_id' in span:
+            identity = ('execution', span['execution_id'])
+            execution_rows.setdefault(identity, []).append(span['row'])
+            lineages.setdefault(identity, set()).add((*lineage, span.get('executor_id'),
+                                                     span.get('task_attempt'), span['phase']))
+    for rows in execution_rows.values():
+        if len(rows) > 1:
+            problems.append(f'duplicate task execution rows: {", ".join(map(str, rows))}')
+    if any(len(values) != 1 for values in lineages.values()):
+        problems.append('task execution has conflicting cycle or owner lineage')
     owner_phase_intervals = {}
     for span in intervals:
-        if span['end_ns'] > span['start_ns']:
-            owner_phase_intervals.setdefault(
-                (span['phase'], span['owner_unit'], span['owner_module']), []).append(span)
-    for (phase, unit, module), spans in owner_phase_intervals.items():
-        furthest_end = None
-        for span in sorted(spans, key=lambda item: (item['start_ns'], item['end_ns'])):
-            if furthest_end is not None and span['start_ns'] < furthest_end:
-                problems.append(f'{phase}: overlapping intervals for owner {unit}/{module}')
-                break
-            furthest_end = max(furthest_end or span['end_ns'], span['end_ns'])
+        owner_phase_intervals.setdefault((span['phase'], span['owner_unit'], span['owner_module']), []).append(span)
+    for spans in owner_phase_intervals.values():
+        prior = []
+        for span in sorted(spans, key=lambda item: item['start_ns']):
+            overlapping = [earlier for earlier in prior if earlier['end_ns'] > span['start_ns']]
+            if overlapping and any('execution_id' not in item and 'task_attempt' not in item
+                                   for item in overlapping + [span]):
+                problems.append('overlapping same-owner tasks lack execution identity')
+            prior.append(span)
     if not selected:
         problems.append('no qualified task phase spans')
     if problems:
@@ -170,7 +199,7 @@ def task_overlap(details):
             phase: {**unknown, 'qualified_spans': [span for span in intervals if span['phase'] == phase]}
             for phase in sorted(TASK_PHASES)}, 'combined_scope': 'mixed_phase_descriptive_only',
                 'mixed_phase_overlap_is_independent_cpu_proof': False,
-                'same_owner_policy': 'same owner across phases counts once; same-phase overlap is UNKNOWN',
+                'same_owner_policy': 'distinct task attempts may share an owner; owner concurrency counts modules once',
                 'problems': problems}
 
     def measure(spans):
@@ -187,13 +216,15 @@ def task_overlap(details):
                 points.append((span['end_ns'], -1, owner))
         # Close before opening at one timestamp so touching intervals do not overlap.
         points.sort(key=lambda point: (point[0], point[1]))
-        active, maximum, overlap_ns = {}, 0, 0
+        active, maximum, maximum_tasks, overlap_ns, task_overlap_ns = {}, 0, 0, 0, 0
         previous = None
         index = 0
         while index < len(points):
             timestamp = points[index][0]
             if previous is not None and len(active) >= 2:
                 overlap_ns += timestamp - previous
+            if previous is not None and sum(active.values()) >= 2:
+                task_overlap_ns += timestamp - previous
             while index < len(points) and points[index][0] == timestamp and points[index][1] < 0:
                 owner = points[index][2]
                 active[owner] -= 1
@@ -204,11 +235,12 @@ def task_overlap(details):
                 owner = points[index][2]
                 active[owner] = active.get(owner, 0) + 1
                 maximum = max(maximum, len(active))
+                maximum_tasks = max(maximum_tasks, sum(active.values()))
                 index += 1
             previous = timestamp
-        return {'status': 'observed', 'maximum_simultaneous_tasks': maximum,
+        return {'status': 'observed', 'maximum_simultaneous_tasks': maximum_tasks,
                 'maximum_simultaneous_distinct_owners': maximum,
-                'overlapping_wall_ns': overlap_ns, 'overlapping_wall_ns_distinct_owners': overlap_ns,
+                'overlapping_wall_ns': task_overlap_ns, 'overlapping_wall_ns_distinct_owners': overlap_ns,
                 'qualified_spans': spans}
 
     measured = measure(intervals)
@@ -216,7 +248,7 @@ def task_overlap(details):
                             for phase in sorted(TASK_PHASES)}
     measured['combined_scope'] = 'mixed_phase_descriptive_only'
     measured['mixed_phase_overlap_is_independent_cpu_proof'] = False
-    measured['same_owner_policy'] = 'same owner across phases counts once; same-phase overlap is UNKNOWN'
+    measured['same_owner_policy'] = 'distinct task attempts may share an owner; owner concurrency counts modules once'
     measured['problems'] = []
     return measured
 
@@ -307,13 +339,20 @@ def analyze(events):
         elif (request.get('terminal_message') != 'compiler request finished'
                 or type(request.get('exit_code')) is not int or request['exit_code'] != 0):
             request_problems.append('request did not finish successfully')
+        successful = (len(terminals) == 1 and request.get('terminal_message') == 'compiler request finished'
+                      and type(request.get('exit_code')) is int and request['exit_code'] == 0)
         legacy_problems = []
         seen_legacy = set()
         for observation in request['legacy_observations'] + request['legacy_compile_summaries']:
             bounded = len(terminals) == 1
-            if observation['line'] in seen_legacy:
+            # Untimestamped rows describe repeated work, including identical
+            # cycle totals. Only an owning observation stamp can prove replay.
+            stamp = re.search(r'(?:^| )count_ns=([0-9]+)(?: |$)', observation['line'])
+            observation_key = (observation['kind'], observation['name'], int(stamp[1])) if stamp else None
+            if observation_key is not None and observation_key in seen_legacy:
                 bounded = False
-            seen_legacy.add(observation['line'])
+            if observation_key is not None:
+                seen_legacy.add(observation_key)
             observation['boundary_status'] = 'observed' if bounded else 'UNKNOWN'
             if not bounded:
                 legacy_problems.append(f"row {observation['row']}: legacy diagnostic lacks unique physical terminal or is duplicated")
@@ -328,8 +367,8 @@ def analyze(events):
                     request['legacy_counts'][name] = request['legacy_counts'].get(name, 0) + value
         request_problems.extend(legacy_problems)
         for detail in request['timing_details']:
-            if len(terminals) != 1:
-                detail['_boundary_problem'] = 'task timing detail lacks unique physical terminal'
+            if not successful:
+                detail['_boundary_problem'] = 'task timing detail lacks successful unique physical terminal'
             detail['correlation_basis'] = 'exact_physical_request_identity; arrival_order_is_not_execution_order'
             if detail.get('_boundary_problem'):
                 request_problems.append(f"row {detail['row']}: {detail['_boundary_problem']}")
@@ -370,13 +409,16 @@ def analyze(events):
                 'stages': {stage: stage_observation(
                     [event for event in cycle_events if event['stage'] == stage], [cycle])[0]
                     for stage in STAGES}})
+        invalid_request_evidence = bool(request_problems)
         for stage in STAGES:
             selected = [event for event in request['events'] if event['stage'] == stage]
             observation, stage_problems = stage_observation(selected, cycles)
+            if not successful or invalid_request_evidence:
+                observation.update(status='UNKNOWN', counts=None, bytes=None)
             request['stages'][stage] = observation
             request_problems.extend(f'{stage}{problem}' for problem in stage_problems)
         request['problems'] = sorted(set(request_problems))
-        request['task_overlap'] = task_overlap(request['timing_details'])
+        request['task_overlap'] = task_overlap(request['timing_details'], {cycle for cycle, _ in cycles})
         problems.extend(f'{key}: {problem}' for problem in request['problems'])
         request['status'] = 'observed' if request['events'] and len(terminals) == 1 and not request_problems else 'UNKNOWN'
     incomplete = problems or not requests or any(request['status'] == 'UNKNOWN' or any(
@@ -396,7 +438,8 @@ def stage_observation(selected, cycles):
     touched = {(event['cycle'], event['purpose']) for event in selected}
     problems = []
     for cycle in touched:
-        ordered = [event for event in selected if (event['cycle'], event['purpose']) == cycle]
+        ordered = sorted([event for event in selected if (event['cycle'], event['purpose']) == cycle],
+                         key=lambda event: event['observed_ns'])
         closures = [event for event in ordered if event['decision'] in ('complete', 'not_applicable')]
         if (len(closures) != 1 or ordered[-1]['decision'] not in ('complete', 'not_applicable')
                 or (closures[0]['decision'] == 'not_applicable' and len(ordered) != 1)):

@@ -5,7 +5,7 @@
 module Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedModuleCompletion, PreparedModuleCompletionInputs(..), PreparedModuleObserver(..)
   , PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces, pprFinalizedModules
-  , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings
+  , pprPackageImports, pprCandidateAdmissions, pprOriginalBindings, pprReuseContext
   , AdmittedSourceCandidate, pprAcceptedCandidates, preparedCandidateOriginal, preparedCandidateProof, revalidatePreparedCandidateInputs, PreparedSegmentProductsResult(..), TypedSegmentPreparation, CheckedEnvironmentResult(..)
   , PreparedDependencies, preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements
   , ProgramSourceImports, retainProgramSourceImports, withProgramSourceImports
@@ -217,7 +217,7 @@ import Tidepool.Session
   , scaffoldTargetName, scaffoldOutputBase, evalUserBinder, parseSessionModule, isReservedSessionModuleName )
 import Tidepool.Timing
   ( readTimingEnabled, timeSection, timePhase, emitPhase, emitCount
-  , timeDetailPhase, timeModuleDetailPhase, ResourceTimingStart, beginResourceTiming, endResourceTiming
+  , timeDetailPhase, timeTaskDetailPhase, TaskOwner(..), TaskComponent(..), ResourceTimingStart, beginResourceTiming, endResourceTiming
   , monotonicTime, elapsedMs
   , emitCompileSummary, emitModuleTiming, emitModuleInterfaceTiming
   , InterfaceStage(..), InterfaceReuse(..), measureModuleInterface
@@ -236,7 +236,7 @@ import Tidepool.ExecutionProjection
   , preparedRootIdentity )
 import Tidepool.CompilerExecution
   ( CompilerExecutionGrant, serialCompilerExecutionGrant, compilerModuleJobs
-  , CompilerExecutor, withCompilerExecutor, runCompilerTasks, dependencyClosedReuse )
+  , CompilerExecutor, withCompilerExecutor, runCompilerTasks, runCompilerTasksWithAttempt, dependencyClosedReuse )
 import Tidepool.PreparedSites
   ( resolvePreparedSiblings, resolvePreparedInterfaceSiblings )
 import Tidepool.ExecutionSchema (SymbolIdentity(..))
@@ -376,6 +376,7 @@ data PreparedPipelineResult = PreparedPipelineResult
   , ownedPprPackageImports :: Map.Map ModuleName PackageImportEvidence
   , ownedPprCandidateAdmissions :: [AdmittedSourceCandidate]
   , ownedPprOriginalBindings :: Map.Map Name SymbolIdentity
+  , ownedPprReuseContext :: ReuseContext
   }
 
 -- Read accessors expose issued facts without record-update labels.
@@ -399,6 +400,9 @@ pprCandidateAdmissions = ownedPprCandidateAdmissions
 
 pprOriginalBindings :: PreparedPipelineResult -> Map.Map Name SymbolIdentity
 pprOriginalBindings = ownedPprOriginalBindings
+
+pprReuseContext :: PreparedPipelineResult -> ReuseContext
+pprReuseContext = ownedPprReuseContext
 
 -- The opaque admissions retain the issuer's selected descriptor, loading
 -- demand and captured owner as one value through every prepared consumer.
@@ -3095,12 +3099,14 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             throwIO failure)
         observedCanonicalLoad :: TPhase a -> IO a
         observedCanonicalLoad phase@(T_Hsc _ summary)
-          | ms_hsc_src summary == HsSrcFile = timeModuleDetailPhase timing
-              "compile" "source_frontend_task_service" (ms_mod summary)
+          | ms_hsc_src summary == HsSrcFile = timeTaskDetailPhase timing
+              "compile" "source_frontend_task_service" (Just reuseContext) Nothing
+              (TaskOwner (ms_mod summary) (Just (show (ms_hs_hash summary))) Nothing WholeModuleTask)
               (canonicalLoadPhase phase)
         observedCanonicalLoad phase@(T_HscPostTc _ summary (FrontendTypecheck _) _ _)
-          | ms_hsc_src summary == HsSrcFile = timeModuleDetailPhase timing
-              "compile" "source_finalization_task_service" (ms_mod summary)
+          | ms_hsc_src summary == HsSrcFile = timeTaskDetailPhase timing
+              "compile" "source_finalization_task_service" (Just reuseContext) Nothing
+              (TaskOwner (ms_mod summary) (Just (show (ms_hs_hash summary))) Nothing WholeModuleTask)
               (canonicalLoadPhase phase)
         observedCanonicalLoad phase = canonicalLoadPhase phase
     when (isJust originalPhaseHook) (liftIO (throwIO CustomLoadPhaseHook))
@@ -3463,7 +3469,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                     targetOwner (pvExactScope variant) inputs)
               lowerTasks preparedNormallyReusable observer tasks = liftIO $ timePhase timing "prepared_graph" $ do
                 let summariesByName = Map.fromList [(ms_mod_name summary,summary) | summary <- summaries]
-                    lower input = do
+                    lower attempt input = do
                       forM_ (Map.lookup (fst input) summariesByName) $ \summary -> case snd input of
                         Right _ -> reuseEvent PreparedBody ReuseHit Matched summary
                         Left _ -> do
@@ -3479,10 +3485,16 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                                          Nothing -> Absent
                           reuseEvent PreparedBody (if disabled then ReuseDisabled else ReuseMiss) reason summary
                           reuseEvent PreparedBody ReuseWork reason summary
-                      prepared <- either runPreparedModuleTask pure (snd input)
+                      let action = either runPreparedModuleTask pure (snd input)
+                      prepared <- case Map.lookup (fst input) summariesByName of
+                        Nothing -> action
+                        Just summary -> timeTaskDetailPhase timing "prepared_graph" "prepared_stg_task_service"
+                          (Just reuseContext) (Just attempt)
+                          (TaskOwner (ms_mod summary) (Just (show (ms_hs_hash summary))) Nothing WholeModuleTask)
+                          action
                       observePreparedModule observer prepared
                       pure prepared
-                    lowerWith executor = runCompilerTasks executor lower
+                    lowerWith executor = runCompilerTasksWithAttempt executor lower
                       (\_ prepared -> completedPreparedModule observer prepared) tasks
                 case executorFor selection of
                   Just executor -> lowerWith executor
@@ -4004,6 +4016,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , ownedPprPackageImports = packageRoots
               , ownedPprCandidateAdmissions = []
               , ownedPprOriginalBindings = Map.empty
+              , ownedPprReuseContext = reuseContext
               }
           PreparedProducts _ -> do
             (result, modules, dependencies, productInterfaces, finalizedModules, packageRoots) <- compileExecutable
@@ -4022,6 +4035,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
               , ownedPprPackageImports = packageRoots
               , ownedPprCandidateAdmissions = Map.elems acceptedCandidates
               , ownedPprOriginalBindings = originalBindings
+              , ownedPprReuseContext = reuseContext
               }
           PreparedSegmentProducts _ candidatePath -> do
             products <- finish (PreparedProducts candidatePath)
@@ -4039,8 +4053,6 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       emitReuseComplete timing reuseContext Interface
       emitReuseComplete timing reuseContext FinalizedCore
       case preparation of
-        PrepareStg | isNothing (completionFactoryFor selection) ->
-          emitReuseComplete timing reuseContext PreparedBody
         PrepareStg -> pure ()
         CheckOnly -> emitCheckOnlyReuseApplicability timing reuseContext
     getSession >>= liftIO . recordCompilerInterpreter interpreterState selectedExecutables

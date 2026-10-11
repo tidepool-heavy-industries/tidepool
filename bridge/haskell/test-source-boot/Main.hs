@@ -4,7 +4,7 @@ import Tidepool.Test.Runner (TestTree, runTests, testCase, testGroup, requiredIn
 import Test.Tasty (withResource)
 import SourceBootCases
 import BoundedReadTest (boundedReadChecks)
-import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, validationTimingControl, freshOutputSealSetLaws)
+import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestInputHistories, requestInputBoundaries, retainedCompilationPublication, fixtureIssuerCountingHistories, ownedScopeInputReuse, validationTimingControl, compilerTimingRoundtrip, compilerTaskAttemptHistories, freshOutputSealSetLaws)
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
@@ -24,6 +24,8 @@ tests = testGroup "source-boot"
   , testCase "fixture issuer counting histories" fixtureIssuerCountingHistories
   , testCase "retained compilation publication" retainedCompilationPublication
   , testCase "validation timing outcomes" validationTimingControl
+  , testCase "compiler timing producer consumer roundtrip" compilerTimingRoundtrip
+  , testCase "compiler task attempt histories" compilerTaskAttemptHistories
   , testCase "fresh output seal set laws" freshOutputSealSetLaws
   , testCase "request input admission boundaries" requestInputBoundaries
   , testCase "bounded artifact reads" boundedReadChecks

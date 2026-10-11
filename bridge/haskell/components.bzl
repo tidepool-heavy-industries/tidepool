@@ -3613,6 +3613,7 @@ def declare_haskell_components():
         "test-source-boot/fixtures/ScheduleRight.hs": "test-source-boot/fixtures/ScheduleRight.hs",
         "test-source-boot/fixtures/ScheduleShared.hs": "test-source-boot/fixtures/ScheduleShared.hs",
         "test-source-boot/fixtures/SourceBootCapture.hs": "test-source-boot/fixtures/SourceBootCapture.hs",
+        "test-source-boot/fixtures/TelemetryTypedTemplate.hs": "test-source-boot/fixtures/TelemetryTypedTemplate.hs",
         "test-source-boot/fixtures/WatchReplyEvidence.hs": "test-source-boot/fixtures/WatchReplyEvidence.hs",
         "test-source-boot/fixtures/WatchReplyEvidenceWarmup.hs": "test-source-boot/fixtures/WatchReplyEvidenceWarmup.hs",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
@@ -3638,7 +3639,9 @@ def declare_haskell_components():
         ":source_boot_child",
         "//tidepool/toolchain:candidate_fixture_issuer",
         "//build/package:compiler_deployment",
-        "//build/package:tidepool_extract_runtime_libraries"
+        "//build/package:tidepool_extract_runtime_libraries",
+        "//scripts:compiler_reuse_report",
+        "//scripts:compiler_reuse_report_test_source"
     ],
         env = {
         "PATH": read_root_config("nix", "ghc_bin") + ":" + read_root_config("nix", "action_path"),
@@ -3652,7 +3655,9 @@ def declare_haskell_components():
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_WORKER": "$(exe :tidepool_extract_bin)",
         "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
-        "TIDEPOOL_TEST_INPUT_PATHS": "PATH:search-list TIDEPOOL_GHC_LIBDIR:directory TIDEPOOL_TEST_EFFECTS_DIR:directory TIDEPOOL_PRELUDE_DIR:directory TIDEPOOL_TEST_PYTHON:executable TIDEPOOL_TEST_SOURCE_BOOT_CHILD:executable TIDEPOOL_CANDIDATE_FIXTURE_ISSUER:executable TIDEPOOL_COMPILER_DEPLOYMENT:file TIDEPOOL_EXTRACT:executable TIDEPOOL_EXTRACT_WORKER:executable LD_LIBRARY_PATH:library-search-list",
+        "TIDEPOOL_TEST_REUSE_REPORT": "$(location //scripts:compiler_reuse_report)",
+        "TIDEPOOL_TEST_REUSE_REPORT_TESTS": "$(location //scripts:compiler_reuse_report_test_source)",
+        "TIDEPOOL_TEST_INPUT_PATHS": "PATH:search-list TIDEPOOL_GHC_LIBDIR:directory TIDEPOOL_TEST_EFFECTS_DIR:directory TIDEPOOL_PRELUDE_DIR:directory TIDEPOOL_TEST_PYTHON:executable TIDEPOOL_TEST_SOURCE_BOOT_CHILD:executable TIDEPOOL_CANDIDATE_FIXTURE_ISSUER:executable TIDEPOOL_COMPILER_DEPLOYMENT:file TIDEPOOL_EXTRACT:executable TIDEPOOL_EXTRACT_WORKER:executable LD_LIBRARY_PATH:library-search-list TIDEPOOL_TEST_REUSE_REPORT:file TIDEPOOL_TEST_REUSE_REPORT_TESTS:file",
     },
         labels = ["haskell_component_suite"],
         test_rule_timeout_ms = 14400000,

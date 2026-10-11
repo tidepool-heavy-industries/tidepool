@@ -5,6 +5,7 @@ module Tidepool.PreparedRecovery
   ( RecoveryFailure(..), RecoveryPublicationFailure(..), requirePreparedRecoveryPublication
   , RecoveredClosure(..), recoverPreparedClosure
   , newPreparedRecovery, newPreparedRecoveryWithPackageRoots, newPreparedRecoveryWithExecutor, newPreparedRecoveryWithDemand
+  , newPreparedRecoveryWithDemandAndReuse
   , PreparedRecovery, preparedRecoveryClosure, growPreparedRecovery
   , insertGroup
   ) where
@@ -43,12 +44,12 @@ import Tidepool.PreparedStg
   ( PreparedBodyCache, PreparedModule, pmModule, pmBindings, RecoveredModuleFailure(..)
   , PreparedComponents, PreparedComponentTask, PreparedUnitKey, PreparedUnitTask
   , newPreparedComponentUnitsPreparer, preparedComponentTaskKnown, preparedComponentTaskPending
-  , preparedUnitTaskKey, preparedUnitIsSite, runPreparedUnitTask, finishPreparedComponentTask
+  , preparedUnitTaskKey, preparedUnitIsSite, runPreparedUnitTaskWithTiming, finishPreparedComponentTask
   , preparedComponentModules, preparedComponentUnitRows, validatePreparedComponents )
-import Tidepool.CompilerExecution (CompilerExecutor, runCompilerWorklistWithStarted)
+import Tidepool.CompilerExecution (CompilerExecutor, runCompilerWorklistWithAttempt)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedBuiltins (deferredFunction, wiredInErrorKind)
-import Tidepool.Timing (emitDetailPhase, emitCount, readTimingEnabled, timeSection)
+import Tidepool.Timing (emitDetailPhase, emitCount, readTimingEnabled, timeSection, ReuseContext, TaskAttempt)
 
 data RecoveryFailure
   = MissingImplementation Name FatIfaceMissing
@@ -174,14 +175,14 @@ newPreparedRecovery env cache ownerCache bodyCache baseContext home = do
 newPreparedRecoveryWithPackageRoots :: HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> ProjectionContext
   -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
-newPreparedRecoveryWithPackageRoots = newPreparedRecoveryUsing Nothing (\_ _ _ -> pure [])
+newPreparedRecoveryWithPackageRoots = newPreparedRecoveryUsing Nothing Nothing (\_ _ _ -> pure [])
 
 -- | All recovery jobs use the request's existing allowance. Module contexts
 -- are acquired by its coordinator before lowering tasks enter the executor.
 newPreparedRecoveryWithExecutor :: CompilerExecutor -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> ProjectionContext
   -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
-newPreparedRecoveryWithExecutor executor = newPreparedRecoveryUsing (Just executor) (\_ _ _ -> pure [])
+newPreparedRecoveryWithExecutor executor = newPreparedRecoveryUsing Nothing (Just executor) (\_ _ _ -> pure [])
 
 -- The demand owner projects only a quiescent component selection and returns
 -- canonical package roots from actual executable globals. Root growth stays
@@ -191,26 +192,33 @@ newPreparedRecoveryWithDemand :: Maybe CompilerExecutor
   -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache -> PreparedBodyCache
   -> ProjectionContext -> [PreparedModule] -> [Id]
   -> IO (SymbolIdentity -> IO PreparedRecovery)
-newPreparedRecoveryWithDemand = newPreparedRecoveryUsing
+newPreparedRecoveryWithDemand = newPreparedRecoveryUsing Nothing
 
-newPreparedRecoveryUsing :: Maybe CompilerExecutor
+newPreparedRecoveryWithDemandAndReuse :: Maybe ReuseContext -> Maybe CompilerExecutor
+  -> (SymbolIdentity -> [Id] -> RecoveredClosure -> IO [Id])
+  -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache -> PreparedBodyCache
+  -> ProjectionContext -> [PreparedModule] -> [Id]
+  -> IO (SymbolIdentity -> IO PreparedRecovery)
+newPreparedRecoveryWithDemandAndReuse = newPreparedRecoveryUsing
+
+newPreparedRecoveryUsing :: Maybe ReuseContext -> Maybe CompilerExecutor
   -> (SymbolIdentity -> [Id] -> RecoveredClosure -> IO [Id]) -> HscEnv -> FatIfaceCache -> OwnerInterfaceCache
   -> PreparedBodyCache -> ProjectionContext
   -> [PreparedModule] -> [Id] -> IO (SymbolIdentity -> IO PreparedRecovery)
-newPreparedRecoveryUsing executor demand env cache ownerCache bodyCache baseContext home initialRoots = do
+newPreparedRecoveryUsing reuse executor demand env cache ownerCache bodyCache baseContext home initialRoots = do
   timing <- readTimingEnabled
   checking <- isJust <$> lookupEnv "TIDEPOOL_RECOVERY_CHECK"
   let factsOf prepared =
         (preparedModuleReferenceFacts baseContext prepared, preparedModuleReachFacts baseContext prepared)
       homeFacts = [(prepared, factsOf prepared) | prepared <- home]
       homeSeedIndex = prepareHomeSeedIndex home
-      runJobs :: (input -> IO output) -> (input -> IO ()) -> (input -> output -> IO [input]) -> [input] -> IO [output]
+      runJobs :: (Maybe TaskAttempt -> input -> IO output) -> (input -> IO ()) -> (input -> output -> IO [input]) -> [input] -> IO [output]
       runJobs action started completed inputs = case executor of
-        Just shared -> runCompilerWorklistWithStarted shared action started completed inputs
+        Just shared -> runCompilerWorklistWithAttempt shared (\attempt -> action (Just attempt)) started completed inputs
         Nothing -> let loop [] outputs = pure (reverse outputs)
                        loop (input:pending) outputs = do
                          started input
-                         output <- action input
+                         output <- action Nothing input
                          additions <- completed input output
                          loop (pending ++ additions) (output:outputs)
                     in loop inputs []
@@ -474,7 +482,7 @@ newPreparedRecoveryUsing executor demand env cache ownerCache bodyCache baseCont
             forM_ (Map.toAscList (preparedComponentUnitRows selected)) $ \(key,prepared) -> admitUnit owner key prepared
           initialJobs <- expand
           _ <- runJobs
-            (\(_,_,task) -> timeSection (runPreparedUnitTask task)) started complete initialJobs
+            (\attempt (_,_,task) -> timeSection (runPreparedUnitTaskWithTiming reuse attempt task)) started complete initialJobs
           settled <- readIORef state
           Spent factsTotal reachTotal refsTotal lookupTotal prepareTotal rounds preparations <- readIORef spent
           emitDetailPhase timing "prepared_recover" "prepared_recover_facts" factsTotal

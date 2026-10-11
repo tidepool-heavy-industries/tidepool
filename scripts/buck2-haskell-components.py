@@ -360,6 +360,12 @@ def render(metadata=None):
                 "LD_LIBRARY_PATH": RuntimeInput(literal("$(location //build/package:tidepool_extract_runtime_libraries)"), RuntimeInputRole.LIBRARY_SEARCH_LIST),
             })
             runtime.extend(["//tidepool/toolchain:candidate_fixture_issuer", "//build/package:compiler_deployment", "//build/package:tidepool_extract_runtime_libraries"])
+        if name == "source_boot_product_reuse_test":
+            env.update({
+                "TIDEPOOL_TEST_REUSE_REPORT": RuntimeInput(literal("$(location //scripts:compiler_reuse_report)"), RuntimeInputRole.FILE),
+                "TIDEPOOL_TEST_REUSE_REPORT_TESTS": RuntimeInput(literal("$(location //scripts:compiler_reuse_report_test_source)"), RuntimeInputRole.FILE),
+            })
+            runtime.extend(["//scripts:compiler_reuse_report", "//scripts:compiler_reuse_report_test_source"])
         path_roles = " ".join(key + ":" + value.role.value for key, value in env.items())
         env_text = "{\n" + "\n".join("    " + literal(key) + ": " + value.expression + ","
                                     for key, value in env.items())
