@@ -1502,6 +1502,9 @@ impl BindingTable {
         tokens: Vec<crate::prepared_program::SourceInstanceAttachment>,
         machine: &crate::prepared_program::PreparedMachine<'_>,
     ) -> Result<SourceScopeAdmission, Vec<crate::prepared_program::SourceInstanceAttachment>> {
+        if !tree.is_live(scope) {
+            return Err(tokens);
+        }
         let empty = SourceSelectionView::for_scope(scope);
         let view = self.source_selection.get(&scope).unwrap_or(&empty);
         let mut physical = HashMap::<SourceLeaseKey, &SourceInstanceLease>::new();
@@ -1521,7 +1524,7 @@ impl BindingTable {
             }
             let domain = attachment.domain();
             let token = attachment.lease();
-            if !tree.is_live(scope) || !view.domains.contains_key(&domain) {
+            if !view.domains.contains_key(&domain) {
                 return Err(tokens);
             }
             let key = SourceLeaseKey::of(token);

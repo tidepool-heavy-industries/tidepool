@@ -1637,6 +1637,69 @@ mod selection_tests {
     }
 
     #[test]
+    fn domain_registration_requires_live_scope_even_for_empty_batches() {
+        let (machine, leases) = installed_leases();
+        let mut tree = ScopeTree::new();
+        let live = tree.mint_isolated();
+        let retired = tree.mint_isolated();
+        tree.retire(retired);
+        let mut table = BindingTable::new();
+        let before = table.scope_snapshot(&tree, ScopeId::ROOT).unwrap();
+        let revision = table.mutation_revision();
+        assert!(
+            table
+                .register_source_instances_in_domains(&tree, retired, vec![], &machine)
+                .is_err(),
+            "an empty batch cannot issue an admission for a retired scope"
+        );
+        assert_eq!(table.mutation_revision(), revision);
+        assert_eq!(table.scope_snapshot(&tree, ScopeId::ROOT).unwrap(), before);
+        let rejected = table
+            .register_source_instances_in_domains(
+                &tree,
+                retired,
+                vec![SourceInstanceAttachment::installed(
+                    SourceInstanceDomain::for_scope(retired),
+                    leases[0].clone(),
+                )],
+                &machine,
+            )
+            .unwrap_err();
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(table.mutation_revision(), revision);
+        assert_eq!(table.scope_snapshot(&tree, ScopeId::ROOT).unwrap(), before);
+        assert!(table.source_instances_in(&tree, retired).is_empty());
+        assert!(table
+            .selected_source_instances_in(&tree, retired)
+            .is_empty());
+        machine.validate_source_attachment(&rejected[0]).unwrap();
+
+        let empty = table
+            .register_source_instances_in_domains(&tree, live, vec![], &machine)
+            .ok()
+            .expect("a live scope admits an empty batch");
+        assert!(empty.is_empty());
+        assert_ne!(table.mutation_revision(), revision);
+        assert!(table.source_instances_in(&tree, live).is_empty());
+        assert!(table.selected_source_instances_in(&tree, live).is_empty());
+        let admitted = table
+            .register_source_instances_in_domains(
+                &tree,
+                live,
+                vec![SourceInstanceAttachment::installed(
+                    SourceInstanceDomain::for_scope(live),
+                    leases[0].clone(),
+                )],
+                &machine,
+            )
+            .ok()
+            .expect("a live scope admits the genuine source root");
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(table.selected_source_instances_in(&tree, live).len(), 1);
+        assert_eq!(table.source_instances_in(&tree, live).len(), 1);
+    }
+
+    #[test]
     fn late_domain_registration_conflict_preserves_snapshot_and_custody() {
         let (machine, leases) = installed_leases();
         let tree = ScopeTree::new();
