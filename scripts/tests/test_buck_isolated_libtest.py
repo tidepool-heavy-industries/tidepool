@@ -2315,7 +2315,8 @@ class IsolatedLibtestTests(unittest.TestCase):
             with self.subTest(global_mode=global_mode):
                 arguments = ['--exact', 'suite::works', '--expected-count', '1',
                              '--case-compiler-mode', 'suite::works=owned-resident',
-                             '--output-dir', str(Path(self.tmp.name) / 'modes')]
+                             '--output-dir', str(Path(self.tmp.name) / 'modes'),
+                             '--resource-env', 'TIDEPOOL_EXTRACT']
                 if global_mode:
                     arguments += ['--compiler-mode', global_mode]
                 records = []
@@ -2326,7 +2327,8 @@ class IsolatedLibtestTests(unittest.TestCase):
                     record.update(artifact_root=str(artifact_root), status='completed')
                     return True, '', ''
 
-                with patch.object(runner, 'run_one', side_effect=case):
+                with patch.object(runner, 'run_one', side_effect=case), \
+                     patch.dict(os.environ, TIDEPOOL_EXTRACT=str(self.binary)):
                     result, _, errors = self.invoke(arguments, lambda argv, *args, **kwargs: self.discover(argv))
                 self.assertEqual(result, 0, errors)
                 self.assertEqual(records, [expected])
@@ -2370,6 +2372,18 @@ class IsolatedLibtestTests(unittest.TestCase):
             self.assertIn('case compiler mode names are not discovered', errors)
             execute.assert_not_called()
 
+    def test_selected_owned_case_refuses_missing_declared_frontend_before_allocation(self):
+        with patch.object(runner, 'run_one') as execute, \
+             patch.object(runner.tempfile, 'mkdtemp') as allocate:
+            result, _, errors = self.invoke(
+                ['--exact', 'suite::works', '--expected-count', '1',
+                 '--case-compiler-mode', 'suite::works=owned-resident'],
+                lambda argv, *args, **kwargs: self.discover(argv))
+        self.assertEqual(result, 1)
+        self.assertIn('requires a declared TIDEPOOL_EXTRACT frontend', errors)
+        execute.assert_not_called()
+        allocate.assert_not_called()
+
     def test_declared_owned_resident_case_retains_temporary_failure_evidence(self):
         retained = Path(self.tmp.name) / 'temporary-case'
         retained.mkdir()
@@ -2383,10 +2397,12 @@ class IsolatedLibtestTests(unittest.TestCase):
             return False, '', 'cleanup unconfirmed'
 
         with patch.object(runner.tempfile, 'mkdtemp', return_value=str(retained)) as allocate, \
-             patch.object(runner, 'run_one', side_effect=case):
+             patch.object(runner, 'run_one', side_effect=case), \
+             patch.dict(os.environ, TIDEPOOL_EXTRACT=str(self.binary)):
             result, output, errors = self.invoke(
                 ['--exact', 'suite::works', '--expected-count', '1',
-                 '--case-compiler-mode', 'suite::works=owned-resident'], lambda argv, *args, **kwargs: self.discover(argv))
+                 '--case-compiler-mode', 'suite::works=owned-resident',
+                 '--resource-env', 'TIDEPOOL_EXTRACT'], lambda argv, *args, **kwargs: self.discover(argv))
         self.assertEqual(result, 1)
         allocate.assert_called_once_with(prefix='tidepool-libtest-case-', dir='/tmp')
         self.assertIn(str(retained), output)

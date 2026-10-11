@@ -585,6 +585,10 @@ def parse_args(argv):
     return options
 
 
+def compiler_mode_for(options, name):
+    return options.compiler_mode or options.case_compiler_modes.get(name, 'direct')
+
+
 def select_tests(all_names, ignored_names, options):
     if not ignored_names.issubset(all_names):
         raise RuntimeError('ignored tests missing from discovery')
@@ -1423,6 +1427,9 @@ def main(argv=None):
             all_names = names(options.binary)
             ignored_names = set(names(options.binary, '--ignored'))
             selected = select_tests(all_names, ignored_names, options)
+            if (any(compiler_mode_for(options, name) == 'owned-resident' for name in selected)
+                    and not os.environ.get('TIDEPOOL_EXTRACT')):
+                raise RuntimeError('owned-resident requires a declared TIDEPOOL_EXTRACT frontend')
         except RunnerInterrupted as error:
             print(f'libtest runner interrupted by signal {error.signum}', file=sys.stderr)
             return 128 + error.signum
@@ -1442,8 +1449,7 @@ def main(argv=None):
             if INTERRUPT_SIGNAL is not None:
                 raise RunnerInterrupted(INTERRUPT_SIGNAL)
             record = {}
-            compiler_mode = (options.compiler_mode or
-                             options.case_compiler_modes.get(name, 'direct'))
+            compiler_mode = compiler_mode_for(options, name)
             # Caller TMPDIR may be removed by the enclosing Buck/dev shell.
             # The runner retains failed-case evidence outside that lifetime.
             temporary_output = (Path(tempfile.mkdtemp(prefix='tidepool-libtest-case-', dir='/tmp'))
