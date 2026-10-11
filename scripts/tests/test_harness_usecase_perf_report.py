@@ -705,6 +705,60 @@ class HarnessUsecasePerfReportTests(unittest.TestCase):
                 self.assertIsNone(observe(0, invalid))
         self.assertIsNone(observe())
 
+    def test_publication_summary_is_joined_to_its_unique_settlement(self):
+        record = self.make_case()
+        host_path = self.root / "artifacts/host.jsonl"
+        rows = reporter.read_jsonl(host_path)
+        counters = {"publication_attempts": 3, "semantic_rebases": 1,
+                    "metadata_restages": 1, "latest_join_reservation": 17}
+        rows[1]["fields"].update(counters)
+        self.write_jsonl(host_path, rows)
+        result = reporter.analyze(record)["phases"][0]["publication_work"]
+        self.assertEqual(result["status"], "observed")
+        self.assertEqual(result["counts"], {key: counters[key] for key in
+                         ("publication_attempts", "semantic_rebases", "metadata_restages")})
+        self.assertEqual(result["latest_join_reservation"], 17)
+        self.write_jsonl(host_path, rows + [rows[1]])
+        ambiguous = reporter.analyze(record)["phases"][0]["publication_work"]
+        self.assertEqual(ambiguous, {"status": "ambiguous_settlement"})
+
+    def test_publication_summary_distinguishes_zero_and_unobserved(self):
+        counts = {"publication_attempts": 0, "semantic_rebases": 0, "metadata_restages": 0}
+        self.assertEqual(reporter.publication_work_observation([])["status"], "not_observed_unknown")
+        self.assertEqual(reporter.publication_work_observation([counts])["counts"], counts)
+        for field, invalid in itertools.product(counts, (None, -1, True, 1.5, "invalid")):
+            with self.subTest(field=field, invalid=invalid):
+                row = {**counts, field: invalid}
+                observed = reporter.publication_work_observation([row])
+                self.assertEqual(observed["status"], "partial_or_unknown")
+                self.assertIsNone(observed["counts"][field])
+
+    def test_bound_group_work_retains_shared_inventory_totals_without_summing(self):
+        observations = [{"target": "exomonad_harness::timing", "fields": {
+            "phase": "products.bound_native_demand",
+            "message": "bound native demand inventory observation",
+            "issued_native_groups": issued, "reused_native_groups": reused,
+            "canonical_hits_total": hits, "canonical_comparisons_total": 2,
+            "canonical_bytes_offered_total": 1024, "installed_binding_rows_total": installed,
+            "graph_visits_total": installed, "entry_handle_copies_total": 5},
+            "span": {"name": "cell", "execution": execution}}
+            for execution, issued, reused, hits, installed in
+            (("exec-a", 3, 0, 10, 30), ("exec-b", 0, 3, 18, 34))]
+        observed = reporter.owned_artifact_observations(observations, [])["bound_native_demand"]
+        self.assertEqual(observed["status"], "observed")
+        self.assertEqual([row["local_group_work"] for row in observed["observations"]],
+                         [{"issued_native_groups": 3, "reused_native_groups": 0},
+                          {"issued_native_groups": 0, "reused_native_groups": 3}])
+        self.assertEqual([row["inventory_totals"]["installed_binding_rows_total"]
+                          for row in observed["observations"]], [30, 34])
+        self.assertEqual([row["execution"] for row in observed["observations"]], ["exec-a", "exec-b"])
+        self.assertNotIn("counts", observed)
+        observations[1]["fields"].pop("issued_native_groups")
+        partial = reporter.bound_native_demand_observations(observations)
+        self.assertEqual(partial["status"], "partial_or_unknown")
+        self.assertIsNone(partial["observations"][1]["local_group_work"]["issued_native_groups"])
+        self.assertEqual(reporter.bound_native_demand_observations([])["status"], "not_observed_unknown")
+
     def test_phase_measurements_require_nonnegative_json_integers(self):
         record = self.make_complete_case()
         phase_path = self.root / "artifacts/phases.jsonl"

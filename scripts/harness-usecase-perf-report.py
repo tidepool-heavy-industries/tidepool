@@ -378,6 +378,53 @@ def interval_union_ns(rows):
     return total
 
 
+def publication_work_observation(call_records):
+    """A unique cell settlement owns these counts, not each retry event."""
+    names = ("publication_attempts", "semantic_rebases", "metadata_restages")
+    if not call_records:
+        return {"status": "not_observed_unknown"}
+    if len(call_records) != 1:
+        return {"status": "ambiguous_settlement"}
+    row = call_records[0]
+    counts = {name: nonnegative_integer(row.get(name)) for name in names}
+    if any(value is None for value in counts.values()):
+        return {"status": "partial_or_unknown", "counts": counts}
+    return {"status": "observed", "counts": counts,
+            "latest_join_reservation": nonnegative_integer(row.get("latest_join_reservation"))}
+
+
+def bound_native_demand_observations(host_rows):
+    """Inventory totals can overlap between consumers; never sum or difference them."""
+    local_names = ("issued_native_groups", "reused_native_groups")
+    inventory_names = ("canonical_hits_total", "canonical_comparisons_total",
+                       "canonical_bytes_offered_total", "installed_binding_rows_total",
+                       "graph_visits_total", "entry_handle_copies_total")
+    observations = []
+    for index, row in enumerate(host_rows):
+        value = fields(row)
+        if (row.get("target") != "exomonad_harness::timing"
+                or value.get("phase") != "products.bound_native_demand"
+                or value.get("message") != "bound native demand inventory observation"):
+            continue
+        local = {name: nonnegative_integer(value.get(name)) for name in local_names}
+        inventory = {name: nonnegative_integer(value.get(name)) for name in inventory_names}
+        observations.append({
+            "event_index": index, "execution": attr(row, "execution"),
+            "status": "observed" if all(item is not None for item in (*local.values(), *inventory.values()))
+                      else "partial_or_unknown",
+            "local_group_work": local, "inventory_totals": inventory,
+            "span": row.get("span"), "spans": row.get("spans"),
+        })
+    return {
+        "status": ("not_observed_unknown" if not observations else
+                   "observed" if all(row["status"] == "observed" for row in observations)
+                   else "partial_or_unknown"),
+        "observations": observations,
+        "interpretation": "Group work belongs to the demand operation. Inventory totals may include concurrent "
+                          "consumers and are not operation deltas. Offered bytes are not measured I/O or memory traffic.",
+    }
+
+
 def owned_artifact_observations(host_rows, daemon_rows):
     """Retain owner facts; absent summaries never prove zero work or retention."""
     native_targets = {"tidepool_codegen::image_registry", "tidepool_codegen::prepared_compile",
@@ -506,6 +553,7 @@ def owned_artifact_observations(host_rows, daemon_rows):
         "problems": problems,
         "counts_scope": "observed_owner_records; no missing-event zeros or exhaustive-stream claim",
         "ghc_frontend_summaries": frontend,
+        "bound_native_demand": bound_native_demand_observations(host_rows),
         "ghc_physical_request_count_observed": len(physical_terminals) or None,
         "actual_native_image_compiles_observed": (observed_count(compile_events)
             if not any("native compile" in problem for problem in problems) else None),
@@ -682,6 +730,7 @@ def analyze(record_path):
             "dispatch_attribution": "one" if len(execution_ids) == 1 else
                                     "missing" if not execution_ids else "ambiguous",
             "call_timing_records": call_timing,
+            "publication_work": publication_work_observation(call_timing),
             "harness_runtime_cost_events": phase_costs,
             "harness_runtime_cost_coverage": cost_coverage,
             "host_admission_status": cost_coverage["host_admission_status"],
