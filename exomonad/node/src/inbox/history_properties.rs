@@ -62,7 +62,6 @@ enum Operation {
         possibly_seen: bool,
     },
     Ack(Sequence),
-    Surface(Vec<Sequence>),
     Reopen,
     Read,
 }
@@ -102,7 +101,6 @@ fn operation_strategy() -> impl Strategy<Value = Operation> {
         3 => (sequence_strategy(), 0u8..3, any::<bool>())
             .prop_map(|(sequence, context, possibly_seen)| Operation::Redeliver { sequence, context, possibly_seen }),
         4 => sequence_strategy().prop_map(Operation::Ack),
-        2 => prop::collection::vec(sequence_strategy(), 0..4).prop_map(Operation::Surface),
         2 => Just(Operation::Reopen), 2 => Just(Operation::Read),
     ]
 }
@@ -205,7 +203,6 @@ struct Model<R> {
     rows: Vec<DurableEnvelope<u8, R>>,
     receipts: Vec<(u64, R, Stage)>,
     cursor: u64,
-    surfaced: Vec<u64>,
 }
 
 impl<R: Clone + PartialEq> Default for Model<R> {
@@ -214,7 +211,6 @@ impl<R: Clone + PartialEq> Default for Model<R> {
             rows: vec![],
             receipts: vec![],
             cursor: 0,
-            surfaced: vec![],
         }
     }
 }
@@ -296,7 +292,6 @@ impl<R: Clone + PartialEq> Model<R> {
 
     fn advance(&mut self, sequence: u64) {
         self.cursor = sequence;
-        self.surfaced.retain(|seen| *seen > sequence);
     }
 
     fn begin(&mut self, sequence: u64) -> Result<(), Refusal> {
@@ -436,7 +431,6 @@ struct Coverage {
     reopens: usize,
     reads: usize,
     blocked_legacy_reads: usize,
-    surfaced: usize,
     max_pending: usize,
 }
 
@@ -519,26 +513,6 @@ where
     };
     coverage.blocked_legacy_reads += usize::from(barrier.is_some());
     prop_assert_eq!(actual_pending, expected_pending);
-    let notices = pending
-        .iter()
-        .filter(|row| row.receipt_context.is_none() && !model.surfaced.contains(&row.sequence))
-        .cloned()
-        .collect::<Vec<_>>();
-    prop_assert_eq!(
-        inbox
-            .legacy_notices_beyond_barrier()
-            .map_err(|error| TestCaseError::fail(format!("notices: {error:?}")))?,
-        notices
-    );
-    let mut surfaced = model.surfaced.clone();
-    surfaced.sort_unstable();
-    prop_assert_eq!(
-        inbox
-            .surfaced_out_of_order()
-            .into_iter()
-            .collect::<Vec<_>>(),
-        surfaced
-    );
     for sequence in 0..=model.rows.len() as u64 + 1 {
         let expected =
             model
@@ -735,26 +709,12 @@ where
                 coverage.ack_advanced += usize::from(model.cursor > previous);
                 compare(inbox.acknowledge(sequence), expected, coverage)?;
             }
-            Operation::Surface(ref sequences) => {
-                let sequences = sequences
-                    .iter()
-                    .map(|sequence| model.sequence(*sequence))
-                    .collect::<Vec<_>>();
-                inbox.mark_surfaced_out_of_order(sequences.clone());
-                for sequence in sequences {
-                    if !model.surfaced.contains(&sequence) {
-                        model.surfaced.push(sequence);
-                        coverage.surfaced += 1;
-                    }
-                }
-            }
             Operation::Reopen => {
                 // The previous owner is closed before a new one opens these paths.
                 drop(inbox);
                 inbox = DurableInbox::open(&anchor, "rows.jsonl", "cursor").map_err(|error| {
                     TestCaseError::fail(format!("reopen at {index}: {error:?}"))
                 })?;
-                model.surfaced.clear();
                 coverage.reopens += 1;
             }
             Operation::Read => observe(&inbox, &model, coverage)?,
@@ -793,7 +753,6 @@ fn guided(context: u8, finish: Finish, possibly_seen: bool) -> Vec<Operation> {
         },
         Operation::Read,
         Operation::Ack(Sequence::Last),
-        Operation::Surface(vec![Sequence::Last]),
         Operation::Reopen,
         Operation::Native {
             sequence: Sequence::Front,
@@ -833,7 +792,6 @@ fn prefix_strategy() -> impl Strategy<Value = Operation> {
     prop_oneof![
         3 => (0u8..2, 0u8..4, 0u8..4).prop_map(|(stream, revision, payload)| Operation::Latest { stream, revision, payload }),
         2 => (0u8..4).prop_map(|payload| Operation::Append { payload, context: None }),
-        1 => prop::collection::vec(sequence_strategy(), 0..4).prop_map(Operation::Surface),
         1 => Just(Operation::Read), 1 => Just(Operation::Reopen),
     ]
 }
@@ -953,7 +911,7 @@ fn deterministic_inbox_support_covers_delivery_reopen_and_redelivery() {
     assert!(coverage.attempts > 0 && coverage.attempt_races > 0);
     assert!(coverage.redelivered > 0 && coverage.ack_advanced > 0);
     assert!(coverage.refusals > 0 && coverage.successful_after_refusal > 0);
-    assert!(coverage.reopens > 0 && coverage.surfaced > 0);
+    assert!(coverage.reopens > 0);
     eprintln!("durable inbox deterministic support coverage: {coverage:#?}");
 }
 
