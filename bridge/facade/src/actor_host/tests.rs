@@ -774,10 +774,38 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
     })
     .await
     .unwrap();
+    let owner = policy
+        .retained_operation(request.context.clone().unwrap())
+        .expect("the original notification has an issued native settlement owner");
     first.abort();
     // best-effort: task is aborted; the join result is expected to be Cancelled.
     first.await.ok();
     notification.admitted("recovery-test-inbox".into(), 1);
+    let terminal = tokio::time::timeout(
+        test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+        async {
+            loop {
+                match owner.terminal() {
+                    exomonad_actor::HostedOperationTerminal::Pending => {
+                        tokio::task::yield_now().await;
+                    }
+                    terminal => break terminal,
+                }
+            }
+        },
+    )
+    .await
+    .expect("the original notification settles after losing its reply observer");
+    let exomonad_actor::HostedOperationTerminal::Settled(
+        exomonad_actor::WorkbenchCancellationOutcome::PublicationSettled { reply, .. },
+    ) = &terminal
+    else {
+        panic!("the original notification must complete independently: {terminal:?}");
+    };
+    assert_eq!(
+        reply.as_ref().unwrap().status,
+        tidepool_runtime::session::WorkbenchRunStatus::Committed
+    );
     let retained = tokio::time::timeout(
         Duration::from_secs(60),
         policy.dispatch_json_boxed(request.clone()),
