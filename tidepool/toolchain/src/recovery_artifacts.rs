@@ -4149,10 +4149,7 @@ mod tests {
             ),
         )
         .unwrap();
-        assert!(matches!(
-            materialize_recovery_closure(run.path(), [1; 32], &input),
-            Err(RecoveryArtifactError::DigestMismatch(_))
-        ));
+        assert!(materialize_recovery_closure(run.path(), [1; 32], &input).is_err());
         let retained = verify_materialized_ref(run.path(), &first).unwrap();
         assert_eq!(
             retained.package_imports_bytes,

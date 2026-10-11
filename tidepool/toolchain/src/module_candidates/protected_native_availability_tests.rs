@@ -469,6 +469,9 @@ fn protected_deployment_record_refuses_changed_source_and_competing_definitions(
     let record = super::tests::candidate_fixture(sources.path(), "ProtectedSource");
     let key = (record.unit.clone(), record.module.clone());
     let context = context_for(std::slice::from_ref(&record), &BTreeSet::from([key]));
+    let intact = select(scratch.path(), vec![record.clone()], &context).unwrap();
+    assert!(intact.by_owner.is_empty());
+    assert_eq!(intact.native_availability.len(), 1);
     assert!(select(
         scratch.path(),
         vec![record.clone(), record.clone()],
@@ -480,7 +483,7 @@ fn protected_deployment_record_refuses_changed_source_and_competing_definitions(
         "module ProtectedSource where\nchanged = True\n",
     )
     .unwrap();
-    assert_empty_offer(select(scratch.path(), vec![record], &context).unwrap());
+    assert!(select(scratch.path(), vec![record], &context).is_none());
 }
 
 #[test]

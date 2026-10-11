@@ -2943,14 +2943,7 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
     };
     fields[7] = acquisition;
     let value = Value::Array(fields);
-    let mut encoded = Vec::new();
-    ciborium::ser::into_writer(&value, &mut encoded).ok()?;
-    if encoded.len() > MANIFEST_LIMIT {
-        tracing::info!(target: "tidepool_toolchain::module_candidates", reason = ?CandidateExecutionUnavailable::ManifestBound,
-            manifest_bytes = encoded.len(), limit = MANIFEST_LIMIT,
-            "candidate offer omitted because its execution provenance exceeds the manifest bound");
-        return None;
-    }
+    let encoded = encode_candidate_manifest(&value)?;
     crate::host_work::checkpoint().ok()?;
     let manifest_path = scratch.join("module-candidates.cbor");
     tidepool_atomic_write::write_best_effort(&manifest_path, &encoded).ok()?;
@@ -2961,6 +2954,18 @@ fn select_records_inner_with_transport<R: Into<CandidateRecord>>(
         catalog_owner: None,
         input_transport,
     })
+}
+
+fn encode_candidate_manifest(value: &Value) -> Option<Vec<u8>> {
+    let mut encoded = Vec::new();
+    ciborium::ser::into_writer(value, &mut encoded).ok()?;
+    if encoded.len() > MANIFEST_LIMIT {
+        tracing::info!(target: "tidepool_toolchain::module_candidates", reason = ?CandidateExecutionUnavailable::ManifestBound,
+            manifest_bytes = encoded.len(), limit = MANIFEST_LIMIT,
+            "candidate offer omitted because its execution provenance exceeds the manifest bound");
+        return None;
+    }
+    Some(encoded)
 }
 
 /// Close only compatible protected roots. Native dependencies retain full
@@ -5250,6 +5255,9 @@ pub(crate) mod tests {
         record.evidence.make_mut().modules[0].source = record.source.clone();
         record.include = vec![absolute(sources.path()).unwrap()];
         record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
+        let original = finalized_candidate_fixture(&record);
+        record.original_certification = original.certification_bytes().to_vec();
+        record.module_interface_proof = original.module_interface().cloned();
         let original_version = version_hash(&record);
         store_fixture(cache.path(), &record, "original");
         unsafe {
@@ -5454,6 +5462,20 @@ pub(crate) mod tests {
                 candidates: vec![root.path().join("Data/List.hs")],
             });
         record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
+        let original = finalized_candidate_fixture(&record);
+        let canonical = original.module_interface().unwrap();
+        record.module_interface = Some(
+            crate::recovery_artifacts::materialize_module_interface(
+                scratch.path(),
+                canonical,
+                &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
+                crate::recovery_artifacts::MaterializationMode::Scratch,
+            )
+            .unwrap(),
+        );
+        record.module_interface_proof = Some(canonical.clone());
+        record.original_certification = original.certification_bytes().to_vec();
+        let interface_sha256 = Sha256::digest(&record.interface).into();
         let empty = ExactCandidateContext::new(BTreeSet::new(), BTreeSet::new());
         assert_eq!(
             select_context_records(scratch.path(), vec![record.clone()], &empty)
@@ -5475,7 +5497,7 @@ pub(crate) mod tests {
             &bytes,
             "u",
             "Library",
-            &Sha256::digest([0x42]).into(),
+            &interface_sha256,
             Path::new("packages"),
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
@@ -5502,7 +5524,7 @@ pub(crate) mod tests {
             &bytes,
             "u",
             "Library",
-            &Sha256::digest([0x42]).into(),
+            &interface_sha256,
             Path::new("packages"),
             &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
         )
@@ -5852,27 +5874,24 @@ pub(crate) mod tests {
     }
 
     #[test]
-    #[serial_test::serial]
-    fn selection_refuses_manifest_over_four_mebibytes() {
-        let root = tempfile::tempdir().unwrap();
-        let scratch = tempfile::tempdir().unwrap();
-        let source = root.path().join("Library.hs");
-        fs::write(&source, "module Library where").unwrap();
-        let record = candidate_fixture(root.path(), "Library");
-        let records = (0..12)
-            .map(|n| {
-                let mut record = record.clone();
-                record.module = format!("{}{}", n, "M".repeat(390_000));
-                record.evidence.make_mut().modules[0].module = record.module.clone();
-                record.products = product_bytes("u", &record.module, &[0x42]);
-                record.package_imports = package_imports("u", &record.module, &[0x42]);
-                record.original_owner = OriginalOwner::from_owner(&computed_owner(&record));
-                (record, CandidateOrigin::Ordinary)
-            })
-            .collect();
-        assert!(
-            select_records(b"endpoint", &[root.path().into()], scratch.path(), records).is_none()
-        );
+    fn candidate_manifest_encoding_obeys_exact_byte_bound() {
+        // For this length CBOR's byte-string header occupies five bytes.
+        // Exercise the encoder directly: malformed candidate owners are omitted
+        // during selection and cannot establish an oversized manifest premise.
+        for (payload_bytes, accepted) in [
+            (MANIFEST_LIMIT - 6, true),
+            (MANIFEST_LIMIT - 5, true),
+            (MANIFEST_LIMIT - 4, false),
+        ] {
+            let value = Value::Bytes(vec![0; payload_bytes]);
+            let encoded = encode_candidate_manifest(&value);
+            assert_eq!(encoded.is_some(), accepted);
+            if let Some(encoded) = encoded {
+                assert_eq!(encoded.len(), payload_bytes + 5);
+                let decoded: Value = ciborium::de::from_reader(encoded.as_slice()).unwrap();
+                assert_eq!(decoded, value);
+            }
+        }
     }
 
     const QUERY_OWNER_COUNT: usize = 4;
