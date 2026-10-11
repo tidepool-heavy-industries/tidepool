@@ -351,7 +351,8 @@ impl NativeOriginalRequirement {
                 "native original requirement is outside issuer custody",
             ));
         }
-        let roots = owned
+        let roots = view
+            .roots()
             .iter()
             .filter(|node| {
                 matches!(node,
@@ -8651,6 +8652,271 @@ mod tests {
         }
     }
 
+    fn check_late_native_original_recapture(
+        helper: Arc<ArtifactEntry>,
+        interfaces: Vec<Arc<ArtifactEntry>>,
+        helper_import: crate::certified_products::PendingImportOwner,
+        producer_bytes: &[u8],
+        products: &[crate::recovery_artifacts::CertifiedRecoveryProduct],
+    ) {
+        use crate::declaration_context::{ExactDeclarationContext, OriginalCompilerInputs};
+        let producer = CanonicalProducerIdentity::from_producer_bytes(producer_bytes);
+        let inventory = ArtifactInventory::default();
+        let originals = ["RecaptureLeft", "RecaptureRight"].map(|name| {
+            let raw = crate::certified_products::tests::original_groups_fixture_with_interface(
+                name,
+                vec![(7, vec![helper_import.clone()])],
+                1,
+                &BTreeMap::new(),
+                name.as_bytes().to_vec(),
+            );
+            let raw = crate::certified_products::fixture_finalized_product_with_requirements(
+                raw,
+                producer.sha256(),
+                Some(BTreeMap::from([(
+                    (
+                        helper.descriptor.owner.unit.clone(),
+                        helper.descriptor.owner.module.clone(),
+                    ),
+                    helper.descriptor.interface_sha256,
+                )])),
+            );
+            let product = crate::certified_products::tests::recovered_witness_fixtures(&[raw])
+                .remove(0)
+                .product;
+            Arc::new(ArtifactEntry::original(producer.sha256(), product).unwrap())
+        });
+        let mut entries = interfaces;
+        entries.extend([helper.clone(), originals[0].clone(), originals[1].clone()]);
+        let available = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                entries.clone(),
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let receipt = bound_selection_for_entries(&available, &entries);
+        let issuers = originals.each_ref().map(|original| {
+            let mut fixed = inventory
+                .bind_segment(&available, entries.clone(), &receipt)
+                .unwrap();
+            inventory
+                .admit_bound_target(
+                    &mut fixed,
+                    &inventory.empty_view(),
+                    NativeArtifactDemand::CertifiedTargetImports(&[issued_source(original, 7)]),
+                    vec![],
+                    &receipt,
+                )
+                .unwrap()
+        });
+        let expected = ExactNativeClosureModel {
+            groups: issuers
+                .iter()
+                .flat_map(|view| view.capture_graph_selection().native_groups)
+                .collect(),
+            rows: issuers
+                .iter()
+                .flat_map(ArtifactView::binding_dependencies)
+                .collect(),
+        };
+        let helper_groups = expected
+            .groups
+            .iter()
+            .filter(|group| group.binding.artifact == helper.descriptor.id)
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(helper_groups.len(), 2);
+        assert_ne!(
+            helper_groups[0].binding.selection,
+            helper_groups[1].binding.selection
+        );
+        let carriers = expected
+            .rows
+            .iter()
+            .filter_map(|(from, to, edge)| match (from, to, edge) {
+                (
+                    ArtifactBindingNode::Group(group),
+                    ArtifactBindingNode::Artifact(carrier),
+                    ArtifactDependency::Interface,
+                ) if group.binding.artifact == helper.descriptor.id
+                    && carrier.artifact == helper.descriptor.id =>
+                {
+                    Some(*carrier)
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            carriers.len(),
+            1,
+            "distinct group issuers retain the same exact carrier"
+        );
+        let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+        for reverse in [false, true] {
+            let first = usize::from(reverse);
+            let joined = issuers[first]
+                .merge_selected(&issuers[1 - first], &projection)
+                .unwrap();
+            assert!(joined.lease.roots.is_empty());
+            assert!(joined.roots().iter().any(|root| matches!(root, InventoryNodeKey::Group(group) if group.binding.artifact == originals[0].descriptor.id)));
+            assert!(!joined.roots().iter().any(|root| matches!(root, InventoryNodeKey::Group(group) if group.binding.artifact == helper.descriptor.id)));
+            let recovery = ArtifactInventory::default();
+            let restored = recovery
+                .recover_selection(
+                    &recovery.empty_view(),
+                    joined.entries(),
+                    &joined.capture_graph_selection(),
+                    &joined.binding_dependencies(),
+                )
+                .unwrap();
+            for view in [&joined, &restored] {
+                let context = ExactDeclarationContext::from_authenticated_execution(
+                    producer.sha256(),
+                    view,
+                    projection.clone(),
+                    vec![],
+                    originals[0].descriptor.owner.clone(),
+                    &[],
+                )
+                .unwrap();
+                let inputs =
+                    OriginalCompilerInputs::from_native_availability(&context, producer, products)
+                        .unwrap();
+                let scratch = tempfile::tempdir().unwrap();
+                let request =
+                    crate::declaration_context::ExactCompileContext::new(Arc::new(context))
+                        .prepare_compilation_with_private_input(
+                            scratch.path(),
+                            producer_bytes,
+                            None,
+                            Some(inputs),
+                        )
+                        .unwrap();
+                let facts = &request.compiler_inputs().native_original_requirements;
+                assert!(!facts
+                    .iter()
+                    .any(|fact| fact.original == helper.descriptor.id));
+                for original in &originals {
+                    assert!(facts
+                        .iter()
+                        .any(|fact| fact.original == original.descriptor.id));
+                }
+                let admitted = view
+                    .inventory()
+                    .admit_projected_with_native_requirements(
+                        view,
+                        originals.to_vec(),
+                        &projection,
+                        facts,
+                    )
+                    .unwrap();
+                expected.check(&admitted).unwrap();
+                let graph = admitted.capture_graph_selection();
+                let count = admitted.inventory().node_count();
+                assert!(
+                    matches!(admitted.native_requirements_from_roots(&[NativeRequirementRoot::Group {
+                    artifact: helper.descriptor.id, original_ordinal: helper_groups[0].original_ordinal,
+                }]), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                    ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == helper.descriptor.id))
+                );
+                assert_eq!(admitted.capture_graph_selection(), graph);
+                assert_eq!(admitted.inventory().node_count(), count);
+            }
+        }
+    }
+
+    #[test]
+    fn late_native_original_recapture_keeps_inherited_roots_and_historical_children() {
+        let producer = CanonicalProducerIdentity::from_producer_bytes(b"native recapture fixture");
+        let product = crate::certified_products::tests::original_groups_fixture(
+            "RecaptureHelper",
+            vec![(7, Vec::new())],
+            1,
+            &BTreeMap::new(),
+        );
+        let product =
+            crate::certified_products::fixture_finalized_product(product, producer.sha256());
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
+        let helper = Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap());
+        check_late_native_original_recapture(
+            helper.clone(),
+            vec![],
+            issued_source(&helper, 7),
+            b"native recapture fixture",
+            &[product],
+        );
+    }
+
+    #[test]
+    #[ignore = "requires declared compiler deployment and native catalog"]
+    fn borrowed_native_original_late_recapture_preserves_issued_descendants() {
+        let configuration = crate::toolchain::CompilerDeploymentConfiguration::from_env().unwrap();
+        let (endpoint, _, _) =
+            crate::toolchain::bind_admitted_extract_endpoint(&configuration).unwrap();
+        let package = crate::toolchain::CatalogSelection::FreshConfigured
+            .acquire()
+            .unwrap()
+            .expect("declared native catalog");
+        let scratch = tempfile::tempdir().unwrap();
+        let candidates = crate::module_candidates::select_acquired_catalog(
+            &package,
+            endpoint.identity().producer_bytes(),
+            &package.source_selection().include_roots(),
+            scratch.path(),
+        )
+        .unwrap()
+        .expect("catalog candidates");
+        let producer =
+            CanonicalProducerIdentity::from_producer_bytes(endpoint.identity().producer_bytes());
+        let product = candidates
+            .native_availability
+            .iter()
+            .find(|product| product.owner().module == "Tidepool.View.Types")
+            .expect("borrowed View.Types original")
+            .clone();
+        let helper = Arc::new(ArtifactEntry::original(producer.sha256(), product.clone()).unwrap());
+        assert!(helper.catalog_input_custody().is_some());
+        let interfaces = candidates
+            .by_owner
+            .values()
+            .map(|candidate| {
+                Arc::new(ArtifactEntry::canonical(
+                    candidate.original_module_interface.clone(),
+                ))
+            })
+            .collect();
+        let binder = tidepool_repr::execution_schema::SymbolIdentity {
+            unit: product.owner().unit.clone(),
+            module: product.owner().module.clone(),
+            namespace: "value".into(),
+            occurrence: "viewTree".into(),
+            record_parent: None,
+        };
+        let groups = crate::certified_products::original_available_groups(&product)
+            .unwrap()
+            .filter(|group| group.binders().contains(&binder))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            groups.len(),
+            1,
+            "one certified group owns View.Types.viewTree"
+        );
+        let helper_import = crate::certified_products::PendingImportOwner::Source {
+            owner: product.owner().clone(),
+            original_ordinal: groups[0].original_ordinal(),
+            binder,
+        };
+        check_late_native_original_recapture(
+            helper,
+            interfaces,
+            helper_import,
+            endpoint.identity().producer_bytes(),
+            &candidates.native_availability,
+        );
+    }
     #[test]
     fn independent_native_roots_keep_overlapping_exact_descendant_bindings() {
         for count in [1, 3] {

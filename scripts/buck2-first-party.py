@@ -1553,6 +1553,17 @@ tidepool_buildscript_run(
                 runtime_arguments(env, resources, worker),
                 '    visibility = ["PUBLIC"],', ")", "",
             ]))
+            rules.append("\n".join([
+                "tidepool_rust_test_cases(",
+                '    name = "toolchain_native_original_recapture_test",',
+                f"    binary = {json.dumps(':' + unit_target['name'] + '_binary')},",
+                "    exact_tests = [",
+                '        "artifact_inventory::tests::borrowed_native_original_late_recapture_preserves_issued_descendants",',
+                "    ],", "    expected_count = 1,", "    ignored = True,",
+                "    jobs = 1,", "    timeout = 600,", "    test_rule_timeout_ms = 660000,",
+                runtime_arguments(env, resources, worker),
+                '    visibility = ["PUBLIC"],', ")", "",
+            ]))
             rules.append(toolchain_compiler_free_test_cases(":" + unit_target["name"] + "_binary"))
             rules.append('''runtime_executable(
     name = "candidate_fixture_issuer",
