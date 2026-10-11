@@ -55,7 +55,7 @@ lunaApplicativeAwait = do
     "respond (\"lookup note: \" <> (sessionInput :: Text))"
   void $ turn owner finish
   assertCell owner "one applicative await retains both typed settlements"
-    "case joinedScoutSettlements of { Right (Right compiler, Right lookup) -> responseValue compiler == \"compiler note: Summarize the named compiler boundary in one sentence.\" && responseValue lookup == \"lookup note: Summarize the public lookup contract in one sentence.\"; _ -> False }"
+    "joinedScoutSettlements == Right (Right \"compiler note: Summarize the named compiler boundary in one sentence.\", Right \"lookup note: Summarize the public lookup contract in one sentence.\")"
 
 skills :: Member RecipeCheck effects => Eff effects ()
 skills = do
