@@ -1059,6 +1059,10 @@ fn append_inheritance_authority(instructions: &mut String) {
 
 #[derive(Debug, Clone)]
 pub enum ActorHostReadiness {
+    /// Current actor availability is independent of browser listener readiness.
+    ActorsObserved {
+        actors: Vec<harness::server::HostActorProjection>,
+    },
     /// Coordination failed; the native application may still be alive.
     CoordinationFailed { root: ActorRef, error: String },
     /// The embedded browser listener is bound and its root conversation is

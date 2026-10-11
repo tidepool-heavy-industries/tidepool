@@ -168,6 +168,7 @@ pub(super) async fn run_interactive_applications(
         embedded_projection
             .publish(
                 &service.control,
+                &readiness,
                 &embedded_run,
                 &(host_graph)(),
                 &embedded_projection::LifecycleState::default(),
@@ -217,6 +218,7 @@ pub(super) async fn run_interactive_applications(
                         }
                         if let Err(error) = embedded_projection.publish(
                             &service.control,
+                            &readiness,
                             &embedded_run,
                             &(host_graph)(),
                             &states,
@@ -266,6 +268,7 @@ pub(super) async fn run_interactive_applications(
                     }
                     if let Err(error) = embedded_projection.publish(
                         &service.control,
+                        &readiness,
                         &embedded_run,
                         &(host_graph)(),
                         &(*embedded_lifecycle_rx.borrow()).clone(),
@@ -815,6 +818,7 @@ pub(super) async fn run_interactive_applications(
                             let live_actors = embedded_live_actors(&application_owners);
                             if let Err(error) = embedded_projection.publish(
                                 &service.control,
+                                &readiness,
                                 &embedded_run,
                                 &(host_graph)(),
                                 &lifecycle_states,

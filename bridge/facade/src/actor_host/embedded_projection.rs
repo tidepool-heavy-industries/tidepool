@@ -65,6 +65,7 @@ pub(super) struct EmbeddedProjection {
     // so a terminal actor remains linked to its exact history head in the snapshot.
     // Cold restart cannot reconstruct these associations from logical paths alone.
     conversations: HashMap<ActorRef, ConversationObservation>,
+    published_actors: Option<Vec<HostActorProjection>>,
 }
 
 struct ConversationObservation {
@@ -217,6 +218,7 @@ impl EmbeddedProjection {
     pub(super) fn publish(
         &mut self,
         control: &ServerControl,
+        observation: &tokio::sync::mpsc::UnboundedSender<super::ActorHostReadiness>,
         run: &str,
         nodes: &[ActorGraphNode],
         states: &LifecycleState,
@@ -232,6 +234,14 @@ impl EmbeddedProjection {
             head_for,
             history_finished_for,
         )?;
+        if self.published_actors.as_ref() != Some(&actors) {
+            observation
+                .send(super::ActorHostReadiness::ActorsObserved {
+                    actors: actors.clone(),
+                })
+                .ok();
+            self.published_actors = Some(actors.clone());
+        }
         control.update_host_projection(run.to_owned(), actors, conversations);
         Ok(())
     }
@@ -286,6 +296,68 @@ mod tests {
         assert_eq!(receiver.borrow().len(), 2);
         assert_eq!(receiver.borrow()[&actor(1)], HostActorLifecycle::Running);
         assert_eq!(receiver.borrow()[&actor(2)], HostActorLifecycle::Retired);
+    }
+
+    #[test]
+    fn host_observation_reports_actor_loss_and_suppresses_unchanged_projection() {
+        let (_, control, _) = harness::server::server(std::path::PathBuf::new());
+        let (observations, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let mut projection = EmbeddedProjection::default();
+        let identity = HostIdentity {
+            run: "run".into(),
+            actor: AgentPath("/root".into()),
+            incarnation: "1".into(),
+        };
+        projection.attached(actor(1), &identity);
+        let mut root = node(1, None, true);
+        for _ in 0..2 {
+            projection
+                .publish(
+                    &control,
+                    &observations,
+                    "run",
+                    &[root.clone()],
+                    &LifecycleState::default(),
+                    |_| None,
+                    |_| Ok(Some("retained-head".into())),
+                    |_| false,
+                )
+                .unwrap();
+        }
+        let super::super::ActorHostReadiness::ActorsObserved { actors } =
+            received.try_recv().unwrap()
+        else {
+            panic!("the projection must publish its typed actor observation");
+        };
+        assert_eq!(actors[0].lifecycle, HostActorLifecycle::Waiting);
+        assert!(received.try_recv().is_err());
+        root.terminal = Some(ActorTerminal {
+            kind: ActorExitKind::Failed,
+            summary: "runtime failed".into(),
+            diagnostic: None,
+        });
+        projection
+            .publish(
+                &control,
+                &observations,
+                "run",
+                &[root],
+                &LifecycleState::default(),
+                |_| None,
+                |_| Ok(Some("retained-head".into())),
+                |_| true,
+            )
+            .unwrap();
+        let super::super::ActorHostReadiness::ActorsObserved { actors } =
+            received.try_recv().unwrap()
+        else {
+            panic!("actor failure must remain observable while the browser stays ready");
+        };
+        assert_eq!(actors[0].lifecycle, HostActorLifecycle::Lost);
+        assert_eq!(
+            actors[0].model_head_request.as_deref(),
+            Some("retained-head")
+        );
     }
 
     #[test]
