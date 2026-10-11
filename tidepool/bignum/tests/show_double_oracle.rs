@@ -7,7 +7,6 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 #[test]
-#[ignore = "requires the repository's pinned GHC toolchain"]
 fn formatting_matches_native_ghc_at_rounding_boundaries() {
     let mut bits = vec![0, 1, 2, (1_u64 << 52) - 1, 1_u64 << 52, f64::MAX.to_bits()];
     for exponent in -323..=308 {
@@ -34,16 +33,17 @@ fn formatting_matches_native_ghc_at_rounding_boundaries() {
         clippy::disallowed_methods,
         reason = "short synchronous probe: runs a GHC oracle script over piped input and exits, not a long-lived child"
     )]
-    let mut child = Command::new("runghc")
-        .arg(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/tests/show_double_oracle.hs"
-        ))
+    let ghc = std::env::var_os("TIDEPOOL_GHC").expect("declare the pinned GHC executable");
+    let source = std::env::var_os("TIDEPOOL_DOUBLE_ORACLE_SOURCE")
+        .expect("declare the double-format oracle source");
+    let mut child = Command::new(ghc)
+        .args(["-package-env=-", "-ignore-dot-ghci", "-e", "main"])
+        .arg(source)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("run in the repository dev shell with runghc available");
+        .expect("the declared GHC executable must run");
     let mut stdin = child.stdin.take().unwrap();
     let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
     let output = child.wait_with_output().unwrap();
@@ -56,6 +56,7 @@ fn formatting_matches_native_ghc_at_rounding_boundaries() {
     let output = String::from_utf8(output.stdout).unwrap();
     let expected: Vec<_> = output.lines().collect();
     assert_eq!(expected.len(), bits.len());
+    eprintln!("double-format oracle: {} bit patterns", bits.len());
     for (bits, expected) in bits.into_iter().zip(expected) {
         assert_eq!(
             tidepool_bignum::haskell_show_double(f64::from_bits(bits)),

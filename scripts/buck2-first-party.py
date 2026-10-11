@@ -648,6 +648,10 @@ PREPARED_FIXTURE_RESOURCES = {
 def test_runtime_inputs(package_name, target_name, unit=False):
     env, resources, worker = {}, [], False
     fixture_names = []
+    if package_name == "tidepool-bignum" and target_name == "show_double_oracle":
+        env["TIDEPOOL_GHC"] = "$(exe toolchains//:ghc)"
+        env["TIDEPOOL_DOUBLE_ORACLE_SOURCE"] = "$(location :show_double_oracle_source)"
+        resources.extend(["toolchains//:ghc", ":show_double_oracle_source"])
     if package_name in {"tidepool", "exomonad-actor"}:
         env["TIDEPOOL_TEST_FIXTURE_ROOT"] = "$(location //bridge/testing:haskell_test_fixtures)"
         resources.append("//bridge/testing:haskell_test_fixtures")
@@ -778,6 +782,7 @@ NATIVE_RESOURCE_ENV_KEYS = (
     "TIDEPOOL_CELL_TEST_EXTRACT",
     "TIDEPOOL_COMPILER_DEPLOYMENT",
     "TIDEPOOL_COMPILER_MODULES",
+    "TIDEPOOL_DOUBLE_ORACLE_SOURCE",
     "TIDEPOOL_EFFECTS_SOURCE_ROOT",
     "TIDEPOOL_EXTRACT",
     "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES",
@@ -1622,6 +1627,14 @@ tidepool_buildscript_run(
         NATIVE_TARGETS[package_name]["integration"][target["name"]] = {"test_build": "//" + CURRENT_DIR + ":" + target["name"] + "_binary", "test": "//" + CURRENT_DIR + ":" + target["name"]}
         if package_name == "exomonad-actor" and target["name"] == "actor":
             rules.append(actor_notebook_contract_test_cases(target["name"] + "_binary", env, resources, worker))
+    if package_name == "tidepool-bignum":
+        rules.append('''export_file(
+    name = "show_double_oracle_source",
+    src = "tests/show_double_oracle.hs",
+    out = "show_double_oracle.hs",
+    visibility = ["PUBLIC"],
+)
+''')
     if package_name == "tidepool-handlers":
         rules.append('''export_file(
     name = "handler_library_source",

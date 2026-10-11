@@ -79,6 +79,21 @@ tidepool_rust_isolated_test(
     required_test_modules = [
         "tidepool/bignum/tests/show_double_oracle.rs",
     ],
+    resources = [
+        ":show_double_oracle_source",
+        "toolchains//:ghc",
+    ],
+    resource_env = {
+        "TIDEPOOL_DOUBLE_ORACLE_SOURCE": "$(location :show_double_oracle_source)",
+        "TIDEPOOL_GHC": "$(exe toolchains//:ghc)",
+    },
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "show_double_oracle_source",
+    src = "tests/show_double_oracle.hs",
+    out = "show_double_oracle.hs",
     visibility = ["PUBLIC"],
 )
 
