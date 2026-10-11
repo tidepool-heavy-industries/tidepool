@@ -612,7 +612,6 @@ rust_filegroup(
         "//bridge/protocol:generated[exomonad_actor_src_generated_reflect_rs]": "exomonad/actor/src/generated/reflect.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_resource_scopes_rs]": "exomonad/actor/src/generated/resource_scopes.rs",
         "//bridge/protocol:generated[exomonad_actor_src_generated_sleep_rs]": "exomonad/actor/src/generated/sleep.rs",
-        "tests/exact_source_membrane.rs": "exomonad/actor/tests/exact_source_membrane.rs",
         "tests/prepared_render_probe.rs": "exomonad/actor/tests/prepared_render_probe.rs",
         "tests/profile_compile_failures.rs": "exomonad/actor/tests/profile_compile_failures.rs",
         "tests/profile_compile_failures/selected_fs_write.hs": "exomonad/actor/tests/profile_compile_failures/selected_fs_write.hs",
@@ -690,7 +689,6 @@ tidepool_rust_isolated_test(
         ":exomonad_actor",
     ],
     required_test_modules = [
-        "exomonad/actor/tests/exact_source_membrane.rs",
         "exomonad/actor/tests/prepared_render_probe.rs",
         "exomonad/actor/tests/profile_compile_failures.rs",
         "exomonad/actor/tests/ractor_substrate.rs",
@@ -922,7 +920,6 @@ filegroup(
         "exomonad/actor/src/wait.rs": "src/wait.rs",
         "exomonad/actor/src/workbench_display.rs": "src/workbench_display.rs",
         "exomonad/actor/src/workbench_display_tests.rs": "src/workbench_display_tests.rs",
-        "exomonad/actor/tests/exact_source_membrane.rs": "tests/exact_source_membrane.rs",
         "exomonad/actor/tests/prepared_render_probe.rs": "tests/prepared_render_probe.rs",
         "exomonad/actor/tests/profile_compile_failures.rs": "tests/profile_compile_failures.rs",
         "exomonad/actor/tests/profile_compile_failures/selected_fs_write.hs": "tests/profile_compile_failures/selected_fs_write.hs",

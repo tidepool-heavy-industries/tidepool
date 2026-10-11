@@ -136,6 +136,7 @@
     "bridge/facade/src/actor_host/fixtures/scripted_three_actor_cleanup.hs",
     "bridge/facade/src/actor_host/fixtures/scripted_three_actor_read.hs",
     "bridge/facade/src/actor_host/fixtures/scripted_three_actor_setup.hs",
+    "bridge/facade/src/actor_host/fixtures/selected_nominal_membrane.hs",
     "bridge/facade/src/actor_host/fixtures/shell_agent_spec.hs",
     "bridge/facade/src/actor_host/fixtures/sleep_required_spec.hs",
     "bridge/facade/src/actor_host/fixtures/spec_reload_with_slot.hs",

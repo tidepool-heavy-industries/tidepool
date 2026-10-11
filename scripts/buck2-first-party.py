@@ -1286,6 +1286,12 @@ def facade_test_cases(binary):
         ("facade_recipe_source_capture_test", [
             "exomonad::workspace::source_capture_tests::background_command_recipe_capture_records_seven_cells_without_validating_assertions",
         ], capture_recipe_env, {}, capture_recipe_resources, True, False, 600),
+        ("facade_inherited_counter_test", [
+            "actor_host::tests::stateful_replacement_preserves_owned_children",
+        ], host_env, host_paths, host_resources, True, False, 600),
+        ("facade_selected_nominal_membrane_test", [
+            "actor_host::documentation_tests::selected_nominal_capture_excludes_ambient_sibling_from_native_notebook",
+        ], host_env, host_paths, host_resources, True, False, 600),
         ("facade_narrow_parent_forwarding_test", [
             "actor_host::documentation_tests::narrow_parent_forwards_one_request_with_exact_child_effects",
         ], host_env, host_paths, host_resources, True, False, 600),

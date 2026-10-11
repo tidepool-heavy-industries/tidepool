@@ -4090,3 +4090,29 @@ async fn narrow_parent_forwards_one_request_with_exact_child_effects() {
         assert_eq!(explicit_display_texts(&repeated), vec!["True"], "{repeated}");
     })).await;
 }
+
+#[tokio::test]
+async fn selected_nominal_capture_excludes_ambient_sibling_from_native_notebook() {
+    let campaign = TestCampaign::start().await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
+        let root = campaign.root_installation.policy.clone();
+        let (setup, target) = campaign.dispatch_native_spawn_setup(
+            "selected nominal membrane installation",
+            include_str!("fixtures/selected_nominal_membrane.hs"),
+            Duration::from_secs(240),
+        ).await;
+        assert_eq!(setup["status"], "committed", "{setup}");
+        campaign.await_native_activation(target.actor.identity(), "membrane request activation", Duration::from_secs(120)).await;
+        let selected = dispatch_haskell_script(target.policy.as_ref(),
+            "import qualified Tidepool.Agent.Contract as A\nlet selectedNominalWitness = Nothing :: Maybe (MembraneTools '[Replies] (A.AsServerT (Eff '[Replies])))").await;
+        assert_eq!(selected["status"], "committed", "{selected}");
+        let hidden = dispatch_haskell_script(target.policy.as_ref(),
+            "let ambientNominalWitness = Nothing :: Maybe AmbientNominal").await;
+        assert_eq!(hidden["status"], "rejected", "{hidden}");
+        let reply = dispatch_haskell_script(target.policy.as_ref(), "respond (42 :: Int)").await;
+        assert_eq!(reply["status"], "replied", "{reply}");
+        let original = displayed(campaign, root.as_ref(),
+            "let waitMembrane = do { observed <- pollResponse membraneResponse; case observed of { ResponseReady result -> pure result; ResponseUnavailable failure -> error (show failure); _ -> sleep (milliseconds 1) >> waitMembrane } }\nresult <- waitMembrane\n_ <- display (case AmbientNominal 42 of AmbientNominal value -> value)").await;
+        assert_eq!(explicit_display_texts(&original), vec!["42"], "{original}");
+    })).await;
+}

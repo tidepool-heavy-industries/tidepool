@@ -23,6 +23,14 @@ Installation-issued effect rows carry their exact nominal imports through
 templates, actor compile views, and inspection. Keep that source fragment coupled;
 authored type text does not issue imports or additional effect authority.
 
+Child capture resolves original nominal identities against local declarations
+first, then acquired certified interfaces from the actor's source owner. Narrow
+inherited interfaces through their issuer; copied source and rendered names do
+not issue identity. Each child owns an independent capture release slot over
+shared immutable projections. Allocator floors travel separately and install
+no lexical roots. Selection controls default visibility while retaining the
+certified implementation, instance, and family closure.
+
 Compiler work receives its stop relationship with the affine `CompilerWorkTicket`
 issued by the execution or preparation owner. The ticket opens and settles the
 entire native scope; callers must not create an unrelated cancellation token.

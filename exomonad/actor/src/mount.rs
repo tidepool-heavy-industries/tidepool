@@ -345,17 +345,25 @@ impl ActorSourceImports {
         Vec<std::sync::Arc<tidepool_runtime::session::CertifiedDeclarationProjection>>,
         ActorCompileViewError,
     > {
-        let Some(capture) = &self.selected_facades else {
-            return Ok(Vec::new());
-        };
-        let facades = capture.facades.lock();
-        let facades = facades
-            .as_ref()
-            .ok_or(ActorCompileViewError::ReleasedDeclarationCapture)?;
-        Ok(facades
+        Ok(self
+            .exact_facades()?
             .iter()
             .filter_map(|facade| facade.projection().cloned())
             .collect())
+    }
+
+    /// Successfully acquired immutable custody survives release of this slot.
+    /// A child must retain it in its own capture slot, not clone this owner.
+    pub(crate) fn exact_facades(&self) -> Result<Vec<MaterializedFacade>, ActorCompileViewError> {
+        let Some(capture) = &self.selected_facades else {
+            return Ok(Vec::new());
+        };
+        capture
+            .facades
+            .lock()
+            .as_ref()
+            .cloned()
+            .ok_or(ActorCompileViewError::ReleasedDeclarationCapture)
     }
 }
 
@@ -981,11 +989,21 @@ mod source_authority_tests {
         let imports = ActorSourceImports::from_exact_facades([&facade]);
         let retained = imports.clone();
         assert_eq!(imports.declaration_projections().unwrap().len(), 1);
+        let acquired = imports.exact_facades().unwrap();
+        let child = ActorSourceImports::from_exact_facades(&acquired);
+        drop(acquired);
         drop(facade);
         assert!(projection.upgrade().is_some());
         imports.release_capture();
+        assert!(projection.upgrade().is_some());
+        assert_eq!(child.declaration_projections().unwrap().len(), 1);
+        child.release_capture();
         assert!(projection.upgrade().is_none());
         for observation in [&imports, &retained] {
+            assert!(matches!(
+                observation.exact_facades(),
+                Err(ActorCompileViewError::ReleasedDeclarationCapture)
+            ));
             assert!(matches!(
                 observation.declaration_projections(),
                 Err(ActorCompileViewError::ReleasedDeclarationCapture)
