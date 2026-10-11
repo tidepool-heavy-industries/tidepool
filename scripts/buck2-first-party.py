@@ -1295,7 +1295,7 @@ def facade_test_cases(binary):
             "production_host_recovers_ancestor_tool_output_after_request_rejection"],
          host_env, host_paths, host_resources, True, False, 600),
         ("facade_request_reload_test", [prefix +
-            "m1_request_reload_tests::real_host_pins_typed_handler_across_reload_and_pending_compaction"],
+            "request_reload_tests::real_host_pins_typed_handler_across_reload_and_pending_compaction"],
          host_env, host_paths, host_resources, True, False, 600),
         ("facade_late_output_test", [prefix +
             "real_host_late_output_tests::real_host_retains_one_late_haskell_output_across_compaction"],

@@ -2143,7 +2143,7 @@ tidepool_rust_test_cases(
     name = "facade_request_reload_test",
     binary = ":tidepool_unit_tests",
     exact_tests = [
-        "actor_host::m1_host_tests::m1_request_reload_tests::real_host_pins_typed_handler_across_reload_and_pending_compaction",
+        "actor_host::m1_host_tests::request_reload_tests::real_host_pins_typed_handler_across_reload_and_pending_compaction",
     ],
     expected_count = 1,
     ignored = False,
