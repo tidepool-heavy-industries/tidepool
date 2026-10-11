@@ -52,6 +52,7 @@ import System.CPUTime (getCPUTime)
 import System.Environment (lookupEnv)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.Process (getProcessID)
+import Tidepool.ExtractUtil (trySynchronous)
 import Tidepool.Json (jsonString)
 
 -- These events describe one owner's decision, never a whole-compile hit.
@@ -146,7 +147,8 @@ readSummaryTimingEnabled = do
 
 -- One bounded owner validation interval. The counts action runs after the work,
 -- so observation totals come from the same fresh map and never escape it.
--- Exceptions are recorded and rethrown unchanged, including cancellation.
+-- Work exceptions are recorded and rethrown unchanged, including cancellation.
+-- Ordinary count failures omit optional counts; count cancellation escapes.
 withValidationTiming
   :: forall a. Bool -> String -> String -> IO [(String,Integer)]
   -> IO (Either String a) -> IO (Either String a)
@@ -161,7 +163,7 @@ withValidationTiming True owner reason counts action = do
   end <- getMonotonicTimeNSec
   cpu1 <- getCPUTime
   rts1 <- readRtsStats
-  measuredCounts <- try counts :: IO (Either SomeException [(String,Integer)])
+  measuredCounts <- trySynchronous counts
   let outcome = case result of
         Left _ -> "exception"
         Right (Left _) -> "refused"

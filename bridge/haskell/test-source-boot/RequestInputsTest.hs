@@ -401,8 +401,19 @@ validationTimingControl = do
       (try (withValidationTiming True "exact_scope" "checked_receipt_publication"
         (pure []) (throwIO ThreadKilled)) :: IO (Either AsyncException (Either String ())))
     unless (accepted == Right () && refused == Left "controlled refusal"
-        && either (const True) (const False) thrown)
+        && thrown == Left ThreadKilled)
       (fail "validation timing changed a validation result or swallowed its exception")
+    forM_ [Right (),Left "controlled refusal"] $ \expected -> do
+      (observed,_) <- captureDiagnostics
+        (withValidationTiming True "exact_scope" "checked_receipt_publication"
+          (ioError (userError "optional count observation failed")) (pure expected))
+      unless (observed == expected)
+        (fail "optional count observation failure changed the validation result")
+    (cancelledCounts,_) <- captureDiagnostics
+      (try (withValidationTiming True "exact_scope" "checked_receipt_publication"
+        (throwIO ThreadKilled) (pure (Right ()))) :: IO (Either AsyncException (Either String ())))
+    unless (cancelledCounts == Left ThreadKilled)
+      (fail "optional count observation swallowed cancellation after successful validation")
     let rows logText = filter ("tidepool-validation " `isPrefixOf`) (lines logText)
         allRows = concatMap rows [acceptedLog,refusedLog,exceptionLog]
         has outcome row = ("\"outcome\":\"" ++ outcome ++ "\"") `isInfixOf` row
