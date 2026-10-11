@@ -712,7 +712,6 @@ pub(super) fn matches_parent(
         || current.creator() != original.creator()
         || current.supervisor_parent() != original.supervisor_parent()
         || current.context_parent() != original.context_parent()
-        || current.profile() != original.profile()
         || current.capabilities() != original.capabilities()
         || current.persistence_policy() != original.persistence_policy()
         || current.source_layer() != original.source_layer())

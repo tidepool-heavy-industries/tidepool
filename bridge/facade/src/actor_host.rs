@@ -150,7 +150,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use exomonad_actor::{
-    ActorDescriptor, ActorEffectProfile, ActorExitKind, ActorPlacement, ActorRef, ActorTerminal,
+    ActorDescriptor, ActorExitKind, ActorPlacement, ActorRef, ActorTerminal,
     ActorWorkbenchSource, ExternalApplicationFailure, ExternalApplicationFailureClass,
     ExternalFailureDisposition, LocalActorRef, LocalResidentDeployment, LocalResidentInstallation,
     ResidentActorRoot, ResidentForest, WorkspaceAdmission, WorkspaceAdmissionError,
@@ -3719,7 +3719,6 @@ fn compile_root(
     .with_persistence_policy(exomonad_actor::ActorPersistencePolicy::Durable)
     // Profiles classify resident Haskell rows, not the native Codex sandbox.
     // The root allocates worktrees and may attenuate children to ReadOnly.
-    .with_profile(ActorEffectProfile::ReadWrite)
     .with_capabilities(exomonad_actor::ActorCapabilities::default());
     if let Some(layers) = source {
         descriptor = descriptor.with_source_layer(

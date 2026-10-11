@@ -4997,17 +4997,6 @@ where
                 descriptor = descriptor
                     .with_fork_effort(checkpoint_effort.or(self.descriptor.fork_effort()));
             }
-            if !self
-                .descriptor
-                .profile()
-                .permits_child(descriptor.profile())
-            {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
-                    "actor profile {:?} cannot start child profile {:?}",
-                    self.descriptor.profile(),
-                    descriptor.profile()
-                )));
-            }
             let capabilities = self
                 .descriptor
                 .capabilities()
