@@ -6354,7 +6354,16 @@ mod tests {
             .await
             .unwrap();
         task.await.unwrap();
-        assert!(actor.terminal().cleanup().unwrap().is_confirmed());
+        let cleanup = actor.terminal().cleanup().unwrap();
+        assert!(matches!(
+            cleanup.hook,
+            crate::CleanupComponentOutcome::Confirmed
+        ));
+        assert!(matches!(
+            cleanup.realm,
+            crate::CleanupComponentOutcome::Unsupported
+        ));
+        assert!(actor.terminal().compiler_close_observations().is_empty());
     }
 
     #[tokio::test]
