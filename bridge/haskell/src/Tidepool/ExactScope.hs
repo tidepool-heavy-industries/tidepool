@@ -18,7 +18,7 @@ module Tidepool.ExactScope
   , canonicalProofMatchesOwner
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner
-  , readExactScope, ExactScopeValidationReason(..), revalidateExactScope, revalidateExactScopesAt, validateExactScopeEnvironment, scopeValueInterfaces
+  , readExactScope, ExactScopeValidationReason(..), revalidateExactScope, revalidateExactScopesAt, validateExactScopeEnvironment, ExactScopeRequestFailure(..), validateExactScopeRequest, scopeValueInterfaces
   , scopeInterfaceBytes, scopeInterfaceToken, scopeOriginalBytes, readScopedInterfaces, readScopedInterfaceClosure, admittedInterfaceCoreBytes
   , ExactCompilationPublication(..)
   , writeExactCompilation, writeCheckedExactCompilation
@@ -37,7 +37,7 @@ import Codec.CBOR.Decoding
 import Codec.CBOR.Read (deserialiseFromBytes)
 import qualified Codec.CBOR.Encoding as E
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Exception (IOException, try, throwIO, evaluate)
+import Control.Exception (Exception, IOException, try, throwIO, evaluate)
 import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import Control.Monad (foldM, forM, forM_, replicateM, unless, when)
 import qualified Crypto.Hash.SHA256 as SHA
@@ -696,9 +696,13 @@ validateInputClosure producer inputs products = do
   where firstOfThree (value,_,_) = value
 
 observeSeal :: FileObservations -> FilePath -> Maybe Int -> String -> String -> IO ()
-observeSeal observations path bound expected reason = do
+observeSeal observations path bound expected reason =
+  observeSealWith observations path bound expected (userError reason)
+
+observeSealWith :: Exception failure => FileObservations -> FilePath -> Maybe Int -> String -> failure -> IO ()
+observeSealWith observations path bound expected failure = do
   observed <- observeFile observations path bound
-  unless (observedSha256 observed == expected) (fail reason)
+  unless (observedSha256 observed == expected) (throwIO failure)
 
 data ParsedInterfaceEvidence
   = ParsedModuleEvidence CanonicalInterfaceDescriptor
@@ -905,6 +909,19 @@ validateExactScopeEnvironment :: HscEnv -> ExactScope -> IO (Either String ())
 validateExactScopeEnvironment env scope = do
   let AdmittedScopeInputs _ _ roots _ _ = scopeInputs scope
   validateAdmittedPackageSelection env roots
+
+data ExactScopeRequestFailure = ExactScopeRequestChanged FilePath
+  deriving (Eq, Show)
+
+instance Exception ExactScopeRequestFailure
+
+-- Carried admission retains captured inputs but cannot authorize a changed
+-- request envelope. Check once before source work; publication still observes
+-- the envelope independently to reject drift during compilation.
+validateExactScopeRequest :: ExactScope -> IO ()
+validateExactScopeRequest scope = withFileObservations $ \observations ->
+  observeSealWith observations (scopeManifestPath scope) (Just (4 * 1024 * 1024))
+    (scopeRequestSha256 scope) (ExactScopeRequestChanged (scopeManifestPath scope))
 
 data CanonicalModuleCertificate = CanonicalModuleCertificate
   { certificateProducer :: String

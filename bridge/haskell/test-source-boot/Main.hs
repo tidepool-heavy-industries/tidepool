@@ -8,7 +8,7 @@ import RequestInputsTest (ownedArenaRangeReads, artifactByteOwnership, requestIn
 import SourceBootFixtureSupport (withTiming, withScratch)
 import CandidateExecutionSourcesTest (candidateExecutionSourcesTest)
 import ExecutionSourceDecodeTest (executionSourceDecodeChecks, executionSourceResolutionBudgetChecks)
-import FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory, snapshotExecutableHook)
+import FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory, snapshotExecutableHook, unownedUpToDateDependency, mixedCandidateLoads, canonicalLoadGraphHistories)
 import ProgressBoundaryTest (progressBoundaryChecks, watchReplyEvidenceChecks, watchReplyWarmAuthorityChecks)
 import PhysicalExecutableEpochTest (exactInterfaceOwnerReuse, physicalExecutableEpoch, sourceSummaryContinuation)
 
@@ -33,6 +33,9 @@ tests = testGroup "source-boot"
   , testCase "physical native executable epoch" physicalExecutableEpoch
   , testCase "exact interface compiler owner reuse" exactInterfaceOwnerReuse
   , testCase "snapshot executable hook" snapshotExecutableHook
+  , testCase "mixed candidate load kinds" mixedCandidateLoads
+  , testCase "canonical load graph histories" canonicalLoadGraphHistories
+  , testCase "unowned up-to-date dependency" unownedUpToDateDependency
   , testCase "finalized Core" $ finalizedCoreChecks
   , testCase "finalized frontend once" $ finalizedFrontendOnce
   , testCase "post-load provider frontend once" postloadProviderFrontendOnce

@@ -93,10 +93,10 @@ import Tidepool.TypedSegment.Source (rewriteParsedSegmentRoot)
 import Tidepool.DiagJson (Diag(..), DiagSeverity(..), InputRejection(..), DependencyLoadFailure(..), dependencyDiagnostic, spanOf)
 import GHC.Data.FastString (unpackFS, mkFastString)
 import GHC.Fingerprint.Type (Fingerprint)
-import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..), NodeKey, mkNodeKey, nodeDependencies)
+import GHC.Unit.Module.Graph (mgModSummaries', ModuleGraphNode(..), NodeKey(..), ModNodeKeyWithUid(..), mkNodeKey, nodeDependencies)
 import GHC.Unit.Home (homeUnitAsUnit, homeUnitId, isHomeUnit)
 import GHC.Unit.Env (UnitEnv(..))
-import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId)
+import GHC.Unit.Types (unitString, unitIdString, stringToUnit, toUnitId, GenWithIsBoot(..), IsBootInterface(..))
 import GHC.Data.Graph.Directed (flattenSCCs)
 import GHC.Driver.Session
   ( updOptLevel, gopt_set, gopt_unset, xopt
@@ -258,7 +258,7 @@ import Tidepool.ExactHydration
 import Tidepool.ExactScope
   ( ExactScope , scopeManifestPath, scopeRequestSha256, scopeProducerSha256, scopeSemanticSha256, scopeLexical, scopeExecutionGraphs, scopeExecutionOwners, scopePurpose, scopeRequestTypes, scopeSourceSelectedOwners, scopePublishedSourceOriginals, scopeInterfaces, scopeInterfaceEvidence, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..), ExactCompilation(..), SourceSelectedOriginals(..), extendSourceSelectedOriginals, CheckedCellAdmission(..), CheckedItemAdmission(..), readExactScope, validateExactScopeEnvironment, scopeInterfaceBytes, scopeOriginalBytes, readScopedInterfaceClosure, writeCheckedExactCompilation, scopeValueInterfaces
   , scopeAvailableOriginalProducts
-  , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner
+  , ExactInputOwner, newExactInputOwner, readExactScopeWithOwner, validateExactScopeRequest
   , ActivationPreviewAdmission(..), scopeActivationPreview
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths
   , compilationOriginalSourceImports, scopeExecutionNativeOwners, ExactInterfaceEvidence(..), CanonicalOrigin(..), canonicalOrigin, normalizeInterfaceEvidence )
@@ -1458,7 +1458,7 @@ data ResultBoundary = NativeMergeBoundary | CheckedReceiptBoundary
 data CompilePlan = CompilePlan
   { cpLoadGraph :: ModuleGraph
     -- ^ The graph handed to @load'@ (the skeleton applies @unpoison@ itself).
-  , cpAfterLoad :: Ghc ()
+  , cpAfterLoad :: (ModSummary -> Ghc (Either HomeModInfo ModSummary)) -> Ghc ()
     -- ^ Runs immediately after @load'@ and its @ghc_load@ phase emit, before
     -- summaries are taken, after the shared load barrier. The session path
     -- restores its module graph here; dependency-directed Val injection occurs at
@@ -1521,6 +1521,7 @@ data CanonicalFrontendFailure
   | LoadedFinalizationOwnerMismatch
   | MissingLoadedFrontend
   | MissingLoadedFinalization
+  | DuplicateLoadedFinalization Module
   | UnfinishedLoadedFrontend
   | CandidateInterfaceBytesMismatch ModuleName
   | CandidateOriginalHomeMissing ModuleName
@@ -1540,6 +1541,7 @@ instance Show CanonicalFrontendFailure where
     LoadedFinalizationOwnerMismatch -> showString "LoadedFinalizationOwnerMismatch"
     MissingLoadedFrontend -> showString "MissingLoadedFrontend"
     MissingLoadedFinalization -> showString "MissingLoadedFinalization"
+    DuplicateLoadedFinalization owner -> renderGhc "DuplicateLoadedFinalization" owner
     UnfinishedLoadedFrontend -> showString "UnfinishedLoadedFrontend"
     CandidateInterfaceBytesMismatch owner -> argument "CandidateInterfaceBytesMismatch" (showsPrec 11 owner)
     CandidateOriginalHomeMissing owner -> argument "CandidateOriginalHomeMissing" (showsPrec 11 owner)
@@ -1759,6 +1761,31 @@ sourceImportOwners summary = Set.fromList (mapMaybe selected
       NoPkgQual -> Just (mkModule (moduleUnit (ms_mod summary)) (unLoc locatedName))
       ThisPkg unit -> Just (mkModule (stringToUnit (unitIdString unit)) (unLoc locatedName))
       OtherPkg _ -> Nothing
+
+-- Load deferral follows GHC's resolved graph. Excluded source-less home
+-- imports have no downsweep edge, so retain their qualifier and boot kind.
+-- A source/boot pair belongs to one SOURCE component and is deferred together.
+sourceLoadDependencyGraph :: ModuleGraph -> Map.Map NodeKey (Set.Set NodeKey)
+sourceLoadDependencyGraph graph = Map.fromListWith Set.union
+  ([(mkNodeKey node, Set.fromList (nodeDependencies False node)) | node <- nodes]
+    ++ [(mkNodeKey node, Set.fromList (excludedImports summary))
+      | node@(ModuleNode _ summary) <- nodes]
+    ++ [(key, Set.singleton sibling) | node@(ModuleNode _ summary) <- nodes
+      , let key = mkNodeKey node
+            sibling = mkNodeKey (ModuleNode [] summary
+              {ms_hsc_src=if ms_hsc_src summary == HsBootFile then HsSrcFile else HsBootFile})
+      , sibling `Set.member` keys])
+  where
+    nodes = mgModSummaries' graph
+    keys = Set.fromList (map mkNodeKey nodes)
+    excludedImports summary =
+      [mkNodeKey (ModuleNode [] summary {ms_mod=owner, ms_hsc_src=sourceKind})
+      | (sourceKind, imports) <- [(HsSrcFile,ms_textual_imps summary),(HsBootFile,ms_srcimps summary)]
+      , (qualifier,name) <- imports
+      , Just owner <- [case qualifier of
+          NoPkgQual -> Just (mkModule (moduleUnit (ms_mod summary)) (unLoc name))
+          ThisPkg unit -> Just (mkModule (stringToUnit (unitIdString unit)) (unLoc name))
+          OtherPkg _ -> Nothing]]
 
 sourceDependencyGraph :: ModuleGraph -> Map.Map Module (Set.Set Module)
 sourceDependencyGraph graph = Map.fromListWith Set.union
@@ -2184,6 +2211,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
             delegate request expression
       setSession current {hsc_hooks=(hsc_hooks current) {runMetaHook=Just observe}}
     forM_ (pvExactScope variant) $ \scope -> do
+      liftIO (validateExactScopeRequest scope)
       env <- getSession
       verified <- liftIO (validateExactScopeEnvironment env scope)
       either (liftIO . ioError . userError) pure verified
@@ -2676,6 +2704,19 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     let recompiledOwners = Set.fromList [ms_mod summary | summary <- sourceOrder
           , ms_mod summary `Map.notMember` validatedMemo
           , ms_mod_name summary `Map.notMember` acceptedCandidates]
+        freshSource summary = ms_hsc_src summary == HsSrcFile
+          && ms_mod summary `Set.member` recompiledOwners
+        sourceFlags = Map.fromList [(ms_mod summary, ms_hspp_opts summary) | summary <- sourceOrder]
+        forceFreshSource summary
+          | freshSource summary = summary
+              {ms_hspp_opts=gopt_set (ms_hspp_opts summary) Opt_ForceRecomp}
+          | otherwise = summary
+        restoreFreshSource summary
+          | freshSource summary
+          , Just original <- Map.lookup (ms_mod summary) sourceFlags
+          , not (gopt Opt_ForceRecomp original) = summary
+              {ms_hspp_opts=gopt_unset (ms_hspp_opts summary) Opt_ForceRecomp}
+          | otherwise = summary
     beforeEpoch <- liftIO (compilerInterpreterEpoch <$> readIORef interpreterState)
     liftIO markInterpreterMutation
     getSession >>= liftIO . activateCompilerInterpreter interpreterState selectedExecutables recompiledOwners
@@ -2791,26 +2832,18 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     let acceptedNames = Map.keysSet acceptedCandidates
         loadRequired = any ((== CandidateLoadForExecution) . admittedCandidateLoading)
           (Map.elems acceptedCandidates)
-        sourceSummaries = [summary | ModuleNode _ summary <- mgModSummaries' modGraphRaw]
-        importedNames summary =
-          [ unLoc name | (_, name) <- ms_textual_imps summary ++ ms_srcimps summary ]
-        importerClosure seed =
-          let grown = Set.union seed (Set.fromList
-                [ ms_mod_name summary
-                | summary <- sourceSummaries
-                , any (`Set.member` seed) (importedNames summary) ])
-          in if grown == seed then seed else importerClosure grown
-        deferred = if loadRequired then Set.empty else importerClosure acceptedNames
+        candidateKeys = Set.fromList [mkNodeKey (ModuleNode [] (admittedCandidateView candidate))
+          | candidate <- Map.elems acceptedCandidates]
+        deferred = if loadRequired then Set.empty else
+          reverseDependencyClosure (sourceLoadDependencyGraph modGraphRaw) candidateKeys
         candidateLoadGraph = mkModuleGraph
-          [ node | node <- mgModSummaries' (cpLoadGraph originalPlan)
-          , case node of
-              ModuleNode _ summary -> ms_mod_name summary `Set.notMember` deferred
-              _ -> True ]
+          [node | node <- mgModSummaries' (cpLoadGraph originalPlan)
+            , mkNodeKey node `Set.notMember` deferred]
         plan | Set.null acceptedNames = originalPlan
              | otherwise = originalPlan
                  { cpLoadGraph = candidateLoadGraph
-               , cpAfterLoad = do
-                     cpAfterLoad originalPlan
+               , cpAfterLoad = \freshIngress -> do
+                     cpAfterLoad originalPlan freshIngress
                      current <- getSession
                      -- Exact hydration owns the lexical graph; installing
                      -- source-selected candidates preserve that authority.
@@ -2857,10 +2890,7 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 (Map.lookup (ms_mod_name summary) acceptedCandidates)
               flags = (canonicalizeDFlags original)
                 { backend = backend original, ghcLink = ghcLink original }
-              actualFlags
-                | ms_mod summary `Set.member` disabledSourceOwners = gopt_set flags Opt_ForceRecomp
-                | otherwise = flags
-          in selected { ms_hspp_opts = actualFlags }
+          in forceFreshSource selected { ms_hspp_opts = flags }
     let plannedLoadGraph = cpLoadGraph plan
         (loadGraph, loadHowMuch) = case preparation of
           CheckOnly ->
@@ -2889,7 +2919,18 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     canonicalFailureRef <- liftIO (newIORef Nothing)
     frontendQuasiQuotesRef <- liftIO (newIORef Map.empty)
     pendingFinalizationsRef <- liftIO (newIORef Map.empty)
+    requiredLoadedOwnersRef <- liftIO (newIORef (Set.fromList
+      [ms_mod summary | ModuleNode _ summary <- mgModSummaries' loadGraph, freshSource summary]))
     beforeLoad <- getSession
+    let selectedMemoHomes = Map.fromList
+          [(mi_module (hm_iface home),home) | home <- eltsHpt (hsc_HPT beforeLoad)
+            , mi_module (hm_iface home) `Map.member` validatedMemo]
+        freshIngress summary = case Map.lookup (ms_mod summary) selectedMemoHomes of
+          Just home -> pure (Left home)
+          Nothing -> do
+            when (freshSource summary) $ liftIO $
+              modifyIORef' requiredLoadedOwnersRef (Set.insert (ms_mod summary))
+            pure (Right (canonicalizeLoadSummary summary))
     let originalPhaseHook = runPhaseHook (hsc_hooks beforeLoad)
         publishLoadedFinalization loaded = do
           let name = ms_mod_name (loadedSummary loaded)
@@ -2902,8 +2943,8 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
         runOriginalPhase phase = case originalPhaseHook of
           Nothing -> runPhase phase
           Just (PhaseHook hook) -> hook phase
-        canonicalSummary summary = summary
-          { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts summary) }
+        canonicalSummary summary = (restoreFreshSource summary)
+          { ms_hspp_opts = canonicalizeDFlags (ms_hspp_opts (restoreFreshSource summary)) }
         canonicalEnvironment env summary = scopeRetainedSummaryHscEnv (canonicalSummary summary) env
         validateCandidateInterface env name iface =
           forM_ (Map.lookup name acceptedCandidates) $ \candidate -> do
@@ -2972,8 +3013,11 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
           -- may not supply a different interface to an importer while the old
           -- certified product remains selected downstream.
           validateCandidateInterface (pendingEnvironment pending) name skinny
-          atomicModifyIORef' loadedModulesRef (\known ->
-            (Map.insert (ms_mod (pendingSummary pending)) loaded known, ()))
+          let owner = ms_mod (pendingSummary pending)
+          duplicate <- atomicModifyIORef' loadedModulesRef (\known ->
+            if Map.member owner known then (known, True)
+            else (Map.insert owner loaded known, False))
+          when duplicate (throwIO (DuplicateLoadedFinalization owner))
           publishLoadedFinalization loaded
         canonicalLoadPhase :: TPhase a -> IO a
         canonicalLoadPhase (T_Hsc phaseEnv summary)
@@ -3116,20 +3160,25 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
     -- executable epoch before planning; per-file TH backends do not change it.
     -- Make prefers its cached interface over the current summary's staged
     -- interface. An admitted original owns that choice now; remove its prior
-    -- interface and linkable together while preserving every other cache entry.
+    -- interface and linkable together. Only this cycle's selected memo
+    -- interfaces may enter Make through its cache; an unowned disk interface
+    -- cannot stand in for a fresh canonical finalization.
     let candidateOwners = Set.fromList
           [ms_mod (admittedCandidateView candidate) | candidate <- Map.elems acceptedCandidates]
         currentMemoInterfaces = Map.map (hm_iface . finalizedHomeModInfo .
           loadedFinalized . (\entry -> payloadLoaded (sourceSummaries Map.! payloadOwner (gmePayload entry)) (gmePayload entry))) validatedMemo
         sourceSummaries = Map.fromList [(ms_mod summary,summary) | ModuleNode _ summary <- mgModSummaries' modGraphRaw]
         keepCurrent iface = mi_module iface `Set.notMember` candidateOwners && case Map.lookup (mi_module iface) currentMemoInterfaces of
-          Nothing -> True
-          Just original -> mi_iface_hash (mi_final_exts iface) == mi_iface_hash (mi_final_exts original)
+          Nothing -> False
+          Just original -> mi_hsc_src iface == mi_hsc_src original
+            && mi_iface_hash (mi_final_exts iface) == mi_iface_hash (mi_final_exts original)
         loadCache = fmap (filterModIfaceCache keepCurrent) mCache
     -- Fresh providers compile after exact hydration under the same canonical
     -- frontend/finalization owner as GHC Make. Restore only this owner's
     -- temporary fields; the plan's Core-expression link hook remains in force
-    -- until its existing cpFinalEnv boundary.
+    -- until its existing cpFinalEnv boundary. Direct provider ingress consumes
+    -- the selected memo's refreshed HMI, a staged original or a fresh source;
+    -- GHC's disk recompilation status cannot choose that owner.
     let withCanonicalLoadHooks :: Ghc a -> Ghc a
         withCanonicalLoadHooks action = reifyGhc $ \session -> bracket
           (reflectGhc (getSession >>= \env -> setSession env
@@ -3173,7 +3222,9 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
       case loadFlag of
         Succeeded -> do
           getSession >>= liftIO . validateCandidateHomeInterfaces
-          cpAfterLoad plan
+          current <- getSession
+          setSession current {hsc_mod_graph=mapMG restoreFreshSource (hsc_mod_graph current)}
+          cpAfterLoad plan freshIngress
           pending <- liftIO (readIORef pendingFinalizationsRef)
           quotes <- liftIO (readIORef frontendQuasiQuotesRef)
           unless (Map.null pending && Map.null quotes) $
@@ -3384,10 +3435,14 @@ runCompileCycle selection cycleState retained incarnation timing requestIdentity
                 liftIO (acquirePreparedModuleWithSiteEnvironment siteEnvironment env (ms_location summary) siblings
                   (loadedFinalized loaded))
               finalizeCurrent interfaceUse summary = do
-                captured <- liftIO (Map.lookup (ms_mod summary) <$> readIORef loadedModulesRef)
+                captured <- liftIO (atomicModifyIORef' loadedModulesRef (\known ->
+                  (Map.delete (ms_mod summary) known, Map.lookup (ms_mod summary) known)))
                 case captured of
                   Just loaded -> pure loaded
                   Nothing -> do
+                    required <- liftIO (readIORef requiredLoadedOwnersRef)
+                    when (ms_mod summary `Set.member` required) $
+                      liftIO (throwIO MissingLoadedFinalization)
                     front <- compileFront summary
                     (_, output, finalized) <- compileBack interfaceUse front
                     facts <- liftIO (frontFacts front)
@@ -5353,7 +5408,7 @@ normalVariant purpose = do
    , pvTransformParsed = transformFor purpose
    , pvPlan = \_compilerViewDirectory _timing _targetName modGraphRaw _selectedExact -> pure CompilePlan
       { cpLoadGraph = modGraphRaw
-      , cpAfterLoad = pure ()
+      , cpAfterLoad = \_ -> pure ()
         -- Consume load captures and finalize any deferred source in dependency
         -- order before selecting prepared STG.
       , cpSummaries = pure
@@ -5814,24 +5869,23 @@ planExactExecutionLoad directory admitted interfaces checkedInterfaces targetNam
     (retainedCompilerClosure directory initial admitted interfaces roots)
   let moduleNodes = [ModuleNode (retainedCompilerDependencies selected)
           (retainedCompilerSummary selected) | selected <- modules]
-      ordinaryNames = Set.fromList [ms_mod_name summary | ModuleNode _ summary <- mgModSummaries' ordinaryLoad]
+      ordinaryKeys = Set.fromList (map mkNodeKey (mgModSummaries' ordinaryLoad))
       freshProviders = [summary | not (null roots)
-        , ModuleNode _ summary <- flattenSCCs (topSortModuleGraph True sourceGraph Nothing)
-        , ms_mod_name summary `Set.notMember` ordinaryNames
+        , node@(ModuleNode _ summary) <- flattenSCCs (topSortModuleGraph True sourceGraph Nothing)
+        , mkNodeKey node `Set.notMember` ordinaryKeys
         , ms_mod_name summary /= targetName
         , backendGeneratesCode (backend (ms_hspp_opts summary))]
-      admittedNames = Set.fromList [ms_mod_name (retainedCompilerSummary selected) | selected <- modules]
-      excluded = [mkModuleName (exactModule artifact) | (artifact,_,_) <- scopeInterfaces admitted
-        , mkModuleName (exactModule artifact) `Set.notMember` admittedNames]
-        ++ [mkModuleName (exactModule artifact) | artifact <- scopeValueInterfaces admitted]
-      deferred names =
-        let grown = names `Set.union` Set.fromList [ms_mod_name summary
-              | ModuleNode _ summary <- mgModSummaries' sourceGraph
-              , any ((`Set.member` names) . unLoc . snd) (ms_textual_imps summary)]
-        in if grown == names then names else deferred grown
-      blocked = deferred (Set.fromList (targetName : excluded))
+      admittedOwners = Set.fromList [ms_mod (retainedCompilerSummary selected) | selected <- modules]
+      excludedKeys = Set.fromList [mkNodeKey (ModuleNode [] (exactInterfaceSummary initial artifact))
+        | artifact <- [iface | (iface,_,_) <- scopeInterfaces admitted] ++ scopeValueInterfaces admitted
+        , mkModule (stringToUnit (exactUnit artifact)) (mkModuleName (exactModule artifact))
+            `Set.notMember` admittedOwners]
+      targetKeys = Set.fromList [mkNodeKey node | node@(ModuleNode _ summary) <- mgModSummaries' sourceGraph
+        , ms_mod_name summary == targetName]
+      blocked = reverseDependencyClosure (sourceLoadDependencyGraph sourceGraph)
+        (targetKeys `Set.union` excludedKeys)
   forM_ freshProviders $ \summary -> unless
-      (ms_mod_name summary `Set.notMember` blocked
+      (mkNodeKey (ModuleNode [] summary) `Set.notMember` blocked
         && null (ms_srcimps summary)
         && not (any (\case ModuleNode _ boot -> ms_hsc_src boot == HsBootFile && ms_mod boot == ms_mod summary
                            _ -> False) (mgModSummaries' sourceGraph))
@@ -5888,42 +5942,20 @@ sessionVariant purpose scope = do
            thenNativeModule transformed (rewriteRequestTypes env recipe signatures)
          _ -> pure transformed
    , pvPlan = \compilerViewDirectory timing targetModName' modGraphRaw selectedExact -> do
-      let directSummaries = [ ms | ModuleNode _ ms <- mgModSummaries' modGraphRaw ]
-          importsOf ms = [ unLoc lmn | (_, lmn) <- ms_textual_imps ms ]
-          -- Everything that (directly or transitively) imports an injected
-          -- Val module can't go through the @load'@ below — its import can
-          -- only resolve once dependency-directed injection has happened. This
-          -- generalizes the old "just exclude the target" rule: a decl module
-          -- (@Lib.G<g>@) that itself imports a Val module is ALSO a
-          -- dependency needing deferral, not just the ultimate leaf target.
-          -- Plain forward fixpoint over the (small, per-turn) module graph —
-          -- no existing GHC utility does this specific reverse-reachability
-          -- query, so this is a self-contained graph closure over data
-          -- already on each 'ModSummary'.
-          closure seed =
-            let grown = seed `Set.union` Set.fromList
-                  [ ms_mod_name ms
-                  | ms <- directSummaries
-                  , any (`Set.member` seed) (importsOf ms)
-                  ]
-            in if grown == seed then seed else closure grown
-          deferredMods = closure (Set.fromList (targetModName' : excludedOwners))
-          -- Exclude every deferred module (target ∪ transitive Val-importers)
-          -- from the load' graph. A @load'@ that reaches one of them (e.g.
-          -- @LoadDependenciesOf targetHUM@, whose @createBuildPlan@ includes
-          -- ALL modules reachable from the root) compiles it BEFORE the Val
-          -- iface is injected, so its @import Tidepool.Session.Val.G<g>@
-          -- fails → GHC error-recovery emits "Could not find module" AND
-          -- inserts a FAKE empty iface into the EPS PIT for the Val module.
-          -- Filtering deferred modules out makes @load'@ compile ONLY the
-          -- untouched source deps; each deferred module is compiled AND its
-          -- interface registered back into the HPT in the post-injection
-          -- loop, in dependency order.
+      current <- getSession
+      let targetKeys = Set.fromList [mkNodeKey node
+            | node@(ModuleNode _ summary) <- mgModSummaries' modGraphRaw
+            , ms_mod_name summary == targetModName']
+          excludedKeys = Set.fromList [mkNodeKey (ModuleNode [] (exactInterfaceSummary current artifact))
+            | admitted <- maybe [] pure selectedExact
+            , artifact <- map (\(iface,_,_) -> iface) (scopeInterfaces admitted) ++ scopeValueInterfaces admitted]
+            `Set.union` Set.fromList [NodeKey_Module
+                (ModNodeKeyWithUid (GWIB name NotBoot) (homeUnitId (hsc_home_unit current)))
+              | name <- excludedVal]
+          deferredMods = reverseDependencyClosure (sourceLoadDependencyGraph modGraphRaw)
+            (targetKeys `Set.union` excludedKeys)
           depGraph = mkModuleGraph
-            [ node | node <- mgModSummaries' modGraphRaw
-                   , case node of
-                       ModuleNode _ ms -> not (ms_mod_name ms `Set.member` deferredMods)
-                       _               -> True ]
+            [node | node <- mgModSummaries' modGraphRaw, mkNodeKey node `Set.notMember` deferredMods]
       injectedRef <- liftIO (newIORef Set.empty)
       injectedInterfacesRef <- liftIO (newIORef [])
       originalHooks <- hsc_hooks <$> getSession
@@ -5980,7 +6012,7 @@ sessionVariant purpose scope = do
         -- filtered out above) — equivalent to the old @LoadDependenciesOf@
         -- but without compiling the target prematurely.
         { cpLoadGraph = executionLoadGraph executionPlan
-        , cpAfterLoad = do
+        , cpAfterLoad = \freshIngress -> do
             -- Restore the FULL module graph (target included) so the
             -- per-module typecheck can see HPT instances from dep modules:
             -- @hptSomeThingsBelowUs@ walks @moduleGraphModulesBelow
@@ -6054,9 +6086,11 @@ sessionVariant purpose scope = do
                    -- supply bytecode, never an orphan instance or family rule.
                    forM_ (executionFreshProviders executionPlan) $ \summary -> do
                      current <- getSession
-                     hmi <- liftIO (compileOne' (Just batchMsg) (exactHomeInstancesFor summary current)
-                       summary {ms_hspp_opts=canonicalizeRepresentationFlags (ms_hspp_opts summary)}
-                       1 1 Nothing emptyHomeModInfoLinkable)
+                     ingress <- freshIngress summary
+                     hmi <- case ingress of
+                       Left selected -> pure selected
+                       Right fresh -> liftIO (compileOne' (Just batchMsg) (exactHomeInstancesFor fresh current)
+                         fresh 1 1 Nothing emptyHomeModInfoLinkable)
                      unless (mi_module (hm_iface hmi) == ms_mod summary
                          && (isJust (homeMod_bytecode (hm_linkable hmi)) || isJust (homeMod_object (hm_linkable hmi)))) $
                        liftIO (throwIO (ExecutionSourceLinkableMissing
@@ -6084,14 +6118,14 @@ sessionVariant purpose scope = do
             _ -> effectivePurpose == OriginalDeclarationCompile
         , cpResultBinders = [scaffoldTargetName, scaffoldOutputBase]
         , cpBeforeModule = \modSum ->
-            when (ms_mod_name modSum `Set.member` deferredMods) $ do
+            when (mkNodeKey (ModuleNode [] modSum) `Set.member` deferredMods) $ do
               injected <- liftIO (readIORef injectedRef)
-              let directImports = Set.fromList (importsOf modSum)
+              let directImports = sourceImportOwners modSum
                   needed =
                     [ valueModule
                     | valueModule <- ssValIfaces scope
                     , let moduleName = renderSessionModule valueModule
-                    , moduleName `Set.member` directImports
+                    , mkModule (homeUnitAsUnit (hsc_home_unit current)) moduleName `Set.member` directImports
                     , moduleName `Set.notMember` injected
                     ]
                   captureCompleted = ms_mod_name modSum == targetModName' && not (null completedValues)

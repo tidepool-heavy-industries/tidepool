@@ -1,9 +1,9 @@
 {-# LANGUAGE GADTs #-}
 
-module FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory, snapshotExecutableHook) where
+module FinalizedCoreTest (finalizedCoreChecks, postloadProviderFrontendOnce, memoIngressSelectionHistory, snapshotExecutableHook, unownedUpToDateDependency, mixedCandidateLoads, canonicalLoadGraphHistories) where
 
 import Control.Exception (SomeException, IOException, bracket, try)
-import Control.Monad (forM_, unless)
+import Control.Monad (forM_, unless, when)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.ByteString qualified as BS
@@ -13,6 +13,7 @@ import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text qualified as Text
 import GHC
+import Test.QuickCheck qualified as QC
 import GHC.Core (Bind(..), bindersOfBinds)
 import GHC.Core.InstEnv (is_dfun)
 import GHC.Core.TyCo.Compare (eqType)
@@ -33,6 +34,7 @@ import GHC.Data.FlatBag (elemsFlatBag)
 import GHC.Linker.Types (linkableModule, linkableParts, linkablePartAllBCOs)
 import GHC.Fingerprint.Type (Fingerprint(..))
 import GHC.Types.Name (getOccString)
+import GHC.Types.SourceFile (HscSource(..))
 import GHC.Types.SptEntry (SptEntry(..))
 import GHC.Types.TypeEnv (lookupTypeEnv)
 import GHC.Types.Var (varName)
@@ -50,41 +52,44 @@ import GHC.Driver.Env (HscEnv(..), hsc_HPT, hscUpdateHPT, hsc_dflags, hsc_home_u
 import GHC.Types.Error (mkUnknownDiagnostic)
 import GHC.ForeignSrcLang (ForeignSrcLang(..))
 import Numeric (showHex)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, intercalate)
 import System.Directory
-  ( copyFile, createDirectory, doesFileExist, getTemporaryDirectory
+  ( copyFile, createDirectory, createDirectoryIfMissing, doesFileExist, getTemporaryDirectory
   , removeDirectoryRecursive, removeFile )
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile, hPutStrLn, stderr)
 import Tidepool.ArtifactBytes (artifactBytes)
 import Tidepool.ExactHydration
-  ( ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope )
+  ( ExactIfaceArtifact(..), readExactIfaceArtifacts, hydrateExactScope, serializeOriginalInterface )
 import Tidepool.ExtractUtil (getLibdir)
 import Tidepool.FinalizedCore
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import Tidepool.ExactScope
   ( CanonicalInterfaceProof, CanonicalInterfaceAdmission(..), admittedInterfaceCore
-  , ExactScope, scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
+  , ExactScope, scopeManifestPath, scopeInterfaces, readExactScope, scopeModuleInterfaceProofs
   , canonicalCertificatePath, canonicalCertificateSha256, readScopedInterfaces, revalidateExactScope, captureCanonicalProofs, CanonicalInterfaceUse(..)
   , validateCanonicalInterfaceProof, admittedInterfaceCoreBytes, extendExactScopeInputs, ExactInterfaceEvidence(..) )
 import Tidepool.FinalizedModuleArtifacts (finalizedLocalAdmissions, materializeFinalizedModuleArtifacts, localFinalizedInterface, localFinalizedCore, localFinalizedCoreBody, revalidateLocalFinalizedAdmission, FinalizedModuleArtifacts)
 import Tidepool.CompilerProducts (certifiedFinalizedArtifacts)
 import Tidepool.GhcPipeline
   ( pprPipelineResult, pprFinalizedModules, prHscEnv, prResultType, PipelineSelection(..)
-  , CheckedEnvironmentResult(..), CompilePurpose(..), runPipelineSessionSelected, withResidentPipelineSelected )
+  , pprAcceptedCandidates, revalidatePreparedCandidateInputs, CheckedEnvironmentResult(..), CompilePurpose(..), runPipelineSessionSelected, withResidentPipelineSelected, withSourceImportIntents )
 import Tidepool.Test.GenuineCandidate
   ( FixtureCompilerInput(..), captureCompilerFixture, capturedCertifiedProducts
-  , writeGenuineMetadataScope, writeGenuineEmptyMetadataScope )
+  , writeGenuineMetadataScope, writeGenuineEmptyMetadataScope, writeGenuineCandidateManifestFor )
 import Tidepool.HomeProducts
   ( CandidateCoreFailure(..), materializeCandidateCompilerView
   , admittedCompilerInterface, validateCapturedAdmittedCore, validateAdmittedInterfaceRequirements
   , validateCandidateInterfaceRequirements )
 import Tidepool.PreparedStg (pmBindings, prepareModule)
+import Tidepool.ModuleCandidates (candidateModule)
 import Tidepool.Session (SessionScope(..), emptySessionScope)
+import Tidepool.Binders (analyzeCellWithFlags, CellSourcePlan(..))
+import SourceBootCases (admitCheckedScope)
 import SourceBootFixtureSupport
   ( withTiming, withScratch, captureDiagnostics, capturePreparedFixture
-  , writeExecutionScope, hasIntResultLiteral )
+  , writeExecutionScope, hasIntResultLiteral, manifest )
 import Tidepool.RetainedUnfoldings
   ( emptyRetainedContext, installRetainedUnfoldingsPlugin
   , scopeRetainedModuleGraph, scopeRetainedSummaryHscEnv )
@@ -548,21 +553,45 @@ postloadProviderFrontendOnce = withTiming $ withScratch $ \producerRoot -> withS
   quotedSource <- Text.pack <$> readFile (fixture "PostloadQuotedProvider.hs")
   writeFile provider (Text.unpack (Text.replace "{{QUOTER_COUNTER}}" (Text.pack counter) quotedSource))
   let scope = emptySessionScope {ssRoot=work, ssExactScope=Just scopePath}
+  seededProvider <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile
+    Nothing provider [work,producerRoot] (Just work)
+  let seededEnv = prHscEnv (pprPipelineResult seededProvider)
+  retainRegressionInterfaces "postload-seed" seededEnv
+  quoterSummary <- case [summary | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph seededEnv)
+      , ms_mod_name summary == mkModuleName "PostloadObservedQuoter"] of
+    [summary] -> pure summary
+    _ -> fail "post-load seed lacks its ordinary quoter summary"
+  currentQuoter <- checkOldIface (scopeRetainedSummaryHscEnv quoterSummary seededEnv) quoterSummary Nothing
+  assert (case currentQuoter of UpToDateItem _ -> True; _ -> False)
+    "post-load regression did not seed an up-to-date provider interface"
   writeFile counter ""
   withResidentPipelineSelected [work] $ \compile -> do
     (checked, diagnostics) <- captureDiagnostics $
-      compile CheckedEnvironment Set.empty GeneralCompile (Just scope) target [work] Nothing
+      compile CheckedEnvironment Set.empty GeneralCompile (Just scope) target [work] (Just work)
+    retainRegressionInterfaces "postload-checked" (crHscEnv checked)
     requireOnce diagnostics
     assert (all (executable (crHscEnv checked)) (retained : owners))
       "checked consumer lost its retained or fresh providers' real GHC bytecode"
     assert (case crResultType checked of Just _ -> True; Nothing -> False)
       "checked provider consumer lost its result type"
+    writeFile counter ""
+    (warm, warmDiagnostics) <- captureDiagnostics $
+      compile CheckedEnvironment Set.empty GeneralCompile (Just scope) target [work] (Just work)
+    actual <- lines <$> readFile counter
+    assert (actual == ["42"] && captured "frontend" "PostloadObservedQuoter" warmDiagnostics == 0
+        && captured "finalization" "PostloadObservedQuoter" warmDiagnostics == 0
+        && captured "frontend" "PostloadQuotedProvider" warmDiagnostics == 1
+        && captured "finalization" "PostloadQuotedProvider" warmDiagnostics == 1)
+      ("post-load memo provider replayed or untracked quoter was reused: " ++ warmDiagnostics)
+    assert (all (executable (crHscEnv warm)) (retained : owners))
+      "warm direct provider ingress lost selected memo bytecode"
   -- A separate fresh compiler makes this native check independent of the
   -- preceding checked request's resident memo and executable products.
   writeFile counter ""
   withResidentPipelineSelected [work] $ \compile -> do
     (prepared, diagnostics) <- captureDiagnostics $
-      compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [work] Nothing
+      compile (PreparedProducts Nothing) Set.empty GeneralCompile (Just scope) target [work] (Just work)
+    retainRegressionInterfaces "postload-native" (prHscEnv (pprPipelineResult prepared))
     requireOnce diagnostics
     assert (all (\name -> Map.member (mkModuleName name) (pprFinalizedModules prepared)) owners)
       "native consumer omitted a fresh provider's canonical finalized product"
@@ -736,3 +765,217 @@ promotionScopeChecks env work scope proof = do
       pure extended
     requireRight =<< revalidateExactScope env extended
   putStrLn "canonical proof history: absent metadata Core, explicit promotion, shared exact budget and transfer across deleted producer paths passed"
+
+-- Persistent interfaces can be current for GHC while the resident universe
+-- has never admitted their finalized owners. A fresh importer must observe the
+-- interface produced by exactly one canonical dependency finalization.
+unownedUpToDateDependency :: IO ()
+unownedUpToDateDependency = withTiming $ withScratch $ \work -> do
+  let fixtures = "test-source-boot/fixtures"
+      owner = work </> "MetadataQuoteSupport.hs"
+      target = work </> "MetadataCurrentSourceTarget.hs"
+      name = mkModuleName "MetadataQuoteSupport"
+      count phase diagnostics = length [line | line <- lines diagnostics,
+        line == "tidepool-canonical-" ++ phase ++ " module=MetadataQuoteSupport"]
+  copyFile (fixtures </> "MetadataQuoteSupport.hs") owner
+  copyFile (fixtures </> "MetadataCurrentSourceTarget.hs") target
+  seeded <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile
+    Nothing owner [work] (Just work)
+  let env = prHscEnv (pprPipelineResult seeded)
+  retainRegressionInterfaces "unowned-seed" env
+  summary <- case [item | ModuleNode _ item <- mgModSummaries' (hsc_mod_graph env),
+      ms_mod_name item == name] of
+    [item] -> pure item
+    _ -> fail "persistent dependency seed omitted its summary"
+  decision <- checkOldIface (scopeRetainedSummaryHscEnv summary env) summary Nothing
+  case decision of
+    UpToDateItem _ -> pure ()
+    OutOfDateItem reason _ -> fail ("regression dependency is not GHC-up-to-date: "
+      ++ Outputable.showSDocUnsafe (Outputable.ppr reason))
+  withResidentPipelineSelected [work] $ \compile -> do
+    (prepared, diagnostics) <- captureDiagnostics $
+      compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] (Just work)
+    retainRegressionInterfaces "unowned-native" (prHscEnv (pprPipelineResult prepared))
+    unless (count "frontend" diagnostics == 1 && count "finalization" diagnostics == 1) $ do
+      hPutStrLn stderr diagnostics
+      fail "unowned GHC-up-to-date dependency skipped canonical load finalization"
+    capture <- capturePreparedFixture work prepared
+    scopePath <- writeGenuineMetadataScope work ["MetadataQuoteSupport", "MetadataCurrentSourceTarget"] capture
+    scope <- requireRight =<< readExactScope scopePath
+    requireRight =<< revalidateExactScope (prHscEnv (pprPipelineResult prepared)) scope
+    (_, warmDiagnostics) <- captureDiagnostics $
+      compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] (Just work)
+    assert (count "frontend" warmDiagnostics == 0 && count "finalization" warmDiagnostics == 0)
+      "admitted completed dependency replayed its source frontend"
+    -- This actual current-source import runs checkOldIface over the complete
+    -- captured dependency graph, under the same resident summary history.
+    admitted <- admitCheckedScope scope [work] []
+    let consumer = work </> "CurrentOriginalConsumer.hs"
+        session = emptySessionScope {ssRoot=work,ssExactScope=Just (scopeManifestPath admitted)}
+    writeFile consumer "module CurrentOriginalConsumer where\nimport MetadataCurrentSourceTarget qualified as Original\n__result :: Int\n__result = Original.__result\n"
+    parsed <- analyzeCellWithFlags (hsc_dflags (prHscEnv (pprPipelineResult prepared))) ""
+      "import MetadataCurrentSourceTarget qualified as Original\nOriginal.__result"
+      >>= either (fail . show) pure
+    let purpose = withSourceImportIntents (cellPlanPrologue parsed) GeneralCompile
+    _ <- compile CheckedEnvironment Set.empty (ExactScopeCompile purpose admitted)
+      (Just session) consumer [work] Nothing
+    copyFile (fixtures </> "MetadataQuoteSupportChanged.hs") owner
+    (_, changedDiagnostics) <- captureDiagnostics $
+      compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] (Just work)
+    assert (count "frontend" changedDiagnostics == 1 && count "finalization" changedDiagnostics == 1)
+      "changed dependency did not earn a new canonical finalization"
+    copyFile (fixtures </> "MetadataQuoteSupport.hs") owner
+    (_, restoredDiagnostics) <- captureDiagnostics $
+      compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing target [work] (Just work)
+    assert (count "frontend" restoredDiagnostics == 0 && count "finalization" restoredDiagnostics == 0)
+      "byte-exact restoration did not retain its original completed memo"
+  putStrLn "unowned up-to-date dependency: GHC disk hit, canonical frontend/finalization once, immediate exact graph validation and memo hit passed"
+
+-- Retain both the issued in-memory interface and the physical ingress bytes.
+-- This runs while the producer's scratch and captured file descriptors live.
+retainRegressionInterfaces :: String -> HscEnv -> IO ()
+retainRegressionInterfaces label env = do
+  destination <- lookupEnv "TIDEPOOL_TEST_ARTIFACT_ROOT"
+  forM_ destination $ \root -> do
+    let directory = root </> "canonical-load" </> label
+    createDirectoryIfMissing True directory
+    forM_ [summary | ModuleNode _ summary <- mgModSummaries' (hsc_mod_graph env)
+      , ms_hsc_src summary == HsSrcFile] $ \summary ->
+      forM_ (lookupHpt (hsc_HPT env) (ms_mod_name summary)) $ \home -> do
+        let iface = hm_iface home
+            prefix = directory </> moduleNameString (ms_mod_name summary)
+        when (mi_module iface == ms_mod summary) $ do
+          bytes <- serializeOriginalInterface env directory iface
+          BS.writeFile (prefix ++ ".issued.hi") bytes
+          present <- doesFileExist (ml_hi_file (ms_location summary))
+          when present (copyFile (ml_hi_file (ms_location summary)) (prefix ++ ".disk.hi"))
+          writeFile (prefix ++ ".usages") (unlines (map renderUsage (mi_usages iface)))
+          writeFile (prefix ++ ".sha256") (hexBytes (SHA256.hash bytes) ++ "\n")
+
+renderUsage :: Usage -> String
+renderUsage usage = case usage of
+  UsageHomeModule{} -> show ("home", render (usg_unit_id usage), render (usg_mod_name usage),
+    usg_mod_hash usage, [(render occurrence, fingerprint) | (occurrence,fingerprint) <- usg_entities usage],
+    usg_exports usage, usg_safe usage)
+  UsageHomeModuleInterface{} -> show ("home-interface", render (usg_unit_id usage),
+    render (usg_mod_name usage), usg_iface_hash usage)
+  UsagePackageModule{} -> show ("package", render (usg_mod usage), usg_mod_hash usage, usg_safe usage)
+  UsageFile{} -> show ("file", render (usg_file_path usage), usg_file_hash usage, usg_file_label usage)
+  UsageMergedRequirement{} -> show ("merged", render (usg_mod usage), usg_mod_hash usage)
+  where
+    render :: Outputable.Outputable a => a -> String
+    render = Outputable.showSDocUnsafe . Outputable.ppr
+
+-- GHC Make consumes both candidate kinds in one graph when a splice requires
+-- executable capacity. The interface-only branch must keep its staged owner.
+mixedCandidateLoads :: IO ()
+mixedCandidateLoads = withTiming $ withScratch $ \work -> do
+  let target = work </> "MixedCandidateTarget.hs"
+      seed = work </> "MixedCandidateSeed.hs"
+      selected = ["MetadataOwner","MetadataQuoteSupport"]
+      source name = "module " ++ name ++ " where\nimport MetadataTarget qualified as Metadata\nimport MetadataQuotedTarget qualified as Quoted\n__result :: Int\n__result = Metadata.__result + Quoted.__result\n"
+  forM_ ["MetadataOwner.hs","MetadataTarget.hs","MetadataQuoteSupport.hs","MetadataQuoter.hs","MetadataQuotedTarget.hs"] $ \name ->
+    copyFile ("test-source-boot/fixtures" </> name) (work </> name)
+  -- Candidate publication requires a source-reusable seed. Execute the
+  -- quotation only in the fresh consumer, after the two native owners issue.
+  writeFile seed "module MixedCandidateSeed where\nimport MetadataTarget qualified as Metadata\nimport MetadataQuoter qualified as Quoter\n__result :: Int\n__result = Metadata.__result\nquoter = Quoter.answer\n"
+  writeFile target (source "MixedCandidateTarget")
+  original <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile
+    Nothing seed [work] Nothing
+  fixture <- capturePreparedFixture work original
+  writeGenuineCandidateManifestFor selected work fixture
+  (prepared, diagnostics) <- captureDiagnostics $
+    runPipelineSessionSelected (PreparedProducts (Just (manifest work))) Set.empty GeneralCompile
+      Nothing target [work] Nothing
+  retainRegressionInterfaces "mixed-candidate" (prHscEnv (pprPipelineResult prepared))
+  assert (Set.fromList (map candidateModule (pprAcceptedCandidates prepared)) == Set.fromList selected)
+    ("mixed graph did not admit both certified candidate kinds: " ++ diagnostics)
+  assert ("tidepool-count name=candidate_executable_required count=1 " `isInfixOf` diagnostics)
+    ("mixed graph did not require exactly its helper executable: " ++ diagnostics)
+  forM_ selected $ \name -> assert (not (any (\phase ->
+      ("tidepool-canonical-" ++ phase ++ " module=" ++ name) `elem` lines diagnostics)
+      ["frontend","finalization"])) "mixed graph replayed a certified candidate frontend"
+  let env = prHscEnv (pprPipelineResult prepared)
+      hasCode name = case lookupHpt (hsc_HPT env) (mkModuleName name) of
+        Nothing -> False
+        Just home -> let linkable = hm_linkable home
+          in case (homeMod_bytecode linkable, homeMod_object linkable) of
+            (Nothing,Nothing) -> False
+            _ -> True
+  assert (hasCode "MetadataQuoteSupport" && not (hasCode "MetadataOwner"))
+    "mixed graph changed the independent metadata/executable capacities"
+  captured <- capturePreparedFixture work prepared
+  forM_ (Map.elems (finalizedLocalAdmissions
+      (certifiedFinalizedArtifacts (capturedCertifiedProducts captured)))) $ \admission ->
+    revalidateLocalFinalizedAdmission admission >>= requireRight
+  revalidatePreparedCandidateInputs prepared
+  putStrLn "mixed candidates: staged metadata plus canonical-Core bytecode, no candidate frontend, captured originals and candidate validation passed"
+
+-- Small authored graphs run through the real compiler. The oracle rescans
+-- their import relation to identify the source changes that must invalidate
+-- importers; cold, repeated, changed and restored histories observe actual
+-- canonical frontend/finalization events and captured interface graph seals.
+canonicalLoadGraphHistories :: IO ()
+canonicalLoadGraphHistories = withTiming $ do
+  let graph = do
+        size <- QC.chooseInt (2,4)
+        edges <- mapM (\i -> QC.sublistOf [0..i-1]) [0..size-1]
+        changed <- QC.chooseInt (0,size-1)
+        pure (edges,changed)
+      shrink (edges,changed) = [(take i edges ++ [reduced] ++ drop (i+1) edges,changed)
+        | (i,imports) <- zip [0..] edges, reduced <- QC.shrinkList (const []) imports]
+  result <- QC.quickCheckWithResult QC.stdArgs {QC.maxSuccess=6, QC.maxShrinks=12}
+    (QC.forAllShrink graph shrink $ \scenario@(edges,changed) ->
+      QC.classify (any null (drop 1 edges)) "independent dependency" $
+      QC.classify (any ((>1) . length) edges) "shared dependency graph" $
+      QC.counterexample (show scenario) (QC.ioProperty (runHistory edges changed)))
+  unless (QC.isSuccess result) (fail "canonical load graph/history diverged from its import oracle")
+  where
+    runHistory edges changed = withScratch $ \work -> do
+      let nodes = [0..length edges-1]
+          name i = "CanonicalGraph" ++ show i
+          path i = work </> name i ++ ".hs"
+          moduleSource i value = unlines
+            (["module " ++ name i ++ " (value) where"]
+            ++ ["import " ++ name child ++ " qualified as N" ++ show child | child <- edges !! i]
+            ++ ["value :: Int","value = " ++ intercalate " + "
+              (show value : ["N" ++ show child ++ ".value" | child <- edges !! i])])
+          targetSource targetName = unlines
+            (["module " ++ targetName ++ " where"]
+            ++ ["import " ++ name i ++ " qualified as N" ++ show i | i <- nodes]
+            ++ ["__result :: Int","__result = " ++ intercalate " + " ["N" ++ show i ++ ".value" | i <- nodes]])
+          affected = grow (Set.singleton changed)
+            where
+              grow seen =
+                let next = seen `Set.union` Set.fromList
+                      [i | (i,children) <- zip nodes edges, any (`Set.member` seen) children]
+                in if next == seen then seen else grow next
+          captureEvents phase diagnostics = [i | i <- nodes,
+            ("tidepool-canonical-" ++ phase ++ " module=" ++ name i) `elem` lines diagnostics]
+          once phase diagnostics i = length [() | line <- lines diagnostics,
+            line == "tidepool-canonical-" ++ phase ++ " module=" ++ name i] == 1
+          observe compile label expected = do
+            (prepared,diagnostics) <- captureDiagnostics $
+              compile (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
+                (work </> "CanonicalGraphConsumer.hs") [work] (Just work)
+            forM_ ["frontend","finalization"] $ \phase ->
+              assert (Set.fromList (captureEvents phase diagnostics) == expected
+                && all (once phase diagnostics) (Set.toList expected))
+                ("graph " ++ label ++ " canonical work disagreed with the import oracle: " ++ diagnostics)
+            fixture <- capturePreparedFixture work prepared
+            scopePath <- writeGenuineMetadataScope work ("CanonicalGraphConsumer" : map name nodes) fixture
+            scope <- requireRight =<< readExactScope scopePath
+            requireRight =<< revalidateExactScope (prHscEnv (pprPipelineResult prepared)) scope
+      forM_ nodes $ \i -> writeFile (path i) (moduleSource i (i+1))
+      writeFile (work </> "CanonicalGraphSeed.hs") (targetSource "CanonicalGraphSeed")
+      writeFile (work </> "CanonicalGraphConsumer.hs") (targetSource "CanonicalGraphConsumer")
+      _ <- runPipelineSessionSelected (PreparedProducts Nothing) Set.empty GeneralCompile Nothing
+        (work </> "CanonicalGraphSeed.hs") [work] (Just work)
+      withResidentPipelineSelected [work] $ \compile -> do
+        observe compile "unowned disk" (Set.fromList nodes)
+        observe compile "memo hit" Set.empty
+        writeFile (path changed) (moduleSource changed 100)
+        observe compile "source change" affected
+        writeFile (path changed) (moduleSource changed (changed+1))
+        observe compile "source restoration" Set.empty
+      pure True

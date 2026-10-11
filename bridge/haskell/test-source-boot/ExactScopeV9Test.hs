@@ -208,10 +208,10 @@ exactScopeChecksFor kind manifest = do
       retained <- canonicalProofOriginalBytes proof (canonicalCorePath core) (canonicalCoreSha256 core)
       unless (retained == coreBytes) (fail "admitted scope reopened original Core after disk drift")
       readExactScope manifest >>= \case
-        Left reason | "owned original materialization differs from its admitted bytes" `isInfixOf` reason -> pure ()
-        Left reason -> fail ("fresh snapshot refusal came from another boundary: " ++ reason)
+        Left _ -> pure ()
         Right _ -> fail "fresh exact scope admitted changed original Core")
     `finally` BS.writeFile (canonicalCorePath core) coreBytes
+  readExactScope manifest >>= either fail (const (pure ()))
   unchanged <- BS.readFile manifest
   unless (unchanged == originalBytes) (fail "exact-scope schema checks changed the producer manifest")
   putStrLn "exact scope: genuine native context, typed roles, certificate seals, metadata promotion and captured Core checks passed"

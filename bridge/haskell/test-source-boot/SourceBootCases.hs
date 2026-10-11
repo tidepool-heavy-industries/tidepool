@@ -219,6 +219,7 @@ import Tidepool.ExactScope
   , scopeInterfaces, scopeInterfaceEvidence, scopeAvailableOriginalProducts, scopeOriginalBytes, extendExactScopeInputs, extendExactScopeGeneration, ExactScopePurpose(..), ExactProduct(..), ExactOriginalGroup(..)
   , CheckedCellAdmission(checkedValueInterfaces), CheckedItemAdmission(..), CheckedItemPurpose(..)
   , scopeCheckedCell, scopeCheckedItem, scopeIncludePaths, readExactScope, revalidateExactScope, scopeInterfaceBytes, validateExactScopeEnvironment
+  , ExactScopeRequestFailure(..)
   , scopeModuleInterfaceProofs, canonicalCoreArtifact, canonicalCorePath, canonicalCoreSha256
   , canonicalCertificatePath, canonicalCertificateSha256, canonicalRequirements
   , ExactCompilation(..), ExactInterfaceEvidence(..), SourceSelectedOriginals(..)
@@ -5000,21 +5001,22 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
           admittedCheck session = compile CheckedEnvironment Set.empty
             (ExactScopeCompile (ExactScopeCompile GeneralCompile admitted) admitted)
             (Just session) target [work] Nothing
-          requirePreEntryRefusal label expected operation = do
+          requirePreEntryRefusal label matches operation = do
             (refused,diagnostics) <- captureDiagnostics
               (try operation :: IO (Either SomeException CheckedEnvironmentResult))
             case refused of
-              Left reason | expected `isInfixOf` show reason
+              Left reason | matches reason
                   , not (any (\line -> "tidepool-checked module=" `isPrefixOf` line
                     || "tidepool-canonical-frontend module=" `isPrefixOf` line) (lines diagnostics)) -> pure ()
               Left reason -> fail (label ++ " had another refusal: " ++ show reason)
               Right _ -> fail (label ++ " accepted a scope outside its original offer")
       requirePreEntryRefusal "carried scope with another offer path"
-        "planned declaration leaves its original compiler offer" (admittedCheck relocated)
+        (maybe False isUserError . (fromException :: SomeException -> Maybe IOException))
+        (admittedCheck relocated)
       (do
         BS.writeFile scopePath (BS.snoc originalScopeBytes 0)
         requirePreEntryRefusal "manifest changed after metadata admission"
-          "exact scope request changed" (admittedCheck scope)
+          ((== Just (ExactScopeRequestChanged scopePath)) . fromException) (admittedCheck scope)
         ) `finally` BS.writeFile scopePath originalScopeBytes
       (cold,coldDiagnostics) <- captureDiagnostics (check scope)
       unless (isInt cold && frontends coldDiagnostics == 1) $
