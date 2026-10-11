@@ -3250,6 +3250,14 @@ async fn workspace_profile_executes_scopes_and_sleep_with_its_installed_effects(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn recipe_workspace_definitions_compile_before_resident_execution() {
+    let repository = recipe_workspace(Some(&["Project.CollaborationChecks.collaboration"]));
+    crate::exomonad::check(Some(repository.path().to_path_buf()), false)
+        .await
+        .expect("the authored recipe's configured source closure must compile");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
     let repository = recipe_workspace(Some(&["Project.CollaborationChecks.collaboration"]));
     let work = repository
