@@ -788,8 +788,10 @@ impl DispatchEffect for Driver {
 
 #[cfg(test)]
 mod tests {
+    use super::resolve_scope_bubblewrap;
     use super::select_checks;
     use std::cell::RefCell;
+    use std::collections::BTreeMap;
 
     #[test]
     fn preparation_result_reaches_execution_only_after_confirmed_close() {
@@ -890,10 +892,8 @@ mod tests {
         assert!(bubblewrap.is_absolute());
 
         let unavailable = tempfile::tempdir().unwrap();
-        let unavailable_environment = BTreeMap::from([(
-            "PATH".into(),
-            unavailable.path().to_str().unwrap().into(),
-        )]);
+        let unavailable_environment =
+            BTreeMap::from([("PATH".into(), unavailable.path().to_str().unwrap().into())]);
         assert_eq!(
             resolve_scope_bubblewrap(&unavailable_environment)
                 .unwrap_err()

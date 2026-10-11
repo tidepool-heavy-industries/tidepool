@@ -32,7 +32,7 @@ def _test_environment(env, haskell_worker):
             fail("configure Buck with the pinned Nix GHC before building a Haskell-worker test")
         env["TIDEPOOL_GHC_LIBDIR"] = ghc_libdir
         # Execution targets may supply a declared command directory. Compiler
-        # entrypoints and libdir are separate inputs; do not replace their PATH.
+        # entrypoints and libdir are separate inputs; retain the command selection.
         env.setdefault("PATH", read_root_config("nix", "action_path") + ":" + ghc_bin)
     return env
 
