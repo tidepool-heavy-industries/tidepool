@@ -671,7 +671,7 @@ def test_runtime_inputs(package_name, target_name, unit=False):
     if (
         package_name in {"tidepool-toolchain", "tidepool-runtime", "tidepool-testing", "tidepool-handlers", "exomonad-actor"}
         or (package_name == "tidepool-extract-cmd" and not unit
-            and target_name in {"daemon_integration", "transaction_integration"})
+            and target_name in {"daemon_integration", "transaction_integration", "build_products_ownership"})
         or (package_name == "tidepool" and target_name in {
             "facade_prepared_recipe_contract_test", "facade_recipe_source_capture_test",
             "exomonad_action_surface",

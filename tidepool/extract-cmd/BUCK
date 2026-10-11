@@ -264,7 +264,23 @@ tidepool_rust_isolated_test(
     required_test_modules = [
         "tidepool/extract-cmd/tests/build_products_ownership.rs",
     ],
-
+    env = {
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:compiler_deployment",
+        "//build/package:tidepool_extract_runtime_libraries",
+    ],
+    resource_env = {
+        "LD_LIBRARY_PATH": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+    },
+    haskell_worker = True,
     compile_env = {"CARGO_BIN_EXE_tidepool-extract": "$(location //tidepool/extract-cmd:tidepool-extract)"},
     visibility = ["PUBLIC"],
 )

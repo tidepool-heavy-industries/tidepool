@@ -6816,13 +6816,15 @@ fn main() {{
         let mut decision = [0];
         first.read_exact(&mut decision).unwrap();
         assert_eq!(decision, [ACCEPTED]);
+        assert_eq!(read_admission_id(&mut first).unwrap(), AdmissionId(1));
         let mut excess = UnixStream::connect(&socket).unwrap();
         excess.write_all(REQUEST).unwrap();
         excess.write_all(&binding.epoch).unwrap();
         excess.write_all(&encode_request(&dir, &argv)).unwrap();
         excess.read_exact(&mut decision).unwrap();
         assert_eq!(decision, [BUSY]);
-        assert_eq!(decode_output(&mut first).unwrap().status.code(), Some(0));
+        let output = decode_output(&mut first).unwrap();
+        assert_eq!(output.status.code(), Some(0), "first request: {output:?}");
         assert_eq!(server.join().unwrap().unwrap(), 0);
         assert!(!socket.exists());
         std::fs::remove_dir_all(&dir).ok();

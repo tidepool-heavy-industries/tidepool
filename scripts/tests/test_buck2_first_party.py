@@ -398,6 +398,11 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
             self.assertEqual(self.rule("tidepool/extract-cmd", name)["compile_env"], {
                 "CARGO_BIN_EXE_tidepool-extract": "$(location //tidepool/extract-cmd:tidepool-extract)",
             })
+        owner = self.rule("tidepool/extract-cmd", "build_products_ownership")
+        self.assertIn("TIDEPOOL_EXTRACT_WORKER", owner["resource_env"])
+        self.assertIn("//build/package:compiler_deployment", owner["resources"])
+        for name in ("build_products_frontend", "response_cleanup"):
+            self.assertNotIn("TIDEPOOL_EXTRACT_WORKER", self.rule("tidepool/extract-cmd", name).get("resource_env", {}))
         self.assertNotIn("compile_env", self.rule("tidepool/extract-cmd", "tidepool_extract_cmd", "tidepool_rust_library"))
 
     def test_integration_executable_input_without_a_binary_owner_refuses_publication(self):
