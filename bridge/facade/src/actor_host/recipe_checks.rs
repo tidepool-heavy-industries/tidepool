@@ -33,9 +33,39 @@ pub(crate) async fn run(
     for entry in entries {
         println!("Recipe {entry}; definitions {}", selected.identity());
         let prepared = tokio::task::block_in_place(|| prepare_recipe(entry, selected))?;
+        #[cfg(test)]
+        let diagnostics =
+            super::hosted_test_context::HostedTestDiagnostics::root_from_environment()
+                .map_err(runtime_error)?;
         let mut driver = Driver::start(workspace, selected.clone()).await?;
         let result = driver.execute(&prepared);
         let cleanup = driver.shutdown_session().await;
+        #[cfg(test)]
+        if let Some(root) = diagnostics {
+            use super::hosted_test_context::{
+                CleanupOutcome, HostedTestDiagnostics, ScenarioOutcome, ScenarioPhase,
+            };
+            let scenario = match &result {
+                Ok(()) => ScenarioOutcome::Passed,
+                Err(error) => ScenarioOutcome::Failed {
+                    phase: ScenarioPhase::Scenario,
+                    message: error.to_string(),
+                },
+            };
+            let outcome = match &cleanup {
+                Ok(_) => CleanupOutcome::Confirmed,
+                Err(error) => CleanupOutcome::Failed {
+                    message: error.to_string(),
+                },
+            };
+            HostedTestDiagnostics::report_model_free(
+                &root,
+                &scenario,
+                &outcome,
+                Some(format!("{cleanup:?}")),
+            )
+            .map_err(runtime_error)?;
+        }
         let result = result.map_err(|mut error| {
             let mut retained = driver
                 .installations
@@ -58,7 +88,7 @@ pub(crate) async fn run(
                 )));
             }
             (Err(error), _) | (_, Err(error)) => return Err(error),
-            (Ok(()), Ok(())) => {}
+            (Ok(()), Ok(_)) => {}
         }
         println!(
             "Recipe {entry}: {} assertions passed",
@@ -482,26 +512,34 @@ impl Driver {
         }
     }
 
-    async fn shutdown_session(&mut self) -> Result<()> {
+    async fn shutdown_session(&mut self) -> Result<Vec<exomonad_actor::ForestRootShutdown>> {
         self.shutting_down = true;
+        let mut deployment_error = None;
         while let Some(event) = self.pending.pop_front() {
-            self.handle_deployment(event).await?;
+            if let Err(error) = self.handle_deployment(event).await {
+                deployment_error.get_or_insert(error);
+            }
         }
         let shutdown = if let Some(session) = &self.session {
             let forest = Arc::clone(&session.forest);
-            self.pump(forest.shutdown()).await.map(|_| ())
+            self.pump(forest.shutdown()).await
         } else {
-            Ok(())
+            Err(runtime_error(
+                "recipe shutdown has no resident owner observation",
+            ))
         };
-        if let Err(error) = shutdown {
-            let resources = self.finish_resources().await;
-            return Err(match resources {
-                Ok(()) => error,
-                Err(resources) => runtime_error(format!(
-                    "resident shutdown failed: {error}; command resource cleanup also failed: {resources}"
-                )),
-            });
-        }
+        let outcomes = match shutdown {
+            Ok(outcomes) => outcomes,
+            Err(error) => {
+                let resources = self.finish_resources().await;
+                return Err(match resources {
+                    Ok(()) => error,
+                    Err(resources) => runtime_error(format!(
+                        "resident shutdown failed: {error}; command resource cleanup also failed: {resources}"
+                    )),
+                });
+            }
+        };
         let hosted_result = self.await_hosted().await;
         let resources = self.finish_resources().await;
         drop(self.output_store.take());
@@ -511,7 +549,18 @@ impl Driver {
                 "resident host cleanup failed: {hosted}; command resource cleanup also failed: {resources}"
             ))),
             (Err(error), _) | (_, Err(error)) => Err(error),
-            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Ok(())) if deployment_error.is_some() => {
+                Err(deployment_error.expect("observed deployment error"))
+            }
+            (Ok(()), Ok(()))
+                if !outcomes.is_empty()
+                    && outcomes.iter().all(exomonad_actor::ForestRootShutdown::is_confirmed) =>
+            {
+                Ok(outcomes)
+            }
+            (Ok(()), Ok(())) => Err(runtime_error(format!(
+                "resident forest cleanup unconfirmed: {outcomes:?}"
+            ))),
         }
     }
 
