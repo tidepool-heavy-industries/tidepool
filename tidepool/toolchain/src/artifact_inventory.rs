@@ -19,6 +19,7 @@ use crate::CompileError;
 mod properties;
 
 mod compiler_projection;
+pub(crate) use compiler_projection::CompilerSourceSupport;
 pub use compiler_projection::{CompilerInputProjection, CompilerInputRole};
 mod scope_proof;
 pub use scope_proof::ScopeProofV3;
@@ -4716,7 +4717,7 @@ impl ArtifactView {
 
     /// Narrow compiler support to issued roles without changing native demand.
     /// Existing custody-only groups keep their exact edges and remain private.
-    pub(crate) fn select_compiler_support(
+    fn select_compiler_support(
         &self,
         projection: &CompilerInputProjection,
     ) -> Result<Self, CompileError> {

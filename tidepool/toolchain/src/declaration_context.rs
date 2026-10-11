@@ -4843,10 +4843,10 @@ impl ExactDeclarationContext {
     /// from the broader artifact custody retained by its view.
     pub(crate) fn extend_issued_compiler_support(
         mut self,
-        artifacts: &ArtifactView,
-        projection: &CompilerInputProjection,
+        support: &crate::artifact_inventory::CompilerSourceSupport,
     ) -> Result<Self, CompileError> {
-        projection.validate(artifacts)?;
+        let artifacts = support.artifacts();
+        let projection = support.projection();
         for descriptor in artifacts.descriptors() {
             self.admit_producer(descriptor.producer_sha256)?;
         }

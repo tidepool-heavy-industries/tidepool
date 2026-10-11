@@ -25,44 +25,8 @@ pub(super) fn authored_interface_context(
         Some(context) => context.as_ref().clone(),
         None => ExactDeclarationContext::new(&[], &[], vec![])?,
     };
-    // Original proofs require a complete type namespace. Dependencies outside
-    // the lexical source closure keep only the issuer's exact interface role.
-    let metadata = compiled.metadata_snapshot();
-    let mut projection = crate::artifact_inventory::CompilerInputProjection::default();
-    let mut pending = owners
-        .iter()
-        .filter(|owner| issued.snapshot_roles().contains_key(*owner))
-        .cloned()
-        .collect::<Vec<_>>();
-    while let Some(owner) = pending.pop() {
-        if projection.snapshot_roles().contains_key(&owner) {
-            continue;
-        }
-        let role = issued
-            .snapshot_roles()
-            .get(&owner)
-            .ok_or_else(|| contract("authored compiler dependency lacks its issued role"))?;
-        let role = if owners.contains(&owner) {
-            role.clone()
-        } else {
-            crate::artifact_inventory::CompilerInputRole::InterfaceOnly {
-                interface: role.interface(),
-            }
-        };
-        let id = role.original().unwrap_or(role.interface());
-        let entry = metadata
-            .artifacts
-            .get(&id)
-            .ok_or_else(|| contract("authored compiler role is outside its issued custody"))?;
-        pending.extend(entry.requirements.iter().cloned());
-        projection.admit_role(owner, role)?;
-    }
-    // Role transfer preserves the issuer's graph and native demand. Selecting
-    // carrier roots here would promote groups held only as later-body custody.
-    let support = compiled.select_compiler_support(&projection)?;
-    Ok(Arc::new(
-        context.extend_issued_compiler_support(&support, &projection)?,
-    ))
+    let support = issued.source_support(compiled, &owners)?;
+    Ok(Arc::new(context.extend_issued_compiler_support(&support)?))
 }
 
 // Includes materialization, closure certification and descriptor assembly.
@@ -1106,7 +1070,24 @@ mod tests {
                     BTreeSet::from([root.clone(), dependency.clone()]),
                     "unrelated whole-check native products must remain transient"
                 );
+                let persistent =
+                    issued.for_source_owners(&BTreeSet::from([root.clone(), dependency.clone()]));
+                persistent.validate(&view).unwrap();
                 let roles = context.compiler_input_projection().snapshot_roles();
+                for (owner, role) in roles {
+                    assert_eq!(
+                        persistent.snapshot_roles().get(owner),
+                        Some(role),
+                        "bounded support and persistent policy must agree on retained roles"
+                    );
+                }
+                assert!(persistent.snapshot_roles()[&module("Transient")]
+                    .original()
+                    .is_none());
+                assert!(!roles.contains_key(&module("Transient")),
+                    "persistent type visibility and bounded support have different retention scopes");
+                assert!(issued.snapshot_roles()[&module("Transient")].original().is_some(),
+                    "the original private issuer keeps implementation choices independently of lexical publication");
                 assert!(roles[&root].original().is_some());
                 assert!(roles[&dependency].original().is_some());
                 assert!(

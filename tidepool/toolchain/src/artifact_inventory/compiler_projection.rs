@@ -152,7 +152,69 @@ pub struct CompilerInputProjection {
     roles: imbl::OrdMap<ExactModuleIdentity, CompilerInputRole>,
 }
 
+/// Matched compiler roles and exact custody selected by their existing issuer.
+/// Required type interfaces do not grant lexical imports or native body demand.
+pub(crate) struct CompilerSourceSupport {
+    projection: CompilerInputProjection,
+    artifacts: ArtifactView,
+}
+
+impl CompilerSourceSupport {
+    pub(crate) fn projection(&self) -> &CompilerInputProjection {
+        &self.projection
+    }
+
+    pub(crate) fn artifacts(&self) -> &ArtifactView {
+        &self.artifacts
+    }
+}
+
 impl CompilerInputProjection {
+    /// Narrow one issued namespace to authenticated source owners and their
+    /// exact required type closure. Reuse remains restricted to source owners;
+    /// other dependencies keep interface roles and their existing graph only.
+    pub(crate) fn source_support(
+        &self,
+        view: &ArtifactView,
+        source_owners: &BTreeSet<ExactModuleIdentity>,
+    ) -> Result<CompilerSourceSupport, CompileError> {
+        let metadata = view.metadata_snapshot();
+        let mut projection = Self::default();
+        let mut pending = source_owners
+            .iter()
+            .filter(|owner| self.roles.contains_key(*owner))
+            .cloned()
+            .collect::<Vec<_>>();
+        while let Some(owner) = pending.pop() {
+            if projection.roles.contains_key(&owner) {
+                continue;
+            }
+            let role = self
+                .roles
+                .get(&owner)
+                .ok_or_else(|| failure("source compiler dependency lacks its issued role"))?;
+            let role = if source_owners.contains(&owner) {
+                role.clone()
+            } else {
+                CompilerInputRole::InterfaceOnly {
+                    interface: role.interface(),
+                }
+            };
+            let id = role.original().unwrap_or(role.interface());
+            let entry = metadata
+                .artifacts
+                .get(&id)
+                .ok_or_else(|| failure("source compiler role is outside its issued custody"))?;
+            pending.extend(entry.requirements.iter().cloned());
+            projection.admit_role(owner, role)?;
+        }
+        let artifacts = view.select_compiler_support(&projection)?;
+        Ok(CompilerSourceSupport {
+            projection,
+            artifacts,
+        })
+    }
+
     pub(crate) fn snapshot_roles(&self) -> &imbl::OrdMap<ExactModuleIdentity, CompilerInputRole> {
         &self.roles
     }
