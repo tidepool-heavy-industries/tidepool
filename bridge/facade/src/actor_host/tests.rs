@@ -814,7 +814,13 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
     .unwrap()
     .unwrap();
     assert_eq!(retained["status"], "committed", "{retained:?}");
-    policy.complete_boxed(completion.clone()).await.unwrap();
+    policy.complete_boxed(completion).await.unwrap();
+    assert!(matches!(
+        owner.finalization(),
+        exomonad_actor::HostedOperationFinalization::Settled(Ok(
+            exomonad_actor::ProviderFinalizationKind::Completed
+        ))
+    ));
     campaign
         .actor
         .shutdown(ActorTerminal {
@@ -904,7 +910,12 @@ async fn root_recovery_replays_lost_workbench_reply_without_repeating_effects() 
         replay, retained,
         "replay preserves the original execution receipt"
     );
-    successor_policy.complete_boxed(completion).await.unwrap();
+    assert!(
+        successor_policy
+            .retained_operation(request.context.clone().unwrap())
+            .is_err(),
+        "replaying the settled receipt must not issue a successor native operation"
+    );
     let mut altered = request;
     altered.arguments = exomonad_tool::ToolArguments::Raw("pure (99 :: Int)".into());
     let conflict = successor_policy
