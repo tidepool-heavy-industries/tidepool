@@ -8462,8 +8462,8 @@ pub(crate) mod tests {
     mod sparse_interface_selection_properties;
     use super::*;
     use crate::cache::{ModuleEvidence, SourceEvidence};
+    use tidepool_repr::execution_schema::InventoryDecodeLimits;
     use tidepool_repr::execution_schema::testing;
-    use tidepool_repr::execution_schema::{DecodeLimits, InventoryDecodeLimits};
 
     #[test]
     fn bounded_evidence_read_preserves_path_reason_and_operation_budget() {
@@ -8532,22 +8532,11 @@ pub(crate) mod tests {
         use crate::recovery_artifacts::{
             CertifiedJoinedInterface, CertifiedRecoveryProduct, CertifiedValueInterface,
         };
-        use tidepool_repr::execution_schema::{parse_program, parse_projected_group, Group};
-        let bytes =
-            tidepool_test_data::prepared_encode::encode_wire_program(&testing::wire_program());
-        let requirements = crate::prepared_artifact::production_requirements().unwrap();
-        let prepared = parse_program(&bytes, &requirements, DecodeLimits::default()).unwrap();
-        let mut binders = prepared
-            .bindings()
-            .iter()
-            .flat_map(|group| match group {
-                Group::NonRecursive(top) => std::slice::from_ref(top),
-                Group::Recursive(tops) => tops,
-            })
-            .map(|top| top.identity.clone())
-            .collect::<Vec<_>>();
-        binders.truncate(1);
-        let entry = binders[0].clone();
+        let mut wire = testing::wire_program();
+        let tidepool_repr::execution_schema::Group::NonRecursive(top) = &wire.bindings[0] else {
+            unreachable!()
+        };
+        let entry = top.identity.clone();
         let retained = SymbolIdentity {
             unit: entry.unit.clone(),
             module: "Val1".into(),
@@ -8555,102 +8544,31 @@ pub(crate) mod tests {
             occurrence: "x".into(),
             record_parent: None,
         };
-        let symbol = |identity: &SymbolIdentity| {
-            value_array([
-                value_text(&identity.unit),
-                value_text(&identity.module),
-                value_text(&identity.namespace),
-                value_text(&identity.occurrence),
-                value_array([Value::Integer(0.into())]),
-            ])
-        };
-        let Value::Array(mut fields) = ciborium::de::from_reader(bytes.as_slice()).unwrap() else {
-            unreachable!()
-        };
-        fields[7] = value_array([
-            value_array([
-                symbol(&entry),
-                value_array([Value::Integer(1.into())]),
-                value_array([Value::Integer(0.into())]),
-                Value::Bool(false),
-                value_array([Value::Integer(0.into())]),
-            ]),
-            value_array([
-                symbol(&retained),
-                value_array([Value::Integer(1.into())]),
-                value_array([Value::Integer(0.into())]),
-                Value::Bool(false),
-                value_array([Value::Integer(1.into()), Value::Integer(1.into())]),
-            ]),
-        ]);
-        // Keep the pinned envelope and replace executable fixture payload with
-        // a neutral original group whose two certified imports are explicit.
-        let number = |value: u64| Value::Integer(value.into());
-        fields[6] = value_array([value_array([
-            value_array([]),
-            value_array([
-                number(0),
-                value_array([value_array([number(4), number(64)])]),
-            ]),
-        ])]);
-        fields[8] = value_array([]);
-        fields[9] = value_array([]);
-        fields[10] = value_array([value_array([
-            number(0),
-            value_array([value_array([
-                number(1),
-                value_array([
-                    number(0),
-                    number(64),
-                    Value::Bytes(42_i64.to_be_bytes().to_vec()),
-                ]),
-            ])]),
-        ])]);
-        fields[11] = value_array([value_array([
-            number(0),
-            value_array([
-                symbol(&entry),
-                value_array([
-                    number(0),
-                    value_array([
-                        number(0),
-                        number(0),
-                        value_array([]),
-                        value_array([]),
-                        number(0),
-                    ]),
-                ]),
-            ]),
-        ])]);
-        fields[13] = value_array([]);
-        fields[14] = value_array([]);
-        fields[15] = value_array([]);
-        fields[16] = value_array([number(0)]);
-        fields.remove(12);
-        let mut group_fields = vec![
-            value_text("TPGRP"),
-            Value::Integer(1.into()),
-            Value::Integer(7.into()),
-            value_array(binders.iter().map(symbol)),
+        wire.globals = vec![
+            GlobalDecl {
+                identity: entry.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: None,
+            },
+            GlobalDecl {
+                identity: retained.clone(),
+                rep: RuntimeRep::LiftedRef,
+                entry_signature: None,
+                required_evaluated: false,
+                required_generation: Some(1),
+            },
         ];
-        group_fields.extend(fields.into_iter().skip(1));
-        let mut group_bytes = Vec::new();
-        ciborium::ser::into_writer(&value_array(group_fields), &mut group_bytes).unwrap();
-        let group =
-            parse_projected_group(&group_bytes, &requirements, DecodeLimits::default()).unwrap();
+        let group = testing::projected_group(wire, 7).unwrap();
         let interface = b"original interface".to_vec();
-        let value = value_array([
-            value_text("TPMOD"),
-            Value::Integer(1.into()),
-            value_array([value_array([
-                value_text(&entry.unit),
-                value_text(&entry.module),
-                Value::Bytes(interface.clone()),
-                value_array([Value::Bytes(group_bytes)]),
-            ])]),
-        ]);
-        let mut product_bytes = Vec::new();
-        ciborium::ser::into_writer(&value, &mut product_bytes).unwrap();
+        let product_bytes =
+            tidepool_test_data::prepared_encode::encode_module_products(&[RawModuleProduct {
+                unit: entry.unit.clone(),
+                module: entry.module.clone(),
+                interface: interface.clone(),
+                groups: vec![group.clone()],
+            }]);
         let owner = CachedHomeOwner {
             unit: entry.unit.clone(),
             module: entry.module.clone(),
@@ -9678,7 +9596,7 @@ pub(crate) mod tests {
         let expected =
             certified_native_requirements(original.certification_bytes(), original.owner())
                 .unwrap();
-        let recovered = recovered_witness_fixtures(&[original]);
+        let recovered = recovered_witness_fixtures(&[fixture_finalized_product(original, [1; 32])]);
         let certificate_decodes = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
         assert_eq!(
             original_native_requirements(&recovered[0].product).unwrap(),
@@ -12273,7 +12191,10 @@ pub(crate) mod tests {
         };
         let old = original_witness_fixture("A", Some(retained(11)), 7, &BTreeMap::new());
         let new = original_witness_fixture("A", Some(retained(22)), 8, &BTreeMap::new());
-        let recovered = recovered_witness_fixtures(&[old, new]);
+        let recovered = recovered_witness_fixtures(&[
+            fixture_finalized_product(old, [1; 32]),
+            fixture_finalized_product(new, [1; 32]),
+        ]);
         for (index, original) in recovered.iter().enumerate() {
             let groups = certify_owned_products_with_validation(
                 &[&original.product],
@@ -13649,7 +13570,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn exact_cached_closure_refuses_zero_group_owner_overlap_and_inherited_substitute() {
+    fn exact_cached_closure_preserves_zero_group_custody_and_refuses_inherited_substitute() {
         let root = tempfile::tempdir().unwrap();
         let (candidates, mut receipt, current, a, b) = cached_closure_pair(root.path());
         let empty =
@@ -13659,27 +13580,18 @@ pub(crate) mod tests {
             .extend_checked_original_products([3; 32], &[a])
             .unwrap();
         assert!(overlapping.recovery_products()[0].product_bytes().len() > 0);
-        // A sealed zero-group payload without a recovered native witness is
-        // unavailable as an exact original reoffer, even for an identical owner.
-        assert!(overlapping.recovery_products()[0]
-            .original_native()
-            .is_none());
-        let refused = validate_exact_cached_closure(
+        let originals = overlapping.recovery_products();
+        let native = originals[0].original_native().unwrap();
+        assert!(native.groups.is_empty());
+        assert!(native.matches_original(&originals[0]));
+        validate_exact_cached_closure(
             Some(&candidates),
             &receipt,
             &overlapping,
             &current,
             &BTreeMap::new(),
-        );
-        assert!(
-            matches!(
-                &refused,
-                Err(CertificationError::Mismatch(
-                    "cached original reoffer bytes"
-                ))
-            ),
-            "missing-native reoffer refusal: {refused:?}"
-        );
+        )
+        .unwrap();
         let inherited = empty
             .clone()
             .extend_checked_original_products([3; 32], &[b])
@@ -13820,7 +13732,7 @@ pub(crate) mod tests {
         validate_exact_cached_closure(Some(&candidates), &receipt, &context, &current, &imports)
             .unwrap();
         receipt.modules.push(accepted_b);
-        assert!(b.original_native().is_none());
+        assert!(context.recovery_products()[0].original_native().is_some());
         let refused = validate_exact_cached_closure(
             Some(&candidates),
             &receipt,
@@ -13832,11 +13744,39 @@ pub(crate) mod tests {
             matches!(
                 &refused,
                 Err(CertificationError::Mismatch(
-                    "cached original reoffer bytes"
+                    "cached candidate exact dependency closure"
                 ))
             ),
-            "missing-native dependency reoffer refusal: {refused:?}"
+            "accepted dependency without its original graph refused: {refused:?}"
         );
+        candidates
+            .by_owner
+            .get_mut(&b_key)
+            .unwrap()
+            .original_execution = Some(crate::module_candidates::OriginalCandidateExecution {
+            graph: b_graph.clone(),
+        });
+        assert!(matches!(
+            validate_exact_cached_closure(
+                Some(&candidates),
+                &receipt,
+                &context,
+                &current,
+                &imports
+            ),
+            Err(CertificationError::Mismatch(
+                "cached candidate current source owner"
+            ))
+        ));
+        let mut reoffered = current.clone();
+        reoffered
+            .modules
+            .push(candidates.by_owner[&b_key].evidence.modules[1].clone());
+        reoffered
+            .sources
+            .push(candidates.by_owner[&b_key].evidence.sources[1].clone());
+        validate_exact_cached_closure(Some(&candidates), &receipt, &context, &reoffered, &imports)
+            .unwrap();
         receipt.modules.pop();
         // A retained dependency additionally binds B's separately issued graph.
         let retained = crate::execution_source::test_graph_requiring_original(
@@ -14161,21 +14101,13 @@ pub(crate) mod tests {
             .by_owner
             .get(&(accepted.unit.clone(), accepted.module.clone()))
             .unwrap();
-        assert_eq!(bundle.owner, *original.recovery_products[0].owner());
+        let selected_owner = bundle.owner.clone();
+        assert_eq!(selected_owner, *original.recovery_products[0].owner());
         assert_eq!(
             bundle.original_execution.as_ref().unwrap().graph.digest(),
             original_graph.digest()
         );
-        let manifest = std::fs::read(&selected.manifest_path).unwrap();
-        let ciborium::value::Value::Array(fields) =
-            ciborium::de::from_reader(manifest.as_slice()).unwrap()
-        else {
-            panic!("manifest");
-        };
-        assert_eq!(fields[1].as_text(), Some("10"));
-        let execution = fields[5].as_array().unwrap();
-        assert_eq!(execution[0].as_array().unwrap().len(), 1);
-        assert_eq!(execution[1].as_array().unwrap().len(), 1);
+        assert_eq!(selected.by_owner.len(), 1);
         if recompile_fresh {
             // A new transaction can produce the exact same native owner. Its
             // source recipe belongs to that transaction, not the offered record.
@@ -14535,11 +14467,23 @@ pub(crate) mod tests {
             crate::module_candidates::test_candidate_graph_path(&producer, original_graph.digest());
         let graph_bytes = std::fs::read(&graph_path).unwrap();
         std::fs::remove_file(&graph_path).unwrap();
-        assert!(select(&producer, &include, &root.path().join("missing-offer")).is_none());
+        let missing = select(&producer, &include, &root.path().join("missing-offer")).unwrap();
+        assert!(missing.by_owner.is_empty());
+        assert!(missing.native_availability.is_empty());
         std::fs::write(&graph_path, b"tampered").unwrap();
-        assert!(select(&producer, &include, &root.path().join("tampered-offer")).is_none());
+        let tampered = select(&producer, &include, &root.path().join("tampered-offer")).unwrap();
+        assert!(tampered.by_owner.is_empty());
+        assert!(tampered.native_availability.is_empty());
         std::fs::write(&graph_path, graph_bytes).unwrap();
-        assert!(select(&producer, &include, &root.path().join("restored-offer")).is_some());
+        let restored = select(&producer, &include, &root.path().join("restored-offer")).unwrap();
+        assert_eq!(restored.by_owner.len(), 1);
+        let restored =
+            &restored.by_owner[&(selected_owner.unit.clone(), selected_owner.module.clone())];
+        assert_eq!(restored.owner, selected_owner);
+        assert_eq!(
+            restored.original_execution.as_ref().unwrap().graph.digest(),
+            original_graph.digest()
+        );
         if !exact_mode && std::env::var_os("TIDEPOOL_CANDIDATE_PROVENANCE_OUTPUT").is_some() {
             let _retained = root.keep();
         }
@@ -17620,7 +17564,7 @@ pub(crate) mod tests {
         let expected =
             certified_native_requirements(original.certification_bytes(), original.owner())
                 .unwrap();
-        let recovered = recovered_witness_fixtures(&[original]);
+        let recovered = recovered_witness_fixtures(&[fixture_finalized_product(original, [1; 32])]);
         let certificate_decodes = HOME_CERTIFICATION_DECODES.with(std::cell::Cell::get);
         assert_eq!(
             original_native_requirements(&recovered[0].product).unwrap(),
@@ -17824,8 +17768,9 @@ pub(crate) mod tests {
 
     #[test]
     fn original_interface_seals_survive_cold_codec_and_native_witness_without_executable_sources() {
-        let owner = inherited_owner("Original");
-        let encoded = encode_home_certification(&owner, &[], &BTreeMap::new()).unwrap();
+        let fixture = original_groups_fixture("Original", vec![], 1, &BTreeMap::new());
+        let owner = fixture.owner().clone();
+        let encoded = fixture.certification_bytes().to_vec();
         let mut witness = decode_home_witness(&encoded).unwrap();
         let requirements =
             BTreeMap::from([(("old-cohort".into(), "PrivateNominalOwner".into()), [7; 32])]);
@@ -17834,20 +17779,24 @@ pub(crate) mod tests {
         let cold = decode_home_witness(&encoded).unwrap();
         assert_eq!(cold.interface_requirements, requirements);
         assert!(cold.sources.is_empty());
-        assert!(native_requirements_from_witness(&cold)
-            .artifact_edges
-            .is_empty());
+        assert!(
+            native_requirements_from_witness(&cold)
+                .artifact_edges
+                .is_empty()
+        );
         let product = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
             owner.clone(),
-            vec![1],
-            vec![2],
-            vec![],
+            fixture.interface_bytes().to_vec(),
+            fixture.product_bytes().to_vec(),
+            fixture.package_imports_bytes().to_vec(),
             encoded,
         );
         assert_eq!(
             original_interface_requirements(&product).unwrap(),
             requirements
         );
+        let product = fixture_finalized_product(product, [1; 32]);
+        let cold = decode_home_witness(product.certification_bytes()).unwrap();
         let retained = retain_original_native(product, vec![], cold).unwrap();
         assert_eq!(
             original_interface_requirements(&retained).unwrap(),
@@ -17861,9 +17810,9 @@ pub(crate) mod tests {
         wrong_owner.owner.module = "AnotherOriginal".into();
         let wrong = crate::recovery_artifacts::CertifiedRecoveryProduct::from_certification(
             owner,
-            vec![1],
-            vec![2],
-            vec![],
+            fixture.interface_bytes().to_vec(),
+            fixture.product_bytes().to_vec(),
+            fixture.package_imports_bytes().to_vec(),
             encode_home_witness(&wrong_owner).unwrap(),
         );
         assert!(original_interface_requirements(&wrong).is_err());
