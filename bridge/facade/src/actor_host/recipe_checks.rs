@@ -32,8 +32,9 @@ pub(crate) async fn run(
     let entries = select_checks(&selected.checks, recipe)?;
     for entry in entries {
         println!("Recipe {entry}; definitions {}", selected.identity());
+        let prepared = tokio::task::block_in_place(|| prepare_recipe(entry, selected))?;
         let mut driver = Driver::start(workspace, selected.clone()).await?;
-        let result = driver.evaluate(entry, selected);
+        let result = driver.execute(prepared);
         let cleanup = driver.shutdown_session().await;
         driver.installations.clear();
         driver.pending.clear();
@@ -107,6 +108,59 @@ fn select_checks<'a>(checks: &'a [String], recipe: Option<&str>) -> Result<Vec<&
             ))),
         },
     }
+}
+
+/// Issued only after recipe compilation and confirmed transaction close.
+/// Its owned artifacts can be executed without retaining compiler authority.
+struct PreparedRecipe {
+    artifacts: tidepool_runtime::CompiledArtifacts,
+    source: String,
+    entry: String,
+}
+
+fn prepare_recipe(entry: &str, selected: &FrozenWorkspace) -> Result<PreparedRecipe> {
+    let (module, _) = entry
+        .rsplit_once('.')
+        .ok_or("invalid configured check entry")?;
+    let mut declarations = exomonad_effect_declarations();
+    declarations.push(tidepool_mcp::recipe_check_decl());
+    let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
+    let mut includes = if let Some(mut roots) = selected.runtime_catalog_roots() {
+        if roots.first() != Some(&effects.core) {
+            return Err("frozen stable effect source selection changed".into());
+        }
+        roots.push(effects.orchestration.clone());
+        roots
+    } else {
+        let mut roots = effects.include_paths().to_vec();
+        roots.push(selected.runtime_actors());
+        roots.push(selected.runtime_stdlib());
+        roots
+    };
+    includes.extend(selected.include.iter().cloned());
+    // Assemble the same prepared-STG scaffold as ordinary one-shot runs.
+    let preamble = format!(
+        "{{-# LANGUAGE DataKinds #-}}\nmodule RecipeMain where\n\
+         import Control.Monad.Freer\nimport Tidepool.Check\n\
+         import qualified {module}\n"
+    );
+    let source = tidepool_runtime::session::assemble_expression_module(
+        &preamble,
+        "result",
+        "'[RecipeCheck]",
+        entry,
+        tidepool_runtime::session::ExpressionLift::Effectful,
+    );
+    let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
+    let artifacts = super::run_compiler_preparation(|settlement| {
+        tidepool_runtime::compile_targets(&source, &[target], &includes, |_, _, _| {}, settlement)
+            .map_err(|error| render_recipe_compile_error(error.into(), &source, entry))
+    })?;
+    Ok(PreparedRecipe {
+        artifacts,
+        source,
+        entry: entry.to_owned(),
+    })
 }
 
 struct Driver {
@@ -267,65 +321,18 @@ impl Driver {
             .map_err(|error| runtime_error(format!("recipe file operation: {error:?}")))
     }
 
-    fn evaluate(&mut self, entry: &str, selected: &FrozenWorkspace) -> Result<()> {
-        let (module, _) = entry
-            .rsplit_once('.')
-            .ok_or("invalid configured check entry")?;
-        let mut declarations = exomonad_effect_declarations();
-        declarations.push(tidepool_mcp::recipe_check_decl());
-        let effects = tidepool_mcp::ensure_effects_module(&declarations)?;
-        let mut includes = if let Some(mut roots) = selected.runtime_catalog_roots() {
-            if roots.first() != Some(&effects.core) {
-                return Err("frozen stable effect source selection changed".into());
-            }
-            roots.push(effects.orchestration.clone());
-            roots
-        } else {
-            let mut roots = effects.include_paths().to_vec();
-            roots.push(selected.runtime_actors());
-            roots.push(selected.runtime_stdlib());
-            roots
-        };
-        includes.extend(selected.include.iter().cloned());
-        // Assemble the same prepared-STG scaffold as ordinary one-shot runs.
-        let preamble = format!(
-            "{{-# LANGUAGE DataKinds #-}}\nmodule RecipeMain where\n\
-             import Control.Monad.Freer\nimport Tidepool.Check\n\
-             import qualified {module}\n"
-        );
-        let source = tidepool_runtime::session::assemble_expression_module(
-            &preamble,
-            "result",
-            "'[RecipeCheck]",
-            entry,
-            tidepool_runtime::session::ExpressionLift::Effectful,
-        );
-        let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
-        let artifacts = tokio::task::block_in_place(|| {
-            super::run_compiler_preparation(|settlement| {
-                tidepool_runtime::compile_targets(
-                    &source,
-                    &[target],
-                    &includes,
-                    |_, _, _| {},
-                    settlement,
-                )
-                .map_err(|error| render_recipe_compile_error(error.into(), &source, entry))
-            })
-        })?;
-        // Recipe handlers can admit actor compilation. Their caller must release
-        // the recipe compiler transaction before entering any such handler.
+    fn execute(&mut self, prepared: PreparedRecipe) -> Result<()> {
         tokio::task::block_in_place(|| {
             tidepool_runtime::run_compiled_target(
-                &artifacts,
-                target,
+                &prepared.artifacts,
+                tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET,
                 tidepool_runtime::DEFAULT_NURSERY_SIZE,
                 self,
                 &(),
                 |_| {},
             )
         })
-        .map_err(|error| render_recipe_compile_error(error, &source, entry))?;
+        .map_err(|error| render_recipe_compile_error(error, &prepared.source, &prepared.entry))?;
         Ok(())
     }
 
@@ -782,6 +789,94 @@ impl DispatchEffect for Driver {
 #[cfg(test)]
 mod tests {
     use super::select_checks;
+    use std::cell::RefCell;
+
+    #[test]
+    fn preparation_result_reaches_execution_only_after_confirmed_close() {
+        let events = RefCell::new(Vec::new());
+        let prepared = super::super::run_compiler_preparation(|settlement| {
+            events.borrow_mut().push("compile");
+            settlement(tidepool_runtime::CompilerTransactionClose::Clean);
+            events.borrow_mut().push("closed");
+            Ok(42)
+        })
+        .unwrap();
+        events.borrow_mut().push("execute");
+        assert_eq!(prepared, 42);
+        assert_eq!(*events.borrow(), ["compile", "closed", "execute"]);
+    }
+
+    #[test]
+    fn preparation_refusal_and_unconfirmed_cancellation_never_authorize_execution() {
+        for refuses in [false, true] {
+            for confirmed in [false, true] {
+                let mut executed = false;
+                let result = super::super::run_compiler_preparation(|settlement| {
+                    settlement(if confirmed {
+                        tidepool_runtime::CompilerTransactionClose::Clean
+                    } else {
+                        tidepool_runtime::CompilerTransactionClose::Unconfirmed(
+                            tidepool_extract_cmd::CompilerTransactionCloseEvidence::new(
+                                tidepool_extract_cmd::CompilerTransactionCloseReason::Cancelled,
+                                tidepool_extract_cmd::CompilerTransactionRetirement::DaemonUnobserved {
+                                    disconnect: None,
+                                },
+                            ),
+                        )
+                    });
+                    if refuses {
+                        Err(super::runtime_error("recipe source refused"))
+                    } else {
+                        Ok(42)
+                    }
+                });
+                let result = result.map(|prepared| {
+                    executed = true;
+                    prepared
+                });
+                assert_eq!(executed, confirmed && !refuses);
+                assert_eq!(result.is_ok(), confirmed && !refuses);
+                if !confirmed {
+                    assert!(result
+                        .unwrap_err()
+                        .is::<super::super::PreparationCleanupUnconfirmed<i32>>());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_preparation_closes_admission_without_publishing_its_result() {
+        let mut owner = exomonad_actor::CompilerPreparationOwner::new();
+        let cleanup = owner.cleanup();
+        let (entered, admitted) = tokio::sync::oneshot::channel();
+        let mut operation = Box::pin(owner.scope(async {
+            let prepared = exomonad_actor::ActorCompilerCloseOwner::current()
+                .unwrap()
+                .run(|settlement| {
+                    settlement(tidepool_runtime::CompilerTransactionClose::Clean);
+                    42
+                })
+                .unwrap();
+            entered.send(()).unwrap();
+            std::future::pending::<()>().await;
+            prepared.action
+        }));
+        tokio::select! {
+            _ = &mut operation => panic!("preparation must still be pending"),
+            ready = admitted => ready.unwrap(),
+        }
+        assert!(!cleanup.observation().admission_closed);
+        drop(operation);
+        assert!(cleanup.observation().admission_closed);
+        assert!(cleanup.observation().is_confirmed());
+        assert_eq!(
+            cleanup.observation().work,
+            vec![exomonad_actor::CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::Clean
+            ),]
+        );
+    }
 
     #[test]
     fn recipe_selector_matches_one_configured_entry_exactly() {

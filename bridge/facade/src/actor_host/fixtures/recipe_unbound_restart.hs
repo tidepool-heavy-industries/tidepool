@@ -1,10 +1,16 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.RecipeBoundaryChecks (unboundAcrossRestart) where
+module Project.RecipeBoundaryChecks (nestedCompilation, unboundAcrossRestart) where
 
 import Control.Monad.Freer (Eff, Member)
 import qualified Data.Text as Text
 import Tidepool.Check
+
+nestedCompilation :: Member RecipeCheck effects => Eff effects ()
+nestedCompilation = do
+  actor <- root
+  awaitCell actor "recipe execution admits nested actor compilation after preparation closes"
+    "pure ((21 * 2 :: Int) == 42)"
 
 unboundAcrossRestart :: Member RecipeCheck effects => Eff effects ()
 unboundAcrossRestart = do

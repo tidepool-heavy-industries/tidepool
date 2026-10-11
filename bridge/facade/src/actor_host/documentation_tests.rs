@@ -3258,6 +3258,33 @@ async fn recipe_workspace_definitions_compile_before_resident_execution() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "broad authored compiler recovery performance comparison"]
+async fn broad_collaboration_recipe_preserves_authored_compilation_workload() {
+    let repository = recipe_workspace(Some(&["Project.CollaborationChecks.collaboration"]));
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .expect("the full authored collaboration recipe must execute with its broad import set");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn recipe_execution_releases_preparation_before_nested_actor_compilation() {
+    let repository = recipe_workspace(Some(&["Project.RecipeBoundaryChecks.nestedCompilation"]));
+    let authored = repository.path().join(".exomonad");
+    std::fs::write(
+        authored.join("Project/RecipeBoundaryChecks.hs"),
+        include_str!("fixtures/recipe_unbound_restart.hs"),
+    )
+    .unwrap();
+    crate::exomonad::edit_fixture_project_config(&authored, |project| {
+        project.haskell.modules.clear();
+    });
+    super::test_campaign::commit_workspace(repository.path());
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .expect("recipe effects must acquire the same single-worker compiler after preparation");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn recipe_restart_reinstalls_the_unbound_conversation_service() {
     let repository = recipe_workspace(Some(&["Project.RecipeBoundaryChecks.unboundAcrossRestart"]));
     let authored = repository.path().join(".exomonad");
@@ -3297,10 +3324,13 @@ async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
     crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .unwrap();
-    let broken = format!(
-        "{original}\n{}",
-        include_str!("fixtures/recipe_decision_consumer_stale_question.hs"),
+    let correct_input = "let changedQuestions = raiseQuestion newer openQuestions";
+    assert_eq!(original.matches(correct_input).count(), 1);
+    let broken = original.replace(
+        correct_input,
+        include_str!("fixtures/recipe_decision_consumer_stale_question.hs").trim(),
     );
+    assert_ne!(broken, original);
     std::fs::write(&work, broken).unwrap();
     // This candidate fixture is data, not a compiled module; it still compiles,
     // and the running selected worker must expose its defect.
