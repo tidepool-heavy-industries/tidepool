@@ -22185,6 +22185,95 @@ pub(crate) mod request_tests {
     }
 
     #[test]
+    fn lookup_preserves_active_request_annotations_with_checked_values() {
+        use tidepool_runtime::session::{InspectionResult, RequestCompileAnnotations};
+        use tidepool_toolchain::declaration_join::RequestHelperRecipe;
+        let (session, context, mut source, inputs, _root) = activation_input_fixture(|_| {});
+        let evidence = inputs[0].type_evidence().clone();
+        source.request_evidence = Some(evidence.clone());
+        let source = source.for_workbench(
+            &context,
+            Some(&RequestWorkbenchScope {
+                response: ResponseExpectation::new("()"),
+                request: crate::RequestId(1),
+            }),
+        );
+        let view = actor_compile_view(&session, &context, &source).unwrap();
+        let values = session
+            .capture_inspection_inputs(view.session_view())
+            .unwrap();
+        let prepared = source.prepare(&view);
+        let queries = [
+            InspectionQuery::TypeOf("respond".into()),
+            InspectionQuery::TypeOf("sessionReply".into()),
+            InspectionQuery::Info("pure".into()),
+        ];
+        let results = tidepool_testing::with_settlement(|settlement| {
+            inspect_lookup_queries(
+                &view,
+                Some(&values),
+                &prepared.preamble,
+                &prepared.imports,
+                &prepared.include,
+                &prepared.injected,
+                &context.haskell_effects_alias,
+                &queries,
+                None,
+                settlement,
+            )
+        })
+        .unwrap();
+        assert_eq!(results.len(), queries.len());
+        for result in &results[..2] {
+            assert!(
+                matches!(result, InspectionResult::Type { display, .. }
+                if !display.contains("TidepoolRequestReply")),
+                "{results:?}"
+            );
+        }
+        assert!(
+            matches!(&results[2], InspectionResult::Info { entries, .. }
+            if !entries.is_empty()),
+            "{results:?}"
+        );
+
+        // A declaration-equivalent view cannot replace this request's helper recipe.
+        let unannotated_helpers = view
+            .session_view()
+            .clone()
+            .with_request_annotations(
+                &RequestCompileAnnotations::new(evidence, RequestHelperRecipe::None).unwrap(),
+            )
+            .unwrap();
+        let include = prepared
+            .include
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let mismatched = tidepool_testing::with_settlement(|settlement| {
+            run_admitted_inspections(
+                InspectionRequest {
+                    exact_context: unannotated_helpers.exact_compile_context(),
+                    preamble: &prepared.preamble,
+                    imports: &prepared.imports,
+                    include: &include,
+                    session_root: view.session_root(),
+                    inject_modules: &prepared.injected,
+                    queries: &queries,
+                    effects: Some(&context.haskell_effects_alias),
+                },
+                view.session_view(),
+                &values,
+                settlement,
+            )
+        });
+        assert!(
+            mismatched.is_err(),
+            "another helper recipe must refuse before compilation"
+        );
+    }
+
+    #[test]
     fn request_annotations_survive_planned_admission() {
         use tidepool_runtime::session::RequestCompileAnnotations;
         use tidepool_toolchain::declaration_join::RequestHelperRecipe;
