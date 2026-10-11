@@ -1549,6 +1549,8 @@ rust_filegroup(
         "src/actor_host/fixtures/supplied_live_spawn.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_spawn.hs",
         "src/actor_host/fixtures/supplied_live_spawn_request_same_cell.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_spawn_request_same_cell.hs",
         "src/actor_host/fixtures/supplied_live_tools.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_tools.hs",
+        "src/actor_host/fixtures/terminal_transfer_request.hs": "bridge/facade/src/actor_host/fixtures/terminal_transfer_request.hs",
+        "src/actor_host/fixtures/terminal_transfer_setup.hs": "bridge/facade/src/actor_host/fixtures/terminal_transfer_setup.hs",
         "src/actor_host/fixtures/three_actor_workload_roster.json": "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json",
         "src/actor_host/form_output.rs": "bridge/facade/src/actor_host/form_output.rs",
         "src/actor_host/fresh_child_tests.rs": "bridge/facade/src/actor_host/fresh_child_tests.rs",
@@ -1592,6 +1594,7 @@ rust_filegroup(
         "src/actor_host/scripted_recursive_acceptance.rs": "bridge/facade/src/actor_host/scripted_recursive_acceptance.rs",
         "src/actor_host/scripted_three_actor_performance.rs": "bridge/facade/src/actor_host/scripted_three_actor_performance.rs",
         "src/actor_host/source_reload_tests.rs": "bridge/facade/src/actor_host/source_reload_tests.rs",
+        "src/actor_host/terminal_transfer_tests.rs": "bridge/facade/src/actor_host/terminal_transfer_tests.rs",
         "src/actor_host/test_campaign.rs": "bridge/facade/src/actor_host/test_campaign.rs",
         "src/actor_host/tests.rs": "bridge/facade/src/actor_host/tests.rs",
         "src/actor_host/workspace.rs": "bridge/facade/src/actor_host/workspace.rs",
@@ -2105,6 +2108,48 @@ tidepool_rust_test_cases(
     binary = ":tidepool_unit_tests",
     exact_tests = [
         "actor_host::tests::actor_sources_capture_current_then_deliver_every_publication_and_settlement",
+    ],
+    expected_count = 1,
+    ignored = False,
+    jobs = 1,
+    timeout = 600,
+    test_rule_timeout_ms = 660000,
+    env = {
+        "EXOMONAD_NIX_OFFLINE": "1",
+        "TIDEPOOL_KEEP_TEST_LOGS": "1",
+    },
+    resources = [
+        "toolchains//:test_tools_closure",
+        "//build/rust:workspace_gitlink",
+        "//build/rust:workspace_git_bundle",
+        "//bridge/testing:haskell_test_fixtures",
+        "toolchains//:exomonad_runtime_tools",
+        "//web:dist",
+        "//bridge/haskell:facade_embedded_sources",
+        "//build/package:compiler_deployment",
+    ],
+    resource_env = {
+        "EXOMONAD_EMBEDDED_ASSET_ROOT": "$(location //web:dist)/web",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
+        "EXOMONAD_WORKSPACE_GITLINK": "$(location //build/rust:workspace_gitlink)",
+        "EXOMONAD_WORKSPACE_GIT_BUNDLE": "$(location //build/rust:workspace_git_bundle)",
+        "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
+        "TIDEPOOL_EXTRACT_WORKER": "$(exe //bridge/haskell:tidepool_extract_bin)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location //bridge/haskell:facade_embedded_sources)/lib",
+        "TIDEPOOL_TEST_BASH": "$(exe toolchains//:bash)",
+        "TIDEPOOL_TEST_FIXTURE_ROOT": "$(location //bridge/testing:haskell_test_fixtures)",
+        "TIDEPOOL_TEST_SLEEP": "$(exe toolchains//:sleep)",
+    },
+    haskell_worker = True,
+    visibility = ["PUBLIC"],
+)
+
+tidepool_rust_test_cases(
+    name = "facade_terminal_transfer_test",
+    binary = ":tidepool_unit_tests",
+    exact_tests = [
+        "actor_host::terminal_transfer_tests::request_local_reply_helper_settles_exact_request_and_keeps_actor_live",
     ],
     expected_count = 1,
     ignored = False,
@@ -3037,6 +3082,8 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/supplied_live_spawn.hs": "src/actor_host/fixtures/supplied_live_spawn.hs",
         "bridge/facade/src/actor_host/fixtures/supplied_live_spawn_request_same_cell.hs": "src/actor_host/fixtures/supplied_live_spawn_request_same_cell.hs",
         "bridge/facade/src/actor_host/fixtures/supplied_live_tools.hs": "src/actor_host/fixtures/supplied_live_tools.hs",
+        "bridge/facade/src/actor_host/fixtures/terminal_transfer_request.hs": "src/actor_host/fixtures/terminal_transfer_request.hs",
+        "bridge/facade/src/actor_host/fixtures/terminal_transfer_setup.hs": "src/actor_host/fixtures/terminal_transfer_setup.hs",
         "bridge/facade/src/actor_host/fixtures/three_actor_workload_roster.json": "src/actor_host/fixtures/three_actor_workload_roster.json",
         "bridge/facade/src/actor_host/form_output.rs": "src/actor_host/form_output.rs",
         "bridge/facade/src/actor_host/fresh_child_tests.rs": "src/actor_host/fresh_child_tests.rs",
@@ -3080,6 +3127,7 @@ filegroup(
         "bridge/facade/src/actor_host/scripted_recursive_acceptance.rs": "src/actor_host/scripted_recursive_acceptance.rs",
         "bridge/facade/src/actor_host/scripted_three_actor_performance.rs": "src/actor_host/scripted_three_actor_performance.rs",
         "bridge/facade/src/actor_host/source_reload_tests.rs": "src/actor_host/source_reload_tests.rs",
+        "bridge/facade/src/actor_host/terminal_transfer_tests.rs": "src/actor_host/terminal_transfer_tests.rs",
         "bridge/facade/src/actor_host/test_campaign.rs": "src/actor_host/test_campaign.rs",
         "bridge/facade/src/actor_host/tests.rs": "src/actor_host/tests.rs",
         "bridge/facade/src/actor_host/workspace.rs": "src/actor_host/workspace.rs",
@@ -4086,6 +4134,20 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737570706c6965645f6c6976655f746f6f6c732e6873",
     src = "src/actor_host/fixtures/supplied_live_tools.hs",
     out = "supplied_live_tools.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7465726d696e616c5f7472616e736665725f726571756573742e6873",
+    src = "src/actor_host/fixtures/terminal_transfer_request.hs",
+    out = "terminal_transfer_request.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7465726d696e616c5f7472616e736665725f73657475702e6873",
+    src = "src/actor_host/fixtures/terminal_transfer_setup.hs",
+    out = "terminal_transfer_setup.hs",
     visibility = ["PUBLIC"],
 )
 

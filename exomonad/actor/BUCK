@@ -1273,20 +1273,6 @@ export_file(
 )
 
 export_file(
-    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f7465726d696e616c5f7472616e736665725f726571756573742e6873",
-    src = "src/resident_actor/terminal_transfer_request.hs",
-    out = "terminal_transfer_request.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
-    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f7465726d696e616c5f7472616e736665725f73657475702e6873",
-    src = "src/resident_actor/terminal_transfer_setup.hs",
-    out = "terminal_transfer_setup.hs",
-    visibility = ["PUBLIC"],
-)
-
-export_file(
     name = "haskell_test_fixture_7372632f7265736964656e745f776f726b62656e63682f646973706c61795f63616c6c6261636b5f696d6d6564696174652e6873",
     src = "src/resident_workbench/display_callback_immediate.hs",
     out = "display_callback_immediate.hs",

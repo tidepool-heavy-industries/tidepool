@@ -1,3 +1,5 @@
+import Tidepool.Agent.Reply (Replies, retainRequest)
+import Tidepool.Effects.Core (WorkerLifetime(..))
 import qualified Tidepool.Actors.Spawn as Spawn
 import qualified Tidepool.Agent.Contract as Contract
 nativeAdmission <- Spawn.spawnSubagent

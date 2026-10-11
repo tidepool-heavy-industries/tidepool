@@ -1295,6 +1295,9 @@ def facade_test_cases(binary):
         ("facade_selected_source_test", [
             "actor_host::tests::actor_sources_capture_current_then_deliver_every_publication_and_settlement",
         ], host_env, host_paths, host_resources, True, False, 600),
+        ("facade_terminal_transfer_test", [
+            "actor_host::terminal_transfer_tests::request_local_reply_helper_settles_exact_request_and_keeps_actor_live",
+        ], host_env, host_paths, host_resources, True, False, 600),
         ("facade_selected_routing_tests", ["actor_host::documentation_tests::" + name for name in (
             "work_actor_consumes_later_progress_without_rearming",
             "attention_actor_recipe_retains_independent_sources_through_closure",
