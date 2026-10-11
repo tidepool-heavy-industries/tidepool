@@ -102,10 +102,10 @@ results before advancing both. Compiler receipt, binder, table and target checks
 belong to `PreparedCellProgram`. Contextual sealing consumes those observations
 after physical compiler close and preserves independent host cancellation.
 
-Candidate publication occurs once after every item of that segment seals and
-rechecks mutable source observations at publication. A failed or cancelled
-segment publishes no original suggestions. Whole-program and value publication
-keep their existing atomic owners. A fresh admission operation authenticates
+Candidate publication starts once after every item of the segment seals and
+rechecks mutable source observations. Cancellation refuses program handoff and
+stops remaining writes; completed atomic candidate records remain suggestions.
+Whole-program and value publication keep their existing atomic owners. A fresh admission operation authenticates
 physical artifacts afresh; an existing shared owner needs no repeated immutable
 byte observation or proof memo.
 
