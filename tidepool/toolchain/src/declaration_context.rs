@@ -4597,7 +4597,6 @@ impl ExactDeclarationContext {
             .iter()
             .map(|node| node.owner.clone())
             .collect::<BTreeSet<_>>();
-        let mut entries = Vec::new();
         for certificate in authored {
             self.admit_producer(certificate.toolchain_identity_sha256())?;
             self.inventory = self.inventory.merge(certificate.artifact_view())?;
@@ -4609,14 +4608,7 @@ impl ExactDeclarationContext {
         }
         for join in joins {
             self.admit_producer(join.toolchain_identity_sha256())?;
-            self.inventory = self.inventory.merge(join.context().artifact_view())?;
-            self.compiler_projection = self.compiler_projection.merge(
-                &join
-                    .context()
-                    .compiler_projection
-                    .for_source_owners(&selected_sources),
-            )?;
-            entries.push(ArtifactEntry::interface(
+            let entry = Arc::new(ArtifactEntry::interface(
                 join.interface().clone(),
                 JoinedInterfaceRole::LexicalJoin,
                 join.context()
@@ -4625,14 +4617,29 @@ impl ExactDeclarationContext {
                     .map(|interface| interface.owner)
                     .collect(),
             ));
+            let issued = CompilerInputProjection::from_issued_entries(&[Arc::clone(&entry)])?;
+            // Bind the join against its issuer's exact graph before combining
+            // independently scoped native custody.
+            let source = join.context().artifact_view();
+            let namespace = join.context().compiler_projection.merge(&issued)?;
+            let joined = source
+                .inventory()
+                .admit_projected_with_native_requirements(
+                    source,
+                    vec![entry],
+                    &namespace.interface_only(),
+                    &[],
+                )?;
+            let joined = joined.merge_selected(source, &namespace)?;
+            self.inventory = self.inventory.merge(&joined)?;
+            self.compiler_projection = self.compiler_projection.merge(
+                &join
+                    .context()
+                    .compiler_projection
+                    .for_source_owners(&selected_sources),
+            )?;
+            self.compiler_projection = self.compiler_projection.merge(&issued)?;
         }
-        let entries = entries.into_iter().map(Arc::new).collect::<Vec<_>>();
-        let issued = CompilerInputProjection::from_issued_entries(&entries)?;
-        self.inventory = self
-            .inventory
-            .inventory()
-            .admit_shared(&self.inventory, entries)?;
-        self.compiler_projection = self.compiler_projection.merge(&issued)?;
         self.lexical = self.lexical.replace(lexical)?;
         self.original_instance_environment = OriginalInstanceEnvironment::Unknown;
         self.finish()
