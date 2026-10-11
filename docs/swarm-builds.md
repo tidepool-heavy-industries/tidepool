@@ -252,7 +252,10 @@ See `bridge/haskell/tests.md` for current suite/resource interfaces.
 
 Use `just check-plan PACKAGE...` to inspect a bounded package selection and
 `swarm-build just check PACKAGE...` to compile its production, unit, binary-test
-and integration consumers from `build/native-targets.json`. Omitting packages
+and integration consumers from `build/native-targets.json`. Dependencies compile
+as libraries; their own `cfg(test)` and integration targets enter the check only
+when their packages are selected. For an API change, inspect callers in test
+modules too and include their owning packages in `check-plan`. Omitting packages
 retains the complete compile check. A focused `test-lib` run does not compile
 integration callers of the same public API; include their owning packages in
 the compile selection when that API changes. The generated roster and runner
