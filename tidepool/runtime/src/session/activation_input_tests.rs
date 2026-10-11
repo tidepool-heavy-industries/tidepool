@@ -3313,7 +3313,7 @@ fn display_owner_shares_specialization_across_two_child_machines_after_parent_fa
 }
 
 #[test]
-fn display_owner_shares_checked_segment_inputs_across_unrelated_value_prefix() {
+fn display_owner_preserves_checked_segment_capture_demand_across_value_prefix() {
     let (root, recipe) = InputFixture::source_recipe(false);
     let mut source = InputFixture::fresh_in(SessionId(1844), &root, &recipe);
     let execution = Arc::new(source.begin_private_execution(ScopeId::ROOT).unwrap());
@@ -3398,34 +3398,55 @@ fn display_owner_shares_checked_segment_inputs_across_unrelated_value_prefix() {
                 previous.original_execution_digest(),
                 "the later item must have a broader actual original context"
             );
-            if admission.original_context_digest() != previous.original_context_digest() {
-                for (label, observed) in [
-                    ("earlier", previous.as_ref()),
-                    ("later", admission.as_ref()),
-                ] {
-                    let projected = observed.original_display_context().unwrap().declarations();
-                    eprintln!("DISPLAY_OBSERVATION {label} descriptors={:?} dependencies={:?} projection={:?} lexical={:?}", projected.artifact_view().descriptors(), projected.artifact_view().dependencies(), projected.compiler_input_projection(), projected.lexical_graph());
-                }
-            }
+            let earlier = previous.original_display_context().unwrap().declarations();
+            let later = admission.original_display_context().unwrap().declarations();
             assert_eq!(
+                earlier.artifact_view().descriptors(),
+                later.artifact_view().descriptors()
+            );
+            assert_eq!(
+                earlier.compiler_input_projection(),
+                later.compiler_input_projection()
+            );
+            assert_eq!(earlier.lexical_graph(), later.lexical_graph());
+            let earlier_edges = earlier
+                .artifact_view()
+                .dependencies()
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            let later_edges = later
+                .artifact_view()
+                .dependencies()
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert!(earlier_edges.is_subset(&later_edges));
+            let additional = later_edges.difference(&earlier_edges).collect::<Vec<_>>();
+            assert!(!additional.is_empty());
+            assert!(additional.iter().all(|(_, _, dependency)| matches!(
+                dependency,
+                tidepool_toolchain::artifact_inventory::ArtifactDependency::NativeGroup { .. }
+            )));
+            // Another checked target demands additional groups in the same
+            // immutable carrier. Those edges retain preferred exact capture
+            // choices even though the input type and compiler roles are equal.
+            assert_ne!(
                 admission.original_context_digest(),
                 previous.original_context_digest()
             );
-            assert!(Arc::ptr_eq(
+            assert!(!Arc::ptr_eq(
                 &admission.mounted.renderer_owner,
                 &previous.mounted.renderer_owner
             ));
         }
+        let before = tidepool_extract_cmd::extract_spawn_count();
         let turn::ActivationPreviewCompilation::Ready(preview) =
             compile_activation_preview(admission.clone(), &template, 512, &recipe.include).unwrap()
         else {
             panic!("Int input renders")
         };
+        assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before + 1);
         if let Some(previous) = &previous_renderer {
-            assert!(
-                Arc::ptr_eq(previous, &preview.renderer),
-                "same full display facts reuse specialization"
-            );
+            assert!(!Arc::ptr_eq(previous, &preview.renderer));
         }
         previous_renderer = Some(preview.renderer.clone());
         let ResidentOutcome::Completed { result, .. } =
