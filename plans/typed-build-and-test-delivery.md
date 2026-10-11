@@ -61,6 +61,14 @@ Complete these owning changes before final frozen qualification:
   frozen `skill-workflow` cohort must pass alongside M3; isolated repeated
   compilation is not a substitute for the relocated-source history.
 
+The `skill-workflow` cohort executes published documentation examples through
+ordinary workers; it is not a separate actor capability. Use independently
+selectable startup/request/reply, actor-reuse, routing, notebook and Jev checks
+for repair feedback. Share their authored scenarios with the complete workflow,
+preserve its sequential history, and avoid registering both the full recipe and
+every focused recipe in the default workspace check list. Focused passing cases
+do not replace the frozen workflow gate.
+
 Integrate component repairs incrementally, then freeze the joined production
 and fast-dev bundles and run the applicable complete rosters. After final
 qualification, promote the exact joined source to main, push its matched pins,
