@@ -3413,13 +3413,14 @@ async fn haskell_actor_sends_normal_steering_without_a_native_session() {
                     None => run.await.unwrap(),
                 };
                 assert_eq!(launched["status"], "committed", "{launched:?}");
-                let finished = dispatch_haskell_script(
+                let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let finished = campaign.drive_actor_output(&store, dispatch_haskell_script(
         root.as_ref(),
-        "finished <- awaitExit relay\ncase finished of { Completed (Right _) -> True; _ -> False }",
+        "finished <- awaitExit relay\ndisplay (case finished of { Completed (Right _) -> True; _ -> False })",
     )
-    .await;
+    ).await;
                 assert_eq!(finished["status"], "committed", "{finished:?}");
-                assert!(finished.to_string().contains("True"), "{finished:?}");
+                assert_eq!(test_campaign::committed_display_text(&finished), "True");
             })
         })
         .await;
