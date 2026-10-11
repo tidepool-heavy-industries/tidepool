@@ -209,3 +209,170 @@ Completion deletes cumulative manifests/witness encoders, custom issued-delta
 chains and replay, duplicated SQL fact hydration, online commit reconciliation
 and obsolete caller/test paths. Replace superseded plan material. Additional work
 requires a concrete failure, integration repair or measured regression.
+
+## Current implementation wave: immutable owners and bounded publication
+
+The delivery branch starts this wave at `4c36f6bf2b72`. It is not qualified.
+The sampled admission interval attributes about 85% of CPU to inventory
+installation dominated by artifact comparisons. Finish the following contracts
+and the existing pending integration repairs before freezing another candidate.
+
+### Complete artifact facts, separate issuing authority
+
+The existing ArtifactInventory owns canonicalization. Represent immutable facts
+as an enum of typed Arcs: OriginalFacts, CanonicalFacts and JoinedFacts. Do not
+wrap authority-bearing certified facades recursively inside these facts.
+OriginalFacts requires a canonical companion and authenticated native witness;
+incomplete construction is a private draft. JoinedFacts includes its complete
+normalized requirements and role before issuance, including recovered joins.
+CanonicalFacts contains immutable receipt, producer, interface/package bytes,
+optional Core, origin and home-unit facts. Execution graphs remain optional only
+when their original certification permits absence.
+
+Fresh source permission and catalog custody belong to issuing/view facades.
+Absence explicitly withholds authority and cannot fall back to an inherited
+grant. Splitting only ArtifactEntry is insufficient: certified original and
+canonical owners must share the immutable facts as well. Canonical projections
+borrow facts or return a cheap certified facade with the receiving authority.
+
+Authenticate independent ingress, compare its complete facts once against any
+same-ID resident owner, and return the inventory's canonical handle. A known
+handle takes a pointer fast path. ArtifactId alone is insufficient because
+joined requirements are not sealed by it. Keep structural comparison private
+to ingress; remove deep equality from per-group installation and ordinary views.
+Adopt the complete original owner: never replace its individual byte Arcs while
+retaining a witness anchored to the old bytes. The finalizer establishes that
+relationship once. Native census, adjacency and owner indexes belong to the
+authenticated witness and are borrowed by consumers.
+
+ArtifactView remains the live leased capability. Decoded ExactArtifactSelection
+is inert transport and becomes a live view only through authenticated recovery.
+Installed graph outgoing rows are immutable. A consuming binding transaction
+validates a complete insertion before mutation; reclamation removes only unowned
+rows. Drop the graph guard before destructing leases. Preserve read-only petgraph
+traversal, cold checks and conflicts against independently submitted rows; remove
+whole-parent witness revalidation on each valid live extension. Defect injection
+belongs at raw ingress or the graph owner, not in an otherwise valid live view.
+
+### Incremental segment admission
+
+Capture produced interfaces once per physical request, retaining bytes,
+certification and item ordinal. BoundSegment retains the compiler's fixed native
+owner selection, exact issued bindings and produced-output inventory. The
+existing inventory is the only namespace/binding resolver.
+
+One SegmentCursor owns admitted prefix and accumulated demand. Item admission
+borrows it mutably, commits prefix and demand together on success, and leaves
+semantic state unchanged on failure. Issue a missing exact group closure once,
+including mutually dependent new groups as one installation. Reuse old group
+handles without namespace reselection. Do not eagerly bind all native groups or
+use carrier ArtifactId root selection, which broadens group demand. Preserve
+historical dependency custody and distinct group/carrier scopes.
+
+Current/prior output type evidence follows item ordinal; runtime value authority
+requires completed prior items. Future output interfaces remain private. Sparse
+generations, discard slots and declaration barriers retain their semantics.
+Final captures add contextual authority using the already captured certificate.
+Borrows stay inside a synchronous phase; suspended captures own narrow views.
+
+### Publication state and semantic currency
+
+Use OwnerStamp (required owner Arc plus epoch), affine JoinReservation,
+PublicationSemanticBase, DurableWriteBase, CertifiedPublication and
+StagedPublicManifest. Independent optional capabilities remain optional;
+declaration payload versus binding-only payload and durable versus ephemeral
+state are sum types. A declaration payload owns its reservation and receipt.
+
+PublicationAttempt distinguishes Settled(PublicManifestCommit),
+Rebase(FinalExecutionIntent), and RestageMetadata(CertifiedPublication). Terminal
+PublicManifestCommit has no Stale case. Relevant public changes require a new
+join against the new semantic base, retaining private declarations and effects.
+Storage-only changes reuse the same certificate and reservation. Capture a new
+coherent DurableWriteBase and apply the delta to its latest complete graph;
+never replace unrelated private or other-public-owner work with an old candidate.
+Invalid private intent or owner epoch is terminal. Post-claim refusal and unknown
+commit remain terminal/fenced, never retryable execution.
+
+Reservation consumes a generation immediately; dropping it burns that identity
+without asynchronous rollback. Reservation, burn and ceiling changes do not
+advance declaration-fact revision or invalidate semantic compiler views.
+Committed/restored/activated declaration facts do. Paired baseline v3 hashes
+library/session/owner identity, relevant public/private visibility and existing
+scoped compile-view commitments, excluding global log revision, SQL revision and
+allocation ceiling. Keep TPDJOIN and receipt version 3 and lexical-projection
+identity unchanged. Keep full typed comparisons at admission; hashes do not grant
+authority. RecoveryGraphCandidate derives revision/ceiling from DurableWriteBase.
+
+Migrate ordinary/final private publication and activation-input publication
+together. The existing exclusive session borrow performs preflight, short claim
+and commit. Expensive staging, serialization and compiler work happen outside
+that critical section. Metadata restaging never registers compiler work.
+
+### Compiler lease and host cancellation
+
+Use one pipeline: prepare/certify, complete existing declaration projections,
+close the compiler transaction, seal host results, publish. First-pass target
+admission remains before projection issuance because declaration certificates
+require it. Preserve malformed receipt/binder/slot refusals before projections.
+PreparedCellProgram privately owns checked items, certificates, immutable output
+custody, pending publications and context, with no compiler endpoint.
+
+Exit CompilerWorkTicket::run_with_close normally after the final projection.
+Then consume the prepared result for prefix construction and contextual capture.
+Keep one implementation for actor, fixture and performance callers. Successful
+physical request counts do not increase. Do not introduce an early-finish TLS
+escape hatch or release/reacquire the worker mid-transaction.
+
+Logical host cancellation outlives compiler cancellation registration and is
+passed explicitly into post-close work. Completed output and confirmed close
+are distinct outcomes. An unconfirmed close retains required custody and never
+authorizes replay. Retain TempDir/file owners until bytes or immutable retained
+outputs have transferred; a scratch path alone is insufficient ownership.
+
+### Implementation, work counters and qualification
+
+Sol owns facts/inventory, publication and actor callers, segment admission,
+compiler lifetime, Harness completion, and typed observers/property coverage.
+Luna owns bounded build/fixture/report work with semantic review where needed.
+Publish buildable interfaces before dependent parcels. Root owns integration;
+each isolated worker compiles production and test consumers and executes its
+focused checks independently. Initial admission is three heavy hosted cases
+total with roughly 20 GiB host reserve, adjusted from actual peaks.
+
+Finish existing build-input/C-driver/header/binding-owner repairs, Harness
+forms/cancellation/GUI integration, browser command joining and narrowed recovery
+observers. Preserve the human server on port 8081 and all source WIP. New findings
+require a concrete mechanism and a bounded neighboring search, not an open-ended
+new audit wave before delivery.
+
+Extend existing bounded observations with canonical hits/comparison calls and
+bytes offered, issued/reused groups, output certifications, physical requests,
+semantic rebases, metadata restages, worker residence and host phase timings.
+Do not add per-hit logging. Deduplicate physical requests by their real identity;
+inclusive phase times cannot be added as independent costs.
+
+Required work contracts: known canonical reuse compares no payload bytes;
+each produced output is certified once; old exact groups are not reissued;
+metadata restaging makes no compiler request; unrelated history is not walked
+for every admission; post-compiler sealing holds no physical compiler lease.
+Exercise independent equal allocations, authority absence/overrides, lexical
+requirement conflicts, graph cycles/sharing/recovery, sparse output histories,
+and fault schedules with independent models and shrinking. Calibrate targeted
+mutations and retain deterministic regressions. Reuse native compile-fail
+infrastructure with positive controls; do not expose private authority factories.
+
+Publication controls include reserveA/reserveB before certification, actual lease
+refill, unrelated private C preserved after reopen, separate public owners,
+semantic change, cancellation before/after claim, retirement and commit ambiguity.
+Execute an actual counting effect once through the owned workbench while retries
+occur. Progress models use bounded interference followed by fair drain.
+
+Finally freeze one matched production bundle and execute every required central
+cohort, including M1/M2/M3, result delivery, child preparation and both harness
+performance scenarios. Compare three matched repetitions of repeated A,A,B,A,
+retained reuse and scripted root/child/grandchild scenarios, reporting cold/warm,
+compiler/host/queue time, allocation and retained RSS separately. Run a short
+real Sol 6.1 root/two Luna children/grandchild trial in a fresh workspace, then
+shut that trial down. Update main and annotate exact acceptance with source,
+Harness pin, bundle descriptor and evidence identities; old component passes
+are not acceptance of the new bundle.
