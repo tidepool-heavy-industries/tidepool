@@ -99,8 +99,12 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
     for refused in [foreign, negative] {
         assert!(serde_json::from_value::<ModelRequestEnvelope>(refused).is_err());
     }
+    assert_eq!(
+        serde_json::to_value(ModelAnnotationEnvelope::ModelNoAnnotation {}).unwrap(),
+        json!({"kind": "none"})
+    );
     for annotation in [
-        ModelAnnotationEnvelope::ModelNoAnnotation,
+        ModelAnnotationEnvelope::ModelNoAnnotation {},
         ModelAnnotationEnvelope::ModelAbstained {
             reason: "reason".into(),
         },
@@ -117,9 +121,26 @@ fn model_request_and_annotation_controls_are_closed_after_valid_controls() {
             serde_json::from_value::<ModelAnnotationEnvelope>(valid.clone()).unwrap(),
             annotation
         );
-        let mut unknown = valid;
-        unknown["foreign"] = json!(true);
-        assert!(serde_json::from_value::<ModelAnnotationEnvelope>(unknown).is_err());
+        for field in ["foreign", "reason", "text", "handle", "", "λ"] {
+            if valid.get(field).is_some() {
+                continue;
+            }
+            for value in [
+                Value::Null,
+                json!(true),
+                json!(7),
+                json!("payload"),
+                json!([]),
+                json!({}),
+            ] {
+                let mut unknown = valid.clone();
+                unknown[field] = value;
+                assert!(
+                    serde_json::from_value::<ModelAnnotationEnvelope>(unknown).is_err(),
+                    "surplus field {field:?} accepted for {annotation:?}"
+                );
+            }
+        }
     }
     assert_eq!(
         serde_json::to_value(ModelOutcomeEnvelope::ModelExhaustedOutcome {

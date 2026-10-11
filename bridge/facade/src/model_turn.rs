@@ -504,7 +504,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
         let annotation: ModelAnnotationEnvelope =
             serde_json::from_value(annotation).map_err(|error| rejected(error.to_string()))?;
         let annotation = match annotation {
-            ModelAnnotationEnvelope::ModelNoAnnotation => HookAnnotation::NoAnnotation,
+            ModelAnnotationEnvelope::ModelNoAnnotation {} => HookAnnotation::NoAnnotation,
             ModelAnnotationEnvelope::ModelAbstained { reason } => HookAnnotation::Abstained(reason),
             ModelAnnotationEnvelope::ModelAnnotated { text } => HookAnnotation::Annotated(text),
             ModelAnnotationEnvelope::ModelPruned {
@@ -1009,12 +1009,20 @@ mod tests {
         let mut missing = hook.clone();
         missing.as_object_mut().unwrap().remove("value");
         assert!(serde_json::from_value::<ModelControlStep>(missing).is_err());
+        assert!(service
+            .annotate(
+                caller,
+                token,
+                hook["operation"].as_str().unwrap(),
+                json!({"kind": "none", "foreign": true}),
+            )
+            .is_err());
         let final_step = service
             .annotate(
                 caller,
                 token,
                 hook["operation"].as_str().unwrap(),
-                serde_json::to_value(ModelAnnotationEnvelope::ModelNoAnnotation).unwrap(),
+                serde_json::to_value(ModelAnnotationEnvelope::ModelNoAnnotation {}).unwrap(),
             )
             .unwrap();
         assert_eq!(final_step["receipt"]["outcome"]["kind"], "text");

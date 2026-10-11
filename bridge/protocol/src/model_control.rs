@@ -273,7 +273,8 @@ pub fn generated_files() -> Vec<GeneratedFile> {
                 for v in &variants {
                     rust.push_str(&format!("    #[serde(rename = \"{}\")]\n", v.tag));
                     if v.fields.is_empty() {
-                        rust.push_str(&format!("    {},\n", v.ctor));
+                        // Empty records retain unknown-field validation for tagged variants.
+                        rust.push_str(&format!("    {} {{}},\n", v.ctor));
                     } else {
                         let fields = v
                             .fields

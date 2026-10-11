@@ -107,7 +107,7 @@ pub enum ModelControlStep {
 #[serde(tag = "kind", deny_unknown_fields)]
 pub enum ModelAnnotationEnvelope {
     #[serde(rename = "none")]
-    ModelNoAnnotation,
+    ModelNoAnnotation {},
     #[serde(rename = "abstained")]
     ModelAbstained { reason: String },
     #[serde(rename = "annotated")]
