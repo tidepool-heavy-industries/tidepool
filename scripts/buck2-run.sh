@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  exec python3 scripts/buck-output-lease.py buck "$@"
+fi
 mountpoint -q "$PWD/buck-out" || { echo 'Buck requires the per-checkout buck-out bind mount' >&2; exit 1; }
 [[ -f .buckconfig.local ]] || { echo 'Run scripts/buck2-configure.sh first' >&2; exit 1; }
 

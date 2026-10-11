@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import selectors
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,7 @@ class ConfigureToolchainTests(unittest.TestCase):
         self.root = Path(self.storage.name)
         (self.root / "scripts").mkdir()
         shutil.copyfile(SCRIPT, self.root / "scripts/buck2-configure.sh")
+        shutil.copyfile(SCRIPT.parent / "buck-output-lease.py", self.root / "scripts/buck-output-lease.py")
         shutil.copyfile(SCRIPT.parent / "toolchain-inputs.sh", self.root / "scripts/toolchain-inputs.sh")
         (self.root / "scripts/workspace-git-resource.py").write_text("""import os, pathlib, sys
 if os.environ.get('TEST_WORKSPACE_FAILURE'):
@@ -110,7 +112,7 @@ else:
         path.write_text(source)
         path.chmod(0o755)
 
-    def run_configure(self, *args, pin=PIN, extra_env=None):
+    def configure_environment(self, pin=PIN, extra_env=None):
         environment = dict(os.environ)
         environment.update(
             PATH=str(self.tools) + os.pathsep + environment["PATH"],
@@ -123,9 +125,12 @@ else:
             TEST_TEST_GHC_ROOT=str(self.test_ghc.parent),
         )
         environment.update(extra_env or {})
+        return environment
+
+    def run_configure(self, *args, pin=PIN, extra_env=None):
         return subprocess.run(
             ["bash", str(self.root / "scripts/buck2-configure.sh"), *args],
-            env=environment, text=True, capture_output=True,
+            env=self.configure_environment(pin, extra_env), text=True, capture_output=True,
         )
 
     def test_unpinned_selection_refuses_before_nix(self):
@@ -133,6 +138,45 @@ else:
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("revision-pinned", result.stderr)
         self.assertFalse(self.log.exists())
+
+    def test_configuration_waits_for_checkout_output_lease(self):
+        directory = self.root / ".buck2-toolchains"
+        directory.mkdir()
+        holder = subprocess.Popen(
+            [sys.executable, "-c", "import fcntl, sys; "
+             "lease = open(sys.argv[1], 'a'); fcntl.flock(lease, fcntl.LOCK_EX); "
+             "print('locked', flush=True); sys.stdin.readline()",
+             str(directory / "output.lock")],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        )
+        def cleanup(process):
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+
+        self.addCleanup(cleanup, holder)
+        self.assertEqual(holder.stdout.readline(), "locked\n")
+        # This is the same production configure entrypoint used by the other
+        # controls; only the competing lease holder differs.
+        configure = subprocess.Popen(
+            ["bash", str(self.root / "scripts/buck2-configure.sh")],
+            env=self.configure_environment(), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        self.addCleanup(cleanup, configure)
+        with selectors.DefaultSelector() as selector:
+            selector.register(configure.stderr, selectors.EVENT_READ)
+            self.assertTrue(selector.select(timeout=5), "configuration did not report contention")
+        self.assertIn("Waiting for checkout Buck output lease", configure.stderr.readline())
+        self.assertIsNone(configure.poll())
+        self.assertFalse(self.log.exists())
+        self.assertFalse((self.root / ".buckconfig.local").exists())
+        holder.stdin.write("release\n")
+        holder.stdin.flush()
+        holder.wait(timeout=5)
+        _, stderr = configure.communicate(timeout=10)
+        self.assertEqual(configure.returncode, 0, stderr)
+        self.assertTrue((self.root / ".buckconfig.local").exists())
 
     def test_uncommitted_toolchain_input_refuses_before_nix(self):
         (self.root / "flake.nix").write_text("changed toolchain\n")

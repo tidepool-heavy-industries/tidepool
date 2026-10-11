@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Prepare and retain the selected pinned Nix outputs before publishing config.
-cd "$(dirname "$0")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 usage() {
   printf 'Usage: scripts/buck2-configure.sh [--tests] [--browser]\n'
@@ -38,6 +38,9 @@ fi
 
 if [[ -z ${TIDEPOOL_DEV_SHELL:-} ]]; then
   exec bash scripts/dev-shell.sh bash scripts/buck2-configure.sh "$@"
+fi
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  exec python3 scripts/buck-output-lease.py configure "$@"
 fi
 flake_source=${TIDEPOOL_DEV_SHELL%#*}
 case "$flake_source" in

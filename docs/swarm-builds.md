@@ -32,6 +32,34 @@ test counts, exit status and log before reporting. Building a `rust_test` target
 only links its executable; use an accepted focused runner to execute tests.
 Do not claim remote qualification from local results.
 
+### Checkout output custody
+
+`scripts/buck2-run.sh` holds an exclusive per-checkout output lease from
+configuration validation through the complete synchronous Buck command.
+`buck2 run` and `buck2 test` retain it through native runner execution, including
+later cases, successor executable launches and declared resource use. A build,
+check or configuration preparation in that checkout waits until the command
+settles. `scripts/buck2-configure.sh` takes the same lease after entering its
+pinned shell and before preparing or publishing a generation. Source cleanliness
+is independent of this custody rule. Other checkouts have independent leases
+and may build or test concurrently within their resource admission budgets.
+
+The short-lived Python supervisor owns the `fcntl.flock` descriptor; its children
+and Buck daemon do not inherit it. INT/TERM forwards to the command and the lease
+remains held until that child exits; cancellation while waiting starts no
+command. The existing Buck and native runner owners remain responsible for their
+child cleanup. The persistent lock inode is `.buck2-toolchains/output.lock`;
+do not delete or replace it while a command may use the checkout.
+
+Use the supported script/Just entrypoints. Direct ambient Buck, sourcing the
+entrypoint shell, manual output deletion and raw executables launched from
+`buck-out` bypass the lease. Tests holding the lease cannot invoke another build
+in the same checkout; use a separate provisioned checkout for that work. The
+lease protects synchronous commands, not a service deliberately left running
+after its command returns. SIGKILL or a supervisor crash can release the lease
+before an orphaned child settles; verify and settle surviving work before
+starting another command. The supervisor does not claim arbitrary service cleanup.
+
 ### Test profiles and link inputs
 
 Ordinary `just test-lib`, `test-target`, `test-bin`, `test-native`, `quick` and

@@ -3,11 +3,13 @@
 import json
 import os
 from pathlib import Path
+import selectors
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -20,7 +22,7 @@ class BuckRunnerTests(unittest.TestCase):
         self.addCleanup(self.storage.cleanup)
         self.root = Path(self.storage.name) / "checkout with spaces"
         (self.root / "scripts").mkdir(parents=True)
-        for script in ("buck2-run.sh", "toolchain-inputs.sh", "buck2-config-args.py"):
+        for script in ("buck2-run.sh", "buck-output-lease.py", "toolchain-inputs.sh", "buck2-config-args.py"):
             shutil.copyfile(SCRIPT.parent / script, self.root / "scripts" / script)
         self.git = shutil.which("git")
         self.git_command("init", "-q")
@@ -43,11 +45,11 @@ class BuckRunnerTests(unittest.TestCase):
                         "record workspace Gitlink"], check=True)
         self.tools = self.root / "tools"
         self.tools.mkdir()
-        # Launcher bootstrap receives only its declared Bash/coreutils inputs.
+        # Launcher bootstrap receives only Bash/coreutils and the Python lease owner.
         # Optional host utilities must not hide a missing action dependency.
         self.bootstrap_tools = self.root / "bootstrap tools"
         self.bootstrap_tools.mkdir()
-        for name in ("bash", "cat", "dirname", "id", "readlink"):
+        for name in ("bash", "cat", "dirname", "id", "readlink", "python3"):
             executable = shutil.which(name)
             self.assertIsNotNone(executable, f"declared {name} executable")
             (self.bootstrap_tools / name).symlink_to(executable)
@@ -170,14 +172,16 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
         self.assertIn("Run scripts/buck2-configure.sh first", result.stderr)
         self.assert_no_shell_or_buck()
 
-    def test_configured_launch_preserves_arguments_cwd_pid_cgroup_and_path(self):
+    def test_configured_launch_preserves_arguments_cwd_cgroup_and_path(self):
         args = ["build", "--local-only", "-c", "remote.enabled=false", "//pkg:target", "with spaces", ""]
         result = self.run_runner(*args)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse(self.shell_log.exists())
-        self.assertEqual(json.loads(self.buck_log.read_text()), {
+        record = json.loads(self.buck_log.read_text())
+        self.assertNotEqual(record.pop("pid"), self.launch_pid)
+        self.assertEqual(record, {
             "args": args, "cwd": str(self.root),
-            "path": f"{self.action_tools}:/run/current-system/sw/bin", "pid": self.launch_pid,
+            "path": f"{self.action_tools}:/run/current-system/sw/bin",
             "cgroup": Path("/proc/self/cgroup").read_text(),
         })
 
@@ -260,6 +264,212 @@ sys.exit(int(os.environ.get('BUCK_EXIT', '0')))
         self.assertEqual(result.returncode, 37, result.stderr)
         result = self.run_runner("build", BUCK_SIGNAL="1")
         self.assertEqual(result.returncode, -signal.SIGTERM, result.stderr)
+
+    def custody_fixture(self):
+        runner = SCRIPT.parents[1] / "build/rust/isolated-libtest.py"
+        shutil.copyfile(runner, self.root / "isolated-libtest.py")
+        (self.root / "buck-out").mkdir()
+        case_source = self.root / "case.py"
+        case_source.write_text(f'''#!{sys.executable}
+import os, signal, subprocess, sys, time
+from pathlib import Path
+root = Path(__file__).parent.parent
+resource = Path(__file__).parent / 'resource'
+if '--list' in sys.argv:
+    if '--ignored' not in sys.argv:
+        print('first: test\\nsecond: test')
+    sys.exit(0)
+if '--successor' in sys.argv:
+    assert resource.read_text() == 'original'
+    sys.exit(0)
+name = sys.argv[sys.argv.index('--exact') + 1]
+assert resource.read_text() == 'original'
+if name == 'first':
+    (root / 'entered').touch()
+    while not (root / 'release').exists():
+        time.sleep(0.01)
+subprocess.run([str(Path(__file__).absolute()), '--successor'], check=True)
+if os.environ.get('CASE_FAIL'):
+    print('test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out')
+    sys.exit(1)
+print('test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out')
+''')
+        self.buck.write_text(f'''#!{sys.executable}
+import os, shutil, signal, subprocess, sys, time
+from pathlib import Path
+root = Path.cwd()
+binary = root / 'buck-out/libtest'
+resource = root / 'buck-out/resource'
+if sys.argv[1] == 'build':
+    binary.unlink(missing_ok=True)
+    resource.write_text('replaced')
+    (root / 'mutated').touch()
+    sys.exit(0)
+shutil.copyfile(root / 'case.py', binary)
+binary.chmod(0o755)
+resource.write_text('original')
+if os.environ.get('CLEANUP_DELAY'):
+    def cancel(signum, frame):
+        (root / 'cancelling').touch()
+        while not (root / 'cleanup-release').exists():
+            time.sleep(0.01)
+        (root / 'settled').touch()
+        sys.exit(128 + signum)
+    signal.signal(signal.SIGTERM, cancel)
+    (root / 'entered').touch()
+    while True:
+        time.sleep(0.01)
+if os.environ.get('START_DAEMON'):
+    daemon = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                              close_fds=False, start_new_session=True,
+                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+    (root / 'daemon.pid').write_text(str(daemon.pid))
+os.execv(sys.executable, [sys.executable, str(root / 'isolated-libtest.py'),
+    str(binary), '--exact', 'first', '--exact', 'second',
+    '--expected-count', '2', '--jobs', '1', '--timeout', '10'])
+''')
+
+    def start_custody_command(self, command, **environment):
+        process = subprocess.Popen(
+            ["bash", str(self.root / "scripts/buck2-run.sh"), command],
+            env=dict(self.env, **environment), cwd=self.root,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
+        )
+
+        def cleanup():
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=5)
+
+        self.addCleanup(cleanup)
+        return process
+
+    def wait_path(self, path, process):
+        deadline = time.monotonic() + 5
+        while not path.exists():
+            if process.poll() is not None:
+                stdout, stderr = process.communicate(timeout=5)
+                self.fail(f"command exited before creating {path}: {stdout}\n{stderr}")
+            if time.monotonic() > deadline:
+                self.fail(f"command did not create {path}")
+            time.sleep(0.01)
+
+    def assert_waiting(self, process):
+        # The owner prints this only after a failed nonblocking lock attempt.
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stderr, selectors.EVENT_READ)
+            self.assertTrue(selector.select(timeout=5), "command did not report lease contention")
+        self.assertIn("Waiting for checkout Buck output lease", process.stderr.readline())
+        self.assertIsNone(process.poll())
+        self.assertFalse((self.root / "mutated").exists())
+
+    def test_build_waits_through_counted_cases_and_successor_exec(self):
+        self.custody_fixture()
+        test = self.start_custody_command("run")
+        self.wait_path(self.root / "entered", test)
+        build = self.start_custody_command("build")
+        self.assert_waiting(build)
+        (self.root / "release").touch()
+        stdout, stderr = test.communicate(timeout=10)
+        self.assertEqual(test.returncode, 0, stderr)
+        self.assertIn("Isolated libtest: 2 passed; 0 failed", stdout)
+        build.communicate(timeout=5)
+        self.assertEqual(build.returncode, 0)
+        self.assertTrue((self.root / "mutated").exists())
+
+    def test_failed_suite_releases_waiting_build(self):
+        self.custody_fixture()
+        test = self.start_custody_command("test", CASE_FAIL="1")
+        self.wait_path(self.root / "entered", test)
+        build = self.start_custody_command("build")
+        self.assert_waiting(build)
+        (self.root / "release").touch()
+        stdout, stderr = test.communicate(timeout=10)
+        self.assertEqual(test.returncode, 1, stderr)
+        self.assertIn("Isolated libtest: 0 passed; 2 failed", stdout)
+        build.communicate(timeout=5)
+        self.assertEqual(build.returncode, 0)
+
+    def test_cancelled_suite_settles_and_releases_waiting_build(self):
+        self.custody_fixture()
+        test = self.start_custody_command("run")
+        self.wait_path(self.root / "entered", test)
+        build = self.start_custody_command("build")
+        self.assert_waiting(build)
+        test.send_signal(signal.SIGTERM)
+        _, stderr = test.communicate(timeout=10)
+        self.assertEqual(test.returncode, 128 + signal.SIGTERM, stderr)
+        self.assertIn("libtest runner interrupted", stderr)
+        build.communicate(timeout=5)
+        self.assertEqual(build.returncode, 0)
+
+    def test_cancelled_waiter_never_starts_mutating_command(self):
+        self.custody_fixture()
+        test = self.start_custody_command("run")
+        self.wait_path(self.root / "entered", test)
+        build = self.start_custody_command("build")
+        self.assert_waiting(build)
+        build.send_signal(signal.SIGINT)
+        build.communicate(timeout=5)
+        self.assertEqual(build.returncode, 128 + signal.SIGINT)
+        self.assertFalse((self.root / "mutated").exists())
+        (self.root / "release").touch()
+        test.communicate(timeout=10)
+        self.assertEqual(test.returncode, 0)
+
+    def test_cancellation_keeps_lease_until_child_cleanup_settles(self):
+        self.custody_fixture()
+        test = self.start_custody_command("run", CLEANUP_DELAY="1")
+        self.wait_path(self.root / "entered", test)
+        build = self.start_custody_command("build")
+        self.assert_waiting(build)
+        test.send_signal(signal.SIGTERM)
+        self.wait_path(self.root / "cancelling", test)
+        self.assertFalse((self.root / "mutated").exists())
+        self.assertIsNone(build.poll())
+        (self.root / "cleanup-release").touch()
+        test.communicate(timeout=5)
+        build.communicate(timeout=5)
+        self.assertEqual(test.returncode, 128 + signal.SIGTERM)
+        self.assertEqual(build.returncode, 0)
+        self.assertTrue((self.root / "settled").exists())
+
+    def test_distinct_checkout_build_overlaps_running_suite(self):
+        self.custody_fixture()
+        other = BuckRunnerTests()
+        other.setUp()
+        self.addCleanup(other.doCleanups)
+        other.custody_fixture()
+        test = self.start_custody_command("run")
+        self.wait_path(self.root / "entered", test)
+        build = other.start_custody_command("build")
+        build.communicate(timeout=5)
+        self.assertEqual(build.returncode, 0)
+        self.assertTrue((other.root / "mutated").exists())
+        self.assertIsNone(test.poll())
+        (self.root / "release").touch()
+        test.communicate(timeout=10)
+        self.assertEqual(test.returncode, 0)
+
+    def test_daemon_cannot_retain_output_lease_after_command(self):
+        self.custody_fixture()
+        test = self.start_custody_command("run", START_DAEMON="1")
+        self.wait_path(self.root / "entered", test)
+        daemon_pid = int((self.root / "daemon.pid").read_text())
+        self.addCleanup(os.kill, daemon_pid, signal.SIGKILL)
+        (self.root / "release").touch()
+        test.communicate(timeout=10)
+        self.assertEqual(test.returncode, 0)
+        os.kill(daemon_pid, 0)
+        self.assertFalse(any(
+            path.resolve() == self.root / ".buck2-toolchains/output.lock"
+            for path in Path(f"/proc/{daemon_pid}/fd").iterdir()
+        ))
+        build = self.start_custody_command("build")
+        build.communicate(timeout=5)
+        self.assertEqual(build.returncode, 0)
 
     def test_legacy_config_requires_explicit_preparation(self):
         self.config.write_text("[nix]\naction_path = /somewhere\n")

@@ -108,11 +108,18 @@ class BuckProfileConfiguration(unittest.TestCase):
             namespace[rule] = lambda **kwargs: None
         namespace["system_cxx_toolchain"] = lambda **kwargs: calls.append(kwargs)
         load_definitions(ROOT / "toolchains/BUCK", namespace)
-        self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0]["linker"], paths["cxx"])
-        self.assertEqual(calls[0]["link_flags"], [
-            "-fuse-ld=lld", "-B/pinned/lld/bin/", "-B/pinned/binutils/bin/",
-        ])
+        toolchains = {call["name"]: call for call in calls}
+        self.assertEqual(set(toolchains), {"c", "cxx"})
+        self.assertEqual(len(toolchains), len(calls), "duplicate toolchain declaration")
+        for name, linker in (("c", paths["cc"]), ("cxx", paths["cxx"])):
+            with self.subTest(toolchain=name):
+                self.assertEqual(toolchains[name]["linker"], linker)
+                self.assertEqual(toolchains[name]["compiler"], paths["cc"])
+                self.assertEqual(toolchains[name]["cxx_compiler"], paths["cxx"])
+                self.assertEqual(toolchains[name]["archiver"], paths["ar"])
+                self.assertEqual(toolchains[name]["link_flags"], [
+                    "-fuse-ld=lld", "-B/pinned/lld/bin/", "-B/pinned/binutils/bin/",
+                ])
 
 
 if __name__ == "__main__":
