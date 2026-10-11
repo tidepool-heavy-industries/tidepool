@@ -10,7 +10,7 @@ let recursiveSpec = workspaceAgentSpec
 let recursiveOptions = (defaultSpawnOptions recursiveSpec)
       { spawnModel = Just (Alias "luna"), spawnLifetime = ActorOwned, spawnLabel = Just "recursive-child" }
 Right recursiveChild <- spawnSubagent (ForkCtx rootSeed) (ForkWorktree projectHead) recursiveOptions
-Right childRequest <- request @Int recursiveChild ("delegate to a grandchild and return its inherited helper" :: Text) defaultRequestOptions
+Right childRequest <- request @Int recursiveChild (RecursiveRootInput 20) defaultRequestOptions
 childWatch <- watch (Just "recursive-child-reply") (settlement childRequest)
 childAnswer <- await (observed childWatch)
 case childAnswer of

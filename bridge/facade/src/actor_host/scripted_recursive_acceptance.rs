@@ -545,6 +545,11 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             grandchild.call("recursive-leaf-reply", GRANDCHILD_REPLY);
             grandchild = next(host, &mut requests, &mut pending, &grandchild_path).await;
             replied(&grandchild, "recursive-leaf-reply");
+            assert_eq!(
+                explicit_display_text(&grandchild.settled_output("recursive-leaf-reply")),
+                "True",
+                "the leaf forces both nominal request inputs and the captured native helper"
+            );
             grandchild.finish();
 
             let mut child = next(host, &mut requests, &mut pending, &child_path).await;
