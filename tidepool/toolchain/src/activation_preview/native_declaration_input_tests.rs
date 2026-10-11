@@ -420,12 +420,6 @@ fn display_projection_preserves_exact_canonical_implementation_dependencies() {
                 ],
             )
             .unwrap();
-        let target_id = view
-            .descriptors()
-            .iter()
-            .find(|descriptor| descriptor.owner.module == "OriginalTarget")
-            .unwrap()
-            .id;
         let target = ExactModuleIdentity {
             unit: "main".into(),
             module: "OriginalTarget".into(),
@@ -438,17 +432,17 @@ fn display_projection_preserves_exact_canonical_implementation_dependencies() {
             ExactDeclarationContext::from_authenticated_execution(
                 producer,
                 &view,
-                CompilerInputProjection::restore(
-                    &view,
-                    &[CompilerInputRole::InterfaceOnly {
-                        interface: target_id,
-                    }],
-                )
-                .unwrap(),
-                vec![ExactLexicalNode {
-                    owner: target.clone(),
-                    imports: vec![dependency],
-                }],
+                CompilerInputProjection::from_interface_view(&view).unwrap(),
+                vec![
+                    ExactLexicalNode {
+                        owner: target.clone(),
+                        imports: vec![dependency.clone()],
+                    },
+                    ExactLexicalNode {
+                        owner: dependency,
+                        imports: vec![],
+                    },
+                ],
                 target,
                 &[],
             )
