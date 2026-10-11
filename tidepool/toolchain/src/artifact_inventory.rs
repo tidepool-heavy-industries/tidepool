@@ -3856,20 +3856,34 @@ impl ArtifactView {
     // initialized under either OnceLock acquires that mutex, so concurrent first
     // reads and admission always take inventory -> projection in that order.
     fn selected_nodes(&self, state: &InventoryState) -> &imbl::OrdSet<InventoryNodeKey> {
-        self.reads
-            .selected_nodes
-            .get_or_init(|| admitted_closure(state, self.roots().iter().copied()))
+        self.reads.selected_nodes.get_or_init(|| {
+            if self.custody_roots().is_empty() {
+                if let Some(projection) = self.reads.read_projection.get() {
+                    return projection.nodes.clone();
+                }
+            }
+            admitted_closure(state, self.roots().iter().copied())
+        })
     }
 
     fn read_projection(&self, state: &InventoryState) -> &ViewReadProjection {
         self.reads.read_projection.get_or_init(|| {
-            let nodes = admitted_closure(
-                state,
-                self.roots()
-                    .iter()
-                    .copied()
-                    .chain(self.custody_roots().iter().copied()),
-            );
+            // Selected and retained closures coincide only without custody-only
+            // roots. Reuse an already observed closure without promoting custody.
+            let nodes = if self.custody_roots().is_empty() {
+                self.reads.selected_nodes.get().cloned()
+            } else {
+                None
+            }
+            .unwrap_or_else(|| {
+                admitted_closure(
+                    state,
+                    self.roots()
+                        .iter()
+                        .copied()
+                        .chain(self.custody_roots().iter().copied()),
+                )
+            });
             let ids = artifact_ids(&nodes);
             let mut custody = BTreeMap::new();
             let mut pending = std::collections::VecDeque::from([&self.lease]);
@@ -5284,7 +5298,17 @@ mod tests {
                 let mut changed = value.clone();
                 let rows = changed["graph"][field].as_array_mut().unwrap();
                 if rows.is_empty() {
-                    rows.push(value["graph"]["bindings"][0].clone());
+                    let binding = selection.graph_selection().bindings[0];
+                    let added = match field {
+                        "roots" | "custody_roots" =>
+                            serde_json::to_value(ArtifactBindingNode::Artifact(binding)).unwrap(),
+                        "native_groups" => serde_json::to_value(
+                            selection.graph_selection().native_groups[0],
+                        ).unwrap(),
+                        "bindings" | "namespace" => serde_json::to_value(binding).unwrap(),
+                        _ => unreachable!(),
+                    };
+                    rows.push(added);
                 } else {
                     rows.pop();
                 }
@@ -7945,6 +7969,7 @@ mod tests {
                     after, before,
                     "whole-original certification must retain the issuer's exact group"
                 );
+                let compiler_values = parent.namespace().get(&values.descriptor.id).copied();
                 let mut admitted = parent;
                 for _ in 0..2 {
                     admitted = owning
@@ -7955,7 +7980,11 @@ mod tests {
                             &[],
                         )
                         .unwrap();
-                    assert_eq!(admitted.namespace()[&values.descriptor.id], original_values);
+                    // Compiler roles preserve their selected namespace independently
+                    // of the historical exact child issued with the native group.
+                    if let Some(binding) = compiler_values {
+                        assert_eq!(admitted.namespace()[&values.descriptor.id], binding);
+                    }
                     let selected = admitted
                         .select_admission_roots(vec![native.descriptor.id])
                         .unwrap();
@@ -11544,6 +11573,40 @@ mod tests {
         assert!(selected
             .entries_for_artifacts(&BTreeSet::from([unused_id]))
             .is_err());
+    }
+
+    #[test]
+    fn selected_and_retained_reads_share_one_closure_without_custody_roots() {
+        for count in [1, 8, 32] {
+            for selected_first in [false, true] {
+                let inventory = ArtifactInventory::default();
+                let original = issued_native_groups(
+                    "Original",
+                    (0..count).map(|ordinal| (ordinal, Vec::new())).collect(),
+                    &[],
+                    &BTreeMap::new(),
+                );
+                let view = inventory
+                    .admit(&inventory.empty_view(), vec![original])
+                    .unwrap();
+                assert!(view.custody_roots().is_empty());
+                let before = inventory.metrics().graph_visits;
+                if selected_first {
+                    assert_eq!(view.selected_native_groups().len(), count as usize);
+                    view.metadata_snapshot();
+                } else {
+                    view.metadata_snapshot();
+                    assert_eq!(view.selected_native_groups().len(), count as usize);
+                }
+                let after = inventory.metrics().graph_visits;
+                assert_eq!(after - before, u64::from(count) + 2);
+                for _ in 0..3 {
+                    view.metadata_snapshot();
+                    assert_eq!(view.selected_native_groups().len(), count as usize);
+                }
+                assert_eq!(inventory.metrics().graph_visits, after);
+            }
+        }
     }
 
     #[test]
