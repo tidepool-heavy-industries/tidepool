@@ -21565,11 +21565,16 @@ pub(crate) mod request_tests {
             context.haskell_effects_alias.expression(),
             &prepared.imports,
         );
-        let include = prepared
-            .include
+        assert!(
+            prepared.injected.is_empty(),
+            "ordinary producer has no session imports"
+        );
+        let include = source
+            .base_include
             .iter()
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
+        let producer_started = std::time::Instant::now();
         let producer_text = if renderer_values {
             tidepool_testing::fixture_source(
                 "tidepool/runtime/src/session/fixtures/activation-input-twenty-renderers.hs",
@@ -21579,36 +21584,78 @@ pub(crate) mod request_tests {
                 "tidepool/runtime/src/session/fixtures/activation-input-function.hs",
             )
         };
-        let TurnResult::Bind {
-            compiled: producer,
-            bound: producer_bound,
-            ..
-        } = tidepool_testing::with_settlement(|settlement| {
-            tidepool_runtime::session::turn::run_turn(
-                TurnRequest {
-                    exact_context: None,
-                    session_id: None,
-                    turn_text: &producer_text,
-                    templates: &templates,
-                    include: &include,
-                    session_root: view.session_root(),
-                    inject_modules: &[],
-                    gen: view.next_value_generation().0,
-                    verdict: None,
-                    target: None,
-                    retained_imports: &[],
-                },
-                settlement,
-            )
-        })
-        .unwrap()
-        else {
-            panic!("native input producer must execute a bind");
-        };
-        assert!(
-            producer_bound.is_empty(),
-            "request producer creates no persistent binding"
+        struct ProducerFixture {
+            compiled: CompiledTurn,
+            source: String,
+            templates: Vec<tidepool_runtime::session::TurnTemplate>,
+            include: Vec<PathBuf>,
+            generation: u64,
+            _root: tempfile::TempDir,
+        }
+        // These ordinary programs issue no persistent binding or library-local
+        // prefix. Share only their compiler-issued immutable code; every replay
+        // below admits its receiver and executes its requests in a fresh session.
+        static FUNCTION_PRODUCER: std::sync::OnceLock<ProducerFixture> = std::sync::OnceLock::new();
+        static RENDERER_PRODUCER: std::sync::OnceLock<ProducerFixture> = std::sync::OnceLock::new();
+        let producer_fixture = if renderer_values {
+            &RENDERER_PRODUCER
+        } else {
+            &FUNCTION_PRODUCER
+        }
+        .get_or_init(|| {
+            let compile_root = tempfile::tempdir().unwrap();
+            let TurnResult::Bind {
+                compiled, bound, ..
+            } = tidepool_testing::with_settlement(|settlement| {
+                tidepool_runtime::session::turn::run_turn(
+                    TurnRequest {
+                        exact_context: None,
+                        session_id: None,
+                        turn_text: &producer_text,
+                        templates: &templates,
+                        include: &include,
+                        session_root: compile_root.path(),
+                        inject_modules: &[],
+                        gen: view.next_value_generation().0,
+                        verdict: None,
+                        target: None,
+                        retained_imports: &[],
+                    },
+                    settlement,
+                )
+            })
+            .unwrap()
+            else {
+                panic!("native input producer must execute a bind");
+            };
+            assert!(
+                bound.is_empty(),
+                "request producer creates no persistent binding"
+            );
+            ProducerFixture {
+                compiled,
+                source: producer_text.clone(),
+                templates: templates.clone(),
+                include: source.base_include.to_vec(),
+                generation: view.next_value_generation().0,
+                _root: compile_root,
+            }
+        });
+        assert_eq!(producer_fixture.source, producer_text);
+        assert_eq!(producer_fixture.include, source.base_include.as_ref());
+        assert_eq!(producer_fixture.generation, view.next_value_generation().0);
+        assert!(producer_fixture
+            .templates
+            .iter()
+            .zip(&templates)
+            .all(|(left, right)| left.kind == right.kind && left.source == right.source));
+        assert_eq!(producer_fixture.templates.len(), templates.len());
+        let producer = &producer_fixture.compiled;
+        eprintln!(
+            "activation fixture producer preparation: {:?}",
+            producer_started.elapsed()
         );
+        let receiver_started = std::time::Instant::now();
         let previous_context = session.run_context();
         let execution = Arc::new(
             session
@@ -21673,6 +21720,11 @@ pub(crate) mod request_tests {
             )
         })
         .unwrap();
+        eprintln!(
+            "activation fixture receiver parse: {:?}",
+            receiver_started.elapsed()
+        );
+        let receiver_compile_started = std::time::Instant::now();
         let authority =
             crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone());
         let admission = session
@@ -21693,6 +21745,10 @@ pub(crate) mod request_tests {
             )
         })
         .unwrap();
+        eprintln!(
+            "activation fixture receiver compilation: {:?}",
+            receiver_compile_started.elapsed()
+        );
         assert_eq!(
             checked.items.len(),
             1,

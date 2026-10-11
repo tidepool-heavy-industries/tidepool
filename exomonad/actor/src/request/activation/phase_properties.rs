@@ -1438,6 +1438,40 @@ async fn generated_request_activation_matches_native_evidence() {
     );
 }
 
+fn run_fence_partition(
+    cfg: Config,
+    initially_pending: bool,
+    result_history: Arc<parking_lot::Mutex<()>>,
+) {
+    let coverage = RefCell::new(Coverage::default());
+    let attempts = Cell::new(0usize);
+    TestRunner::new(cfg)
+        .run(&histories(true), |history| {
+            let attempt = attempts.get() + 1;
+            attempts.set(attempt);
+            let setup = std::time::Instant::now();
+            eprintln!("fresh-owner attempt {attempt}, initially_pending={initially_pending}, operations={}: fixture construction begin", history.len());
+            let fixture = tokio::runtime::Handle::current().block_on(
+                crate::resident_workbench::request_tests::activation_publication_phase_fixture(),
+            );
+            eprintln!("fresh-owner initially_pending={initially_pending}, attempt {attempt}: fixture construction complete in {:?}", setup.elapsed());
+            // The result fixture resets one mutable machine between histories.
+            // Keep its complete custody lifetime serial, while independent phase
+            // owners and their checked receiver compilation overlap above.
+            let _result_history = result_history.lock();
+            let execution = std::time::Instant::now();
+            let result = run_history(&history, &fixture, initially_pending, &mut coverage.borrow_mut());
+            eprintln!("fresh-owner initially_pending={initially_pending}, attempt {attempt}: operations complete in {:?}, result={result:?}", execution.elapsed());
+            result
+        })
+        .unwrap();
+    eprintln!(
+        "fresh-owner fence histories initially_pending={initially_pending}, callbacks={}: {:#?}",
+        attempts.get(),
+        coverage.borrow()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn generated_run_fences_preserve_publication_receipts() {
     let mut cfg = config(concat!(
@@ -1456,30 +1490,21 @@ async fn generated_run_fences_preserve_publication_receipts() {
     if std::env::var_os("PROPTEST_MAX_SHRINK_ITERS").is_none() {
         cfg.max_shrink_iters = 4;
     }
-    for initially_pending in [false, true] {
-        let coverage = RefCell::new(Coverage::default());
-        let attempts = Cell::new(0usize);
-        TestRunner::new(cfg.clone())
-            .run(&histories(true), |history| {
-                let attempt = attempts.get() + 1;
-                attempts.set(attempt);
-                let setup = std::time::Instant::now();
-                eprintln!("fresh-owner attempt {attempt}, initially_pending={initially_pending}, operations={}: fixture construction begin", history.len());
-                let fixture = tokio::task::block_in_place(|| {
-                    let future = crate::resident_workbench::request_tests::activation_publication_phase_fixture();
-                    tokio::runtime::Handle::current().block_on(future)
-                });
-                eprintln!("fresh-owner attempt {attempt}: fixture construction complete in {:?}", setup.elapsed());
-                let execution = std::time::Instant::now();
-                let result = run_history(&history, &fixture, initially_pending, &mut coverage.borrow_mut());
-                eprintln!("fresh-owner attempt {attempt}: operations complete in {:?}, result={result:?}", execution.elapsed());
-                result
-            })
-            .unwrap();
-        eprintln!(
-            "fresh-owner fence histories initially_pending={initially_pending}: {:#?}",
-            coverage.borrow()
-        );
+    // Readiness partitions prepare independent machines and recovery owners.
+    // They share immutable phase code and serialize the result fixture's mutable
+    // custody lifetime. Each generator still replays and shrinks serially.
+    let result_history = Arc::new(parking_lot::Mutex::new(()));
+    let partitions = [false, true].map(|initially_pending| {
+        let cfg = cfg.clone();
+        let result_history = result_history.clone();
+        tokio::task::spawn_blocking(move || {
+            run_fence_partition(cfg, initially_pending, result_history)
+        })
+    });
+    // Retain both workers until completion, including when one partition panics.
+    let outcomes = futures_util::future::join_all(partitions).await;
+    for outcome in outcomes {
+        outcome.unwrap();
     }
 }
 
