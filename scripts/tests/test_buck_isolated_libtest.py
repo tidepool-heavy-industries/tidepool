@@ -1667,6 +1667,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         with patch.object(runner.subprocess, 'Popen', return_value=process), \
              patch.object(process, 'communicate', side_effect=[
                  subprocess.TimeoutExpired(['fake-test'], 1), ('', '')]), \
+             patch.object(runner.time, 'monotonic', side_effect=[0, 0, 1]), \
              patch.object(runner.os, 'killpg'), \
              patch.object(runner, 'stop_delegated_service') as stop, \
              patch.object(runner, 'observe_delegated_admission'), \
@@ -1674,6 +1675,89 @@ class IsolatedLibtestTests(unittest.TestCase):
             runner.execute(['fake-test'], 1, 'app.slice', {})
         self.assertEqual(stop.call_count, 1)
         self.assertEqual(runner.ACTIVE_PROCESSES, {})
+
+    def test_delegated_cancellation_stops_owner_before_draining_output(self):
+        for confirmed in (True, False):
+            with self.subTest(cleanup_confirmed=confirmed):
+                events = []
+                record = {}
+                class Process:
+                    pid = 781240
+                    stdout = None
+                    stderr = None
+                    returncode = None
+                    def communicate(self, timeout=None):
+                        if not events:
+                            events.append('pipe_wait')
+                            runner._signal_active_processes(signal.SIGINT, None)
+                            runner._signal_active_processes(signal.SIGTERM, None)
+                            raise subprocess.TimeoutExpired(['fake-libtest'], timeout)
+                        self_test.assertEqual(events, ['pipe_wait', 'stop'])
+                        events.append('drain')
+                        self.returncode = -9
+                        return 'partial test output\n', 'partial test diagnostic\n'
+                self_test = self
+                def stop(unit, receipt):
+                    self.assertEqual(unit, receipt['unit'])
+                    self.assertTrue(receipt['admission_observer_stopped'])
+                    events.append('stop')
+                    receipt.update(cleanup_confirmed=confirmed,
+                                   cleanup_error='stop refused' if not confirmed else '')
+                runner.INTERRUPT_SIGNAL = None
+                try:
+                    with patch.object(runner.subprocess, 'Popen', return_value=Process()), \
+                         patch.object(runner.os, 'killpg'), \
+                         patch.object(runner, 'observe_delegated_admission'), \
+                         patch.object(runner, 'stop_delegated_service', side_effect=stop), \
+                         self.assertRaises(runner.RunnerInterrupted) as raised:
+                        runner.execute(['fake-libtest'], 600, 'app.slice', record)
+                    self.assertEqual(events, ['pipe_wait', 'stop', 'drain'])
+                    self.assertEqual(raised.exception.signum, signal.SIGINT)
+                    self.assertEqual(raised.exception.output, 'partial test output\n')
+                    self.assertEqual(raised.exception.stderr, 'partial test diagnostic\n')
+                    self.assertEqual(raised.exception.cleanup_confirmed, confirmed)
+                    self.assertEqual(runner.ACTIVE_PROCESSES, {})
+                finally:
+                    runner.INTERRUPT_SIGNAL = None
+
+    def test_interrupted_case_preserves_actual_summary_and_output_without_passing(self):
+        error = runner.RunnerInterrupted(signal.SIGINT)
+        error.output = 'test result: ok. 1 passed; 0 failed; 0 ignored;\n'
+        error.stderr = 'diagnostic before cancellation\n'
+        error.cleanup_confirmed = False
+        record = {}
+        with patch.object(runner, 'execute', side_effect=error):
+            passed, output, stderr = runner.run_one(str(self.binary), 'suite::works',
+                                                    False, 600, record, 'app.slice')
+        self.assertFalse(passed)
+        self.assertEqual(record['status'], 'interrupted')
+        self.assertEqual(record['interrupt_signal'], signal.SIGINT)
+        self.assertEqual(record['executed_test_count'], 1)
+        self.assertEqual(record['passed_test_count'], 1)
+        self.assertEqual(record['process_cleanup_status'], 'unconfirmed')
+        self.assertIn(error.output, output)
+        self.assertIn(error.stderr, stderr)
+
+    def test_failed_pipe_drain_keeps_partial_output_after_closing_inherited_pipes(self):
+        class Process:
+            pid = 781241
+            returncode = 0
+            _tidepool_delegated = True
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            def communicate(self, timeout=None):
+                raise subprocess.TimeoutExpired(['fake-libtest'], timeout,
+                                                output=b'partial output\n', stderr=b'diagnostic\xff')
+            def wait(self, timeout=None):
+                return self.returncode
+        process = Process()
+        with patch.object(runner.os, 'killpg') as kill:
+            output, stderr = runner._kill_and_reap(process)
+        kill.assert_not_called()
+        self.assertEqual(output, 'partial output\n')
+        self.assertEqual(stderr, 'diagnostic\ufffd')
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
 
     def test_delegated_stop_escalates_only_exact_service_and_verifies_end_state(self):
         unit = 'tidepool-libtest-exact.service'
@@ -1792,6 +1876,7 @@ class IsolatedLibtestTests(unittest.TestCase):
         with patch.object(runner.subprocess, 'Popen', return_value=process), \
              patch.object(process, 'communicate', side_effect=[
                  subprocess.TimeoutExpired(['fake-libtest'], 2), ('', '')]), \
+             patch.object(runner.time, 'monotonic', side_effect=[0, 0, 2]), \
              patch.object(runner, 'observe_delegated_admission'), \
              patch.object(runner.subprocess, 'run', side_effect=control), \
              self.assertRaises(subprocess.TimeoutExpired):
