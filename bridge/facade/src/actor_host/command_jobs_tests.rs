@@ -1618,9 +1618,13 @@ async fn command_hidden_by_the_response_budget_remains_unobserved() {
                 });
                 let backend = TestCommands::new();
                 backend.finish.send_replace(true);
-                backend_request_while_live(campaign, &mut running)
-                    .await
-                    .supply(Ok(backend.clone()));
+                backend_request_while_live(
+                    campaign,
+                    &mut running,
+                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                )
+                .await
+                .supply(Ok(backend.clone()));
                 let first = running.await.unwrap();
                 assert_eq!(first["status"], "committed");
                 assert!(!first.to_string().contains("stdout ·"));
@@ -1660,9 +1664,13 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
                 let first = invocation();
                 let mut waiter =
                     tokio::spawn(async move { policy.dispatch_json_boxed(first).await });
-                backend_request_while_live(campaign, &mut waiter)
-                    .await
-                    .supply(Ok(backend.clone()));
+                backend_request_while_live(
+                    campaign,
+                    &mut waiter,
+                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                )
+                .await
+                .supply(Ok(backend.clone()));
                 let owner = campaign
                     .root_installation
                     .policy
@@ -1699,14 +1707,19 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
                     }
                 };
                 tokio::pin!(original_settlement);
-                for backend in [&second, &suffix] {
-                    backend_request_while_live(campaign, &mut original_settlement)
+                for (backend, budget) in [
+                    (&second, Duration::from_secs(30)),
+                    (&suffix, COLD_DEBUG_CELL_SETTLEMENT_BUDGET),
+                ] {
+                    backend_request_while_live(campaign, &mut original_settlement, budget)
                         .await
                         .supply(Ok(backend.clone()));
                 }
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
                 let terminal = tokio::time::timeout(
                     COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-                    &mut original_settlement,
+                    campaign.drive_actor_output(&store, &mut original_settlement),
                 )
                 .await
                 .expect("the original settles before transport replay");
@@ -1728,12 +1741,25 @@ async fn disconnected_command_wait_retries_the_same_invocation_without_reexecuti
                 );
                 assert_eq!(recovered["status"], "committed", "{recovered}");
                 assert!(
-                    recovered.to_string().contains("suffix-resumed"),
+                    super::test_campaign::committed_display_text(&recovered)
+                        .contains("suffix-resumed"),
                     "{recovered}"
                 );
                 policy.complete_boxed(boundary).await.unwrap();
-                let retained = committed(campaign, "Cmd.stdout (fst attempt)").await;
-                assert!(retained.to_string().contains("first"), "{retained}");
+                let policy = campaign.root_installation.policy.clone();
+                let retained = campaign
+                    .drive_actor_output(
+                        &store,
+                        dispatch_haskell_script(
+                            policy.as_ref(),
+                            "display (Cmd.stdout (fst attempt))",
+                        ),
+                    )
+                    .await;
+                assert!(
+                    super::test_campaign::committed_display_text(&retained).contains("first"),
+                    "{retained}"
+                );
                 for backend in [&backend, &second, &suffix] {
                     assert_eq!(
                         backend.executions(),
@@ -1752,7 +1778,7 @@ async fn command_run_returns_typed_output_failure_and_resumes_the_suffix() {
     let campaign = TestCampaign::start().await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.clone();
-    let running = tokio::spawn(async move {
+    let mut running = tokio::spawn(async move {
         dispatch_haskell_script(
             policy.as_ref(),
             &tidepool_testing::fixture_source(
@@ -1765,45 +1791,49 @@ async fn command_run_returns_typed_output_failure_and_resumes_the_suffix() {
     backend
         .output_unavailable
         .store(true, std::sync::atomic::Ordering::Release);
-    backend_request(campaign)
+    backend_request_while_live(campaign, &mut running, COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
         .await
         .supply(Ok(backend.clone()));
     let second = TestCommands::completed("second");
-    backend_request(campaign)
+    backend_request_while_live(campaign, &mut running, Duration::from_secs(30))
         .await
         .supply(Ok(second.clone()));
     let suffix = TestCommands::completed("suffix");
-    backend_request(campaign)
+    backend_request_while_live(campaign, &mut running, COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
         .await
         .supply(Ok(suffix.clone()));
-    let result = running.await.unwrap();
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    let result = campaign.drive_actor_output(&store, running).await.unwrap();
     assert_eq!(result["status"], "committed", "{result}");
     for item in result["items"].as_array().unwrap() {
         assert_eq!(item["status"], "committed", "{result}");
     }
-    let projected = committed(campaign,
-        "(Cmd.commandOutcome (Cmd.commandResult (fst attempt)), Cmd.capturedOutput (fst attempt), Cmd.stdout (fst attempt), Cmd.stderr (fst attempt))",
-    ).await;
-    let typed = projected["items"][0]["output"].as_str().unwrap();
+    let policy = campaign.root_installation.policy.clone();
+    let projected = campaign.drive_actor_output(&store, dispatch_haskell_script(policy.as_ref(),
+        "display (Cmd.commandOutcome (Cmd.commandResult (fst attempt)), Cmd.capturedOutput (fst attempt), Cmd.stdout (fst attempt), Cmd.stderr (fst attempt))",
+    )).await;
+    let typed = super::test_campaign::committed_display_text(&projected);
     assert!(typed.contains("CommandExited 0"), "{typed}");
     assert!(typed.contains("CommandUnavailable"), "{typed}");
     assert_eq!(typed.matches("OutputUnavailable").count(), 2, "{typed}");
-    let text = result.to_string();
+    let text = super::test_campaign::committed_display_text(&result);
     assert!(text.contains("output transport lost"), "{text}");
     for marker in ["second", "suffix", "suffix-resumed"] {
         assert!(text.contains(marker), "missing {marker}: {text}");
     }
-    let prefix = committed(campaign, "foregroundPrefix").await;
-    assert!(prefix.to_string().contains("prefix-preserved"), "{prefix}");
+    let prefix = campaign.drive_actor_output(&store,
+        dispatch_haskell_script(policy.as_ref(), "display foregroundPrefix")).await;
+    assert!(super::test_campaign::committed_display_text(&prefix)
+        .contains("prefix-preserved"), "{prefix}");
     backend
         .output_unavailable
         .store(false, std::sync::atomic::Ordering::Release);
-    let recovered = committed(
-        campaign,
-        "recovered <- Cmd.await (Cmd.job (fst attempt))\nCmd.stdout recovered",
-    )
-    .await;
-    assert!(recovered.to_string().contains("first"), "{recovered}");
+    let recovered = campaign.drive_actor_output(&store, dispatch_haskell_script(
+        policy.as_ref(),
+        "recovered <- Cmd.await (Cmd.job (fst attempt))\ndisplay (Cmd.stdout recovered)",
+    )).await;
+    assert!(super::test_campaign::committed_display_text(&recovered)
+        .contains("first"), "{recovered}");
     for backend in [&backend, &second, &suffix] {
         assert_eq!(
             backend.executions(),
@@ -1832,9 +1862,13 @@ async fn command_wait_preserves_the_exact_continuation_until_terminal_completion
                 });
                 let backend = TestCommands::new();
                 *backend.stdout.lock() = "first".into();
-                backend_request_while_live(campaign, &mut running)
-                    .await
-                    .supply(Ok(backend.clone()));
+                backend_request_while_live(
+                    campaign,
+                    &mut running,
+                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                )
+                .await
+                .supply(Ok(backend.clone()));
                 tokio::time::timeout(Duration::from_secs(30), async {
                     while backend.executions() == 0 {
                         assert!(
@@ -1859,19 +1893,25 @@ async fn command_wait_preserves_the_exact_continuation_until_terminal_completion
                 );
                 backend.finish();
                 let second = TestCommands::completed("second");
-                backend_request_while_live(campaign, &mut running)
+                backend_request_while_live(campaign, &mut running, Duration::from_secs(30))
                     .await
                     .supply(Ok(second.clone()));
                 let suffix = TestCommands::completed("suffix");
-                backend_request_while_live(campaign, &mut running)
-                    .await
-                    .supply(Ok(suffix.clone()));
-                let result = running.await.unwrap();
+                backend_request_while_live(
+                    campaign,
+                    &mut running,
+                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                )
+                .await
+                .supply(Ok(suffix.clone()));
+                let store =
+                    super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let result = campaign.drive_actor_output(&store, running).await.unwrap();
                 assert_eq!(result["status"], "committed", "{result}");
                 for item in result["items"].as_array().unwrap() {
                     assert_eq!(item["status"], "committed", "{result}");
                 }
-                let text = result.to_string();
+                let text = super::test_campaign::committed_display_text(&result);
                 for marker in ["first", "second", "suffix", "suffix-resumed"] {
                     assert!(text.contains(marker), "missing {marker}: {text}");
                 }
@@ -1905,7 +1945,7 @@ async fn command_handler_returns_typed_output_failure_without_interactive_recove
     backend
         .output_unavailable
         .store(true, std::sync::atomic::Ordering::Release);
-    let request = backend_request_while_live(campaign, &mut running).await;
+    let request = backend_request_while_live(campaign, &mut running, COLD_DEBUG_CELL_SETTLEMENT_BUDGET).await;
     request.supply(Ok(backend.clone()));
     let result = running
         .await
@@ -1945,7 +1985,12 @@ async fn command_wait_values_and_explicit_observations_have_one_display_owner() 
                 let backend = TestCommands::new();
                 backend.finish.send_replace(true);
                 for _ in 0..3 {
-                    let request = backend_request_while_live(campaign, &mut running).await;
+                    let request = backend_request_while_live(
+                        campaign,
+                        &mut running,
+                        COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                    )
+                    .await;
                     request.supply(Ok(backend.clone()));
                 }
                 let result = running.await.unwrap();
@@ -3052,9 +3097,13 @@ async fn command_direct_wait_captures_report_and_releases_subscription() {
                     .await
                 });
                 let backend = TestCommands::new();
-                backend_request_while_live(campaign, &mut running)
-                    .await
-                    .supply(Ok(backend.clone()));
+                backend_request_while_live(
+                    campaign,
+                    &mut running,
+                    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                )
+                .await
+                .supply(Ok(backend.clone()));
                 tokio::time::timeout(Duration::from_secs(30), async {
                     while backend.executions() == 0 {
                         assert!(!running.is_finished(), "direct wait ended before execution");

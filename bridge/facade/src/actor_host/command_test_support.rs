@@ -340,12 +340,15 @@ fn test_page(text: &str) -> CommandPage {
 pub(super) async fn backend_request(
     campaign: &mut super::test_campaign::TestCampaign,
 ) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
+    backend_request_with_budget(campaign, std::time::Duration::from_secs(30)).await
+}
+
+async fn backend_request_with_budget(
+    campaign: &mut super::test_campaign::TestCampaign,
+    budget: std::time::Duration,
+) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest> {
     loop {
-        let request = raw_backend_request_with_budget(
-            campaign,
-            super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
-        )
-        .await;
+        let request = raw_backend_request_with_budget(campaign, budget).await;
         match request.purpose {
             exomonad_actor::command_jobs::CommandBackendPurpose::Command => return request,
             exomonad_actor::command_jobs::CommandBackendPurpose::SourceProbe => {
@@ -357,16 +360,18 @@ pub(super) async fn backend_request(
     }
 }
 
-/// Command admission can include cold compilation; observe its actual operation too.
+/// Allow cold compilation for a new item, or the shorter resumed-effect budget.
+/// Both phases observe the actual operation's terminal outcome too.
 pub(super) async fn backend_request_while_live<F>(
     campaign: &mut super::test_campaign::TestCampaign,
     operation: &mut F,
+    budget: std::time::Duration,
 ) -> Arc<exomonad_actor::command_jobs::CommandBackendRequest>
 where
     F: std::future::Future + Unpin,
     F::Output: std::fmt::Debug,
 {
-    command_admission_while_live(operation, backend_request(campaign)).await
+    command_admission_while_live(operation, backend_request_with_budget(campaign, budget)).await
 }
 
 async fn command_admission_while_live<F>(
