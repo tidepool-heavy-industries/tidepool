@@ -1103,8 +1103,27 @@ fn dependency_only_catalog_closure_preserves_bytes_without_ambient_origin_custod
                 .clone(),
         )
     };
-    let b = inventory
+    let missing = inventory
         .admit(&inventory.empty_view(), vec![incoming()])
+        .unwrap_err();
+    assert!(matches!(
+        missing,
+        crate::CompileError::ArtifactInventory(error)
+            if matches!(error.failure,
+                crate::artifact_inventory::ArtifactInventoryFailure::MissingDependency { .. })
+    ));
+    // Dependency bytes are explicit authenticated input, independent of the
+    // physical catalog custody carried by the old view.
+    let semantic_a = ArtifactEntry::canonical(
+        selected.by_owner[&("u".into(), "A".into())]
+            .original_module_interface
+            .clone()
+            .without_catalog_input_custody(),
+    );
+    let b = inventory
+        .admit(&inventory.empty_view(), vec![semantic_a, incoming()])
+        .unwrap()
+        .select_roots(vec![id_b])
         .unwrap();
     assert!(
         origin_paths(&b, id_a).is_empty(),
