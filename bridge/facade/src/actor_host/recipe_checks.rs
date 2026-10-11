@@ -287,11 +287,7 @@ impl Driver {
             roots
         };
         includes.extend(selected.include.iter().cloned());
-        let refs = includes.iter().map(PathBuf::as_path).collect::<Vec<_>>();
-        // Pieces, not a whole module string: `compile_and_run` assembles the
-        // prepared-STG scaffold itself (session::assemble_expression_module)
-        // — see its doc for why splicing that into an already-composed
-        // module string isn't safe in general.
+        // Assemble the same prepared-STG scaffold as ordinary one-shot runs.
         let preamble = format!(
             "{{-# LANGUAGE DataKinds #-}}\nmodule RecipeMain where\n\
              import Control.Monad.Freer\nimport Tidepool.Check\n\
@@ -304,12 +300,32 @@ impl Driver {
             entry,
             tidepool_runtime::session::ExpressionLift::Effectful,
         );
-        tokio::task::block_in_place(|| {
+        let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
+        let artifacts = tokio::task::block_in_place(|| {
             super::run_compiler_preparation(|settlement| {
-                tidepool_runtime::compile_and_run(&source, "result", &refs, self, &(), settlement)
-                    .map_err(|error| render_recipe_compile_error(error, &source, entry))
+                tidepool_runtime::compile_targets(
+                    &source,
+                    &[target],
+                    &includes,
+                    |_, _, _| {},
+                    settlement,
+                )
+                .map_err(|error| render_recipe_compile_error(error.into(), &source, entry))
             })
         })?;
+        // Recipe handlers can admit actor compilation. Their caller must release
+        // the recipe compiler transaction before entering any such handler.
+        tokio::task::block_in_place(|| {
+            tidepool_runtime::run_compiled_target(
+                &artifacts,
+                target,
+                tidepool_runtime::DEFAULT_NURSERY_SIZE,
+                self,
+                &(),
+                |_| {},
+            )
+        })
+        .map_err(|error| render_recipe_compile_error(error, &source, entry))?;
         Ok(())
     }
 
