@@ -604,6 +604,27 @@ struct RejectFirstRequest {
     reject_successor: tokio::sync::Notify,
 }
 
+#[derive(Default)]
+struct AncestorOutputGate {
+    requests: Mutex<Vec<String>>,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl exomonad_actor::JevBackend for AncestorOutputGate {
+    fn ask(
+        &self,
+        request: String,
+    ) -> futures_util::future::BoxFuture<'_, Result<String, exomonad_actor::JevCallFailure>> {
+        Box::pin(async move {
+            self.requests.lock().push(request.clone());
+            self.entered.notify_one();
+            self.release.notified().await;
+            exomonad_actor::JevBackend::ask(&super::test_campaign::FixtureJev, request).await
+        })
+    }
+}
+
 #[async_trait]
 impl ResponsesTransport for RejectFirstRequest {
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
@@ -696,17 +717,12 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
         reject_successor: tokio::sync::Notify::new(),
     });
     let host_transport: Arc<dyn ResponsesTransport> = transport.clone();
-    let fixture = HostedTestRuntime::start(&settings, &host_transport)
-        .await
-        .unwrap();
-    let output_release = fixture
-        .context
-        .config
-        .workspace
-        .join("ancestor-output-release");
-    if tool_before_rejection {
-        std::fs::write(&output_release, "pending").unwrap();
-    }
+    let output_gate = Arc::new(AncestorOutputGate::default());
+    let fixture = HostedTestRuntime::start_configured(&settings, &host_transport, |config| {
+        config.jev = Some(output_gate.clone());
+    })
+    .await
+    .unwrap();
     let target = browser_target(&fixture.context);
     let actor = fixture.context.actor.identity();
     let api = format!("http://{}/api", fixture.address);
@@ -749,7 +765,22 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
             item.0["type"] == "custom_tool_call_output"
                 && item.0["call_id"] == "before-rejection-cell"
         }));
-        tidepool_atomic_write::write_durable(&output_release, b"release").unwrap();
+        let claims = store
+            .claims(&harness::model::CallId("before-rejection-cell".into()))
+            .unwrap();
+        assert_eq!(claims.len(), 1);
+        fixture
+            .while_operation_succeeds(
+                &claims[0].operation,
+                tokio::time::timeout(Duration::from_secs(300), output_gate.entered.notified()),
+            )
+            .await
+            .expect("the actual cell failed before entering its completion gate")
+            .expect("the actual cell never entered its completion gate");
+        assert_eq!(output_gate.requests.lock().len(), 1);
+        assert!(output_gate.requests.lock()[0]
+            .contains("hold ancestor output until successor preparation"));
+        output_gate.release.notify_one();
         tokio::time::timeout(Duration::from_secs(300), async {
             loop {
                 let claims = store
@@ -764,6 +795,7 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
                         })
                 }) {
                     assert_eq!(claims.len(), 1);
+                    assert_eq!(output_gate.requests.lock().len(), 1);
                     assert!(!store
                         .items(&claims[0].request)
                         .unwrap()

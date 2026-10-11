@@ -1,10 +1,6 @@
-_ <- let waitForRelease = do
-           Right state <- readFile "ancestor-output-release"
-           if state == "pending"
-             then sleep (milliseconds 10) >> waitForRelease
-             else do
-               True <- pure (state == "release")
-               pure ()
-     in do
-       waitForRelease
-       display (40 + 2 :: Int)
+_ <- do
+  Right response <- J.ask1 (J.rawState (String "hold ancestor output until successor preparation"))
+    (J.choice "Release the retained cell?"
+      (J.alt #yes "Release" () J..| J.alt #no "Reject" ()))
+  True <- pure (J.handle (J.answers response) (#yes (\_ -> True) J..| #no (\_ -> False)))
+  display (40 + 2 :: Int)
