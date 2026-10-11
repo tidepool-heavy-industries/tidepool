@@ -63,6 +63,14 @@ fn exec_decl_matches_the_schema_exactly() {
     );
 }
 
+#[test]
+fn console_decl_matches_the_schema_exactly() {
+    assert_decl_matches_schema(
+        &tidepool_mcp::console_decl(),
+        &tidepool_protocol::effects::console::console(),
+    );
+}
+
 /// Written to run BEFORE the flip, against the still-hand-written
 /// `journal_effect_def!` macro — see the module doc: green here is what makes
 /// this a proof rather than a tautology, and it is the go-ahead the flip
@@ -342,6 +350,7 @@ fn every_schema_effect_is_reachable() {
     assert_eq!(
         names,
         vec![
+            "Console",
             "Exec",
             "Journal",
             "Worktree",
@@ -350,6 +359,7 @@ fn every_schema_effect_is_reachable() {
             "ReadState",
             "RecipeCheck",
             "Green",
+            "ResourceScopes",
             "Actor",
             "ActorContext",
             "Introspection",
@@ -363,7 +373,6 @@ fn every_schema_effect_is_reachable() {
             "Jev",
             "AgentInspection",
             "AgentLaunch",
-            "Forks",
             "AgentTools",
             "AgentSession",
             "Reflect",

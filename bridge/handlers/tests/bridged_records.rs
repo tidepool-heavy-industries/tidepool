@@ -7,7 +7,7 @@
 //!      before/after DIFF — a field ORDER or NAME change on either side flips a
 //!      probe red; this is the drift the tool is built to catch);
 //!   2. golden-checks the generated `Tidepool.Records.Bridged` module against
-//!      the committed stdlib file (regen with `TIDEPOOL_REGEN_BRIDGED=1`).
+//!      the immutable stdlib source supplied to the test by Buck.
 //!
 //! A third, separate guard (bottom of this file) covers `Tidepool.Records.
 //! Stable` — the stable home for `FsError`/`FileRead`/`GitError`/`LlmError`/
@@ -52,31 +52,21 @@ fn generated_decls_match_expected_exactly() {
 // --- 2. Golden: generated Bridged module == committed stdlib file. -----------
 
 fn bridged_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../haskell/lib/Tidepool/Records/Bridged.hs")
+    std::path::PathBuf::from(
+        std::env::var_os("TIDEPOOL_PRELUDE_DIR")
+            .expect("Buck supplies the embedded Prelude source root"),
+    )
+    .join("Tidepool/Records/Bridged.hs")
 }
 
 #[test]
 fn bridged_records_module_matches_committed_file() {
     let generated = bridged_records_module();
     let path = bridged_path();
-    let regen = std::env::var_os("TIDEPOOL_REGEN_BRIDGED").is_some();
-    let current = std::fs::read_to_string(&path).ok();
-    if regen || current.is_none() {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&path, &generated).unwrap();
-        if current.as_deref() != Some(generated.as_str()) && !regen {
-            panic!("wrote missing/updated {} — re-run the test", path.display());
-        }
-        return;
-    }
     assert_eq!(
-        current.unwrap(),
+        std::fs::read_to_string(&path).expect("declared Bridged source must be readable"),
         generated,
-        "committed {} is stale vs the generated module — regenerate with \
-         TIDEPOOL_REGEN_BRIDGED=1 cargo test -p tidepool-handlers bridged_records",
+        "declared {} is stale vs the generated module",
         path.display()
     );
 }
@@ -91,8 +81,11 @@ fn bridged_records_module_matches_committed_file() {
 // catches the two drifting apart.
 
 fn stable_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../haskell/lib/Tidepool/Records/Stable.hs")
+    std::path::PathBuf::from(
+        std::env::var_os("TIDEPOOL_PRELUDE_DIR")
+            .expect("Buck supplies the embedded Prelude source root"),
+    )
+    .join("Tidepool/Records/Stable.hs")
 }
 
 #[test]
@@ -179,23 +172,10 @@ fn stable_records_decl_matches_git_llm_http_effect_defs() {
 fn stable_records_module_matches_committed_file() {
     let generated = tidepool_mcp::stable_records_module();
     let path = stable_path();
-    let regen = std::env::var_os("TIDEPOOL_REGEN_BRIDGED").is_some();
-    let current = std::fs::read_to_string(&path).ok();
-    if regen || current.is_none() {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        std::fs::write(&path, &generated).unwrap();
-        if current.as_deref() != Some(generated.as_str()) && !regen {
-            panic!("wrote missing/updated {} — re-run the test", path.display());
-        }
-        return;
-    }
     assert_eq!(
-        current.unwrap(),
+        std::fs::read_to_string(&path).expect("declared Stable source must be readable"),
         generated,
-        "committed {} is stale vs the generated module — regenerate with \
-         TIDEPOOL_REGEN_BRIDGED=1 cargo test -p tidepool-handlers bridged_records",
+        "declared {} is stale vs the generated module",
         path.display()
     );
 }

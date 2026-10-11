@@ -23,10 +23,15 @@ fn pinned_decls() -> Vec<EffectDecl> {
 #[test]
 fn all_declaration_names_and_order_are_explicit() {
     let names: Vec<_> = pinned_decls().iter().map(|d| d.type_name).collect();
+    let unique_names: std::collections::HashSet<_> = names.iter().copied().collect();
+    assert_eq!(
+        names.len(),
+        unique_names.len(),
+        "the universal declaration roster must not repeat an effect"
+    );
     assert_eq!(
         names,
         vec![
-            "Console",
             "KV",
             "FsRead",
             "FsWrite",
@@ -37,6 +42,7 @@ fn all_declaration_names_and_order_are_explicit() {
             "Meta",
             "Ask",
             "Llm",
+            "Console",
             "Exec",
             "Journal",
             "Worktree",
@@ -45,6 +51,7 @@ fn all_declaration_names_and_order_are_explicit() {
             "ReadState",
             "RecipeCheck",
             "Green",
+            "ResourceScopes",
             "Actor",
             "ActorContext",
             "Introspection",
@@ -58,7 +65,6 @@ fn all_declaration_names_and_order_are_explicit() {
             "Jev",
             "AgentInspection",
             "AgentLaunch",
-            "Forks",
             "AgentTools",
             "AgentSession",
             "Reflect",

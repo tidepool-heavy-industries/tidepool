@@ -638,6 +638,31 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn exec_leader_exit_with_detached_pipe_writer_is_bounded_and_cancellable() {
+        const DETACHED_CHILD_ENV: &str = "TIDEPOOL_EXEC_TEST_DETACHED_CHILD_PID_FILE";
+        if let Some(path) = std::env::var_os(DETACHED_CHILD_ENV) {
+            // The nested test process forks a session leader that keeps the
+            // inherited output descriptors open after the test process exits.
+            // The child uses async-signal-safe calls after fork; its parent
+            // records the PID through the ordinary filesystem API.
+            let child = unsafe { libc::fork() };
+            assert!(
+                child >= 0,
+                "fork failed: {}",
+                std::io::Error::last_os_error()
+            );
+            if child == 0 {
+                unsafe {
+                    if libc::setsid() < 0 {
+                        libc::_exit(120);
+                    }
+                    libc::sleep(5);
+                    libc::_exit(0);
+                }
+            }
+            std::fs::write(path, child.to_string()).expect("write detached child PID");
+            return;
+        }
+
         let dir = tempfile::tempdir().unwrap();
         let pid_file = dir.path().join("detached.pid");
         let mut cleanup = DetachedChildCleanup {
@@ -645,11 +670,14 @@ mod tests {
             pid: None,
             terminated: false,
         };
-        let mut command = Command::new("sh");
-        command.arg("-c").arg(format!(
-            "setsid sleep 5 & echo $! > {}; exit 0",
-            pid_file.display()
-        ));
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "handlers::exec::tests::exec_leader_exit_with_detached_pipe_writer_is_bounded_and_cancellable",
+                "--nocapture",
+            ])
+            .env(DETACHED_CHILD_ENV, &pid_file);
         let started = Instant::now();
         let result =
             ExecHandler::spawn_and_capture_with(command, Duration::from_millis(250), |child| {
@@ -662,10 +690,14 @@ mod tests {
         });
         cleanup.terminate();
 
-        assert!(matches!(
-            result,
-            Err(ExecError::ExecTimeout(detail)) if detail.contains("output streams remained open")
-        ));
+        let result_description = match &result {
+            Err(error) => format!("error {error:?}"),
+            Ok(proc) => format!("success exit_code={}", proc.exit_code),
+        };
+        assert!(
+            matches!(&result, Err(ExecError::ExecTimeout(detail)) if detail.contains("output streams remained open")),
+            "unexpected process capture result: {result_description}"
+        );
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(
             escaped_session_alive,

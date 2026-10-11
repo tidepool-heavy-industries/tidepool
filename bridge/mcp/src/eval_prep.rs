@@ -79,7 +79,6 @@ pub fn standard_decls() -> Vec<EffectDecl> {
 /// narrow handler stack.
 pub fn all_decls() -> Vec<EffectDecl> {
     let mut declarations = vec![
-        crate::console_decl(),
         crate::kv_decl(),
         crate::fs_read_decl(),
         crate::fs_write_decl(),

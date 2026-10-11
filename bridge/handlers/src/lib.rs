@@ -194,7 +194,7 @@ mod tests {
             .iter()
             .map(|decl| decl.type_name)
             .collect();
-        assert_eq!(names, ["Console", "Ask", "RunLLMTurn"]);
+        assert_eq!(names, ["Console", "Ask"]);
     }
 
     #[test]

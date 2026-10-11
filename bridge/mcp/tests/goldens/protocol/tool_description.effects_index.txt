@@ -1,4 +1,4 @@
-  Console: Print text output.
+  Console: Suspend to the driver's console/operator feed (decode-only schema).
       verbs: say
   KV: Persistent key-value store.
       verbs: kvGet, kvSet, kvDel, kvClear, kvKeysP, kvInfo, kvCas
