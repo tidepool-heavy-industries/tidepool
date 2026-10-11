@@ -90,15 +90,58 @@ pub struct RecoveryArtifactInput<'a> {
 /// this bundle; materialization rechecks every member before publication.
 #[derive(Clone, Debug)]
 pub struct CertifiedRecoveryProduct {
-    owner: CachedHomeOwner,
+    state: OriginalState,
     source_sha256: Option<[u8; 32]>,
+    module_interface: Option<crate::certified_products::CertifiedModuleInterface>,
+}
+
+#[derive(Clone, Debug)]
+enum OriginalState {
+    Draft(OriginalDraft),
+    Complete(Arc<OriginalFacts>),
+}
+
+/// Incomplete construction remains private and cannot enter an inventory.
+#[derive(Clone, Debug)]
+struct OriginalDraft {
+    bytes: Arc<OriginalBytes>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OriginalBytes {
+    owner: CachedHomeOwner,
     interface_bytes: Arc<[u8]>,
     product_bytes: Arc<[u8]>,
     package_imports_bytes: Arc<[u8]>,
     certification_bytes: Arc<[u8]>,
     execution_source: Option<Arc<crate::execution_source::CertifiedExecutionSourceGraph>>,
-    original_native: Option<Arc<crate::certified_products::OriginalNativeWitness>>,
-    module_interface: Option<crate::certified_products::CertifiedModuleInterface>,
+}
+
+/// An authenticated original is adopted as one owner, including witness anchors.
+#[derive(Debug)]
+pub(crate) struct OriginalFacts {
+    bytes: Arc<OriginalBytes>,
+    canonical: Arc<crate::certified_products::CanonicalFacts>,
+    native: Arc<crate::certified_products::OriginalNativeWitness>,
+}
+impl PartialEq for OriginalFacts {
+    fn eq(&self, other: &Self) -> bool {
+        self.bytes.owner == other.bytes.owner
+            && self.bytes.product_bytes == other.bytes.product_bytes
+            && self.bytes.certification_bytes == other.bytes.certification_bytes
+            && self.bytes.execution_source == other.bytes.execution_source
+            && self.canonical == other.canonical
+    }
+}
+impl Eq for OriginalFacts {}
+impl std::ops::Deref for CertifiedRecoveryProduct {
+    type Target = OriginalBytes;
+    fn deref(&self) -> &OriginalBytes {
+        match &self.state {
+            OriginalState::Draft(draft) => &draft.bytes,
+            OriginalState::Complete(facts) => &facts.bytes,
+        }
+    }
 }
 
 // The native witness is a derived immutable fact, not another product identity.
@@ -114,13 +157,26 @@ impl CertifiedRecoveryProduct {
     /// witness remains separate admission authority and is never recovered or
     /// promoted by reusing an already retained inventory entry.
     pub(crate) fn same_durable_artifact(&self, other: &Self) -> bool {
-        self.owner == other.owner
-            && self.interface_bytes == other.interface_bytes
-            && self.product_bytes == other.product_bytes
-            && self.package_imports_bytes == other.package_imports_bytes
-            && self.certification_bytes == other.certification_bytes
-            && self.execution_source == other.execution_source
-            && self.module_interface == other.module_interface
+        match (&self.state, &other.state) {
+            (OriginalState::Complete(left), OriginalState::Complete(right)) => {
+                Arc::ptr_eq(left, right) || left == right
+            }
+            _ => **self == **other && self.module_interface == other.module_interface,
+        }
+    }
+
+    pub(crate) fn facts(&self) -> Option<&Arc<OriginalFacts>> {
+        match &self.state {
+            OriginalState::Complete(facts) => Some(facts),
+            OriginalState::Draft(_) => None,
+        }
+    }
+    pub(crate) fn with_facts(mut self, facts: Arc<OriginalFacts>) -> Self {
+        self.module_interface = self
+            .module_interface
+            .map(|interface| interface.with_facts(Arc::clone(&facts.canonical)));
+        self.state = OriginalState::Complete(facts);
+        self
     }
 
     pub(crate) fn from_certification(
@@ -131,14 +187,17 @@ impl CertifiedRecoveryProduct {
         certification_bytes: Vec<u8>,
     ) -> Self {
         Self {
-            owner,
+            state: OriginalState::Draft(OriginalDraft {
+                bytes: Arc::new(OriginalBytes {
+                    owner,
+                    interface_bytes: interface_bytes.into(),
+                    product_bytes: product_bytes.into(),
+                    package_imports_bytes: package_imports_bytes.into(),
+                    certification_bytes: certification_bytes.into(),
+                    execution_source: None,
+                }),
+            }),
             source_sha256: None,
-            interface_bytes: interface_bytes.into(),
-            product_bytes: product_bytes.into(),
-            package_imports_bytes: package_imports_bytes.into(),
-            certification_bytes: certification_bytes.into(),
-            execution_source: None,
-            original_native: None,
             module_interface: None,
         }
     }
@@ -151,14 +210,17 @@ impl CertifiedRecoveryProduct {
     ) -> Self {
         let interface = binding.into_interface();
         Self {
-            owner,
+            state: OriginalState::Draft(OriginalDraft {
+                bytes: Arc::new(OriginalBytes {
+                    owner,
+                    interface_bytes: interface.interface_anchor(),
+                    product_bytes: product_bytes.into(),
+                    package_imports_bytes: interface.package_imports_anchor(),
+                    certification_bytes: certification_bytes.into(),
+                    execution_source: None,
+                }),
+            }),
             source_sha256: None,
-            interface_bytes: interface.interface_anchor(),
-            product_bytes: product_bytes.into(),
-            package_imports_bytes: interface.package_imports_anchor(),
-            certification_bytes: certification_bytes.into(),
-            execution_source: None,
-            original_native: None,
             module_interface: Some(interface),
         }
     }
@@ -248,8 +310,12 @@ impl CertifiedRecoveryProduct {
         .map_err(|error| {
             recovery_validation_error(error, RecoveryArtifactError::InvalidReference)
         })?;
-        self.interface_bytes = interface.interface_anchor();
-        self.package_imports_bytes = interface.package_imports_anchor();
+        let OriginalState::Draft(draft) = &mut self.state else {
+            return Err(RecoveryArtifactError::InvalidReference);
+        };
+        let bytes = Arc::make_mut(&mut draft.bytes);
+        bytes.interface_bytes = interface.interface_anchor();
+        bytes.package_imports_bytes = interface.package_imports_anchor();
         self.module_interface = Some(interface);
         Ok(self)
     }
@@ -266,7 +332,10 @@ impl CertifiedRecoveryProduct {
     pub(crate) fn original_native(
         &self,
     ) -> Option<&Arc<crate::certified_products::OriginalNativeWitness>> {
-        self.original_native.as_ref()
+        match &self.state {
+            OriginalState::Complete(facts) => Some(&facts.native),
+            OriginalState::Draft(_) => None,
+        }
     }
 
     pub(crate) fn with_original_native(
@@ -276,7 +345,18 @@ impl CertifiedRecoveryProduct {
         if !witness.matches_original(&self) {
             return Err(RecoveryArtifactError::InvalidReference);
         }
-        self.original_native = Some(witness);
+        let canonical = self
+            .module_interface
+            .as_ref()
+            .ok_or(RecoveryArtifactError::InvalidReference)?;
+        let OriginalState::Draft(draft) = self.state else {
+            return Err(RecoveryArtifactError::InvalidReference);
+        };
+        self.state = OriginalState::Complete(Arc::new(OriginalFacts {
+            bytes: draft.bytes,
+            canonical: Arc::clone(canonical.facts()),
+            native: witness,
+        }));
         Ok(self)
     }
 
@@ -319,15 +399,33 @@ impl CertifiedRecoveryProduct {
         if sealed != Some(graph.digest()) {
             return Err(RecoveryArtifactError::InvalidReference);
         }
-        self.execution_source = Some(graph);
+        match &mut self.state {
+            OriginalState::Draft(draft) => {
+                Arc::make_mut(&mut draft.bytes).execution_source = Some(graph)
+            }
+            OriginalState::Complete(facts) => {
+                // This is authenticated semantic completion, retaining native byte anchors.
+                let mut bytes = (*facts.bytes).clone();
+                bytes.execution_source = Some(graph);
+                self.state = OriginalState::Complete(Arc::new(OriginalFacts {
+                    bytes: Arc::new(bytes),
+                    canonical: Arc::clone(&facts.canonical),
+                    native: Arc::clone(&facts.native),
+                }));
+            }
+        }
         Ok(self)
     }
 }
 
 /// A source-less interface sealed by declaration certification or verified
 /// recovery admission. Only the toolchain's owning workflows construct it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct CertifiedJoinedInterface {
+    facts: Arc<JoinedInterfaceBytes>,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JoinedInterfaceBytes {
     toolchain_identity_sha256: [u8; 32],
     unit: String,
     module: String,
@@ -335,6 +433,18 @@ pub struct CertifiedJoinedInterface {
     package_imports_bytes: Arc<[u8]>,
 }
 
+impl PartialEq for CertifiedJoinedInterface {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.facts, &other.facts) || self.facts == other.facts
+    }
+}
+impl Eq for CertifiedJoinedInterface {}
+impl std::ops::Deref for CertifiedJoinedInterface {
+    type Target = JoinedInterfaceBytes;
+    fn deref(&self) -> &JoinedInterfaceBytes {
+        &self.facts
+    }
+}
 impl CertifiedJoinedInterface {
     pub(crate) fn from_certification(
         producer: [u8; 32],
@@ -374,11 +484,13 @@ impl CertifiedJoinedInterface {
             validation,
         )?;
         Ok(Self {
-            toolchain_identity_sha256: producer,
-            unit,
-            module,
-            interface_bytes: interface_bytes.into(),
-            package_imports_bytes: package_imports_bytes.into(),
+            facts: Arc::new(JoinedInterfaceBytes {
+                toolchain_identity_sha256: producer,
+                unit,
+                module,
+                interface_bytes: interface_bytes.into(),
+                package_imports_bytes: package_imports_bytes.into(),
+            }),
         })
     }
     pub fn unit(&self) -> &str {

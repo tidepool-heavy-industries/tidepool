@@ -1150,7 +1150,9 @@ impl RecoveredArtifactInventory {
                 }
                 expected = Some(requirements);
             }
-            Arc::make_mut(entry).requirements = expected.unwrap_or_default().into_iter().collect();
+            *entry = Arc::new((**entry).clone().finalize_joined_requirements(
+                expected.unwrap_or_default().into_iter().collect(),
+            )?);
         }
         captured.bindings = available;
         captured.binding_edges = edges.to_vec();

@@ -496,6 +496,13 @@ pub(super) fn decode_envelope_with_operation(
 /// facts together. Clones retain these same allocations; no mutation API exists.
 #[derive(Clone, Debug)]
 pub(crate) struct CertifiedModuleInterface {
+    facts: Arc<CanonicalFacts>,
+    input_custody: Option<Arc<crate::module_candidates::deployment::DeploymentArtifactPaths>>,
+}
+
+/// Complete immutable compiler facts. Admission custody belongs to the facade.
+#[derive(Clone, Debug)]
+pub(crate) struct CanonicalFacts {
     producer_sha256: [u8; 32],
     receipt: Arc<FinalizedModuleReceipt>,
     home_units: Arc<BTreeSet<String>>,
@@ -504,23 +511,44 @@ pub(crate) struct CertifiedModuleInterface {
     certificate: Arc<[u8]>,
     core: Option<Arc<[u8]>>,
     origin: CanonicalOrigin,
-    input_custody: Option<Arc<crate::module_candidates::deployment::DeploymentArtifactPaths>>,
 }
 
-impl PartialEq for CertifiedModuleInterface {
+impl PartialEq for CanonicalFacts {
     fn eq(&self, other: &Self) -> bool {
-        // Scratch capture paths and declared lengths do not create another
-        // durable owner for identical authenticated payloads.
+        // Capture paths are transport metadata; the certificate authenticates
+        // the semantic receipt, origin and home-unit facts.
         self.producer_sha256 == other.producer_sha256
             && self.certificate == other.certificate
             && self.interface == other.interface
             && self.package_imports == other.package_imports
             && self.core == other.core
+            && self.origin == other.origin
+            && self.home_units == other.home_units
+    }
+}
+impl Eq for CanonicalFacts {}
+impl std::ops::Deref for CertifiedModuleInterface {
+    type Target = CanonicalFacts;
+    fn deref(&self) -> &CanonicalFacts {
+        &self.facts
+    }
+}
+impl PartialEq for CertifiedModuleInterface {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.facts, &other.facts) || self.facts == other.facts
     }
 }
 impl Eq for CertifiedModuleInterface {}
 
 impl CertifiedModuleInterface {
+    pub(crate) fn facts(&self) -> &Arc<CanonicalFacts> {
+        &self.facts
+    }
+    pub(crate) fn with_facts(mut self, facts: Arc<CanonicalFacts>) -> Self {
+        self.facts = facts;
+        self
+    }
+
     pub(crate) fn with_catalog_input_custody(
         mut self,
         custody: Arc<crate::module_candidates::deployment::DeploymentArtifactPaths>,
@@ -1086,14 +1114,16 @@ pub(super) fn issue_interfaces(
             validation.inventory.charge(unit.len() + name.len())?;
         }
         issued.push(CertifiedModuleInterface {
-            producer_sha256: producer,
-            receipt: Arc::new(module.clone()),
-            home_units: Arc::clone(&home_units),
-            interface: interface.into(),
-            package_imports: package_imports.into(),
-            certificate: certificate.into(),
-            core: core.map(Into::into),
-            origin,
+            facts: Arc::new(CanonicalFacts {
+                producer_sha256: producer,
+                receipt: Arc::new(module.clone()),
+                home_units: Arc::clone(&home_units),
+                interface: interface.into(),
+                package_imports: package_imports.into(),
+                certificate: certificate.into(),
+                core: core.map(Into::into),
+                origin,
+            }),
             input_custody: None,
         });
     }
@@ -1208,14 +1238,16 @@ pub(super) fn recover_interface(
         .inventory
         .reserve::<(FinalizedModuleReceipt, [usize; 2])>(1)?;
     Ok(CertifiedModuleInterface {
-        producer_sha256: producer,
-        receipt: Arc::new(receipt),
-        home_units: Arc::new(canonical_envelope.home_units),
-        interface: interface.into(),
-        package_imports: package_imports.into(),
-        certificate: certificate.into(),
-        core: core.map(Into::into),
-        origin,
+        facts: Arc::new(CanonicalFacts {
+            producer_sha256: producer,
+            receipt: Arc::new(receipt),
+            home_units: Arc::new(canonical_envelope.home_units),
+            interface: interface.into(),
+            package_imports: package_imports.into(),
+            certificate: certificate.into(),
+            core: core.map(Into::into),
+            origin,
+        }),
         input_custody: None,
     })
 }
@@ -1507,13 +1539,16 @@ mod tests {
         )
         .is_err());
         let canonical_mutations: [fn(&mut CertifiedModuleInterface); 4] = [
-            |module: &mut CertifiedModuleInterface| module.core = None,
+            |module: &mut CertifiedModuleInterface| Arc::make_mut(&mut module.facts).core = None,
             |module: &mut CertifiedModuleInterface| {
-                module.core = Some(b"changed Core".to_vec().into())
+                Arc::make_mut(&mut module.facts).core = Some(b"changed Core".to_vec().into())
             },
-            |module: &mut CertifiedModuleInterface| module.producer_sha256 = [0; 32],
             |module: &mut CertifiedModuleInterface| {
-                module.origin = CanonicalOrigin::NativeAuthoredDeclaration { generation: 1 }
+                Arc::make_mut(&mut module.facts).producer_sha256 = [0; 32]
+            },
+            |module: &mut CertifiedModuleInterface| {
+                Arc::make_mut(&mut module.facts).origin =
+                    CanonicalOrigin::NativeAuthoredDeclaration { generation: 1 }
             },
         ];
         for mutate in canonical_mutations {

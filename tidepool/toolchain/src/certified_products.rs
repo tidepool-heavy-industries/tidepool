@@ -20,7 +20,7 @@ mod finalized_module;
 pub(crate) use entry_dependencies::EntryDependencySelection;
 mod retained_core;
 pub(crate) use finalized_module::{
-    CanonicalOrigin, CanonicalSourceImport, CertifiedModuleInterface,
+    CanonicalFacts, CanonicalOrigin, CanonicalSourceImport, CertifiedModuleInterface,
 };
 pub use finalized_module::{
     CapturedArtifactDescriptor, CapturedValueInterfaceReceipt, FinalizationEnvelope,
@@ -331,6 +331,13 @@ pub(crate) struct CertifiedSegmentOriginals {
 }
 
 impl CertifiedSegmentOriginals {
+    pub(crate) fn source_selection(&self) -> &CertifiedSourceSelection {
+        &self.products.source_selection
+    }
+    pub(crate) fn value_entries(&self) -> &[Arc<crate::artifact_inventory::ArtifactEntry>] {
+        &self.value_entries
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn issue(
         raw: ParsedModuleProducts,
@@ -769,9 +776,14 @@ pub(crate) struct OriginalNativeWitness {
     interface_requirements: BTreeMap<(String, String), [u8; 32]>,
     packages: BTreeMap<(String, String), PackageInterfaceWitness>,
     native_requirements: CertifiedNativeRequirements,
+    inventory: crate::artifact_inventory::NativeInventoryFacts,
 }
 
 impl OriginalNativeWitness {
+    pub(crate) fn inventory_facts(&self) -> &crate::artifact_inventory::NativeInventoryFacts {
+        &self.inventory
+    }
+
     fn group(&self, original_ordinal: u32) -> Option<&AuthenticatedOriginalGroup> {
         self.group_positions
             .get(&original_ordinal)
@@ -925,6 +937,27 @@ fn retain_authenticated_original_native(
         }
     }
     let native_requirements = native_requirements_from_witness(&witness);
+    let inventory = crate::artifact_inventory::NativeInventoryFacts {
+        native_requirements: crate::artifact_inventory::index_native_requirements(
+            native_requirements.artifact_edges.clone(),
+        )
+        .map_err(|_| CertificationError::Mismatch("native inventory adjacency"))?,
+        native_owners: witness
+            .sources
+            .values()
+            .map(|owner| {
+                (
+                    crate::declaration_join::ExactModuleIdentity {
+                        unit: owner.unit.clone(),
+                        module: owner.module.clone(),
+                    },
+                    crate::artifact_inventory::NativeOwnerKey::from_owner(owner),
+                )
+            })
+            .collect(),
+        native_group_ordinals: native_requirements.group_ordinals.clone(),
+        retained_packages: native_requirements.retained_packages.clone(),
+    };
     let facts = Arc::new(OriginalNativeWitness {
         owner: witness.owner,
         execution_source_sha256: witness.execution_source_sha256,
@@ -935,6 +968,7 @@ fn retain_authenticated_original_native(
         interface_requirements: witness.interface_requirements,
         packages: witness.packages,
         native_requirements,
+        inventory,
     });
     product
         .with_original_native(facts)
@@ -5999,6 +6033,45 @@ pub(crate) fn certify_recovery_products_with_validation(
             })
         })
         .collect()
+}
+
+/// Complete private construction before an artifact can enter the live inventory.
+pub(crate) fn finalize_original_for_inventory(
+    product: crate::recovery_artifacts::CertifiedRecoveryProduct,
+    validation: &mut PackageInterfaceValidation,
+) -> CertResult<crate::recovery_artifacts::CertifiedRecoveryProduct> {
+    if product.facts().is_some() {
+        return Ok(product);
+    }
+    validate_original_module_interface(
+        &product,
+        product
+            .module_interface()
+            .ok_or(CertificationError::Mismatch("original canonical companion"))?,
+    )?;
+    let requirements = crate::prepared_artifact::production_requirements()?;
+    let (raw, witness) = capture_original_product_with_validation(
+        product.owner(),
+        product.interface_bytes(),
+        product.product_bytes(),
+        product.package_imports_bytes(),
+        product.certification_bytes(),
+        &requirements,
+        validation,
+    )?;
+    validate_inherited_group_headers(&raw, &witness)?;
+    let imports = authenticate_original_imports(&raw, &witness, validation)?;
+    let groups = raw
+        .groups
+        .into_iter()
+        .zip(imports)
+        .map(|(group, imports)| AuthenticatedOriginalGroup {
+            owner: witness.owner.clone(),
+            group: Arc::new(group),
+            imports: imports.into(),
+        })
+        .collect();
+    retain_authenticated_original_native(product, groups, witness)
 }
 
 /// The candidate loader owns decoded TPMOD bytes. This issuer authenticates
