@@ -421,7 +421,7 @@ async fn cell_model_policy_matches_admitted_embedded_alias_and_effort() {
     let storage = tempfile::tempdir().unwrap();
     let workspace = serde_json::from_value(json!({
         "include": [], "modules": [], "prompts": {}, "models": {"fast":"admitted-model"},
-        "files": {}, "config": "", "library_identity": ""
+        "files": {}, "config": "", "library_identity": "", "runtime_orchestration": ""
     }))
     .unwrap();
     let config = ActorHostConfig {
