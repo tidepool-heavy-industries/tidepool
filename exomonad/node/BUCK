@@ -5,6 +5,18 @@ load("@prelude//rust:sources.bzl", "rust_filegroup")
 
 load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")
 
+tidepool_rust_binary(
+    name = "view_helper_fixture",
+    package_name = "tidepool",
+    package_dir = "bridge/facade",
+    version = "0.1.0",
+    crate_root = "bridge/facade/src/bin/exomonad-view-helper.rs",
+    edition = "2021",
+    srcs_filegroup = "//bridge/facade:exomonad-view-helper_sources",
+    deps = [":exomonad_node"],
+    visibility = ["PUBLIC"],
+)
+
 rust_filegroup(
     name = "exomonad_node_sources",
     mapped_srcs = {
@@ -224,6 +236,8 @@ tidepool_rust_isolated_test(
     required_test_modules = [
         "exomonad/node/tests/overlay_rotation.rs",
     ],
+
+    companion_executables = {"exomonad-view-helper": ":view_helper_fixture"},
     visibility = ["PUBLIC"],
 )
 

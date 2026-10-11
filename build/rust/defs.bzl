@@ -1,3 +1,4 @@
+load("//build/rust:executable-companions.bzl", "executable_companions")
 load("@prelude//:rules.bzl", "rust_binary", "rust_library", "rust_test", "sh_test")
 load("//build:native_profile.bzl", "rust_optimization_level")
 load(":test_source_participation.bzl", "test_source_requirements")
@@ -79,6 +80,7 @@ def tidepool_rust_test_cases(
         resource_env = {},
         resources = [],
         haskell_worker = False,
+        companion_executables = {},
         run_env = {},
         test_rule_timeout_ms = None,
         visibility = []):
@@ -95,6 +97,13 @@ def tidepool_rust_test_cases(
         fail("timeout must be positive")
     if jobs != None and jobs <= 0:
         fail("jobs must be positive")
+    if companion_executables:
+        executable_companions(
+            name = name + "_execution",
+            executable = binary,
+            companions = companion_executables,
+        )
+        binary = ":" + name + "_execution"
     args = ["$(location " + binary + ")", "--timeout", str(timeout)]
     runtime_env = dict(env)
     resource_env = dict(resource_env)
@@ -157,6 +166,7 @@ def tidepool_rust_isolated_test(
         timeout = 300,
         jobs = None,
         resources = [],
+        companion_executables = {},
         run_env = {},
         test_rule_timeout_ms = None,
         **kwargs):
@@ -182,6 +192,7 @@ def tidepool_rust_isolated_test(
         jobs = jobs,
         env = runtime_env,
         resource_env = resource_env,
+        companion_executables = companion_executables,
         resources = resources,
         haskell_worker = haskell_worker,
         run_env = run_env,

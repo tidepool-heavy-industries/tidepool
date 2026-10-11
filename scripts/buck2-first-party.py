@@ -1387,6 +1387,19 @@ for package_name, package in local.items():
     if package_name == "tidepool-codegen":
         rules.append('load("//build/rust:codegen-md5.bzl", "tidepool_codegen_md5")\n')
     rules.append('load("//build/rust:defs.bzl", "tidepool_rust_isolated_test")\n')
+    if package_name == "exomonad-node":
+        rules.append("""tidepool_rust_binary(
+    name = "view_helper_fixture",
+    package_name = "tidepool",
+    package_dir = "bridge/facade",
+    version = """ + json.dumps(package["version"]) + """,
+    crate_root = "bridge/facade/src/bin/exomonad-view-helper.rs",
+    edition = "2021",
+    srcs_filegroup = "//bridge/facade:exomonad-view-helper_sources",
+    deps = [":exomonad_node"],
+    visibility = ["PUBLIC"],
+)
+""")
     if package_name == "exomonad-actor":
         rules.append('load("//build/rust:defs.bzl", "tidepool_rust_test_cases")\n')
     if package_name == "tidepool-toolchain":
@@ -1588,6 +1601,8 @@ tidepool_buildscript_run(
         extra = runtime_arguments(env, resources, worker)
         if package["name"] == "tidepool-atomic-write" and target["name"] == "strict_directory":
             extra = '    env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location :directory_fault_shared)"},'
+        if package_name == "exomonad-node" and target["name"] == "overlay_rotation":
+            extra += '\n    companion_executables = {"exomonad-view-helper": ":view_helper_fixture"},'
         if package["name"] == "tidepool-repr" and target["name"] == "repr":
             extra = '    env = {"TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location //bridge/atomic-write:directory_fault_shared)"},'
         rules.append(
