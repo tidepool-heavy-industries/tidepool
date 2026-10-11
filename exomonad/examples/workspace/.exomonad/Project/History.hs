@@ -55,7 +55,7 @@ inspectHistory task = do
               pure (either (\issue -> "Cannot inspect commit: " <> T.pack (show issue)) id (Cmd.stdout shown)))) of
           Left doubt ->
             let candidates = take 3
-                  [oid | (_, Just oid) <- J.contenders 0.10 answer
+                  [oid | (_, Just oid) <- J.contenders 0.10 (J.answers response)
                     (#unresolved (\() -> Nothing)
                       J..| #commit (\_ (oid, _) -> Just oid))]
             in if null candidates
