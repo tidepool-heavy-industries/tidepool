@@ -319,72 +319,68 @@ fn run_fairness(preparation_jobs: u32) {
         "queued_digest_matches":queued_digest_matches,"foreground_start":foreground_start,
         "second_preparation_finished":second_preparation,"reserved_slot_overlap_observed":overlap,
         "worker_pids":worker_pids,"cleanup_confirmed":true,"status":if overlap {"observed"} else {"inconclusive"}});
-    fs::write(
-        root.join("fairness.json"),
-        serde_json::to_vec_pretty(&report).unwrap(),
-    )
-    .unwrap();
-    eprintln!("native-fairness-summary {report}");
-    for (name, result) in [
-        ("foreground", observation.2),
-        ("preparation one", observation.3),
-        ("preparation two", observation.4),
-    ] {
-        let result = result.unwrap_or_else(|error| panic!("{name}: {error}"));
-        assert!(result.success(), "{name}: {:?}", result.output);
-    }
-    assert_eq!(
-        physical.len(),
-        4,
-        "exactly one warmup, foreground repeat, and two preparation requests"
-    );
-    assert_eq!(
-        physical
-            .iter()
-            .filter(|r| r["span"]["compiler_workload"] == "preparation")
-            .count(),
-        2
-    );
-    assert_eq!(
-        physical
-            .iter()
-            .filter(|r| r["span"]["compiler_workload"] == "foreground")
-            .count(),
-        2
-    );
-    let mut identities = std::collections::HashSet::new();
-    for row in &physical {
-        let span = &row["span"];
-        let digest = row["fields"]["compile_request"]
-            .as_str()
-            .expect("actual logical request digest");
-        assert!(digest.len() == 16 && digest.bytes().all(|c| c.is_ascii_hexdigit()));
-        let physical_id = span["physical_execution"]
-            .as_str()
-            .expect("actual physical request identity");
-        assert!(!physical_id.is_empty());
-        assert!(identities.insert(physical_id));
-        assert_eq!(span["request_ordinal"], 1);
-        assert_eq!(row["fields"]["exit_code"], 0);
-        let preparation = span["compiler_workload"] == "preparation";
-        assert_eq!(span["worker"], if preparation { 1 } else { 0 });
+    publish_fairness_report(&root.join("fairness.json"), report, || {
+        for (name, result) in [
+            ("foreground", observation.2),
+            ("preparation one", observation.3),
+            ("preparation two", observation.4),
+        ] {
+            let result = result.unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(result.success(), "{name}: {:?}", result.output);
+        }
         assert_eq!(
-            span["compiler_jobs"],
-            if preparation { preparation_jobs } else { 2 }
+            physical.len(),
+            4,
+            "exactly one warmup, foreground repeat, and two preparation requests"
         );
         assert_eq!(
-            span["compiler_capabilities"],
-            if preparation { preparation_jobs } else { 2 }
+            physical
+                .iter()
+                .filter(|r| r["span"]["compiler_workload"] == "preparation")
+                .count(),
+            2
         );
-    }
-    assert_eq!(concurrency["status"], "observed");
-    assert_eq!(concurrency["peak_active_physical_requests"], 2);
-    assert_eq!(memory["status"], "observed");
-    assert!(
-        queued_digest_matches,
-        "waiting request must settle under the same logical identity"
-    );
-    assert!(overlap, "inconclusive: preparation finished before reserved-slot overlap; retain report and retry a controlled larger graph");
+        assert_eq!(
+            physical
+                .iter()
+                .filter(|r| r["span"]["compiler_workload"] == "foreground")
+                .count(),
+            2
+        );
+        let mut identities = std::collections::HashSet::new();
+        for row in &physical {
+            let span = &row["span"];
+            let digest = row["fields"]["compile_request"]
+                .as_str()
+                .expect("actual logical request digest");
+            assert!(digest.len() == 16 && digest.bytes().all(|c| c.is_ascii_hexdigit()));
+            let physical_id = span["physical_execution"]
+                .as_str()
+                .expect("actual physical request identity");
+            assert!(!physical_id.is_empty());
+            assert!(identities.insert(physical_id));
+            assert_eq!(span["request_ordinal"], 1);
+            assert_eq!(row["fields"]["exit_code"], 0);
+            let preparation = span["compiler_workload"] == "preparation";
+            assert_eq!(span["worker"], if preparation { 1 } else { 0 });
+            assert_eq!(
+                span["compiler_jobs"],
+                if preparation { preparation_jobs } else { 2 }
+            );
+            assert_eq!(
+                span["compiler_capabilities"],
+                if preparation { preparation_jobs } else { 2 }
+            );
+        }
+        assert_eq!(concurrency["status"], "observed");
+        assert_eq!(concurrency["peak_active_physical_requests"], 2);
+        assert_eq!(memory["status"], "observed");
+        assert!(
+            queued_digest_matches,
+            "waiting request must settle under the same logical identity"
+        );
+        assert!(overlap, "inconclusive: preparation finished before reserved-slot overlap; retain report and retry a controlled larger graph");
+    });
 }
 
 /// Sample actual worker RSS together; this is a sampled aggregate, not a cgroup peak.
@@ -430,6 +426,8 @@ fn sample_memory(pids: &[u64], sampling: &std::sync::atomic::AtomicBool) -> Valu
 
 fn observed_concurrency(rows: &[Value]) -> Value {
     let mut active = std::collections::HashSet::new();
+    let mut starts = std::collections::HashSet::new();
+    let mut terminals = std::collections::HashSet::new();
     let mut peak = 0;
     let mut complete = false;
     let mut events: Vec<_> = rows
@@ -443,18 +441,26 @@ fn observed_concurrency(rows: &[Value]) -> Value {
     }
     events.sort_by_key(|row| row["timestamp"].as_str());
     for row in events {
-        let Some(identity) = row["span"]["physical_execution"].as_str() else {
+        let Some(identity) = row["span"]["physical_execution"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        else {
             complete = false;
             continue;
         };
+        complete &= row["timestamp"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty());
         if message(row, "compiler request started") {
+            complete &= starts.insert(identity);
             complete &= active.insert(identity);
             peak = peak.max(active.len());
         } else {
+            complete &= terminals.insert(identity);
             complete &= active.remove(identity);
         }
     }
-    complete &= active.is_empty();
+    complete &= active.is_empty() && starts == terminals;
     json!({"status":if complete {"observed"} else {"partial_or_unknown"},
         "peak_active_physical_requests":peak,"scope":"daemon physical service intervals; excludes queue wait"})
 }
@@ -476,6 +482,30 @@ fn concurrency_report_distinguishes_overlap_from_grant_width_and_incomplete_trac
         2
     );
     assert_eq!(observed_concurrency(&rows)["status"], "observed");
+    for invalid in [
+        vec![rows[0].clone(), rows[0].clone(), rows[3].clone()],
+        vec![rows[0].clone(), rows[3].clone(), rows[3].clone()],
+        vec![
+            rows[0].clone(),
+            rows[3].clone(),
+            event("5", "compiler request started", "prep"),
+            event("6", "compiler request finished", "prep"),
+        ],
+        vec![rows[3].clone()],
+        vec![],
+    ] {
+        assert_eq!(
+            observed_concurrency(&invalid)["status"],
+            "partial_or_unknown"
+        );
+    }
+    let mut missing_timestamp = rows.clone();
+    missing_timestamp[0]["timestamp"] = Value::Null;
+    assert_eq!(
+        observed_concurrency(&missing_timestamp)["status"],
+        "partial_or_unknown"
+    );
+
     assert_eq!(
         observed_concurrency(&rows[..3])["status"],
         "partial_or_unknown"
@@ -489,4 +519,48 @@ fn unsampled_worker_memory_is_unknown() {
     assert_eq!(report["status"], "partial_or_unknown");
     assert!(report["sampled_aggregate_worker_peak_kib"].is_null());
     assert!(report["sampled_individual_worker_peak_kib"].is_null());
+}
+
+/// Preserve failure evidence before checking the workload; only validated work has throughput.
+fn publish_fairness_report(path: &Path, mut report: Value, validate: impl FnOnce()) {
+    let mut pending = report.clone();
+    pending["status"] = json!("unqualified");
+    pending["measurement_completed"] = json!(false);
+    for field in [
+        "completed_measured_requests",
+        "completed_preparation_requests",
+        "completed_preparation_requests_per_second",
+        "completed_measured_requests_per_second",
+    ] {
+        pending[field] = Value::Null;
+    }
+    fs::write(path, serde_json::to_vec_pretty(&pending).unwrap()).unwrap();
+    validate();
+    report["status"] = json!("observed");
+    report["measurement_completed"] = json!(true);
+    fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    eprintln!("native-fairness-summary {report}");
+}
+
+#[test]
+fn failed_fairness_validation_retains_unqualified_report_without_throughput() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("fairness.json");
+    let report = json!({"status":"observed", "completed_measured_requests":3,
+        "completed_preparation_requests":2,"completed_preparation_requests_per_second":1.0,
+        "completed_measured_requests_per_second":1.5,"reserved_slot_overlap_observed":true});
+    let outcome = std::panic::catch_unwind(|| {
+        publish_fairness_report(&path, report.clone(), || panic!("request failed"))
+    });
+    assert!(outcome.is_err());
+    let failed: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(failed["status"], "unqualified");
+    assert_eq!(failed["measurement_completed"], false);
+    assert!(failed["completed_measured_requests_per_second"].is_null());
+    assert!(failed["completed_preparation_requests_per_second"].is_null());
+    assert!(failed["completed_measured_requests"].is_null());
+    publish_fairness_report(&path, report, || {});
+    let passed: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(passed["measurement_completed"], true);
+    assert_eq!(passed["completed_measured_requests"], 3);
 }
