@@ -331,11 +331,11 @@ mod tests {
         };
         assert_eq!(actors[0].lifecycle, HostActorLifecycle::Waiting);
         assert!(received.try_recv().is_err());
-        root.terminal = Some(ActorTerminal {
+        root.lifecycle = Some(exomonad_actor::ActorLifecycle::Exited(ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "runtime failed".into(),
             diagnostic: None,
-        });
+        }));
         projection
             .publish(
                 &control,
