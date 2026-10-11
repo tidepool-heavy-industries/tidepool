@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 from contextlib import contextmanager
 from enum import Enum
 import hashlib
@@ -387,47 +388,63 @@ class _QualificationSignalOwner:
             event["forwarding_status"] = _forward_runner_signal(
                 self.process, self.runner_identity, signum)
 
+    def persist_dirty(self) -> None:
+        while self.dirty and self.receipt_path is not None:
+            self.dirty = False
+            try:
+                write_private_json(self.receipt_path, self.receipt)
+            except OSError:
+                self.dirty = True
+                return
+
 
 _active_qualification_signal_owner = None
+_qualification_signal_handlers = None
+
+
+def _acquire_qualification_signal_owner():
+    global _active_qualification_signal_owner, _qualification_signal_handlers
+    owner = _active_qualification_signal_owner
+    if owner is None:
+        owner = _QualificationSignalOwner()
+
+        def forward(signum, _frame):
+            owner.request(signum)
+
+        prior_handlers = {}
+        try:
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                prior_handlers[signum] = signal.signal(signum, forward)
+        except BaseException:
+            for signum, handler in prior_handlers.items():
+                signal.signal(signum, handler)
+            raise
+        _active_qualification_signal_owner = owner
+        _qualification_signal_handlers = prior_handlers
+    owner.depth += 1
+    return owner
+
+
+def _release_qualification_signal_owner(owner) -> None:
+    global _active_qualification_signal_owner, _qualification_signal_handlers
+    owner.depth -= 1
+    if owner.depth:
+        return
+    owner.persist_dirty()
+    for signum, handler in (_qualification_signal_handlers or {}).items():
+        signal.signal(signum, handler)
+    _qualification_signal_handlers = None
+    _active_qualification_signal_owner = None
 
 
 @contextmanager
 def qualification_signal_owner():
     """Acquire the process signal owner, reusing it across nested API scopes."""
-    global _active_qualification_signal_owner
-    owner = _active_qualification_signal_owner
-    if owner is not None:
-        owner.depth += 1
-        try:
-            yield owner
-        finally:
-            owner.depth -= 1
-        return
-
-    owner = _QualificationSignalOwner()
-    owner.depth = 1
-    _active_qualification_signal_owner = owner
-    prior_handlers = {}
-
-    def forward(signum, _frame):
-        owner.request(signum)
-
+    owner = _acquire_qualification_signal_owner()
     try:
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            prior_handlers[signum] = signal.signal(signum, forward)
         yield owner
     finally:
-        for signum, handler in prior_handlers.items():
-            signal.signal(signum, handler)
-        _active_qualification_signal_owner = None
-        if owner.dirty and owner.receipt_path is not None:
-            try:
-                write_private_json(owner.receipt_path, owner.receipt)
-                owner.dirty = False
-            except OSError:
-                # The runner receipt remains the best available record when a
-                # late cancellation cannot be persisted during scope cleanup.
-                pass
+        _release_qualification_signal_owner(owner)
 
 def run_owned_qualification_runner(command: list[str], environment: dict, stdout, stderr,
                                    receipt_path: Path, descriptor_path: Path,
@@ -2315,8 +2332,22 @@ def main(argv=None) -> int:
         return 1
 
 
+def cli_entrypoint(argv=None) -> None:
+    """Run the CLI and retain its signal lease through interpreter exit."""
+    cli_args = sys.argv[1:] if argv is None else argv
+    if cli_args[:1] == ["run"]:
+        owner = _acquire_qualification_signal_owner()
+        try:
+            exit_code = main(cli_args)
+        except BaseException:
+            _release_qualification_signal_owner(owner)
+            raise
+        # The process owns this final lease until interpreter shutdown. Its
+        # installed handler remains inert after reap and catches late TERM.
+        atexit.register(owner.persist_dirty)
+        raise SystemExit(exit_code)
+    raise SystemExit(main(cli_args))
+
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "run":
-        with qualification_signal_owner():
-            raise SystemExit(main())
-    raise SystemExit(main())
+    cli_entrypoint()

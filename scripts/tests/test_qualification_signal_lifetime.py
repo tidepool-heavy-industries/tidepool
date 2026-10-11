@@ -294,6 +294,72 @@ class QualificationSignalLifetimeTests(unittest.TestCase):
         self.assertEqual(result['starts'], ['suite::complete', 'suite::active'])
         self.assertTrue(all(result['handlers_restored'].values()), result)
 
+    def test_cli_catches_real_pidfd_term_during_final_receipt_write(self):
+        with tempfile.TemporaryDirectory(prefix='qualification-cli-signal-exit-') as directory:
+            root = Path(directory)
+            ready = root / 'receipt-write-ready.fifo'
+            release = root / 'receipt-write-release.fifo'
+            receipt = root / 'run-owner.json'
+            os.mkfifo(ready, 0o600)
+            os.mkfifo(release, 0o600)
+            helper = root / 'qualification-cli-exit.py'
+            helper.write_text(
+                'import importlib.util, os, signal, sys\n'
+                'from pathlib import Path\n'
+                f'script = Path({str(QUAL)!r})\n'
+                'spec = importlib.util.spec_from_file_location("qualification_under_test", script)\n'
+                'module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)\n'
+                f'receipt_path = Path({str(receipt)!r})\n'
+                f'ready_path = {str(ready)!r}\n'
+                f'release_path = {str(release)!r}\n'
+                'original_write = module.write_private_json\n'
+                'write_gated = False\n'
+                'def gated_write(path, value):\n'
+                '    global write_gated\n'
+                '    if Path(path) == receipt_path and not write_gated:\n'
+                '        write_gated = True\n'
+                '        with open(ready_path, "w") as event: event.write("ready"); event.flush()\n'
+                '        with open(release_path, "r") as gate: gate.read(1)\n'
+                '    return original_write(path, value)\n'
+                'module.write_private_json = gated_write\n'
+                'def completed_main(_argv):\n'
+                '    owner = module._active_qualification_signal_owner\n'
+                '    owner.bind(receipt_path, {"schema": 1, "status": "interrupted", '
+                '        "runner_reaped": True, "runner_exit_code": 143, "cancellation_requests": []})\n'
+                '    owner.phase = "published"\n'
+                '    owner.receipt["owner_state"] = "published"\n'
+                '    owner.dirty = True\n'
+                '    return 143\n'
+                'module.main = completed_main\n'
+                'module.cli_entrypoint(["run"])\n'
+            )
+            process = subprocess.Popen([sys.executable, str(helper)],
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       text=True, start_new_session=True)
+            pidfd = None
+            try:
+                fifo_wait(ready)
+                with open(f'/proc/{process.pid}/status') as status_file:
+                    sigcgt = int(next(line.split()[1] for line in status_file
+                                      if line.startswith('SigCgt:')), 16)
+                self.assertTrue(sigcgt & (1 << (signal.SIGTERM - 1)))
+                pidfd = os.pidfd_open(process.pid, 0)
+                signal.pidfd_send_signal(pidfd, signal.SIGTERM, None, 0)
+                fifo_send(release)
+                stdout, stderr = process.communicate(timeout=10)
+                self.assertEqual(process.returncode, 143, (stdout, stderr))
+                final_receipt = json.loads(receipt.read_text())
+                self.assertEqual(final_receipt['runner_exit_code'], 143)
+                self.assertEqual(final_receipt['owner_state'], 'published')
+                self.assertEqual(final_receipt['cancellation_requests'][-1]['forwarding_status'],
+                                 'runner_already_exited')
+            finally:
+                if pidfd is not None:
+                    os.close(pidfd)
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=5)
+
 
 if __name__ == '__main__':
     unittest.main()
