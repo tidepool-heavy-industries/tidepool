@@ -36,6 +36,19 @@ pub(crate) async fn run(
         let mut driver = Driver::start(workspace, selected.clone()).await?;
         let result = driver.execute(&prepared);
         let cleanup = driver.shutdown_session().await;
+        let result = result.map_err(|mut error| {
+            let mut retained = driver
+                .installations
+                .values()
+                .map(|installation| retained_actor_evidence(&installation.actor))
+                .collect::<Vec<_>>();
+            retained.sort();
+            error.detail.push_str(&format!(
+                "\nRetained actor lifecycle after recipe shutdown (includes shutdown retirement):\n{}",
+                retained.join("\n")
+            ));
+            Box::new(error) as Box<dyn std::error::Error>
+        });
         driver.installations.clear();
         driver.pending.clear();
         match (result, cleanup) {
@@ -65,7 +78,7 @@ fn render_recipe_compile_error(
     error: tidepool_runtime::RuntimeError,
     source: &str,
     entry: &str,
-) -> Box<dyn std::error::Error> {
+) -> RecipeCompilationFailure {
     let detail = match &error {
         tidepool_runtime::RuntimeError::Compile(compile_error) => {
             let detail = tidepool_runtime::session::render_turn_compile_error(
@@ -78,7 +91,7 @@ fn render_recipe_compile_error(
         }
         other => other.to_string(),
     };
-    Box::new(RecipeCompilationFailure { error, detail })
+    RecipeCompilationFailure { error, detail }
 }
 
 #[derive(Debug)]
@@ -92,6 +105,36 @@ impl std::fmt::Display for RecipeCompilationFailure {
     }
 }
 impl std::error::Error for RecipeCompilationFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+#[derive(Debug)]
+struct RecipeTurnFailure {
+    error: exomonad_actor::ResidentToolError,
+    detail: String,
+}
+
+impl RecipeTurnFailure {
+    fn new(
+        boundary: &str,
+        source: &str,
+        error: exomonad_actor::ResidentToolError,
+        retained: String,
+    ) -> Self {
+        let detail = format!("resident recipe {boundary} failed:\n{source}\n{error}\n{retained}");
+        Self { error, detail }
+    }
+}
+
+impl std::fmt::Display for RecipeTurnFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl std::error::Error for RecipeTurnFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.error)
     }
@@ -154,7 +197,9 @@ fn prepare_recipe(entry: &str, selected: &FrozenWorkspace) -> Result<PreparedRec
     let target = tidepool_runtime::session::PREPARED_SCAFFOLD_TARGET;
     let artifacts = super::run_compiler_preparation(|settlement| {
         tidepool_runtime::compile_targets(&source, &[target], &includes, |_, _, _| {}, settlement)
-            .map_err(|error| render_recipe_compile_error(error.into(), &source, entry))
+            .map_err(|error| -> Box<dyn std::error::Error> {
+                Box::new(render_recipe_compile_error(error.into(), &source, entry))
+            })
     })?;
     Ok(PreparedRecipe {
         artifacts,
@@ -325,7 +370,10 @@ impl Driver {
             .map_err(|error| runtime_error(format!("recipe file operation: {error:?}")))
     }
 
-    fn execute(&mut self, prepared: &PreparedRecipe) -> Result<()> {
+    fn execute(
+        &mut self,
+        prepared: &PreparedRecipe,
+    ) -> std::result::Result<(), RecipeCompilationFailure> {
         tokio::task::block_in_place(|| {
             tidepool_runtime::run_compiled_target(
                 &prepared.artifacts,
@@ -341,7 +389,9 @@ impl Driver {
     }
 
     async fn turn(&mut self, key: CheckActor, source: String) -> Result<String> {
-        let endpoint = self.installation(key)?.policy.clone();
+        let installation = self.installation(key)?;
+        let endpoint = installation.policy.clone();
+        let actor = installation.actor.clone();
         let call_id = uuid::Uuid::new_v4().simple().to_string();
         let operation = OriginalOperation {
             origin: ConversationOrigin::External {
@@ -364,9 +414,21 @@ impl Driver {
             ))
             .await?;
         let result = result.map_err(|error| {
-            runtime_error(format!("resident recipe turn failed:\n{source}\n{error}"))
+            Box::new(RecipeTurnFailure::new(
+                "turn",
+                &source,
+                error,
+                retained_actor_evidence(&actor),
+            )) as Box<dyn std::error::Error>
         })?;
-        completion?;
+        completion.map_err(|error| {
+            Box::new(RecipeTurnFailure::new(
+                "turn completion",
+                &source,
+                error,
+                retained_actor_evidence(&actor),
+            )) as Box<dyn std::error::Error>
+        })?;
         Ok(serde_json::to_string(&result)?)
     }
 
@@ -642,7 +704,10 @@ impl Driver {
                 request.answer(release);
                 Ok(None)
             }
-            LocalResidentDeployment::Retired { actor, .. } => {
+            LocalResidentDeployment::Retired { actor, terminal } => {
+                tracing::info!(target: "exomonad_actor::lifecycle", ?actor, ?terminal,
+                    cleanup = ?self.installations.get(&actor).and_then(|installation| installation.actor.terminal().cleanup()),
+                    "recipe actor retired");
                 self.session()?.authority.remove_grant(actor.into());
                 if let Err(error) = self.seal_actor(actor).await {
                     tracing::warn!(?actor, %error, "recipe command producer retirement remains unconfirmed");
@@ -657,8 +722,13 @@ impl Driver {
             }
             event @ (LocalResidentDeployment::SessionReady { .. }
             | LocalResidentDeployment::RequestUpdate { .. }) => Ok(Some(event)),
-            LocalResidentDeployment::ChildExited { .. }
-            | LocalResidentDeployment::WatchChanged { .. }
+            LocalResidentDeployment::ChildExited { notice } => {
+                tracing::info!(target: "exomonad_actor::lifecycle", owner = ?notice.owner,
+                    child = ?notice.child.identity(), terminal = ?notice.terminal,
+                    cleanup = ?notice.child.terminal().cleanup(), "recipe child exited");
+                Ok(None)
+            }
+            LocalResidentDeployment::WatchChanged { .. }
             | LocalResidentDeployment::SettlementChanged { .. }
             | LocalResidentDeployment::RequestCancellation { .. } => {
                 // Recipe effects observe the actor/request owners directly. These
@@ -812,6 +882,22 @@ fn producer(actor: ActorRef) -> String {
     format!("{}-{}", actor.id.0, actor.incarnation.0)
 }
 
+fn retained_actor_evidence(actor: &exomonad_actor::LocalActorRef) -> String {
+    let terminal = actor.terminal();
+    let retained = match terminal.get() {
+        Some(terminal) => format!("{terminal:?}"),
+        None => "not yet published (does not establish liveness)".into(),
+    };
+    let cleanup = match terminal.cleanup() {
+        Some(cleanup) => format!("{cleanup:?}"),
+        None => "not yet observed (does not establish release)".into(),
+    };
+    format!(
+        "actor {}; retained terminal: {retained}; retained cleanup: {cleanup}",
+        actor.identity()
+    )
+}
+
 impl DispatchEffect for Driver {
     fn dispatch(
         &mut self,
@@ -842,6 +928,30 @@ mod tests {
     use super::select_checks;
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn recipe_turn_diagnostics_preserve_original_transport_error() {
+        let error = super::RecipeTurnFailure::new(
+            "turn completion",
+            "pure ()",
+            exomonad_actor::ResidentToolError::Unavailable("original completion failure".into()),
+            "actor 2@1; retained terminal: not yet published".into(),
+        );
+        let original = std::error::Error::source(&error)
+            .unwrap()
+            .downcast_ref::<exomonad_actor::ResidentToolError>()
+            .unwrap();
+        assert!(
+            matches!(original, exomonad_actor::ResidentToolError::Unavailable(detail)
+            if detail == "original completion failure")
+        );
+        let detail = error.to_string();
+        assert!(detail.contains(&original.to_string()), "{detail}");
+        assert!(
+            detail.contains("actor 2@1; retained terminal: not yet published"),
+            "{detail}"
+        );
+    }
 
     #[test]
     fn preparation_result_reaches_execution_only_after_confirmed_close() {
@@ -987,6 +1097,55 @@ mod tests {
                 driver.restart().await.unwrap();
                 assert!(driver.output_store.is_none());
             } else {
+                let actor = session.actor.clone();
+                let key = driver.actor_key(actor.identity()).unwrap();
+                let refusal = driver
+                    .turn(key.clone(), "pure (1 :: Bool)".into())
+                    .await
+                    .unwrap();
+                let refusal: serde_json::Value = serde_json::from_str(&refusal).unwrap();
+                assert_eq!(refusal["status"], "rejected", "{refusal}");
+                let retained = retained_actor_evidence(&actor);
+                assert!(
+                    retained.contains("retained terminal: not yet published"),
+                    "{retained}"
+                );
+                assert!(
+                    retained.contains("retained cleanup: not yet observed"),
+                    "{retained}"
+                );
+                assert!(actor.terminal().get().is_none());
+                let continued = driver.turn(key.clone(), "pure ()".into()).await.unwrap();
+                let continued: serde_json::Value = serde_json::from_str(&continued).unwrap();
+                assert_eq!(continued["status"], "committed", "{continued}");
+                let terminal = exomonad_actor::ActorTerminal::new(
+                    exomonad_actor::ActorExitKind::Cancelled,
+                    "exact recipe diagnostic retirement",
+                );
+                driver
+                    .pump(actor.retire_by(actor.identity(), terminal.clone()))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let rejection = driver
+                    .turn(key, "pure ()".into())
+                    .await
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    rejection.contains("actor mailbox admission is closed"),
+                    "{rejection}"
+                );
+                assert!(
+                    rejection.contains(&format!("actor {}; retained terminal:", actor.identity())),
+                    "{rejection}"
+                );
+                assert!(rejection.contains(&terminal.summary), "{rejection}");
+                assert!(
+                    rejection.contains("retained cleanup: ResidentCleanupOutcome"),
+                    "{rejection}"
+                );
+                assert!(actor.terminal().cleanup().unwrap().is_confirmed());
                 driver.shutdown_session().await.unwrap();
             }
             let reopened = display_output::open_run_store(root.path()).unwrap();
