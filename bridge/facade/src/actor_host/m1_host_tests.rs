@@ -86,6 +86,21 @@ struct CancelRunningCellTransport {
 
 #[async_trait]
 impl ResponsesTransport for CancelRunningCellTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, _request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let round = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
         let items = match round {
@@ -115,6 +130,21 @@ impl ResponsesTransport for CancelRunningCellTransport {
 
 #[async_trait]
 impl ResponsesTransport for HostCellTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let round = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         self.requests.lock().push(request.clone());
@@ -612,6 +642,21 @@ struct RejectFirstRequest {
 
 #[async_trait]
 impl ResponsesTransport for RejectFirstRequest {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let round = {
             let mut requests = self.requests.lock();

@@ -14,6 +14,21 @@ struct RecoveryTransport {
 }
 #[async_trait::async_trait]
 impl harness::engine::ResponsesTransport for RecoveryTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let count = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         std::fs::write(

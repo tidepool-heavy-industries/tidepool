@@ -47,6 +47,21 @@ impl Provider for Echo {
 struct Script(Mutex<VecDeque<Item>>);
 #[async_trait]
 impl ResponsesTransport for Script {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         Ok(ResponsesTurn {
             response_id: "projection".into(),

@@ -318,6 +318,18 @@ async fn engine_yield_claim_waits_and_settles_without_native_dispatch() {
     struct Transport(Arc<dyn harness::engine::ResponsesTransport>);
     #[async_trait::async_trait]
     impl harness::engine::ResponsesTransport for Transport {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                harness::transport::ResponsesRoute,
+                harness::transport::ResponsesProtocol,
+            ),
+            harness::transport::TransportError,
+        > {
+            self.0.response_contract()
+        }
+
         async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             self.0.create(request).await
         }

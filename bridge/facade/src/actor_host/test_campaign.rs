@@ -1654,6 +1654,21 @@ impl HostedScriptProvider {
 
 #[async_trait::async_trait]
 impl harness::engine::ResponsesTransport for HostedScriptProvider {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(
         &self,
         request: harness::transport::ResponsesRequest,
@@ -1668,10 +1683,17 @@ impl harness::engine::ResponsesTransport for HostedScriptProvider {
         sink: tokio::sync::mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
         let turn = self.round(Some(request_id.clone()), request).await?;
-        for item in &turn.items {
-            let _ = sink
-                .send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
-                .await;
+        let mut assembly = harness::transport::sse::ResponseAssembly::default();
+        for (index, item) in turn.items.iter().enumerate() {
+            let event = assembly
+                .accept(
+                    &serde_json::json!({
+                        "type": "response.output_item.done", "output_index": index, "item": item,
+                    })
+                    .to_string(),
+                )?
+                .expect("indexed done item emits its completed event");
+            let _ = sink.send(event).await;
         }
         Ok(turn)
     }
@@ -2609,36 +2631,58 @@ mod tests {
 
     #[tokio::test]
     async fn scripted_provider_retains_engine_issued_original_operation() {
-        let (provider, mut rounds) = hosted_script_provider();
-        let mut request = request();
-        request.session_id = "exact-run:/root:7".into();
-        request.tools = vec![serde_json::json!({"type":"custom", "name":"haskell_sync"})].into();
-        let request_id = harness::model::RequestId("exact-engine-request".into());
-        let issued = request_id.clone();
-        let (sink, mut events) = tokio::sync::mpsc::channel(1);
-        let task = tokio::spawn(async move {
-            provider
-                .create_streaming_for_request(&issued, request, sink)
-                .await
-        });
-        let round = rounds.recv().await.unwrap();
-        assert_eq!(
-            round.operation("expected-call"),
-            harness::model::OperationId {
-                origin: harness::model::ConversationIdentity::Embedded {
-                    run: "exact-run".into(),
-                    actor: harness::model::AgentPath("/root".into()),
-                    incarnation: "7".into(),
-                },
-                request: request_id,
-                call: harness::model::CallId("expected-call".into()),
+        for envelopes in [false, true] {
+            let (provider, mut rounds) = if envelopes {
+                hosted_script_provider_with_envelopes()
+            } else {
+                hosted_script_provider()
+            };
+            assert_eq!(
+                provider.response_contract().unwrap(),
+                (
+                    harness::transport::ResponsesRoute::Codex,
+                    harness::transport::ResponsesProtocol::Standard,
+                )
+            );
+            let mut request = request();
+            request.session_id = "exact-run:/root:7".into();
+            request.tools =
+                vec![serde_json::json!({"type":"custom", "name":"haskell_sync"})].into();
+            let request_id = harness::model::RequestId("exact-engine-request".into());
+            let issued = request_id.clone();
+            let (sink, mut events) = tokio::sync::mpsc::channel(3);
+            let task = tokio::spawn(async move {
+                provider
+                    .create_streaming_for_request(&issued, request, sink)
+                    .await
+            });
+            let round = rounds.recv().await.unwrap();
+            assert_eq!(
+                round.operation("expected-call"),
+                harness::model::OperationId {
+                    origin: harness::model::ConversationIdentity::Embedded {
+                        run: "exact-run".into(),
+                        actor: harness::model::AgentPath("/root".into()),
+                        incarnation: "7".into(),
+                    },
+                    request: request_id,
+                    call: harness::model::CallId("expected-call".into()),
+                }
+            );
+            round.call("expected-call", "display True");
+            let turn = task.await.unwrap().unwrap();
+            assert_eq!(turn.items.len(), if envelopes { 3 } else { 1 });
+            for (index, expected) in turn.items.iter().enumerate() {
+                let Some(harness::transport::sse::StreamEvent::CompletedItem(item)) =
+                    events.recv().await
+                else {
+                    panic!("scripted response must expose each indexed completed output");
+                };
+                assert_eq!(item.output_index(), index as u64);
+                assert_eq!(item.item(), expected);
             }
-        );
-        round.call("expected-call", "display True");
-        let turn = task.await.unwrap().unwrap();
-        assert!(
-            matches!(events.recv().await, Some(harness::transport::sse::StreamEvent::ItemDone(item)) if item == turn.items[0])
-        );
+            assert!(events.recv().await.is_none());
+        }
     }
 
     #[tokio::test]

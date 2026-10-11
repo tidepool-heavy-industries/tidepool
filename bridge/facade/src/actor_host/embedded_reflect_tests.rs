@@ -76,6 +76,21 @@ struct Stream {
 }
 #[async_trait]
 impl ResponsesTransport for Stream {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         unreachable!("must stream")
     }
@@ -86,14 +101,21 @@ impl ResponsesTransport for Stream {
         sink: mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let round = self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut assembly = harness::transport::sse::ResponseAssembly::default();
         let items = if round == 1 {
             *self.request.lock().unwrap() = Some(request.clone());
             let item = Item(
                 json!({"type":"function_call", "call_id":"reflect-call", "name":"reflect", "arguments":"{}"}),
             );
-            sink.send(StreamEvent::ItemDone(item.clone()))
-                .await
-                .unwrap();
+            let event = assembly
+                .accept(
+                    &json!({
+                        "type": "response.output_item.done", "output_index": 0, "item": item,
+                    })
+                    .to_string(),
+                )?
+                .expect("indexed done item emits its completed event");
+            sink.send(event).await.unwrap();
             tokio::time::timeout(std::time::Duration::from_secs(5), self.read.notified())
                 .await
                 .expect("Reflect tool must read while the provider response is gated");
@@ -102,9 +124,15 @@ impl ResponsesTransport for Stream {
             let item = Item(
                 json!({"type":"message", "role":"assistant", "phase":"final_answer", "content":"done"}),
             );
-            sink.send(StreamEvent::ItemDone(item.clone()))
-                .await
-                .unwrap();
+            let event = assembly
+                .accept(
+                    &json!({
+                        "type": "response.output_item.done", "output_index": 0, "item": item,
+                    })
+                    .to_string(),
+                )?
+                .expect("indexed done item emits its completed event");
+            sink.send(event).await.unwrap();
             vec![item]
         };
         Ok(ResponsesTurn {

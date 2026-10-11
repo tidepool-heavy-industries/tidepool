@@ -141,6 +141,21 @@ impl ScriptedRound {
 struct IdleTransport(mpsc::UnboundedSender<ScriptedRound>);
 #[async_trait]
 impl ResponsesTransport for IdleTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         panic!("Engine must provide its actual durable request ID")
     }
@@ -163,8 +178,17 @@ impl ResponsesTransport for IdleTransport {
             .await
             .map_err(|_| TransportError::Stream("test provider response timed out".into()))?
             .map_err(|_| TransportError::Stream("test provider response cancelled".into()))?;
-        for item in &turn.items {
-            sink.send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
+        let mut assembly = harness::transport::sse::ResponseAssembly::default();
+        for (index, item) in turn.items.iter().enumerate() {
+            let event = assembly
+                .accept(
+                    &serde_json::json!({
+                        "type": "response.output_item.done", "output_index": index, "item": item,
+                    })
+                    .to_string(),
+                )?
+                .expect("indexed done item emits its completed event");
+            sink.send(event)
                 .await
                 .map_err(|_| TransportError::Stream("Engine output stream closed".into()))?;
         }

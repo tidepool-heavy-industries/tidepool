@@ -297,6 +297,21 @@ impl BrowserTransport {
 
 #[async_trait]
 impl ResponsesTransport for BrowserTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         self.create_for_request(request, None).await
     }
@@ -308,10 +323,17 @@ impl ResponsesTransport for BrowserTransport {
         sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let turn = self.create_for_request(request, Some(request_id)).await?;
-        for item in &turn.items {
-            let _ = sink
-                .send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
-                .await;
+        let mut assembly = harness::transport::sse::ResponseAssembly::default();
+        for (index, item) in turn.items.iter().enumerate() {
+            let event = assembly
+                .accept(
+                    &serde_json::json!({
+                        "type": "response.output_item.done", "output_index": index, "item": item,
+                    })
+                    .to_string(),
+                )?
+                .expect("indexed done item emits its completed event");
+            let _ = sink.send(event).await;
         }
         Ok(turn)
     }

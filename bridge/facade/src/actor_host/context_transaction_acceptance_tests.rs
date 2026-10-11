@@ -115,6 +115,21 @@ struct ScriptedProvider {
 
 #[async_trait]
 impl ResponsesTransport for ScriptedProvider {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let (reply, completed) = oneshot::channel();
         self.calls.fetch_add(1, Ordering::SeqCst);

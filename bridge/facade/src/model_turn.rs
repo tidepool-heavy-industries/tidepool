@@ -573,6 +573,21 @@ mod tests {
     struct Script(Mutex<VecDeque<ResponsesTurn>>);
     #[async_trait]
     impl ResponsesTransport for Script {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                harness::transport::ResponsesRoute,
+                harness::transport::ResponsesProtocol,
+            ),
+            harness::transport::TransportError,
+        > {
+            Ok((
+                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
         async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
             self.0
                 .lock()

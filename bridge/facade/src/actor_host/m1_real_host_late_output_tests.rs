@@ -146,6 +146,21 @@ fn retains_declared_tools(transport: &PendingCellTransport, request: &ResponsesR
 
 #[async_trait]
 impl ResponsesTransport for PendingCellTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         if request.tools_allowed.as_ref().is_some_and(Vec::is_empty) {
             self.compaction_seen.send(()).map_err(|_| {

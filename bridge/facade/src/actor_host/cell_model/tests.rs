@@ -55,6 +55,21 @@ fn final_turn(answer: &str) -> ResponsesTurn {
 }
 #[async_trait::async_trait]
 impl ResponsesTransport for Script {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let instructions = request.instructions.clone();
         let resumed = request

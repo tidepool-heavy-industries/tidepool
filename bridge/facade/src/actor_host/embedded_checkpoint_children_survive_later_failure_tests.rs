@@ -27,6 +27,21 @@ struct ParentTransport {
 
 #[async_trait]
 impl ResponsesTransport for ParentTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, _request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let round = self.round.fetch_add(1, Ordering::SeqCst) + 1;
         let items = match round {
@@ -85,6 +100,21 @@ struct HostTransport {
 
 #[async_trait]
 impl ResponsesTransport for HostTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
         let (run, path) = prefix.rsplit_once(':').unwrap();

@@ -478,6 +478,21 @@ impl CapturedHostTransport {
 
 #[async_trait]
 impl ResponsesTransport for CapturedHostTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         panic!("checkpoint gate requires the Engine's exact durable request identity")
     }
@@ -489,8 +504,17 @@ impl ResponsesTransport for CapturedHostTransport {
         sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
         let turn = self.create_for_request(request_id, request).await?;
-        for item in &turn.items {
-            sink.send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
+        let mut assembly = harness::transport::sse::ResponseAssembly::default();
+        for (index, item) in turn.items.iter().enumerate() {
+            let event = assembly
+                .accept(
+                    &serde_json::json!({
+                        "type": "response.output_item.done", "output_index": index, "item": item,
+                    })
+                    .to_string(),
+                )?
+                .expect("indexed done item emits its completed event");
+            sink.send(event)
                 .await
                 .map_err(|_| TransportError::Stream("provider stream receiver closed".into()))?;
         }
@@ -1970,6 +1994,21 @@ struct PreflightTransport {
 
 #[async_trait]
 impl ResponsesTransport for PreflightTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
         panic!("hosted preflight requires the Engine's exact request identity")
     }
@@ -2014,8 +2053,17 @@ impl ResponsesTransport for PreflightTransport {
                 "content":[{"type":"output_text","text":"preflight and recovery confirmed"}]
             }))],
         };
-        for item in &items {
-            sink.send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
+        let mut assembly = harness::transport::sse::ResponseAssembly::default();
+        for (index, item) in items.iter().enumerate() {
+            let event = assembly
+                .accept(
+                    &serde_json::json!({
+                        "type": "response.output_item.done", "output_index": index, "item": item,
+                    })
+                    .to_string(),
+                )?
+                .expect("indexed done item emits its completed event");
+            sink.send(event)
                 .await
                 .map_err(|_| TransportError::Stream("preflight provider receiver closed".into()))?;
         }
