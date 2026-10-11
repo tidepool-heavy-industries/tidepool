@@ -1,6 +1,6 @@
 module SourceBootCases where
 
-import Tidepool.ArtifactBytes (captureArtifactBytes)
+import Tidepool.ArtifactBytes (captureArtifactBytes, artifactSha256)
 import Tidepool.PreparedStg.Internal (PreparedModule(..), PreparedCoverage(..))
 import CandidateExecutionSourcesTest (executionScopeDescriptorChecks)
 
@@ -5028,28 +5028,37 @@ exactTransactionReuse = withTiming $ withScratch $ \work -> do
         fail "identical empty exact scopes repeated a dependency frontend"
       requireCheckedApplicability "warm check" warmDiagnostics
       (carried,carriedDiagnostics) <- captureDiagnostics (admittedCheck scope)
+      -- Carried inputs need no decode. The request envelope is observed once
+      -- at preflight and once by the single terminal receipt publication.
       unless (isInt carried && frontends carriedDiagnostics == 0
           && null (counterValues ("hash_bytes.scope_metadata." ++ scopeRequestSha256 admitted) carriedDiagnostics)
-          && length (counterValues ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 admitted) carriedDiagnostics) == 2) $
-        fail "carried admission decoded its manifest again or omitted a compiler proof barrier"
+          && length (counterValues ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 admitted) carriedDiagnostics) == 1
+          && length (counterValues ("hash_bytes.observed_file." ++ scopeRequestSha256 admitted) carriedDiagnostics) == 2) $
+        fail ("carried admission decoded its manifest again or omitted a compiler proof barrier: " ++ carriedDiagnostics)
       requireCheckedApplicability "carried check" carriedDiagnostics
       mutatingTemplate <- T.pack <$> readFile (fixture "MetadataMutatingScopeTarget.hs")
       let mutatingTarget = work </> "MetadataMutatingScopeTarget.hs"
       writeFile mutatingTarget (T.unpack (T.replace "\"{{SCOPE_MANIFEST}}\""
         (T.pack (show scopePath)) mutatingTemplate))
       receiptsBefore <- sort <$> listDirectory (work </> ".exact-compilations")
+      let mutatedScopeSha = artifactSha256 (captureArtifactBytes (BS.snoc originalScopeBytes 0))
       (do
         (refused,mutationDiagnostics) <- captureDiagnostics
           (try (compile CheckedEnvironment Set.empty (ExactScopeCompile GeneralCompile admitted)
             (Just scope) mutatingTarget [work] Nothing)
             :: IO (Either SomeException CheckedEnvironmentResult))
         case refused of
-          Left reason | "exact scope request changed" `isInfixOf` show reason
+          Left reason | Just failure <- (fromException reason :: Maybe IOException)
+              , isUserError failure
               , "tidepool-checked module=MetadataMutatingScopeTarget target=True" `elem` lines mutationDiagnostics
               , any (\line -> "tidepool-meta-execution " `isPrefixOf` line
                   && "module=\"MetadataMutatingScopeTarget\"" `isInfixOf` line) (lines mutationDiagnostics)
-              , length (counterValues ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 admitted) mutationDiagnostics) == 1 -> pure ()
-          Left reason -> fail ("post-TH manifest mutation had another refusal: " ++ show reason)
+              -- A failed terminal seal emits no successful proof marker, but
+              -- it observes the bytes changed by the actual target splice.
+              , null (counterValues ("hash_bytes.scope_revalidation." ++ scopeRequestSha256 admitted) mutationDiagnostics)
+              , length (counterValues ("hash_bytes.observed_file." ++ scopeRequestSha256 admitted) mutationDiagnostics) == 1
+              , length (counterValues ("hash_bytes.observed_file." ++ mutatedScopeSha) mutationDiagnostics) == 1 -> pure ()
+          Left reason -> fail ("post-TH manifest mutation had another refusal: " ++ show reason ++ ": " ++ mutationDiagnostics)
           Right _ -> fail "terminal metadata proof accepted an actually mutated manifest"
         mutated <- BS.readFile scopePath
         receiptsAfter <- sort <$> listDirectory (work </> ".exact-compilations")
