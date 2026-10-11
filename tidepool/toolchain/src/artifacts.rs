@@ -38,6 +38,7 @@ mod catalog_inventory;
 mod execution_diagnostics;
 mod failure_sources;
 mod production_entry;
+pub(crate) use execution_diagnostics::InputArtifactDiagnostics;
 pub use execution_diagnostics::{compiler_scratch_directory, CompilerDiagnosticCapture};
 pub use production_entry::{
     build_production_entry, load_production_entry, load_selected_production_entry,

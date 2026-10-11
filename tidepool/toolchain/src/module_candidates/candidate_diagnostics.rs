@@ -9,6 +9,8 @@ impl CandidateSet {
         let mut saved = BTreeSet::new();
         let mut bytes = 0usize;
         let mut owners = Vec::new();
+        let mut inputs =
+            crate::artifacts::InputArtifactDiagnostics::new(root.join("input-artifacts"))?;
         for bundle in self.by_owner.values() {
             if let Some(original) = &bundle.original_execution {
                 let graph = &original.graph;
@@ -46,6 +48,10 @@ impl CandidateSet {
                     tidepool_atomic_write::write_best_effort(&root.join(name), content)?;
                 }
             }
+            let canonical = match inputs.canonical(&bundle.original_module_interface) {
+                Ok(files) => serde_json::json!({"files": files}),
+                Err(error) => serde_json::json!({"error": error.to_string()}),
+            };
             owners.push(serde_json::json!({
                 "unit":bundle.owner.unit,"module":bundle.owner.module,
                 "module_version":hex(&bundle.owner.module_version.0),
@@ -54,12 +60,14 @@ impl CandidateSet {
                 "source":bundle.source,"source_sha256":bundle.source_sha256,
                 "original_evidence":evidence_name,"original_evidence_sha256":evidence_sha,
                 "original_target":target_name,"original_target_sha256":target_sha,
+                "canonical":canonical,
                 "validation":bundle.evidence.validate(&bundle.target_source),
             }));
         }
         let index = serde_json::to_vec_pretty(&serde_json::json!({
             "scope":"transaction-selected original evidence; diagnostic only; never compiler authority",
-            "manifest":self.manifest_path,"unique_artifact_bytes":bytes,"owners":owners,
+            "manifest":self.manifest_path,"unique_artifact_bytes":bytes as u64 + inputs.bytes_written(),
+            "input_artifact_bytes":inputs.bytes_written(),"owners":owners,
         }))?;
         Ok(tidepool_atomic_write::write_best_effort(
             &root.join("index.json"),
@@ -91,9 +99,25 @@ mod tests {
         assert_eq!(selected.by_owner.len(), 1);
         let bundle = selected.by_owner.values().next().unwrap();
         assert!(bundle.evidence.valid(&bundle.target_source));
+        let canonical_interface = bundle.original_module_interface.interface_bytes().to_vec();
+        let canonical_packages = bundle
+            .original_module_interface
+            .package_imports_bytes()
+            .to_vec();
+        let canonical_certificate = bundle
+            .original_module_interface
+            .certificate_bytes()
+            .to_vec();
+        let canonical_core = bundle
+            .original_module_interface
+            .core_bytes()
+            .map(<[u8]>::to_vec);
         // No later cache bytes are authoritative for the selected snapshot.
         fs::remove_dir_all(root.path().join(RECORD_DIR)).unwrap();
         fs::write(&bundle.source, "module Library where\nchanged = True\n").unwrap();
+        // Materialized transport inputs may disappear at transaction close.
+        // The selected immutable original, not those paths, owns diagnostics.
+        fs::remove_dir_all(scratch.path()).unwrap();
         selected
             .retain_evidence_diagnostics(destination.path())
             .unwrap();
@@ -113,5 +137,28 @@ mod tests {
         assert_eq!(owner["original_evidence_sha256"], sha(&original));
         assert_eq!(owner["validation"]["Err"]["Source"]["index"], 1);
         assert!(owner["validation"]["Err"]["Source"]["reason"]["Changed"].is_object());
+        let files = &owner["canonical"]["files"];
+        for (kind, expected) in [
+            ("interface", Some(canonical_interface)),
+            ("certificate", Some(canonical_certificate)),
+            ("packages", Some(canonical_packages)),
+            ("core", canonical_core),
+        ] {
+            match expected {
+                Some(expected) => {
+                    let file = &files[kind];
+                    let retained = fs::read(
+                        diagnostics
+                            .join("input-artifacts")
+                            .join(file["file"].as_str().unwrap()),
+                    )
+                    .unwrap();
+                    assert_eq!(retained, expected);
+                    assert_eq!(file["sha256"], sha(&retained));
+                    assert_eq!(file["bytes"], retained.len());
+                }
+                None => assert!(files[kind].is_null()),
+            }
+        }
     }
 }

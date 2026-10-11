@@ -3059,7 +3059,28 @@ impl ExactCompilationRequest {
         };
         let mut encoded = BoundedBytes(Vec::new());
         serde_json::to_writer_pretty(&mut encoded, &facts).map_err(std::io::Error::other)?;
-        std::fs::write(directory.join("facts.json"), encoded.0)
+        std::fs::write(directory.join("facts.json"), encoded.0)?;
+        let mut capture =
+            crate::artifacts::InputArtifactDiagnostics::new(directory.join("input-artifacts"))?;
+        let inputs = self
+            .compiler_inputs()
+            .metadata
+            .entries
+            .values()
+            .map(|entry| {
+                let observed = match capture.payload(&entry.payload) {
+                    Ok(files) => serde_json::json!({"files": files}),
+                    Err(error) => serde_json::json!({"error": error.to_string()}),
+                };
+                serde_json::json!({"descriptor": entry.descriptor, "observed": observed})
+            })
+            .collect::<Vec<_>>();
+        std::fs::write(
+            directory.join("input-artifacts.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "authority": false, "artifact_bytes": capture.bytes_written(), "inputs": inputs
+            }))?,
+        )
     }
 
     pub(crate) fn with_source_search_context(mut self, include: &[PathBuf]) -> Self {
@@ -10131,6 +10152,78 @@ mod tests {
         drop(recovered);
         assert!(weak.upgrade().is_none());
         assert!(!owned.exists());
+    }
+
+    #[test]
+    fn input_diagnostics_preserve_exact_payloads_after_transport_files_disappear() {
+        let (context, producer) = metadata_fixture();
+        let scratch = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let request = context
+            .prepare_compilation(&scratch.path().join("request"), &producer)
+            .unwrap();
+        let expected = request
+            .compiler_inputs()
+            .metadata
+            .entries
+            .values()
+            .map(|entry| {
+                let (interface, packages) = match &entry.payload {
+                    ArtifactPayload::Original(product) => {
+                        (product.interface_bytes(), product.package_imports_bytes())
+                    }
+                    ArtifactPayload::Canonical(interface) => (
+                        interface.interface_bytes(),
+                        interface.package_imports_bytes(),
+                    ),
+                    ArtifactPayload::Interface(interface, _) => (
+                        interface.interface_bytes(),
+                        interface.package_imports_bytes(),
+                    ),
+                };
+                (
+                    entry.descriptor.clone(),
+                    interface.to_vec(),
+                    packages.to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(!expected.is_empty());
+        for artifact in &request.artifacts {
+            std::fs::remove_file(&artifact.interface.path).unwrap();
+        }
+        request
+            .retain_input_diagnostics(destination.path())
+            .unwrap();
+        drop(request);
+        drop(context);
+        drop(scratch);
+        let directory = destination.path().join("exact-request");
+        let index: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(directory.join("input-artifacts.json")).unwrap())
+                .unwrap();
+        assert_eq!(index["authority"], false);
+        let inputs = index["inputs"].as_array().unwrap();
+        assert_eq!(inputs.len(), expected.len());
+        for (descriptor, interface, packages) in expected {
+            let record = inputs
+                .iter()
+                .find(|record| record["descriptor"] == serde_json::to_value(&descriptor).unwrap())
+                .unwrap();
+            assert!(record["observed"]["error"].is_null());
+            for (kind, expected) in [("interface", interface), ("packages", packages)] {
+                let file = &record["observed"]["files"][kind];
+                let retained = std::fs::read(
+                    directory
+                        .join("input-artifacts")
+                        .join(file["file"].as_str().unwrap()),
+                )
+                .unwrap();
+                assert_eq!(retained, expected);
+                assert_eq!(file["sha256"], crate::checked_cell::hash(&retained));
+                assert_eq!(file["bytes"], retained.len());
+            }
+        }
     }
 
     #[test]

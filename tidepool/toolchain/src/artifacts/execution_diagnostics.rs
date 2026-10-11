@@ -10,6 +10,83 @@ const BYTE_LIMIT: u64 = 128 << 20;
 const ENTRY_LIMIT: usize = 4096;
 const DEPTH_LIMIT: usize = 16;
 
+/// Diagnostic copies of already admitted input bytes. In particular, a sealed
+/// transport path may cease to exist when its transaction closes; it is never
+/// reopened to reconstruct the input observed by the compiler.
+pub(crate) struct InputArtifactDiagnostics {
+    directory: PathBuf,
+    remaining: u64,
+    saved: std::collections::BTreeSet<String>,
+}
+
+impl InputArtifactDiagnostics {
+    pub(crate) fn new(directory: PathBuf) -> io::Result<Self> {
+        std::fs::create_dir_all(&directory)?;
+        Ok(Self {
+            directory,
+            remaining: BYTE_LIMIT,
+            saved: Default::default(),
+        })
+    }
+
+    pub(crate) fn bytes_written(&self) -> u64 {
+        BYTE_LIMIT - self.remaining
+    }
+
+    fn bytes(&mut self, extension: &str, bytes: &[u8]) -> io::Result<serde_json::Value> {
+        let sha256 = crate::checked_cell::hash(bytes);
+        let name = format!("{sha256}.{extension}");
+        if !self.saved.contains(&name) {
+            if bytes.len() as u64 > self.remaining || self.saved.len() >= ENTRY_LIMIT {
+                return Err(io::Error::other(format!(
+                    "input artifact diagnostics exceed capture bound: attempted {} bytes, {} bytes remaining, {} of {} entries retained",
+                    bytes.len(),
+                    self.remaining,
+                    self.saved.len(),
+                    ENTRY_LIMIT,
+                )));
+            }
+            std::fs::write(self.directory.join(&name), bytes)?;
+            self.remaining -= bytes.len() as u64;
+            self.saved.insert(name.clone());
+        }
+        Ok(serde_json::json!({"file": name, "sha256": sha256, "bytes": bytes.len()}))
+    }
+
+    pub(crate) fn canonical(
+        &mut self,
+        interface: &crate::certified_products::CertifiedModuleInterface,
+    ) -> io::Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "unit": interface.unit(), "module": interface.module(),
+            "interface": self.bytes("hi", interface.interface_bytes())?,
+            "packages": self.bytes("packages", interface.package_imports_bytes())?,
+            "certificate": self.bytes("certificate", interface.certificate_bytes())?,
+            "core": interface.core_bytes().map(|bytes| self.bytes("core", bytes)).transpose()?,
+        }))
+    }
+
+    pub(crate) fn payload(
+        &mut self,
+        payload: &crate::artifact_inventory::ArtifactPayload,
+    ) -> io::Result<serde_json::Value> {
+        use crate::artifact_inventory::ArtifactPayload;
+        match payload {
+            ArtifactPayload::Canonical(interface) => self.canonical(interface),
+            ArtifactPayload::Original(product) => Ok(serde_json::json!({
+                "interface": self.bytes("hi", product.interface_bytes())?,
+                "packages": self.bytes("packages", product.package_imports_bytes())?,
+                "certificate": self.bytes("certificate", product.certification_bytes())?,
+                "canonical": product.module_interface().map(|interface| self.canonical(interface)).transpose()?,
+            })),
+            ArtifactPayload::Interface(interface, _) => Ok(serde_json::json!({
+                "interface": self.bytes("hi", interface.interface_bytes())?,
+                "packages": self.bytes("packages", interface.package_imports_bytes())?,
+            })),
+        }
+    }
+}
+
 /// Create compiler scratch with its ordinary production lifetime, or with the
 /// isolated case's explicit diagnostic lifetime. Original compiler paths remain
 /// unchanged through execution and hard process termination; only the runner
@@ -220,6 +297,62 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn input_capture_reuses_identical_bytes_and_preserves_budget_after_refusal() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut capture = InputArtifactDiagnostics::new(directory.path().join("inputs")).unwrap();
+        capture.remaining = 5;
+        let first = capture.bytes("hi", b"abc").unwrap();
+        assert_eq!(capture.remaining, 2);
+        assert_eq!(capture.bytes("hi", b"abc").unwrap(), first);
+        assert_eq!(capture.remaining, 2);
+        assert!(capture.bytes("hi", b"abcd").is_err());
+        assert_eq!(capture.remaining, 2);
+        let last = capture.bytes("hi", b"xy").unwrap();
+        assert_eq!(capture.remaining, 0);
+        for (record, expected) in [(first, b"abc".as_slice()), (last, b"xy".as_slice())] {
+            assert_eq!(
+                std::fs::read(capture.directory.join(record["file"].as_str().unwrap())).unwrap(),
+                expected
+            );
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn input_capture_histories_match_unique_owned_bytes(
+            history in proptest::collection::vec(
+                (proptest::bool::ANY, proptest::collection::vec(0u8..8, 0..12)), 0..64
+            )
+        ) {
+            use proptest::prelude::*;
+            let directory = tempfile::tempdir().unwrap();
+            let mut capture = InputArtifactDiagnostics::new(directory.path().join("inputs")).unwrap();
+            capture.remaining = 64;
+            let mut expected = std::collections::BTreeSet::new();
+            let mut remaining = 64;
+            for (kind, bytes) in history {
+                let extension = if kind { "hi" } else { "certificate" };
+                let key = (kind, bytes.clone());
+                let already = expected.contains(&key);
+                let admitted = already || bytes.len() <= remaining;
+                let result = capture.bytes(extension, &bytes);
+                prop_assert_eq!(result.is_ok(), admitted);
+                if admitted {
+                    if !already {
+                        remaining -= bytes.len();
+                        expected.insert(key);
+                    }
+                    let record = result.unwrap();
+                    let actual = std::fs::read(capture.directory.join(record["file"].as_str().unwrap())).unwrap();
+                    prop_assert_eq!(actual, bytes);
+                }
+                prop_assert_eq!(capture.remaining, remaining as u64);
+                prop_assert_eq!(std::fs::read_dir(&capture.directory).unwrap().count(), expected.len());
+            }
+        }
+    }
 
     #[test]
     fn diagnostic_record_retains_original_paths_and_process_outcome() {
