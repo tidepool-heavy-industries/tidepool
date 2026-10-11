@@ -848,7 +848,6 @@ async fn inherited_command_is_readable_without_transferring_control_or_display_p
         ActorWorktreeGrant::Bound {
             enumerate: false,
             allocate: true,
-            integrate: true,
         },
     );
     let _custody = child
@@ -1001,7 +1000,6 @@ async fn inherited_command_helpers_start_fresh_jobs_in_each_callers_checkout() {
         ActorWorktreeGrant::Bound {
             enumerate: false,
             allocate: true,
-            integrate: true,
         },
     );
     campaign.acknowledge_native_spawn(&child);
@@ -1099,7 +1097,6 @@ async fn extracted_effectful_closure_starts_work_in_receiver_after_response_rele
         ActorWorktreeGrant::Bound {
             enumerate: false,
             allocate: true,
-            integrate: true,
         },
     );
     campaign.acknowledge_native_spawn(&producer);
@@ -1142,7 +1139,6 @@ async fn extracted_effectful_closure_starts_work_in_receiver_after_response_rele
         ActorWorktreeGrant::Bound {
             enumerate: false,
             allocate: true,
-            integrate: true,
         },
     );
     campaign.acknowledge_native_spawn(&observer);
@@ -2929,7 +2925,6 @@ async fn sibling_actor_progresses_during_foreground_command_wait() {
         ActorWorktreeGrant::Bound {
             enumerate: false,
             allocate: true,
-            integrate: true,
         },
     );
     let _custody = child

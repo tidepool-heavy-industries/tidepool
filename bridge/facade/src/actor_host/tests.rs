@@ -2713,7 +2713,6 @@ async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
                     ActorWorktreeGrant::Bound {
                         enumerate: false,
                         allocate: true,
-                        integrate: true,
                     },
                 );
                 campaign.acknowledge_native_spawn(&child_installation);
@@ -2747,7 +2746,6 @@ async fn descendants_list_the_spawn_tree_and_drop_a_retired_leaf() {
                     ActorWorktreeGrant::Bound {
                         enumerate: false,
                         allocate: true,
-                        integrate: true,
                     },
                 );
                 campaign.acknowledge_native_spawn(&grandchild_installation);

@@ -47,6 +47,14 @@ One module per effect under `src/handlers/`:
 - `src/handlers/agent.rs` — the agent effect's request handling
 - `src/handlers/entropy.rs` — process-local randomness for authored programs
 
+`ActorWorktreeAuthority` owns effective access for an exact actor attachment.
+`RepositoryReadOnly` caps current attachment operations and newly issued
+workspace capabilities without changing durable attachment rows or older opaque
+capabilities. A live writable attachment authorizes `tryMerge` into that exact
+checkout; the independent `Bound` grant fields control enumeration and allocation.
+Wrong incarnations, released attachments, read-only access and unrelated targets
+must fail before Git runs.
+
 `src/lib.rs` keeps the stack assembly (`HandlerConfig`, `handler_for!`,
 `build_base_stack`, `build_minimal_stack`, `base_decls`) and
 re-exports everything via `pub use handlers::*;`, so the external surface is

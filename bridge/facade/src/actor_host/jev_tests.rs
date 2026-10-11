@@ -1640,7 +1640,6 @@ async fn next_watchdog_child(
         ActorWorktreeGrant::Bound {
             enumerate: false,
             allocate: true,
-            integrate: true,
         },
     );
     campaign.acknowledge_native_spawn(&child);

@@ -1443,7 +1443,6 @@ async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResiden
         ActorWorktreeGrant::Bound {
             enumerate: false,
             allocate: true,
-            integrate: true,
         },
     );
     campaign.acknowledge_native_spawn(&child);

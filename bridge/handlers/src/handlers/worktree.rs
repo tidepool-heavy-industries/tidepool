@@ -101,10 +101,11 @@ pub enum ActorWorktreeGrant {
     /// Repository inspection, capping current attachments and new capabilities
     /// at read-only access. Previously issued capabilities retain their rights.
     RepositoryReadOnly,
+    /// Exact writable attachment custody authorizes merging into that checkout.
+    /// Repository enumeration and allocation remain independent privileges.
     Bound {
         enumerate: bool,
         allocate: bool,
-        integrate: bool,
     },
 }
 
@@ -113,7 +114,6 @@ impl Default for ActorWorktreeGrant {
         Self::Bound {
             enumerate: false,
             allocate: false,
-            integrate: false,
         }
     }
 }
@@ -621,7 +621,6 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
         let ActorWorktreeGrant::Bound {
             enumerate,
             allocate,
-            integrate,
         } = self.authority.grant(principal)
         else {
             let grant = self.authority.grant(principal);
@@ -717,13 +716,12 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
             WorktreeReq::WorktreeList | WorktreeReq::WorktreeListMatching(..) if enumerate => {
                 return tidepool_effect::dispatch::EffectHandler::handle(&mut self.inner, req, cx);
             }
-            WorktreeReq::WorktreeTryMerge(request) if integrate => Some(&request.target_worktree),
+            WorktreeReq::WorktreeTryMerge(request) => Some(&request.target_worktree),
             WorktreeReq::WorktreeCreate(_)
             | WorktreeReq::WorktreeCurrentWorkspace
             | WorktreeReq::WorktreeGrantWorkspace(_)
             | WorktreeReq::WorktreeList
-            | WorktreeReq::WorktreeListMatching(..)
-            | WorktreeReq::WorktreeTryMerge(..) => None,
+            | WorktreeReq::WorktreeListMatching(..) => None,
         };
         if let Some(wire_id) = permitted_tree {
             let id = match worktree_id_from_wire(wire_id) {
@@ -750,7 +748,7 @@ impl tidepool_effect::dispatch::EffectHandler<tidepool_mcp::CapturedOutput>
             )));
         }
         cx.respond(Err::<(), _>(WorktreeError::WorktreeAuthorityDenied(
-            "this actor may inspect its bound worktree but may not allocate, enumerate, or merge managed worktrees".into(),
+            "this actor may not allocate or enumerate managed worktrees".into(),
         )))
     }
 }
@@ -1552,11 +1550,7 @@ mod tests {
     enum AuthorityHistoryGrant {
         Repository,
         Inspection,
-        Bound {
-            enumerate: bool,
-            allocate: bool,
-            integrate: bool,
-        },
+        Bound { enumerate: bool, allocate: bool },
     }
 
     #[derive(Clone, Debug)]
@@ -1576,13 +1570,12 @@ mod tests {
         let grant = prop_oneof![
             Just(AuthorityHistoryGrant::Repository),
             Just(AuthorityHistoryGrant::Inspection),
-            (any::<bool>(), any::<bool>(), any::<bool>()).prop_map(
-                |(enumerate, allocate, integrate)| AuthorityHistoryGrant::Bound {
+            (any::<bool>(), any::<bool>()).prop_map(|(enumerate, allocate)| {
+                AuthorityHistoryGrant::Bound {
                     enumerate,
                     allocate,
-                    integrate
                 }
-            ),
+            }),
         ];
         prop_oneof![
             (0usize..3, grant).prop_map(|(actor, grant)| AuthorityHistoryStep::Grant(actor, grant)),
@@ -1641,7 +1634,7 @@ mod tests {
                         authority.install_grant(principals[actor], match grant {
                             AuthorityHistoryGrant::Repository => ActorWorktreeGrant::Repository,
                             AuthorityHistoryGrant::Inspection => ActorWorktreeGrant::RepositoryReadOnly,
-                            AuthorityHistoryGrant::Bound { enumerate, allocate, integrate } => ActorWorktreeGrant::Bound { enumerate, allocate, integrate },
+                            AuthorityHistoryGrant::Bound { enumerate, allocate } => ActorWorktreeGrant::Bound { enumerate, allocate },
                         });
                         grants[actor] = Some(grant);
                     }
@@ -1686,6 +1679,178 @@ mod tests {
         }
     }
 
+    #[test]
+    fn writable_attachment_can_merge_only_its_exact_target() {
+        use tidepool_bridge::FromHaskell;
+        use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+        let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
+        repository
+            .writer()
+            .commit_file("README.md", "seed", "seed")
+            .unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
+        let manager = WorktreeManager::new(
+            GitCli::new(),
+            WorktreeRegistry::open(&anchor, "registry").unwrap(),
+            storage.path().join("workspaces"),
+            repository.path(),
+        );
+        let target = manager.register_source_checkout().unwrap();
+        let bindings = Arc::new(Mutex::new(BindingTable::open(&anchor, "bindings").unwrap()));
+        let authority = ActorWorktreeAuthority::new("run", bindings.clone());
+        let principal = tidepool_repr::PrincipalId::new(2, 1);
+        let lease = bindings
+            .lock()
+            .bind(
+                target.id(),
+                &WorktreePrincipal::exact_actor("run", 2, 1),
+                WorkspaceAccess::ReadWrite,
+                1,
+            )
+            .unwrap();
+        let mut handler =
+            ActorWorktreeHandler::new(WorktreeHandler::from_manager(manager), authority.clone());
+        let source = handler
+            .authorize_committed_fork(
+                principal,
+                WtWorktreeSource::SourceWorktree(worktree_id_to_wire(target.id())),
+            )
+            .unwrap()
+            .materialize_committed()
+            .unwrap();
+        let source_head = repository
+            .writer_at(&source.handle_receipt.cwd)
+            .commit_file("child.txt", "child", "child")
+            .unwrap();
+        let request = WtMergeRequest {
+            target_worktree: worktree_id_to_wire(target.id()),
+            source_worktree: source.handle_receipt.tree_id.clone(),
+            source_head: git_oid_to_wire(&source_head),
+            source_branch: None,
+            merge_advance: None,
+            merge_message: "integrate child".into(),
+        };
+        let table = workspace_response_table();
+        let output = tidepool_mcp::CapturedOutput::new();
+        let decode = |response| {
+            <Result<WtMergeOutcome, WorktreeError>>::from_value(
+                &crate::test_support::response_value(response, &table),
+                &table,
+            )
+            .unwrap()
+        };
+        let cx = EffectContext::with_principal(&table, principal, &output);
+        let mut wrong_target = request.clone();
+        wrong_target.target_worktree = source.handle_receipt.tree_id.clone();
+        assert!(matches!(
+            decode(
+                handler
+                    .handle(WorktreeReq::WorktreeTryMerge(wrong_target), &cx)
+                    .unwrap()
+            ),
+            Err(WorktreeError::WorktreeUnauthorized(_))
+        ));
+        authority.install_grant(principal, ActorWorktreeGrant::RepositoryReadOnly);
+        assert!(matches!(
+            decode(
+                handler
+                    .handle(WorktreeReq::WorktreeTryMerge(request.clone()), &cx)
+                    .unwrap()
+            ),
+            Err(WorktreeError::WorktreeAuthorityDenied(_))
+        ));
+        authority.remove_grant(principal);
+        let wrong_incarnation =
+            EffectContext::with_principal(&table, tidepool_repr::PrincipalId::new(2, 2), &output);
+        assert!(matches!(
+            decode(
+                handler
+                    .handle(
+                        WorktreeReq::WorktreeTryMerge(request.clone()),
+                        &wrong_incarnation
+                    )
+                    .unwrap()
+            ),
+            Err(WorktreeError::WorktreeUnauthorized(_))
+        ));
+        assert_eq!(
+            repository.writer().head().unwrap(),
+            target.receipt().source_head
+        );
+        let outcome = decode(
+            handler
+                .handle(WorktreeReq::WorktreeTryMerge(request.clone()), &cx)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(outcome, WtMergeOutcome::FastForwarded(_, _, _)));
+        assert_eq!(repository.writer().head().unwrap(), source_head);
+        assert_eq!(
+            std::fs::read_to_string(repository.path().join("child.txt")).unwrap(),
+            "child"
+        );
+        assert_eq!(authority.grant(principal), ActorWorktreeGrant::default());
+        lease.release(&mut bindings.lock()).unwrap();
+        assert!(matches!(
+            decode(
+                handler
+                    .handle(WorktreeReq::WorktreeTryMerge(request), &cx)
+                    .unwrap()
+            ),
+            Err(WorktreeError::WorktreeUnauthorized(_))
+        ));
+    }
+
+    proptest::proptest! {
+        #![proptest_config(authority_history_config())]
+        #[test]
+        fn merge_authority_depends_on_exact_live_writable_target(
+            grant in 0u8..4,
+            attachment in 0u8..5,
+            target_matches in proptest::bool::ANY,
+            enumerate in proptest::bool::ANY,
+            allocate in proptest::bool::ANY,
+        ) {
+            use tidepool_bridge::FromHaskell;
+            use tidepool_effect::dispatch::{EffectContext, EffectHandler};
+            let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
+            repository.writer().commit_file("README.md", "seed", "seed").unwrap();
+            let storage = tempfile::tempdir().unwrap();
+            let anchor = DirectoryAnchor::open_existing(storage.path()).unwrap();
+            let manager = WorktreeManager::new(GitCli::new(), WorktreeRegistry::open(&anchor, "registry").unwrap(), storage.path().join("workspaces"), repository.path());
+            let target = manager.register_source_checkout().unwrap().id().clone();
+            let bindings = Arc::new(Mutex::new(BindingTable::open(&anchor, "bindings").unwrap()));
+            let authority = ActorWorktreeAuthority::new("run", bindings.clone());
+            let principal = tidepool_repr::PrincipalId::new(2, 1);
+            let attached = if target_matches { target.clone() } else { WorktreeId::from_raw("other-target") };
+            let mut lease = if attachment != 0 {
+                Some(bindings.lock().bind(&attached, &WorktreePrincipal::exact_actor("run", 2, if attachment == 4 { 2 } else { 1 }), if attachment == 2 { WorkspaceAccess::ReadOnly } else { WorkspaceAccess::ReadWrite }, 1).unwrap())
+            } else { None };
+            if attachment == 3 { lease.take().unwrap().release(&mut bindings.lock()).unwrap(); }
+            match grant {
+                0 => {},
+                1 => authority.install_grant(principal, ActorWorktreeGrant::Bound { enumerate, allocate }),
+                2 => authority.install_grant(principal, ActorWorktreeGrant::RepositoryReadOnly),
+                _ => authority.install_grant(principal, ActorWorktreeGrant::Repository),
+            }
+            let mut handler = ActorWorktreeHandler::new(WorktreeHandler::from_manager(manager), authority);
+            let table = workspace_response_table();
+            let output = tidepool_mcp::CapturedOutput::new();
+            let cx = EffectContext::with_principal(&table, principal, &output);
+            // A permitted request reaches the concrete handler's independent
+            // source lookup; denied requests cannot observe this missing source.
+            let source = WtWorktreeId { raw: "missing-source".into() };
+            let request = WtMergeRequest { target_worktree: worktree_id_to_wire(&target), source_worktree: source.clone(), source_head: tidepool_bridge_effects::WtGitOid { raw: "unused".into() }, source_branch: None, merge_advance: None, merge_message: "unused".into() };
+            let response = handler.handle(WorktreeReq::WorktreeTryMerge(request), &cx).unwrap();
+            let result = <Result<WtMergeOutcome, WorktreeError>>::from_value(&crate::test_support::response_value(response, &table), &table).unwrap();
+            let expected = grant == 3 || ((grant == 0 || grant == 1) && attachment == 1 && target_matches);
+            proptest::prop_assert_eq!(matches!(&result, Err(WorktreeError::WorktreeNotRegistered(id)) if *id == source), expected);
+            if !expected { proptest::prop_assert!(matches!(result, Err(WorktreeError::WorktreeUnauthorized(_) | WorktreeError::WorktreeAuthorityDenied(_)))); }
+            if let Some(lease) = lease { lease.release(&mut bindings.lock()).unwrap(); }
+        }
+    }
+
     fn workspace_response_table() -> tidepool_repr::DataConTable {
         let mut table = crate::test_support::full_effect_test_table();
         let schema = tidepool_protocol::effects::worktree::worktree();
@@ -1701,6 +1866,10 @@ mod tests {
             ("BranchName", 1),
             ("GitOid", 1),
             ("GitRef", 1),
+            ("AlreadyContained", 2),
+            ("FastForwarded", 3),
+            ("CreatedMergeCommit", 3),
+            ("ManualGitRequired", 4),
         ];
         for (offset, (name, arity)) in records.into_iter().chain(constructors).enumerate() {
             if table.get_by_name(name).is_some() {

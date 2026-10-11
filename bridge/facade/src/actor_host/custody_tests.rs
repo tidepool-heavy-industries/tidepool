@@ -412,7 +412,6 @@ pub(super) async fn inherited_response_scenario(
         ActorWorktreeGrant::Bound {
             enumerate: false,
             allocate: true,
-            integrate: true,
         },
     );
     campaign.acknowledge_native_spawn(&producer);
@@ -456,7 +455,6 @@ pub(super) async fn inherited_response_scenario(
         ActorWorktreeGrant::Bound {
             enumerate: false,
             allocate: true,
-            integrate: true,
         },
     );
     campaign.acknowledge_native_spawn(&observer);
@@ -669,7 +667,6 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
                         ActorWorktreeGrant::Bound {
                             enumerate: false,
                             allocate: true,
-                            integrate: true,
                         },
                     );
                     campaign.acknowledge_native_spawn(&child);
@@ -781,7 +778,6 @@ async fn custody_precedes_first_bootstrap_worktree_use_for_two_siblings() {
                     ActorWorktreeGrant::Bound {
                         enumerate: false,
                         allocate: true,
-                        integrate: true,
                     },
                 );
                 let leaf_tree = campaign
@@ -1320,7 +1316,6 @@ async fn a_resident_actor_may_write_its_own_worktree_and_nothing_else() {
         ActorWorktreeGrant::Bound {
             enumerate: false,
             allocate: false,
-            integrate: false,
         },
     );
     let source = admission.manager.source_repository().to_owned();
@@ -1432,7 +1427,6 @@ async fn resident_command_grants_allow_root_coding_and_preserve_checkout_isolati
         ActorWorktreeGrant::Bound {
             enumerate: false,
             allocate: true,
-            integrate: true,
         },
     );
     let bubblewrap = resolve_scope_bubblewrap(&BTreeMap::new()).unwrap();
