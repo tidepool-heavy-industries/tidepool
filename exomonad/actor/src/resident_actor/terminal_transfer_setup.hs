@@ -5,6 +5,6 @@ nativeAdmission <- Spawn.spawnSubagent
   ((Spawn.defaultSpawnOptions (Contract.defaultAsyncWorkbenchSpec @'[Replies]))
     { Spawn.spawnLabel = Just "terminal-transfer-target" })
 nativeAgent <- case nativeAdmission of
-  Left failure -> error (show failure)
+  Left failure -> error (tshow failure)
   Right agent -> pure agent
 pure True
