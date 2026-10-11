@@ -876,7 +876,10 @@ mod tests {
         assert!(retained.declaration(Generation(1)).unwrap().is_some());
         assert!(retained.declaration(Generation(2)).unwrap().is_none());
         assert!(retained
-            .declaration_dependencies(Generation(1))
+            .declaration_context(Generation(1))
+            .unwrap()
+            .snapshot()
+            .binding_dependencies()
             .unwrap()
             .is_empty());
         let mut next = first.candidate();

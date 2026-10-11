@@ -547,7 +547,20 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
     tidepool_toolchain::recovery_artifacts::verify_materialized_ref(&child_root, &native).unwrap();
     use tidepool_toolchain::artifact_inventory::ArtifactDescriptor;
     let native_id = ArtifactDescriptor::from_recovery_product(&native).id;
-    let dependencies = child_domain.declaration_dependencies(generation).unwrap();
+    let context = child_domain.declaration_context(generation).unwrap();
+    let selected_interfaces = context.snapshot().compiler_roles().into_iter()
+        .filter_map(|role| match child_domain.artifact(role.interface()).unwrap() {
+            Some(RecoveryArtifactClosure::Join(reference)) => Some(reference),
+            _ => None,
+        }).collect::<Vec<_>>();
+    for root in &authored.lexical_roots {
+        let projection = selected_interfaces.iter().find(|projection|
+            root.unit == projection.unit && root.module == projection.module)
+            .expect("the child's newly issued lexical projection is selected in its exact context");
+        tidepool_toolchain::recovery_artifacts::verify_materialized_join(&child_root, projection).unwrap();
+    }
+    assert!(!authored.lexical_roots.is_empty());
+    let dependencies = context.snapshot().binding_dependencies().unwrap();
     let mut reached = std::collections::BTreeSet::new();
     let mut pending = dependencies.iter().flat_map(|(source,target,_)| [*source,*target])
         .filter(|node| node.artifact() == native_id).collect::<std::collections::VecDeque<_>>();
@@ -558,14 +571,16 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
         }
     }
     let selected_ids = reached.iter().map(|node| node.artifact()).collect::<std::collections::BTreeSet<_>>();
-    let projections = selected_ids.into_iter().filter_map(|id| match child_domain.artifact(id).unwrap() {
-        Some(RecoveryArtifactClosure::Join(reference)) => Some(reference),
-        _ => None,
+    let inherited_projections = selected_ids.into_iter().filter_map(|id| {
+        match child_domain.artifact(id).unwrap() {
+            Some(RecoveryArtifactClosure::Join(reference))
+                if parent_domain.artifact(id).unwrap() == Some(RecoveryArtifactClosure::Join(reference.clone())) => Some(reference),
+            _ => None,
+        }
     }).collect::<Vec<_>>();
-    assert!(authored.lexical_roots.iter().any(|root| projections.iter()
-        .any(|projection| root.unit == projection.unit && root.module == projection.module)),
-        "the public lexical root must be an exact selected interface: {authored:?}");
-    for projection in &projections {
+    assert!(!inherited_projections.is_empty(),
+        "the exact child original must depend on an interface retained before child creation");
+    for projection in &inherited_projections {
         tidepool_toolchain::recovery_artifacts::verify_materialized_join(&child_root, projection).unwrap();
     }
     let parent_after = observe_declaration_domain(&recovery_path, RecoveryDomainId::Root)

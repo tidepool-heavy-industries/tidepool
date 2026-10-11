@@ -55,18 +55,11 @@ impl DeclarationDomainObservation {
             .map_err(|error| graph_error(self.reader.store.path(), error))
     }
 
-    /// Demand only this declaration's exact selected dependency facts.
-    pub fn declaration_dependencies(
+    /// Hydrate only this declaration's exact selected compiler facts.
+    pub fn declaration_context(
         &self,
         generation: tidepool_repr::Generation,
-    ) -> Result<
-        Vec<(
-            tidepool_toolchain::artifact_inventory::ArtifactBindingNode,
-            tidepool_toolchain::artifact_inventory::ArtifactBindingNode,
-            tidepool_toolchain::artifact_inventory::ArtifactDependency,
-        )>,
-        SessionError,
-    > {
+    ) -> Result<tidepool_toolchain::exact_context::MaterializedContext, SessionError> {
         let path = self.reader.store.path();
         let node = self
             .reader
@@ -80,7 +73,6 @@ impl DeclarationDomainObservation {
             self.reader.store.as_ref(),
             &node.context_root,
         )
-        .and_then(|context| context.snapshot().binding_dependencies())
         .map_err(|error| SessionError::RecoverySnapshot(Box::new(error)))
     }
 }

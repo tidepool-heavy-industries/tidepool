@@ -967,7 +967,7 @@ async fn production_cold_successor_executes_retained_original_declaration_in_fre
         })
         .expect("authored original module product/interface was not retained");
     tidepool_toolchain::recovery_artifacts::verify_materialized_ref(
-        &root.join("run"),
+        &root.join("run/haskell-session"),
         &original_reference,
     )
     .expect("original interface/product bytes do not match their certified identity");
@@ -1008,7 +1008,7 @@ async fn production_cold_successor_executes_retained_original_declaration_in_fre
         "cold successor replaced the original module/product identity"
     );
     tidepool_toolchain::recovery_artifacts::verify_materialized_ref(
-        &root.join("run"),
+        &root.join("run/haskell-session"),
         &original_reference,
     )
     .expect("cold successor changed the original retained product/interface bytes");
