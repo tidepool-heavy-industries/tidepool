@@ -257,3 +257,24 @@ fn journal_contract_text_is_pinned() {
     assert!(journal.type_params.is_empty());
     assert!(journal.default_row_args.is_empty());
 }
+
+#[test]
+fn green_completion_requires_integer_thread_identity_after_valid_control() {
+    use tidepool_protocol::HsType;
+    let green = tidepool_protocol::effects::green::green();
+    green.validate().expect("valid emitted Green control");
+    for wrong_type in [HsType::Text, HsType::Unit, HsType::list(HsType::Int)] {
+        let mut malformed = green.clone();
+        malformed
+            .verbs
+            .iter_mut()
+            .find(|verb| verb.ctor == "AsyncDoneWith")
+            .unwrap()
+            .args[0]
+            .ty = wrong_type;
+        assert!(
+            malformed.validate().is_err(),
+            "non-integer completion identity was accepted after valid control"
+        );
+    }
+}

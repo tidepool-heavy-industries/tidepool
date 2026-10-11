@@ -127,7 +127,7 @@ pub fn green() -> Effect {
             Verb {
                 ctor: "AsyncDoneWith",
                 method: "async_done_with",
-                args: vec![site_arg()],
+                args: vec![thread_id_arg()],
                 ret: HsType::Unit,
                 errors: None,
                 handling: HandlingClass::Green,

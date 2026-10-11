@@ -730,10 +730,13 @@ impl Effect {
                         ));
                         continue;
                     };
-                    if done.args.len() != 1 || done.ret != HsType::Unit {
+                    if done.args.len() != 1
+                        || done.args[0].ty != HsType::Int
+                        || done.ret != HsType::Unit
+                    {
                         errs.push(format!(
                             "{}: helper {} completion verb `{done_ctor}` must take only its \
-                             site argument and return ()",
+                             runtime-issued thread identity Int and return ()",
                             self.name, h.name
                         ));
                     }
@@ -1126,8 +1129,8 @@ pub enum HelperBody {
         /// `cases` target and `default`.
         result_type: &'static str,
     },
-    /// `v param = send (Ctor 0 (\_ -> param >>= \() -> send
-    /// (<done_ctor> 0)))` — spawn a green thread whose sealed Haskell wrapper
+    /// `v param = send (Ctor 0 (\threadId -> param >>= \() -> send
+    /// (<done_ctor> threadId)))` — spawn a green thread whose sealed Haskell wrapper
     /// has already published its result into managed heap storage before its
     /// last, payload-free completion suspension.
     ///
@@ -1231,8 +1234,8 @@ impl Helper {
                 &HsType::Int,
             );
             out.push_str(&format!(
-                "{} :: {sig}\n{} {param} = send ({ctor} 0 (\\_ -> {param} >>= \
-                 \\() -> send ({done_ctor} 0)))",
+                "{} :: {sig}\n{} {param} = send ({ctor} 0 (\\threadId -> {param} >>= \
+                 \\() -> send ({done_ctor} threadId)))",
                 self.name, self.name
             ));
             return out;

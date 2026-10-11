@@ -413,9 +413,14 @@ async fn compiled_green_evaluation_failure_is_not_success_or_authored_cancellati
     assert!(
         matches!(
             &result,
-            Err(KernelInvocationFailure::Failed { diagnostic: Some(diagnostic), .. })
-                if diagnostic.class == tidepool_toolchain::failclass::FailureClass::Runtime
-                    && diagnostic.phase == tidepool_toolchain::failclass::Phase::Run
+            Err(KernelInvocationFailure::Workbench(failure))
+                if failure.diagnostic.as_ref().is_some_and(|diagnostic|
+                    diagnostic.class == tidepool_toolchain::failclass::FailureClass::Runtime
+                        && diagnostic.phase == tidepool_toolchain::failclass::Phase::Run
+                        && diagnostic.message.contains("controlled green infrastructure failure"))
+                    && failure.receipts.iter().any(|receipt|
+                        receipt.status == tidepool_runtime::session::WorkbenchItemStatus::Rejected
+                            && receipt.failure_layer == Some(tidepool_runtime::session::WorkbenchFailureLayer::Effect))
         ),
         "expected native evaluation failure after actual Green execution: {result:?}"
     );
@@ -466,6 +471,28 @@ async fn compiled_expression_concurrent_forms_reverse_settlement_preserves_heap_
     );
     assert_eq!(fixture.host.state.lock().committed, ["two", "one"]);
     assert!(fixture.host.state.lock().closed.is_empty());
+    fixture.assert_live_leases_released();
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn compiled_green_completion_preserves_issued_token_and_refuses_zero() {
+    let fixture = Fixture::new(752, Scenario::Reverse);
+    let actor = fixture.parent().await;
+    assert_true(fixture.execute(&actor, "_ <- do\n  thread <- Async.async (pure ())\n  Async.wait thread\n  say (tshow True)", None).await);
+    let result = fixture
+        .execute(
+            &actor,
+            "_ <- do\n  thread <- Async.async (send (Core.AsyncDoneWith 0))\n  Async.wait thread",
+            None,
+        )
+        .await;
+    assert!(
+        matches!(&result, Err(KernelInvocationFailure::Workbench(failure))
+        if failure.detail == "actor protocol violation: async completion does not match its current thread delimiter"
+            && failure.receipts.is_empty()),
+        "wrong thread token must fail at the actual runtime boundary: {result:?}"
+    );
     fixture.assert_live_leases_released();
     fixture.finish().await;
 }
