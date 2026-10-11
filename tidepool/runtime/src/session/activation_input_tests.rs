@@ -3610,9 +3610,17 @@ fn display_owner_preserves_later_family_evidence_without_a_new_display_dictionar
     let earlier = resident
         .capture_activation_input(&hole, RealmId::ROOT, site)
         .unwrap();
+    let recipe = Arc::new(InputRecipe {
+        preamble: format!(
+            "{{-# LANGUAGE TypeFamilies #-}}\n{}",
+            fixture.recipe.preamble
+        ),
+        row: fixture.recipe.row.clone(),
+        include: fixture.recipe.include.clone(),
+    });
     let family_owner = publish_fixture_declaration(
         &mut resident,
-        &fixture.recipe,
+        &recipe,
         include_str!("fixtures/activation-display-later-family.hs"),
         0,
     );
@@ -3625,7 +3633,7 @@ fn display_owner_preserves_later_family_evidence_without_a_new_display_dictionar
         .unwrap();
     let (bound, producer, _) = compile_checked_binding(
         &mut resident,
-        &fixture.recipe,
+        &recipe,
         include_str!("fixtures/activation-input-opaque.hs"),
         execution,
     );
@@ -3633,7 +3641,7 @@ fn display_owner_preserves_later_family_evidence_without_a_new_display_dictionar
     let later_fixture = InputFixture {
         root: tempfile::tempdir().unwrap(),
         session: fixture.session,
-        recipe: fixture.recipe.clone(),
+        recipe: recipe.clone(),
         producer,
     };
     let reservation = later_fixture.start(&mut resident);
@@ -3660,10 +3668,9 @@ fn display_owner_preserves_later_family_evidence_without_a_new_display_dictionar
     assert!(!Arc::ptr_eq(&earlier.renderer_owner, &later.renderer_owner));
     resident.set_run_context(SessionRunContext::ROOT).unwrap();
     for input in [earlier, later] {
-        let (owner, interface) =
-            issued_captured_input(&mut resident, input, fixture.recipe.clone());
+        let (owner, interface) = issued_captured_input(&mut resident, input, recipe.clone());
         assert_eq!(
-            execute_mounted_input_preview(&mut resident, owner, interface, &fixture.recipe),
+            execute_mounted_input_preview(&mut resident, owner, interface, &recipe),
             serde_json::json!(["<opaque>", false])
         );
     }

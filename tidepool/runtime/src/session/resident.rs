@@ -350,6 +350,23 @@ pub struct ActivationDisplayOwners {
 struct OriginalDisplayIndex {
     buckets: BTreeMap<[u8; 32], Vec<Weak<OriginalDisplayOwner>>>,
     since_sweep: usize,
+    next_sweep: usize,
+}
+
+impl OriginalDisplayIndex {
+    fn prune_dead(&mut self) {
+        self.since_sweep += 1;
+        if self.since_sweep >= self.next_sweep.max(1) {
+            self.buckets.retain(|_, bucket| {
+                bucket.retain(|owner| owner.strong_count() != 0);
+                !bucket.is_empty()
+            });
+            self.since_sweep = 0;
+            // Snapshot the interval: an all-new-key stream must not move its
+            // next sweep further away on every insertion.
+            self.next_sweep = self.buckets.len().max(1);
+        }
+    }
 }
 
 impl ActivationDisplayOwners {
@@ -358,14 +375,7 @@ impl ActivationDisplayOwners {
         display: Arc<tidepool_toolchain::activation_preview::OriginalDisplayContext>,
     ) -> Arc<OriginalDisplayOwner> {
         let mut owners = self.owners.lock();
-        owners.since_sweep += 1;
-        if owners.since_sweep >= owners.buckets.len().max(1) {
-            owners.buckets.retain(|_, bucket| {
-                bucket.retain(|owner| owner.strong_count() != 0);
-                !bucket.is_empty()
-            });
-            owners.since_sweep = 0;
-        }
+        owners.prune_dead();
         let bucket = owners.buckets.entry(display.identity()).or_default();
         bucket.retain(|owner| owner.strong_count() != 0);
         for owner in bucket.iter().filter_map(Weak::upgrade) {
@@ -11307,6 +11317,30 @@ mod compiled_provenance_plan_tests {
 mod renderer_slot_tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn display_index_prunes_cold_owners_during_all_new_key_histories() {
+        let mut index = OriginalDisplayIndex::default();
+        for ordinal in 0u64..1024 {
+            index.prune_dead();
+            let mut identity = [0; 32];
+            identity[..8].copy_from_slice(&ordinal.to_le_bytes());
+            let owner = Arc::new(OriginalDisplayOwner {
+                identity,
+                display: None,
+                renderers: Mutex::default(),
+            });
+            index.buckets.insert(identity, vec![Arc::downgrade(&owner)]);
+            drop(owner);
+            assert_eq!(
+                index.buckets.len(),
+                1,
+                "cold keys cannot defer their sweep by growing the map"
+            );
+        }
+        index.prune_dead();
+        assert!(index.buckets.is_empty());
+    }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(256))]
