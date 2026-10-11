@@ -1,0 +1,3 @@
+let input = sessionInput :: Task
+display (taskSource input == expectedSource && map decisionSource (acceptedDecisions input) == [expectedSource] && taskName input == "assigned-review" && planPath input == "plan.md" && obligation input == "review implementation" && ownedPaths input == ["review-fixture.txt"] && acceptance input == "assigned acceptance" && rationale input == "retained reason" && map decisionSummary (acceptedDecisions input) == ["preserve the boundary"] && map decisionEvidence (acceptedDecisions input) == [["decision evidence"]])
+respond (Blocked "fresh task read" [] :: Outcome Candidate)

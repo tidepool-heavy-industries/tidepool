@@ -21,7 +21,7 @@ module Exomonad.Contrib.ReviewFlow
   , ReviewCleanupResult (..)
   , ReviewStage (..)
   , ReviewCompletion (..)
-  , ReviewStop (..)
+  , ReviewStop (..), CheckSourceRefusal (..)
   , ReviewChoice (..)
   , ReviewContext (..)
   , ReviewRouteResult (..)
@@ -37,7 +37,7 @@ module Exomonad.Contrib.ReviewFlow
 import GHC.Generics (Generic)
 import Control.Monad.Freer (Eff, Member, raise)
 import qualified Control.Monad.Freer.State as S
-import Data.List (find, nubBy)
+import Data.List (nubBy)
 import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Tidepool.Actor as Actor
@@ -45,8 +45,8 @@ import qualified Tidepool.Actor.Record as R
 import qualified Tidepool.Command as Cmd
 import Tidepool.Actors.Exomonad
 import Tidepool.Effects.Core (GitRef (..), Jev, WorktreeHandle (..), WorktreeIntegration, ActorLocal, Commands, Lookup)
-import Tidepool.Actors.Worktree (boundWorktree)
-import Tidepool.Worktree (WorktreeReceipt (..), renderGitOid, renderWorktreeError, renderWorktreeId, workspaceFor)
+import Tidepool.Actors.Worktree (boundWorktree, observeSubmission)
+import Tidepool.Worktree (WorktreeReceipt (..), WorktreeError, SubmissionObservation (..), HeadState (..), MergeOutcome, renderGitOid, renderWorktreeError, renderWorktreeId, workspaceFor)
 import qualified Exomonad.Contrib.Merge as Merge
 import Tidepool.Agent.Reply (requestIdNumber)
 import Exomonad.Contrib.CheckResults
@@ -105,6 +105,22 @@ data ReviewFlowPolicy = ReviewFlowPolicy
   , flowRepairInstructions :: Text
   }
 
+-- Preparation retains the issuing worktree observations and command results.
+-- Unavailable evidence is distinct from a dirty or mismatched checkout.
+data CheckSourceRefusal
+  = CheckCandidateUnbound
+  | CheckCandidateUnavailable WorktreeError
+  | CheckTargetUnbound WorktreeError
+  | CheckTargetUnavailable WorktreeError
+  | CheckTargetDirty SubmissionObservation
+  | CheckTargetNotAncestor GitOid GitOid
+  | CheckAncestryUnavailable Cmd.RunResult
+  | CheckMergeRefused WorktreeError
+  | CheckMergeDidNotFastForward MergeOutcome
+  | CheckTargetAfterMergeUnavailable WorktreeError
+  | CheckTargetHeadMismatch GitOid SubmissionObservation
+  deriving (Show)
+
 data ReviewStop
   = CandidateUnavailable ResponseFailure
   | CandidateBlocked Text [Text]
@@ -112,6 +128,7 @@ data ReviewStop
   | CandidateReceiptMismatch RequestId RequestId
   | RequiredSiblingMissing GitOid GitOid
   | SourcePreflightUnavailable Text
+  | CandidateCheckSourceRefused CheckSourceRefusal
   | CandidateChecksRefused Text
   | CandidateChecksUnknown Text
   | SourceAttachmentRefused RequestId R.AttachmentError
@@ -312,7 +329,7 @@ buildReviewFlow
      , Member Commands effects, Member Jev effects
      , Member (ActorLocal (R.Message ReviewFlow)) effects)
   => Actor.EffectProfile (R.Message ReviewFlow) effects
-  -> (Candidate -> WorktreeEvidence -> Eff effects (Either Text ()))
+  -> (Candidate -> WorktreeEvidence -> Eff effects (Either CheckSourceRefusal ()))
   -> AgentRef -> Task -> ReviewFlowPolicy -> Request (Outcome Candidate)
   -> Maybe [PlanCheck]
   -> (forall selected. Member Jev selected => ReviewContext -> Eff selected ReviewRouteResult)
@@ -434,8 +451,7 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
           <> fmap (RepairSettled attempt) (R.settlement attempt))
 
     cleanupReviewers request state = do
-      let agents = nubBy (\left right -> agentIdentity left == agentIdentity right)
-            (flowReviewerAgents state)
+      let agents = nubBy (\left right -> agentIdentity left == agentIdentity right) (flowReviewerAgents state)
           prior = case flowCleanupResult state of
             Just (ReviewCleanupAttempted receipts) -> receipts
             _ -> []
@@ -445,8 +461,8 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
       R.modify' (\current -> current { flowCleanupResult = Just result })
       pure result
 
-    cleanupAgent request prior agent = case snd <$> find
-      (\(previous, _) -> agentIdentity previous == agentIdentity agent) prior of
+    cleanupAgent request prior agent = case lookup (agentIdentity agent)
+      [(agentIdentity earlier, receipts) | (earlier, receipts) <- prior] of
       Just receipts | not (shouldRetry request receipts) -> pure (agent, receipts)
       earlier -> do
         outcome <- stopAgent agent
@@ -580,7 +596,7 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
         else do
           prepared <- raise (prepareSource exact source)
           case prepared of
-            Left reason -> publish (ReviewStopped (CandidateChecksRefused reason))
+            Left reason -> publish (ReviewStopped (CandidateCheckSourceRefused reason))
             Right () -> do
               started <- startCheckPlanInto (checksCompleted own) (candidateCommit exact) checks
               case started of
@@ -726,48 +742,51 @@ buildReviewFlow profile prepareSource owner task policy implementer checkPlan ch
             Left issue -> publish (ReviewStopped (RequestAdmissionRefused recipient issue))
             Right (attempt, updates) -> retainRepair own candidate attempt updates
 
--- Never reset or publish a branch. tryMerge owns checkout mutation; an
--- ancestry check ensures this is a fast-forward, and HEAD is checked again.
+-- Never reset or publish a branch. The bound worktree owner observes HEAD
+-- and cleanliness together; tryMerge retains mutation authority. Observations
+-- are fresh samples, not seals, so preparation observes the target again.
 prepareCheckSource
   :: (Member BoundWorktree effects, Member WorktreeIntegration effects, Member Commands effects)
-  => Candidate -> WorktreeEvidence -> Eff effects (Either Text ())
+  => Candidate -> WorktreeEvidence -> Eff effects (Either CheckSourceRefusal ())
 prepareCheckSource exact source = do
   bound <- boundWorktree
   case (source, bound) of
-    (NoBoundWorktree, _) -> pure (Left "candidate has no bound-source evidence")
-    (WorktreeObservationFailed failure, _) -> pure (Left (renderWorktreeError failure))
-    (_, Left failure) -> pure (Left (Text.pack (show failure)))
+    (NoBoundWorktree, _) -> pure (Left CheckCandidateUnbound)
+    (WorktreeObservationFailed failure, _) -> pure (Left (CheckCandidateUnavailable failure))
+    (_, Left failure) -> pure (Left (CheckTargetUnbound failure))
     (WorktreeObserved sourceReceipt _ _, Right handle) -> do
-      let directory = cwd (handleReceipt handle)
-          git args = Cmd.run (Cmd.inDirectory directory (Cmd.argv ("git" : args)))
-      before <- git ["rev-parse", "HEAD"]
-      clean <- git ["status", "--porcelain"]
-      case (Cmd.stdout before, Cmd.commandCleanup (Cmd.commandResult before),
-            Cmd.stdout clean, Cmd.commandCleanup (Cmd.commandResult clean)) of
-        (Right headText, Cmd.CommandClean, Right dirty, Cmd.CommandClean)
-          | Text.null (Text.strip dirty) -> do
-          ancestor <- git ["merge-base", "--is-ancestor", Text.strip headText, renderGitOid (candidateCommit exact)]
-          case (Cmd.commandOutcome (Cmd.commandResult ancestor), Cmd.commandCleanup (Cmd.commandResult ancestor)) of
-            (Cmd.CommandExited 0, Cmd.CommandClean) -> do
-              merged <- tryMerge MergeRequest
-                { mergeSourceHead = candidateCommit exact
-                , mergeSourceWorktree = treeId sourceReceipt
-                , mergeSourceBranch = Nothing
-                , mergeTargetWorktree = worktreeId handle
-                , mergeMessage = "prepare exact candidate checks", mergeAdvance = Nothing }
-              case merged of
-                Left issue -> pure (Left (Text.pack (show issue)))
-                Right (FastForwarded _ _ _) -> verifyHead git
-                Right (AlreadyContained _ _) -> verifyHead git
-                Right other -> pure (Left ("check checkout did not fast-forward: " <> Text.pack (show other)))
-            (Cmd.CommandExited 1, Cmd.CommandClean) ->
-              pure (Left "check checkout cannot fast-forward to candidate")
-            other -> pure (Left ("source preflight command failed: " <> Text.pack (show other)))
-        _ -> pure (Left "check checkout is dirty or source evidence is unavailable")
+      observed <- observeSubmission (worktreeId handle)
+      case observed of
+        Left failure -> pure (Left (CheckTargetUnavailable failure))
+        Right before
+          | not (cleanReviewCheckout (workingState before)) -> pure (Left (CheckTargetDirty before))
+          | otherwise -> do
+              let current = headOid (submittedHead before)
+                  candidate = candidateCommit exact
+              ancestor <- Cmd.run (Cmd.inDirectory (cwd (handleReceipt handle))
+                (Cmd.argv ["git", "merge-base", "--is-ancestor", renderGitOid current, renderGitOid candidate]))
+              case (Cmd.commandOutcome (Cmd.commandResult ancestor), Cmd.commandCleanup (Cmd.commandResult ancestor)) of
+                (Cmd.CommandExited 0, Cmd.CommandClean) -> do
+                  merged <- tryMerge MergeRequest
+                    { mergeSourceHead = candidate
+                    , mergeSourceWorktree = treeId sourceReceipt
+                    , mergeSourceBranch = Nothing
+                    , mergeTargetWorktree = worktreeId handle
+                    , mergeMessage = "prepare exact candidate checks", mergeAdvance = Nothing }
+                  case merged of
+                    Left failure -> pure (Left (CheckMergeRefused failure))
+                    Right (FastForwarded _ _ _) -> verifyTarget handle
+                    Right (AlreadyContained _ _) -> verifyTarget handle
+                    Right other -> pure (Left (CheckMergeDidNotFastForward other))
+                (Cmd.CommandExited 1, Cmd.CommandClean) -> pure (Left (CheckTargetNotAncestor current candidate))
+                _ -> pure (Left (CheckAncestryUnavailable ancestor))
   where
-    verifyHead git = do
-      after <- git ["rev-parse", "HEAD"]
-      pure $ case (Cmd.stdout after, Cmd.commandCleanup (Cmd.commandResult after)) of
-        (Right actual, Cmd.CommandClean)
-          | Text.strip actual == renderGitOid (candidateCommit exact) -> Right ()
-        _ -> Left "check checkout did not reach exact candidate; source retained"
+    verifyTarget handle = do
+      observed <- observeSubmission (worktreeId handle)
+      pure $ case observed of
+        Left failure -> Left (CheckTargetAfterMergeUnavailable failure)
+        Right after
+          | headOid (submittedHead after) /= candidateCommit exact ->
+              Left (CheckTargetHeadMismatch (candidateCommit exact) after)
+          | not (cleanReviewCheckout (workingState after)) -> Left (CheckTargetDirty after)
+          | otherwise -> Right ()

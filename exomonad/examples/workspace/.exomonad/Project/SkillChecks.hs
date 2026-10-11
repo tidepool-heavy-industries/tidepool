@@ -14,29 +14,72 @@ import Tidepool.Aeson (Value)
 import Project.Work (workspaceAgentSpec)
 
 -- Execute the skill's actual code blocks, not separately maintained copies.
-example :: Member RecipeCheck effects => CheckActor -> Text -> Int -> Eff effects Value
-example actor skill index = do
+exampleBody :: Member RecipeCheck effects => CheckActor -> Text -> Int -> Eff effects Text
+exampleBody actor skill index = do
   body <- readFile actor (Text.pack workspaceRoot <> "/skills/" <> skill <> "/SKILL.md")
   let blocks = map (fst . Text.breakOn "```") (drop 1 (Text.splitOn "```haskell\n" body))
-  turn actor (blocks !! index)
+  pure (blocks !! index)
+
+example :: Member RecipeCheck effects => CheckActor -> Text -> Int -> Eff effects Value
+example actor skill index = exampleBody actor skill index >>= turn actor
 
 skills :: Member RecipeCheck effects => Eff effects ()
 skills = do
   owner <- root
   baseline <- git owner ["rev-parse", "HEAD"]
   void $ turn owner "let input = \"typed skill request\" :: Text\nRight worker <- spawnSubagent (FreshCtx \"Reply to one typed request.\") SameDir ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"skill-example\" })"
-  void $ example owner "exomonad-agent-work" 0
+  requestExample <- exampleBody owner "exomonad-agent-work" 0
+  -- The model-free recipe drives the reply after request admission, before
+  -- executing the published example's blocking await.
+  let (requestSource, replySource) = Text.breakOn "\n" requestExample
+  void $ turn owner requestSource
   worker <- activation
-  check "typed request activates the explicitly spawned Luna worker" (checkModel worker == Just "gpt-6-luna" && "Reply to one typed request" `Text.isInfixOf` checkContext worker)
+  check "typed request activates the explicitly spawned Luna worker" (checkModel worker == Just "gpt-6-luna")
+  assertCell (checkActor worker) "the worker receives the typed skill request"
+    "(sessionInput :: Text) == \"typed skill request\""
+  void $ turn (checkActor worker)
+    "import qualified Tidepool.Agent.Reply as SkillReply\nfirstScope <- (SkillReply.currentRequest :: Eff WorkspaceEffects (SkillReply.RequestScope Text Text))\nlet firstSkillRequest = case firstScope of { SkillReply.RequestActive request _ -> SkillReply.requestIdNumber request; _ -> -1 }"
+  assertCell (checkActor worker) "the first skill request has its own active typed identity"
+    "case firstScope of { SkillReply.RequestActive _ active -> active == (sessionInput :: Text); _ -> False }"
   void $ turn (checkActor worker) "respond (\"typed result\" :: Text)"
-  awaitCell owner "the published skill awaits the exact request result" "reply == \"typed result\""
+  void $ turn owner (Text.drop 1 replySource)
+  assertCell owner "the published skill awaits the exact request result" "reply == \"typed result\""
+  void $ turn owner "import Tidepool.Agent.Reply (ExecutionReceipt (..), responseExecution)\nimport qualified Tidepool.Actor as Actor\nfirstSkillReceipt <- pollResponse pending"
+  assertCell owner "the first skill receipt belongs to the original request"
+    "case firstSkillReceipt of { ResponseReady receipt -> executionRequest (responseExecution receipt) == requestId pending && responseValue receipt == \"typed result\"; _ -> False }"
   void $ example owner "exomonad-define-actors" 0
   awaitCell owner "record skill joins differently typed inputs"
     "(== Just (\"abc123\",4)) <$> R.call (joined endpoints) ()"
+  void $ turn owner "let resultsWorker = worker\nRight worker <- request @(Outcome Candidate) resultsWorker input defaultRequestOptions"
+  let resultsWorker = worker
+  void $ turn owner "candidateAdmission <- pollResponse worker\ndisplay (T.pack (show (requestId pending, requestId worker, candidateAdmission)))"
+  assertCell owner "the new skill request has a distinct identity without an observed terminal refusal"
+    "case candidateAdmission of { ResponseUnavailable failure -> error (T.pack (show (requestId pending, requestId worker, failure))); _ -> requestId pending /= requestId worker }"
+  reused <- activation
+  check "the heterogeneous request activates the same actor incarnation"
+    (checkActor reused == checkActor resultsWorker)
+  awaitCellBy (checkActor resultsWorker) "the retained actor mounts the new skill request and reply type"
+    "\\scope -> case scope of { Right (request, active) -> SkillReply.requestIdNumber request /= firstSkillRequest && active == \"typed skill request\"; _ -> False }"
+    "do { scope <- (SkillReply.currentRequest :: Eff WorkspaceEffects (SkillReply.RequestScope Text (Outcome Candidate))); pure (case scope of { SkillReply.RequestActive request active -> Right (request, active); SkillReply.RequestUnavailable failure -> Left failure }) }"
+  void $ turn (checkActor resultsWorker)
+    "candidateScope <- (SkillReply.currentRequest :: Eff WorkspaceEffects (SkillReply.RequestScope Text (Outcome Candidate)))\noldResultScope <- (SkillReply.currentRequest :: Eff WorkspaceEffects (SkillReply.RequestScope Text Text))\ndisplay (T.pack (show (case candidateScope of { SkillReply.RequestActive request active -> Right (request, active); SkillReply.RequestUnavailable failure -> Left failure })))"
+  assertCell (checkActor resultsWorker) "the old result type no longer borrows the active request"
+    "case oldResultScope of { SkillReply.RequestUnavailable SkillReply.RequestTypeMismatch -> True; _ -> False }"
   void $ example owner "exomonad-define-actors" 1
-  awaitCell owner "record skill attaches the exact pending request"
-    "(== 0) <$> R.call (resultCount (R.client results)) ()"
-  void $ example owner "exomonad-define-actors" 2
+  void $ turn owner "candidateBeforeReply <- pollResponse worker\nresultsBeforeReply <- R.call (resultCount (R.client results)) ()\ndisplay (T.pack (show (candidateBeforeReply, resultsBeforeReply)))"
+  assertCell owner "the exact candidate request remains available for its deliberate reply"
+    "case candidateBeforeReply of { ResponseStarting _ -> True; ResponsePending _ -> True; _ -> False }"
+  void $ turn (checkActor resultsWorker) "respond (Blocked \"skill result\" [] :: Outcome Candidate)"
+  awaitCellBy owner "the exact skill request reaches successful typed settlement"
+    "\\observed -> case observed of { ResponseReady _ -> True; ResponseUnavailable failure -> error (T.pack (show failure)); _ -> False }"
+    "pollResponse worker"
+  awaitCellBy owner "record skill observes the real request settlement"
+    "(== 1)" "R.call (resultCount (R.client results)) ()"
+  void $ turn owner "candidateReceipt <- pollResponse worker\nresultsExit <- R.finish results\nfirstSkillAfterReuse <- pollResponse pending"
+  assertCell owner "record settlement retains the exact new request, value and actor incarnation"
+    "case (firstSkillReceipt, candidateReceipt, resultsExit) of { (ResponseReady original, ResponseReady receipt, Actor.Completed [Right event]) -> executionRequest (responseExecution receipt) == requestId worker && responseValue receipt == Blocked \"skill result\" [] && event == receipt && executionActorId (responseExecution receipt) == executionActorId (responseExecution original) && executionActorIncarnation (responseExecution receipt) == executionActorIncarnation (responseExecution original); _ -> False }"
+  assertCell owner "reusing an actor preserves the original request receipt"
+    "firstSkillAfterReuse == firstSkillReceipt && requestId pending /= requestId worker"
 
   -- Execute the published notebook forms in the actual ambient namespace.
   -- File/command examples belong to the command material.
@@ -73,7 +116,7 @@ checkNotebookForms :: Member RecipeCheck effects => CheckActor -> Eff effects ()
 checkNotebookForms owner = do
   -- The project-free record definition: no Exomonad.Contrib.Actors wrapper, the row
   -- named in the cell and pinned by a signature on the definition.
-  void $ example owner "exomonad-define-actors" 3
+  void $ example owner "exomonad-define-actors" 2
   awaitCell owner "a record definition pins its own effect row without a project wrapper"
     "(== 1) <$> R.call (noteCount (R.client tally)) ()"
 
@@ -100,9 +143,6 @@ reviewProvenance = do
     <> " [\"review-provenance.txt\"] \"review provenance fixture\") (Candidate "
     <> gitOidLiteral candidate <> " [] []) OwnerRepairs\nRight (reviewRequest, reviewProgress) <- requestReview \"review-provenance\" reviewInputValue")
   reviewer <- activation
-  check "review context carries the distinct cumulative base and candidate"
-    (("Base: " <> baseline) `Text.isInfixOf` checkContext reviewer
-      && ("Candidate: " <> candidate) `Text.isInfixOf` checkContext reviewer)
   actual <- git (checkActor reviewer) ["rev-parse", "HEAD"]
   check "review checkout is the assigned candidate" (actual == candidate)
   void $ turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current"
@@ -116,13 +156,19 @@ reviewProvenance = do
     "wrongInput <- (ReviewReply.currentRequest :: Eff WorkspaceEffects (ReviewReply.RequestScope () (Outcome ReviewDecision)))\nwrongResult <- (ReviewReply.currentRequest :: Eff WorkspaceEffects (ReviewReply.RequestScope ReviewRequest ()))"
   assertCell (checkActor reviewer) "wrong request input and result types refuse before borrowing"
     "case (wrongInput, wrongResult) of { (ReviewReply.RequestUnavailable ReviewReply.RequestTypeMismatch, ReviewReply.RequestUnavailable ReviewReply.RequestTypeMismatch) -> True; _ -> False }"
-  void $ turn (checkActor reviewer) "let checks = [\"recipe verified candidate checkout\"] :: [Text]\nlet conclusion = \"review provenance fixture\" :: Text\nimport qualified Project.ReviewTools as ReviewTool\nimport Tidepool.Agent.Contract (handler)\nlet submit = handler (ReviewTool.submit_review ReviewTool.tools)\nsubmit (ReviewTool.ReviewSubmitInput oldId commit checks conclusion)"
+  -- Named submit_review admission and refusal controls run through the actual
+  -- provider tool consumer. This recipe owns typed response provenance.
+  void $ turn (checkActor reviewer)
+    "respond (Produced (Accepted (ReviewedCandidate (reviewBasis current) latest [\"recipe verified candidate checkout\"] \"review provenance fixture\")))"
   void $ turn owner "accepted <- pollResponse reviewRequest"
   assertCell owner "exact acceptance retains its scope without fabricating a Task"
-    "case accepted of { Right receipt -> case responseValue receipt of { Produced (Accepted checked) -> case reviewedBasis checked of { ExactScope originalBase _ _ -> originalBase == base && candidateCommit (reviewedCandidate checked) == commit; _ -> False }; _ -> False }; _ -> False }"
+    "case accepted of { ResponseReady receipt -> case responseValue receipt of { Produced (Accepted checked) -> case reviewedBasis checked of { ExactScope originalBase _ _ -> originalBase == base && candidateCommit (reviewedCandidate checked) == commit; _ -> False }; _ -> False }; _ -> False }"
   -- Exact review retries retain the real scope, including when the caller offers
   -- a retained implementer: there is no implementation Task to assign to it.
-  void $ turn owner "let exact = ReviewRequest (ExactScope base [\"review-provenance.txt\"] \"exact acceptance\") (Candidate commit [] [\"remaining gate\"]) (RetainedImplementer (responseActor reviewer))\nRight (retry, retryProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) exact defaultRequestOptions"
+  void $ turn owner "let exact = ReviewRequest (ExactScope base [\"review-provenance.txt\"] \"exact acceptance\") (Candidate commit [] [\"remaining gate\"]) (RetainedImplementer (responseActor reviewRequest))\nRight (retry, retryProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewRequest) exact defaultRequestOptions"
+  retryReviewer <- activation
+  check "the exact retry activates the retained reviewer incarnation"
+    (checkActor retryReviewer == checkActor reviewer)
   void $ turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current\nverdict <- repair \"exact-findings\" current latest [\"repair at the owner\"]"
   assertCell (checkActor reviewer) "exact-scope repair returns findings without inventing an implementation assignment"
     "case verdict of { Left (Repair found issues) -> found == latest && issues == [\"repair at the owner\"]; _ -> False }"
@@ -130,32 +176,17 @@ reviewProvenance = do
   revised <- checkpoint owner "review-provenance.txt" "revised review candidate\n" "review repair fixture"
   void $ git (checkActor reviewer) ["merge", "--ff-only", revised]
   void $ turn owner ("let revisedCommit = " <> gitOidLiteral revised)
-  void $ turn owner "let question = Question \"contract\" (DesignQuestion \"plan.md\" base \"boundary\" [\"evidence\"] [] [])\nlet decision = AcceptedDecision question base \"preserve the boundary\" [\"checked\"]\nlet assigned = (task \"assigned-review\" \"review implementation\" [\"review-provenance.txt\"] \"assigned acceptance\" base) { planPath = \"plan.md\", rationale = \"retained reason\", acceptedDecisions = [decision] }\nlet assignedRequest = ReviewRequest (AssignedTask assigned) (Candidate revisedCommit [\"candidate check\"] [\"open gate\"]) OwnerRepairs\nRight (assignedReview, assignedProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewer) assignedRequest defaultRequestOptions"
+  void $ turn owner "let question = Question \"contract\" (DesignQuestion \"plan.md\" base \"boundary\" [\"evidence\"] [] [])\nlet decision = AcceptedDecision question base \"preserve the boundary\" [\"checked\"]\nlet assigned = (task \"assigned-review\" \"review implementation\" [\"review-provenance.txt\"] \"assigned acceptance\" base) { planPath = \"plan.md\", rationale = \"retained reason\", acceptedDecisions = [decision] }\nlet assignedRequest = ReviewRequest (AssignedTask assigned) (Candidate revisedCommit [\"candidate check\"] [\"open gate\"]) OwnerRepairs\nRight (assignedReview, assignedProgress) <- requestWithProgress @WorkProgress @(Outcome ReviewDecision) (responseActor reviewRequest) assignedRequest defaultRequestOptions"
+  assignedReviewer <- activation
+  check "the assigned retry activates the retained reviewer incarnation"
+    (checkActor assignedReviewer == checkActor reviewer)
   void $ turn (checkActor reviewer) "let current = sessionInput :: ReviewRequest\nlet latest = reviewInput current"
   void $ turn (checkActor reviewer)
     "newScope <- (ReviewReply.currentRequest :: Eff WorkspaceEffects (ReviewReply.RequestScope ReviewRequest (Outcome ReviewDecision)))\nlet newId = case newScope of { ReviewReply.RequestActive request _ -> ReviewReply.requestIdNumber request; _ -> -1 }"
   assertCell (checkActor reviewer) "a prepared retained request replaces identity and mounted input"
     ("case newScope of { ReviewReply.RequestActive request active -> ReviewReply.requestIdNumber request /= oldId && candidateCommit (reviewInput active) == " <> gitOidLiteral revised <> "; _ -> False }")
   void $ turn (checkActor reviewer)
-    ("import qualified Project.ReviewTools as ReviewTool\nimport Tidepool.Agent.Contract (handler)\nlet submit = handler (ReviewTool.submit_review ReviewTool.tools)\nstale <- submit (ReviewTool.ReviewSubmitInput oldId "
-      <> gitOidLiteral revised <> " [\"checked revised candidate\"] \"assigned acceptance\")")
-  assertCell (checkActor reviewer) "review tool refuses the previous request id"
-    "case stale of { ReviewTool.RequestIdMismatch _ -> True; _ -> False }"
-  void $ turn (checkActor reviewer)
-    ("wrong <- submit (ReviewTool.ReviewSubmitInput newId " <> gitOidLiteral candidate
-      <> " [\"checked revised candidate\"] \"assigned acceptance\")")
-  assertCell (checkActor reviewer) "review tool refuses the previous candidate commit"
-    "case wrong of { ReviewTool.CandidateOidMismatch _ -> True; _ -> False }"
-  writeFile (checkActor reviewer) "review-provenance.txt" "dirty review checkout\n"
-  void $ turn (checkActor reviewer)
-    ("dirty <- submit (ReviewTool.ReviewSubmitInput newId " <> gitOidLiteral revised
-      <> " [\"checked revised candidate\"] \"assigned acceptance\")")
-  assertCell (checkActor reviewer) "review tool refuses a dirty checkout"
-    "case dirty of { ReviewTool.ReviewCheckoutDirty -> True; _ -> False }"
-  void $ git (checkActor reviewer) ["restore", "--", "review-provenance.txt"]
-  void $ turn (checkActor reviewer)
-    ("submit (ReviewTool.ReviewSubmitInput newId " <> gitOidLiteral revised
-      <> " [\"checked revised candidate\"] \"assigned acceptance\")")
+    "respond (Produced (Accepted (ReviewedCandidate (reviewBasis current) latest [\"checked revised candidate\"] \"assigned acceptance\")))"
   void $ turn owner "retained <- pollResponse assignedReview"
   assertCell owner "assigned acceptance preserves the whole Task, decisions and candidate gates"
-    "case retained of { Right receipt -> case responseValue receipt of { Produced (Accepted checked) -> reviewedBasis checked == AssignedTask assigned && reviewedCandidate checked == reviewInput assignedRequest; _ -> False }; _ -> False }"
+    "case retained of { ResponseReady receipt -> case responseValue receipt of { Produced (Accepted checked) -> reviewedBasis checked == AssignedTask assigned && reviewedCandidate checked == reviewInput assignedRequest; _ -> False }; _ -> False }"

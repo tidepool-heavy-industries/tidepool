@@ -30,3 +30,8 @@ display delegate and an explicit typed refusal at form opening.
 Optional notebook effects derive from installed services at admission. For an
 unbound-conversation case, install a reader that returns the typed unbound result
 through the existing conversation seam so the root admits `Reflect`.
+
+Recipe activation messages present the typed request; they are separate from
+the fresh context seed supplied during provider attachment. Assert payload
+fields through the checked actor's `sessionInput`. Assert seeded provider context
+at the real provider attachment consumer.

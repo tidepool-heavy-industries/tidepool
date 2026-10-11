@@ -34,9 +34,19 @@ continuation = do
   implementer <- activation
   first <- checkpoint (checkActor implementer) "review-flow.txt" "fail\n" "failing recovery fixture"
   void $ turn (checkActor implementer) ("respond (Produced (Candidate " <> gitOidLiteral first <> " [] []))")
+  void $ turn owner "import Exomonad.Contrib.CheckPlan (readCheckPlan)"
+  awaitCellBy owner "failed counted check reaches repair without a terminal refusal"
+    "\\observed@(state, _, _, _) -> case flowStage state of { AwaitingRepair _ -> True; ReviewStopped _ -> error (T.pack (show observed)); _ -> False }"
+    "do\n  state <- R.call (reviewSnapshot (R.client flow)) ()\n  report <- case flowStage state of { CheckingCandidate _ started -> Just <$> readCheckPlan started; _ -> pure Nothing }\n  commands <- case report of { Just retained -> mapM (Cmd.status . runJob) [run | (_, Right run) <- planStarts (planOriginal retained)]; _ -> pure [] }\n  request <- pollResponse worker\n  pure (state, report, commands, request)"
   repairing <- activation
-  check "failed counted check routes to retained implementer before review"
+  check "check repair activates the same implementer incarnation"
     (checkActor repairing == checkActor implementer)
+  void $ turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()"
+  assertCell owner "failed counted check routes to retained implementer before review"
+    "case flowRepairRequests state of { [response] -> responseActor response == responseActor worker; _ -> False }"
+  assertCell (checkActor repairing) "retained implementer receives the exact failed candidate and repair assignment"
+    ("let input = sessionInput :: RepairTask in candidateCommit (repairInput input) == " <> gitOidLiteral first
+      <> " && taskName (repairAssignment input) == \"implement-recovery\" && planPath (repairAssignment input) == \"plans/component.md\" && not (null (repairFindings input))")
   void $ turn (checkActor repairing) "let question = Question \"repair-scope\" (DesignQuestion \"plans/component.md\" (taskSource (repairAssignment sessionInput)) \"confirm repair scope\" [] [] [])\nreportProgress (WorkProgress [] [question])"
   awaitCell owner "pending repair question retains owner notification receipt"
     "do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (case flowRepairRequests state of { [response] -> length (flowNotices state) == 1 && any (\\(request, questions) -> request == requestId response && any ((== \"repair-scope\") . questionKey) questions) (flowQuestions state); _ -> False }) }"
@@ -48,11 +58,18 @@ continuation = do
     "focusedSource (runSpec (checkRun entry)) == renderGitOid (candidateCommit checked) && checkEvidenceComplete entry outcome && checkVerdict entry outcome == CheckFailed"
   repaired <- checkpoint (checkActor repairing) "review-flow.txt" "pass\n" "repair recovery fixture"
   void $ turn (checkActor repairing) ("respond (Produced (Candidate " <> gitOidLiteral repaired <> " [] []))")
+  awaitCellBy owner "repaired counted check reaches review without a terminal refusal"
+    "\\state -> case flowStage state of { ReviewingCandidate _ -> True; ReviewStopped _ -> error (T.pack (show state)); _ -> False }"
+    "R.call (reviewSnapshot (R.client flow)) ()"
   reviewer <- activation
   reviewedHead <- git (checkActor reviewer) ["rev-parse", "HEAD"]
   check "successful repaired checks admit exact-source review" (reviewedHead == repaired)
-  check "inspection review receives the separately executed check evidence"
-    ("Flow check evidence:" `Text.isInfixOf` checkContext reviewer && "recovery" `Text.isInfixOf` checkContext reviewer)
+  assertCell (checkActor reviewer) "the reviewer receives the exact repaired candidate"
+    ("candidateCommit (reviewInput (sessionInput :: ReviewRequest)) == " <> gitOidLiteral repaired)
+  void $ turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()"
+  assertCell owner "successful check evidence retains the repaired candidate and terminal receipt"
+    ("case reverse (flowCheckReports state) of { (checked, report):_ -> candidateCommit checked == " <> gitOidLiteral repaired
+      <> " && case planState report of { Just observed -> case checkEntries observed of { [entry] -> case checkOutcome entry of { Just outcome -> focusedSource (runSpec (checkRun entry)) == renderGitOid (candidateCommit checked) && checkEvidenceComplete entry outcome && checkVerdict entry outcome == CheckPassed; _ -> False }; _ -> False }; _ -> False }; _ -> False }")
   void $ turn (checkActor reviewer) "let question = Question \"review-scope\" (DesignQuestion \"plans/component.md\" (reviewBase (reviewBasis sessionInput)) \"confirm review scope\" [] [] [])\nreportProgress (WorkProgress [] [question])"
   awaitCell owner "pending reviewer question retains owner notification receipt"
     "do { state <- R.call (reviewSnapshot (R.client flow)) (); pure (case flowReviewerRequests state of { [response] -> length (flowNotices state) == 2 && any (\\(request, questions) -> request == requestId response && any ((== \"review-scope\") . questionKey) questions) (flowQuestions state); _ -> False }) }"

@@ -33,10 +33,14 @@ episode = do
     , "let change = BaselineChange before after amendment decision"
     , "Right workerAgent <- spawnSubagent (FreshCtx (taskContext ownerTask)) (ForkWorktree (atRef (GitRef (renderGitOid before)))) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"worker\" })"
     ])
-  worker <- activation
   void $ turn owner "opened <- openBaselineEpisode me\nlet workerInput = BaselineAssignment ownerTask \"worker\" opened\nRight (worker, workerProgress) <- requestWithProgress @WorkProgress @(Outcome Candidate) workerAgent workerInput defaultRequestOptions"
-  check "selected Luna receives the task without changing its role prompt"
-    (checkModel worker == Just "gpt-6-luna" && "Plan:" `Text.isInfixOf` checkContext worker)
+  worker <- activation
+  check "the typed assignment activates the selected Luna worker"
+    (checkModel worker == Just "gpt-6-luna")
+  void $ turn (checkActor worker) "let current = sessionInput :: BaselineAssignment\nlet assigned = baselineTask current"
+  assertCell (checkActor worker) "the worker receives the exact baseline task and owner label"
+    ("baselineOwnerLabel current == \"worker\" && taskSource assigned == " <> gitOidLiteral before
+      <> " && taskName assigned == \"baseline-change\" && planPath assigned == \".exomonad/WORKBENCH.md\" && obligation assigned == \"Incorporate the accepted baseline\" && ownedPaths assigned == [\"plans/baseline.md\"] && acceptance assigned == \"report exact source and named checks\"")
   void $ turn owner "lateOpened <- openBaselineEpisode me\nlet lateInput = BaselineAssignment ownerTask \"late\" lateOpened\nRight lateAgent <- spawnSubagent (FreshCtx (taskContext ownerTask)) (ForkWorktree (atRef (GitRef (renderGitOid before)))) ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"late\" })\nRight (lateWorker, lateProgress) <- requestWithProgress @WorkProgress @(Outcome Candidate) lateAgent lateInput defaultRequestOptions"
   lateWorker <- activation
   void $ turn (checkActor lateWorker) "respond (Blocked \"already settled\" [] :: Outcome Candidate)"
