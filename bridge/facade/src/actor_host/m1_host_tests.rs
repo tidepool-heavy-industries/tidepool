@@ -604,11 +604,9 @@ struct RejectFirstRequest {
     reject_successor: tokio::sync::Notify,
 }
 
-#[derive(Default)]
 struct AncestorOutputGate {
     requests: Mutex<Vec<String>>,
-    entered: tokio::sync::Notify,
-    release: tokio::sync::Notify,
+    entered: mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
 }
 
 impl exomonad_actor::JevBackend for AncestorOutputGate {
@@ -618,8 +616,17 @@ impl exomonad_actor::JevBackend for AncestorOutputGate {
     ) -> futures_util::future::BoxFuture<'_, Result<String, exomonad_actor::JevCallFailure>> {
         Box::pin(async move {
             self.requests.lock().push(request.clone());
-            self.entered.notify_one();
-            self.release.notified().await;
+            let (release, held) = tokio::sync::oneshot::channel();
+            self.entered.send(release).map_err(|_| {
+                exomonad_actor::JevCallFailure::JevTransport(
+                    "ancestor output observer closed".into(),
+                )
+            })?;
+            held.await.map_err(|_| {
+                exomonad_actor::JevCallFailure::JevTransport(
+                    "ancestor output test abandoned the admitted handler".into(),
+                )
+            })?;
             exomonad_actor::JevBackend::ask(&super::test_campaign::FixtureJev, request).await
         })
     }
@@ -717,7 +724,11 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
         reject_successor: tokio::sync::Notify::new(),
     });
     let host_transport: Arc<dyn ResponsesTransport> = transport.clone();
-    let output_gate = Arc::new(AncestorOutputGate::default());
+    let (output_entered, mut pending_output) = mpsc::unbounded_channel();
+    let output_gate = Arc::new(AncestorOutputGate {
+        requests: Mutex::new(Vec::new()),
+        entered: output_entered,
+    });
     let fixture = HostedTestRuntime::start_configured(&settings, &host_transport, |config| {
         config.jev = Some(output_gate.clone());
     })
@@ -769,18 +780,21 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
             .claims(&harness::model::CallId("before-rejection-cell".into()))
             .unwrap();
         assert_eq!(claims.len(), 1);
-        fixture
+        let release_output = fixture
             .while_operation_succeeds(
                 &claims[0].operation,
-                tokio::time::timeout(Duration::from_secs(300), output_gate.entered.notified()),
+                tokio::time::timeout(Duration::from_secs(300), pending_output.recv()),
             )
             .await
             .expect("the actual cell failed before entering its completion gate")
-            .expect("the actual cell never entered its completion gate");
+            .expect("the actual cell never entered its completion gate")
+            .expect("the actual cell's completion gate closed");
         assert_eq!(output_gate.requests.lock().len(), 1);
         assert!(output_gate.requests.lock()[0]
             .contains("hold ancestor output until successor preparation"));
-        output_gate.release.notify_one();
+        release_output
+            .send(())
+            .expect("the actual cell abandoned its completion gate");
         tokio::time::timeout(Duration::from_secs(300), async {
             loop {
                 let claims = store
