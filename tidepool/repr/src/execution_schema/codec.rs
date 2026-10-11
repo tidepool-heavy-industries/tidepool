@@ -1579,13 +1579,51 @@ mod tests {
             Err(ParseError::Malformed(_))
         ));
         assert!(matches!(
-            scan_item(&[0x82, 0], &mut OperationBudget::new(10)),
+            scan_item(
+                &[0x82, 0],
+                &mut OperationBudget::new(DecodeLimits::default().max_work)
+            ),
             Err(ParseError::Truncated)
         ));
         assert!(matches!(
             scan_item(&[0x82, 0, 0], &mut OperationBudget::new(2)),
             Err(ParseError::LimitExceeded("work"))
         ));
+    }
+
+    fn definite_cbor_values() -> impl proptest::strategy::Strategy<Value = Value> {
+        use proptest::prelude::*;
+        prop_oneof![
+            any::<i64>().prop_map(|value| Value::Integer(value.into())),
+            proptest::collection::vec(any::<u8>(), 0..16).prop_map(Value::Bytes),
+            proptest::collection::vec(any::<char>(), 0..16)
+                .prop_map(|characters| Value::Text(characters.into_iter().collect())),
+        ]
+        .prop_recursive(4, 64, 8, |inner| {
+            prop_oneof![
+                proptest::collection::vec(inner.clone(), 0..8).prop_map(Value::Array),
+                proptest::collection::vec((inner.clone(), inner), 0..8).prop_map(Value::Map),
+            ]
+        })
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn complete_cbor_and_every_truncated_prefix_have_distinct_outcomes(
+            value in definite_cbor_values(),
+        ) {
+            let mut bytes = Vec::new();
+            ciborium::ser::into_writer(&value, &mut bytes).unwrap();
+            // The normal budget reaches syntax validation; resource exhaustion
+            // is a separate contract and must not mask the truncation oracle.
+            let budget = || OperationBudget::new(DecodeLimits::default().max_work);
+            proptest::prop_assert_eq!(scan_item(&bytes, &mut budget()).unwrap(), bytes.len());
+            for end in 0..bytes.len() {
+                let result = scan_item(&bytes[..end], &mut budget());
+                proptest::prop_assert!(matches!(result, Err(ParseError::Truncated)),
+                    "prefix {end}/{}: {result:?}", bytes.len());
+            }
+        }
     }
 
     fn number(value: u8) -> Value {
