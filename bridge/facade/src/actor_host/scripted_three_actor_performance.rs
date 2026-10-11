@@ -434,7 +434,8 @@ async fn production_harness_two_children_execute_concurrently() {
 }
 
 async fn three_actor_capture(concurrent: bool) {
-    let (host_trace, compiler_trace, phase_trace, lifecycle) = prepare_performance_traces();
+    let (host_trace, compiler_trace, phase_trace, lifecycle, trace_capture) =
+        prepare_performance_traces();
     let roster: &[&str] = if concurrent {
         &[
             "activation",
@@ -474,6 +475,7 @@ async fn three_actor_capture(concurrent: bool) {
         json!({
             "schema": 1, "phase": "environment", "workload_cohort": if concurrent { "two-children-concurrent" } else { WORKLOAD_COHORT },
             "campaign_trace_profile": super::test_campaign::campaign_trace_profile(),
+            "campaign_trace_capture": trace_capture,
             "workload_roster": roster, "prepared_root_entry_supplied": true,
             "host_trace": host_trace, "compiler_trace": compiler_trace, "phase_trace": phase_trace,
             "owned_compiler_lifecycle": lifecycle, "deployment": deployment,
