@@ -650,6 +650,13 @@ impl PreparedCellProgram {
         &self.checked
     }
 
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "products.cell_program.seal",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     pub fn seal(
         self,
         cancellation: &tidepool_extract_cmd::HostAdmissionCancellation,
@@ -754,6 +761,98 @@ impl PreparedCellProgram {
             offer.publish_segment_original_products(&segment, &mut validation)?;
         }
         Ok(program)
+    }
+}
+
+/// Fixed physical compiler authority and private output inventory for one
+/// segment. Item progress belongs exclusively to its mutable cursor.
+struct BoundSegment {
+    offer: ModuleCandidateOffer,
+    source: crate::declaration_context::ExactProgramSegmentAdmission,
+    produced_types: crate::checked_cell::ProducedValueTypeInterfaces,
+}
+
+struct SegmentCursor {
+    next: usize,
+    end: usize,
+    request: crate::declaration_context::ExactCompilationRequest,
+    context: Arc<crate::declaration_context::ExactDeclarationContext>,
+    artifacts: crate::artifact_inventory::ArtifactView,
+    groups: Arc<[certified_products::PendingCertifiedGroup]>,
+}
+
+struct ItemAdmission<'a> {
+    segment: &'a BoundSegment,
+    cursor: &'a mut SegmentCursor,
+    ordinal: usize,
+}
+
+impl BoundSegment {
+    fn item<'a>(
+        &'a self,
+        cursor: &'a mut SegmentCursor,
+        ordinal: usize,
+    ) -> Result<ItemAdmission<'a>, CompileError> {
+        if ordinal != cursor.next || ordinal >= cursor.end {
+            return Err(CompileError::ExtractFailed(
+                "segment item differs from its admitted prefix".into(),
+            ));
+        }
+        self.produced_types.for_item(ordinal)?;
+        Ok(ItemAdmission {
+            segment: self,
+            cursor,
+            ordinal,
+        })
+    }
+}
+
+impl ItemAdmission<'_> {
+    #[allow(clippy::too_many_arguments)]
+    fn admit(
+        self,
+        root: &Path,
+        source_directory: &Path,
+        typed_segments: &[crate::checked_cell::CheckedTypedSegmentPlan],
+        admission_digest: [u8; 32],
+        generation: u64,
+        validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
+    ) -> Result<ProgramNativeOutput, CompileError> {
+        let produced = self.segment.produced_types.for_item(self.ordinal)?;
+        let directory = root.join(format!("item-{}", self.ordinal));
+        let output = self.segment.offer.read_program_output(
+            &directory,
+            source_directory,
+            &produced,
+            typed_segments,
+            self.ordinal,
+            admission_digest,
+            &self.segment.source,
+            Some((&self.cursor.artifacts, self.cursor.groups.as_ref())),
+            validation,
+        )?;
+        let mut request = self.cursor.request.clone();
+        let next_context = self.segment.offer.admit_program_support(
+            &mut request,
+            self.cursor.context.clone(),
+            &output,
+            &self.segment.source,
+            Some(&produced),
+        )?;
+        let next_context = self.segment.offer.admit_program_value(
+            next_context,
+            generation,
+            &output.turn,
+            &produced,
+        )?;
+        // All fallible admission work precedes the single prefix/demand advance.
+        let products = output.products.as_ref().expect("program output was sealed");
+        self.cursor.artifacts = products.artifact_view.clone();
+        self.cursor.groups = products.certified_groups.clone();
+        self.cursor.request = request;
+        self.cursor.context = next_context;
+        self.cursor.next += 1;
+        Ok(output)
     }
 }
 
@@ -2031,6 +2130,13 @@ impl ModuleCandidateOffer {
 
     /// Retain compiler-observed outputs and validate all targets while the
     /// caller still owns the physical compiler transaction.
+    #[tracing::instrument(
+        target = "exomonad_harness::timing",
+        name = "products.cell_program.prepare",
+        level = "debug",
+        skip_all,
+        fields(inclusive = true)
+    )]
     pub fn prepare_cell_program(
         &self,
         root: Arc<tempfile::TempDir>,
@@ -2220,29 +2326,33 @@ impl ModuleCandidateOffer {
                     &produced_types,
                     &mut validation,
                 )?;
+                let bound = BoundSegment {
+                    offer: segment_offer,
+                    source: source_segment,
+                    produced_types,
+                };
+                let mut cursor = SegmentCursor {
+                    next: index,
+                    end,
+                    artifacts: bound
+                        .offer
+                        .exact
+                        .as_ref()
+                        .expect("exact segment")
+                        .compiler_inputs()
+                        .artifacts
+                        .clone(),
+                    groups: bound
+                        .offer
+                        .exact
+                        .as_ref()
+                        .expect("exact segment")
+                        .groups
+                        .clone(),
+                    request: program_request.clone(),
+                    context,
+                };
                 while index < end {
-                    let item_produced_types = produced_types.for_item(index)?;
-                    program_request = program_request
-                        .in_program_context(&root.join("program-inputs"), context.clone())?;
-                    let effective = self.program_offer(program_request.clone());
-                    let directory = root.join(format!("item-{index}"));
-                    let output = effective.read_program_output(
-                        &directory,
-                        &segment_root,
-                        &item_produced_types,
-                        &typed_segments,
-                        index,
-                        specification.admission_digest,
-                        &source_segment,
-                        &mut validation,
-                    )?;
-                    context = self.admit_program_support(
-                        &mut program_request,
-                        context,
-                        &output,
-                        &source_segment,
-                        Some(&item_produced_types),
-                    )?;
                     let generation = match &planned.slots[index] {
                         CheckedPlannedCellSlot::Bind { value } => *value,
                         CheckedPlannedCellSlot::Expression { capture, .. } => *capture,
@@ -2252,16 +2362,20 @@ impl ModuleCandidateOffer {
                             ));
                         }
                     };
-                    context = self.admit_program_value(
-                        context,
+                    let output = bound.item(&mut cursor, index)?.admit(
+                        root,
+                        &segment_root,
+                        &typed_segments,
+                        specification.admission_digest,
                         generation,
-                        &output.turn,
-                        &item_produced_types,
+                        &mut validation,
                     )?;
                     outputs.insert(index, output);
                     index += 1;
                 }
-                pending_segments.push((segment_offer, source_segment));
+                context = cursor.context;
+                program_request = cursor.request;
+                pending_segments.push((bound.offer, bound.source));
             }
             segment += 1;
         }
@@ -2472,6 +2586,10 @@ impl ModuleCandidateOffer {
         item_index: usize,
         admission_digest: [u8; 32],
         source_segment: &crate::declaration_context::ExactProgramSegmentAdmission,
+        cursor: Option<(
+            &crate::artifact_inventory::ArtifactView,
+            &[certified_products::PendingCertifiedGroup],
+        )>,
         validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
     ) -> Result<ProgramNativeOutput, CompileError> {
         let turn: Arc<[u8]> =
@@ -2505,6 +2623,7 @@ impl ModuleCandidateOffer {
                 Some(produced_types),
                 Some((typed_segments, item_index, admission_digest)),
                 Some(source_segment),
+                cursor,
                 validation,
             )?
             .ok_or_else(|| {
@@ -2664,6 +2783,7 @@ impl ModuleCandidateOffer {
             Some(&authored),
             OriginalOutputPublication::Transaction,
             produced_types,
+            None,
             None,
             None,
             validation,
@@ -3094,6 +3214,7 @@ fn seal_turn_outputs_inner(
         None,
         None,
         None,
+        None,
         &mut crate::recovery_artifacts::PackageInterfaceValidation::default(),
     )
 }
@@ -3123,6 +3244,10 @@ fn seal_turn_outputs_with_validation(
         [u8; 32],
     )>,
     source_segment: Option<&crate::declaration_context::ExactProgramSegmentAdmission>,
+    segment_cursor: Option<(
+        &crate::artifact_inventory::ArtifactView,
+        &[certified_products::PendingCertifiedGroup],
+    )>,
     validation: &mut crate::recovery_artifacts::PackageInterfaceValidation,
 ) -> Result<Option<SealedTurnProducts>, CompileError> {
     if std::fs::read_to_string(source_path)? != source {
@@ -3456,7 +3581,9 @@ fn seal_turn_outputs_with_validation(
                 producer,
                 originals,
                 &certified.value_interfaces,
-                compiler_inputs.as_ref().map(|input| &input.artifacts),
+                segment_cursor
+                    .map(|(view, _)| view)
+                    .or_else(|| compiler_inputs.as_ref().map(|input| &input.artifacts)),
                 demand,
                 validation,
                 &certified.source_selection,
@@ -3478,10 +3605,12 @@ fn seal_turn_outputs_with_validation(
     certified.groups = crate::declaration_context::certify_artifact_view_groups_with_validation(
         &artifact_view,
         &certified.groups,
-        offer
-            .exact
-            .as_ref()
-            .map_or(&[], |request| request.groups.as_ref()),
+        segment_cursor.map(|(_, groups)| groups).unwrap_or_else(|| {
+            offer
+                .exact
+                .as_ref()
+                .map_or(&[], |request| request.groups.as_ref())
+        }),
         validation,
     )?
     .into();
