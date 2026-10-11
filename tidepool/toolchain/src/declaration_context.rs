@@ -4839,6 +4839,23 @@ impl ExactDeclarationContext {
         self.finish()
     }
 
+    /// Carry a compiler issuer's exact role selection without deriving roles
+    /// from the broader artifact custody retained by its view.
+    pub(crate) fn extend_issued_compiler_support(
+        mut self,
+        artifacts: &ArtifactView,
+        projection: &CompilerInputProjection,
+    ) -> Result<Self, CompileError> {
+        projection.validate(artifacts)?;
+        for descriptor in artifacts.descriptors() {
+            self.admit_producer(descriptor.producer_sha256)?;
+        }
+        let projection = self.compiler_projection.merge(projection)?;
+        self.inventory = self.inventory.merge_selected(artifacts, &projection)?;
+        self.compiler_projection = projection;
+        self.finish()
+    }
+
     /// Retain the interface evidence admitted by an original compiler proof.
     /// Only compiler-owned issuers may supply the producer identity.
     pub(crate) fn from_authenticated_interfaces(

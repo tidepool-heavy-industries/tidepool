@@ -15273,6 +15273,7 @@ pub(crate) mod tests {
             &producer,
             &selected,
             &view,
+            &planned.certified.source_selection,
             &exact,
             &include,
             Some(&baseline),

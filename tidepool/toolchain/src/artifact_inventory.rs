@@ -4714,6 +4714,55 @@ impl ArtifactView {
         self.retain_projected_materializations(retained)
     }
 
+    /// Narrow compiler support to issued roles without changing native demand.
+    /// Existing custody-only groups keep their exact edges and remain private.
+    pub(crate) fn select_compiler_support(
+        &self,
+        projection: &CompilerInputProjection,
+    ) -> Result<Self, CompileError> {
+        projection.validate(self)?;
+        let ids = projection
+            .roles()
+            .into_iter()
+            .flat_map(|role| std::iter::once(role.interface()).chain(role.original()))
+            .collect::<BTreeSet<_>>();
+        let state = self.lease.inventory.0.lock().expect("inventory lock");
+        let owned = &self.read_projection(&state).nodes;
+        let namespace = ids
+            .iter()
+            .map(|id| {
+                self.resolve_binding(*id, owned)
+                    .map(|binding| (*id, binding))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        let mut roots = namespace
+            .values()
+            .copied()
+            .map(InventoryNodeKey::Artifact)
+            .collect::<Vec<_>>();
+        let issued = self.roots().iter().copied().collect::<BTreeSet<_>>();
+        roots.extend(issued.iter().copied().filter(|node| {
+            matches!(node, InventoryNodeKey::Group(group) if ids.contains(&group.binding.artifact))
+        }));
+        let custody = owned
+            .iter()
+            .copied()
+            .filter(|node| {
+                matches!(node, InventoryNodeKey::Group(group)
+                if ids.contains(&group.binding.artifact) && !issued.contains(node))
+            })
+            .collect::<Vec<_>>();
+        drop(state);
+        let mut retained = self
+            .lease
+            .inventory
+            .retain(roots, custody, Vec::new(), Vec::new());
+        retained.replace_namespace(&namespace);
+        let mut retained = self.retain_projected_materializations(retained)?;
+        retained.replace_namespace(&namespace);
+        Ok(retained)
+    }
+
     /// Preserve exact support nodes even when they were dependencies of the
     /// generated root. Native byte custody stays separate from source roots.
     pub(crate) fn support_without_owner(

@@ -5,11 +5,12 @@ use super::*;
 use crate::declaration_context::{ExactProductAdmission, ExactSourceAdmission};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Retain interfaces reachable from selected originals, including source
-/// imports with no native product. Other whole-check consumers stay transient.
+/// Retain issued native roles in the selected authored source closure and their
+/// required type interfaces. Other whole-check consumers stay transient.
 pub(super) fn authored_interface_context(
     baseline: Option<&Arc<ExactDeclarationContext>>,
     compiled: &crate::artifact_inventory::ArtifactView,
+    issued: &crate::artifact_inventory::CompilerInputProjection,
     original_owners: impl IntoIterator<Item = ExactModuleIdentity>,
     source_imports: &BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
 ) -> Result<Arc<ExactDeclarationContext>, CompileError> {
@@ -20,20 +21,48 @@ pub(super) fn authored_interface_context(
             pending.extend(source_imports.get(&owner).into_iter().flatten().cloned());
         }
     }
-    let retained = compiled
-        .interface_owners()
-        .into_iter()
-        .map(|interface| interface.owner)
-        .filter(|owner| owners.contains(owner))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let interfaces = compiled.interface_projection(&retained)?;
     let context = match baseline {
         Some(context) => context.as_ref().clone(),
         None => ExactDeclarationContext::new(&[], &[], vec![])?,
     };
-    Ok(Arc::new(context.extend_interface_artifacts(&interfaces)?))
+    // Original proofs require a complete type namespace. Dependencies outside
+    // the lexical source closure keep only the issuer's exact interface role.
+    let metadata = compiled.metadata_snapshot();
+    let mut projection = crate::artifact_inventory::CompilerInputProjection::default();
+    let mut pending = owners
+        .iter()
+        .filter(|owner| issued.snapshot_roles().contains_key(*owner))
+        .cloned()
+        .collect::<Vec<_>>();
+    while let Some(owner) = pending.pop() {
+        if projection.snapshot_roles().contains_key(&owner) {
+            continue;
+        }
+        let role = issued
+            .snapshot_roles()
+            .get(&owner)
+            .ok_or_else(|| contract("authored compiler dependency lacks its issued role"))?;
+        let role = if owners.contains(&owner) {
+            role.clone()
+        } else {
+            crate::artifact_inventory::CompilerInputRole::InterfaceOnly {
+                interface: role.interface(),
+            }
+        };
+        let id = role.original().unwrap_or(role.interface());
+        let entry = metadata
+            .artifacts
+            .get(&id)
+            .ok_or_else(|| contract("authored compiler role is outside its issued custody"))?;
+        pending.extend(entry.requirements.iter().cloned());
+        projection.admit_role(owner, role)?;
+    }
+    // Role transfer preserves the issuer's graph and native demand. Selecting
+    // carrier roots here would promote groups held only as later-body custody.
+    let support = compiled.select_compiler_support(&projection)?;
+    Ok(Arc::new(
+        context.extend_issued_compiler_support(&support, &projection)?,
+    ))
 }
 
 // Includes materialization, closure certification and descriptor assembly.
@@ -674,6 +703,7 @@ pub(crate) fn certify_same_offer_planned_declaration(
     producer_identity: &[u8],
     originals: &crate::certified_products::SelectedOriginalClosure,
     sealed_artifacts: &crate::artifact_inventory::ArtifactView,
+    source_selection: &crate::certified_products::CertifiedSourceSelection,
     admission: &ExactProductAdmission<'_>,
     includes: &[PathBuf],
     baseline: Option<&Arc<ExactDeclarationContext>>,
@@ -770,9 +800,13 @@ pub(crate) fn certify_same_offer_planned_declaration(
         published_baseline = published_baseline.with_published_source_originals(&selection)?;
     }
     let published_baseline = Arc::new(published_baseline);
+    let issued = source_selection
+        .compiler_support_projection(sealed_artifacts, std::slice::from_ref(source_admission))
+        .map_err(|error| contract(format!("planned compiler source selection: {error}")))?;
     let artifact_context = authored_interface_context(
         Some(&published_baseline),
         sealed_artifacts,
+        &issued,
         products.iter().map(|product| ExactModuleIdentity {
             unit: product.owner().unit.clone(),
             module: product.owner().module.clone(),
@@ -959,6 +993,201 @@ mod tests {
     }
 
     #[test]
+    fn authored_source_closure_preserves_issued_native_roles_and_refuses_other_versions() {
+        use crate::artifact_inventory::{ArtifactPayload, CompilerInputProjection};
+        use crate::certified_products::{
+            fixture_finalized_product, fixture_finalized_product_with_requirements,
+            tests::{original_groups_fixture_with_interface, recovered_witness_fixtures},
+        };
+        let product = |name: &str, version| {
+            let legacy = fixture_finalized_product(
+                original_groups_fixture_with_interface(
+                    name,
+                    vec![(7, vec![]), (11, vec![])],
+                    version,
+                    &BTreeMap::new(),
+                    name.as_bytes().to_vec(),
+                ),
+                [1; 32],
+            );
+            recovered_witness_fixtures(&[legacy]).remove(0).product
+        };
+        let private_type = product("PrivateType", 1);
+        let authored = fixture_finalized_product_with_requirements(
+            product("Authored", 1),
+            [1; 32],
+            Some(BTreeMap::from([(
+                (
+                    private_type.owner().unit.clone(),
+                    private_type.owner().module.clone(),
+                ),
+                private_type.module_interface().unwrap().interface_sha256(),
+            )])),
+        );
+        let authored = recovered_witness_fixtures(&[authored]).remove(0).product;
+        let products = [
+            authored,
+            product("NativeA", 1),
+            product("NativeB", 1),
+            product("Transient", 1),
+            private_type,
+        ];
+        let module = |name: &str| ExactModuleIdentity {
+            unit: products[0].owner().unit.clone(),
+            module: name.into(),
+        };
+        let issued_view = |products: &[CertifiedRecoveryProduct]| {
+            let view = crate::declaration_context::certified_product_artifact_view(
+                [1; 32],
+                products,
+                &[],
+                None,
+            )
+            .unwrap();
+            let entries = view
+                .entries()
+                .into_iter()
+                .filter(|entry| matches!(&entry.payload, ArtifactPayload::Original(_)))
+                .collect::<Vec<_>>();
+            let projection = CompilerInputProjection::from_issued_entries(&entries).unwrap();
+            (view, projection)
+        };
+        for reverse in [false, true] {
+            let mut ordered = products.to_vec();
+            if reverse {
+                ordered.reverse();
+            }
+            let (full, issued) = issued_view(&ordered);
+            let interfaces = full
+                .interface_projection(
+                    &full
+                        .interface_owners()
+                        .into_iter()
+                        .map(|row| row.owner)
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap();
+            let view = full.retain_original_custody(&interfaces).unwrap();
+            assert!(view.selected_native_groups().is_empty());
+            for dependency in ["NativeA", "NativeB"] {
+                let root = module("Authored");
+                let dependency = module(dependency);
+                let imports = BTreeMap::from([
+                    (root.clone(), vec![dependency.clone()]),
+                    (dependency.clone(), vec![]),
+                    (
+                        module("Transient"),
+                        vec![module("NativeA"), module("NativeB")],
+                    ),
+                ]);
+                let context =
+                    authored_interface_context(None, &view, &issued, [root.clone()], &imports)
+                        .unwrap();
+                assert_eq!(
+                    context
+                        .compiler_input_projection()
+                        .snapshot_roles()
+                        .keys()
+                        .cloned()
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from([root.clone(), dependency.clone(), module("PrivateType")])
+                );
+                assert_eq!(
+                    context
+                        .recovery_products()
+                        .iter()
+                        .map(|product| {
+                            ExactModuleIdentity {
+                                unit: product.owner().unit.clone(),
+                                module: product.owner().module.clone(),
+                            }
+                        })
+                        .collect::<BTreeSet<_>>(),
+                    BTreeSet::from([root.clone(), dependency.clone()]),
+                    "unrelated whole-check native products must remain transient"
+                );
+                let roles = context.compiler_input_projection().snapshot_roles();
+                assert!(roles[&root].original().is_some());
+                assert!(roles[&dependency].original().is_some());
+                assert!(
+                    roles[&module("PrivateType")].original().is_none(),
+                    "native proof type dependencies do not receive a body reuse offer"
+                );
+                assert_eq!(
+                    context.artifact_view().selected_native_groups(),
+                    view.selected_native_groups(),
+                    "compiler role transfer cannot demand custody-only native groups"
+                );
+                assert!(
+                    context.lexical_graph().is_empty(),
+                    "private compiler roles do not publish source imports"
+                );
+                let native = view
+                    .entries()
+                    .into_iter()
+                    .find(|entry| {
+                        matches!(&entry.payload, ArtifactPayload::Original(product)
+                        if product.owner().module == dependency.module)
+                    })
+                    .unwrap();
+                let ArtifactPayload::Original(selected) = &native.payload else {
+                    unreachable!()
+                };
+                let demand = crate::certified_products::PendingImportOwner::Source {
+                    owner: selected.owner().clone(),
+                    original_ordinal: 7,
+                    binder: tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: dependency.unit.clone(),
+                        module: dependency.module.clone(),
+                        namespace: "value".into(),
+                        occurrence: "entry_7".into(),
+                        record_parent: None,
+                    },
+                };
+                let first = view
+                    .inventory()
+                    .admit_shared_with_demand(
+                        &view,
+                        vec![native],
+                        crate::artifact_inventory::NativeArtifactDemand::CertifiedTargetImports(&[
+                            demand,
+                        ]),
+                    )
+                    .unwrap();
+                let first = first
+                    .retain_original_custody(&first)
+                    .unwrap()
+                    .with_compiler_projection(&issued)
+                    .unwrap();
+                let before = first.selected_native_groups();
+                assert_eq!(before.len(), 1);
+                assert!(before.iter().all(|group| group.original_ordinal == 7));
+                let narrowed =
+                    authored_interface_context(None, &first, &issued, [root.clone()], &imports)
+                        .unwrap();
+                assert_eq!(
+                    narrowed.artifact_view().selected_native_groups(),
+                    before,
+                    "inherited first-group demand must survive without demanding later groups"
+                );
+                let historical = product(&dependency.module, 2);
+                let (conflicting, conflict_selection) = issued_view(&[historical]);
+                assert!(
+                    authored_interface_context(
+                        Some(&context),
+                        &conflicting,
+                        &conflict_selection,
+                        [dependency.clone()],
+                        &BTreeMap::from([(dependency, vec![])]),
+                    )
+                    .is_err(),
+                    "another native version cannot replace the selected owner"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn authored_interface_context_retains_type_only_source_closure() {
         use crate::artifact_inventory::{ArtifactInventory, ArtifactKind};
         use crate::certified_products::fixture_module_interface;
@@ -989,8 +1218,15 @@ mod tests {
             None,
         )
         .unwrap();
-        let context =
-            authored_interface_context(None, &compiled, [root.clone()], &admitted).unwrap();
+        let context = authored_interface_context(
+            None,
+            &compiled,
+            &crate::artifact_inventory::CompilerInputProjection::from_interface_view(&compiled)
+                .unwrap(),
+            [root.clone()],
+            &admitted,
+        )
+        .unwrap();
         assert!(context.recovery_products().is_empty());
         assert!(context.lexical_graph().is_empty());
         assert!(context
@@ -1041,6 +1277,7 @@ mod tests {
         let missing = authored_interface_context(
             None,
             &ArtifactInventory::default().empty_view(),
+            &Default::default(),
             [root.clone()],
             &admitted,
         )
@@ -1065,7 +1302,14 @@ mod tests {
             None,
         )
         .unwrap();
-        let wrong = authored_interface_context(None, &wrong, [root.clone()], &admitted).unwrap();
+        let wrong = authored_interface_context(
+            None,
+            &wrong,
+            &Default::default(),
+            [root.clone()],
+            &admitted,
+        )
+        .unwrap();
         assert!(inherited_source_lexical_imports(
             &root,
             &admitted,
@@ -1123,11 +1367,24 @@ mod tests {
         let first_offer = offer([1; 32]);
         let second_offer = offer([2; 32]);
         assert!(first_offer.merge(&second_offer).is_err());
-        let first =
-            authored_interface_context(None, &first_offer, [original.clone()], &admitted).unwrap();
-        let second =
-            authored_interface_context(Some(&first), &second_offer, [original.clone()], &admitted)
-                .unwrap();
+        let first = authored_interface_context(
+            None,
+            &first_offer,
+            &crate::artifact_inventory::CompilerInputProjection::from_interface_view(&first_offer)
+                .unwrap(),
+            [original.clone()],
+            &admitted,
+        )
+        .unwrap();
+        let second = authored_interface_context(
+            Some(&first),
+            &second_offer,
+            &crate::artifact_inventory::CompilerInputProjection::from_interface_view(&second_offer)
+                .unwrap(),
+            [original.clone()],
+            &admitted,
+        )
+        .unwrap();
         let owners = second
             .artifact_view()
             .descriptors()

@@ -3840,14 +3840,18 @@ fn checked_cell_retained_policy_reuses_finalized_dependencies() {
                 "shared source {phase} repeated in declaration={declaration}: {stderr}"
             );
         }
-        assert!(
-            stderr.lines().any(|line| {
+        let reused_products = stderr
+            .lines()
+            .filter_map(|line| {
                 line.strip_prefix("tidepool-count name=transaction_reused_source_products count=")
                     .and_then(|rest| rest.split_whitespace().next())
                     .and_then(|count| count.parse::<usize>().ok())
-                    .is_some_and(|count| count > 0)
-            }),
-            "native compilation must consume validated canonical products: {stderr}"
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reused_products,
+            [0],
+            "one cold canonical source cycle: {stderr}"
         );
         if declaration {
             execute_cell(

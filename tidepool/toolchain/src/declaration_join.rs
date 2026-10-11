@@ -685,9 +685,19 @@ fn certify_authored_declaration_inner(
             &Default::default(),
         )?,
     };
+    let issued = compiled
+        .source_selection
+        .as_ref()
+        .ok_or_else(|| contract("authored certification has no issued source selection"))?
+        .compiler_support_projection(
+            &compiled.artifact_view,
+            compiled.exact_source_admission.as_slice(),
+        )
+        .map_err(|error| contract(format!("authored compiler source selection: {error}")))?;
     let artifact_context = planned::authored_interface_context(
         context.as_ref(),
         &compiled.artifact_view,
+        &issued,
         products.iter().map(|product| ExactModuleIdentity {
             unit: product.owner().unit.clone(),
             module: product.owner().module.clone(),

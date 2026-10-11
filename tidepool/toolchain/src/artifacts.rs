@@ -2846,6 +2846,7 @@ impl ModuleCandidateOffer {
             &self.producer,
             &selected_originals,
             &sealed.artifact_view,
+            &sealed.source_selection,
             &crate::declaration_context::ExactProductAdmission {
                 request: exact,
                 source: &admission,
