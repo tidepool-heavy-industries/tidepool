@@ -3950,9 +3950,10 @@ impl Drop for MachineLease<'_> {
 ///
 /// `roots_released` is the number of persistent GC roots deregistered, and it
 /// is exactly the drop a caller must observe in
-/// [`PersistentSession::persistent_roots_count`] across the call. It is `<=`
-/// `bindings_retired`: a binding whose handle is still owned by a survivor (the
-/// sole-ownership rule) retires its NAME without releasing its ROOT.
+/// [`PersistentSession::persistent_roots_count`] across the call. This includes
+/// source-instance registrations as well as solely owned binding handles.
+/// A binding whose handle is still owned by a survivor retires its name without
+/// releasing its root.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ScopeRetirement {
     /// Scopes removed from the tree — the retired scope plus every live
@@ -3961,7 +3962,7 @@ pub struct ScopeRetirement {
     /// `live` entries evicted across all of those scopes' frames, shadowed
     /// older gens included.
     pub bindings_retired: usize,
-    /// Persistent GC roots deregistered — the sole-owner subset of the above.
+    /// Persistent GC roots deregistered from bindings and source instances.
     pub roots_released: usize,
 }
 
@@ -4348,6 +4349,7 @@ mod checkpoint_scope_tests {
         let conflict_handle = conflict.value.handle;
         conflict.id = id;
         let roots = session.persistent_roots_count();
+        let durable_before = crate::session::recovery_test_fixture::domain_state(session.lib());
         assert!(matches!(
             tidepool_testing::with_settlement(|settlement| session.bind_replacing_decls(vec![first, conflict], settlement)),
             Err(SessionError::InvalidBindingIdentity(error)) if error.id == id
@@ -4369,7 +4371,10 @@ mod checkpoint_scope_tests {
         );
         assert!(machine.prepared_handle_of(first_handle.raw()).is_none());
         assert!(machine.prepared_handle_of(conflict_handle.raw()).is_none());
-        assert!(session.lib().durable_graph.is_none());
+        assert_eq!(
+            crate::session::recovery_test_fixture::domain_state(session.lib()),
+            durable_before
+        );
     }
 
     #[test]
@@ -4533,10 +4538,7 @@ mod checkpoint_scope_tests {
         let original = crate::session::recovery_test_fixture::domain_state(foreign.lib());
         assert!(matches!(
             foreign.publish_durable_public_bootstrap(seal),
-            Err(SessionError::InvalidDurablePublicAdmission {
-                reason: super::super::DurablePublicAdmissionFailure::BootstrapIdentity,
-                ..
-            })
+            Err(SessionError::WrongPublicManifestTicket)
         ));
         assert_eq!(
             crate::session::recovery_test_fixture::domain_state(foreign.lib()),
@@ -4549,13 +4551,7 @@ mod checkpoint_scope_tests {
         session.lib_mut().set_scope_tip_in(public, Generation(99));
         assert!(matches!(
             session.publish_durable_public_bootstrap(seal),
-            Err(SessionError::InvalidDurablePublicAdmission {
-                reason: super::super::DurablePublicAdmissionFailure::DeclarationTip {
-                    published: None,
-                    current: Some(Generation(99))
-                },
-                ..
-            })
+            Err(SessionError::WrongPublicManifestTicket)
         ));
         assert_eq!(
             crate::session::recovery_test_fixture::domain_state(session.lib()),

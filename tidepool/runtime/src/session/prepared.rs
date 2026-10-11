@@ -9157,6 +9157,12 @@ pub(super) mod tests {
             let mut incidental_top = optional_top.clone();
             incidental_top.identity = incidental.clone();
             incidental_top.binding.id = ValueId(u32::from(include_package) + 2);
+            let HeapRhs::Function { body, .. } = &mut incidental_top.binding.rhs else {
+                unreachable!()
+            };
+            let expression = wire.expressions.nodes[*body as usize].clone();
+            *body = wire.expressions.nodes.len();
+            wire.expressions.nodes.push(expression);
             wire.bindings.push(Group::NonRecursive(optional_top));
             wire.bindings.push(Group::NonRecursive(incidental_top));
             let Group::NonRecursive(top) = &mut wire.bindings[0] else {

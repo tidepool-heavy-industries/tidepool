@@ -3825,11 +3825,25 @@ fn audit_compiler_issued_item_receipts(
     fn captured_owner(row: &CborValue) -> (&str, &str) {
         observed_receipt_owner(row, ObservedReceiptOwnerRow::CapturedValue)
     }
-    let value_rows = products.as_array().unwrap()[2].as_array().unwrap()[4]
-        .as_array()
-        .unwrap()[3]
-        .as_array()
-        .unwrap();
+    fn captured_rows(packet: &CborValue) -> &[CborValue] {
+        let envelope = packet.as_array().expect("issued receipt envelope");
+        assert_eq!(envelope.len(), 3);
+        let payload = envelope[2].as_array().expect("issued receipt payload");
+        assert_eq!(payload[0].as_text(), Some("segment-originals"));
+        let finalization = payload[4].as_array().expect("issued finalization");
+        finalization[3]
+            .as_array()
+            .expect("issued captured value rows")
+    }
+    fn captured_rows_mut(packet: &mut CborValue) -> &mut Vec<CborValue> {
+        captured_rows(packet);
+        packet.as_array_mut().unwrap()[2].as_array_mut().unwrap()[4]
+            .as_array_mut()
+            .unwrap()[3]
+            .as_array_mut()
+            .unwrap()
+    }
+    let value_rows = captured_rows(&products);
     let output_index = value_rows
         .iter()
         .position(|row| row.as_array().unwrap()[1].as_text() == Some(output_module))
@@ -3849,28 +3863,38 @@ fn audit_compiler_issued_item_receipts(
         })
         .expect("the later segment must produce a real reserved capture");
     let future_module = future.native().unwrap().value_interface().unwrap().0;
-    let future_segment_index = valid
-        .typed_segments()
-        .iter()
-        .position(|segment| {
-            segment
-                .items()
-                .iter()
-                .any(|item| item.ordinal() == future.checked_item().index())
-        })
-        .unwrap();
-    let future_directory = root.join(format!("segment-{future_segment_index}"));
-    let future_bytes = std::fs::read(future_directory.join("certified-products.cbor")).unwrap();
-    let future_products: CborValue = ciborium::de::from_reader(future_bytes.as_slice()).unwrap();
-    let future_row = future_products.as_array().unwrap()[2].as_array().unwrap()[4]
-        .as_array()
-        .unwrap()[3]
-        .as_array()
+    let mut future_receipts = std::fs::read_dir(root)
         .unwrap()
-        .iter()
-        .find(|row| row.as_array().unwrap()[1].as_text() == Some(future_module))
-        .expect("later segment owns its actual capture type")
-        .clone();
+        .map(|entry| entry.unwrap().path())
+        .filter(|directory| {
+            directory
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("segment-")
+        })
+        .filter_map(|directory| {
+            let path = directory.join("certified-products.cbor");
+            let bytes = std::fs::read(path).ok()?;
+            let packet: CborValue = ciborium::de::from_reader(bytes.as_slice()).unwrap();
+            let payload = packet.as_array().unwrap()[2].as_array().unwrap();
+            if payload[0].as_text() != Some("segment-originals") {
+                return None;
+            }
+            captured_rows(&packet)
+                .iter()
+                .find(|row| row.as_array().unwrap()[1].as_text() == Some(future_module))
+                .cloned()
+                .map(|row| (directory, row))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        future_receipts.len(),
+        1,
+        "capture has one issued originals owner"
+    );
+    let (future_directory, future_row) = future_receipts.pop().unwrap();
     let same_segment_future = valid.items()[index + 1..declaration]
         .iter()
         .find(|item| {
@@ -3937,11 +3961,7 @@ fn audit_compiler_issued_item_receipts(
             original: products_original.clone(),
         };
         let mut changed = products.clone();
-        let rows = changed.as_array_mut().unwrap()[2].as_array_mut().unwrap()[4]
-            .as_array_mut()
-            .unwrap()[3]
-            .as_array_mut()
-            .unwrap();
+        let rows = captured_rows_mut(&mut changed);
         let mut restore_payload = None;
         let mut foreign_payloads = None;
         match mutation {
@@ -9781,29 +9801,33 @@ mod tests {
         };
         assert_eq!(variant, 1);
         assert_eq!(
-            wrapped_source,
-            templates[1]
-                .source
-                .replace("{{TURN}}", "((+ 1) :: Int -> Int)")
+            wrapped_source.matches("((+ 1) :: Int -> Int)").count(),
+            1,
+            "the selected alternative preserves the authored expression exactly once"
         );
     }
 
-    /// Ordered templates are a typechecking fallback, not a blanket recovery
-    /// loop. A missing external preprocessor raises an infrastructure
-    /// exception rather than a GHC `SourceError`; the worker must surface it
-    /// immediately instead of silently compiling the valid second template.
+    /// Ordered templates cannot recover a missing configured compiler endpoint.
+    /// Refuse before submitting either otherwise valid source alternative.
     #[test]
-    fn run_turn_does_not_retry_template_after_infrastructure_exception() {
+    #[serial_test::serial]
+    fn run_turn_does_not_retry_template_after_configured_endpoint_failure() {
         tidepool_testing::eval_harness::require_extract();
         let session_root = TempDir::new().unwrap();
+        let _extract = TestEnvGuard::set(
+            "TIDEPOOL_EXTRACT",
+            session_root.path().join("missing-compiler-endpoint"),
+        );
+        let _daemon = TestEnvGuard::unset("TIDEPOOL_EXTRACT_DAEMON_SOCKET");
+        let submissions_before = tidepool_extract_cmd::extract_spawn_count();
         let templates = vec![
             TurnTemplate {
                 kind: TemplateSelector::Expr,
-                source: "{-# OPTIONS_GHC -F -pgmF /definitely/missing/tidepool-turn-preprocessor #-}\nmodule Expr where\n__result = {{TURN}}\n".to_string(),
+                source: "module Expr where\n__result = {{TURN}}\n".to_string(),
             },
             TurnTemplate {
                 kind: TemplateSelector::Expr,
-                source: "module Expr where\n__result = {{TURN}}\n".to_string(),
+                source: "module Expr where\n__result = ({{TURN}}) + 2\n".to_string(),
             },
         ];
         let err = tidepool_testing::with_settlement(|settlement| {
@@ -9828,18 +9852,22 @@ mod tests {
                 settlement,
             )
         })
-        .expect_err("an infrastructure exception must not select the valid fallback template");
+        .expect_err("endpoint failure must not select the valid fallback template");
         assert!(
-            matches!(err.error, CompileError::WorkerFailure(_)),
-            "worker infrastructure failure must remain distinct from source rejection: {err:?}"
+            matches!(err.error, CompileError::Io(_)),
+            "endpoint failure must remain distinct from source rejection: {err:?}"
         );
         assert_eq!(
             crate::classify_compile(&err.error).class,
             crate::FailureClass::Infra
         );
         assert_eq!(
-            err.attempted_source.as_deref(),
-            Some(templates[0].source.replace("{{TURN}}", "1 :: Int").as_str())
+            tidepool_extract_cmd::extract_spawn_count(),
+            submissions_before
+        );
+        assert!(
+            err.attempted_source.is_none(),
+            "endpoint admission fails before either source alternative is rendered"
         );
     }
 
@@ -9874,10 +9902,13 @@ mod tests {
             )
         })
         .expect_err("both typed alternatives are rejected");
-        assert_eq!(
-            failure.attempted_source.as_deref(),
-            Some(templates[1].source.as_str())
-        );
+        let attempted = failure
+            .attempted_source
+            .as_deref()
+            .expect("compiler retains the final rendered alternative");
+        let (_, attempted_body) = attempted.split_once('\n').unwrap();
+        let (_, requested_body) = templates[1].source.split_once('\n').unwrap();
+        assert_eq!(attempted_body, requested_body);
     }
 
     // ---- TurnOut CBOR decoding ----

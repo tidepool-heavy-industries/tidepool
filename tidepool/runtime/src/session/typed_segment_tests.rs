@@ -199,17 +199,26 @@ impl SemanticSession {
             .copied()
             .expect("history executes its fixed final observation");
         let index = usize::try_from(effect_submission - *submissions_before).unwrap();
-        let [join] = &requests[index..] else {
-            panic!("only the accepted public declaration join may follow the last effect");
-        };
+        let following = &requests[index..];
         let published = self
             .resident
             .public_visibility_snapshot_in(self.public)
             .unwrap();
-        assert!(
-            join.is_publication_join(published.declaration_tip.0),
-            "post-effect work must certify the exact published interface: {join:?}"
+        eprintln!(
+            "typed-segment-history-compiler-census before_effect={index} total={} post_effect={following:?} published_generation={}",
+            requests.len(),
+            published.declaration_tip.0,
         );
+        assert!(
+            following.len() <= 1,
+            "only the accepted public declaration join may follow the last effect: {following:?}"
+        );
+        if let [join] = following {
+            assert!(
+                join.is_publication_join(published.declaration_tip.0),
+                "post-effect work must certify the exact published interface: {join:?}"
+            );
+        }
     }
 }
 

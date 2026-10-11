@@ -2723,12 +2723,18 @@ fn native_input_generation_retains_original_type_owner_after_source_readers_drop
     assert!(inventory.node_count() > 0);
 
     let (owner, compiled) = issued_captured_input(&mut resident, input, recipe);
+    let prototype = Arc::downgrade(compiled.prototype());
     let mounted = mount_original(&mut resident, owner, compiled);
     let view = resident.compile_view_in(ScopeId::ROOT).unwrap();
     assert!(
-        view.exact_compile_context()
-            .unwrap()
-            .declarations()
+        view.exact_compile_context().is_none(),
+        "a mounted type interface grants no notebook source namespace",
+    );
+    assert!(
+        prototype
+            .upgrade()
+            .expect("mounted interface retains its original type prototype")
+            .context()
             .artifact_view()
             .descriptors()
             .contains(&original),
@@ -4664,10 +4670,14 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
         .cancel_handle(RealmId::ROOT)
         .cancel();
     let parked = resident.parked_count();
+    let roots_before_retirement = resident.persistent_roots_count();
     let retired = resident.retire_scope(scope);
     assert_eq!(retired.bindings_retired, 1);
-    assert_eq!(retired.roots_released, 1);
-    assert_eq!(resident.persistent_roots_count(), roots);
+    assert_eq!(
+        retired.roots_released,
+        roots_before_retirement - resident.persistent_roots_count()
+    );
+    assert!(retired.roots_released >= retired.bindings_retired);
     assert_eq!(
         resident.parked_count(),
         parked,
@@ -4677,6 +4687,12 @@ fn activation_input_committed_binding_owns_interface_and_scope_releases_root_onc
     assert!(resident.binding_provenance.get(&binding.raw()).is_none());
     assert_eq!(resident.retire_scope(scope), ScopeRetirement::default());
     assert!(certificate_lease.upgrade().is_none());
+    assert!(
+        prototype_lease.upgrade().is_some(),
+        "the original parked caller still owns its checked type prototype"
+    );
+    drop(resident);
+    drop(fixture);
     assert!(prototype_lease.upgrade().is_none());
 }
 

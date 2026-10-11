@@ -3532,6 +3532,14 @@ mod tests {
         session
             .install_prepared(testing::prepare(testing::wire_program()).unwrap())
             .unwrap();
+        assert!(!session
+            .capture_admitted_native_imports(ScopeId::ROOT)
+            .unwrap()
+            .entries
+            .contains(&(package_identity.clone(), 0)));
+        let (certified, _) =
+            crate::session::prepared::tests::certified_package_export_fixture([61; 32]);
+        *session.prepared_mut().unwrap() = certified;
         let mut value = crate::session::prepared::tests::rooted_publication_fixture(
             &mut session,
             "answer",
@@ -3703,8 +3711,17 @@ mod tests {
             "nativeExport",
             914,
         );
-        let identity = unbound.value.identity;
+        let ordinary_identity = unbound.value.identity;
         let scope = session.mint_scope(ScopeId::ROOT).unwrap();
+        assert!(!session
+            .capture_admitted_native_imports(scope)
+            .unwrap()
+            .entries
+            .contains(&(ordinary_identity, 0)));
+        let (certified, _) =
+            crate::session::prepared::tests::certified_package_export_fixture([62; 32]);
+        *session.prepared_mut().unwrap() = certified;
+        let identity = tidepool_repr::execution_schema::testing::identity("Fixture", "entry");
         let admitted = session.capture_admitted_native_imports(scope).unwrap();
         assert!(admitted.entries.contains(&(identity.clone(), 0)));
         let Some(ImportOwner::CodeExport { root_id, .. }) = session
