@@ -647,6 +647,9 @@ impl KernelContext {
     ) -> impl std::future::Future<Output = F::Output> {
         let owner =
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(self.retained_exit());
+        // The scope owns only a pinned pointer, rather than capturing the
+        // complete resident operation again in its task-local future.
+        let operation = Box::pin(operation);
         async move { owner.scope(operation).await }
     }
 
@@ -6297,6 +6300,61 @@ mod tests {
         let mut probe = behavior(false).behavior;
         probe.start_observations = Some(observations.clone());
         probe
+    }
+
+    #[tokio::test]
+    async fn lifecycle_scope_keeps_large_operation_out_of_wrapper_and_drops_it_once() {
+        struct PendingOperation {
+            payload: [u8; 128 * 1024],
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl std::future::Future for PendingOperation {
+            type Output = ();
+
+            fn poll(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<()> {
+                assert!(crate::ActorCompilerCloseOwner::current().is_ok());
+                assert_eq!(self.payload[0], 42);
+                std::task::Poll::Pending
+            }
+        }
+
+        impl Drop for PendingOperation {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let (actor, task) = spawn_local_actor(None, observed_probe(&observations))
+            .await
+            .unwrap();
+        let context = observations.lock()[0].0.clone();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let operation = context.compiler_lifecycle_scope(PendingOperation {
+            payload: [42; 128 * 1024],
+            drops: drops.clone(),
+        });
+        assert!(std::mem::size_of_val(&operation) < 1024);
+        let mut operation = Box::pin(operation);
+        assert!(futures_util::poll!(operation.as_mut()).is_pending());
+        assert!(crate::ActorCompilerCloseOwner::current().is_err());
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(operation);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(crate::ActorCompilerCloseOwner::current().is_err());
+        actor
+            .shutdown(ActorTerminal::new(
+                ActorExitKind::Completed,
+                "scope dropped",
+            ))
+            .await
+            .unwrap();
+        task.await.unwrap();
+        assert!(actor.terminal().cleanup().unwrap().is_confirmed());
     }
 
     #[tokio::test]
