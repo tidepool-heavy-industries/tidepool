@@ -4137,12 +4137,12 @@ async fn selected_nominal_capture_excludes_ambient_sibling_from_native_notebook(
         assert_eq!(setup["status"], "committed", "{setup}");
         campaign.await_native_activation(target.actor.identity(), "membrane request activation", Duration::from_secs(120)).await;
         let selected = dispatch_haskell_script(target.policy.as_ref(),
-            "import qualified Tidepool.Agent.Contract as A\nlet selectedNominalWitness = Nothing :: Maybe (MembraneTools '[Replies] (A.AsServerT (Eff '[Replies])))").await;
+            "let selectedNominalWitness = Just sessionInput :: Maybe SelectedNominal").await;
         assert_eq!(selected["status"], "committed", "{selected}");
         let hidden = dispatch_haskell_script(target.policy.as_ref(),
             "let ambientNominalWitness = Nothing :: Maybe AmbientNominal").await;
         assert_eq!(hidden["status"], "rejected", "{hidden}");
-        let reply = dispatch_haskell_script(target.policy.as_ref(), "respond (42 :: Int)").await;
+        let reply = dispatch_haskell_script(target.policy.as_ref(), "case sessionInput of SelectedNominal value -> respond value").await;
         assert_eq!(reply["status"], "replied", "{reply}");
         let original = displayed(campaign, root.as_ref(),
             "let waitMembrane = do { observed <- pollResponse membraneResponse; case observed of { ResponseReady result -> pure result; ResponseUnavailable failure -> error (show failure); _ -> sleep (milliseconds 1) >> waitMembrane } }\nresult <- waitMembrane\n_ <- display (case AmbientNominal 42 of AmbientNominal value -> value)").await;
