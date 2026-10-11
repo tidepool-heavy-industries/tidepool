@@ -3258,6 +3258,26 @@ async fn recipe_workspace_definitions_compile_before_resident_execution() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn recipe_restart_reinstalls_the_unbound_conversation_service() {
+    let repository = recipe_workspace(Some(&["Project.RecipeBoundaryChecks.unboundAcrossRestart"]));
+    let authored = repository.path().join(".exomonad");
+    std::fs::write(
+        authored.join("Project/RecipeBoundaryChecks.hs"),
+        include_str!("fixtures/recipe_unbound_restart.hs"),
+    )
+    .unwrap();
+    // Keep the shipped spec's service requirements; notebook module exposure
+    // is qualified by the separate authored source gate.
+    crate::exomonad::edit_fixture_project_config(&authored, |project| {
+        project.haskell.modules.clear();
+    });
+    super::test_campaign::commit_workspace(repository.path());
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .expect("each recipe incarnation must install the same unbound reader");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn recipe_checks_reject_a_candidate_only_defect_and_accept_its_repair() {
     let repository = recipe_workspace(Some(&["Project.CollaborationChecks.collaboration"]));
     let work = repository

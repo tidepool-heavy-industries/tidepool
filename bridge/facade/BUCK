@@ -1529,6 +1529,7 @@ rust_filegroup(
         "src/actor_host/fixtures/m3_recursive_grandchild_reply.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_grandchild_reply.hs",
         "src/actor_host/fixtures/m3_recursive_root.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_root.hs",
         "src/actor_host/fixtures/m3_recursive_setup.hs": "bridge/facade/src/actor_host/fixtures/m3_recursive_setup.hs",
+        "src/actor_host/fixtures/recipe_unbound_restart.hs": "bridge/facade/src/actor_host/fixtures/recipe_unbound_restart.hs",
         "src/actor_host/fixtures/scripted_three_actor_capture.hs": "bridge/facade/src/actor_host/fixtures/scripted_three_actor_capture.hs",
         "src/actor_host/fixtures/scripted_three_actor_cleanup.hs": "bridge/facade/src/actor_host/fixtures/scripted_three_actor_cleanup.hs",
         "src/actor_host/fixtures/scripted_three_actor_read.hs": "bridge/facade/src/actor_host/fixtures/scripted_three_actor_read.hs",
@@ -2796,6 +2797,7 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/m3_recursive_grandchild_reply.hs": "src/actor_host/fixtures/m3_recursive_grandchild_reply.hs",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_root.hs": "src/actor_host/fixtures/m3_recursive_root.hs",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_setup.hs": "src/actor_host/fixtures/m3_recursive_setup.hs",
+        "bridge/facade/src/actor_host/fixtures/recipe_unbound_restart.hs": "src/actor_host/fixtures/recipe_unbound_restart.hs",
         "bridge/facade/src/actor_host/fixtures/scripted_three_actor_capture.hs": "src/actor_host/fixtures/scripted_three_actor_capture.hs",
         "bridge/facade/src/actor_host/fixtures/scripted_three_actor_cleanup.hs": "src/actor_host/fixtures/scripted_three_actor_cleanup.hs",
         "bridge/facade/src/actor_host/fixtures/scripted_three_actor_read.hs": "src/actor_host/fixtures/scripted_three_actor_read.hs",
@@ -3666,6 +3668,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f70726f6a6563742f576f726b2e6873",
     src = "src/actor_host/fixtures/project/Work.hs",
     out = "Work.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f7265636970655f756e626f756e645f726573746172742e6873",
+    src = "src/actor_host/fixtures/recipe_unbound_restart.hs",
+    out = "recipe_unbound_restart.hs",
     visibility = ["PUBLIC"],
 )
 

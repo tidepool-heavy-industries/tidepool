@@ -32,17 +32,9 @@ pub(super) struct ModelFreeSession {
 }
 
 impl ModelFreeSession {
-    pub async fn start(
-        config: &ActorHostConfig,
-        transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,
-    ) -> Result<Self> {
-        Self::start_with_conversation(config, transform, None).await
-    }
-
-    /// As [`Self::start`], with a reader for the root's own conversation.
-    /// Without one `reflect` reports every context unbound, so a test that
-    /// needs real history supplies it here — the same seam the host uses at
-    /// `actor_host.rs`'s `with_conversation_reader`.
+    /// Install the root's conversation reader before deriving its effect row.
+    /// A missing reader leaves Reflect unavailable; an installed reader can
+    /// return either history or a typed unavailable result.
     pub async fn start_with_conversation(
         config: &ActorHostConfig,
         transform: impl FnOnce(Arc<dyn WorkspaceAdmission>) -> Arc<dyn WorkspaceAdmission>,

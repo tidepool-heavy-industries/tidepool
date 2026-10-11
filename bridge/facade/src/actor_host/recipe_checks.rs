@@ -127,6 +127,19 @@ struct Driver {
 }
 
 impl Driver {
+    async fn acquire_session(config: &ActorHostConfig) -> Result<ModelFreeSession> {
+        // Every recipe incarnation supplies the selected spec with Reflect.
+        // Its typed unavailable service preserves the absence of a provider.
+        ModelFreeSession::start_with_conversation(
+            config,
+            |admission| admission,
+            Some(Arc::new(|_, _| {
+                Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
+            })),
+        )
+        .await
+    }
+
     async fn start(workspace: &Path, selected: FrozenWorkspace) -> Result<Self> {
         let repository = tempfile::tempdir()?;
         let runtime = tempfile::tempdir()?;
@@ -184,16 +197,7 @@ impl Driver {
             pane_environment: BTreeMap::new(),
             jev: None,
         };
-        // Recipes have no provider conversation, but the selected spec can
-        // require Reflect. Install its actual typed unavailable service.
-        let session = ModelFreeSession::start_with_conversation(
-            &config,
-            |admission| admission,
-            Some(Arc::new(|_, _| {
-                Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
-            })),
-        )
-        .await?;
+        let session = Self::acquire_session(&config).await?;
         let installations =
             HashMap::from([(session.actor.identity(), session.root_installation.clone())]);
         Ok(Self {
@@ -647,7 +651,7 @@ impl Driver {
         self.config.model = defaults.defaults.model;
         self.config.effort = defaults.defaults.effort.into();
         self.config.workspace_inputs = Some(selected);
-        let session = ModelFreeSession::start(&self.config, |admission| admission).await?;
+        let session = Self::acquire_session(&self.config).await?;
         self.installations
             .insert(session.actor.identity(), session.root_installation.clone());
         self.session = Some(session);
