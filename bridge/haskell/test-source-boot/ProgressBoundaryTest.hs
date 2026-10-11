@@ -145,7 +145,7 @@ watchReplyEvidenceWith warmup effects work = do
     result <- compile (PreparedProducts Nothing) Set.empty CertifyHomeProductsCompile Nothing target includes Nothing
     rows <- retainWatchReplyEvidence work result
     forM_ rows $ \(occurrence, targetRows, originalRows) -> do
-      unless (all (== [True]) targetRows) $
+      unless (not (null targetRows) && all (== [True]) targetRows) $
         fail ("watch target lacks its closed Int reply row: " ++ T.unpack occurrence)
       unless (any (== [True]) originalRows) $
         fail ("watch native original lacks its closed Int reply row: " ++ T.unpack occurrence)
