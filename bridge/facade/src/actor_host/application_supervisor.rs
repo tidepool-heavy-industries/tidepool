@@ -1220,37 +1220,34 @@ pub(super) async fn drain_browser_command_tasks(
     control: &harness::server::ServerControl,
     timeout: Duration,
 ) -> Option<String> {
-    match tokio::time::timeout(timeout, async {
-        let mut failure = None;
+    let mut failures = Vec::new();
+    if tokio::time::timeout(timeout, async {
         while let Some(result) = tasks.join_next().await {
             if let Err(error) = observe_browser_command_join(result, control) {
-                failure.get_or_insert(error);
+                failures.push(error);
             }
         }
-        failure
     })
     .await
+    .is_err()
     {
-        Ok(failure) => failure,
-        Err(_) => {
-            // Forest and Engine cleanup already ran with their original event
-            // consumer. Only these command observers remain; their durable
-            // claimed rows cannot be replayed or reported as confirmed.
-            tasks.abort_all();
-            let mut failure = "embedded browser command observation cleanup timed out".to_owned();
-            while let Some(result) = tasks.join_next().await {
-                match result {
-                    Err(error) if error.is_cancelled() => {}
-                    result => {
-                        if let Err(error) = observe_browser_command_join(result, control) {
-                            failure.push_str(&format!("; {error}"));
-                        }
+        // Forest and Engine cleanup already ran with their original event
+        // consumer. Only these command observers remain; their durable
+        // claimed rows cannot be replayed or reported as confirmed.
+        failures.push("embedded browser command observation cleanup timed out".to_owned());
+        tasks.abort_all();
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Err(error) if error.is_cancelled() => {}
+                result => {
+                    if let Err(error) = observe_browser_command_join(result, control) {
+                        failures.push(error);
                     }
                 }
             }
-            Some(failure)
         }
     }
+    (!failures.is_empty()).then(|| failures.join("; "))
 }
 
 async fn retire_interactive_application(

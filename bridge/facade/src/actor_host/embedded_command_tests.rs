@@ -53,7 +53,14 @@ impl HostActor for TestHost {
     }
 
     async fn control(&self, control: HostControl) -> Result<Value, HostControlError> {
-        if matches!(&control, HostControl::Retire) {
+        let refuse_retire =
+            matches!(&control, HostControl::Retire) && self.fail_retire.load(Ordering::Relaxed);
+        let retiring = matches!(&control, HostControl::Retire);
+        self.controls
+            .lock()
+            .expect("test host control mutex")
+            .push(control);
+        if retiring {
             self.retire_entered.notify_one();
             let acknowledgment = self.retire_ack.lock().unwrap().take();
             if let Some(acknowledgment) = acknowledgment {
@@ -62,12 +69,6 @@ impl HostActor for TestHost {
                     .map_err(|_| HostControlError::Unconfirmed("retirement owner lost".into()))?;
             }
         }
-        let refuse_retire =
-            matches!(&control, HostControl::Retire) && self.fail_retire.load(Ordering::Relaxed);
-        self.controls
-            .lock()
-            .expect("test host control mutex")
-            .push(control);
         if self.uncertain_retire.load(Ordering::Relaxed) {
             Err(HostControlError::Unconfirmed(
                 "retirement acknowledgment lost".into(),
@@ -507,7 +508,7 @@ async fn claimed_control_and_retained_uncertainty_never_redispatch() {
         )
         .unwrap();
     assert_eq!(dispatch().await.unwrap(), Some(retained));
-    assert!(fixture.hosts[&actor].controls.lock().unwrap().is_empty());
+    assert_eq!(fixture.hosts[&actor].controls.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -623,7 +624,7 @@ async fn pending_retirement_keeps_command_admission_live_and_never_reclaims_its_
             .unwrap();
         assert!(matches!(
             receipt.outcome,
-            CommandReceiptOutcome::InputAdmitted { .. }
+            CommandReceiptOutcome::Admitted { .. }
         ));
         assert_eq!(fixture.hosts[&accepting].wakes.load(Ordering::Relaxed), 1);
         assert_eq!(
@@ -687,6 +688,203 @@ fn command_bindings(
             )
         })
         .collect()
+}
+
+#[tokio::test]
+async fn pending_browser_retirement_allows_exact_release_during_resident_shutdown() {
+    use exomonad_actor::{ReleaseAwait, ResourceRelease};
+
+    for cleanup_failed in [false, true] {
+        let fixture = RoutingFixture::new();
+        let scratch = tempfile::tempdir().unwrap();
+        let bindings = command_bindings(&fixture, scratch.path());
+        let (_, control, _channel) = harness::server::server(scratch.path().into());
+        let retiring = actor(1);
+        let operation = new_operation();
+        let (acknowledge, acknowledged) = oneshot::channel();
+        *fixture.hosts[&retiring].retire_ack.lock().unwrap() = Some(acknowledged);
+        fixture
+            .store
+            .enqueue_embedded_command(
+                operation,
+                &HostCommand::Retire {
+                    target: fixture.hosts[&retiring].identity.clone(),
+                },
+            )
+            .unwrap();
+        let mut commands = BrowserCommandTasks::new();
+        drain_embedded_browser_commands(
+            &fixture.store,
+            &control,
+            "run",
+            &fixture.nodes,
+            &fixture.live,
+            &fixture.projection,
+            &bindings,
+            &fixture.lifecycle,
+            &mut commands,
+        )
+        .unwrap();
+        fixture.hosts[&retiring].retire_entered.notified().await;
+        assert_eq!(fixture.hosts[&retiring].controls.lock().unwrap().len(), 1);
+        assert!(fixture
+            .store
+            .embedded_command("run", operation)
+            .unwrap()
+            .unwrap()
+            .receipt
+            .is_none());
+
+        let (complete_engine, engine_completion) = oneshot::channel();
+        let mut drivers = JoinSet::new();
+        let driver = drivers.spawn(async move {
+            engine_completion.await.unwrap();
+            let outcome = if cleanup_failed {
+                Err(embedded_service::EmbeddedDriverError::Engine(
+                    harness::engine::EngineError::Cleanup {
+                        primary: Box::new(harness::engine::EngineError::Cancelled {
+                            head_request: None,
+                        }),
+                        cleanup: "native owner cleanup remains unconfirmed".into(),
+                    },
+                ))
+            } else {
+                Ok(())
+            };
+            (retiring, (), outcome)
+        });
+        let mut owner = InteractiveApplicationOwner::embedded();
+        owner.embedded.live = true;
+        owner.embedded.task_id = Some(driver.id());
+        let owners = Arc::new(Mutex::new(HashMap::from([(retiring, owner)])));
+        let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(scratch.path()).unwrap();
+        let table = Arc::new(Mutex::new(BindingTable::open(&anchor, "bindings").unwrap()));
+        let authority = ActorWorktreeAuthority::new("browser-shutdown-control", table);
+        let (events, mut lifecycle) = mpsc::channel(1);
+        let (request, release) = ReleaseAwait::channel(retiring);
+        events
+            .send(LocalResidentDeployment::ReleaseAwait(request))
+            .await
+            .unwrap();
+        let (forest, shutdown) =
+            watch::channel(ApplicationShutdown::Draining(NativeRetirement::Terminate));
+        let mut waiters = HashMap::new();
+        let mut notifications = JoinSet::new();
+
+        let cleanup = application_supervisor::drain_resident_shutdown(
+            &mut lifecycle,
+            &mut drivers,
+            &owners,
+            &authority,
+            &mut notifications,
+            &fixture.lifecycle,
+            None,
+            &mut waiters,
+            shutdown,
+        );
+        let forest_progress = async {
+            // The sole production lifecycle consumer must answer this native
+            // release before the browser control can finish its acknowledgment.
+            complete_engine.send(()).unwrap();
+            let release = release.await.unwrap();
+            if cleanup_failed {
+                assert!(matches!(release, ResourceRelease::Retained(ref detail)
+                    if detail.contains("native owner cleanup remains unconfirmed")));
+                drop(acknowledge);
+            } else {
+                assert_eq!(release, ResourceRelease::Released);
+                acknowledge.send(()).unwrap();
+            }
+            forest.send_replace(ApplicationShutdown::ForestSettled(
+                NativeRetirement::Terminate,
+            ));
+        };
+        let (cleanup, ()) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(cleanup, forest_progress)
+        })
+        .await
+        .expect(
+            "shutdown must consume exact native release while browser acknowledgment is pending",
+        );
+        assert_eq!(cleanup.cleanup_failure.is_some(), cleanup_failed);
+        assert!(drivers.is_empty());
+        assert!(waiters.is_empty());
+        assert_eq!(
+            application_supervisor::drain_browser_command_tasks(
+                &mut commands,
+                &control,
+                Duration::from_secs(1),
+            )
+            .await,
+            None
+        );
+        assert!(commands.is_empty());
+        let receipt = fixture
+            .store
+            .embedded_command("run", operation)
+            .unwrap()
+            .unwrap()
+            .receipt
+            .unwrap();
+        if cleanup_failed {
+            assert!(matches!(
+                receipt.outcome,
+                CommandReceiptOutcome::Unconfirmed { .. }
+            ));
+        } else {
+            assert!(matches!(
+                receipt.outcome,
+                CommandReceiptOutcome::ControlRequested {
+                    control: CommandControl::Retire,
+                    ..
+                }
+            ));
+        }
+        assert_eq!(fixture.hosts[&retiring].controls.lock().unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn browser_command_join_failures_are_reported_after_observer_drain() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (_, control, _channel) = harness::server::server(scratch.path().into());
+    let mut tasks = BrowserCommandTasks::new();
+    tasks.spawn(async { Err("command store settlement failed".into()) });
+    tasks.spawn(async { panic!("command observer panic") });
+    let failure = application_supervisor::drain_browser_command_tasks(
+        &mut tasks,
+        &control,
+        Duration::from_secs(1),
+    )
+    .await
+    .expect("lost or failed observer cannot establish successful cleanup");
+    assert!(failure.contains("command store settlement failed"));
+    assert!(failure.contains("command observer panic"));
+    assert!(tasks.is_empty());
+}
+
+#[tokio::test]
+async fn observer_timeout_preserves_already_observed_failure_and_joins_remaining_tasks() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (_, control, _channel) = harness::server::server(scratch.path().into());
+    let mut tasks = BrowserCommandTasks::new();
+    tasks.spawn(async { Err("command store settlement failed".into()) });
+    let (completed, completion) = oneshot::channel();
+    tasks.spawn(async move {
+        completion.await.unwrap();
+        Ok(None)
+    });
+    let failure = application_supervisor::drain_browser_command_tasks(
+        &mut tasks,
+        &control,
+        Duration::from_millis(20),
+    )
+    .await
+    .unwrap();
+    assert!(failure.contains("command store settlement failed"));
+    assert!(failure.contains("observation cleanup timed out"));
+    assert!(tasks.is_empty());
+    assert!(completed.send(()).is_err());
 }
 
 #[tokio::test]
@@ -755,7 +953,7 @@ async fn retirement_owner_loss_retains_uncertainty_without_control_replay() {
     )
     .unwrap();
     assert!(tasks.is_empty());
-    assert!(fixture.hosts[&actor].controls.lock().unwrap().is_empty());
+    assert_eq!(fixture.hosts[&actor].controls.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -910,7 +1108,7 @@ async fn durable_command_drain_runs_without_a_channel_hint_and_skips_claimed_wor
         harness::store::EmbeddedCommandState::InputAdmitted
     );
     assert_eq!(fixture.hosts[&actor].wakes.load(Ordering::Relaxed), 1);
-    assert!(fixture.hosts[&actor].controls.lock().unwrap().is_empty());
+    assert_eq!(fixture.hosts[&actor].controls.lock().unwrap().len(), 1);
 }
 
 use super::test_campaign::TestCampaign;
