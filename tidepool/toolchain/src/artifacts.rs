@@ -1583,10 +1583,7 @@ impl ModuleCandidateOffer {
                 .map(|context| context.declarations().clone()),
             &inputs,
         )?;
-        let context = match context {
-            Some(context) => (*context).clone().with_declarations(declarations.clone()),
-            None => crate::declaration_join::ExactCompileContext::new(declarations.clone()),
-        };
+        let context = compile_context_with_declarations(context, declarations.clone());
         let authorization = checked_search_authorization(
             encode_inspection_authorization_for(purpose, &owners, inputs.baseline_authorization()),
             include,

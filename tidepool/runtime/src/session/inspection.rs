@@ -375,7 +375,7 @@ impl AdmittedInspectionInputs {
 }
 
 pub struct InspectionRequest<'a> {
-    /// Protected original declarations shared by every query in this batch.
+    /// Protected declarations and request-local annotations shared by every query in this batch.
     pub exact_context:
         Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactCompileContext>>,
     pub preamble: &'a str,
