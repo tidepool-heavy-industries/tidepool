@@ -210,6 +210,9 @@ impl CompilerWorkReceipt {
     }
 
     pub(crate) fn request_cancellation(&self) {
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.host_admission_cancellation().cancel();
+        }
         let cancellation = {
             let close = self.close.lock();
             matches!(*close, CompilerWorkClose::Pending)
@@ -1207,6 +1210,31 @@ mod tests {
             receipt,
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(owner.clone()),
         )
+    }
+
+    #[tokio::test]
+    async fn actor_exit_cancels_host_admission_after_compiler_close() {
+        let owner = RetainedActorExit::new();
+        let ticket = admitted_compiler(&owner);
+        let host = ticket.cancellation().host_admission_cancellation();
+        let outcome = ticket.run_with_close(|_| 17);
+        assert_eq!(outcome.action, 17);
+        assert_eq!(
+            outcome.close,
+            tidepool_runtime::CompilerTransactionClose::NotStarted
+        );
+        host.checkpoint().unwrap();
+        owner.request_shutdown(ActorTerminal::new(ActorExitKind::Cancelled, "stop sealing"));
+        assert_eq!(
+            host.checkpoint().unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
+        assert_eq!(
+            owner.compiler_close_observations(),
+            vec![CompilerWorkClose::Settled(
+                tidepool_runtime::CompilerTransactionClose::NotStarted
+            )]
+        );
     }
 
     #[tokio::test]

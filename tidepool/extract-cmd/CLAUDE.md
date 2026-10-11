@@ -64,6 +64,12 @@ Host-side preparation polls `compiler_host_checkpoint` within the same compiler
 scope. It returns `io::ErrorKind::Interrupted` when that scope is cancelled;
 unscoped work is allowed. Polling acquires no endpoint or admission and leaves
 accepted-request and END cleanup custody with the original owner.
+Post-close admission receives `HostAdmissionCancellation` explicitly from the
+invocation's compiler cancellation owner. This logical stop edge retains no
+transport and survives END and thread-local scope removal. Path-based request
+inputs retain their directory owner through END with
+`retain_compiler_input_directory`; unconfirmed closure keeps that owner in the
+existing close evidence.
 
 Direct identity and transaction-BEGIN handshakes share the same process owner.
 A scoped cancellation token arms the child immediately after spawn, before

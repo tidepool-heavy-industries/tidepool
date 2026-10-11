@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::process::Command;
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
@@ -675,6 +676,36 @@ pub struct CompilerTransaction {
 #[derive(Clone, Debug)]
 pub struct CompilerTransactionCancellation {
     state: Arc<Mutex<CancellationState>>,
+    host: HostAdmissionCancellation,
+}
+
+/// Logical cancellation for host admission after the compiler lease closes.
+/// This retains no compiler connection or child and acquires no admission.
+#[derive(Clone, Debug, Default)]
+pub struct HostAdmissionCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl HostAdmissionCancellation {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    pub fn checkpoint(&self) -> io::Result<()> {
+        if self.cancelled.load(Ordering::Acquire) {
+            Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "compiler host work was cancelled",
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -770,13 +801,21 @@ impl CompilerTransactionCancellation {
     pub fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(CancellationState::default())),
+            host: HostAdmissionCancellation::new(),
         }
+    }
+
+    /// Preserve the invocation's stop relationship through post-close sealing.
+    #[must_use]
+    pub fn host_admission_cancellation(&self) -> HostAdmissionCancellation {
+        self.host.clone()
     }
 
     /// Interrupt the currently armed transaction, if any. Repeated calls are
     /// harmless and an arm installed after cancellation is interrupted
     /// immediately.
     pub fn cancel(&self) {
+        self.host.cancel();
         let target = {
             let mut state = self
                 .state
@@ -1562,6 +1601,20 @@ pub fn retain_compiler_input_file(file: Arc<File>) -> bool {
             return false;
         };
         scope.input_custody.insert(file);
+        true
+    })
+}
+
+/// Retain path-based inputs and outputs until the enclosing END settles.
+/// An unconfirmed close carries the original directory owner in its evidence.
+#[must_use]
+pub fn retain_compiler_input_directory(directory: Arc<tempfile::TempDir>) -> bool {
+    TRANSACTION_SCOPE.with(|scope| {
+        let mut scope = scope.borrow_mut();
+        let Some(scope) = scope.as_mut() else {
+            return false;
+        };
+        scope.input_custody.insert_directory(directory);
         true
     })
 }
@@ -3939,6 +3992,63 @@ mod tests {
                 },
             )
             .unwrap();
+    }
+
+    #[test]
+    fn host_admission_cancellation_survives_confirmed_end_without_compiler_scope() {
+        let cancellation = CompilerTransactionCancellation::new();
+        let host = cancellation.host_admission_cancellation();
+        let mut fixture =
+            DeferredDaemonFixture::new(DaemonFixtureBehavior::Normal, cancellation.clone());
+        let command = fixture.command();
+        let outcome = with_compiler_transaction_cancellable(
+            cancellation.clone(),
+            |_| {},
+            || {
+                fixture
+                    .bind(&command)
+                    .unwrap()
+                    .execute(&command)
+                    .unwrap()
+                    .output
+                    .stdout
+            },
+        );
+        assert_eq!(outcome.action, [1]);
+        assert_eq!(outcome.close, CompilerTransactionClose::Clean);
+        fixture.settle();
+        host.checkpoint().unwrap();
+        cancellation.cancel();
+        assert_eq!(
+            host.checkpoint().unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+        // The scoped checkpoint cannot express the invocation's stop edge once
+        // END has removed the thread-local compiler owner.
+        compiler_host_checkpoint().unwrap();
+        let counts = fixture.counts.lock().unwrap();
+        assert_eq!((counts.requests, counts.ends, counts.active), (1, 1, 0));
+    }
+
+    #[test]
+    fn detached_host_admission_cancellation_retains_only_logical_stop_edge() {
+        let cancellation = CompilerTransactionCancellation::new();
+        let host = cancellation.host_admission_cancellation();
+        cancellation.disarm();
+        let detached = host.clone();
+        let task = std::thread::spawn(move || {
+            detached.cancel();
+            detached.checkpoint().unwrap_err().kind()
+        });
+        assert_eq!(task.join().unwrap(), io::ErrorKind::Interrupted);
+        assert_eq!(
+            host.checkpoint().unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+        assert!(
+            !cancellation.is_cancelled(),
+            "host stop does not rearm compiler transport"
+        );
     }
 
     #[test]
