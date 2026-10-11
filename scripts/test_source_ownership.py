@@ -83,6 +83,7 @@ TEST_ONLY_MODULES = {
         'tidepool/toolchain/src/certified_products/planned_original_history_tests.rs',
         'tidepool/toolchain/src/certified_products/retained_core/properties.rs',
         'tidepool/toolchain/src/certified_products/tests/artifact_view_group_index_properties.rs',
+        'tidepool/toolchain/src/certified_products/tests/complete_original_admission_properties.rs',
         'tidepool/toolchain/src/certified_products/tests/issued_interface_selection_history.rs',
         'tidepool/toolchain/src/certified_products/tests/promotion_import_history.rs',
         'tidepool/toolchain/src/certified_products/tests/sparse_interface_selection_properties.rs',

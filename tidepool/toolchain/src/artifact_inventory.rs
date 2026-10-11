@@ -6549,6 +6549,232 @@ mod tests {
         );
     }
 
+    fn replay_equal_payload_admission_history(choices: &[u8]) {
+        let inventory = ArtifactInventory::default();
+        let (_, values, next) = native_scope_fixture();
+        assert_ne!(values.descriptor.id, next.descriptor.id);
+        let native = issued_native_groups(
+            "HistoricalAdmission",
+            [3, 11, 29]
+                .into_iter()
+                .map(|ordinal| {
+                    (
+                        ordinal,
+                        vec![crate::certified_products::PendingImportOwner::Retained {
+                            identity: tidepool_repr::execution_schema::testing::identity(
+                                "Values", "value",
+                            ),
+                            generation: 4,
+                        }],
+                    )
+                })
+                .collect(),
+            &[],
+            &BTreeMap::new(),
+        );
+        let available = inventory
+            .admit_shared_with_demand(
+                &inventory.empty_view(),
+                vec![Arc::new(native.clone()), Arc::new(values.clone())],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let old = inventory
+            .admit_shared_with_demand(
+                &available,
+                vec![Arc::new(native.clone())],
+                NativeArtifactDemand::CertifiedTargetImports(&[issued_source(&native, 3)]),
+            )
+            .unwrap();
+        let old_facts = ExactArtifactSelection::capture(&old);
+        let projection = CompilerInputProjection::from_issued_entries(&[
+            Arc::new(native.clone()),
+            Arc::new(next.clone()),
+        ])
+        .unwrap();
+        let mut current = inventory
+            .admit_shared_with_intent(
+                &old,
+                vec![Arc::new(native.clone()), Arc::new(next.clone())],
+                NativeArtifactDemand::AllGroups,
+                ArtifactRootIntent::Projected(&projection, &[]),
+            )
+            .unwrap();
+        // Payload equality leaves historical scope and child choice independent.
+        assert_eq!(
+            current
+                .entries()
+                .iter()
+                .filter(|entry| entry.descriptor.id == native.descriptor.id)
+                .count(),
+            1
+        );
+        let expected_old = BTreeSet::from([(3, values.descriptor.id)]);
+        let expected_new = [3, 11, 29]
+            .into_iter()
+            .map(|ordinal| (ordinal, next.descriptor.id))
+            .collect::<BTreeSet<_>>();
+        let expected_union = expected_old
+            .union(&expected_new)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let observe = |view: &ArtifactView| {
+            view.capture_graph_selection()
+                .native_groups
+                .into_iter()
+                .filter(|group| group.binding.artifact == native.descriptor.id)
+                .map(|group| {
+                    (
+                        group.original_ordinal,
+                        scoped_group_child(view, group).1.artifact,
+                    )
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let mut recovered_owners = Vec::new();
+        for choice in std::iter::once(&0).chain(choices) {
+            match choice % 4 {
+                0 => {
+                    current = current
+                        .inventory()
+                        .admit_shared_with_intent(
+                            &current,
+                            vec![Arc::new(native.clone())],
+                            NativeArtifactDemand::AllGroups,
+                            ArtifactRootIntent::Projected(&projection, &[]),
+                        )
+                        .unwrap();
+                }
+                1 => {
+                    current = current
+                        .with_compiler_projection(&projection.interface_only())
+                        .unwrap();
+                }
+                2 => {
+                    let owner = ArtifactInventory::default();
+                    let restored = owner
+                        .recover_selection(
+                            &owner.empty_view(),
+                            current.entries(),
+                            &current.capture_graph_selection(),
+                            &current.binding_dependencies(),
+                        )
+                        .unwrap();
+                    current = restored;
+                    recovered_owners.push(owner);
+                }
+                _ => {
+                    current = current.merge_selected(&old, &projection).unwrap();
+                }
+            }
+            assert_eq!(observe(&current), expected_union);
+            let reopened = current
+                .select_issued(vec![native.descriptor.id], &old_facts)
+                .unwrap();
+            assert_eq!(observe(&reopened), expected_old);
+            let graph = current.capture_graph_selection();
+            assert!(
+                matches!(current.native_requirements_from_roots(&[NativeRequirementRoot::Group {
+                artifact: native.descriptor.id, original_ordinal: 3,
+            }]), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. }))
+            );
+            assert!(
+                matches!(current.native_requirements_from_roots(&[NativeRequirementRoot::AllGroups(ArtifactId([255; 32]))]),
+                Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::NativeRootOutsideView { .. }))
+            );
+            let foreign = ArtifactInventory::default();
+            assert!(foreign.admit(&current, vec![native.clone()]).is_err());
+            assert_eq!(foreign.node_count(), 0);
+            assert_eq!(current.capture_graph_selection(), graph);
+            let issued = current
+                .inventory()
+                .admit_shared_with_intent(
+                    &current,
+                    vec![Arc::new(native.clone())],
+                    NativeArtifactDemand::AllGroups,
+                    ArtifactRootIntent::Projected(&projection, &[]),
+                )
+                .unwrap();
+            let exact = issued
+                .select_admission_roots(vec![native.descriptor.id])
+                .unwrap();
+            assert_eq!(observe(&exact), expected_new);
+            assert_eq!(exact.capture_graph_selection().roots.len(), 4);
+        }
+        let missing_inventory = ArtifactInventory::default();
+        let missing = missing_inventory
+            .admit_shared_with_demand(
+                &missing_inventory.empty_view(),
+                vec![Arc::new(native.clone())],
+                NativeArtifactDemand::ScopeInterfaces,
+            )
+            .unwrap();
+        let missing_graph = missing.capture_graph_selection();
+        assert!(
+            matches!(missing_inventory.admit_shared_with_demand(&missing, vec![Arc::new(native)], NativeArtifactDemand::AllGroups),
+            Err(CompileError::ArtifactInventory(error)) if matches!(error.failure, ArtifactInventoryFailure::MissingDependency { .. }))
+        );
+        assert_eq!(missing.capture_graph_selection(), missing_graph);
+        drop(missing);
+        assert_eq!(missing_inventory.node_count(), 0);
+        drop(current);
+        drop(old);
+        drop(available);
+        assert_eq!(inventory.node_count(), 0);
+        assert!(recovered_owners.iter().all(|owner| owner.node_count() == 0));
+    }
+
+    #[test]
+    fn equal_payload_admission_refusals_preserve_exact_history_and_release() {
+        replay_equal_payload_admission_history(&[0, 1, 2, 3, 0, 2, 1, 0]);
+    }
+
+    #[test]
+    fn equal_payload_complete_admissions_match_independent_child_history() {
+        use proptest::test_runner::{
+            contextualize_config, Config, FileFailurePersistence, TestRunner,
+        };
+        let mut config = Config::default();
+        if std::env::var_os("PROPTEST_CASES").is_none() {
+            config.cases = 64;
+        }
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(FileFailurePersistence::Direct(path)));
+        }
+        let mut config = contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::equal_payload_complete_admissions_match_independent_child_history"
+        ));
+        let configured = config.cases;
+        let callbacks = std::cell::Cell::new(0usize);
+        let completed = std::cell::Cell::new(0usize);
+        let operations = std::cell::Cell::new([0usize; 4]);
+        let result =
+            TestRunner::new(config).run(&proptest::collection::vec(0u8..4, 0..16), |choices| {
+                callbacks.set(callbacks.get() + 1);
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    replay_equal_payload_admission_history(&choices)
+                })) {
+                    Ok(()) => {
+                        completed.set(completed.get() + 1);
+                        let mut counts = operations.get();
+                        for choice in choices {
+                            counts[usize::from(choice)] += 1;
+                        }
+                        operations.set(counts);
+                        Ok(())
+                    }
+                    Err(_) => Err(proptest::test_runner::TestCaseError::fail(format!(
+                        "historical choices={choices:?}"
+                    ))),
+                }
+            });
+        eprintln!("equal payload admission: configured={configured}, callbacks={}, completed={}, operation_counts={:?}; each case covers ambiguity, foreign inventory, missing dependency and release", callbacks.get(), completed.get(), operations.get());
+        result.unwrap();
+    }
+
     #[test]
     fn equal_native_rows_in_distinct_scopes_do_not_choose_an_arbitrary_handle() {
         let inventory = ArtifactInventory::default();

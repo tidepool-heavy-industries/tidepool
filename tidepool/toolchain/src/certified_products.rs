@@ -8454,6 +8454,7 @@ mod home_self_issuer_tests;
 #[cfg(test)]
 pub(crate) mod tests {
     mod artifact_view_group_index_properties;
+    mod complete_original_admission_properties;
     mod issued_interface_selection_history;
     #[path = "../planned_original_history_tests.rs"]
     mod planned_original_history_tests;

@@ -1222,13 +1222,51 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                     .unwrap()
                     .merge(&CompilerInputProjection::from_interface_view(available).unwrap())
                     .unwrap();
-                    let selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
+                    let mut selection = crate::certified_products::CertifiedSourceSelection::from_compiler_projection(
                         &projection, &available.metadata_snapshot(),
                         &tidepool_repr::execution_schema::InventoryOperation::new(Default::default()),
                     ).unwrap();
-                    let result = selection.selected_original_closure(available);
                     if published[domain] {
-                        let original = result.unwrap();
+                        assert!(selection.selected_original_closure(available).is_err(),
+                            "available captured values do not issue hidden native dependency bindings");
+                        // Publishing the captured value does not choose the
+                        // original's historical implementation dependencies.
+                        // Carry the exact closure earned by its admission into
+                        // the narrowed compiler selection before consuming it.
+                        let custody = available
+                            .inventory()
+                            .admit_shared(
+                                available,
+                                vec![Arc::clone(catalog.original(module, version))],
+                            )
+                            .unwrap();
+                        let issued = custody
+                            .select_admission_roots(vec![
+                                catalog.original(module, version).descriptor.id,
+                            ])
+                            .unwrap();
+                        assert_eq!(
+                            issued.selected_native_groups(),
+                            catalog
+                                .closure(
+                                    ORDINALS
+                                        .into_iter()
+                                        .map(|ordinal| (module, version, ordinal))
+                                )
+                                .into_iter()
+                                .map(|group| catalog.key(group))
+                                .collect()
+                        );
+                        selection
+                            .with_native_original_requirements(
+                                &custody.metadata_snapshot(),
+                                &[NativeOriginalRequirement {
+                                    original: catalog.original(module, version).descriptor.id,
+                                    selection: ExactArtifactSelection::capture(&issued),
+                                }],
+                            )
+                            .unwrap();
+                        let original = selection.selected_original_closure(&custody).unwrap();
                         assert_eq!(original.products().len(), 1);
                         let ArtifactPayload::Original(expected) =
                             &catalog.original(module, version).payload
@@ -1239,7 +1277,7 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
                             "whole-original consumers preserve issued roles rather than custody variants");
                     } else {
                         assert!(
-                            result.is_err(),
+                            selection.selected_original_closure(available).is_err(),
                             "whole-original consumers require unavailable captured groups"
                         );
                         outcome = Outcome::Refusal;
@@ -1285,6 +1323,10 @@ fn replay(catalog: &Catalog, operations: &[Op]) -> ([usize; 13], [usize; 13], [u
     assert!(
         successes[11] > 0,
         "release must drop an actual segment owner"
+    );
+    assert!(
+        successes[12] > 0,
+        "the complete-original consumer must accept an earned native requirement"
     );
     for kind in [8, 9, 10, 11, 12] {
         assert!(
