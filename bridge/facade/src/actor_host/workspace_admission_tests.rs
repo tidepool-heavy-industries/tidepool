@@ -238,3 +238,127 @@ async fn opaque_workspace_attachment_inherits_access_and_outlives_issuer() {
     drop(custody);
     assert!(admission.manager.lookup(&tree).unwrap().is_some());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn inspection_caps_same_directory_but_keeps_independent_workspace_rights() {
+    let (repository, _storage, admission) = fixture();
+    let root = ActorRef::first(exomonad_actor::ActorId(1));
+    admission
+        .authority
+        .install_grant(root.into(), ActorWorktreeGrant::Repository);
+    let actor = ActorRef::first(exomonad_actor::ActorId(2));
+    let attachment = admission
+        .prepare(root, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap()
+        .install(actor)
+        .unwrap();
+    let tree = admission.authority.bound_worktree(actor.into()).unwrap();
+    let independent = admission
+        .authority
+        .issue_workspace(actor.into(), &tree, WorkspaceAccess::ReadWrite)
+        .unwrap();
+    admission
+        .authority
+        .install_grant(actor.into(), ActorWorktreeGrant::RepositoryReadOnly);
+    assert!(admission
+        .prepare(
+            actor,
+            WorkspaceSelection::SameDirectory,
+            Some(WorkspaceAccess::ReadWrite)
+        )
+        .await
+        .is_err());
+    let fresh = admission
+        .prepare(actor, WorkspaceSelection::SameDirectory, None)
+        .await
+        .unwrap();
+    let fresh_actor = ActorRef::first(exomonad_actor::ActorId(3));
+    let fresh_attachment = fresh.install(fresh_actor).unwrap();
+    assert_eq!(
+        admission
+            .authority
+            .workspace_access(fresh_actor.into(), &tree),
+        Some(WorkspaceAccess::ReadOnly)
+    );
+    assert!(resident_command_roots(
+        &admission.authority,
+        &admission.manager,
+        repository.path(),
+        fresh_actor
+    )
+    .unwrap()
+    .writable
+    .is_empty());
+    let previous = admission
+        .prepare(
+            actor,
+            WorkspaceSelection::ExistingDirectory(tidepool_bridge_effects::WtWorkspaceHandle {
+                raw: independent,
+            }),
+            Some(WorkspaceAccess::ReadWrite),
+        )
+        .await
+        .unwrap();
+    let previous_actor = ActorRef::first(exomonad_actor::ActorId(4));
+    let previous_attachment = previous.install(previous_actor).unwrap();
+    assert_eq!(
+        admission
+            .authority
+            .workspace_access(previous_actor.into(), &tree),
+        Some(WorkspaceAccess::ReadWrite)
+    );
+    assert!(!resident_command_roots(
+        &admission.authority,
+        &admission.manager,
+        repository.path(),
+        previous_actor
+    )
+    .unwrap()
+    .writable
+    .is_empty());
+    // Committed forks are independent clones, not renewed access to the
+    // inspecting actor's current attachment.
+    let fork = admission
+        .prepare(
+            actor,
+            WorkspaceSelection::ForkDirectory(exomonad_actor::WorkspaceSeedWire::CurrentCheckout),
+            Some(WorkspaceAccess::ReadWrite),
+        )
+        .await
+        .unwrap();
+    let fork_actor = ActorRef::first(exomonad_actor::ActorId(5));
+    let fork_tree = WorktreeId::from_raw(fork.handle().handle_receipt.tree_id.raw.clone());
+    assert_ne!(fork_tree, tree);
+    let fork_attachment = fork.install(fork_actor).unwrap();
+    assert_eq!(
+        admission
+            .authority
+            .workspace_access(fork_actor.into(), &fork_tree),
+        Some(WorkspaceAccess::ReadWrite)
+    );
+    drop((
+        attachment,
+        fresh_attachment,
+        previous_attachment,
+        fork_attachment,
+    ));
+    assert_eq!(
+        admission
+            .bindings
+            .lock()
+            .participants(&tree)
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(
+        admission
+            .bindings
+            .lock()
+            .participants(&fork_tree)
+            .unwrap()
+            .count(),
+        0
+    );
+}
