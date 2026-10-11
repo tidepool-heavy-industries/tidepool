@@ -1,27 +1,5 @@
-//! The pin for `gen::wire_rs`'s Event (`RepoEvent`) output — the same proof
-//! `worktree_wire_rust.rs` gives Worktree, extended with the cross-effect
-//! `external_types` reference (`EventWatch`/`HeadChangeKind`/`HeadChangeReceipt`/
-//! `CommitReceipt` all name Worktree's OWN types) that Worktree's lane never
-//! exercised.
-//!
-//! Two independent proofs, same shape as the Worktree pin:
-//!
-//! 1. [`event_wire_module_matches_pin`] — the WHOLE emitted module, byte-for-byte
-//!    against an insta snapshot (`tests/snapshots/`). A coarse regression net:
-//!    it catches ANY change to the emitted module, but its own baseline can be
-//!    blindly re-accepted (`cargo insta accept`), so it proves nothing by
-//!    itself — test 2 is the independent proof.
-//! 2. [`event_wire_types_match_the_hand_written_block_field_for_field`] — per
-//!    type, field/variant NAMES and ORDER (positional, never a set), Rust field
-//!    types, the exact derive line, and `#[haskell(name = …)]` presence.
-//!
-//! Every expected value in test 2 is HAND-TRANSCRIBED from the `Ev*` block that
-//! was live in `tidepool/bridge-effects/src/lib.rs` before the migration flip
-//! (`EvEventId` through `EvRepositoryEvent`) — not copied from this generator's
-//! own output, for the same reason `worktree_wire_rust.rs`'s header gives. It
-//! stays a literal `assert_eq!`, not a snapshot: snapshotting it would seed the
-//! baseline from the schema's own output on first run, which is exactly the
-//! tautology this test exists to avoid.
+//! Check the complete Event wire output against its retained immutable snapshot,
+//! and independently check its field types, ordering and derives.
 
 use tidepool_protocol::effects;
 use tidepool_protocol::gen::wire_rs;
@@ -30,7 +8,12 @@ use tidepool_protocol::gen::wire_rs;
 fn event_wire_module_matches_pin() {
     let event = effects::event::event();
     let generated = wire_rs::file(&event);
-    insta::assert_snapshot!(generated.contents);
+    let snapshot =
+        include_str!("snapshots/protocol__event_wire_rust__event_wire_module_matches_pin.snap");
+    let (_, expected) = snapshot
+        .split_once("\n---\n")
+        .expect("the retained snapshot has a metadata header");
+    assert_eq!(generated.contents, expected);
 }
 
 // ---------------------------------------------------------------------------

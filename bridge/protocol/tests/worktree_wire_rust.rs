@@ -1,30 +1,5 @@
-//! Narrow rendering pins for the Worktree wire projection.
-//!
-//! Two independent proofs:
-//!
-//! 1. [`worktree_wire_module_matches_pin`] — the WHOLE emitted module,
-//!    asserted byte-for-byte against an insta snapshot (`tests/snapshots/`).
-//!    A coarse regression net: it catches ANY change to the emitted module,
-//!    but its own baseline can be blindly re-accepted (`cargo insta accept`),
-//!    so it proves nothing by itself — test 2 is the independent proof.
-//! 2. [`worktree_wire_types_match_the_hand_written_block_field_for_field`] —
-//!    per type, the field/variant NAMES and ORDER (asserted POSITIONALLY, as
-//!    a `Vec`, never as a set — a permutation is exactly the failure the
-//!    hand-written struct's positional comment stood guard against and a set
-//!    comparison would pass straight through), the Rust field types, the
-//!    exact derive line, and the presence/absence of `#[haskell(name = …)]`.
-//!
-//! Every expected value in test 2 is HAND-TRANSCRIBED by reading the
-//! still-live struct block in `tidepool/bridge-effects/src/lib.rs` (roughly
-//! lines 105-232, `WtWorktreeId` through `WtWorktreeSummary`) — not copied out
-//! of this generator's own output. That transcription is the only thing
-//! making the test a proof rather than a tautology: a generator bug that
-//! renders the wrong field order, the wrong Rust type, or the wrong derive set
-//! would still produce SOME output, and only an independently-authored
-//! expectation catches it being the wrong one. It stays a literal
-//! `assert_eq!`, not a snapshot: snapshotting it would seed the baseline from
-//! the schema's own output on first run, which is exactly the tautology this
-//! test exists to avoid.
+//! Independently check Worktree wire field types, ordering and derives.
+//! Receipts represent both branch-backed and detached worktrees.
 
 use tidepool_protocol::effects;
 use tidepool_protocol::gen::wire_rs;
@@ -333,7 +308,7 @@ fn worktree_wire_types_match_the_hand_written_block_field_for_field() {
         &[
             ("tree_id", "WtWorktreeId"),
             ("cwd", "String"),
-            ("branch", "WtBranchName"),
+            ("branch", "Option<WtBranchName>"),
             ("source_head", "WtGitOid"),
             ("snapshot_ref", "Option<WtGitRef>"),
             ("created_at", "i64"),

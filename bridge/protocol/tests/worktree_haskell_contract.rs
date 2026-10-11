@@ -244,10 +244,8 @@ fn the_helper_ctor_pairing_is_enforced_in_both_directions() {
         .validate()
         .expect_err("a send-wrapper must name the verb it wraps");
     assert!(
-        errs.iter().any(|e| e.contains(
-            "names no verb, but only a \
-             pure projection, variant-render, or OPAQUE forward may"
-        )),
+        errs.iter()
+            .any(|e| e.contains("names no verb, but only a pure projection may")),
         "got: {errs:?}"
     );
 }
