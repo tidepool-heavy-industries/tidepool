@@ -809,7 +809,7 @@ impl BindingTable {
         }
         // The existing selection owner validates every selected lease and
         // authored domain before its metadata can authorize publication.
-        self.source_domain_selection_in(tree, scope)?;
+        self.validate_source_domain_selection_in(tree, scope)?;
         let excluded = changes
             .map(|p| p.observations.as_slice())
             .unwrap_or_default();
@@ -1504,14 +1504,14 @@ impl BindingTable {
     ) -> Result<SourceScopeAdmission, Vec<crate::prepared_program::SourceInstanceAttachment>> {
         let empty = SourceSelectionView::for_scope(scope);
         let view = self.source_selection.get(&scope).unwrap_or(&empty);
-        let mut physical = HashMap::<SourceLeaseKey, SourceInstanceLease>::new();
+        let mut physical = HashMap::<SourceLeaseKey, &SourceInstanceLease>::new();
         let mut entries = Vec::new();
         for (domain, record) in view.domains.iter() {
             for key in record.selected.iter() {
                 let Some(existing) = self.source_instances.get(key) else {
                     return Err(tokens);
                 };
-                entries.push((*domain, existing.token.clone()));
+                entries.push((*domain, &existing.token));
             }
         }
         let mut installs = HashSet::new();
@@ -1544,29 +1544,24 @@ impl BindingTable {
             }
             let existing = physical
                 .get(&key)
+                .copied()
                 .or_else(|| self.source_instances.get(&key).map(|record| &record.token));
             if existing.is_some_and(|old| !same_source_lease(old, token)) {
                 return Err(tokens);
             }
-            physical.insert(key, token.clone());
-            entries.push((domain, token.clone()));
+            physical.insert(key, token);
+            entries.push((domain, token));
         }
-        let transitions = view
-            .domains
-            .iter()
-            .map(|(domain, record)| {
-                (
-                    *domain,
-                    record
-                        .authored
-                        .iter()
-                        .map(|(owner, target)| (owner.clone(), *target))
-                        .collect(),
-                )
-            })
-            .collect();
-        if crate::prepared_program::SourceDomainSelection::new(view.current, transitions, entries)
-            .is_err()
+        if crate::prepared_program::SourceDomainSelection::validate(
+            view.current,
+            |domain| view.domains.contains_key(domain),
+            view.domains
+                .values()
+                .flat_map(|record| record.authored.values())
+                .copied(),
+            entries,
+        )
+        .is_err()
         {
             return Err(tokens);
         }
@@ -1855,20 +1850,7 @@ impl BindingTable {
         }
         let empty = SourceSelectionView::for_scope(scope);
         let view = self.source_selection.get(&scope).unwrap_or(&empty);
-        let custody = self.source_instance_keys_in(tree, scope);
-        let mut entries = Vec::new();
-        for (domain, record) in view.domains.iter() {
-            for key in record.selected.iter() {
-                if !custody.contains(key) {
-                    return Err(BindingPromotionError::MissingOrForeignSourceInstance);
-                }
-                let lease = self
-                    .source_instances
-                    .get(key)
-                    .ok_or(BindingPromotionError::MissingOrForeignSourceInstance)?;
-                entries.push((*domain, lease.token.clone()));
-            }
-        }
+        let entries = self.source_domain_entries_in(tree, scope, view)?;
         crate::prepared_program::SourceDomainSelection::new(
             view.current,
             view.domains
@@ -1884,9 +1866,63 @@ impl BindingTable {
                     )
                 })
                 .collect(),
+            entries
+                .into_iter()
+                .map(|(domain, lease)| (domain, lease.clone())),
+        )
+        .map_err(|_| BindingPromotionError::ConflictingSourceOrigin)
+    }
+
+    fn validate_source_domain_selection_in(
+        &self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+    ) -> Result<(), BindingPromotionError> {
+        if self.scope_witness(tree, scope).is_none() {
+            return Err(BindingPromotionError::UnverifiableSourceSelection);
+        }
+        let empty = SourceSelectionView::for_scope(scope);
+        let view = self.source_selection.get(&scope).unwrap_or(&empty);
+        let entries = self.source_domain_entries_in(tree, scope, view)?;
+        crate::prepared_program::SourceDomainSelection::validate(
+            view.current,
+            |domain| view.domains.contains_key(domain),
+            view.domains
+                .values()
+                .flat_map(|record| record.authored.values())
+                .copied(),
             entries,
         )
         .map_err(|_| BindingPromotionError::ConflictingSourceOrigin)
+    }
+
+    fn source_domain_entries_in<'a>(
+        &'a self,
+        tree: &ScopeTree,
+        scope: ScopeId,
+        view: &SourceSelectionView,
+    ) -> Result<
+        Vec<(
+            crate::prepared_program::SourceInstanceDomain,
+            &'a SourceInstanceLease,
+        )>,
+        BindingPromotionError,
+    > {
+        let custody = self.source_instance_keys_in(tree, scope);
+        let mut entries = Vec::new();
+        for (domain, record) in view.domains.iter() {
+            for key in record.selected.iter() {
+                if !custody.contains(key) {
+                    return Err(BindingPromotionError::MissingOrForeignSourceInstance);
+                }
+                let lease = self
+                    .source_instances
+                    .get(key)
+                    .ok_or(BindingPromotionError::MissingOrForeignSourceInstance)?;
+                entries.push((*domain, &lease.token));
+            }
+        }
+        Ok(entries)
     }
 
     pub fn prepare_source_owner_origin_in(

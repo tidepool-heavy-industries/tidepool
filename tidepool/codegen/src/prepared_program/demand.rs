@@ -56,19 +56,89 @@ pub struct SourceDomainSelection {
 }
 
 impl SourceDomainSelection {
+    fn validate_domains(
+        current: SourceInstanceDomain,
+        contains: impl Fn(&SourceInstanceDomain) -> bool,
+        targets: impl IntoIterator<Item = SourceInstanceDomain>,
+    ) -> Result<(), DemandError> {
+        if !contains(&current) || targets.into_iter().any(|target| !contains(&target)) {
+            return Err(DemandError::MissingDomain(current));
+        }
+        Ok(())
+    }
+
+    fn validate_anchor(
+        domain: SourceInstanceDomain,
+        incoming: &SourceInstanceLease,
+        previous: Option<&SourceInstanceLease>,
+    ) -> Result<(), DemandError> {
+        if previous.is_some_and(|old| old.instance() != incoming.instance()) {
+            return Err(DemandError::ConflictingDomainInstance {
+                domain,
+                binder: incoming.binder().clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_binder(
+        domain: SourceInstanceDomain,
+        binder: &SourceBinder,
+        instance: GroupInstanceId,
+        handle: PreparedHandle,
+        previous: Option<&SourceInstanceLease>,
+    ) -> Result<(), DemandError> {
+        if previous.is_some_and(|old| old.instance() != instance || old.handle() != handle) {
+            return Err(DemandError::ConflictingDomainInstance {
+                domain,
+                binder: binder.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Check the same domain and exact-instance rules without owning copies of
+    /// leases or authored maps when the caller only needs validation.
+    pub(crate) fn validate<'a>(
+        current: SourceInstanceDomain,
+        contains: impl Fn(&SourceInstanceDomain) -> bool,
+        targets: impl IntoIterator<Item = SourceInstanceDomain>,
+        entries: impl IntoIterator<Item = (SourceInstanceDomain, &'a SourceInstanceLease)>,
+    ) -> Result<(), DemandError> {
+        Self::validate_domains(current, &contains, targets)?;
+        let mut inherited = BTreeMap::new();
+        let mut anchors = HashMap::new();
+        for (domain, lease) in entries {
+            if !contains(&domain) {
+                return Err(DemandError::MissingDomain(domain));
+            }
+            let group = (domain, lease.owner(), lease.original_ordinal());
+            Self::validate_anchor(domain, lease, anchors.insert(group, lease))?;
+            let previous = inherited.insert((domain, lease.binder()), lease);
+            Self::validate_binder(
+                domain,
+                lease.binder(),
+                lease.instance(),
+                lease.handle(),
+                previous,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn new(
         current: SourceInstanceDomain,
         authored: HashMap<SourceInstanceDomain, HashMap<CachedHomeOwner, SourceInstanceDomain>>,
         entries: impl IntoIterator<Item = (SourceInstanceDomain, SourceInstanceLease)>,
     ) -> Result<Self, DemandError> {
-        if !authored.contains_key(&current)
-            || authored
+        Self::validate_domains(
+            current,
+            |domain| authored.contains_key(domain),
+            authored
                 .values()
                 .flat_map(|origins| origins.values())
-                .any(|target| !authored.contains_key(target))
-        {
-            return Err(DemandError::MissingDomain(current));
-        }
+                .copied(),
+        )?;
         let mut inherited = BTreeMap::new();
         let mut anchors = HashMap::new();
 
@@ -77,29 +147,16 @@ impl SourceDomainSelection {
                 return Err(DemandError::MissingDomain(domain));
             }
             let group = (domain, lease.owner().clone(), lease.original_ordinal());
-            if anchors
-                .insert(group, lease.clone())
-                .is_some_and(|old: SourceInstanceLease| old.instance() != lease.instance())
-            {
-                return Err(DemandError::ConflictingDomainInstance {
-                    domain,
-                    binder: lease.binder().clone(),
-                });
-            }
+            let previous = anchors.insert(group, lease.clone());
+            Self::validate_anchor(domain, &lease, previous.as_ref())?;
             let key = ScopedSourceBinder {
                 domain,
                 source: lease.binder().clone(),
             };
-            if inherited.insert(key.clone(), lease.clone()).is_some_and(
-                |old: SourceInstanceLease| {
-                    old.instance() != lease.instance() || old.handle() != lease.handle()
-                },
-            ) {
-                return Err(DemandError::ConflictingDomainInstance {
-                    domain,
-                    binder: key.source,
-                });
-            }
+            let instance = lease.instance();
+            let handle = lease.handle();
+            let previous = inherited.insert(key.clone(), lease);
+            Self::validate_binder(domain, &key.source, instance, handle, previous.as_ref())?;
         }
         Ok(Self {
             current,
@@ -1025,7 +1082,7 @@ mod tests {
     use super::*;
     use tidepool_repr::execution_schema::{testing, GlobalDecl, RuntimeRep};
 
-    fn group(name: &str, ordinal: u32, imports: &[&str]) -> CertifiedGroup {
+    pub(super) fn group(name: &str, ordinal: u32, imports: &[&str]) -> CertifiedGroup {
         let mut wire = testing::wire_program();
         wire.bindings[0] = match wire.bindings[0].clone() {
             tidepool_repr::execution_schema::Group::NonRecursive(mut top) => {
@@ -1065,7 +1122,7 @@ mod tests {
         .unwrap()
     }
 
-    fn source(name: &str) -> SourceBinder {
+    pub(super) fn source(name: &str) -> SourceBinder {
         SourceBinder {
             version: ModuleVersion([1; 32]),
             binder: testing::identity("Fixture", name),
@@ -1268,5 +1325,345 @@ mod tests {
         };
         assert_eq!(selected_images.len(), 2);
         assert_eq!(selected_images[0].group().original_ordinal(), 4);
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::binding_table::BindingTable;
+    use crate::prepared_program::{
+        BatchLeaseRequest, BatchProgram, PreparedMachine, PreparedMachineOptions,
+    };
+    use crate::scope::{ScopeId, ScopeTree};
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, TestRunner};
+    use std::cell::Cell;
+
+    fn installed_leases() -> (PreparedMachine<'static>, Vec<SourceInstanceLease>) {
+        let groups = [super::tests::group("a", 4, &[])];
+        let inventory = GroupInventory::new(&groups).unwrap();
+        let registry = ImageRegistry::new();
+        let images = inventory
+            .seal([super::tests::source("a")])
+            .unwrap()
+            .compile(&registry)
+            .unwrap();
+        let mut machine = PreparedMachine::empty(PreparedMachineOptions {
+            nursery_bytes: 4096,
+        })
+        .unwrap();
+        let mut leases = Vec::new();
+        for _ in 0..2 {
+            let receipt = machine
+                .install_shared_batch_with_leases(
+                    vec![BatchProgram {
+                        image: Arc::clone(images[0].image()),
+                        imports: vec![],
+                    }],
+                    vec![BatchLeaseRequest::for_demanded(
+                        0,
+                        &images[0],
+                        &super::tests::source("a"),
+                    )
+                    .unwrap()],
+                )
+                .unwrap();
+            leases.extend(receipt.leases);
+        }
+        (machine, leases)
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    enum Refusal {
+        Missing(SourceInstanceDomain),
+        Conflict(SourceInstanceDomain, SourceBinder),
+    }
+
+    fn refusal(result: Result<(), DemandError>) -> Result<(), Refusal> {
+        result.map_err(|error| match error {
+            DemandError::MissingDomain(domain) => Refusal::Missing(domain),
+            DemandError::ConflictingDomainInstance { domain, binder } => {
+                Refusal::Conflict(domain, binder)
+            }
+            error => panic!("unexpected domain selection error: {error:?}"),
+        })
+    }
+
+    // A full pairwise scan of explicit rows, independent of the production indexes
+    // and shared compatibility predicates. The incoming row owns a conflict's label.
+    fn row_oracle(
+        current: SourceInstanceDomain,
+        authored: &HashMap<SourceInstanceDomain, HashMap<CachedHomeOwner, SourceInstanceDomain>>,
+        rows: &[(SourceInstanceDomain, SourceInstanceLease)],
+    ) -> Result<(), Refusal> {
+        if !authored.contains_key(&current)
+            || authored
+                .values()
+                .flat_map(|origins| origins.values())
+                .any(|target| !authored.contains_key(target))
+        {
+            return Err(Refusal::Missing(current));
+        }
+        for (index, (domain, incoming)) in rows.iter().enumerate() {
+            if !authored.contains_key(domain) {
+                return Err(Refusal::Missing(*domain));
+            }
+            let previous = &rows[..index];
+            if previous.iter().any(|(old_domain, old)| {
+                old_domain == domain
+                    && old.owner() == incoming.owner()
+                    && old.original_ordinal() == incoming.original_ordinal()
+                    && old.instance() != incoming.instance()
+            }) || previous.iter().any(|(old_domain, old)| {
+                old_domain == domain
+                    && old.binder() == incoming.binder()
+                    && (old.instance() != incoming.instance() || old.handle() != incoming.handle())
+            }) {
+                return Err(Refusal::Conflict(*domain, incoming.binder().clone()));
+            }
+        }
+        Ok(())
+    }
+
+    fn compare(
+        current: SourceInstanceDomain,
+        authored: &HashMap<SourceInstanceDomain, HashMap<CachedHomeOwner, SourceInstanceDomain>>,
+        rows: &[(SourceInstanceDomain, SourceInstanceLease)],
+    ) -> Result<(), Refusal> {
+        let expected = row_oracle(current, authored, rows);
+        let owned = refusal(
+            SourceDomainSelection::new(current, authored.clone(), rows.iter().cloned()).map(|_| ()),
+        );
+        let borrowed = refusal(SourceDomainSelection::validate(
+            current,
+            |domain| authored.contains_key(domain),
+            authored
+                .values()
+                .flat_map(|origins| origins.values())
+                .copied(),
+            rows.iter().map(|(domain, lease)| (*domain, lease)),
+        ));
+        assert_eq!(owned, expected);
+        assert_eq!(borrowed, expected);
+        expected
+    }
+
+    #[test]
+    fn borrowed_selection_matches_explicit_rows_across_domain_histories() {
+        let (mut machine, leases) = installed_leases();
+        let extra_handle = machine
+            .retain_top(leases[0].instance().program(), leases[0].value())
+            .unwrap();
+        let mut tree = ScopeTree::new();
+        let domains = [
+            SourceInstanceDomain::single(),
+            SourceInstanceDomain::for_scope(tree.mint_isolated()),
+            SourceInstanceDomain::for_scope(tree.mint_isolated()),
+        ];
+        let closed: HashMap<_, _> = domains
+            .iter()
+            .map(|domain| (*domain, HashMap::new()))
+            .collect();
+        let first = (domains[0], leases[0].clone());
+        assert_eq!(
+            compare(domains[0], &closed, &[first.clone(), first.clone()]),
+            Ok(())
+        );
+        assert_eq!(
+            compare(
+                domains[0],
+                &closed,
+                &[first.clone(), (domains[1], leases[1].clone())]
+            ),
+            Ok(())
+        );
+        assert!(matches!(
+            compare(
+                domains[0],
+                &closed,
+                &[first.clone(), (domains[0], leases[1].clone())]
+            ),
+            Err(Refusal::Conflict(_, _))
+        ));
+        let mut changed_handle = leases[0].clone();
+        changed_handle.handle = extra_handle;
+        assert!(matches!(
+            compare(domains[0], &closed, &[first, (domains[0], changed_handle)]),
+            Err(Refusal::Conflict(_, _))
+        ));
+
+        let strategy = (
+            any::<[bool; 3]>(),
+            0usize..3,
+            proptest::collection::vec((0usize..3, 0usize..3), 0..8),
+            proptest::collection::vec(
+                (
+                    0usize..3,
+                    0usize..2,
+                    0usize..2,
+                    0u32..3,
+                    0usize..3,
+                    any::<bool>(),
+                ),
+                0..20,
+            ),
+        );
+        let mut config = Config::default();
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        let mut config = proptest::test_runner::contextualize_config(config);
+        config.source_file = Some(file!());
+        config.test_name = Some(concat!(
+            module_path!(),
+            "::borrowed_selection_matches_explicit_rows_across_domain_histories"
+        ));
+        let configured_cases = config.cases;
+        let callbacks = Cell::new(0usize);
+        let prefixes = Cell::new(0usize);
+        let accepted = Cell::new(0usize);
+        let missing = Cell::new(0usize);
+        let conflicts = Cell::new(0usize);
+        let observe = |result: Result<(), Refusal>| {
+            prefixes.set(prefixes.get() + 1);
+            match result {
+                Ok(()) => accepted.set(accepted.get() + 1),
+                Err(Refusal::Missing(_)) => missing.set(missing.get() + 1),
+                Err(Refusal::Conflict(_, _)) => conflicts.set(conflicts.get() + 1),
+            }
+        };
+        let result =
+            TestRunner::new(config).run(&strategy, |(present, current, transitions, history)| {
+                callbacks.set(callbacks.get() + 1);
+                let mut authored: HashMap<_, HashMap<_, _>> = domains
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| present[*index])
+                    .map(|(_, domain)| (*domain, HashMap::new()))
+                    .collect();
+                for (from, to) in transitions {
+                    if let Some(origins) = authored.get_mut(&domains[from]) {
+                        origins.insert(leases[0].owner().clone(), domains[to]);
+                    }
+                }
+                let mut rows = Vec::new();
+                observe(compare(domains[current], &authored, &rows));
+                for (domain, instance, owner, ordinal, binder, alternate_handle) in history {
+                    let mut lease = leases[instance].clone();
+                    lease.owner.module = format!("Owner{owner}");
+                    lease.original_ordinal = ordinal;
+                    lease.binder = super::tests::source(&format!("binder{binder}"));
+                    if alternate_handle {
+                        lease.handle = extra_handle;
+                    }
+                    rows.push((domains[domain], lease));
+                    // Every prefix is the current selection plus one incoming row.
+                    observe(compare(domains[current], &authored, &rows));
+                }
+                Ok(())
+            });
+        eprintln!(
+            "source_selection_campaign={}",
+            serde_json::json!({
+                "configured_cases": configured_cases,
+                "callbacks_including_replay_and_shrinking": callbacks.get(),
+                "prefixes": prefixes.get(), "accepted": accepted.get(),
+                "missing_domain": missing.get(), "conflicting_instance": conflicts.get(),
+            })
+        );
+        result.unwrap();
+    }
+
+    #[test]
+    fn borrowed_selection_validation_avoids_owned_lease_allocations() {
+        let (_machine, leases) = installed_leases();
+        let current = SourceInstanceDomain::single();
+        let authored = HashMap::from([(
+            current,
+            HashMap::from([(leases[0].owner().clone(), current)]),
+        )]);
+        let rows: Vec<_> = (0..128)
+            .map(|index| {
+                let mut lease = leases[0].clone();
+                lease.binder = super::tests::source(&format!("selected{index}"));
+                (current, lease)
+            })
+            .collect();
+        compare(current, &authored, &rows).unwrap();
+        let owned = crate::binding_table::cost_tests::measure(|| {
+            for _ in 0..32 {
+                std::hint::black_box(
+                    SourceDomainSelection::new(current, authored.clone(), rows.iter().cloned())
+                        .unwrap(),
+                );
+            }
+        });
+        let borrowed = crate::binding_table::cost_tests::measure(|| {
+            for _ in 0..32 {
+                SourceDomainSelection::validate(
+                    current,
+                    |domain| authored.contains_key(domain),
+                    authored
+                        .values()
+                        .flat_map(|origins| origins.values())
+                        .copied(),
+                    rows.iter().map(|(domain, lease)| (*domain, lease)),
+                )
+                .unwrap();
+            }
+        });
+        let owned_counts = serde_json::to_value(owned.1).unwrap();
+        let borrowed_counts = serde_json::to_value(borrowed.1).unwrap();
+        assert!(
+            borrowed_counts["allocations"].as_u64().unwrap()
+                < owned_counts["allocations"].as_u64().unwrap()
+        );
+        assert!(
+            borrowed_counts["allocated_bytes"].as_u64().unwrap()
+                < owned_counts["allocated_bytes"].as_u64().unwrap()
+        );
+        eprintln!(
+            "source_selection_validation_cost={}",
+            serde_json::json!({
+                "selected_rows": rows.len(), "repetitions": 32,
+                "measurement_scope": "current-thread validation, excluding fixture construction and JIT; owned comparison is current constructor",
+                "owned": {"elapsed_ns": owned.0, "allocations": owned_counts},
+                "borrowed": {"elapsed_ns": borrowed.0, "allocations": borrowed_counts},
+            })
+        );
+    }
+
+    #[test]
+    fn late_domain_registration_conflict_preserves_snapshot_and_custody() {
+        let (machine, leases) = installed_leases();
+        let tree = ScopeTree::new();
+        let mut table = BindingTable::new();
+        let scope = ScopeId::ROOT;
+        let before = table.scope_snapshot(&tree, scope).unwrap();
+        let revision = table.mutation_revision();
+        let custody = table.source_instances_in(&tree, scope);
+        let selected = table.selected_source_instances_in(&tree, scope);
+        let incoming = leases
+            .into_iter()
+            .map(|lease| SourceInstanceAttachment::installed(SourceInstanceDomain::single(), lease))
+            .collect();
+        let refused = table
+            .register_source_instances_in_domains(&tree, scope, incoming, &machine)
+            .unwrap_err();
+        assert_eq!(refused.len(), 2);
+        assert_eq!(table.scope_snapshot(&tree, scope).unwrap(), before);
+        assert_eq!(table.mutation_revision(), revision);
+        assert_eq!(table.source_instances_in(&tree, scope).len(), custody.len());
+        assert_eq!(
+            table.selected_source_instances_in(&tree, scope).len(),
+            selected.len()
+        );
+        // Both genuine roots remain usable after refusal; no partial admission.
+        for attachment in &refused {
+            machine.validate_source_attachment(attachment).unwrap();
+        }
     }
 }
