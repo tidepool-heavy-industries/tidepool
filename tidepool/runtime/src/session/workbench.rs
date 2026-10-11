@@ -1765,22 +1765,94 @@ mod tests {
     }
 
     #[test]
-    fn resident_expression_templates_prefer_haskell_display_then_fall_back() {
-        let templates = resident_workbench_templates("module Expr where\n", "ActorEffects", "");
-        let expressions = templates
-            .iter()
-            .filter(|template| template.kind == TemplateSelector::Expr)
-            .collect::<Vec<_>>();
+    fn resident_expression_templates_keep_results_opaque_and_display_explicit() {
+        use tidepool_testing::eval_harness;
 
-        assert_eq!(expressions.len(), 4);
-        assert!(expressions[0].source.contains("pack (show __value)"));
-        assert!(expressions[1]
-            .source
-            .contains("pack (show __workbenchValue)"));
-        assert!(!expressions[2].source.contains("pack (show"));
-        assert!(!expressions[3].source.contains("pack (show"));
-        assert!(expressions[2].source.contains("pack \"<opaque value>\""));
-        assert!(expressions[3].source.contains("pack \"<opaque value>\""));
+        eval_harness::require_extract();
+        let effects = tidepool_testing::effect_surface::TestEffectSurface::minimal(&[
+            tidepool_mcp::console_decl(),
+        ])
+        .unwrap();
+        let templates = resident_workbench_templates(
+            effects.preamble(),
+            effects.row(),
+            "qualified Tidepool.Effects.Core as Core",
+        );
+        let session_root = tempfile::tempdir().unwrap();
+        let compile = |source: &str| {
+            tidepool_testing::with_settlement(|settlement| {
+                super::super::run_turn(
+                    super::super::TurnRequest {
+                        exact_context: None,
+                        session_id: None,
+                        turn_text: source,
+                        templates: &templates,
+                        include: &effects.include_path_refs(),
+                        session_root: session_root.path(),
+                        inject_modules: &[],
+                        gen: 0,
+                        verdict: None,
+                        target: None,
+                        retained_imports: &[],
+                    },
+                    settlement,
+                )
+            })
+        };
+        let run = |source: String| {
+            let include = effects.include_paths().to_vec();
+            eval_harness::with_eval_stack(move || {
+                tidepool_testing::with_settlement(|settlement| {
+                    crate::compile_and_run(
+                        &source,
+                        "__result",
+                        &include
+                            .iter()
+                            .map(std::path::PathBuf::as_path)
+                            .collect::<Vec<_>>(),
+                        &mut frunk::hlist![],
+                        &(),
+                        settlement,
+                    )
+                })
+            })
+        };
+        for source in ["((+ 1) :: Int -> Int)", "pure (42 :: Int)"] {
+            let super::super::TurnResult::Expr { wrapped_source, .. } =
+                compile(source).expect("ordinary expression compiles without Show")
+            else {
+                panic!("ordinary value must remain an expression");
+            };
+            let result = run(wrapped_source).expect("opaque result executes");
+            assert_eq!(result.to_json(), serde_json::json!("<opaque value>"));
+        }
+        let source = "send (Core.DisplayWith ((0, 0, 0), \"explicit display\", [], False) \
+            ((\\_ -> pure ()) :: Int -> Eff '[] ()))";
+        let super::super::TurnResult::Expr { wrapped_source, .. } =
+            compile(source).expect("explicit display compiles")
+        else {
+            panic!("explicit display must remain an expression");
+        };
+        let result = run(wrapped_source);
+        assert!(
+            matches!(
+                result.as_ref().err(),
+                Some(crate::RuntimeError::Jit(
+                    tidepool_effect::error::EffectError::UnhandledEffect { constructor }
+                )) if constructor.rsplit('.').next() == Some("DisplayWith")
+            ),
+            "explicit display must remain an effect request: {result:?}"
+        );
+        assert!(
+            matches!(
+                compile("(42 :: Bool)"),
+                Err(super::super::TurnFailure {
+                    error: crate::CompileError::Diagnostics(_),
+                    ..
+                })
+            ),
+            "invalid types remain refused"
+        );
     }
 
     #[test]

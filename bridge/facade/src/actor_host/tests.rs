@@ -3,7 +3,7 @@ pub(super) use super::test_campaign::{
     dispatch_structured_tool,
 };
 use super::*;
-use exomonad_tool::{ToolArguments, ToolInvocation, ToolInvocationContext};
+use exomonad_tool::{ToolArguments, ToolInvocation};
 use exomonad_worktree::WorktreeSpec;
 use std::error::Error as _;
 
@@ -966,11 +966,21 @@ async fn actor_sources_capture_current_then_deliver_every_publication_and_settle
     )
     .await
     .expect_err("replacement cannot change the source graph");
+    let exomonad_actor::ResidentToolError::Invocation(
+        exomonad_actor::KernelInvocationFailure::Workbench(failure),
+    ) = rejected else {
+        panic!("replacement refusal must retain admitted runtime receipts: {rejected:?}");
+    };
+    assert!(failure.diagnostic.as_ref().is_none_or(|diagnostic| {
+        diagnostic.phase == tidepool_toolchain::failclass::Phase::Run
+    }), "{failure:?}");
+    assert!(failure.receipts.iter().any(|receipt| {
+        receipt.status == tidepool_runtime::session::WorkbenchItemStatus::Rejected
+            && receipt.operations.iter().any(|operation| operation.effect == "replaceActor")
+    }), "runtime replacement dispatch must precede refusal: {failure:?}");
     assert!(
-        rejected
-            .to_string()
-            .contains("replacement removed a source"),
-        "{rejected:?}"
+        failure.detail.contains("removed a startup source"),
+        "{failure:?}"
     );
     let replaced = dispatch_haskell_script(
         root.as_ref(),
@@ -3413,13 +3423,14 @@ async fn haskell_actor_sends_normal_steering_without_a_native_session() {
                     None => run.await.unwrap(),
                 };
                 assert_eq!(launched["status"], "committed", "{launched:?}");
-                let finished = dispatch_haskell_script(
+                let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+                let finished = campaign.drive_actor_output(&store, dispatch_haskell_script(
         root.as_ref(),
-        "finished <- awaitExit relay\ncase finished of { Completed (Right _) -> True; _ -> False }",
+        "finished <- awaitExit relay\ndisplay (case finished of { Completed (Right _) -> True; _ -> False })",
     )
-    .await;
+    ).await;
                 assert_eq!(finished["status"], "committed", "{finished:?}");
-                assert!(finished.to_string().contains("True"), "{finished:?}");
+                assert_eq!(test_campaign::committed_display_text(&finished), "True");
             })
         })
         .await;

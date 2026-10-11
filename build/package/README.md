@@ -486,6 +486,16 @@ remain disabled. `--trace-profile full` is an explicit diagnostic control for a
 bounded selected cohort, with detailed attribution enabled. Primary paired
 latency repetitions use minimal; detailed captures do not replace those results.
 
+Measurement qualification binds the requested runner profile to successful host
+and compiler capture receipts in the actual retained writers. An existing custom
+observer remains explicitly unverified. Older records without applied receipts
+remain readable diagnostics, but cannot establish this measurement contract;
+missing profile selection is unknown and does not imply full capture. Each named
+workload declares its required native calls. Their exact dispatches and eventual
+terminals must carry owner-issued timing and publication counters, including
+async calls that settle after their phase closes. Engine intrinsic, preparation
+and lifecycle phases record explicit non-applicability.
+
 `owned_artifact_observations` separates GHC frontend summaries, native image
 production and machine publication. Image IDs are process-local, registry entry
 IDs identify exact equal keys while retained, and expired weak images may be

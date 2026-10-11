@@ -12410,7 +12410,9 @@ where
             if let Some(handler) = &mut handler {
                 handler.cleanup.take();
             }
-            let resumed = async {
+            // Box before the task-local scopes so each wrapper retains only
+            // the pointer instead of propagating the program's inline state.
+            let resumed = Box::pin(async {
                 if let Some(suspended) = &handler {
                     self.advance_cast_handler(
                         kernel,
@@ -12437,7 +12439,7 @@ where
                     .await
                     .map_err(Self::workbench_failure)
                 }
-            };
+            });
             let step = match &cleanup {
                 Some(cleanup) => cleanup.registration().scope(resumed).await,
                 None => resumed.await,

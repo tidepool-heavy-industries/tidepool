@@ -147,7 +147,7 @@ async fn production_harness_notebook_a_a_b_a() {
 
 async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
     let cohort = history.cohort();
-    let (host_trace, compiler_trace, phase_trace, compiler_lifecycle) =
+    let (host_trace, compiler_trace, phase_trace, compiler_lifecycle, trace_capture) =
         prepare_performance_traces();
     assert!(
         std::env::var_os(tidepool_extract_cmd::DAEMON_SOCKET_ENV).is_some(),
@@ -190,6 +190,7 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
             "phase": "environment",
             "workload_cohort": cohort,
             "campaign_trace_profile": super::super::test_campaign::campaign_trace_profile(),
+            "campaign_trace_capture": trace_capture,
             "workload_roster": phases.iter().map(|phase| phase.name).collect::<Vec<_>>(),
             "prepared_root_entry_supplied": deployment["TIDEPOOL_PREPARED_ROOT_ENTRY"].is_some(),
             "host_trace": host_trace,
@@ -281,6 +282,7 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
             &phase_trace,
             json!({
                 "schema": 1, "phase": phase.name, "sequence": index, "call_id": call_id,
+                "actor_id": actor.to_string(),
                 "completed": true, "wall_ns": completed_ns, "first_successor_ns": first_successor_ns,
                 "logical_compiler_requests": logical_compiler_requests,
                 "successful_native_image_constructions": tidepool_codegen::prepared_program::CompiledProgram::successful_image_compilations() - images_before,
@@ -307,7 +309,8 @@ async fn production_harness_prepare_once_repeated_launch() {
     use crate::exomonad::workspace::{prepare_workspace, FrozenWorkspace};
     use harness::model::AgentPath;
     use std::collections::{HashSet, VecDeque};
-    let (host_trace, compiler_trace, phase_trace, lifecycle) = prepare_performance_traces();
+    let (host_trace, compiler_trace, phase_trace, lifecycle, trace_capture) =
+        prepare_performance_traces();
     let roster = [
         "fresh-preparation",
         "launch-1",
@@ -320,6 +323,7 @@ async fn production_harness_prepare_once_repeated_launch() {
         json!({"schema": 1, "phase": "environment",
         "workload_cohort": "prepare-once-repeated-launch", "workload_roster": roster,
         "campaign_trace_profile": super::super::test_campaign::campaign_trace_profile(),
+            "campaign_trace_capture": trace_capture,
         "prepared_root_entry_supplied": std::env::var_os("TIDEPOOL_PREPARED_ROOT_ENTRY").is_some(),
         "host_trace": host_trace, "compiler_trace": compiler_trace, "phase_trace": phase_trace,
         "owned_compiler_lifecycle": lifecycle,

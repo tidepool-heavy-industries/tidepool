@@ -899,7 +899,7 @@ impl TestCampaign {
         root: CampaignRoot,
     ) -> Self {
         tidepool_testing::eval_harness::require_extract();
-        install_tracing();
+        ensure_campaign_tracing();
         let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
         repository
             .writer()
@@ -991,21 +991,53 @@ impl TestCampaign {
     }
 }
 
-pub(super) fn campaign_trace_profile() -> &'static str {
-    match std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").as_deref() {
-        Ok("minimal") => "minimal",
-        Ok("full") | Err(_) => "full",
-        Ok(other) => panic!("unsupported TIDEPOOL_TEST_TRACE_PROFILE {other:?}"),
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CampaignTraceProfile {
+    Minimal,
+    Full,
+}
+
+impl CampaignTraceProfile {
+    fn selected() -> Self {
+        match std::env::var("TIDEPOOL_TEST_TRACE_PROFILE").as_deref() {
+            Ok("minimal") => Self::Minimal,
+            Ok("full") | Err(_) => Self::Full,
+            Ok(other) => panic!("unsupported TIDEPOOL_TEST_TRACE_PROFILE {other:?}"),
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Full => "full",
+        }
+    }
+
+    fn span_policy(self) -> &'static str {
+        match self {
+            Self::Minimal => "none",
+            Self::Full => "new_close",
+        }
+    }
+
+    fn span_events(self) -> tracing_subscriber::fmt::format::FmtSpan {
+        match self {
+            Self::Minimal => tracing_subscriber::fmt::format::FmtSpan::NONE,
+            Self::Full => {
+                tracing_subscriber::fmt::format::FmtSpan::NEW
+                    | tracing_subscriber::fmt::format::FmtSpan::CLOSE
+            }
+        }
     }
 }
 
-fn campaign_trace_filter() -> tracing_subscriber::EnvFilter {
-    campaign_trace_filter_for(campaign_trace_profile())
+pub(super) fn campaign_trace_profile() -> &'static str {
+    CampaignTraceProfile::selected().name()
 }
 
-fn campaign_trace_filter_for(profile: &str) -> tracing_subscriber::EnvFilter {
+fn campaign_trace_filter_for(profile: CampaignTraceProfile) -> tracing_subscriber::EnvFilter {
     let directives = match profile {
-        "minimal" => {
+        CampaignTraceProfile::Minimal => {
             "warn,tidepool::actor_host::startup=info,exomonad_harness::timing=debug,\
                       exomonad_actor::request=info,exomonad_actor::workbench_phase=info,\
                       tidepool_extract_cmd::endpoint=info,exomonad_actor::resident_tools=info,\
@@ -1015,7 +1047,7 @@ fn campaign_trace_filter_for(profile: &str) -> tracing_subscriber::EnvFilter {
                       tidepool_codegen::image_lifetime=info,tidepool_codegen::image_install=info,\
                       tidepool_runtime::activation_renderer_install=info,exomonad::content=off"
         }
-        _ => {
+        CampaignTraceProfile::Full => {
             "warn,tidepool::actor_host::startup=info,tidepool_runtime::compile=info,\
              tidepool_runtime::compile::modules=debug,tidepool_runtime::session::turn=info,\
              exomonad_harness::timing=debug,tidepool_runtime::prepared_install=info,\
@@ -1031,36 +1063,71 @@ fn campaign_trace_filter_for(profile: &str) -> tracing_subscriber::EnvFilter {
     tracing_subscriber::EnvFilter::new(directives)
 }
 
-/// Retain phase and compile observations across the host's executor threads.
-/// An isolated native test owns the global subscriber; an already-installed
-/// measurement subscriber keeps its filter and writer. Explicit trace files
-/// remain supported, otherwise libtest's writer retains JSON in test output.
-pub(super) fn install_tracing() {
+struct AppliedCampaignTrace {
+    profile: CampaignTraceProfile,
+    writer: Option<std::path::PathBuf>,
+}
+
+struct UnverifiedCampaignTrace {
+    requested: CampaignTraceProfile,
+    writer: Option<std::path::PathBuf>,
+}
+
+impl AppliedCampaignTrace {
+    fn record(&self) -> Value {
+        serde_json::json!({"schema": 1, "status": "installed", "profile": self.profile.name(),
+            "span_events": self.profile.span_policy(), "filter_contract": 1,
+            "writer": self.writer, "process_id": std::process::id()})
+    }
+
+    fn emit(&self) {
+        tracing::info!(target: "tidepool::actor_host::startup", profile = self.profile.name(),
+            span_events = self.profile.span_policy(), filter_contract = 1u64,
+            writer = self.writer.as_ref().map(|path| path.to_string_lossy().into_owned()),
+            process_id = std::process::id(), "campaign trace profile applied");
+    }
+}
+
+/// Only successful installation issues applied-profile evidence. Ordinary
+/// tests may keep their custom observer; retained measurements record that
+/// observer as unverified. The existing subscriber remains the sole owner.
+fn install_tracing() -> Result<AppliedCampaignTrace, UnverifiedCampaignTrace> {
+    let profile = CampaignTraceProfile::selected();
+    let writer = std::env::var_os("TIDEPOOL_TEST_TRACE").map(std::path::PathBuf::from);
     let subscriber = tracing_subscriber::fmt()
         .json()
         .with_ansi(false)
         .with_thread_names(true)
-        .with_env_filter(campaign_trace_filter())
-        .with_span_events(if campaign_trace_profile() == "full" {
-            tracing_subscriber::fmt::format::FmtSpan::NEW
-                | tracing_subscriber::fmt::format::FmtSpan::CLOSE
-        } else {
-            tracing_subscriber::fmt::format::FmtSpan::NONE
-        })
+        .with_env_filter(campaign_trace_filter_for(profile))
+        .with_span_events(profile.span_events())
         .with_test_writer();
-    if let Some(path) = std::env::var_os("TIDEPOOL_TEST_TRACE") {
+    let installed = if let Some(path) = &writer {
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(path)
             .unwrap_or_else(|error| panic!("TIDEPOOL_TEST_TRACE {path:?}: {error}"));
         subscriber
             .with_writer(std::sync::Mutex::new(file))
             .try_init()
-            .ok();
+            .is_ok()
     } else {
-        subscriber.try_init().ok();
+        subscriber.try_init().is_ok()
+    };
+    if installed {
+        let capture = AppliedCampaignTrace { profile, writer };
+        capture.emit();
+        Ok(capture)
+    } else {
+        Err(UnverifiedCampaignTrace {
+            requested: profile,
+            writer,
+        })
     }
+}
+
+pub(super) fn ensure_campaign_tracing() {
+    let _ = install_tracing();
 }
 
 pub(super) fn committed_display_text(response: &serde_json::Value) -> &str {
@@ -1250,6 +1317,7 @@ pub(super) fn prepare_performance_traces() -> (
     std::path::PathBuf,
     std::path::PathBuf,
     Value,
+    Value,
 ) {
     let artifact_root = std::path::PathBuf::from(
         std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
@@ -1279,7 +1347,12 @@ pub(super) fn prepare_performance_traces() -> (
     std::env::set_var("TIDEPOOL_TEST_TRACE", &host_trace);
     std::env::set_var("TIDEPOOL_TEST_TRACE_PROFILE", campaign_trace_profile());
     std::env::set_var("TIDEPOOL_PERFORMANCE_COMPILER_TRACE", &compiler_trace);
-    (host_trace, compiler_trace, phase_trace, lifecycle)
+    let capture = match install_tracing() {
+        Ok(applied) => applied.record(),
+        Err(existing) => serde_json::json!({"schema": 1, "status": "existing_unverified",
+            "requested_profile": existing.requested.name(), "writer": existing.writer}),
+    };
+    (host_trace, compiler_trace, phase_trace, lifecycle, capture)
 }
 
 pub(super) fn record_phase(path: &std::path::Path, record: Value) {
@@ -1743,6 +1816,128 @@ mod tests {
     use super::*;
     use std::future::Future;
 
+    async fn applied_capture_retains_production_cell(profile: CampaignTraceProfile) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| directory.path().to_path_buf())
+            .join("host.jsonl");
+        std::env::set_var("TIDEPOOL_TEST_TRACE", &path);
+        std::env::set_var("TIDEPOOL_TEST_TRACE_PROFILE", profile.name());
+        let capture = install_tracing()
+            .ok()
+            .expect("isolated case installs its own capture");
+        let receipt = capture.record();
+        let campaign = TestCampaign::start().await;
+        campaign
+            .run_scenario(|campaign| {
+                Box::pin(async move {
+                    let result = dispatch_haskell_script(
+                        campaign.root_installation.policy.as_ref(),
+                        "value <- pure (40 + 2 :: Int)",
+                    )
+                    .await;
+                    assert_eq!(result["status"], "committed");
+                })
+            })
+            .await;
+        let rows = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let applied = rows
+            .iter()
+            .filter(|row| row["fields"]["message"] == "campaign trace profile applied")
+            .collect::<Vec<_>>();
+        assert_eq!(applied.len(), 1);
+        for name in [
+            "profile",
+            "span_events",
+            "filter_contract",
+            "writer",
+            "process_id",
+        ] {
+            assert_eq!(applied[0]["fields"][name], receipt[name]);
+        }
+        let dispatch = rows
+            .iter()
+            .find(|row| row["fields"]["message"] == "workbench cell dispatched to its actor")
+            .expect("real actor dispatch survives the filter");
+        let execution = &dispatch["fields"]["execution"];
+        let terminals = rows
+            .iter()
+            .filter(|row| {
+                row["fields"]["message"] == "call timing"
+                    && row["fields"]["execution"] == *execution
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terminals.len(),
+            1,
+            "one actual terminal per dispatched cell"
+        );
+        let terminal = &terminals[0]["fields"];
+        assert_eq!(terminal["outcome"], "Committed");
+        for field in [
+            "publication_attempts",
+            "semantic_rebases",
+            "metadata_restages",
+            "start_ns",
+            "end_ns",
+            "wall_ns",
+        ] {
+            assert!(
+                terminal[field].is_u64(),
+                "missing owner field {field}: {terminal}"
+            );
+        }
+        let compiler = rows.iter().find(|row| {
+            row["target"] == "tidepool_extract_cmd::endpoint"
+                && row["fields"]["message"] == "compiler request identified"
+                && row["spans"].as_array().is_some_and(|spans| {
+                    spans
+                        .iter()
+                        .any(|span| span["name"] == "cell" && span["execution"] == *execution)
+                })
+        });
+        assert!(
+            compiler.is_some(),
+            "real compiler submission retains the actual cell span"
+        );
+        println!(
+            "trace-contract-witness {}",
+            serde_json::json!({"receipt": receipt,
+            "dispatch": dispatch, "terminal": terminals[0], "compiler": compiler.unwrap()})
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated owned-resident compiler for exact host/daemon trace joins"]
+    async fn applied_minimal_capture_retains_production_cell() {
+        applied_capture_retains_production_cell(CampaignTraceProfile::Minimal).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated owned-resident compiler for exact host/daemon trace joins"]
+    async fn applied_full_capture_retains_production_cell() {
+        applied_capture_retains_production_cell(CampaignTraceProfile::Full).await;
+    }
+
+    #[test]
+    fn custom_campaign_observer_remains_unverified() {
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_writer(std::io::sink)
+                .finish(),
+        )
+        .expect("one isolated custom observer");
+        let unverified = install_tracing()
+            .err()
+            .expect("existing observer cannot issue applied evidence");
+        assert_eq!(unverified.requested, CampaignTraceProfile::selected());
+    }
+
     #[test]
     fn before_call_exclusion_preserves_preceding_provider_item_ids() {
         let call_id = "recursive-child-await";
@@ -1885,7 +2080,7 @@ mod tests {
         let subscriber = tracing_subscriber::fmt()
             .json()
             .with_ansi(false)
-            .with_env_filter(campaign_trace_filter())
+            .with_env_filter(campaign_trace_filter_for(CampaignTraceProfile::selected()))
             .with_writer(std::sync::Mutex::new(file))
             .finish();
         let request = exomonad_actor::RequestId(7);
@@ -1982,7 +2177,7 @@ mod tests {
         let subscriber = tracing_subscriber::fmt()
             .json()
             .with_ansi(false)
-            .with_env_filter(campaign_trace_filter_for("minimal"))
+            .with_env_filter(campaign_trace_filter_for(CampaignTraceProfile::Minimal))
             .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NONE)
             .with_writer(std::sync::Mutex::new(file))
             .finish();

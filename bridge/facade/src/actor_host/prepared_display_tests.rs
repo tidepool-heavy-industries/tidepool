@@ -102,14 +102,6 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
             TurnResult::Expr { compiled, .. } => compiled,
             other => panic!("prepared display must compile as an expression: {other:?}"),
         };
-        machine.set_effect_execution(
-            EffectRunPolicy::SuspendAll,
-            LivePayloadPolicy::HASKELL_EFFECT_VALUE,
-        );
-        let outcome = tidepool_testing::with_settlement(|settlement| {
-            machine.run_with_sites("prepared_first_display", compiled.code(), settlement)
-        })
-        .unwrap();
         let descriptor = ActorDescriptor::new(
             "prepared-display",
             ActorPlacement {
@@ -118,6 +110,21 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
                 lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
             },
         );
+        machine
+            .set_actor_execution(
+                tidepool_runtime::session::SessionRunContext {
+                    resource_scope: descriptor.placement().resource_scope,
+                    lexical_scope: descriptor.placement().lexical_scope,
+                    ..tidepool_runtime::session::SessionRunContext::ROOT
+                },
+                EffectRunPolicy::SuspendAll,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .expect("initial display actor placement");
+        let outcome = tidepool_testing::with_settlement(|settlement| {
+            machine.run_with_sites("prepared_first_display", compiled.code(), settlement)
+        })
+        .unwrap();
         let (forest, mut deployments) = ResidentForest::new(
             ActorWorkbenchSource::new(preamble, include),
             session,
