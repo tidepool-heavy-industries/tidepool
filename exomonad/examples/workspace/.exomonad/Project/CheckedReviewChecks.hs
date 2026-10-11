@@ -43,7 +43,7 @@ continuation = do
     (checkActor repairing == checkActor implementer)
   void $ turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()"
   assertCell owner "failed counted check routes to retained implementer before review"
-    "case flowRepairRequests state of { [response] -> responseActor response == responseActor worker; _ -> False }"
+    "case flowRepairRequests state of { [response] -> agentIdentity (responseActor response) == agentIdentity (responseActor worker); _ -> False }"
   assertCell (checkActor repairing) "retained implementer receives the exact failed candidate and repair assignment"
     ("let input = sessionInput :: RepairTask in candidateCommit (repairInput input) == " <> gitOidLiteral first
       <> " && taskName (repairAssignment input) == \"implement-recovery\" && planPath (repairAssignment input) == \"plans/component.md\" && not (null (repairFindings input))")
@@ -82,7 +82,7 @@ continuation = do
   void $ turn owner "state <- R.call (reviewSnapshot (R.client flow)) ()\nlet hasQuestionHistory request = any (\\(seen, progress) -> seen == request && not (null (workQuestions progress))) (flowProgress state)"
   assertCell owner "settlement retains original receipts, progress handles and question history"
     "length (flowReviewerReceipts state) == 1 && length (flowCandidateReceipts state) == 2 && length (flowReviewerUpdates state) == 1 && length (flowRepairUpdates state) == 1 && case (flowReviewerRequests state, flowRepairRequests state) of { ([reviewer], [repair]) -> hasQuestionHistory (requestId reviewer) && hasQuestionHistory (requestId repair); _ -> False }"
-  void $ turn owner "R.finish flow"
+  void $ turn owner "R.finish flow >> pure ()"
 
 green :: Member RecipeCheck effects => Eff effects ()
 green = greenScenario "green" False
