@@ -6437,10 +6437,8 @@ mod tests {
             };
             assert!(matches!(
                 self.resident
-                    .publish_staged_public_manifest(
-                        ticket,
-                        &crate::session::PublicationDecision::new()
-                    )
+                    .attempt_public_manifest(ticket, &crate::session::PublicationDecision::new())
+                    .map(crate::session::settled_manifest_attempt)
                     .unwrap(),
                 crate::session::PublicManifestCommit::Ephemeral
             ));
@@ -8107,10 +8105,11 @@ mod tests {
         };
         assert!(matches!(
             resident
-                .publish_staged_public_manifest(
+                .attempt_public_manifest(
                     accepted.stage().unwrap(),
                     &crate::session::PublicationDecision::new()
                 )
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             crate::session::PublicManifestCommit::Ephemeral
         ));
@@ -8223,10 +8222,8 @@ mod tests {
         };
         assert!(matches!(
             session
-                .publish_staged_public_manifest(
-                    accepted.stage().unwrap(),
-                    &PublicationDecision::new(),
-                )
+                .attempt_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new(),)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));

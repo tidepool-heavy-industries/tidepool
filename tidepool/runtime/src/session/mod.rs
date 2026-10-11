@@ -495,36 +495,116 @@ pub struct PublicVisibilitySnapshot {
     pub source_selection: tidepool_codegen::binding_table::BindingScopeSnapshot,
 }
 
-/// Immutable v2 manifest baseline captured under the owning session checkout.
-/// Staging its replacement is fallible and may run after that checkout ends.
+/// Exact runtime issuing owner and incarnation. Epoch changes fence all held work.
+#[derive(Clone)]
+pub struct OwnerStamp {
+    owner: Arc<admission::RuntimeAdmissionOwner>,
+    epoch: u64,
+}
+impl OwnerStamp {
+    fn capture(owner: &Arc<admission::RuntimeAdmissionOwner>) -> Self {
+        Self {
+            owner: owner.clone(),
+            epoch: owner.epoch(),
+        }
+    }
+    fn matches(&self, owner: &Arc<admission::RuntimeAdmissionOwner>) -> bool {
+        Arc::ptr_eq(&self.owner, owner) && self.epoch == owner.epoch()
+    }
+}
+
+/// Exact relevant visibility and scoped compiler commitments; allocation is excluded.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PublicationSemanticBase {
+    expected_public: PublicVisibilitySnapshot,
+    expected_private: PublicVisibilitySnapshot,
+    public_view: [u8; 32],
+    private_view: [u8; 32],
+}
+
+/// One coherent durable graph, compare-and-swap revision and reserved ceiling.
+#[derive(Clone)]
+pub struct DurableWriteBase {
+    owner: RecoveryPublicOwner,
+    manifest_owner: Arc<recovery_hydration::OwnedRecoveryManifest>,
+    domain: recovery_store::RecoveryDomainId,
+    graph: recovery::RecoveryGraph,
+    store_revision: StoreRevision,
+    allocation_ceiling: Generation,
+    artifact_root: PathBuf,
+}
+
+#[derive(Clone)]
+enum PublicationIntent {
+    Final(Arc<FinalExecutionIntent>),
+    HostBindings(BindingPublicationPolicy),
+}
+
+#[derive(Clone, Copy)]
+enum BindingPublicationPolicy {
+    ExactPromotion,
+    ActivationInput,
+}
+
+/// Immutable exact visibility and the durable write base captured by the owner.
+#[derive(Clone)]
 pub struct PublicManifestBase {
-    admission_owner: Option<std::sync::Arc<admission::RuntimeAdmissionOwner>>,
-    admission_owner_epoch: Option<u64>,
-    manifest_owner: Option<std::sync::Arc<recovery_hydration::OwnedRecoveryManifest>>,
+    owner_stamp: OwnerStamp,
+    semantic: PublicationSemanticBase,
+    intent: PublicationIntent,
     session: SessionId,
-    log_revision: u64,
     path: PathBuf,
     target: PublicPublicationBaseline,
     public_scope: ScopeId,
     private_scope: ScopeId,
     write_ids: Vec<SessionVarId>,
     source_keys: Vec<SourceLeaseKey>,
-    expected_public: PublicVisibilitySnapshot,
-    expected_private: PublicVisibilitySnapshot,
     final_bindings: Vec<(String, SessionVarId)>,
     final_source_instances: Vec<recovery::RecoveryPublicSourceInstance>,
 }
 
+#[derive(Clone)]
 enum PublicPublicationBaseline {
-    Durable {
-        owner: RecoveryPublicOwner,
-        graph: recovery::RecoveryGraph,
-        store_revision: StoreRevision,
-        allocation_ceiling: Generation,
-        artifact_root: PathBuf,
-    },
+    Durable(DurableWriteBase),
     Ephemeral,
 }
+
+/// Affine certificate retained across storage-only contention.
+pub enum CertifiedPublication {
+    Bindings(PublicManifestBase),
+    Declarations(AcceptedDeclarationPublication),
+}
+impl CertifiedPublication {
+    fn base(&self) -> &PublicManifestBase {
+        match self {
+            Self::Bindings(base) => base,
+            Self::Declarations(accepted) => &accepted.base.public,
+        }
+    }
+    fn base_mut(&mut self) -> &mut PublicManifestBase {
+        match self {
+            Self::Bindings(base) => base,
+            Self::Declarations(accepted) => &mut accepted.base.public,
+        }
+    }
+    pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
+        let mut ticket = match &self {
+            Self::Bindings(base) => base.clone().stage_materialized()?,
+            Self::Declarations(accepted) => accepted.stage_materialized()?,
+        };
+        ticket.certified = self;
+        Ok(ticket)
+    }
+}
+
+pub enum PublicationAttempt {
+    Settled(PublicManifestCommit),
+    Rebase(Arc<FinalExecutionIntent>),
+    RestageMetadata(CertifiedPublication),
+}
+
+static_assertions::assert_not_impl_any!(CertifiedPublication: Clone, Copy);
+static_assertions::assert_not_impl_any!(StagedPublicManifest: Clone, Copy);
 
 enum StagedPublicationTarget {
     Durable {
@@ -551,23 +631,24 @@ pub struct RecoveryPublicationWork {
 /// A fully written, fsynced manifest candidate. Only the owning session may
 /// compare its baseline and rename it while holding the machine checkout.
 pub struct StagedPublicManifest {
-    admission_owner: Option<std::sync::Arc<admission::RuntimeAdmissionOwner>>,
-    admission_owner_epoch: Option<u64>,
-    manifest_owner: Option<std::sync::Arc<recovery_hydration::OwnedRecoveryManifest>>,
-    session: SessionId,
-    log_revision: u64,
-    path: PathBuf,
+    certified: CertifiedPublication,
     target: StagedPublicationTarget,
-    public_scope: ScopeId,
-    private_scope: ScopeId,
-    write_ids: Vec<SessionVarId>,
-    source_keys: Vec<SourceLeaseKey>,
-    expected_public: PublicVisibilitySnapshot,
-    expected_private: PublicVisibilitySnapshot,
     declaration: Option<paired_publication::PreparedDeclarationPublication>,
+}
+impl std::ops::Deref for StagedPublicManifest {
+    type Target = PublicManifestBase;
+    fn deref(&self) -> &Self::Target {
+        self.certified.base()
+    }
 }
 
 impl StagedPublicManifest {
+    pub fn reserved_generation(&self) -> Option<Generation> {
+        match &self.certified {
+            CertifiedPublication::Bindings(_) => None,
+            CertifiedPublication::Declarations(accepted) => Some(accepted.reserved_generation()),
+        }
+    }
     /// Per-ticket durable work; ephemeral staging performs no recovery I/O.
     pub fn recovery_work(&self) -> RecoveryPublicationWork {
         match &self.target {
@@ -577,16 +658,27 @@ impl StagedPublicManifest {
     }
 }
 
-/// A stale stage preserves the execution's intent; its caller can stage again
-/// from the new public graph without repeating the execution's effects.
+/// Terminal publication settlement. Retryable work is retained by PublicationAttempt.
 #[derive(Debug)]
 pub enum PublicManifestCommit {
-    Stale,
     Cancelled,
     Refused { error: Box<SessionError> },
     RecoveryRequired { error: Box<SessionError> },
     Durable,
     Ephemeral,
+}
+
+#[cfg(test)]
+pub(super) fn settled_manifest_attempt(attempt: PublicationAttempt) -> PublicManifestCommit {
+    match attempt {
+        PublicationAttempt::Settled(commit) => commit,
+        PublicationAttempt::Rebase(_) => {
+            panic!("expected terminal publication, received semantic rebase")
+        }
+        PublicationAttempt::RestageMetadata(_) => {
+            panic!("expected terminal publication, received metadata restage")
+        }
+    }
 }
 
 /// The capability issued with a confirmed durable owner publication.
@@ -646,15 +738,19 @@ impl PublicManifestBase {
     /// Stage the exact binding and native source-instance winners captured by
     /// the session owner. This writes bytes without borrowing the machine.
     pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
-        let target = match self.target {
+        CertifiedPublication::Bindings(self).stage()
+    }
+    fn stage_materialized(self) -> Result<StagedPublicManifest, SessionError> {
+        let target = match &self.target {
             PublicPublicationBaseline::Ephemeral => StagedPublicationTarget::Ephemeral,
-            PublicPublicationBaseline::Durable {
-                owner,
-                graph,
-                store_revision,
-                allocation_ceiling,
-                ..
-            } => {
+            PublicPublicationBaseline::Durable(
+                write_base @ DurableWriteBase {
+                    owner,
+                    graph,
+                    store_revision,
+                    ..
+                },
+            ) => {
                 let mut surface = graph
                     .surface(&owner)
                     .map_err(|error| recovery::graph_error(&self.path, error))?
@@ -665,7 +761,7 @@ impl PublicManifestBase {
                     .checked_add(1)
                     .ok_or(SessionError::WrongPublicManifestTicket)?;
                 surface.set_visibility(
-                    self.final_bindings.into_iter().map(|(name, id)| {
+                    self.final_bindings.iter().cloned().map(|(name, id)| {
                         recovery::RecoveryPublicBinding {
                             name,
                             owner: recovery::RecoveryBindingId {
@@ -674,36 +770,25 @@ impl PublicManifestBase {
                             },
                         }
                     }),
-                    self.final_source_instances,
+                    self.final_source_instances.clone(),
                 );
                 let mut candidate = graph.candidate();
                 candidate
                     .replace_surface(surface)
                     .map_err(|error| recovery::graph_error(&self.path, error))?;
                 let staged = candidate
-                    .prepare(store_revision, allocation_ceiling)
+                    .prepare_publication(write_base)
                     .map_err(|error| recovery::graph_error(&self.path, error))?;
                 StagedPublicationTarget::Durable {
-                    owner,
-                    base_revision: store_revision,
+                    owner: owner.clone(),
+                    base_revision: *store_revision,
                     staged,
                 }
             }
         };
         Ok(StagedPublicManifest {
-            admission_owner: self.admission_owner,
-            admission_owner_epoch: self.admission_owner_epoch,
-            manifest_owner: self.manifest_owner,
-            session: self.session,
-            log_revision: self.log_revision,
-            path: self.path,
+            certified: CertifiedPublication::Bindings(self),
             target,
-            public_scope: self.public_scope,
-            private_scope: self.private_scope,
-            write_ids: self.write_ids,
-            source_keys: self.source_keys,
-            expected_public: self.expected_public,
-            expected_private: self.expected_private,
             declaration: None,
         })
     }
@@ -1164,12 +1249,12 @@ impl SessionLib {
     fn snapshot_public_manifest(
         &self,
         owner: RecoveryPublicOwner,
+        owner_stamp: OwnerStamp,
+        semantic: PublicationSemanticBase,
         public_scope: ScopeId,
         private_scope: ScopeId,
         write_ids: Vec<SessionVarId>,
         source_keys: Vec<SourceLeaseKey>,
-        expected_public: PublicVisibilitySnapshot,
-        expected_private: PublicVisibilitySnapshot,
         final_bindings: Vec<(String, SessionVarId)>,
         final_source_instances: Vec<recovery::RecoveryPublicSourceInstance>,
     ) -> Result<PublicManifestBase, SessionError> {
@@ -1188,28 +1273,27 @@ impl SessionLib {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         Ok(PublicManifestBase {
-            admission_owner: None,
-            admission_owner_epoch: None,
-            manifest_owner: state.owner.clone(),
+            owner_stamp,
+            semantic,
+            intent: PublicationIntent::HostBindings(BindingPublicationPolicy::ExactPromotion),
             session: self.id,
-            log_revision: self
-                .log
-                .publication_revision()
-                .ok_or(SessionError::StaleStagedDeclaration)?,
             path: state.path.clone(),
-            target: PublicPublicationBaseline::Durable {
+            target: PublicPublicationBaseline::Durable(DurableWriteBase {
                 owner,
+                manifest_owner: state
+                    .owner
+                    .clone()
+                    .ok_or(SessionError::WrongPublicManifestTicket)?,
+                domain: state.domain_id,
                 graph: state.graph.clone(),
                 store_revision: state.store_revision,
                 allocation_ceiling: state.allocation_ceiling,
                 artifact_root: state.artifact_root.clone(),
-            },
+            }),
             public_scope,
             private_scope,
             write_ids,
             source_keys,
-            expected_public,
-            expected_private,
             final_bindings,
             final_source_instances,
         })
@@ -1219,9 +1303,6 @@ impl SessionLib {
         &self,
         ticket: &StagedPublicManifest,
     ) -> Result<bool, SessionError> {
-        if self.log.publication_revision() != Some(ticket.log_revision) {
-            return Ok(false);
-        }
         let StagedPublicationTarget::Durable {
             owner,
             base_revision,
@@ -1238,7 +1319,11 @@ impl SessionLib {
             .durable_graph
             .as_ref()
             .ok_or(SessionError::WrongPublicManifestTicket)?;
-        if !recovery_hydration::same_manifest_owner(&live.owner, &ticket.manifest_owner) {
+        let PublicPublicationBaseline::Durable(base) = &ticket.certified.base().target else {
+            return Err(SessionError::WrongPublicManifestTicket);
+        };
+        if !recovery_hydration::same_manifest_owner(&live.owner, &Some(base.manifest_owner.clone()))
+        {
             return Err(SessionError::WrongPublicManifestTicket);
         }
         self.public_manifest_baseline_is_current(
@@ -1254,15 +1339,12 @@ impl SessionLib {
         &self,
         base: &PublicManifestBase,
     ) -> Result<bool, SessionError> {
-        if self.log.publication_revision() != Some(base.log_revision) {
-            return Ok(false);
-        }
         match &base.target {
-            PublicPublicationBaseline::Durable {
+            PublicPublicationBaseline::Durable(DurableWriteBase {
                 owner,
                 store_revision,
                 ..
-            } => self.public_manifest_baseline_is_current(
+            }) => self.public_manifest_baseline_is_current(
                 base.session,
                 &base.path,
                 owner,
@@ -1292,24 +1374,14 @@ impl SessionLib {
         } else {
             self.log.reserve()
         };
-        base.log_revision = self
-            .log
-            .publication_revision()
-            .ok_or(SessionError::StaleStagedDeclaration)?;
-        if let PublicPublicationBaseline::Durable {
-            graph,
-            store_revision,
-            allocation_ceiling,
-            ..
-        } = &mut base.target
-        {
+        if let PublicPublicationBaseline::Durable(write_base) = &mut base.target {
             let state = self
                 .durable_graph
                 .as_ref()
                 .expect("validated publication attachment");
-            *graph = state.graph.clone();
-            *store_revision = state.store_revision;
-            *allocation_ceiling = state.allocation_ceiling;
+            write_base.graph = state.graph.clone();
+            write_base.store_revision = state.store_revision;
+            write_base.allocation_ceiling = state.allocation_ceiling;
         }
         Ok(reserved)
     }

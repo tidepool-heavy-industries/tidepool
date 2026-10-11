@@ -47,11 +47,11 @@ struct AuthoredWrite {
 
 /// Immutable final execution writes. A public retry changes only its merge
 /// baseline, never this private suffix, exact winners, leases, or effects.
-/// Each captured publication attempt reserves its own causal join identity.
+/// Each semantic certification owns a causal join reservation; storage retries
+/// retain that identity and its receipt.
 /// The private scope keeps live roots owned until publication or abandonment.
 pub struct FinalExecutionIntent {
-    owner: Arc<super::admission::RuntimeAdmissionOwner>,
-    owner_epoch: u64,
+    owner_stamp: super::OwnerStamp,
     durable_owner: Option<RecoveryPublicOwner>,
     _private_scope_lease: Option<Arc<super::RuntimeLexicalScopeLease>>,
     admitted: PublicVisibilitySnapshot,
@@ -85,10 +85,16 @@ struct CapturedDeclarationPublication {
     surface: AdmittedDeclarationSurface,
 }
 
+/// Issued once and consumed by a declaration certificate. Abandonment burns it.
+pub struct JoinReservation {
+    generation: Generation,
+}
+static_assertions::assert_not_impl_any!(JoinReservation: Clone, Copy);
+
 /// One current public graph paired with the unchanged final execution intent.
 pub struct DeclarationPublicationBase {
-    public: PublicManifestBase,
-    reserved: Generation,
+    pub(super) public: PublicManifestBase,
+    reservation: JoinReservation,
     intent: Arc<FinalExecutionIntent>,
     current_public: Option<DeclarationTip>,
     public_context: Option<Arc<ExactDeclarationContext>>,
@@ -110,7 +116,7 @@ pub enum CertifiedDeclarationPublication {
 }
 
 pub struct AcceptedDeclarationPublication {
-    base: DeclarationPublicationBase,
+    pub(super) base: DeclarationPublicationBase,
     receipt: PublicationEvidence,
 }
 
@@ -302,21 +308,17 @@ fn snapshot_digest(snapshot: &PublicVisibilitySnapshot) -> serde_json::Value {
 
 fn paired_version(base: &PublicManifestBase) -> String {
     let target = match &base.target {
-        super::PublicPublicationBaseline::Durable {
-            owner,
-            store_revision,
-            allocation_ceiling,
-            ..
-        } => serde_json::json!({
-            "mode": "durable", "owner": owner, "revision": store_revision.0, "ceiling": allocation_ceiling.0 }),
+        super::PublicPublicationBaseline::Durable(write) => serde_json::json!({
+            "mode": "durable", "owner": write.owner, "domain": write.domain }),
         super::PublicPublicationBaseline::Ephemeral => serde_json::json!({ "mode": "ephemeral" }),
     };
     let bytes = serde_json::to_vec(&serde_json::json!({
-        "schema": "tidepool-paired-declaration-baseline-v2", "session": base.session.0,
+        "schema": "tidepool-paired-declaration-baseline-v3", "session": base.session.0,
+        "owner": base.owner_stamp.owner.identity(), "epoch": base.owner_stamp.epoch,
         "target": target,
-        "log_revision": base.log_revision,
-        "public": snapshot_digest(&base.expected_public), "private": snapshot_digest(&base.expected_private),
-    })).expect("paired baseline contains serializable scalar identities");
+        "public": snapshot_digest(&base.semantic.expected_public), "private": snapshot_digest(&base.semantic.expected_private),
+        "public_view": base.semantic.public_view, "private_view": base.semantic.private_view,
+    })).expect("paired baseline contains serializable identities");
     blake3::hash(&bytes).to_hex().to_string()
 }
 
@@ -689,8 +691,7 @@ impl PersistentSession {
             )
             .map_err(SessionError::InvalidPublicBindingPromotion)?;
         Ok(Arc::new(FinalExecutionIntent {
-            owner: self.admission_owner().clone(),
-            owner_epoch: self.admission_owner().epoch(),
+            owner_stamp: super::OwnerStamp::capture(self.admission_owner()),
             durable_owner,
             _private_scope_lease: private_scope_lease,
             admitted: admitted.clone(),
@@ -772,28 +773,27 @@ impl PersistentSession {
         owner: Option<RecoveryPublicOwner>,
         intent: Arc<FinalExecutionIntent>,
     ) -> Result<CapturedDeclarationPublication, SessionError> {
-        if !Arc::ptr_eq(&intent.owner, self.admission_owner())
-            || intent.owner_epoch != self.admission_owner().epoch()
-        {
+        if !intent.owner_stamp.matches(self.admission_owner()) {
             return Err(SessionError::StaleStagedDeclaration);
         }
         if intent.durable_owner != owner {
             return Err(SessionError::WrongPublicManifestTicket);
         }
-        let public = self.snapshot_publication_target(
+        let mut public = self.snapshot_publication_target(
             owner,
             intent.admitted.scope,
             intent.private.scope,
             intent.write_ids.clone(),
             intent.source_keys.clone(),
         )?;
-        if public.expected_private != intent.private {
+        public.intent = super::PublicationIntent::Final(intent.clone());
+        if public.semantic.expected_private != intent.private {
             return Err(SessionError::StaleStagedDeclaration);
         }
-        let current_public = tip(self.lib(), public.expected_public.declaration_tip)?;
+        let current_public = tip(self.lib(), public.semantic.expected_public.declaration_tip)?;
         let public_context = self
             .lib()
-            .current_exact_context_in(public.expected_public.scope);
+            .current_exact_context_in(public.semantic.expected_public.scope);
         let mut surface = current_public
             .as_ref()
             .map(|tip| tip.surface.clone())
@@ -824,7 +824,9 @@ impl PersistentSession {
         let reserved = self.lib_mut().reserve_join_for_publication(&mut public)?;
         let expected_public_version = paired_version(&public);
         Ok(DeclarationPublicationBase {
-            reserved,
+            reservation: JoinReservation {
+                generation: reserved,
+            },
             public,
             intent,
             current_public,
@@ -880,19 +882,25 @@ impl PersistentSession {
         &self,
         base: &PublicManifestBase,
     ) -> Result<bool, SessionError> {
-        if base
-            .admission_owner
-            .as_ref()
-            .is_none_or(|owner| !Arc::ptr_eq(owner, self.admission_owner()))
-            || base.admission_owner_epoch != Some(self.admission_owner().epoch())
-        {
-            return Ok(false);
+        if !base.owner_stamp.matches(self.admission_owner()) {
+            return Err(SessionError::StaleStagedDeclaration);
         }
         if !self.has_lib() {
             return Err(SessionError::MissingDeclarationLibrary);
         }
-        Ok(self.lib().publication_baseline_is_current(base)?
-            && self.publication_views_are_current(&base.expected_public, &base.expected_private))
+        if self
+            .public_visibility_snapshot_in(base.private_scope)
+            .as_ref()
+            != Some(&base.semantic.expected_private)
+            || self.compile_view_digest_in(base.private_scope) != Some(base.semantic.private_view)
+        {
+            return Err(SessionError::StaleStagedDeclaration);
+        }
+        Ok(self
+            .public_visibility_snapshot_in(base.public_scope)
+            .as_ref()
+            == Some(&base.semantic.expected_public)
+            && self.compile_view_digest_in(base.public_scope) == Some(base.semantic.public_view))
     }
 }
 
@@ -960,7 +968,7 @@ impl DeclarationPublicationBase {
         &self,
         selection: &PublicationSelection,
     ) -> Option<Arc<super::CertifiedDeclarationProjection>> {
-        if self.public.expected_public != self.intent.admitted
+        if self.public.semantic.expected_public != self.intent.admitted
             || self.public_context != self.intent.admitted_context
         {
             return None;
@@ -987,7 +995,7 @@ impl DeclarationPublicationBase {
         Some(projection.clone())
     }
     pub fn reserved_generation(&self) -> Generation {
-        self.reserved
+        self.reservation.generation
     }
     pub fn intent(&self) -> &Arc<FinalExecutionIntent> {
         &self.intent
@@ -999,7 +1007,7 @@ impl DeclarationPublicationBase {
     ) -> Result<CertifiedDeclarationPublication, SessionError> {
         let selection = self.selected_facts()?;
         if let Some(projection) = self.reusable_projection(&selection) {
-            let generation = self.reserved;
+            let generation = self.reservation.generation;
             return Ok(CertifiedDeclarationPublication::Accepted(
                 AcceptedDeclarationPublication {
                     base: self,
@@ -1114,7 +1122,7 @@ impl DeclarationPublicationBase {
             writes,
             reserved: ReservedJoin {
                 unit: owner.unit.clone(),
-                module: SessionModule::lib(self.reserved).module_name(),
+                module: SessionModule::lib(self.reservation.generation).module_name(),
                 path: scratch.path().join("joined.hi"),
             },
             artifacts: materialized.artifacts,
@@ -1148,13 +1156,18 @@ impl DeclarationPublicationBase {
 
 impl AcceptedDeclarationPublication {
     pub fn reserved_generation(&self) -> Generation {
-        self.base.reserved
+        self.base.reservation.generation
     }
     pub fn intent(&self) -> &Arc<FinalExecutionIntent> {
         &self.base.intent
     }
     pub fn stage(self) -> Result<StagedPublicManifest, SessionError> {
-        let Self { mut base, receipt } = self;
+        super::CertifiedPublication::Declarations(self).stage()
+    }
+    pub(super) fn stage_materialized(&self) -> Result<StagedPublicManifest, SessionError> {
+        let base = &self.base;
+        let receipt = self.receipt.clone();
+        let mut public = base.public.clone();
         let context = if let Some(projection) = receipt.projection() {
             projection.context().clone()
         } else {
@@ -1181,13 +1194,13 @@ impl AcceptedDeclarationPublication {
             })
         };
         let binding_custody = receipt.native_binding_custody_requirements()?;
-        let error_path = base.public.path.clone();
-        if let super::PublicPublicationBaseline::Durable {
+        let error_path = public.path.clone();
+        if let super::PublicPublicationBaseline::Durable(super::DurableWriteBase {
             owner,
             graph,
             artifact_root,
             ..
-        } = &mut base.public.target
+        }) = &mut public.target
         {
             let mut candidate = graph.candidate();
             let root = artifact_root.as_path();
@@ -1253,7 +1266,7 @@ impl AcceptedDeclarationPublication {
             }
             candidate
                 .insert_node(recovery::RecoveryNode {
-                    id: base.reserved,
+                    id: base.reservation.generation,
                     parent: None,
                     kind: recovery::RecoveryNodeKind::Join,
                     implementation_refs,
@@ -1280,7 +1293,7 @@ impl AcceptedDeclarationPublication {
             let mut surface = previous
                 .map(|surface| (*surface).clone())
                 .unwrap_or_else(|| recovery::RecoveryPublicSurface::empty(owner.clone()));
-            surface.declaration_root = Some(base.reserved);
+            surface.declaration_root = Some(base.reservation.generation);
             surface.context_root = Some(context_root);
             candidate
                 .replace_surface(surface)
@@ -1408,19 +1421,19 @@ impl AcceptedDeclarationPublication {
         let declaration = PreparedDeclarationPublication {
             source_domain_owners,
             binding_custody,
-            generation: base.reserved,
+            generation: base.reservation.generation,
             declared_names,
             joined: JoinedDeclaration {
                 turn,
                 evidence: receipt,
                 context,
-                surface: base.surface,
+                surface: base.surface.clone(),
             },
         };
-        base.public
+        public
             .final_bindings
             .retain(|(name, _)| !declaration.declared_names.contains(name));
-        let mut ticket = base.public.stage()?;
+        let mut ticket = public.stage_materialized()?;
         ticket.declaration = Some(declaration);
         Ok(ticket)
     }
@@ -1437,7 +1450,8 @@ impl SessionLib {
         ticket.declaration.as_ref().is_none_or(|declaration| {
             self.log.is_reserved(declaration.generation)
                 && declaration.joined.turn.parent.is_none()
-                && self.scope_tip(ticket.public_scope) == ticket.expected_public.declaration_tip
+                && self.scope_tip(ticket.public_scope)
+                    == ticket.semantic.expected_public.declaration_tip
                 && self.tips.contains_key(&ticket.public_scope)
                 && self.source_selections_preserved(
                     ticket.public_scope,
@@ -1476,6 +1490,8 @@ impl SessionLib {
 }
 #[cfg(test)]
 mod linearization_tests;
+#[cfg(test)]
+mod semantic_currency_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1485,7 +1501,7 @@ mod tests {
         SourceImports,
     };
 
-    fn accepted(base: DeclarationPublicationBase) -> AcceptedDeclarationPublication {
+    pub(super) fn accepted(base: DeclarationPublicationBase) -> AcceptedDeclarationPublication {
         match tidepool_testing::with_settlement(|settlement| base.certify(settlement)).unwrap() {
             CertifiedDeclarationPublication::Accepted(accepted) => accepted,
             CertifiedDeclarationPublication::Rejected(rejected) => {
@@ -1494,7 +1510,7 @@ mod tests {
         }
     }
 
-    fn commit_certified_source(
+    pub(super) fn commit_certified_source(
         session: &mut PersistentSession,
         scope: ScopeId,
         source: &str,
@@ -1588,7 +1604,8 @@ mod tests {
             cancelled.request_cancellation();
             assert!(matches!(
                 session
-                    .publish_staged_public_manifest(publication.stage().unwrap(), &cancelled)
+                    .attempt_public_manifest(publication.stage().unwrap(), &cancelled)
+                    .map(crate::session::settled_manifest_attempt)
                     .unwrap(),
                 PublicManifestCommit::Cancelled
             ));
@@ -1604,7 +1621,8 @@ mod tests {
                 let decision = PublicationDecision::new();
                 assert!(matches!(
                     session
-                        .publish_staged_public_manifest(accepted(base).stage().unwrap(), &decision)
+                        .attempt_public_manifest(accepted(base).stage().unwrap(), &decision)
+                        .map(crate::session::settled_manifest_attempt)
                         .unwrap(),
                     PublicManifestCommit::Refused { .. }
                 ));
@@ -1615,16 +1633,14 @@ mod tests {
             let ExecutionPublication::Declarations(base) = restage(&mut session) else {
                 panic!("authored publication")
             };
-            let stage = accepted(base).stage().unwrap();
+            let publication = accepted(base);
+            let semantic = paired_version(&publication.base.public);
+            let revision = session.lib().log.publication_revision();
             session.lib_mut().log.reserve();
+            assert_eq!(paired_version(&publication.base.public), semantic);
+            assert_eq!(session.lib().log.publication_revision(), revision);
+            drop(publication);
             let decision = PublicationDecision::new();
-            assert!(matches!(
-                session
-                    .publish_staged_public_manifest(stage, &decision)
-                    .unwrap(),
-                PublicManifestCommit::Stale
-            ));
-            assert_eq!(decision.phase(), PublicationPhase::Running);
             let ExecutionPublication::Declarations(base) = restage(&mut session) else {
                 panic!("authored publication")
             };
@@ -1635,7 +1651,8 @@ mod tests {
             ));
             let published_generation = publication.reserved_generation();
             let commit = session
-                .publish_staged_public_manifest(publication.stage().unwrap(), &decision)
+                .attempt_public_manifest(publication.stage().unwrap(), &decision)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap();
             assert!(matches!(
                 commit,
@@ -1735,10 +1752,8 @@ mod tests {
         let published_generation = publication.reserved_generation();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(
-                    publication.stage().unwrap(),
-                    &PublicationDecision::new()
-                )
+                .attempt_public_manifest(publication.stage().unwrap(), &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -1795,10 +1810,8 @@ mod tests {
         let continuation_generation = publication.reserved_generation();
         assert!(matches!(
             reopened
-                .publish_staged_public_manifest(
-                    publication.stage().unwrap(),
-                    &PublicationDecision::new()
-                )
+                .attempt_public_manifest(publication.stage().unwrap(), &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -1898,10 +1911,8 @@ mod tests {
         let published_generation = publication.reserved_generation();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(
-                    publication.stage().unwrap(),
-                    &PublicationDecision::new()
-                )
+                .attempt_public_manifest(publication.stage().unwrap(), &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -1965,25 +1976,25 @@ mod tests {
                 let concurrent_publication = accepted(base);
                 proptest::prop_assert!(matches!(&concurrent_publication.receipt, PublicationEvidence::ReusedProjection { .. }), "concurrent winner itself is unchanged");
                 let generation = concurrent_publication.reserved_generation();
-                proptest::prop_assert!(matches!(session.publish_staged_public_manifest(concurrent_publication.stage().unwrap(), &PublicationDecision::new()).unwrap(), PublicManifestCommit::Durable));
+                proptest::prop_assert!(matches!(session.attempt_public_manifest(concurrent_publication.stage().unwrap(), &PublicationDecision::new()).map(crate::session::settled_manifest_attempt).unwrap(), PublicManifestCommit::Durable));
                 insertion_order.push(generation);
                 current_public_generation = Some(generation);
             }
             let old_decision = PublicationDecision::new();
             if !contended { old_decision.request_cancellation(); }
-            let old_outcome = session.publish_staged_public_manifest(old, &old_decision).unwrap();
-            proptest::prop_assert!(matches!(old_outcome, PublicManifestCommit::Stale) && contended || matches!(old_outcome, PublicManifestCommit::Cancelled) && !contended);
+            let old_outcome = session.attempt_public_manifest(old, &old_decision).unwrap();
+            proptest::prop_assert!(matches!(old_outcome, crate::session::PublicationAttempt::Rebase(_)) && contended || matches!(old_outcome, crate::session::PublicationAttempt::Settled(PublicManifestCommit::Cancelled)) && !contended);
             let cancelled = accepted(session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap());
             let cancelled_generation = cancelled.reserved_generation();
             proptest::prop_assert!(Arc::ptr_eq(cancelled.intent(), &intent));
             let cancellation = PublicationDecision::new(); cancellation.request_cancellation();
-            proptest::prop_assert!(matches!(session.publish_staged_public_manifest(cancelled.stage().unwrap(), &cancellation).unwrap(), PublicManifestCommit::Cancelled));
+            proptest::prop_assert!(matches!(session.attempt_public_manifest(cancelled.stage().unwrap(), &cancellation).map(crate::session::settled_manifest_attempt).unwrap(), PublicManifestCommit::Cancelled));
             let refused = accepted(session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap());
             let refused_generation = refused.reserved_generation();
             let refused = refused.stage().unwrap();
             let before_refusal = recovery.state();
             recovery.store.inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
-            proptest::prop_assert!(matches!(session.publish_staged_public_manifest(refused, &PublicationDecision::new()).unwrap(), PublicManifestCommit::Refused { .. }), "known pre-COMMIT refusal");
+            proptest::prop_assert!(matches!(session.attempt_public_manifest(refused, &PublicationDecision::new()).map(crate::session::settled_manifest_attempt).unwrap(), PublicManifestCommit::Refused { .. }), "known pre-COMMIT refusal");
             proptest::prop_assert_eq!(recovery.state(), before_refusal);
             proptest::prop_assert_eq!(session.public_visibility_snapshot_in(execution.private_scope()).unwrap(), private);
             let base = session.restage_declaration_publication(owner.clone(), intent.clone()).unwrap();
@@ -2002,7 +2013,7 @@ mod tests {
                 let export = reused.receipt.exports().iter().find(|export| export.head.occurrence == name).unwrap();
                 proptest::prop_assert_eq!(&export.head.module, &SessionModule::lib(generation).module_name());
             }
-            proptest::prop_assert!(matches!(session.publish_staged_public_manifest(reused.stage().unwrap(), &PublicationDecision::new()).unwrap(), PublicManifestCommit::Durable));
+            proptest::prop_assert!(matches!(session.attempt_public_manifest(reused.stage().unwrap(), &PublicationDecision::new()).map(crate::session::settled_manifest_attempt).unwrap(), PublicManifestCommit::Durable));
             insertion_order.push(generation);
             let cold = recovery::load_domain_graph(Arc::new(crate::session::RunRecoveryStore::open(recovery.store.path()).unwrap()), crate::session::RecoveryDomainId::Root).unwrap();
             let node = cold.node(generation).unwrap().unwrap();
@@ -2065,7 +2076,8 @@ mod tests {
         let b_stage = ephemeral_binding_stage(&mut session, b_intent);
         assert!(matches!(
             session
-                .publish_staged_public_manifest(b_stage, &PublicationDecision::new())
+                .attempt_public_manifest(b_stage, &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             super::super::PublicManifestCommit::Ephemeral
         ));
@@ -2078,16 +2090,15 @@ mod tests {
         );
         let decision = PublicationDecision::new();
         assert!(matches!(
-            session
-                .publish_staged_public_manifest(stale_a, &decision)
-                .unwrap(),
-            PublicManifestCommit::Stale
+            session.attempt_public_manifest(stale_a, &decision).unwrap(),
+            crate::session::PublicationAttempt::Rebase(_)
         ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         let current_a = ephemeral_binding_stage(&mut session, a_intent.clone());
         assert!(matches!(
             session
-                .publish_staged_public_manifest(current_a, &decision)
+                .attempt_public_manifest(current_a, &decision)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Ephemeral
         ));
@@ -2149,7 +2160,8 @@ mod tests {
         );
         assert!(matches!(
             session
-                .publish_staged_public_manifest(stage, &cancelled)
+                .attempt_public_manifest(stage, &cancelled)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Cancelled
         ));
@@ -2182,19 +2194,10 @@ mod tests {
         assert_ne!(session.lib().log.publication_revision(), revision);
         let decision = PublicationDecision::new();
         assert!(matches!(
-            session
-                .publish_staged_public_manifest(stale, &decision)
-                .unwrap(),
-            PublicManifestCommit::Stale
+            session.attempt_public_manifest(stale, &decision).unwrap(),
+            crate::session::PublicationAttempt::Settled(PublicManifestCommit::Ephemeral)
         ));
-        assert_eq!(decision.phase(), PublicationPhase::Running);
-        let current = ephemeral_binding_stage(&mut session, intent.clone());
-        assert!(matches!(
-            session
-                .publish_staged_public_manifest(current, &decision)
-                .unwrap(),
-            PublicManifestCommit::Ephemeral
-        ));
+        assert_eq!(decision.phase(), PublicationPhase::Published);
         assert_eq!(recovery.state(), before);
         assert_eq!(session.lib().generation(), generation);
         let owner = RecoveryPublicOwner::new(
@@ -2253,10 +2256,8 @@ mod tests {
         );
         let decision = PublicationDecision::new();
         assert!(matches!(
-            second
-                .publish_staged_public_manifest(ticket, &decision)
-                .unwrap(),
-            PublicManifestCommit::Stale
+            second.attempt_public_manifest(ticket, &decision).unwrap(),
+            crate::session::PublicationAttempt::Settled(PublicManifestCommit::Refused { .. })
         ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         assert!(second
@@ -2316,10 +2317,8 @@ mod tests {
         );
         let decision = PublicationDecision::new();
         assert!(matches!(
-            second
-                .publish_staged_public_manifest(ticket, &decision)
-                .unwrap(),
-            PublicManifestCommit::Stale
+            second.attempt_public_manifest(ticket, &decision).unwrap(),
+            crate::session::PublicationAttempt::Settled(PublicManifestCommit::Refused { .. })
         ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         let ExecutionPublication::Bindings(base) =
@@ -2329,7 +2328,8 @@ mod tests {
         };
         assert!(matches!(
             first
-                .publish_staged_public_manifest(base.stage().unwrap(), &decision)
+                .attempt_public_manifest(base.stage().unwrap(), &decision)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -2422,10 +2422,8 @@ mod tests {
                 && export.head.namespace == ExportNamespace::Type));
         assert!(matches!(
             session
-                .publish_staged_public_manifest(
-                    publication.stage().unwrap(),
-                    &PublicationDecision::new()
-                )
+                .attempt_public_manifest(publication.stage().unwrap(), &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -2488,7 +2486,8 @@ mod tests {
         .unwrap();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(b_stage, &PublicationDecision::new())
+                .attempt_public_manifest(b_stage, &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -2522,10 +2521,8 @@ mod tests {
         let published_generation = publication.reserved_generation();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(
-                    publication.stage().unwrap(),
-                    &PublicationDecision::new()
-                )
+                .attempt_public_manifest(publication.stage().unwrap(), &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -2622,10 +2619,11 @@ mod tests {
         );
         assert!(matches!(
             session
-                .publish_staged_public_manifest(
+                .attempt_public_manifest(
                     b_publication.stage().unwrap(),
                     &PublicationDecision::new()
                 )
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -2724,17 +2722,19 @@ mod tests {
                 )
                 .unwrap(),
         );
-        let first_generation = first.base.reserved;
-        assert!(matches!(session.publish_staged_public_manifest(
-            first.stage().unwrap(), &PublicationDecision::new(),
-        ).unwrap(), PublicManifestCommit::Durable));
+        let first_generation = first.base.reservation.generation;
+        assert!(matches!(
+            session
+                .attempt_public_manifest(first.stage().unwrap(), &PublicationDecision::new(),)
+                .map(crate::session::settled_manifest_attempt)
+                .unwrap(),
+            PublicManifestCommit::Durable
+        ));
         let first_public = session.public_visibility_snapshot_in(public).unwrap();
         let decision = PublicationDecision::new();
         assert!(matches!(
-            session
-                .publish_staged_public_manifest(old_b, &decision)
-                .unwrap(),
-            PublicManifestCommit::Stale
+            session.attempt_public_manifest(old_b, &decision).unwrap(),
+            crate::session::PublicationAttempt::Rebase(_)
         ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         assert_eq!(
@@ -2767,7 +2767,8 @@ mod tests {
         cancellation.request_cancellation();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(cancelled.stage().unwrap(), &cancellation,)
+                .attempt_public_manifest(cancelled.stage().unwrap(), &cancellation,)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Cancelled
         ));
@@ -2791,7 +2792,7 @@ mod tests {
             &retry.base.intent.writes.last().unwrap().evidence,
             &authored_b
         ));
-        let generation = retry.base.reserved;
+        let generation = retry.base.reservation.generation;
         let proof = retry.receipt.clone();
         for (name, original) in [
             ("keepA", original_a),
@@ -2824,7 +2825,8 @@ mod tests {
         );
         assert!(matches!(
             session
-                .publish_staged_public_manifest(retry.stage().unwrap(), &decision,)
+                .attempt_public_manifest(retry.stage().unwrap(), &decision,)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -3045,7 +3047,8 @@ mod tests {
             .unwrap();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(binding_stage, &PublicationDecision::new())
+                .attempt_public_manifest(binding_stage, &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -3071,7 +3074,8 @@ mod tests {
         cancelled.request_cancellation();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(cancelled_stage, &cancelled)
+                .attempt_public_manifest(cancelled_stage, &cancelled)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Cancelled
         ));
@@ -3091,13 +3095,16 @@ mod tests {
         )
         .stage()
         .unwrap();
-        session.lib_mut().reserve_join_generation_durable().unwrap();
+        session
+            .lib_mut()
+            .reserve_declaration_generations_durable(65)
+            .unwrap();
         let decision = PublicationDecision::new();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(stale_stage, &decision)
+                .attempt_public_manifest(stale_stage, &decision)
                 .unwrap(),
-            PublicManifestCommit::Stale
+            crate::session::PublicationAttempt::RestageMetadata(_)
         ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         assert_eq!(session.lib().scope_tip(public), Generation(0));
@@ -3107,13 +3114,14 @@ mod tests {
                 .snapshot_declaration_publication(owner, &admitted, private, vec![other_id], vec![])
                 .unwrap(),
         );
-        let generation = retry.base.reserved;
+        let generation = retry.base.reservation.generation;
         let proof = retry.receipt.clone();
         let ticket = retry.stage().unwrap();
         let before_epoch = session.public_visibility_snapshot_in(public).unwrap().epoch;
         assert!(matches!(
             session
-                .publish_staged_public_manifest(ticket, &decision)
+                .attempt_public_manifest(ticket, &decision)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -3262,7 +3270,8 @@ mod tests {
         assert_eq!(base.receipt.instances().classes.len(), 1);
         assert!(matches!(
             session
-                .publish_staged_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
+                .attempt_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -3335,19 +3344,18 @@ mod tests {
         assert!(b_generation > original_attempt);
         assert!(matches!(
             session
-                .publish_staged_public_manifest(
+                .attempt_public_manifest(
                     b_publication.stage().unwrap(),
                     &PublicationDecision::new()
                 )
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
         let decision = PublicationDecision::new();
         assert!(matches!(
-            session
-                .publish_staged_public_manifest(old_a, &decision)
-                .unwrap(),
-            PublicManifestCommit::Stale
+            session.attempt_public_manifest(old_a, &decision).unwrap(),
+            crate::session::PublicationAttempt::Rebase(_)
         ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         let cancelled = accepted(
@@ -3362,7 +3370,8 @@ mod tests {
         cancellation.request_cancellation();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(cancelled.stage().unwrap(), &cancellation)
+                .attempt_public_manifest(cancelled.stage().unwrap(), &cancellation)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Cancelled
         ));
@@ -3382,7 +3391,8 @@ mod tests {
             .inject_fault(crate::session::recovery_store::StoreFault::BeforeCommit);
         assert!(matches!(
             session
-                .publish_staged_public_manifest(refused, &PublicationDecision::new())
+                .attempt_public_manifest(refused, &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Refused { .. }
         ));
@@ -3449,7 +3459,8 @@ mod tests {
                 && child.record_parent.as_deref() == Some("PublicRecord")));
         assert!(matches!(
             session
-                .publish_staged_public_manifest(publication.stage().unwrap(), &decision)
+                .attempt_public_manifest(publication.stage().unwrap(), &decision)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));

@@ -8010,7 +8010,8 @@ pub(super) mod tests {
         cancelled.request_cancellation();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(cancel_stage, &cancelled)
+                .attempt_public_manifest(cancel_stage, &cancelled)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Cancelled
         ));
@@ -8036,7 +8037,8 @@ pub(super) mod tests {
         let decision = PublicationDecision::new();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(stage, &decision)
+                .attempt_public_manifest(stage, &decision)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -8067,10 +8069,8 @@ pub(super) mod tests {
         }
         let stale = PublicationDecision::new();
         assert!(matches!(
-            session
-                .publish_staged_public_manifest(old_stage, &stale)
-                .unwrap(),
-            PublicManifestCommit::Stale
+            session.attempt_public_manifest(old_stage, &stale).unwrap(),
+            crate::session::PublicationAttempt::RestageMetadata(_)
         ));
         assert_eq!(stale.phase(), PublicationPhase::Running);
         assert_eq!(
@@ -13027,15 +13027,19 @@ pub(super) mod tests {
             .unwrap()
             .stage()
             .unwrap();
-        assert!(matches!(state.publish_staged_public_manifest(
-            staged_b, &super::super::PublicationDecision::new(),
-        ).unwrap(), super::super::PublicManifestCommit::Durable));
+        assert!(matches!(
+            state
+                .attempt_public_manifest(staged_b, &super::super::PublicationDecision::new(),)
+                .map(crate::session::settled_manifest_attempt)
+                .unwrap(),
+            super::super::PublicManifestCommit::Durable
+        ));
         let decision_a = super::super::PublicationDecision::new();
         assert!(matches!(
             state
-                .publish_staged_public_manifest(staged_a, &decision_a)
+                .attempt_public_manifest(staged_a, &decision_a)
                 .unwrap(),
-            super::super::PublicManifestCommit::Stale
+            crate::session::PublicationAttempt::RestageMetadata(_)
         ));
         let restaged_a = state
             .snapshot_binding_publication(
@@ -13049,7 +13053,8 @@ pub(super) mod tests {
             .unwrap();
         assert!(matches!(
             state
-                .publish_staged_public_manifest(restaged_a, &decision_a)
+                .attempt_public_manifest(restaged_a, &decision_a)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             super::super::PublicManifestCommit::Durable
         ));

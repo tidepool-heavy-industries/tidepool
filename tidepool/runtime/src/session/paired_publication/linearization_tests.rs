@@ -122,7 +122,8 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
             assert!(!eligible.load(Ordering::Acquire));
             assert!(matches!(
                 session
-                    .publish_staged_public_manifest(staged, &decision)
+                    .attempt_public_manifest(staged, &decision)
+                    .map(crate::session::settled_manifest_attempt)
                     .unwrap(),
                 PublicManifestCommit::Cancelled
             ));
@@ -142,7 +143,8 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
                 (
                     persistence,
                     session
-                        .publish_staged_public_manifest(staged, &decision)
+                        .attempt_public_manifest(staged, &decision)
+                        .map(crate::session::settled_manifest_attempt)
                         .unwrap()
                 ),
                 (Persistence::Durable, PublicManifestCommit::Durable)
@@ -193,7 +195,8 @@ fn actual_binding_publication_keeps_winner(persistence: Persistence, first: Firs
     let restaged = stage(&mut session);
     assert!(matches!(
         session
-            .publish_staged_public_manifest(restaged, &decision)
+            .attempt_public_manifest(restaged, &decision)
+            .map(crate::session::settled_manifest_attempt)
             .unwrap(),
         PublicManifestCommit::Cancelled
     ));
@@ -327,7 +330,8 @@ fn fixed_sibling_intents_restage_after_observation_and_domain_changes_without_re
     };
     assert!(matches!(
         session
-            .publish_staged_public_manifest(base_b.stage().unwrap(), &PublicationDecision::new())
+            .attempt_public_manifest(base_b.stage().unwrap(), &PublicationDecision::new())
+            .map(crate::session::settled_manifest_attempt)
             .unwrap(),
         PublicManifestCommit::Durable
     ));
@@ -340,9 +344,9 @@ fn fixed_sibling_intents_restage_after_observation_and_domain_changes_without_re
     let decision_a = PublicationDecision::new();
     assert!(matches!(
         session
-            .publish_staged_public_manifest(staged_a, &decision_a)
+            .attempt_public_manifest(staged_a, &decision_a)
             .unwrap(),
-        PublicManifestCommit::Stale
+        crate::session::PublicationAttempt::RestageMetadata(_)
     ));
     assert_eq!(decision_a.phase(), PublicationPhase::Running);
     let ExecutionPublication::Bindings(retry_a) = session
@@ -353,7 +357,8 @@ fn fixed_sibling_intents_restage_after_observation_and_domain_changes_without_re
     };
     assert!(matches!(
         session
-            .publish_staged_public_manifest(retry_a.stage().unwrap(), &decision_a)
+            .attempt_public_manifest(retry_a.stage().unwrap(), &decision_a)
+            .map(crate::session::settled_manifest_attempt)
             .unwrap(),
         PublicManifestCommit::Durable
     ));

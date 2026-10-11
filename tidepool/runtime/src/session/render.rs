@@ -312,8 +312,8 @@ impl DeclarationRetraction {
 /// has no lexical meaning until a certified join commits it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeclLog {
-    /// Changes at every graph mutation, including reserved-slot settlement.
-    /// Zero permanently fences publication if the revision space is exhausted.
+    /// Changes when committed declaration facts are installed or restored.
+    /// Zero records exhaustion of the fact revision space.
     revision: u64,
     /// Highest consumed identity, including failed candidates and burned floors.
     /// Durable reservation tails belong to SessionLib, never this sparse log.
@@ -390,13 +390,7 @@ impl DeclLog {
     ) -> Option<PreparedDeclarationReservations> {
         let count_u64 = u64::try_from(count).ok()?;
         let high_water = Generation(self.high_water.0.checked_add(count_u64)?);
-        // Exhaustion disables revision-based publication tickets, as in
-        // advance_revision; it does not consume the generation namespace.
-        let revision = if self.revision == 0 {
-            0
-        } else {
-            self.revision.checked_add(count_u64).unwrap_or(0)
-        };
+        let revision = self.revision;
         let mut generations = Vec::new();
         generations.try_reserve_exact(count).ok()?;
         let mut slots = BTreeMap::new();
@@ -464,7 +458,6 @@ impl DeclLog {
             return false;
         }
         self.high_water = high_water;
-        self.advance_revision();
         true
     }
 
@@ -474,7 +467,6 @@ impl DeclLog {
         assert!(floor >= self.high_water);
         if floor != self.high_water {
             self.high_water = floor;
-            self.advance_revision();
         }
     }
 
@@ -515,6 +507,7 @@ impl DeclLog {
         let generation = self.next_generation();
         self.turns
             .insert(generation, DeclarationSlot::Committed(turn));
+        self.advance_revision();
         generation
     }
 
@@ -728,7 +721,6 @@ impl DeclLog {
     }
 
     fn next_generation(&mut self) -> Generation {
-        self.advance_revision();
         self.high_water = Generation(
             self.high_water
                 .0
@@ -1435,7 +1427,10 @@ mod tests {
                 log.commit_reservations(prepared),
                 vec![Generation(u64::MAX - 1), Generation(u64::MAX)]
             );
-            assert_eq!(log.publication_revision(), None);
+            assert_eq!(
+                log.publication_revision(),
+                (revision != 0).then_some(revision)
+            );
             assert!(log.is_reserved(Generation(u64::MAX)));
             assert!(log.prepare_reservations(1).is_none());
         }

@@ -693,7 +693,6 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         Refused,
         RecoveryRequired,
         Cancelled,
-        Stale,
     }
     enum NativeEvent {
         Claimed,
@@ -733,7 +732,6 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
                         ObservedCommit::RecoveryRequired
                     }
                     PublicManifestCommit::Cancelled => ObservedCommit::Cancelled,
-                    PublicManifestCommit::Stale => ObservedCommit::Stale,
                 };
                 native_tx.send(NativeEvent::Settled(observed)).unwrap();
                 // Native disposition is already settled, and the JoinHandle

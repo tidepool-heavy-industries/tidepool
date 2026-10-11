@@ -3698,30 +3698,38 @@ where
                 binding: input.mounted.binding,
             });
         }
-        Ok(self.state.snapshot_publication_target(
+        let mut base = self.state.snapshot_publication_target(
             execution.durable_owner.clone(),
             execution.admitted_public().scope,
             execution.private_scope(),
             vec![input.mounted.binding],
             Vec::new(),
-        )?)
+        )?;
+        base.intent = super::PublicationIntent::HostBindings(
+            super::BindingPublicationPolicy::ActivationInput,
+        );
+        Ok(base)
     }
 
-    pub fn publish_staged_public_manifest(
+    pub fn attempt_public_manifest(
         &mut self,
         ticket: super::StagedPublicManifest,
         decision: &Arc<super::PublicationDecision>,
-    ) -> Result<super::PublicManifestCommit, SessionError> {
-        self.state.publish_staged_public_manifest(ticket, decision)
+    ) -> Result<super::PublicationAttempt, SessionError> {
+        self.state.attempt_public_manifest(ticket, decision)
     }
-
-    pub fn publish_staged_public_manifest_admitted(
+    pub fn attempt_public_manifest_admitted(
         &mut self,
         ticket: super::StagedPublicManifest,
         claim: impl FnOnce() -> Option<super::PublicationClaim>,
-    ) -> Result<super::PublicManifestCommit, SessionError> {
-        self.state
-            .publish_staged_public_manifest_admitted(ticket, claim)
+    ) -> Result<super::PublicationAttempt, SessionError> {
+        self.state.attempt_public_manifest_admitted(ticket, claim)
+    }
+    pub fn restage_publication_metadata(
+        &mut self,
+        certified: super::CertifiedPublication,
+    ) -> Result<super::PublicationAttempt, SessionError> {
+        self.state.restage_publication_metadata(certified)
     }
 
     /// Admit one compiler-certified target and its demanded source closure
@@ -9444,10 +9452,8 @@ mod authored_publication_tests {
         };
         assert!(matches!(
             producer
-                .publish_staged_public_manifest(
-                    accepted.stage().unwrap(),
-                    &PublicationDecision::new()
-                )
+                .attempt_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -10102,10 +10108,11 @@ mod authored_publication_tests {
         };
         assert!(matches!(
             session
-                .publish_staged_public_manifest(
+                .attempt_public_manifest(
                     joined.stage().unwrap(),
                     &super::super::PublicationDecision::new()
                 )
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             super::super::PublicManifestCommit::Durable
         ));
@@ -10174,10 +10181,11 @@ mod authored_publication_tests {
         };
         assert!(matches!(
             session
-                .publish_staged_public_manifest(
+                .attempt_public_manifest(
                     joined.stage().unwrap(),
                     &super::super::PublicationDecision::new()
                 )
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             super::super::PublicManifestCommit::Durable
         ));

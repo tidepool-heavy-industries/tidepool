@@ -370,7 +370,8 @@ fn publish_checked_fixture(
     };
     assert!(matches!(
         resident
-            .publish_staged_public_manifest(ticket, &crate::session::PublicationDecision::new())
+            .attempt_public_manifest(ticket, &crate::session::PublicationDecision::new())
+            .map(crate::session::settled_manifest_attempt)
             .expect("commit the checked fixture to ROOT"),
         crate::session::PublicManifestCommit::Ephemeral
     ));
@@ -3789,7 +3790,8 @@ fn durable_activation_binding_retains_private_authored_source_after_retirement_a
     );
     assert!(matches!(
         resident
-            .publish_staged_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
+            .attempt_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
+            .map(crate::session::settled_manifest_attempt)
             .unwrap(),
         PublicManifestCommit::Durable
     ));

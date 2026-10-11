@@ -218,7 +218,8 @@ fn recovered_public_owner_rejects_foreign_admission_and_incarnation_without_effe
     };
     assert!(matches!(
         first
-            .publish_staged_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
+            .attempt_public_manifest(base.stage().unwrap(), &PublicationDecision::new())
+            .map(crate::session::settled_manifest_attempt)
             .unwrap(),
         PublicManifestCommit::Durable
     ));
@@ -521,7 +522,8 @@ fn materialization_retraction_attaches_authored_owner_before_publication() {
     };
     assert!(matches!(
         session
-            .publish_staged_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new(),)
+            .attempt_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new(),)
+            .map(crate::session::settled_manifest_attempt)
             .unwrap(),
         PublicManifestCommit::Durable
     ));
@@ -602,7 +604,8 @@ fn exact_publication_recovery_in_fresh_worker_preserves_originals_hidden_depende
     };
     assert!(matches!(
         producer
-            .publish_staged_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new())
+            .attempt_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new())
+            .map(crate::session::settled_manifest_attempt)
             .unwrap(),
         PublicManifestCommit::Durable
     ));

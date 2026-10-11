@@ -562,6 +562,9 @@ pub(super) struct RuntimeAdmissionOwner {
 }
 
 impl RuntimeAdmissionOwner {
+    pub(super) fn identity(&self) -> uuid::Uuid {
+        self.identity
+    }
     pub(super) fn epoch(&self) -> u64 {
         self.epoch.load(std::sync::atomic::Ordering::Acquire)
     }
@@ -3842,10 +3845,8 @@ mod tests {
         ));
         let decision = PublicationDecision::new();
         assert!(matches!(
-            session
-                .publish_staged_public_manifest(ticket, &decision)
-                .unwrap(),
-            PublicManifestCommit::Stale
+            session.attempt_public_manifest(ticket, &decision).unwrap(),
+            crate::session::PublicationAttempt::Settled(PublicManifestCommit::Refused { .. })
         ));
         assert_eq!(decision.phase(), PublicationPhase::Running);
         assert!(session.scope_tree().is_live(private.private_scope()));

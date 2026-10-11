@@ -73,9 +73,13 @@ prepare/close/seal pipeline. Ticket owners use `prepare_cell_program_admitted`
 and pass its independent action/close result to `finish_cell_program_admitted`.
 
 Execution intent retains the exact original declaration and value identities.
-A declaration publication attempt captures its current public predecessors
-before issuing its own join identity. Restaging allocates a fresh attempt;
-stale, refused and cancelled attempts burn their reservations without rerunning
-private execution. Binding-only capture does not issue a declaration reservation.
+A declaration publication captures its relevant public predecessors before
+issuing an affine join reservation. Reservation and durable allocation changes
+do not alter declaration facts or compiler-view currency. Relevant public changes
+require compiler recertification against the retained private intent; metadata
+changes retain the same receipt and reservation while applying the delta to the
+latest complete durable graph. Owner retirement or private-intent mutation is
+terminal. Abandoned, refused and cancelled reservations remain burned without
+rerunning private execution. Binding-only capture issues no join reservation.
 Recovery declarations remain an append-only causal DAG:
 parents and implementation references identify previously issued declarations.

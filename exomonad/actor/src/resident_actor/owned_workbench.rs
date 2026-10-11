@@ -8,6 +8,8 @@ use super::*;
 use crate::{OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAdvance, WorkbenchDispatch};
 
 #[cfg(test)]
+pub(super) mod counting_publication_tests;
+#[cfg(test)]
 mod model_tests;
 #[cfg(test)]
 mod publication_tests;

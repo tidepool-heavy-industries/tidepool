@@ -746,6 +746,17 @@ impl RecoveryGraphCandidate {
     pub(crate) fn seal(self) -> Result<RecoveryGraph, RecoveryError> {
         Ok(self.graph)
     }
+    pub(crate) fn prepare_publication(
+        self,
+        base: &crate::session::DurableWriteBase,
+    ) -> Result<StagedRecoveryManifest, RecoveryError> {
+        if self.graph.domain != base.domain {
+            return Err(error(
+                "publication candidate belongs to a different durable domain",
+            ));
+        }
+        self.prepare(base.store_revision, base.allocation_ceiling)
+    }
     pub(crate) fn prepare(
         self,
         expected: StoreRevision,

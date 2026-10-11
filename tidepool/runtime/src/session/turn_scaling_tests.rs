@@ -2047,7 +2047,8 @@ where
         None,
         |resident| {
             let result = resident
-                .publish_staged_public_manifest(ticket, &PublicationDecision::new())
+                .attempt_public_manifest(ticket, &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap();
             assert!(matches!(
                 (publication_target, result),

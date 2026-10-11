@@ -6,6 +6,21 @@
 //! run after the mount checkout settles; invocation reacquires and validates
 //! the mounted input before applying the retained code.
 
+#[cfg(test)]
+pub(crate) fn settled_manifest_attempt(
+    attempt: tidepool_runtime::session::PublicationAttempt,
+) -> tidepool_runtime::session::PublicManifestCommit {
+    match attempt {
+        tidepool_runtime::session::PublicationAttempt::Settled(commit) => commit,
+        tidepool_runtime::session::PublicationAttempt::Rebase(_) => {
+            panic!("expected terminal publication, received semantic rebase")
+        }
+        tidepool_runtime::session::PublicationAttempt::RestageMetadata(_) => {
+            panic!("expected terminal publication, received metadata restage")
+        }
+    }
+}
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7795,19 +7810,58 @@ where
             ));
         }
         let resources = input.publication_resources();
+        let mut retained = None;
         loop {
-            let snapshot_resources = resources.clone();
-            let baseline = self
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    session
-                        .snapshot_host_binding_publication(
-                            &snapshot_resources.execution.admission,
-                            &snapshot_resources.input,
-                        )
-                        .map_err(ResidentActorWorkbenchError::Resident)
-                })
-                .await?;
+            let baseline = if let Some(certified) = retained.take() {
+                let refreshed = self
+                    .access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        session
+                            .restage_publication_metadata(certified)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })
+                    })
+                    .await?;
+                match refreshed {
+                    tidepool_runtime::session::PublicationAttempt::RestageMetadata(certified) => {
+                        certified
+                    }
+                    tidepool_runtime::session::PublicationAttempt::Settled(commit) => {
+                        return Ok(match commit {
+                            tidepool_runtime::session::PublicManifestCommit::Refused { error } => {
+                                ActivationInputPublication::Refused { error }
+                            }
+                            tidepool_runtime::session::PublicManifestCommit::RecoveryRequired {
+                                error,
+                            } => ActivationInputPublication::RecoveryRequired { error },
+                            tidepool_runtime::session::PublicManifestCommit::Cancelled => {
+                                ActivationInputPublication::Cancelled
+                            }
+                            _ => unreachable!("metadata refresh cannot publish"),
+                        })
+                    }
+                    tidepool_runtime::session::PublicationAttempt::Rebase(_) => {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            "host metadata refresh returned declaration intent".into(),
+                        ))
+                    }
+                }
+            } else {
+                let snapshot_resources = resources.clone();
+                let base = self
+                    .access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        session
+                            .snapshot_host_binding_publication(
+                                &snapshot_resources.execution.admission,
+                                &snapshot_resources.input,
+                            )
+                            .map_err(ResidentActorWorkbenchError::Resident)
+                    })
+                    .await?;
+                tidepool_runtime::session::CertifiedPublication::Bindings(base)
+            };
             let stage_resources = resources.clone();
             let ticket = spawn_blocking_in_span(move || {
                 let _native_owner = stage_resources;
@@ -7816,6 +7870,7 @@ where
             .await
             .map_err(ResidentActorWorkbenchError::Join)?
             .map_err(ResidentError::Session)?;
+            crate::call_timing::publication_attempt(ticket.reserved_generation());
             let native_resources = resources.clone();
             let native_requests = requests.clone();
             let native_retirement = retirement.clone();
@@ -7827,7 +7882,7 @@ where
                     .with_machine(context.clone(), move |session, _, _| {
                         let mut activation = None;
                         let mut refusal = None;
-                        let outcome = session.publish_staged_public_manifest_admitted(ticket, || {
+                        let outcome = session.attempt_public_manifest_admitted(ticket, || {
                     let admitted = native_requests.begin_activation_publication(
                         actor, request, native_resources.clone(), &native_retirement,
                     );
@@ -7848,8 +7903,12 @@ where
                         let completion = activation.map(|lease| lease.finish());
                         #[cfg(test)]
                         if let Some(observer) = &native_observer {
-                            observer(ActivationPublicationObservation::NativeSettled(&outcome))
-                                .expect("native settlement observer must release its phase");
+                            if let tidepool_runtime::session::PublicationAttempt::Settled(commit) =
+                                &outcome
+                            {
+                                observer(ActivationPublicationObservation::NativeSettled(commit))
+                                    .expect("native settlement observer must release its phase");
+                            }
                         }
                         match refusal {
                             Some(crate::request::ActivationPublicationRefusal::Retired(
@@ -7871,25 +7930,38 @@ where
                         Ok((outcome, completion))
                     })
                     .await?;
-            return Ok(match publication {
-                (tidepool_runtime::session::PublicManifestCommit::Stale, _) => continue,
-                (
-                    tidepool_runtime::session::PublicManifestCommit::Durable
-                    | tidepool_runtime::session::PublicManifestCommit::Ephemeral,
-                    completion,
-                ) => ActivationInputPublication::Published(
-                    completion.expect("native visible claim issued its request completion"),
-                ),
-                (tidepool_runtime::session::PublicManifestCommit::Cancelled, _) => {
+            let (outcome, completion) = publication;
+            let commit = match outcome {
+                tidepool_runtime::session::PublicationAttempt::RestageMetadata(certified) => {
+                    crate::call_timing::publication_retry(
+                        crate::call_timing::PublicationRetryReason::Metadata,
+                    );
+                    retained = Some(certified);
+                    continue;
+                }
+                tidepool_runtime::session::PublicationAttempt::Rebase(_) => {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "host binding publication returned declaration intent".into(),
+                    ));
+                }
+                tidepool_runtime::session::PublicationAttempt::Settled(commit) => commit,
+            };
+            return Ok(match commit {
+                tidepool_runtime::session::PublicManifestCommit::Durable
+                | tidepool_runtime::session::PublicManifestCommit::Ephemeral => {
+                    ActivationInputPublication::Published(
+                        completion.expect("native visible claim issued its request completion"),
+                    )
+                }
+                tidepool_runtime::session::PublicManifestCommit::Cancelled => {
                     ActivationInputPublication::Cancelled
                 }
-                (tidepool_runtime::session::PublicManifestCommit::Refused { error }, _) => {
+                tidepool_runtime::session::PublicManifestCommit::Refused { error } => {
                     ActivationInputPublication::Refused { error }
                 }
-                (
-                    tidepool_runtime::session::PublicManifestCommit::RecoveryRequired { error },
-                    _,
-                ) => ActivationInputPublication::RecoveryRequired { error },
+                tidepool_runtime::session::PublicManifestCommit::RecoveryRequired { error } => {
+                    ActivationInputPublication::RecoveryRequired { error }
+                }
             });
         }
     }
@@ -7924,7 +7996,7 @@ where
                 source: Box::new(source),
             };
         let admission = execution.admission.clone();
-        let intent = self
+        let mut intent = self
             .access
             .with_machine(context.clone(), move |session, _, _| {
                 session
@@ -7937,6 +8009,7 @@ where
             .map_err(|error| publication_error(PrivatePublicationPhase::Freeze, error))?;
         let native_bindings = intent.native_binding_names();
         let mut cancel_on_drop = CancelCompilerTransactionOnDrop(None);
+        let mut retained = None;
         loop {
             if matches!(
                 execution.decision.phase(),
@@ -7948,59 +8021,124 @@ where
                     native_bindings,
                 });
             }
-            let owner = execution.owner.clone();
-            let intent = intent.clone();
-            let baseline = self
-                .access
-                .with_machine(context.clone(), move |session, _, _| {
-                    match owner.durable() {
-                        Some(durable) => {
-                            session.restage_execution_publication(durable.clone(), intent)
-                        }
-                        None => session.restage_ephemeral_execution_publication(intent),
-                    }
-                    .map_err(|error| {
-                        ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+            let prepared = if let Some(certified) = retained.take() {
+                let refreshed = self
+                    .access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        session
+                            .restage_publication_metadata(certified)
+                            .map_err(|error| {
+                                ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                            })
                     })
+                    .await
+                    .map_err(|error| publication_error(PrivatePublicationPhase::Restage, error))?;
+                let certified = match refreshed {
+                    tidepool_runtime::session::PublicationAttempt::RestageMetadata(certified) => {
+                        certified
+                    }
+                    tidepool_runtime::session::PublicationAttempt::Rebase(retained_intent) => {
+                        crate::call_timing::publication_retry(
+                            crate::call_timing::PublicationRetryReason::Semantic,
+                        );
+                        intent = retained_intent;
+                        continue;
+                    }
+                    tidepool_runtime::session::PublicationAttempt::Settled(commit) => {
+                        return Ok(PrivateExecutionPublication::Manifest {
+                            commit,
+                            native_bindings,
+                        })
+                    }
+                };
+                spawn_blocking_in_span(move || {
+                    certified
+                        .stage()
+                        .map(PreparedExecutionPublication::Manifest)
                 })
                 .await
-                .map_err(|error| publication_error(PrivatePublicationPhase::Restage, error))?;
-            let compiler_work = CompilerCloseOwner::current()
-                .and_then(|owner| owner.register_publication_work())
+                .map_err(ResidentActorWorkbenchError::Join)?
                 .map_err(|error| {
-                    publication_error(PrivatePublicationPhase::CertifyAndStage, error)
-                })?;
-            cancel_on_drop.0 = Some(compiler_work.cancellation());
-            let prepared = crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
-                compiler_work.run(
-                    |settlement| match baseline {
-                        tidepool_runtime::session::ExecutionPublication::Bindings(base) => {
-                            base.stage().map(PreparedExecutionPublication::Manifest)
-                        }
-                        tidepool_runtime::session::ExecutionPublication::Declarations(base) => {
-                            match base.certify(settlement)? {
-                                tidepool_runtime::session::CertifiedDeclarationPublication::Accepted(accepted) => {
-                                    accepted.stage().map(PreparedExecutionPublication::Manifest)
-                                }
-                                tidepool_runtime::session::CertifiedDeclarationPublication::Rejected(rejected) => {
-                                    Ok(PreparedExecutionPublication::Rejected(rejected))
-                                }
+                    ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                })?
+            } else {
+                let owner = execution.owner.clone();
+                let next_intent = intent.clone();
+                let baseline = self
+                    .access
+                    .with_machine(context.clone(), move |session, _, _| {
+                        match owner.durable() {
+                            Some(durable) => {
+                                session.restage_execution_publication(durable.clone(), next_intent)
                             }
+                            None => session.restage_ephemeral_execution_publication(next_intent),
                         }
-                    },
-                )
-            }))
-            .await
-            .map_err(|error| publication_error(PrivatePublicationPhase::CertifyAndStage, ResidentActorWorkbenchError::Join(error)))?
-            .map_err(|error| publication_error(PrivatePublicationPhase::CertifyAndStage, ResidentActorWorkbenchError::Resident(ResidentError::Session(error))))?;
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })
+                    })
+                    .await
+                    .map_err(|error| publication_error(PrivatePublicationPhase::Restage, error))?;
+                match baseline {
+                    tidepool_runtime::session::ExecutionPublication::Bindings(base) => {
+                        spawn_blocking_in_span(move || {
+                            base.stage().map(PreparedExecutionPublication::Manifest)
+                        })
+                        .await
+                        .map_err(ResidentActorWorkbenchError::Join)?
+                        .map_err(|error| {
+                            ResidentActorWorkbenchError::Resident(ResidentError::Session(error))
+                        })?
+                    }
+                    tidepool_runtime::session::ExecutionPublication::Declarations(base) => {
+                        let compiler_work = CompilerCloseOwner::current()
+                            .and_then(|owner| owner.register_publication_work())
+                            .map_err(|error| {
+                                publication_error(PrivatePublicationPhase::CertifyAndStage, error)
+                            })?;
+                        cancel_on_drop.0 = Some(compiler_work.cancellation());
+                        let certification =
+                            crate::call_timing::timed_compile(spawn_blocking_in_span(move || {
+                                compiler_work.run(|settlement| base.certify(settlement))
+                            }))
+                            .await
+                            .map_err(|error| {
+                                publication_error(
+                                    PrivatePublicationPhase::CertifyAndStage,
+                                    ResidentActorWorkbenchError::Join(error),
+                                )
+                            })?
+                            .map_err(|error| {
+                                publication_error(
+                                    PrivatePublicationPhase::CertifyAndStage,
+                                    ResidentActorWorkbenchError::Resident(ResidentError::Session(
+                                        error,
+                                    )),
+                                )
+                            })?;
+                        // The compiler ticket has settled before metadata staging begins.
+                        match certification {
+                            tidepool_runtime::session::CertifiedDeclarationPublication::Accepted(accepted) => {
+                                spawn_blocking_in_span(move || accepted.stage().map(PreparedExecutionPublication::Manifest))
+                                    .await.map_err(ResidentActorWorkbenchError::Join)?
+                                    .map_err(|error| ResidentActorWorkbenchError::Resident(ResidentError::Session(error)))?
+                            }
+                            tidepool_runtime::session::CertifiedDeclarationPublication::Rejected(rejected) => PreparedExecutionPublication::Rejected(rejected),
+                        }
+                    }
+                }
+            };
             match prepared {
                 PreparedExecutionPublication::Manifest(ticket) => {
+                    #[cfg(test)]
+                    crate::resident_actor::before_private_publication_attempt().await;
+                    crate::call_timing::publication_attempt(ticket.reserved_generation());
                     let decision = execution.decision.clone();
                     let outcome = self
                         .access
                         .with_machine(context.clone(), move |session, _, _| {
                             let outcome = session
-                                .publish_staged_public_manifest(ticket, &decision)
+                                .attempt_public_manifest(ticket, &decision)
                                 .map_err(|error| {
                                     ResidentActorWorkbenchError::Resident(ResidentError::Session(
                                         error,
@@ -8012,12 +8150,25 @@ where
                         .map_err(|error| {
                             publication_error(PrivatePublicationPhase::Publish, error)
                         })?;
-                    if matches!(
-                        outcome,
-                        tidepool_runtime::session::PublicManifestCommit::Stale
-                    ) {
-                        continue;
-                    }
+                    let outcome = match outcome {
+                        tidepool_runtime::session::PublicationAttempt::Settled(commit) => commit,
+                        tidepool_runtime::session::PublicationAttempt::Rebase(retained_intent) => {
+                            crate::call_timing::publication_retry(
+                                crate::call_timing::PublicationRetryReason::Semantic,
+                            );
+                            intent = retained_intent;
+                            continue;
+                        }
+                        tidepool_runtime::session::PublicationAttempt::RestageMetadata(
+                            certified,
+                        ) => {
+                            crate::call_timing::publication_retry(
+                                crate::call_timing::PublicationRetryReason::Metadata,
+                            );
+                            retained = Some(certified);
+                            continue;
+                        }
+                    };
                     cancel_on_drop.0 = None;
                     return Ok(PrivateExecutionPublication::Manifest {
                         commit: outcome,
@@ -21551,10 +21702,11 @@ pub(crate) mod request_tests {
         let ticket = publication.stage().unwrap();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(
+                .attempt_public_manifest(
                     ticket,
                     &tidepool_runtime::session::PublicationDecision::new(),
                 )
+                .map(crate::resident_workbench::settled_manifest_attempt)
                 .unwrap(),
             tidepool_runtime::session::PublicManifestCommit::Ephemeral
         ));
@@ -21714,10 +21866,12 @@ pub(crate) mod request_tests {
             };
             let ticket = base.stage().unwrap();
             self.recovery.fail_commits();
-            let outcome = session.publish_staged_public_manifest(
-                ticket,
-                &tidepool_runtime::session::PublicationDecision::new(),
-            );
+            let outcome = session
+                .attempt_public_manifest(
+                    ticket,
+                    &tidepool_runtime::session::PublicationDecision::new(),
+                )
+                .map(crate::resident_workbench::settled_manifest_attempt);
             self.recovery.clear_commit_failure();
             assert!(matches!(
                 outcome.unwrap(),

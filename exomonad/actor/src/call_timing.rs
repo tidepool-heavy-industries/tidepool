@@ -30,6 +30,10 @@ struct Totals {
     compile_ms: AtomicU64,
     compile_count: AtomicU64,
     compile_observations: AtomicU64,
+    semantic_rebases: AtomicU64,
+    metadata_restages: AtomicU64,
+    publication_attempts: AtomicU64,
+    latest_join_reservation: AtomicU64,
     jev_ms: AtomicU64,
     jev_count: AtomicU64,
     exec_ms: AtomicU64,
@@ -97,6 +101,35 @@ impl Drop for CompilerInterval {
                 "compiler round timing");
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PublicationRetryReason {
+    Semantic,
+    Metadata,
+}
+pub(crate) fn publication_attempt(reservation: Option<tidepool_repr::Generation>) {
+    CURRENT
+        .try_with(|totals| {
+            totals.publication_attempts.fetch_add(1, Ordering::Relaxed);
+            if let Some(reservation) = reservation {
+                totals
+                    .latest_join_reservation
+                    .store(reservation.0, Ordering::Relaxed);
+            }
+        })
+        .ok();
+}
+pub(crate) fn publication_retry(reason: PublicationRetryReason) {
+    CURRENT
+        .try_with(|totals| {
+            let field = match reason {
+                PublicationRetryReason::Semantic => &totals.semantic_rebases,
+                PublicationRetryReason::Metadata => &totals.metadata_restages,
+            };
+            field.fetch_add(1, Ordering::Relaxed);
+        })
+        .ok();
 }
 
 /// Add to the open scope's checkout-wait total; a no-op with no open scope.
@@ -250,6 +283,10 @@ impl CallScope {
             checkout_hold_ms = self.totals.checkout_hold_ms.load(Ordering::Relaxed),
             compile_ms = self.totals.compile_ms.load(Ordering::Relaxed),
             compile_count = self.totals.compile_count.load(Ordering::Relaxed),
+            semantic_rebases = self.totals.semantic_rebases.load(Ordering::Relaxed),
+            metadata_restages = self.totals.metadata_restages.load(Ordering::Relaxed),
+            publication_attempts = self.totals.publication_attempts.load(Ordering::Relaxed),
+            latest_join_reservation = match self.totals.latest_join_reservation.load(Ordering::Relaxed) { 0 => None, generation => Some(generation) },
             jev_ms = self.totals.jev_ms.load(Ordering::Relaxed),
             jev_count = self.totals.jev_count.load(Ordering::Relaxed),
             exec_ms = self.totals.exec_ms.load(Ordering::Relaxed),

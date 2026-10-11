@@ -3078,15 +3078,25 @@ impl PersistentSession {
             .lib
             .as_ref()
             .ok_or(SessionError::MissingDeclarationLibrary)?;
-        let mut base = if let Some(owner) = owner {
+        let semantic = super::PublicationSemanticBase {
+            expected_public,
+            expected_private,
+            public_view: self
+                .compile_view_digest_in(public_scope)
+                .ok_or(SessionError::StaleStagedDeclaration)?,
+            private_view: self
+                .compile_view_digest_in(private_scope)
+                .ok_or(SessionError::StaleStagedDeclaration)?,
+        };
+        let base = if let Some(owner) = owner {
             lib.snapshot_public_manifest(
                 owner,
+                super::OwnerStamp::capture(self.admission_owner()),
+                semantic,
                 public_scope,
                 private_scope,
                 write_ids,
                 source_keys,
-                expected_public,
-                expected_private,
                 final_by_name.into_iter().collect(),
                 final_source_instances,
             )?
@@ -3099,67 +3109,156 @@ impl PersistentSession {
                 return Err(SessionError::WrongPublicManifestTicket);
             }
             PublicManifestBase {
-                admission_owner: None,
-                admission_owner_epoch: None,
-                manifest_owner: None,
+                owner_stamp: super::OwnerStamp::capture(self.admission_owner()),
+                semantic,
+                intent: super::PublicationIntent::HostBindings(
+                    super::BindingPublicationPolicy::ExactPromotion,
+                ),
                 session: lib.id,
-                log_revision: lib
-                    .log
-                    .publication_revision()
-                    .ok_or(SessionError::StaleStagedDeclaration)?,
                 path: lib.root.clone(),
                 target: super::PublicPublicationBaseline::Ephemeral,
                 public_scope,
                 private_scope,
                 write_ids,
                 source_keys,
-                expected_public,
-                expected_private,
                 final_bindings: final_by_name.into_iter().collect(),
                 final_source_instances,
             }
         };
-        base.admission_owner = Some(self.admission_owner().clone());
-        base.admission_owner_epoch = Some(self.admission_owner().epoch());
         Ok(base)
     }
 
-    /// Compare and rename under the same exclusive session checkout. A stale
-    /// candidate never claims the execution's publication decision.
-    pub fn publish_staged_public_manifest(
+    /// Exact semantic and durable preflight happens before the short commit claim.
+    pub fn attempt_public_manifest(
         &mut self,
         ticket: StagedPublicManifest,
         decision: &Arc<PublicationDecision>,
-    ) -> Result<PublicManifestCommit, SessionError> {
-        self.publish_staged_public_manifest_admitted(ticket, || decision.claim_commit())
+    ) -> Result<super::PublicationAttempt, SessionError> {
+        self.attempt_public_manifest_admitted(ticket, || decision.claim_commit())
+    }
+    /// Reacquire a coherent write base, retaining compiler authority and identity.
+    /// Interference since the failed attempt can still require semantic rebasing.
+    pub fn restage_publication_metadata(
+        &mut self,
+        mut certified: super::CertifiedPublication,
+    ) -> Result<super::PublicationAttempt, SessionError> {
+        let old = certified.base();
+        if !old.owner_stamp.matches(self.admission_owner())
+            || !self.scopes.is_live(old.public_scope)
+            || !self.scopes.is_live(old.private_scope)
+        {
+            return Ok(super::PublicationAttempt::Settled(
+                PublicManifestCommit::Refused {
+                    error: Box::new(SessionError::StaleStagedDeclaration),
+                },
+            ));
+        }
+        let owner = match &old.target {
+            super::PublicPublicationBaseline::Durable(base) => Some(base.owner.clone()),
+            super::PublicPublicationBaseline::Ephemeral => None,
+        };
+        let mut current = self.snapshot_publication_target(
+            owner,
+            old.public_scope,
+            old.private_scope,
+            old.write_ids.clone(),
+            old.source_keys.clone(),
+        )?;
+        if current.semantic.expected_private != old.semantic.expected_private
+            || current.semantic.private_view != old.semantic.private_view
+        {
+            return Ok(super::PublicationAttempt::Settled(
+                PublicManifestCommit::Refused {
+                    error: Box::new(SessionError::StaleStagedDeclaration),
+                },
+            ));
+        }
+        if current.semantic.expected_public != old.semantic.expected_public
+            || current.semantic.public_view != old.semantic.public_view
+        {
+            if let super::PublicationIntent::Final(intent) = &old.intent {
+                return Ok(super::PublicationAttempt::Rebase(intent.clone()));
+            }
+        }
+        current.intent = old.intent.clone();
+        *certified.base_mut() = current;
+        Ok(super::PublicationAttempt::RestageMetadata(certified))
     }
 
     /// Admit the frontend's short control claim only after exact native preflight.
     /// The claim callback must not await or perform native publication itself.
-    pub fn publish_staged_public_manifest_admitted(
+    pub fn attempt_public_manifest_admitted(
         &mut self,
         mut ticket: StagedPublicManifest,
         claim: impl FnOnce() -> Option<super::PublicationClaim>,
-    ) -> Result<PublicManifestCommit, SessionError> {
-        if ticket
-            .admission_owner
-            .as_ref()
-            .is_none_or(|owner| !Arc::ptr_eq(owner, self.admission_owner()))
-            || ticket.admission_owner_epoch != Some(self.admission_owner().epoch())
+    ) -> Result<super::PublicationAttempt, SessionError> {
+        if !ticket.owner_stamp.matches(self.admission_owner())
+            || !self.scopes.is_live(ticket.public_scope)
+            || !self.scopes.is_live(ticket.private_scope)
         {
-            return Ok(PublicManifestCommit::Stale);
+            return Ok(super::PublicationAttempt::Settled(
+                PublicManifestCommit::Refused {
+                    error: Box::new(SessionError::StaleStagedDeclaration),
+                },
+            ));
         }
         let lib = self
             .lib
             .as_ref()
             .ok_or(SessionError::MissingDeclarationLibrary)?;
-        let graph_is_current = lib.public_manifest_ticket_is_current(&ticket)?;
-        if !graph_is_current
-            || !lib.declaration_publication_is_ready(&ticket)
-            || !self
-                .publication_views_are_current(&ticket.expected_public, &ticket.expected_private)
+        if matches!(
+            ticket.intent,
+            super::PublicationIntent::HostBindings(
+                super::BindingPublicationPolicy::ActivationInput
+            )
+        ) && lib
+            .current_decl_heads_in(ticket.public_scope)
+            .iter()
+            .any(|(name, _)| name == "sessionInput")
         {
-            return Ok(PublicManifestCommit::Stale);
+            return Ok(super::PublicationAttempt::Settled(
+                PublicManifestCommit::Refused {
+                    error: Box::new(SessionError::StaleStagedDeclaration),
+                },
+            ));
+        }
+        if self
+            .public_visibility_snapshot_in(ticket.private_scope)
+            .as_ref()
+            != Some(&ticket.semantic.expected_private)
+            || self.compile_view_digest_in(ticket.private_scope)
+                != Some(ticket.semantic.private_view)
+        {
+            return Ok(super::PublicationAttempt::Settled(
+                PublicManifestCommit::Refused {
+                    error: Box::new(SessionError::StaleStagedDeclaration),
+                },
+            ));
+        }
+        if self
+            .public_visibility_snapshot_in(ticket.public_scope)
+            .as_ref()
+            != Some(&ticket.semantic.expected_public)
+            || self.compile_view_digest_in(ticket.public_scope) != Some(ticket.semantic.public_view)
+        {
+            return Ok(match &ticket.intent {
+                super::PublicationIntent::Final(intent) => {
+                    super::PublicationAttempt::Rebase(intent.clone())
+                }
+                super::PublicationIntent::HostBindings(_) => {
+                    super::PublicationAttempt::RestageMetadata(ticket.certified)
+                }
+            });
+        }
+        if !lib.declaration_publication_is_ready(&ticket) {
+            return Ok(super::PublicationAttempt::Settled(
+                PublicManifestCommit::Refused {
+                    error: Box::new(SessionError::StaleStagedDeclaration),
+                },
+            ));
+        }
+        if !lib.public_manifest_ticket_is_current(&ticket)? {
+            return Ok(super::PublicationAttempt::RestageMetadata(ticket.certified));
         }
         let next_epoch = self.prepare_public_visibility_advance(ticket.public_scope)?;
         let prepared = if let Some(declaration) = &ticket.declaration {
@@ -3211,7 +3310,9 @@ impl PersistentSession {
             })
             .transpose()?;
         let Some(claim) = claim() else {
-            return Ok(PublicManifestCommit::Cancelled);
+            return Ok(super::PublicationAttempt::Settled(
+                PublicManifestCommit::Cancelled,
+            ));
         };
         let Self {
             lib,
@@ -3234,11 +3335,11 @@ impl PersistentSession {
             | PublicManifestCommit::RecoveryRequired { .. } => {
                 claim.before_rename_failure();
             }
-            PublicManifestCommit::Stale | PublicManifestCommit::Cancelled => {
+            PublicManifestCommit::Cancelled => {
                 unreachable!("prepared publication")
             }
         }
-        Ok(outcome)
+        Ok(super::PublicationAttempt::Settled(outcome))
     }
 
     pub(super) fn publication_views_are_current(
@@ -4564,7 +4665,8 @@ mod checkpoint_scope_tests {
                 .unwrap();
             assert!(matches!(
                 session
-                    .publish_staged_public_manifest(staged, &PublicationDecision::new())
+                    .attempt_public_manifest(staged, &PublicationDecision::new())
+                    .map(crate::session::settled_manifest_attempt)
                     .unwrap(),
                 PublicManifestCommit::Durable
             ));
@@ -5414,7 +5516,8 @@ mod checkpoint_scope_tests {
             .unwrap();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(staged_b, &PublicationDecision::new())
+                .attempt_public_manifest(staged_b, &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -5435,9 +5538,9 @@ mod checkpoint_scope_tests {
         let a_decision = PublicationDecision::new();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(staged_a, &a_decision)
+                .attempt_public_manifest(staged_a, &a_decision)
                 .unwrap(),
-            PublicManifestCommit::Stale
+            crate::session::PublicationAttempt::RestageMetadata(_)
         ));
         assert_eq!(a_decision.phase(), super::super::PublicationPhase::Running);
         let restaged_a = session
@@ -5447,7 +5550,8 @@ mod checkpoint_scope_tests {
             .unwrap();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(restaged_a, &a_decision)
+                .attempt_public_manifest(restaged_a, &a_decision)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -5502,10 +5606,8 @@ mod checkpoint_scope_tests {
         );
         let decision = PublicationDecision::new();
         assert!(matches!(
-            session
-                .publish_staged_public_manifest(stage, &decision)
-                .unwrap(),
-            PublicManifestCommit::Stale
+            session.attempt_public_manifest(stage, &decision).unwrap(),
+            crate::session::PublicationAttempt::Settled(PublicManifestCommit::Refused { .. })
         ));
         assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
         assert!(!crate::session::recovery_test_fixture::has_public_owners(
@@ -5519,7 +5621,8 @@ mod checkpoint_scope_tests {
         decision.request_cancellation();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(retry, &decision)
+                .attempt_public_manifest(retry, &decision)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Cancelled
         ));
@@ -5551,10 +5654,8 @@ mod checkpoint_scope_tests {
         session.advance_public_visibility(public);
         let decision = PublicationDecision::new();
         assert!(matches!(
-            session
-                .publish_staged_public_manifest(stage, &decision)
-                .unwrap(),
-            PublicManifestCommit::Stale
+            session.attempt_public_manifest(stage, &decision).unwrap(),
+            crate::session::PublicationAttempt::RestageMetadata(_)
         ));
         assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
         let retry = session
@@ -5564,7 +5665,8 @@ mod checkpoint_scope_tests {
             .unwrap();
         assert!(matches!(
             session
-                .publish_staged_public_manifest(retry, &decision)
+                .attempt_public_manifest(retry, &decision)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
@@ -5594,7 +5696,9 @@ mod checkpoint_scope_tests {
             .unwrap();
         let decision = PublicationDecision::new();
         assert!(matches!(
-            session.publish_staged_public_manifest(stage, &decision),
+            session
+                .attempt_public_manifest(stage, &decision)
+                .map(crate::session::settled_manifest_attempt),
             Err(SessionError::RecoveryManifest { .. })
         ));
         assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
@@ -5624,21 +5728,40 @@ mod checkpoint_scope_tests {
             .stage()
             .unwrap();
         assert!(matches!(
-            second.publish_staged_public_manifest(foreign, &PublicationDecision::new()),
-            Err(SessionError::WrongPublicManifestTicket)
+            second
+                .attempt_public_manifest(foreign, &PublicationDecision::new())
+                .unwrap(),
+            crate::session::PublicationAttempt::Settled(PublicManifestCommit::Refused { .. })
         ));
         let retired = first
             .snapshot_binding_publication(owner, public, private, vec![])
             .unwrap()
             .stage()
             .unwrap();
+        let metadata = first
+            .snapshot_binding_publication(public_owner("root/a"), public, private, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        first
+            .lib_mut()
+            .reserve_declaration_generations_durable(65)
+            .unwrap();
+        let crate::session::PublicationAttempt::RestageMetadata(certified) = first
+            .attempt_public_manifest(metadata, &PublicationDecision::new())
+            .unwrap()
+        else {
+            panic!("allocation refill requires metadata refresh")
+        };
         first.retire_scope(public);
+        assert!(matches!(
+            first.restage_publication_metadata(certified).unwrap(),
+            crate::session::PublicationAttempt::Settled(PublicManifestCommit::Refused { .. })
+        ));
         let decision = PublicationDecision::new();
         assert!(matches!(
-            first
-                .publish_staged_public_manifest(retired, &decision)
-                .unwrap(),
-            PublicManifestCommit::Stale
+            first.attempt_public_manifest(retired, &decision).unwrap(),
+            crate::session::PublicationAttempt::Settled(PublicManifestCommit::Refused { .. })
         ));
         assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
         assert!(!crate::session::recovery_test_fixture::has_public_owners(
@@ -5647,7 +5770,7 @@ mod checkpoint_scope_tests {
     }
 
     #[test]
-    fn staged_publication_refuses_foreign_owner_and_changed_graph_generation() {
+    fn staged_publication_refuses_foreign_owner_and_accepts_in_range_reservation() {
         let dir = tempfile::tempdir().unwrap();
         let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(dir.path());
         let mut session = publication_session(&recovery, dir.path(), 72);
@@ -5673,24 +5796,28 @@ mod checkpoint_scope_tests {
         };
         *owner = actor_b;
         assert!(matches!(
-            session.publish_staged_public_manifest(foreign, &PublicationDecision::new()),
+            session
+                .attempt_public_manifest(foreign, &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt),
             Err(SessionError::WrongPublicManifestTicket)
         ));
 
+        // Materialize the initial lease before capturing this in-range control.
+        session.lib_mut().reserve_join_generation_durable().unwrap();
         let stage = session
             .snapshot_binding_publication(actor_a, public_a, private_a, vec![])
             .unwrap()
             .stage()
             .unwrap();
+        let revision = session.lib().log.publication_revision();
         session.lib_mut().reserve_join_generation_durable().unwrap();
+        assert_eq!(session.lib().log.publication_revision(), revision);
         let decision = PublicationDecision::new();
         assert!(matches!(
-            session
-                .publish_staged_public_manifest(stage, &decision)
-                .unwrap(),
-            PublicManifestCommit::Stale
+            session.attempt_public_manifest(stage, &decision).unwrap(),
+            crate::session::PublicationAttempt::Settled(PublicManifestCommit::Durable)
         ));
-        assert_eq!(decision.phase(), super::super::PublicationPhase::Running);
+        assert_eq!(decision.phase(), super::super::PublicationPhase::Published);
     }
 
     #[test]
@@ -5713,7 +5840,8 @@ mod checkpoint_scope_tests {
         decision.request_cancellation();
         assert!(matches!(
             cancelled
-                .publish_staged_public_manifest(stage, &decision)
+                .attempt_public_manifest(stage, &decision)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Cancelled
         ));
@@ -5740,7 +5868,8 @@ mod checkpoint_scope_tests {
         let decision = PublicationDecision::new();
         assert!(matches!(
             failed
-                .publish_staged_public_manifest(stage, &decision)
+                .attempt_public_manifest(stage, &decision)
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Refused { .. }
         ));

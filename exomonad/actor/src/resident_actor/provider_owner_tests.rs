@@ -336,7 +336,8 @@ async fn commit_error_fences_provider_and_sibling_owners_until_authenticated_reo
     let original = recovery.public_owner(&owner).unwrap();
     recovery.fail_commits();
     let commit = resident
-        .publish_staged_public_manifest(ticket, &PublicationDecision::new())
+        .attempt_public_manifest(ticket, &PublicationDecision::new())
+        .map(crate::resident_workbench::settled_manifest_attempt)
         .unwrap();
     recovery.clear_commit_failure();
     assert!(matches!(
@@ -348,7 +349,10 @@ async fn commit_error_fences_provider_and_sibling_owners_until_authenticated_reo
         .with_admission(|| provider_entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
         .unwrap_err();
     assert!(blocked.requires_recovery());
-    assert_eq!(provider_entries.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        provider_entries.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
     assert!(!sibling.is_ready());
     assert!(initial_capability.is_current());
     let delayed_initial_owner =
@@ -401,7 +405,10 @@ async fn commit_error_fences_provider_and_sibling_owners_until_authenticated_reo
     assert!(provider
         .with_admission(|| provider_entries.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
         .is_err());
-    assert_eq!(provider_entries.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        provider_entries.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
     forest.shutdown().await;
     drop(actor);
     drop(forest);

@@ -921,10 +921,8 @@ mod lazy_tests {
         };
         assert!(matches!(
             producer
-                .publish_staged_public_manifest(
-                    accepted.stage().unwrap(),
-                    &PublicationDecision::new()
-                )
+                .attempt_public_manifest(accepted.stage().unwrap(), &PublicationDecision::new())
+                .map(crate::session::settled_manifest_attempt)
                 .unwrap(),
             PublicManifestCommit::Durable
         ));
