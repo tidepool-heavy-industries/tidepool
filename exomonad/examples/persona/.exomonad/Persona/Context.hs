@@ -2,10 +2,10 @@
 {-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE OverloadedRecordDot #-}
 {-# LANGUAGE OverloadedStrings #-}
--- | Prepare, inspect and deliberately activate an attention view. Startup
--- publication will be connected through the AgentSpec owner's hook.
+-- | Prepare, inspect and deliberately activate an attention view. The context
+-- owner supplies the historical startup receipt and validates the active edit.
 module Persona.Context
-  ( PreparationError(..), prepare, prepareView, judge, save, activate
+  ( PreparationError(..), prepare, prepareView, judge, save, activate, activateInitial
   , ActivationError(..)
   ) where
 
@@ -88,6 +88,7 @@ save :: Member FsWrite effects => Text -> A.Prepared -> Eff effects (Either FsEr
 save name = Memory.note name . encodeValue . A.snapshot
 
 data ActivationError = MissingBlock | AmbiguousBlock | NotAuthoredText
+  | InitialContextUnavailable C.InitialContextObservation
   deriving (Eq, Show)
 instance Display ActivationError where displayTree = displayTree . T.pack . show
 
@@ -110,3 +111,13 @@ activate reference prepared = do
       pure (Right ())
     [_] -> pure (Left NotAuthoredText)
     _ -> pure (Left AmbiguousBlock)
+
+-- | Read the owner's receipt without replaying startup. A historical reference
+-- can now be absent: activate checks the current context instead of recreating it.
+activateInitial :: Member ContextReadWrite effects
+  => A.Prepared -> Eff effects (Either ActivationError ())
+activateInitial prepared = do
+  observed <- C.getInitialContext
+  case observed of
+    C.InitialContextPublished _ _ _ reference -> activate reference prepared
+    other -> pure (Left (InitialContextUnavailable other))

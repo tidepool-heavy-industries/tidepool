@@ -98,6 +98,12 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
             tidepool_testing::fixture_source("exomonad/examples/persona/.exomonad/Persona/Spec.hs"),
         ),
         (
+            "Persona/Orientation.hs",
+            tidepool_testing::fixture_source(
+                "exomonad/examples/persona/.exomonad/Persona/Orientation.hs",
+            ),
+        ),
+        (
             "Persona/Attention.hs",
             tidepool_testing::fixture_source(
                 "exomonad/examples/persona/.exomonad/Persona/Attention.hs",
@@ -147,6 +153,7 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
             "AgentSpec".into(),
             "Persona.Memory".into(),
             "Persona.Spec".into(),
+            "Persona.Orientation".into(),
             "Persona.Attention".into(),
             "Persona.Collection".into(),
             "Persona.Context".into(),
@@ -467,7 +474,22 @@ async fn shipped_persona_initializer_uses_actual_preparation_before_first_reques
             assert_eq!(result.sections.len(), 1);
             assert_eq!(
                 result.sections[0].source.as_deref(),
-                Some("Persona.Context.prepare")
+                Some("Persona.Orientation.startup; inspection: notes/initial-attention.md")
+            );
+            let saved = preparation(&host.context.config.workspace, "initial-attention");
+            assert!(saved["operation"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()));
+            assert_eq!(
+                saved["attention"]["contextText"].as_str(),
+                Some(result.sections[0].body.as_str())
+            );
+            assert_eq!(
+                saved["attention"]["retainedMemories"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                4
             );
             for (name, expected) in [
                 ("persona", "persona-memory-original"),

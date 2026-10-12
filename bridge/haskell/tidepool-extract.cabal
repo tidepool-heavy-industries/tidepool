@@ -802,12 +802,15 @@ test-suite model-turn-test
   other-modules:
     PersonaSeedTest
     PersonaAttentionTest
+    PersonaNotebookTest
     Persona.Memory
     Persona.Web
     Persona.Spec
     Persona.Attention
     Persona.Collection
     Persona.Context
+    Persona.Orientation
+    Persona.AttentionNotebook
     Tidepool.Agent.Context
     JevPreparedTest
     Examples.JevPreparedWorkflow
@@ -827,6 +830,8 @@ test-suite model-turn-test
     Tidepool.Form.GForm
     Tidepool.Form.Wire
     Tidepool.View
+    Tidepool.Actor
+    Tidepool.Actor.Record
     Tidepool.Actor.Internal
     Tidepool.Actor.Source
     Tidepool.Aeson
