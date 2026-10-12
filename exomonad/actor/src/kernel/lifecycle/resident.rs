@@ -1292,7 +1292,11 @@ fn spawn(
 ) {
     let address = address.clone();
     let kind = match &state.resident.as_ref().unwrap().pending.as_ref().unwrap().1 {
-        Pending::ProviderInitial(_) => 6,
+        Pending::ProviderInitial(pending) => match pending.kind() {
+            provider_initial::StageKind::Beginning => 6,
+            provider_initial::StageKind::Journal => 7,
+            provider_initial::StageKind::Settling => 8,
+        },
         Pending::OwnerObservation { .. } => 4,
         Pending::Initial(_) => 0,
         Pending::Owner(_) => 1,
@@ -1308,8 +1312,15 @@ fn spawn(
                     let error =
                         "resident owner task panicked before confirmed settlement".to_owned();
                     match kind {
-                        6 => {
-                            Completion::ProviderInitial(provider_initial::Completion::Failed(error))
+                        6 | 7 | 8 => {
+                            Completion::ProviderInitial(provider_initial::Completion::Failed {
+                                stage: match kind {
+                                    6 => provider_initial::StageKind::Beginning,
+                                    7 => provider_initial::StageKind::Journal,
+                                    _ => provider_initial::StageKind::Settling,
+                                },
+                                error,
+                            })
                         }
                         0 => Completion::Initial(Err(error)),
                         1 => Completion::Owner(Err(error)),
