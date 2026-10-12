@@ -136,7 +136,7 @@ pub(super) async fn run_interactive_applications(
                         id: exomonad_actor::ActorId(input.origin.native_actor),
                         incarnation: exomonad_actor::Incarnation(input.origin.incarnation),
                     };
-                    let response = forest
+                    forest
                         .request_expansion(
                             actor,
                             (
@@ -148,7 +148,7 @@ pub(super) async fn run_interactive_applications(
                         )
                         .await
                         .map_err(|error| error.to_string())?;
-                    serde_json::to_value(response).map_err(|error| error.to_string())
+                    Ok(())
                 })
             }))
             .map_err(str::to_owned)?;
