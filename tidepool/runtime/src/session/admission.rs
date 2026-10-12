@@ -11,7 +11,7 @@ use tidepool_repr::Generation;
 
 use super::{PersistentSession, PublicVisibilitySnapshot, SessionCompileView, SessionError};
 
-/// Read-only native readiness for one originally admitted durable public owner.
+/// Native execution admission for one originally admitted durable public owner.
 /// The attachment owns its lifetime. A surviving shared run store does not
 /// keep a dropped or replaced machine attachment ready.
 pub struct RuntimeDurablePublicReadiness {
@@ -63,7 +63,7 @@ impl RuntimeDurablePublicReadiness {
                 .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
             return Err(SessionError::WrongPublicManifestTicket);
         }
-        Ok(ticket.retain_attachment(attachment))
+        Ok(ticket.retain_attachment(attachment, store))
     }
 
     pub async fn check_ready_async(&self) -> Result<(), SessionError> {

@@ -129,3 +129,27 @@ fn stopped_owner_observation_does_not_fabricate_zero_work() {
         StoreErrorKind::RecoveryRequired
     );
 }
+
+#[tokio::test]
+async fn provider_transition_retains_its_original_native_owner_until_settlement() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        RunRecoveryStore::create_async(directory.path().join("run.sqlite"))
+            .await
+            .unwrap(),
+    );
+    let observed = Arc::downgrade(&store);
+    let attachment = Arc::new(());
+    let observed_attachment = Arc::downgrade(&attachment);
+    let ticket = store
+        .begin_provider_transition()
+        .await
+        .unwrap()
+        .retain_attachment(attachment, Arc::clone(&store));
+    drop(store);
+    assert!(observed.upgrade().is_some());
+    assert!(observed_attachment.upgrade().is_some());
+    ticket.complete().await.unwrap();
+    assert!(observed.upgrade().is_none());
+    assert!(observed_attachment.upgrade().is_none());
+}

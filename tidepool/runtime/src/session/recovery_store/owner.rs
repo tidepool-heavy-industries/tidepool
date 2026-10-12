@@ -16,6 +16,12 @@ enum Reply<T> {
     Async(tokio::sync::oneshot::Sender<T>),
 }
 impl<T> Reply<T> {
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Async(reply) => reply.is_closed(),
+            Self::Blocking(_) => false,
+        }
+    }
     fn send(self, value: T) -> bool {
         match self {
             Self::Blocking(reply) => reply.send(value).is_ok(),
@@ -338,6 +344,7 @@ impl RunRecoveryStore {
             let mut watchers: Vec<Reply<StoreError>> = Vec::new();
             let mut settled = std::collections::BTreeMap::<u64, SettlementOutcome>::new();
             loop {
+                watchers.retain(|observer| !observer.is_closed());
                 let command = if matches!(phase, Phase::Ready | Phase::Fenced(_)) && !pending.is_empty() {
                     pending.pop_front().expect("nonempty deferred queue")
                 } else {
@@ -587,6 +594,7 @@ impl RunRecoveryStore {
         Ok(ProviderTransition {
             ticket: Some(ticket),
             attachment: None,
+            store_lifetime: None,
         })
     }
     pub(crate) fn begin_native_transition(&self) -> Result<OwnedTransition, StoreError> {
@@ -956,10 +964,16 @@ impl Drop for OwnedTransition {
 pub struct ProviderTransition {
     ticket: Option<OwnedTransition>,
     attachment: Option<Arc<()>>,
+    store_lifetime: Option<Arc<RunRecoveryStore>>,
 }
 impl ProviderTransition {
-    pub(crate) fn retain_attachment(mut self, attachment: Arc<()>) -> Self {
+    pub(crate) fn retain_attachment(
+        mut self,
+        attachment: Arc<()>,
+        store: Arc<RunRecoveryStore>,
+    ) -> Self {
         self.attachment = Some(attachment);
+        self.store_lifetime = Some(store);
         self
     }
     pub async fn complete(mut self) -> Result<(), StoreError> {
