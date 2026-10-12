@@ -111,6 +111,7 @@ pub(crate) enum RunPhase {
     RetiringPreparations,
     RetiringResources,
     Retired,
+    Finalizing,
 }
 
 pub(super) struct RunState {
@@ -196,6 +197,29 @@ impl ReplacementIngressGrant {
     pub(crate) fn successor_handle(&self) -> &crate::kernel::LifecycleHandle {
         &self.successor_handle
     }
+}
+
+/// Issued only after every sealed run population has confirmed settlement.
+/// It authorizes release of one exact retained lifecycle owner.
+pub(crate) struct RunRetirementGrant {
+    actor: ActorRef,
+    lifecycle: crate::kernel::LifecycleHandle,
+    never_registered: bool,
+}
+impl RunRetirementGrant {
+    pub(crate) fn actor(&self) -> ActorRef {
+        self.actor
+    }
+    pub(crate) fn lifecycle(&self) -> &crate::kernel::LifecycleHandle {
+        &self.lifecycle
+    }
+    pub(crate) fn never_registered(&self) -> bool {
+        self.never_registered
+    }
+}
+pub(super) enum RunFinalizationTargets {
+    Retire(Vec<(crate::kernel::LifecycleHandle, Option<ractor::ActorCell>)>),
+    Finalize(Vec<RunRetirementGrant>),
 }
 
 pub(crate) struct ActorReservation {
@@ -422,6 +446,21 @@ impl RunState {
             let _ = waiter.send(outcome.clone());
         }
     }
+    fn finalization_grants(&self) -> Vec<RunRetirementGrant> {
+        self.reservations
+            .iter()
+            .filter_map(|(actor, record)| {
+                record
+                    .lifecycle
+                    .as_ref()
+                    .map(|lifecycle| RunRetirementGrant {
+                        actor: *actor,
+                        lifecycle: lifecycle.clone(),
+                        never_registered: matches!(record.phase, ReservationPhase::Abandoned),
+                    })
+            })
+            .collect()
+    }
     fn settle_preparation_waiters(&mut self) {
         if !self.worker_transfers.is_empty()
             || !self.resource_transfers.is_empty()
@@ -469,7 +508,13 @@ impl RunState {
 pub(super) enum RunControlMessage {
     FinishRun {
         members: Vec<crate::kernel::lifecycle::SuccessorDrainReceipt>,
-        reply: oneshot::Sender<Result<(), DirectoryError>>,
+        reply: oneshot::Sender<Result<Vec<RunRetirementGrant>, DirectoryError>>,
+    },
+    FinalizationTargets {
+        reply: oneshot::Sender<Result<RunFinalizationTargets, DirectoryError>>,
+    },
+    CompleteRun {
+        reply: oneshot::Sender<Result<Option<ractor::ActorCell>, DirectoryError>>,
     },
     RegisterRecoveryBoot {
         journal: Arc<crate::ActorRecoveryJournal>,
@@ -787,7 +832,12 @@ impl Actor for RunControl {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             RunControlMessage::FinishRun { members, reply } => {
-                let exact = members.len() == state.entries.len()
+                let exact = members.len()
+                    == state
+                        .reservations
+                        .values()
+                        .filter(|record| matches!(record.phase, ReservationPhase::Registered))
+                        .count()
                     && members
                         .iter()
                         .map(|member| member.predecessor())
@@ -796,16 +846,19 @@ impl Actor for RunControl {
                         == members.len()
                     && members.iter().all(|receipt| {
                         state
-                            .entries
+                            .reservations
                             .get(&receipt.predecessor())
-                            .is_some_and(|entry| {
-                                receipt.confirms_actor_retirement()
-                                    && entry.actor.terminal().get().as_ref()
-                                        == Some(receipt.terminal())
-                                    && entry.actor.terminal().cleanup().as_ref()
-                                        == Some(receipt.cleanup())
-                                    && entry.actor.address().get_cell().get_status()
-                                        == ActorStatus::Stopped
+                            .is_some_and(|record| {
+                                matches!(record.phase, ReservationPhase::Registered)
+                                    && receipt.confirms_actor_retirement()
+                                    && record.terminal.get().as_ref() == Some(receipt.terminal())
+                                    && record.terminal.cleanup().as_ref() == Some(receipt.cleanup())
+                                    && state.entries.get(&receipt.predecessor()).is_none_or(
+                                        |entry| {
+                                            entry.actor.address().get_cell().get_status()
+                                                == ActorStatus::Stopped
+                                        },
+                                    )
                             })
                     });
                 let confirmed = state.phase == RunPhase::Retired
@@ -835,10 +888,52 @@ impl Actor for RunControl {
                         matches!(outcome, crate::CleanupComponentOutcome::Confirmed)
                     });
                 if exact && confirmed {
-                    if let Some(supervisor) = state.preparation_supervisor.take() {
+                    state.phase = RunPhase::Finalizing;
+                    let _ = reply.send(Ok(state.finalization_grants()));
+                } else {
+                    let _ = reply.send(Err(DirectoryError::Unavailable));
+                }
+            }
+            RunControlMessage::FinalizationTargets { reply } => {
+                let result = match state.phase {
+                    RunPhase::Retired => Ok(RunFinalizationTargets::Retire(
+                        state
+                            .reservations
+                            .values()
+                            .filter(|record| matches!(record.phase, ReservationPhase::Registered))
+                            .filter_map(|record| {
+                                record.lifecycle.clone().map(|lifecycle| {
+                                    let cell = state
+                                        .entries
+                                        .get(&lifecycle.identity())
+                                        .map(|entry| entry.actor.address().get_cell());
+                                    (lifecycle, cell)
+                                })
+                            })
+                            .collect(),
+                    )),
+                    RunPhase::Finalizing => Ok(RunFinalizationTargets::Finalize(
+                        state.finalization_grants(),
+                    )),
+                    _ => Err(DirectoryError::Unavailable),
+                };
+                let _ = reply.send(result);
+            }
+            RunControlMessage::CompleteRun { reply } => {
+                if state.phase == RunPhase::Finalizing
+                    && state.reservations.values().all(|record| {
+                        record
+                            .lifecycle
+                            .as_ref()
+                            .is_none_or(|lifecycle| lifecycle.run_finalized())
+                    })
+                {
+                    let supervisor = state.preparation_supervisor.take().map(|supervisor| {
+                        let cell = supervisor.get_cell();
                         supervisor.stop(None);
-                    }
-                    let _ = reply.send(Ok(()));
+                        cell
+                    });
+                    let _ = reply.send(Ok(supervisor));
                     myself.stop(None);
                 } else {
                     let _ = reply.send(Err(DirectoryError::Unavailable));
@@ -1897,24 +1992,49 @@ impl RunControlClient {
         receiver.await.map_err(|_| DirectoryError::Unavailable)
     }
     pub(crate) async fn finish_run(&self) -> Result<(), DirectoryError> {
-        let membership = self.seal().await?;
-        let mut members = Vec::with_capacity(membership.actors.len());
-        for (actor, _) in membership.actors {
-            let receipt =
-                tokio::time::timeout(SHUTDOWN_BUDGET, actor.lifecycle().retire_for_successor())
+        self.seal().await?;
+        let targets = self
+            .ask(|reply| RunControlMessage::FinalizationTargets { reply })
+            .await??;
+        let grants = match targets {
+            RunFinalizationTargets::Finalize(grants) => grants,
+            RunFinalizationTargets::Retire(lifecycles) => {
+                let mut members = Vec::with_capacity(lifecycles.len());
+                for (lifecycle, cell) in lifecycles {
+                    let receipt =
+                        tokio::time::timeout(SHUTDOWN_BUDGET, lifecycle.retire_for_successor())
+                            .await
+                            .map_err(|_| DirectoryError::Unavailable)?
+                            .map_err(|_| DirectoryError::Unavailable)?;
+                    if let Some(cell) = cell {
+                        cell.wait(Some(SHUTDOWN_BUDGET))
+                            .await
+                            .map_err(|_| DirectoryError::Unavailable)?;
+                    }
+                    members.push(receipt);
+                }
+                self.ask(|reply| RunControlMessage::FinishRun { members, reply })
+                    .await??
+            }
+        };
+        for grant in grants {
+            let lifecycle = grant.lifecycle().clone();
+            if !lifecycle.run_finalized() {
+                tokio::time::timeout(SHUTDOWN_BUDGET, lifecycle.finish_run(grant))
                     .await
                     .map_err(|_| DirectoryError::Unavailable)?
                     .map_err(|_| DirectoryError::Unavailable)?;
-            actor
-                .address()
-                .get_cell()
+            }
+        }
+        if let Some(supervisor) = self
+            .ask(|reply| RunControlMessage::CompleteRun { reply })
+            .await??
+        {
+            supervisor
                 .wait(Some(SHUTDOWN_BUDGET))
                 .await
                 .map_err(|_| DirectoryError::Unavailable)?;
-            members.push(receipt);
         }
-        self.ask(|reply| RunControlMessage::FinishRun { members, reply })
-            .await??;
         self.owner
             .get_cell()
             .wait(Some(SHUTDOWN_BUDGET))
