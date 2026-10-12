@@ -179,12 +179,19 @@ async function retainedOperations(page) {
   });
 }
 
+function assertEnvelopeId(value, message) {
+  // The browser contract carries i64 identifiers as lossless decimal strings.
+  assert.equal(typeof value, 'string', message);
+  assert.match(value, /^[1-9][0-9]*$/, message);
+  assert.ok(BigInt(value) <= 9223372036854775807n, message);
+}
+
 function assertAdmittedOperation(record, original) {
   assert.ok(record, 'original browser operation was not retained');
   assert.deepEqual(record.submission, original, 'retained operation changed its original ID or payload');
   assert.ok(['status', 'receipt'].includes(record.authority), 'admission must have authoritative evidence');
   assert.equal(record.state, 'input_admitted', 'original browser input was not admitted');
-  assert.ok(Number.isSafeInteger(record.envelopeId) && record.envelopeId > 0, 'admission omitted its envelope');
+  assertEnvelopeId(record.envelopeId, 'admission omitted its canonical envelope ID');
   assert.equal(record.receipt?.outcome, 'admitted', 'admission omitted its original receipt');
 }
 
@@ -515,7 +522,7 @@ async function runJourney(ready) {
             assert.equal(status.operationId, lastOperation.operation_id, 'restored lookup returned another operation');
             assert.deepEqual(status.command, lastOperation.command, 'restored lookup changed the original payload');
             assert.equal(status.state, 'input_admitted', 'restored lookup did not prove original admission');
-            assert.ok(Number.isSafeInteger(status.envelopeId) && status.envelopeId > 0, 'restored lookup omitted its envelope');
+            assertEnvelopeId(status.envelopeId, 'restored lookup omitted its canonical envelope ID');
             assert.equal(status.receipt?.outcome, 'admitted', 'restored lookup omitted its admitted receipt');
             await page.locator(`[data-operation-id="${lastOperation.operation_id}"]`)
               .getByText(/^input\s*·\s*input_admitted$/).waitFor({ timeout: 30_000 });
