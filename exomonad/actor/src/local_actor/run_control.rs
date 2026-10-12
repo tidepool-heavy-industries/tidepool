@@ -1,5 +1,6 @@
 //! One run owns actor membership, identity claims and preparation admission.
 use super::*;
+use std::collections::HashSet;
 use tokio::sync::oneshot;
 #[cfg(test)]
 mod cluster_tests;
