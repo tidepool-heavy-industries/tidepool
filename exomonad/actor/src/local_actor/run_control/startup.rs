@@ -67,7 +67,7 @@ impl RootStartupRecoveryAuthority {
     }
 }
 
-pub(super) enum StartupPredecessorAuthority {
+pub(crate) enum StartupPredecessorAuthority {
     Initial,
     Live(LifecycleHandle),
     Recovered(Arc<RootStartupRecoveryAuthority>),
