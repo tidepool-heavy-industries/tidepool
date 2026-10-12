@@ -1004,7 +1004,7 @@ mod tests {
     #[test]
     fn cancelled_context_cannot_supply_a_required_reference_to_another_candidate() {
         let (_directory, base) = fixture();
-        let before = base.store().work();
+        let before = base.store().work().unwrap();
         let mut cancelled = base.candidate();
         let root = context(&mut cancelled);
         drop(cancelled);
@@ -1021,7 +1021,7 @@ mod tests {
             candidate.replace_surface(surface).unwrap_err().kind,
             RecoveryErrorKind::Snapshot(SnapshotError::MissingBlock(_))
         ));
-        assert_eq!(base.store().work(), before);
+        assert_eq!(base.store().work().unwrap(), before);
         assert!(base.node(Generation(1)).unwrap().is_none());
         assert!(base.public_owners().next().is_none());
         // A fresh issuing materializer stages its complete packet and retries.
@@ -1029,7 +1029,7 @@ mod tests {
         let mut missing_artifact = node(1, None, root.clone(), "missing-artifact");
         missing_artifact.artifact_refs.push(ArtifactId([17; 32]));
         assert!(candidate.insert_node(missing_artifact).is_err());
-        assert_eq!(base.store().work(), before);
+        assert_eq!(base.store().work().unwrap(), before);
         candidate
             .insert_node(node(1, None, root, "complete"))
             .unwrap();
@@ -1187,12 +1187,12 @@ mod tests {
         assert!(work.offered_bytes < 16_384, "{work:?}");
         assert!(work.serialized_bytes < 2_048, "{work:?}");
         assert!(work.cid_validation_bytes < 65_536, "{work:?}");
-        let before = graph.store().work();
+        let before = graph.store().work().unwrap();
         graph = match staged.publish_and_install(|graph, _| graph) {
             StoreDisposition::Committed(graph) => graph,
             other => panic!("delta: {other:?}"),
         };
-        let after = graph.store().work();
+        let after = graph.store().work().unwrap();
         assert_eq!(after.transactions - before.transactions, 1);
         assert!(after.block_writes - before.block_writes <= work.staged_blocks);
         assert_eq!(graph.node_ids().count(), 513);
