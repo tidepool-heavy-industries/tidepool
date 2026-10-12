@@ -281,6 +281,15 @@ impl KernelContext {
         &self.lifecycle
     }
 
+    fn preparation_spawn_failure(
+        error: Box<dyn std::error::Error + Send + Sync>,
+    ) -> ractor::SpawnErr {
+        match error.downcast::<ractor::SpawnErr>() {
+            Ok(error) => *error,
+            Err(error) => ractor::SpawnErr::StartupFailed(error),
+        }
+    }
+
     pub(crate) async fn reserve_worker_lifetime_transfer(
         &self,
         child: &LocalActorRef,
@@ -378,7 +387,7 @@ impl KernelContext {
             }))
             .await
             .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?
-            .map_err(ractor::SpawnErr::StartupFailed)?;
+            .map_err(Self::preparation_spawn_failure)?;
         match result {
             // This exact cell was created by the same generic A producer.
             run_control::RootAdmissionOutcome::NativeResource(resource) => Ok(resource.cell.into()),
@@ -632,7 +641,7 @@ impl KernelContext {
                 else { context.directory.child_cleanup(context.identity).await };
             (produced, cleanup)
         }))).await.map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?
-            .map_err(ractor::SpawnErr::StartupFailed)?;
+            .map_err(Self::preparation_spawn_failure)?;
         match result {
             run_control::RootAdmissionOutcome::Actor(child, task) => {
                 drop(task);
