@@ -564,6 +564,15 @@ async fn owned_publication_worker_panic_fences_actual_native_ticket_without_publ
         .wait_transactions()
         .await
         .is_err());
+    assert!(
+        fixture
+            .admission
+            .lifecycle
+            .begin_root_binding_operation()
+            .await
+            .is_err(),
+        "uncertain publication cannot issue another binding claim"
+    );
     assert!(matches!(
         fixture.admission.lifecycle.observation().native_settlement,
         crate::kernel::lifecycle::NativeSettlement::NeedsAttention(_)
