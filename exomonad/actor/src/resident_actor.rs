@@ -12912,6 +12912,7 @@ impl ActorGraphNode {
 pub struct ResidentForest<H, O> {
     environment: ResidentEnvironment<H, O>,
     directory: crate::LocalActorDirectory,
+    _control_task: Arc<ractor::concurrency::JoinHandle<()>>,
     session: tidepool_repr::SessionId,
     incarnation: crate::Incarnation,
 }
@@ -13348,13 +13349,14 @@ where
             .and_then(|session| self.environment.runner.measurement_snapshot(session))
     }
 
-    pub fn new(
+    pub async fn new(
         source: ActorWorkbenchSource,
         session: tidepool_repr::SessionId,
         machine: ResidentSession<H, O>,
         fork_workspaces: Option<crate::fork_workspace::SharedWorkspaceAdmission>,
         incarnation: crate::Incarnation,
-    ) -> (Self, mpsc::Receiver<LocalResidentDeployment>) {
+    ) -> Result<(Self, mpsc::Receiver<LocalResidentDeployment>), ractor::SpawnErr> {
+        let (directory, control_task) = crate::LocalActorDirectory::start().await?;
         let machines = Arc::new(ActorMachineRegistry::<H, O>::new());
         machines.insert_idle(session, Box::new(machine));
         let runner = ResidentActorRunner::new(machines, source);
@@ -13379,15 +13381,16 @@ where
             usage_pointers: crate::UsagePointerTable::default(),
             recovery: None,
         };
-        (
+        Ok((
             Self {
                 environment,
-                directory: crate::LocalActorDirectory::default(),
+                directory,
+                _control_task: Arc::new(control_task),
                 session,
                 incarnation,
             },
             receiver,
-        )
+        ))
     }
 
     /// Read whether an exact actor still owns a retained watch.
@@ -13447,11 +13450,11 @@ where
 
     /// Keep logical IDs from being consumed by unrelated new actors while
     /// restart reconciliation decides which durable actors can be restored.
-    pub fn fence_recovery_identities(
+    pub async fn fence_recovery_identities(
         &self,
         actors: impl IntoIterator<Item = crate::ActorId>,
-    ) -> Result<(), String> {
-        self.directory.fence_logical_ids(actors)
+    ) -> Result<(), crate::DirectoryError> {
+        self.directory.fence_logical_ids(actors).await
     }
 
     /// Observe only actors the exact requester can inspect. This does not enter
