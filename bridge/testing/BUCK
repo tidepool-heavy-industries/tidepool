@@ -480,6 +480,7 @@ filegroup(
         "exomonad/examples/persona/.exomonad/Persona/Collection.hs": "//exomonad/examples/persona:authored_haskell_Persona_Collection_hs",
         "exomonad/examples/persona/.exomonad/Persona/Context.hs": "//exomonad/examples/persona:authored_haskell_Persona_Context_hs",
         "exomonad/examples/persona/.exomonad/Persona/Memory.hs": "//exomonad/examples/persona:authored_haskell_Persona_Memory_hs",
+        "exomonad/examples/persona/.exomonad/Persona/Orientation.hs": "//exomonad/examples/persona:authored_haskell_Persona_Orientation_hs",
         "exomonad/examples/persona/.exomonad/Persona/Spec.hs": "//exomonad/examples/persona:authored_haskell_Persona_Spec_hs",
         "exomonad/examples/workspace/.exomonad/AgentSpec.hs": "//exomonad/examples/workspace:authored_haskell_AgentSpec_hs",
         "exomonad/examples/workspace/.exomonad/Jev/Operators.hs": "//exomonad/examples/workspace:authored_haskell_Jev_Operators_hs",

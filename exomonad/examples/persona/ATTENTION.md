@@ -1,17 +1,10 @@
 # Editable attention lenses
 
-This is the in-place iteration of the persona seed. Git
-retains earlier versions; there is no separate v2 configuration or persona.
-The [AgentSpec PRD](INITIAL-CONTEXT.md) defines the runtime dependency. These
-notes describe persona-owned Haskell policy. The modules are registered in the
-seed configuration; automatic startup publication still requires the supplied
-runtime hook. The live companion workspace has not been changed.
-
-Preserve the current base prompt, its Jev material, curiosity and embodiment,
-and the human-selected root model and interaction-driven operation. Update the
-agent prompt with the available preparation APIs and the outstanding startup seam.
-The human is steering the relationship through conversation; this work does
-not prescribe a personality or try to correct familiar assistant mannerisms.
+The seed's agent spec installs `Persona.Orientation.startup` through Exomonad's
+initial-context hook. `Persona.Orientation.arrival` is the policy currently used:
+its occasion, budget and view are ordinary editable Haskell. This document
+covers preparation mechanics; [SEEDS.md](SEEDS.md) covers the working modules and
+the remaining source-editing access gap. The live companion has not been redeployed.
 
 ## The composition we are building
 
@@ -58,7 +51,9 @@ which are examples rather than permanent categories of self or memory.
 | --- | --- |
 | `Persona.Collection` | `load` preserves existing blocks, reads optional `memory/collection.json`, and returns the observed collection and initialization outcomes; `loadEntries` accepts a parsed or Haskell-authored manifest |
 | `Persona.Attention` | `collection` validates memory references; `continuity`, `connections` and `combineViews` construct views; `prepareWith` runs any authored batched judge; `inspect`, `rendered` and `snapshot` are pure |
-| `Persona.Context` | `prepare` composes loading, a supplied lens and Jev; `prepareView` uses an already retained collection/view; `save` writes the inspection as JSON in `notes/<name>.md`; `activate` replaces one supplied authored block reference synchronously |
+| `Persona.Orientation` | `arrival` is the live policy; `prepare` retains the loaded collection and result; `startup` saves inspection before returning context |
+| `Persona.AttentionNotebook` | typed instructions revise and prepare an actor-owned draft; `snapshot` retains the previous result; `framing` produces a form carrying those instructions |
+| `Persona.Context` | `prepare` composes loading, a supplied lens and Jev; `prepareView` uses an already retained collection/view; `save` writes the inspection as JSON in `notes/<name>.md`; `activate` replaces one supplied authored block reference synchronously; `activateInitial` obtains it from the startup owner |
 
 `prepare` takes `Limits`, an explicit occasion, and a lens function. Its success
 contains both `Loaded` and `Prepared`, so the caller can inspect the input reads
@@ -108,13 +103,12 @@ underlying source is the same. Cycles and dangling references fail before any
 judgment. Expansion keeps the parent presentation and visits its children;
 shared children render once. Omission does not delete a source.
 
-Use `activate` only with the actual reference for the published memory block.
-It returns a typed local refusal for a missing, ambiguous or native block; the
-context runtime checks authority and commits the synchronous edit. This helper
-does not discover startup ownership. Wiring the publication receipt, confirming
-reference behavior after replacement, and exercising startup/recovery and actual
-context commits belong to integration with the PRD owner. No heading search or
-fabricated reference bridges that gap.
+`activateInitial` reads the retained startup observation and uses the published
+reference with `activate`. The latter returns a typed local refusal for a missing,
+ambiguous or native block; the runtime validates authority and commits the
+synchronous edit. A historical receipt does not establish that its block still
+exists. Non-published startup states are retained in the refusal, without a
+heading search, fabricated reference or rerun of startup effects.
 
 Saving an inspection preserves evidence, not a resumable machine binding. After
 losing notebook bindings, read the saved note for inspection or explicitly prepare
@@ -123,11 +117,14 @@ an admitted `Prepared` value, and no silent replay of past effects.
 
 ## Startup integration
 
-The initial-context hook should call the same preparation composition, retain its
-result and return the rendered text for publication. Startup may have no first
-user message; build general orientation from available information. A changed
-occasion later can justify an explicit refresh. Follow the [AgentSpec PRD](INITIAL-CONTEXT.md)
-for publication ordering, receipt observation and recovery without replay.
+`Persona.Orientation.startup` calls the same preparation composition as explicit
+notebook use. It saves the operation identity, collection manifest observation,
+initialization outcomes and attention snapshot in `notes/initial-attention.md`,
+then returns the rendered seed. A failed save refuses startup. This is the latest
+preparation note, overwritten on the next preparation at startup, not a transcript
+archive or a runtime publication receipt. Inspect `getInitialContext` for actual
+publication and its reference. Startup has no first user message; a later situated
+occasion can justify explicit preparation and activation.
 
 ## A vocabulary that can grow
 
@@ -181,12 +178,11 @@ an option when its context is useful. None is mandatory for making memory.
 
 ## Keep the first iteration small and inspectable
 
-Deliver the initializer against the actual installed API, then check the first
-provider request using existing Exomonad qualification paths. Exercise a changed
-memory on a new conversation and an unchanged seed on recovery. Inspecting the
+Check the first provider request using existing Exomonad qualification paths.
+Exercise a changed memory on a new conversation and an unchanged seed on recovery. Inspecting the
 result must not rerun preparation. Missing state and unreadable state need
-different outcomes. Use the [harvested scenarios](CONNECTOME-NOTES.md#regression-scenarios-to-transplant)
-as later compositions introduce recollection, selection and folding.
+different outcomes. Retain those distinctions as later compositions introduce
+recollection, selection and folding.
 
 Do not build an independent transcript store, cache or compression scheduler.
 Reuse current context/source/actor owners. Context selection should not become
@@ -194,11 +190,9 @@ an automatic turn-by-turn tax: stable inputs can retain their existing view,
 and a useful deliberate change can justify recomputation. Measure the actual
 request and cache usage before describing any savings.
 
-The optional [recollection instruction](RECOLLECTION.md) is for use when the companion chooses to
-make an account. It is not appended on every turn and imposes no journaling
-cadence. A helper draft stays attributed until the companion decides what to
-keep. Mechanical checks can establish source coverage and chronology; semantic
-faithfulness still requires comparing the account with its evidence.
+A recollection can be authored when the companion chooses to make an account.
+A helper draft stays attributed until the companion decides what to keep.
+Mechanical checks can establish source coverage and chronology; semantic faithfulness still requires comparing the account with its evidence.
 
 No automatic folding, archival search, speculative summaries, scheduled wakes or
 self-activation is installed by this candidate. Richer memory remains something

@@ -66,19 +66,33 @@ separate OS user or process sandbox.
 
 `Persona.Memory.initialise` creates absent persona/human/curiosities blocks using
 compare-and-swap. It never overwrites an existing identity, and storage errors
-remain distinct from absence. The startup prompt asks the companion to read those blocks explicitly;
-there is no hidden before-model memory injection. Small notes and change requests
-are individual Markdown files. The [attention pipeline](ATTENTION.md) adds
-Haskell-authored views, bounded Jev selection, retained inspection and explicit
-context replacement. It is available through notebook composition. The
-[AgentSpec PRD](INITIAL-CONTEXT.md) requests startup publication and its editable
-reference; that hook is not implemented by this seed. The operator can review `state/changes/*.md` in a
-stock coding session, implement a proposal, and redeploy. Direct, reversible
-persistent self-editing is the intended direction; the proposal path describes
-the current capability gap, not a permanent approval policy. A request does not
-edit or deploy running code. `readSourceModule` returns active captured bytes and
-their source revision; `sourceStatus` distinguishes pending edits. Startup prompts
-are frozen for the run; context editing does not replace system/developer text.
+remain distinct from absence. `Persona.Orientation.startup`, installed by the
+agent spec, assembles initial context from that memory using the editable
+`arrival` policy. It saves the latest preparation in `notes/initial-attention.md`
+before the context owner publishes the returned text. The note includes the
+startup operation so preparation can be distinguished from publication.
+
+The [attention pipeline](ATTENTION.md) supports Haskell-authored views, bounded
+Jev selection, retained inspection and explicit context replacement.
+`Persona.Context.activateInitial` obtains the original block reference from
+`Tidepool.Agent.Context.getInitialContext` and edits only that block, refusing a
+missing or unavailable target. A historical receipt does not recreate removed
+context. Memory writes and source reloads do not automatically refresh it.
+
+The [executable seeds](SEEDS.md) describe the live orientation policy and an
+optional attention notebook actor. The same actor language can be supplied by a
+notebook cell, a human form, or mapped events. These are starting modules for the
+persona's own use and evolution. The criterion is the breadth of useful programs
+their abstractions support, with normal expert Haskell vocabulary available.
+
+Persistent self-editing still has an access gap: persona's Fs handlers reach only
+state, while Exomonad's existing authored-module and SessionHelpers reload paths
+operate on source. The narrow owner handoff is in [SEEDS.md](SEEDS.md#source-editing-handoff).
+Until connected, `Persona.Memory.requestChange` records an operator proposal;
+notebook definitions can still change behavior immediately. `readSourceModule`
+returns active captured bytes and their revision; `sourceStatus` distinguishes
+pending edits. Startup prompts are frozen for the run; context editing does not
+replace system/developer text.
 
 `Persona.Web.search` returns source hits, `open` retains a complete extracted
 Page, `follow` resolves relative links natively, `readLines` returns addressed
@@ -107,9 +121,9 @@ prompt gives positive discoveries, tastes and unresolved questions a place in
 memory alongside corrections.
 
 Exploration runs during human interactions and their ongoing work. No autonomous
-background schedule, actor topology, context assembler or recurring improvement
-routine is installed. Memory starts nearly empty. Templates and conditional
-context can be authored Haskell using existing effects. Optional examples are
+background schedule, standing actor topology or recurring improvement routine
+is installed. The authored orientation policy runs at fresh conversation startup.
+Memory starts nearly empty. Templates and conditional context can be authored Haskell using existing effects. Optional examples are
 marked as notes from an ancestor LLM; they suggest possibilities the companion
 may adapt, ignore or outgrow. The shared API guide retains compiled examples.
 See [design sources](PROVENANCE.md) for the research and [next ideas](NEXT-IDEAS.md)

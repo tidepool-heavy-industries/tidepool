@@ -352,6 +352,7 @@
     "exomonad/examples/persona/.exomonad/Persona/Collection.hs",
     "exomonad/examples/persona/.exomonad/Persona/Context.hs",
     "exomonad/examples/persona/.exomonad/Persona/Memory.hs",
+    "exomonad/examples/persona/.exomonad/Persona/Orientation.hs",
     "exomonad/examples/persona/.exomonad/Persona/Spec.hs",
     "exomonad/examples/workspace/.exomonad/AgentSpec.hs",
     "exomonad/examples/workspace/.exomonad/Jev/Operators.hs",
