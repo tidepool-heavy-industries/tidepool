@@ -1,6 +1,6 @@
 load("//build/rust:executable-companions.bzl", "executable_companions")
 load("@prelude//:rules.bzl", "rust_binary", "rust_library", "rust_test", "sh_test")
-load("//build:native_profile.bzl", "rust_optimization_level")
+load("//build:native_profile.bzl", "rust_optimization_flags", "rust_optimization_level")
 load(":test_source_participation.bzl", "test_source_requirements")
 
 def _common(name, package_name, package_dir, version, env, rustc_flags, is_library = False):
@@ -11,7 +11,7 @@ def _common(name, package_name, package_dir, version, env, rustc_flags, is_libra
     }
     manifest_env.update(env)
     opt = rust_optimization_level(package_name, is_library)
-    return (manifest_env, ["-Copt-level=" + opt] + rustc_flags)
+    return (manifest_env, rust_optimization_flags(opt, rustc_flags))
 
 def tidepool_rust_library(name, package_name, package_dir, version, env = {}, rustc_flags = [], **kwargs):
     compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags, is_library = True)

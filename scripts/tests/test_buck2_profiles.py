@@ -3,6 +3,7 @@
 import configparser
 from pathlib import Path
 import unittest
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,7 +33,30 @@ def resolve(profile):
     namespace["sh_test"] = lambda **kwargs: calls.append(("runner", kwargs))
     namespace["test_source_requirements"] = lambda **kwargs: None
     load_definitions(ROOT / "build/rust/defs.bzl", namespace)
+    namespace["cargo"] = SimpleNamespace(
+        rust_library=lambda **kwargs: calls.append(("dependency_library", kwargs)),
+        rust_binary=lambda **kwargs: calls.append(("dependency_binary", kwargs)),
+    )
+    load_definitions(ROOT / "build/rust/dependency_profiles.bzl", namespace)
     return namespace, calls
+
+
+def toolchain_flags():
+    class Attrs:
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+    namespace = {
+        "attrs": Attrs(), "rule": lambda **kwargs: None,
+        "DefaultInfo": lambda: None, "RunInfo": lambda **kwargs: kwargs,
+        "PanicRuntime": lambda value: value, "RustToolchainInfo": lambda **kwargs: kwargs,
+    }
+    load_definitions(ROOT / "toolchains/tidepool.bzl", namespace)
+    context = SimpleNamespace(attrs=SimpleNamespace(
+        python="/pinned/python", test_source_wrapper="wrapper.py", rustc="/pinned/rustc",
+        rustdoc="/pinned/rustdoc", clippy="/pinned/clippy", clippy_flags=[],
+        linker="/pinned/linker", clippy_toml="clippy.toml",
+    ))
+    return namespace["_nix_rust_toolchain_impl"](context)[1]["rustc_flags"]
 
 
 class BuckProfileConfiguration(unittest.TestCase):
@@ -67,14 +91,53 @@ class BuckProfileConfiguration(unittest.TestCase):
                             and wrapper == "tidepool_rust_library"
                         ):
                             expected = "3"
-                        # The rule's final optimization flag overrides the
-                        # current toolchain's O2 prefix.
-                        argv = ["-Copt-level=2", *compiled["rustc_flags"]]
+                        argv = [*toolchain_flags(), *compiled["rustc_flags"]]
                         levels = [arg for arg in argv if arg.startswith("-Copt-level=")]
-                        self.assertEqual(levels, ["-Copt-level=2", "-Copt-level=" + expected])
+                        self.assertEqual(levels, ["-Copt-level=" + expected])
                         if wrapper == "tidepool_rust_isolated_test":
                             self.assertIn("--test", argv)
                             self.assertNotIn("TIDEPOOL_PROPTEST_REGRESSIONS", calls[-1][1]["env"])
+
+    def test_generated_libraries_proc_macros_and_buildscripts_have_one_profile_flag(self):
+        for profile in ("fast-dev", "debug", "production"):
+            for wrapper, extra in (
+                ("tidepool_cargo_rust_library", {}),
+                ("tidepool_cargo_rust_library", {"proc_macro": True}),
+                ("tidepool_cargo_rust_binary", {"crate": "build_script_build"}),
+            ):
+                for policy in ("dependency", "harness"):
+                    with self.subTest(profile=profile, wrapper=wrapper, policy=policy, extra=extra):
+                        namespace, calls = resolve(profile)
+                        env = {"CARGO_PKG_NAME": "arbitrary-renamed-package"}
+                        if policy == "harness":
+                            env["TIDEPOOL_NATIVE_RUST_POLICY"] = policy
+                        namespace[wrapper](name="arbitrary-renamed-target", env=env,
+                                           rustc_flags=["--cfg=retained"], **extra)
+                        compiled = calls[0][1]
+                        expected = "2" if profile == "production" or (profile == "fast-dev" and policy == "dependency") else "0"
+                        argv = [*toolchain_flags(), *compiled["rustc_flags"]]
+                        self.assertEqual([flag for flag in argv if flag.startswith("-Copt-level=")], ["-Copt-level=" + expected])
+                        self.assertIn("--cfg=retained", argv)
+                        self.assertEqual(compiled["env"], {"CARGO_PKG_NAME": "arbitrary-renamed-package"})
+                        for key, value in extra.items():
+                            self.assertEqual(compiled[key], value)
+
+    def test_policy_marker_and_manual_optimization_refuse_unknown_or_duplicate_selection(self):
+        namespace, calls = resolve("fast-dev")
+        with self.assertRaisesRegex(ValueError, "unknown generated Rust policy"):
+            namespace["tidepool_cargo_rust_library"](env={"TIDEPOOL_NATIVE_RUST_POLICY": "unknown"})
+        for flags in (["-O"], ["-Copt-level=2"], ["-C", "opt-level=2"]):
+            for wrapper in ("tidepool_rust_library", "tidepool_cargo_rust_library", "tidepool_cargo_rust_binary"):
+                with self.subTest(flags=flags, wrapper=wrapper), self.assertRaisesRegex(ValueError, "optimization belongs"):
+                    args = {"rustc_flags": flags}
+                    if wrapper == "tidepool_rust_library":
+                        args.update(name="target", package_name="tidepool", package_dir="owned", version="0.1.0")
+                    namespace[wrapper](**args)
+        for attributes in ({"env": {"TIDEPOOL_NATIVE_RUST_POLICY": "harness"}},
+                           {"rustc_flags": ["-Copt-level=2"]}):
+            with self.subTest(platform=attributes), self.assertRaises(ValueError):
+                namespace["tidepool_cargo_rust_binary"](platform={"linux-x86_64": attributes})
+        self.assertEqual(calls, [])
 
     def test_shared_libtest_binary_remains_unoptimized_in_fast_dev(self):
         namespace, calls = resolve("fast-dev")

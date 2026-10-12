@@ -226,12 +226,7 @@ def guard_harness_source(buck):
     if buck.count(source_reference) != 1:
         raise SystemExit('Cannot select matched harness source: expected one harness crate source reference')
     buck = buck.replace(source_reference, f'srcs = [":{directory_name}"]', 1)
-    buck = buck.replace(
-        'load("@prelude//rust:cargo_package.bzl", "cargo")',
-        'load("@prelude//rust:cargo_package.bzl", "cargo")\n'
-        'load("@toolchains//:tidepool.bzl", "checked_harness_source")',
-        1,
-    )
+    buck = 'load("@toolchains//:tidepool.bzl", "checked_harness_source")\n' + buck
     return buck, directory_name
 with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
     stage = Path(temporary)
@@ -255,12 +250,7 @@ with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
     harness_web_source = harness_fetch
     if harness_fetch:
         if 'load("@prelude//:rules.bzl", "alias", "filegroup")' not in buck:
-            buck = buck.replace(
-                'load("@prelude//rust:cargo_package.bzl", "cargo")',
-                'load("@prelude//rust:cargo_package.bzl", "cargo")\n'
-                'load("@prelude//:rules.bzl", "alias", "filegroup")',
-                1,
-            )
+            buck = 'load("@prelude//:rules.bzl", "alias", "filegroup")\n' + buck
         buck += (
             '\nfilegroup(\n'
             '    name = "matched_harness_source",\n'

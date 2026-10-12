@@ -358,8 +358,13 @@ compile all first-party Rust at opt-level 0 and leave GHC unoptimized, or select
 selected profile so optimized host tests exercise the same first-party code as
 the shipped host. Compiler flags are explicit action inputs: each profile has
 its own Buck action key and reuse remains at the current crate/component action
-boundaries. The pinned Nix compilers and third-party Rust optimization remain
-unchanged.
+boundaries. The pinned Nix compilers remain unchanged. Reindeer dependency libraries,
+proc macros and build-script binaries use explicit O2 in fast-dev/production
+and O0 in debug. The maintained pinned Harness package is explicitly selected
+by its Reindeer fixup for O0 in fast-dev/debug and O2 in production, matching
+its standalone profile. The fixup marker is build-policy metadata consumed
+before compiler environment construction; it does not change package identity.
+Compiler toolchains supply no optimization flags.
 
 For a native production runtime, build
 `//build/package:native_runtime_bundle`. It owns the same-profile host/libtest,

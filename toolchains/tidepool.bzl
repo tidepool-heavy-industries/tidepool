@@ -12,7 +12,7 @@ def _nix_rust_toolchain_impl(ctx):
             default_edition = "2021",
             panic_runtime = PanicRuntime("unwind"),
             rustc_target_triple = "x86_64-unknown-linux-gnu",
-            rustc_flags = ["-Cforce-frame-pointers=yes", "-Copt-level=2", "-Clinker=" + ctx.attrs.linker],
+            rustc_flags = ["-Cforce-frame-pointers=yes", "-Clinker=" + ctx.attrs.linker],
             nightly_features = False,
             clippy_toml = ctx.attrs.clippy_toml,
         ),
