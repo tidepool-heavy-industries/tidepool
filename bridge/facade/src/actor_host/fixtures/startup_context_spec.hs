@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -8,20 +9,41 @@
 module AgentSpec (agentSpec, emptySpec, absentSpec) where
 
 import Control.Monad.Freer (Eff, Members)
+import GHC.Generics (Generic)
 import Jev.Host (jevTransport)
 import Tidepool.Aeson.Value (Value (Bool), object, (.=))
 import Tidepool.Agent.Contract
+import qualified Tidepool.Agent.Contract as A
 import Tidepool.Effects.Core (FsRead, FsWrite, Jev)
 import Tidepool.Records (WriteOutcome (..))
 import qualified Tidepool.Effects as E
 
+data StartupTools effects mode = StartupTools
+  { haskell :: mode :- HaskellCell effects
+  , haskellSync :: mode :- Sync (HaskellCell (SyncEffects effects))
+  } deriving Generic
+
+startupWorkbenchSpec
+  :: forall effects.
+     ( KnownToolEffects effects, AsyncEffects effects
+     , Subset effects (SyncEffects effects)
+     )
+  => AgentSpec (StartupTools effects) effects
+startupWorkbenchSpec = defaultSpec
+  { specTools = StartupTools
+      { haskell = A.haskell (A.haskellTools @effects)
+      , haskellSync = haskellTool "Refresh this actor's context before its next inference."
+      }
+  }
+
 agentSpec
   :: forall effects.
      ( KnownToolEffects effects, AsyncEffects effects
+     , Subset effects (SyncEffects effects)
      , Members '[FsRead, FsWrite, Jev] effects
      )
-  => AgentSpec (HaskellTools effects) effects
-agentSpec = (defaultWorkbenchSpec @effects)
+  => AgentSpec (StartupTools effects) effects
+agentSpec = (startupWorkbenchSpec @effects)
   { initialContext = Just prepare }
 
 prepare
@@ -55,13 +77,13 @@ prepare input = do
 
 emptySpec
   :: forall effects.
-     (KnownToolEffects effects, AsyncEffects effects)
-  => AgentSpec (HaskellTools effects) effects
-emptySpec = (defaultWorkbenchSpec @effects)
+     (KnownToolEffects effects, AsyncEffects effects, Subset effects (SyncEffects effects))
+  => AgentSpec (StartupTools effects) effects
+emptySpec = (startupWorkbenchSpec @effects)
   { initialContext = Just (const (pure emptyContext)) }
 
 absentSpec
   :: forall effects.
-     (KnownToolEffects effects, AsyncEffects effects)
-  => AgentSpec (HaskellTools effects) effects
-absentSpec = defaultWorkbenchSpec @effects
+     (KnownToolEffects effects, AsyncEffects effects, Subset effects (SyncEffects effects))
+  => AgentSpec (StartupTools effects) effects
+absentSpec = startupWorkbenchSpec @effects
