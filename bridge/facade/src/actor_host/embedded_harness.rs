@@ -48,9 +48,11 @@ struct StoreAdmission {
 }
 impl AdmissionGuard for StoreAdmission {}
 
-fn embedded_admission_error(error: KernelCallFailure) -> EmbeddedError {
+pub(super) fn embedded_admission_error(error: KernelCallFailure) -> EmbeddedError {
     match error {
-        KernelCallFailure::MailboxClosed(_) => EmbeddedError::AdmissionClosed,
+        KernelCallFailure::MailboxClosed(_) | KernelCallFailure::TargetExited(_) => {
+            EmbeddedError::AdmissionClosed
+        }
         error => EmbeddedError::Host(error.to_string()),
     }
 }
@@ -1871,10 +1873,15 @@ mod round_control_tests {
             id: exomonad_actor::ActorId(7),
             incarnation: exomonad_actor::Incarnation(2),
         };
-        assert!(matches!(
-            embedded_admission_error(KernelCallFailure::MailboxClosed(actor)),
-            EmbeddedError::AdmissionClosed
-        ));
+        for error in [
+            KernelCallFailure::MailboxClosed(actor),
+            KernelCallFailure::TargetExited(actor),
+        ] {
+            assert!(matches!(
+                embedded_admission_error(error),
+                EmbeddedError::AdmissionClosed
+            ));
+        }
         for error in [
             KernelCallFailure::RetirementPending(actor),
             KernelCallFailure::TargetUnavailable(actor),

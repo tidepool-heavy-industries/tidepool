@@ -108,12 +108,7 @@ impl HostActor for AdmissionHost {
             .admit_transaction()
             .await
             .map(|lease| Box::new(SentinelAdmission { _lease: lease }) as Box<dyn AdmissionGuard>)
-            .map_err(|error| match error {
-                exomonad_actor::KernelCallFailure::MailboxClosed(_) => {
-                    EmbeddedError::AdmissionClosed
-                }
-                error => EmbeddedError::Host(error.to_string()),
-            })
+            .map_err(crate::actor_host::embedded_harness::embedded_admission_error)
     }
     async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
         let _admission = self.admit().await?;
@@ -849,11 +844,19 @@ async fn schema_refusal_then_native_close(close_timing: NativeCloseTiming) {
         scheduler.output(&operation).await.unwrap(),
         Some(harness::turn::JobOutput::Completed(Err(_)))
     ));
+    // The published terminal and physical executor stop precede this late admission.
+    task.await.unwrap();
+    let late_admission_refusal = actor.admit_transaction().await.err();
+    let retained_terminal = actor.terminal().get();
+    let lifecycle = actor.lifecycle().observation();
     assert!(matches!(
-        actor.admit_transaction().await,
-        Err(exomonad_actor::KernelCallFailure::MailboxClosed(target))
+        late_admission_refusal,
+        Some(exomonad_actor::KernelCallFailure::TargetExited(target))
             if target == actor.identity()
-    ));
+    ), "refusal={late_admission_refusal:?}; terminal={retained_terminal:?}; phase={:?}; owner_available={}; native={:?}; transactions={}; ingress={}",
+        lifecycle.phase, lifecycle.owner_available, lifecycle.native_settlement,
+        lifecycle.transactions, lifecycle.ingress);
+
     assert!(matches!(
         host.inner.tool_surface().await,
         Err(harness::embedding::EmbeddedError::AdmissionClosed)
@@ -898,5 +901,4 @@ async fn schema_refusal_then_native_close(close_timing: NativeCloseTiming) {
         output
     );
     host.inner.output_committed(&operation).await.unwrap();
-    task.await.unwrap();
 }
