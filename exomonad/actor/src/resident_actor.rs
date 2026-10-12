@@ -31,6 +31,7 @@ mod green_notebook;
 mod green_runtime_tests;
 mod green_tool;
 mod initial_context;
+mod lifecycle;
 mod inspection_wait;
 mod invocation_effects;
 pub(crate) mod invocation_work;
@@ -503,6 +504,8 @@ fn retain_retired_metadata<H, O>(
     actor: ActorRef,
     terminal: &ActorTerminal,
 ) {
+    let lifecycle = environment.actors.lock().get(&actor).map(|record| record.lifecycle.clone());
+    if let Some(lifecycle) = lifecycle { lifecycle.retire(); }
     environment.actor_admissions.fail_issuer_checkpoints(actor);
     if let Some(recovery) = &environment.recovery {
         if let Err(error) = recovery.retire(actor, terminal.clone()) {
@@ -561,7 +564,7 @@ async fn publish_retired_confirmed<H, O>(
 #[derive(Clone)]
 struct ResidentActorRecord {
     installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
-    initial_context: Arc<Mutex<Option<crate::InitialContextObservation>>>,
+    lifecycle: lifecycle::ActorLifecycle,
     fresh_context_seed: Option<String>,
     root_startup: Option<Arc<Mutex<RootStartupState>>>,
     public_owner: ActorPublicOwnerPlane,
@@ -11156,11 +11159,13 @@ where
                     .map_err(|error| Self::failure(error.to_string()))?;
             }
             kernel.install_session_context(context.clone())?;
+            let lifecycle = lifecycle::ActorLifecycle::start(context.actor, self.environment.recovery.clone())
+                .await.map_err(Self::failure)?;
             self.environment.actors.lock().insert(
                 context.actor,
                 ResidentActorRecord {
                     installed_tools: self.installed_tools.clone(),
-                    initial_context: Default::default(),
+                    lifecycle,
                     fresh_context_seed: self.fresh_context_seed.clone(),
                     root_startup: self
                         .root_startup
