@@ -354,7 +354,16 @@ fn production_recovery_helper_refuses_missing_required_settings() {
     }
 }
 
-struct Process(Child);
+struct Process(Child, Option<ActorRef>);
+
+fn observed_root(root: &Path) -> Option<exomonad_actor::DurableActorRecord> {
+    let journal = root.join("run/actor-lifecycle.v2.jsonl");
+    if !journal.try_exists().unwrap() {
+        return None;
+    }
+    let records = exomonad_actor::ActorRecoveryJournal::read_observed(&journal).unwrap();
+    latest_durable_root_application(&records).unwrap().cloned()
+}
 impl Drop for Process {
     fn drop(&mut self) {
         if self.0.try_wait().ok().flatten().is_none() {
@@ -364,6 +373,7 @@ impl Drop for Process {
     }
 }
 fn start(root: &Path, phase: &str) -> Process {
+    let previous = observed_root(root).map(|record| record.admission.actor);
     let output = std::fs::File::create(root.join(format!("{phase}.log"))).unwrap();
     Process(
         Command::new(std::env::current_exe().unwrap())
@@ -374,21 +384,29 @@ fn start(root: &Path, phase: &str) -> Process {
             .stderr(Stdio::from(output))
             .spawn()
             .unwrap(),
+        previous,
     )
 }
 async fn ready(root: &Path, phase: &str, process: &mut Process) -> serde_json::Value {
     tokio::time::timeout(Duration::from_secs(360), async {
         loop {
-            if let Ok(bytes) = std::fs::read(root.join(format!("{phase}.ready"))) {
-                if let Ok(value) = serde_json::from_slice(&bytes) {
-                    return value;
-                }
-            }
             if let Some(status) = process.0.try_wait().unwrap() {
                 panic!(
                     "production {phase} exited {status}: {}",
                     std::fs::read_to_string(root.join(format!("{phase}.log"))).unwrap()
                 );
+            }
+            if let Some(current) = observed_root(root) {
+                if Some(current.admission.actor) != process.1 {
+                    assert!(current.terminal.is_none(),
+                        "production {phase} actor {} retired before readiness: {:?}",
+                        current.admission.actor, current.terminal);
+                }
+            }
+            if let Ok(bytes) = std::fs::read(root.join(format!("{phase}.ready"))) {
+                if let Ok(value) = serde_json::from_slice(&bytes) {
+                    return value;
+                }
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -968,6 +986,7 @@ async fn production_authored_root_failure_is_not_evaluated_before_durable_bindin
 }
 
 fn start_crashing(root: &Path, phase: &str, checkpoint: &str) -> Process {
+    let previous = observed_root(root).map(|record| record.admission.actor);
     let output = std::fs::File::create(root.join(format!("{phase}.log"))).unwrap();
     Process(
         Command::new(std::env::current_exe().unwrap())
@@ -979,6 +998,7 @@ fn start_crashing(root: &Path, phase: &str, checkpoint: &str) -> Process {
             .stderr(Stdio::from(output))
             .spawn()
             .unwrap(),
+        previous,
     )
 }
 
