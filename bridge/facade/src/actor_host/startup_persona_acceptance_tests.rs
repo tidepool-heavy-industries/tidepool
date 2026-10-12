@@ -95,9 +95,7 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
         ),
         (
             "Persona/Web.hs",
-            tidepool_testing::fixture_source(
-                "exomonad/examples/persona/.exomonad/Persona/Web.hs",
-            ),
+            tidepool_testing::fixture_source("exomonad/examples/persona/.exomonad/Persona/Web.hs"),
         ),
         (
             "Persona/Spec.hs",
