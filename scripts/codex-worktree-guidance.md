@@ -15,6 +15,25 @@ Before adding an abstraction, find its production callers and extend the
 owning mechanism. A test-only caller is not evidence for new public surface.
 Review unexpected complexity as a finding, then repair it within scope.
 
+## Checkout identity
+
+Creating a worktree does not change the working directory of later tool calls.
+Bind every source mutation and build to the assigned checkout with the tool's
+explicit `workdir`; use `git -C /absolute/checkout` for Git mutations. Do not
+rely on a previous shell's `cd`. Before the first mutation in a newly assigned
+checkout, inspect its top-level path, branch, HEAD and working-tree status:
+
+```sh
+git -C /absolute/checkout rev-parse --show-toplevel --abbrev-ref HEAD
+git -C /absolute/checkout rev-parse HEAD
+git -C /absolute/checkout status --short
+```
+
+Compare these with the parcel's assigned checkout and revision before applying
+commits. If a mutation lands in the wrong checkout, stop: retain the operation
+identity and existing WIP, undo only your own operation, and verify unrelated
+edits remain intact. Do not use reset, stash or path checkout as recovery.
+
 ## Focused verification
 
 1. Map every changed file and direct consumer to its declared target. A shared
