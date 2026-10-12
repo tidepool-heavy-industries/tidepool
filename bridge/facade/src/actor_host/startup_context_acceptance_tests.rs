@@ -188,14 +188,29 @@ async fn startup_effects_finish_before_readiness_and_first_request_then_refresh_
                 ["startup-refreshed-again", "startup-activation"]
             );
             assert_eq!(repeated.request.instructions, instructions);
+            let failed_operation = repeated.operation("startup-refresh-failure");
             repeated.call(
                 "startup-refresh-failure",
                 include_str!("fixtures/startup_context_refresh_failure.hs"),
             );
+            let staged = host
+                .while_operation_succeeds(
+                    &failed_operation,
+                    tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, judgments.recv()),
+                )
+                .await
+                .expect("refresh remains live until its post-edit effect")
+                .expect("refresh reaches its post-edit effect")
+                .expect("the real Jev observer remains available");
+            assert_eq!(staged.packet["startup_refresh_staged"], true);
+            staged.answer.send(true).unwrap();
             let failed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            assert_ne!(
-                failed.settled_output("startup-refresh-failure")["status"],
-                "committed"
+            let failure = failed.settled_output("startup-refresh-failure");
+            assert_ne!(failure["status"], "committed");
+            assert_eq!(
+                failure["failure"]["phase"],
+                tidepool_toolchain::failclass::Phase::Run.tag(),
+                "{failure}"
             );
             assert_eq!(
                 user_texts(&failed.request),
