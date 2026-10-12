@@ -2869,7 +2869,10 @@ mod tests {
                         }
                         _ => {
                             let observed = journal.active_application_conversation(actor).await.unwrap();
-                            assert_eq!(observed.is_some(), bound && !retired);
+                            let expected = (bound && !retired).then(|| ApplicationConversation::Codex {
+                                thread_id: if alternate_binding { "conflicting" } else { "conversation" }.into(),
+                            });
+                            assert_eq!(observed, expected);
                             (true, true, false)
                         }
                     };
@@ -2880,7 +2883,11 @@ mod tests {
                     if let Some(record) = records.first() {
                         assert_eq!(record.application.is_some(), prepared);
                         assert_eq!(record.application.as_ref().is_some_and(|app| app.conversation.is_some()), bound);
-                        assert_eq!(record.terminal.is_some(), retired);
+                        assert_eq!(record.terminal.as_ref(), retired.then_some(&terminal));
+                        let expected_conversation = bound.then(|| ApplicationConversation::Codex {
+                            thread_id: if alternate_binding { "conflicting" } else { "conversation" }.into(),
+                        });
+                        assert_eq!(record.application.as_ref().and_then(|app| app.conversation.clone()), expected_conversation);
                     }
                     assert_eq!(std::fs::read_to_string(directory.path().join("actors.jsonl")).unwrap().lines().count(), durable_events);
                 }
