@@ -349,6 +349,7 @@ pub(super) struct WorkbenchUnitStart {
 }
 
 pub(super) enum WorkbenchUnitStartRequest {
+    InitialContext { dispatch: Arc<RootCustody>, input: serde_json::Value },
     Tool {
         dispatch: Arc<RootCustody>,
         name: String,
@@ -371,6 +372,9 @@ where
 {
     async {
         match start.request {
+            WorkbenchUnitStartRequest::InitialContext { dispatch, input } => {
+                workbench.begin_initial_context(context, dispatch, input).await
+            }
             WorkbenchUnitStartRequest::Tool {
                 dispatch,
                 name,
@@ -901,6 +905,7 @@ where
             Err(error) => return terminal_task(Err(error)),
         };
         let WorkbenchAdmission {
+            initial_context,
             context,
             request,
             compilation_authority,
@@ -1032,6 +1037,7 @@ where
             state: Box::new(WorkbenchExecutionState {
                 cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
+                    initial_context,
                     display_receipt_owner,
                     park_effects: true,
                     context: context.clone(),

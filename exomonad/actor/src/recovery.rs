@@ -338,6 +338,7 @@ pub struct DurableActorRecord {
     pub startup: Option<RootStartupIntent>,
     pub application: Option<DurableActorApplication>,
     pub terminal: Option<DurableActorTerminal>,
+    pub initial_context: Option<crate::InitialContextObservation>,
 }
 
 /// Exact retained backend identity; possession grants no live actor authority.
@@ -400,6 +401,10 @@ enum EventKind {
     Retired {
         actor: ActorRef,
         terminal: DurableActorTerminal,
+    },
+    InitialContext {
+        actor: ActorRef,
+        change: crate::initial_context::InitialContextEvent,
     },
 }
 
@@ -636,6 +641,44 @@ impl ActorRecoveryJournal {
         self.state.lock().records.values().cloned().collect()
     }
 
+    /// Find the original preparation through the exact admitted root chain.
+    /// A successor never substitutes its own spec for retained startup output.
+    pub fn initial_context(&self, actor: ActorRef) -> std::io::Result<Option<crate::InitialContextObservation>> {
+        let state = self.state.lock();
+        ensure_writable(&state)?;
+        let mut next = Some(actor);
+        while let Some(owner) = next {
+            let record = state.records.get(&owner).ok_or_else(|| std::io::Error::other("initial context actor has no durable admission"))?;
+            if let Some(mut observation) = record.initial_context.clone() {
+                if owner != actor && observation.state == crate::InitialContextState::Preparing {
+                    observation.state = crate::InitialContextState::RecoveryRequired {
+                        detail: "host loss interrupted initialization; retained effects must not be replayed".into(),
+                    };
+                }
+                return Ok(Some(observation));
+            }
+            next = record.startup.as_ref().and_then(|intent| intent.predecessor);
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn record_initial_context(
+        &self,
+        actor: ActorRef,
+        change: crate::initial_context::InitialContextEvent,
+    ) -> std::io::Result<crate::InitialContextObservation> {
+        let mut state = self.state.lock();
+        ensure_writable(&state)?;
+        let record = state.records.get(&actor).ok_or_else(|| std::io::Error::other("initial context actor has no durable admission"))?;
+        let mut next = record.initial_context.clone();
+        crate::initial_context::apply_event(&mut next, change.clone())?;
+        if next != record.initial_context {
+            self.append(&mut state, EventKind::InitialContext { actor, change })?;
+            state.records.get_mut(&actor).expect("validated actor record").initial_context = next.clone();
+        }
+        next.ok_or_else(|| std::io::Error::other("initial context transition produced no observation"))
+    }
+
     pub(crate) fn admit(
         &self,
         actor: ActorRef,
@@ -685,6 +728,7 @@ impl ActorRecoveryJournal {
                 application: startup.as_ref().map(RootStartupIntent::application),
                 startup,
                 terminal: None,
+                initial_context: None,
             },
         );
         Ok(())
@@ -1172,6 +1216,7 @@ fn apply_event(
                         application: startup.as_ref().map(RootStartupIntent::application),
                         startup,
                         terminal: None,
+                        initial_context: None,
                     },
                 )
                 .is_some()
@@ -1249,6 +1294,10 @@ fn apply_event(
                     "duplicate terminal row for actor {actor}"
                 )));
             }
+        }
+        EventKind::InitialContext { actor, change } => {
+            let record = records.get_mut(&actor).ok_or_else(|| std::io::Error::other("initial context event precedes actor admission"))?;
+            crate::initial_context::apply_event(&mut record.initial_context, change)?;
         }
     }
     Ok(())

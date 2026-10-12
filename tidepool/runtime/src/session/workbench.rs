@@ -9,7 +9,7 @@
 use std::future::Future;
 
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::turn::CellSourceSpan;
 use super::{
@@ -131,6 +131,19 @@ pub struct WorkbenchToolCall {
 }
 
 impl WorkbenchRequest {
+    /// One host-owned invocation of already installed code. Its owner supplies
+    /// the entry separately; the label is diagnostic data, never authored source.
+    pub fn for_retained_operation(label: &str, input: serde_json::Value) -> Self {
+        Self {
+            items: vec![label.to_owned()],
+            input: Some(input),
+            verbose: None,
+            execution_id: None,
+            checkpoint_boundary: None,
+            tool_call: None,
+            cell_source: None,
+        }
+    }
     pub fn for_tool(name: String, arguments: serde_json::Value) -> Self {
         Self {
             items: vec![name.clone()],
@@ -197,7 +210,7 @@ impl WorkbenchRequest {
 ///
 /// The transport hashes structured execution coordinates into this value; no
 /// behavior parses the rendered digest back into authority or control flow.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(transparent)]
 pub struct WorkbenchExecutionId(String);
 

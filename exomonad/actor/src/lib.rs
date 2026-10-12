@@ -33,6 +33,8 @@ mod generated;
 mod hosted_lifecycle;
 mod identity;
 mod interactive_session;
+mod initial_context;
+pub use initial_context::{ContextSection, InitialContextIdentity, InitialContextObservation, InitialContextPublication, InitialContextState, RetainedContextSeed};
 mod jev;
 pub use jev::{
     failed_jev_client_setup, unconfigured_jev, JevBackend, JevBackendHandle, JevCallFailure,

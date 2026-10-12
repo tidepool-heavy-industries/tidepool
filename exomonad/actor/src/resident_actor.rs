@@ -32,6 +32,7 @@ mod green_runtime_tests;
 mod green_tool;
 mod inspection_wait;
 mod invocation_effects;
+mod initial_context;
 pub(crate) mod invocation_work;
 #[cfg(test)]
 mod jev_form_runtime_tests;
@@ -559,6 +560,9 @@ async fn publish_retired_confirmed<H, O>(
 
 #[derive(Clone)]
 struct ResidentActorRecord {
+    installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
+    initial_context: Arc<Mutex<Option<crate::InitialContextObservation>>>,
+    fresh_context_seed: Option<String>,
     root_startup: Option<Arc<Mutex<RootStartupState>>>,
     public_owner: ActorPublicOwnerPlane,
     recovery_claimed: bool,
@@ -3040,6 +3044,7 @@ where
 }
 
 struct WorkbenchEffectState {
+    initial_context: bool,
     display_receipt_owner: Option<Arc<DisplayExecutionSettlement>>,
     park_effects: bool,
     context: ActorSessionContext,
@@ -3464,6 +3469,7 @@ fn prepare_execution_effect(
 }
 
 struct WorkbenchAdmission {
+    initial_context: bool,
     context: ActorSessionContext,
     request: WorkbenchRequest,
     installed_tools: Option<crate::InstalledToolLease>,
@@ -3733,6 +3739,14 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             Some(lease) => Some(lease),
             None => self.installed_tools.current(),
         };
+        if invocation.initial_context {
+            let tools = installed_tools.as_ref().and_then(crate::InstalledToolLease::tools)
+                .filter(|tools| tools.slots.iter().any(|slot| slot == crate::initial_context::INITIAL_CONTEXT_SLOT))
+                .ok_or_else(|| KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(), actor, detail: "actor has no installed initial-context slot".into(), diagnostic: None,
+                })?;
+            context.haskell_effects_alias = tools.dispatcher_effects.clone();
+        }
         let current_builtin = request.tool_call().is_some_and(|call| {
             matches!(
                 call.name.as_str(),
@@ -3982,6 +3996,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             control.bind_context(binding.clone());
         }
         Ok(WorkbenchPreflight::Admitted(WorkbenchAdmission {
+            initial_context: invocation.initial_context,
             context,
             public_owner,
             request,
@@ -8665,6 +8680,23 @@ where
                 }
                 owned_workbench::WorkbenchFragmentAdvance::Captured { fragment, boundary } => {
                     current.fragment = Some(fragment);
+                    if execution_state.initial_context && matches!(&boundary,
+                        ResidentActorBoundary::Form { .. }
+                        | ResidentActorBoundary::Start(_)
+                        | ResidentActorBoundary::Replace { .. }
+                        | ResidentActorBoundary::Outbound(_)
+                        | ResidentActorBoundary::RequestReservation(_)
+                        | ResidentActorBoundary::RequestSubmission(_)
+                        | ResidentActorBoundary::AgentSession(_)
+                        | ResidentActorBoundary::AgentAttachment(_)
+                        | ResidentActorBoundary::Receive(_)
+                        | ResidentActorBoundary::ToolAwait(_)
+                    ) {
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                            "initial-context startup does not admit {}: its continuation is not qualified in this launch phase",
+                            boundary.operation(),
+                        )));
+                    }
                     let effect_owner = match current
                         .scopes
                         .last()
@@ -9640,7 +9672,10 @@ where
                 .filter(|call| call.name == crate::reload_helpers_tool::RELOAD_HELPERS_TOOL)
                 .cloned();
             if !cursor.dispatch_initialized {
-                cursor.tool_dispatch = if let Some(call) = request.tool_call().filter(|call| {
+                cursor.tool_dispatch = if effects.initial_context {
+                    Some(Arc::clone(&installed_tools.as_ref().and_then(crate::InstalledToolLease::tools)
+                        .expect("startup admission retains installed dispatcher").dispatch))
+                } else if let Some(call) = request.tool_call().filter(|call| {
                     call.name != crate::status_tool::STATUS_TOOL
                         && call.name != crate::reload_spec_tool::RELOAD_SPEC_TOOL
                         && call.name != crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
@@ -9968,7 +10003,12 @@ where
                                     total: request.items.len(),
                                 },
                             );
-                            let request_start = if let (Some(call), Some(dispatch)) =
+                            let request_start = if effects.initial_context {
+                                owned_workbench::WorkbenchUnitStartRequest::InitialContext {
+                                    dispatch: Arc::clone(cursor.tool_dispatch.as_ref().expect("startup dispatcher")),
+                                    input: request.input.clone().expect("startup input"),
+                                }
+                            } else if let (Some(call), Some(dispatch)) =
                                 (request.tool_call(), &cursor.tool_dispatch)
                             {
                                 owned_workbench::WorkbenchUnitStartRequest::Tool {
@@ -11098,6 +11138,9 @@ where
             self.environment.actors.lock().insert(
                 context.actor,
                 ResidentActorRecord {
+                    installed_tools: self.installed_tools.clone(),
+                    initial_context: Default::default(),
+                    fresh_context_seed: self.fresh_context_seed.clone(),
                     root_startup: self
                         .root_startup
                         .as_ref()
@@ -11939,6 +11982,7 @@ where
             }
             let admitted = self.preflight_workbench(kernel.identity(), invocation, control)?;
             let WorkbenchAdmission {
+                initial_context,
                 context,
                 request,
                 installed_tools,
@@ -12022,6 +12066,7 @@ where
             let mut execution_state = WorkbenchExecutionState {
                 cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
+                    initial_context,
                     display_receipt_owner,
                     park_effects: false,
                     context: context.clone(),

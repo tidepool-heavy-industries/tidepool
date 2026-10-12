@@ -113,6 +113,13 @@ module Tidepool.Agent.Contract
   , installSpec
   , toolCallEntry
   , afterToolEntry
+  , initialContextEntry
+  , StartupInput (..)
+  , ContextSection (..)
+  , ContextSeed (..)
+  , emptyContext
+  , contextSection
+  , renderContextSeed
   , ToolCall (..)
   , ToolResult (..)
   , ResultHandle
@@ -969,6 +976,54 @@ data NoTools mode = NoTools deriving (Generic)
 -- That is the point of the default. A slot added later is a new field with a
 -- default, so every spec already written keeps compiling untouched; a spec
 -- spelled as a constructor application would break on every addition.
+-- | Launch observations supplied by the actor owner. A fresh child is idle,
+-- so startup does not imply that a user message or typed request exists.
+data StartupInput = StartupInput
+  { startupOperation :: Text
+  , startupCallerSeed :: Maybe Text
+  } deriving (Eq, Show, Generic)
+
+instance FromJSON StartupInput where
+  parseJSON = withObject "StartupInput" $ \o -> StartupInput
+    <$> o .: "operation" <*> o .:? "callerSeed"
+
+-- | Authored attribution. The optional source is descriptive provenance,
+-- not a runtime-issued context reference or an authority grant.
+data ContextSection = ContextSection
+  { contextSectionLabel :: Text
+  , contextSectionSource :: Maybe Text
+  , contextSectionBody :: Text
+  } deriving (Eq, Show, Generic)
+
+newtype ContextSeed = ContextSeed { contextSections :: [ContextSection] }
+  deriving (Eq, Show, Generic)
+
+instance Semigroup ContextSeed where
+  ContextSeed left <> ContextSeed right = ContextSeed (left ++ right)
+
+instance Monoid ContextSeed where
+  mempty = ContextSeed []
+
+emptyContext :: ContextSeed
+emptyContext = mempty
+
+contextSection :: Text -> Maybe Text -> Text -> ContextSeed
+contextSection label source body = ContextSeed [ContextSection label source body]
+
+renderContextSeed :: ContextSeed -> Text
+renderContextSeed (ContextSeed sections) = T.intercalate "\n\n" (map render sections)
+  where
+    render (ContextSection label source body) =
+      "[" <> label <> maybe "" ("; source: " <>) source <> "]\n" <> body
+
+instance ToJSON ContextSection where
+  toJSON (ContextSection label source body) = object
+    ["label" .= label, "source" .= source, "body" .= body]
+
+instance ToJSON ContextSeed where
+  toJSON seed = object
+    ["sections" .= contextSections seed, "rendered" .= renderContextSeed seed]
+
 data AgentSpec tools effects = AgentSpec
   { -- | The tools record this spec installs. Each field names a tool, and its
     -- types generate the schemas.
@@ -980,11 +1035,14 @@ data AgentSpec tools effects = AgentSpec
   , -- | Applied when a tool call finishes, to that call and its result, in the
     -- actor's own resident machine.
     afterTool :: Maybe (ToolCall -> ToolResult -> Eff effects Annotation)
+  , -- | Run once for a fresh conversation, before first inference. Checking
+    -- and reloading a spec install the code without executing this slot.
+    initialContext :: Maybe (StartupInput -> Eff effects ContextSeed)
   }
 
 -- | The spec every field of which is its default: no tools, no slots.
 defaultSpec :: AgentSpec NoTools effects
-defaultSpec = AgentSpec {specTools = NoTools, afterTool = Nothing}
+defaultSpec = AgentSpec {specTools = NoTools, afterTool = Nothing, initialContext = Nothing}
 
 -- | Built-in hosted policy when no workspace spec is supplied. Empty bounded
 -- model specs still use 'defaultSpec'.
@@ -1018,6 +1076,9 @@ toolCallEntry = 0
 afterToolEntry :: Int
 afterToolEntry = 1
 
+initialContextEntry :: Int
+initialContextEntry = 2
+
 -- | Install one spec: its declared tool surface and every slot it fills, from
 -- a single compile of a single module.
 --
@@ -1044,14 +1105,27 @@ installSpec spec = case compileInstalledTools (specTools spec) of
         Nothing -> declaration { dtdEffectKeys = Just $ case dtdSchedule declaration of
           Asynchronous -> toolEffectNames (Proxy @effects)
           BeforeNextInference -> toolEffectNames (Proxy @(SyncEffects effects)) }
-      slots = case afterTool spec of
-        Nothing -> []
-        Just _ -> [T.pack "afterTool"]
+      slots = maybe [] (const ["afterTool"]) (afterTool spec)
+        ++ maybe [] (const ["initialContext"]) (initialContext spec)
 
       entry :: Int -> Eff (AgentTools ': SyncEffects effects) Text
       entry index
         | index == afterToolEntry = runAfterTool (afterTool spec)
+        | index == initialContextEntry = runInitialContext (initialContext spec)
         | otherwise = runToolCall compiled
+
+      runInitialContext
+        :: Maybe (StartupInput -> Eff effects ContextSeed)
+        -> Eff (AgentTools ': SyncEffects effects) Text
+      runInitialContext Nothing = error "uninstalled initial-context slot"
+      runInitialContext (Just slot) = do
+        (_, payload) <- send AgentToolsInputWith
+        case fromJSON payload of
+          Error message -> error ("initial-context slot input: " ++ message)
+          Success startup -> do
+            seed <- raise (raise (slot startup))
+            pure (encodeValue (object
+              ["status" .= ("success" :: Text), "output" .= seed, "presentation" .= ("" :: Text)]))
 
       runToolCall :: CompiledTools (Eff (SyncEffects effects)) -> Eff (AgentTools ': SyncEffects effects) Text
       runToolCall tooling = do

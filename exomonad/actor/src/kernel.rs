@@ -302,6 +302,7 @@ pub type KernelWorkbenchReply = Result<WorkbenchResponse, KernelInvocationFailur
 /// Actor-owned authority beside the transport-neutral workbench request.
 /// The runtime request and its exact execution journal never contain a handler.
 pub struct ActorWorkbenchInvocation {
+    pub(crate) initial_context: bool,
     pub(crate) display_expansion: Option<((i64, i64, i64), i64)>,
     pub request: WorkbenchRequest,
     pub(crate) installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
@@ -314,6 +315,7 @@ pub struct ActorWorkbenchInvocation {
 impl ActorWorkbenchInvocation {
     pub fn unbound(request: WorkbenchRequest) -> Self {
         Self {
+            initial_context: false,
             display_expansion: None,
             request,
             installed_tools: None,
@@ -337,6 +339,7 @@ impl ActorWorkbenchInvocation {
         hosted_checkpoint_capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
     ) -> Self {
         Self {
+            initial_context: false,
             display_expansion: None,
             request,
             installed_tools,

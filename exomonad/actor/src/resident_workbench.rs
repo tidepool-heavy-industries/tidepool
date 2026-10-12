@@ -5500,13 +5500,36 @@ where
         name: String,
         arguments: serde_json::Value,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        self.begin_installed_entry(context, dispatch, 0, name, arguments).await
+    }
+
+    pub(crate) async fn begin_initial_context(
+        &self,
+        context: crate::ActorSessionContext,
+        dispatch: Arc<RootCustody>,
+        input: serde_json::Value,
+    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
+        self.begin_installed_entry(context, dispatch, crate::initial_context::INITIAL_CONTEXT_ENTRY,
+            crate::initial_context::INITIAL_CONTEXT_SLOT.to_owned(), input).await
+    }
+
+    /// Apply immutable installed code through the common invocation input and
+    /// settlement owner. The entry is issued by the actor, never by authored input.
+    async fn begin_installed_entry(
+        &self,
+        context: crate::ActorSessionContext,
+        dispatch: Arc<RootCustody>,
+        entry: i64,
+        name: String,
+        arguments: serde_json::Value,
+    ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
         self.access
             .with_compiler_machine(context, move |session, context, _, settlement| {
                 let outcome = session
                     .run_rooted_entry_borrowed(
                         "hosted_tool",
                         &dispatch,
-                        0,
+                        entry,
                         context.placement.resource_scope,
                         None,
                         settlement,

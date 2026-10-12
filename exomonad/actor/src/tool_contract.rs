@@ -123,7 +123,7 @@ pub(crate) fn validate_installation(
         return Err(ToolContractError::SlotMetadata);
     }
     for slot in slots {
-        if slot != "afterTool" {
+        if slot != "afterTool" && slot != "initialContext" {
             return Err(ToolContractError::UnknownSlot(slot.clone()));
         }
         let keys = slot_effect_keys
