@@ -1017,14 +1017,16 @@ impl HostedTestRuntime {
             .split(';')
             .next()
             .expect("cookie split has a first field");
+        let native = harness::server::ClientCommand::Host {
+            operation_id,
+            command,
+        };
+        let wire = harness::server::browser_contract::ClientCommand::from(&native);
         let receipt = client
             .post(format!("{api}/commands"))
             .header(reqwest::header::ORIGIN, &origin)
             .header(reqwest::header::COOKIE, cookie)
-            .json(&harness::server::ClientCommand::Host {
-                operation_id,
-                command,
-            })
+            .json(&wire)
             .send()
             .await
             .map_err(|error| error.to_string())?;
