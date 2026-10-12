@@ -1,3 +1,4 @@
+import qualified Data.Text as T
 import qualified Tidepool.Aeson.Value as Json
 import qualified Tidepool.Effects.Authored as Files
 import Tidepool.Records (FsError(..))
