@@ -396,17 +396,35 @@ pub enum JournalOwnerStatus {
 }
 
 impl ActorRecoveryJournal {
-    fn start(mut owner: JournalOwner) -> std::io::Result<Arc<Self>> {
+    async fn start(
+        anchor: DirectoryAnchor,
+        relative_file: PathBuf,
+        require_existing: bool,
+    ) -> std::io::Result<Arc<Self>> {
         let (commands, incoming) = std::sync::mpsc::channel();
+        let (initialized, ready) = tokio::sync::oneshot::channel();
         let (status_tx, status) = tokio::sync::watch::channel(JournalOwnerStatus::Running);
         std::thread::Builder::new()
             .name("actor-journal-owner".into())
             .spawn(move || {
+                let mut fenced = false;
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let mut owner =
+                        match JournalOwner::initialize(&anchor, &relative_file, require_existing) {
+                            Ok(owner) => {
+                                let _ = initialized.send(Ok(()));
+                                owner
+                            }
+                            Err(error) => {
+                                let _ = initialized.send(Err(error));
+                                return false;
+                            }
+                        };
                     while let Ok(command) = incoming.recv() {
                         macro_rules! complete {
                             ($reply:expr, $operation:expr) => {{
                                 let outcome = $operation;
+                                fenced = owner.state.uncertain;
                                 if owner.state.uncertain {
                                     status_tx.send_replace(JournalOwnerStatus::Fenced);
                                 }
@@ -521,16 +539,21 @@ impl ActorRecoveryJournal {
                             status_tx.send_replace(JournalOwnerStatus::Fenced);
                         }
                     }
+                    true
                 }));
                 status_tx.send_replace(JournalOwnerStatus::Stopped {
-                    clean: outcome.is_ok(),
-                    fenced: owner.state.uncertain,
+                    clean: matches!(outcome, Ok(true)),
+                    fenced,
                 });
                 if outcome.is_err() {
                     tracing::error!("actor journal owner terminated unexpectedly");
                 }
             })?;
-        Ok(Arc::new(Self { commands, status }))
+        let journal = Arc::new(Self { commands, status });
+        ready.await.map_err(|_| {
+            std::io::Error::other("actor journal owner terminated during initialization")
+        })??;
+        Ok(journal)
     }
     pub fn owner_status(&self) -> tokio::sync::watch::Receiver<JournalOwnerStatus> {
         self.status.clone()
@@ -547,66 +570,17 @@ impl ActorRecoveryJournal {
             std::io::Error::other("actor journal owner terminated without completion")
         })?
     }
-    pub fn open(
+    pub async fn open(
         anchor: &DirectoryAnchor,
         relative_file: impl AsRef<Path>,
     ) -> std::io::Result<Arc<Self>> {
-        Self::open_with_mode(anchor, relative_file.as_ref(), false)
+        Self::start(anchor.clone(), relative_file.as_ref().to_owned(), false).await
     }
-    pub fn open_existing(
+    pub async fn open_existing(
         anchor: &DirectoryAnchor,
         relative_file: impl AsRef<Path>,
     ) -> std::io::Result<Arc<Self>> {
-        Self::open_with_mode(anchor, relative_file.as_ref(), true)
-    }
-    fn open_with_mode(
-        anchor: &DirectoryAnchor,
-        relative_file: &Path,
-        require_existing: bool,
-    ) -> std::io::Result<Arc<Self>> {
-        let path = anchor
-            .resolve(relative_file)
-            .map_err(std::io::Error::from)?;
-        if let Some(parent) = relative_file.parent() {
-            anchor
-                .create_dir_all(parent)
-                .map_err(std::io::Error::from)?;
-        }
-        let existed = path.try_exists()?;
-        if require_existing && !existed {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "recovered host has no actor lifecycle journal",
-            ));
-        }
-        let (rows, torn) = tidepool_repr::jsonl::read_tail(
-            &path,
-            |line| parse_row(line).map_err(|error| error.to_string()),
-            TailPolicy::Repair,
-        )
-        .map_err(std::io::Error::other)?;
-        if let Some(torn) = torn {
-            tracing::warn!(path = %path.display(), line = torn.line_no, reason = %torn.reason,
-                "repaired torn actor lifecycle journal tail");
-        }
-        let (records, expected, created) = replay(rows)?;
-        if existed && !created {
-            return Err(std::io::Error::other(
-                "actor lifecycle journal lacks a durable creation marker",
-            ));
-        }
-        let mut owner = JournalOwner {
-            path: path.clone(),
-            state: State {
-                next_sequence: expected,
-                records,
-                uncertain: false,
-            },
-        };
-        if !existed {
-            append(&path, &mut owner.state, EventKind::Created {})?;
-        }
-        Self::start(owner)
+        Self::start(anchor.clone(), relative_file.as_ref().to_owned(), true).await
     }
     pub fn read_observed(path: &std::path::Path) -> std::io::Result<Vec<DurableActorRecord>> {
         let (rows, _torn) = tidepool_repr::jsonl::read_tail(
@@ -835,6 +809,56 @@ struct JournalOwner {
     state: State,
 }
 impl JournalOwner {
+    fn initialize(
+        anchor: &DirectoryAnchor,
+        relative_file: &Path,
+        require_existing: bool,
+    ) -> std::io::Result<Self> {
+        let path = anchor
+            .resolve(relative_file)
+            .map_err(std::io::Error::from)?;
+        if let Some(parent) = relative_file.parent() {
+            anchor
+                .create_dir_all(parent)
+                .map_err(std::io::Error::from)?;
+        }
+        let existed = path.try_exists()?;
+        if require_existing && !existed {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "recovered host has no actor lifecycle journal",
+            ));
+        }
+        let (rows, torn) = tidepool_repr::jsonl::read_tail(
+            &path,
+            |line| parse_row(line).map_err(|error| error.to_string()),
+            TailPolicy::Repair,
+        )
+        .map_err(std::io::Error::other)?;
+        if let Some(torn) = torn {
+            tracing::warn!(path = %path.display(), line = torn.line_no, reason = %torn.reason,
+                "repaired torn actor lifecycle journal tail");
+        }
+        let (records, expected, created) = replay(rows)?;
+        if existed && !created {
+            return Err(std::io::Error::other(
+                "actor lifecycle journal lacks a durable creation marker",
+            ));
+        }
+        let mut owner = JournalOwner {
+            path: path.clone(),
+            state: State {
+                next_sequence: expected,
+                records,
+                uncertain: false,
+            },
+        };
+        if !existed {
+            append(&path, &mut owner.state, EventKind::Created {})?;
+        }
+        Ok(owner)
+    }
+
     fn certify(
         &mut self,
         predecessor: ActorRef,
@@ -1822,7 +1846,9 @@ mod tests {
         assert_eq!(serde_json::to_string(&row).unwrap(), valid);
         let valid_bytes = format!("{valid}\n");
         std::fs::write(&path, &valid_bytes).unwrap();
-        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         assert!(journal.records().await.unwrap().is_empty());
         drop(journal);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), valid_bytes);
@@ -1841,7 +1867,9 @@ mod tests {
                 let bytes = format!("{invalid}\n");
                 std::fs::write(&path, &bytes).unwrap();
                 assert!(
-                    ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").is_err(),
+                    ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+                        .await
+                        .is_err(),
                     "surplus field {field:?} accepted"
                 );
                 assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
@@ -1851,7 +1879,9 @@ mod tests {
         second["sequence"] = serde_json::json!(2);
         for bytes in [format!("{second}\n"), format!("{valid}\n{second}\n")] {
             std::fs::write(&path, &bytes).unwrap();
-            assert!(ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").is_err());
+            assert!(ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+                .await
+                .is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
         }
     }
@@ -1891,7 +1921,9 @@ mod tests {
     async fn cold_replay_preserves_optional_authored_labels_and_derives_display() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         for (index, label) in [None, Some(""), Some("duplicate"), Some("duplicate")]
             .into_iter()
             .enumerate()
@@ -1908,6 +1940,7 @@ mod tests {
         }
         drop(journal);
         let records = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+            .await
             .unwrap()
             .records()
             .await
@@ -1932,7 +1965,9 @@ mod tests {
             id: ActorId(7),
             incarnation: Incarnation(3),
         };
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         journal
             .admit(actor, &descriptor("worker"), &[])
             .await
@@ -1965,7 +2000,9 @@ mod tests {
             .await
             .is_err());
         drop(journal);
-        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         assert!(journal.records().await.unwrap()[0]
             .application
             .as_ref()
@@ -1981,7 +2018,9 @@ mod tests {
             .await
             .unwrap();
         drop(journal);
-        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         let record = journal.records().await.unwrap().remove(0);
         let application = record.application.unwrap();
         assert_eq!(application.intended_conversation, Some(expected.clone()));
@@ -1997,7 +2036,9 @@ mod tests {
             let bytes = format!("{{\"version\":{version},\"sequence\":1,\"event\":\"created\"}}\n");
             std::fs::write(&path, &bytes).unwrap();
             assert!(
-                ActorRecoveryJournal::open_existing(&anchor, format!("v{version}.jsonl")).is_err()
+                ActorRecoveryJournal::open_existing(&anchor, format!("v{version}.jsonl"))
+                    .await
+                    .is_err()
             );
             assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
         }
@@ -2005,7 +2046,11 @@ mod tests {
         let legacy = r#"{"version":5,"sequence":1,"event":"admitted","admission":{"actor":{"id":1,"incarnation":1},"label":"root","creator":null,"supervisor_parent":null,"context_parent":null,"actor_path":"root","role":"root","descendant_depth":8,"descendant_active_children":null,"model":null,"effort":null,"instructions":null,"launch_worktrees":[],"source_layer":[]}}"#;
         let legacy_path = directory.path().join("legacy-role.jsonl");
         std::fs::write(&legacy_path, format!("{legacy}\n")).unwrap();
-        assert!(ActorRecoveryJournal::open_existing(&anchor, "legacy-role.jsonl").is_err());
+        assert!(
+            ActorRecoveryJournal::open_existing(&anchor, "legacy-role.jsonl")
+                .await
+                .is_err()
+        );
         assert_eq!(
             std::fs::read_to_string(&legacy_path).unwrap(),
             format!("{legacy}\n")
@@ -2021,7 +2066,9 @@ mod tests {
             id: ActorId(7),
             incarnation: Incarnation(3),
         };
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         journal
             .admit(actor, &descriptor("worker"), &[])
             .await
@@ -2058,7 +2105,9 @@ mod tests {
         )
         .unwrap();
         drop(journal);
-        assert!(ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").is_err());
+        assert!(ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+            .await
+            .is_err());
     }
 
     fn descriptor(label: &str) -> ActorDescriptor {
@@ -2081,7 +2130,9 @@ mod tests {
             id: ActorId(7),
             incarnation: Incarnation(3),
         };
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         journal
             .admit(actor, &descriptor("worker"), &["tree-1".into()])
             .await
@@ -2092,7 +2143,9 @@ mod tests {
         for row in stored.lines() {
             parse_row(row).unwrap();
         }
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         let records = journal.records().await.unwrap();
         assert_eq!(records.len(), 1, "stored rows: {stored}");
         assert_eq!(records[0].admission.actor, actor);
@@ -2120,6 +2173,7 @@ mod tests {
             .unwrap();
         drop(journal);
         let records = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
             .unwrap()
             .records()
             .await
@@ -2142,7 +2196,9 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         journal
             .admit(ActorRef::first(ActorId(4)), &descriptor("observed"), &[])
             .await
@@ -2165,7 +2221,9 @@ mod tests {
     async fn identity_reuse_with_changed_parameters_is_rejected() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         let actor = ActorRef::first(ActorId(2));
         journal
             .admit(actor, &descriptor("first"), &[])
@@ -2185,13 +2243,17 @@ mod tests {
         let binding = directory.path().join("binding.json");
         let actor = ActorRef::first(ActorId(9));
 
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         journal
             .admit(actor, &descriptor("worker"), &[])
             .await
             .unwrap();
         drop(journal);
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         assert!(journal.records().await.unwrap()[0].application.is_none());
 
         journal
@@ -2199,7 +2261,9 @@ mod tests {
             .await
             .unwrap();
         drop(journal);
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         let prepared = journal
             .records()
             .await
@@ -2218,7 +2282,9 @@ mod tests {
             .await
             .unwrap();
         drop(journal);
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         assert_eq!(
             journal.records().await.unwrap()[0]
                 .application
@@ -2237,6 +2303,7 @@ mod tests {
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         assert_eq!(
             ActorRecoveryJournal::open_existing(&anchor, "missing.jsonl")
+                .await
                 .err()
                 .unwrap()
                 .kind(),
@@ -2246,13 +2313,20 @@ mod tests {
         let empty = directory.path().join("empty.jsonl");
         std::fs::write(&empty, b"").unwrap();
         assert!(ActorRecoveryJournal::open_existing(&anchor, "empty.jsonl")
+            .await
             .err()
             .unwrap()
             .to_string()
             .contains("creation marker"));
 
-        drop(ActorRecoveryJournal::open(&anchor, "initialized.jsonl").unwrap());
-        ActorRecoveryJournal::open_existing(&anchor, "initialized.jsonl").unwrap();
+        drop(
+            ActorRecoveryJournal::open(&anchor, "initialized.jsonl")
+                .await
+                .unwrap(),
+        );
+        ActorRecoveryJournal::open_existing(&anchor, "initialized.jsonl")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -2260,19 +2334,29 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
 
-        assert!(ActorRecoveryJournal::open(&anchor, "../outside/actors.jsonl").is_err());
+        assert!(
+            ActorRecoveryJournal::open(&anchor, "../outside/actors.jsonl")
+                .await
+                .is_err()
+        );
         assert!(!directory.path().parent().unwrap().join("outside").exists());
         assert!(
-            ActorRecoveryJournal::open(&anchor, directory.path().join("absolute.jsonl")).is_err()
+            ActorRecoveryJournal::open(&anchor, directory.path().join("absolute.jsonl"))
+                .await
+                .is_err()
         );
         assert!(!directory.path().join("absolute.jsonl").exists());
 
         let obstruction = directory.path().join("nested");
         std::fs::write(&obstruction, b"file blocks directory creation").unwrap();
-        assert!(ActorRecoveryJournal::open(&anchor, "nested/actors.jsonl").is_err());
+        assert!(ActorRecoveryJournal::open(&anchor, "nested/actors.jsonl")
+            .await
+            .is_err());
         std::fs::remove_file(obstruction).unwrap();
 
-        let journal = ActorRecoveryJournal::open(&anchor, "nested/actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "nested/actors.jsonl")
+            .await
+            .unwrap();
         assert!(directory.path().join("nested/actors.jsonl").is_file());
         assert_eq!(journal.records().await.unwrap().len(), 0);
     }
@@ -2387,14 +2471,18 @@ mod tests {
             None,
             None,
         );
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         journal
             .admit_with_startup(actor, &root, &[], Some(intent.clone()))
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
         drop(journal);
-        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         let record = &journal.records().await.unwrap()[0];
         assert_eq!(record.startup.as_ref(), Some(&intent));
         assert_eq!(record.application.as_ref(), Some(&intent.application()));
@@ -2406,6 +2494,7 @@ mod tests {
         drop(journal);
         assert_eq!(
             ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+                .await
                 .unwrap()
                 .records()
                 .await
@@ -2423,7 +2512,9 @@ mod tests {
     async fn root_successor_receipt_requires_latest_prepared_journal_and_owned_placement() {
         let run = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         let binding = run.path().join("binding.json");
         let manifest = run.path().join("recovery.sqlite");
         let path = tidepool_repr::ActorPath::parse("root/recovered").unwrap();
@@ -2541,7 +2632,9 @@ mod tests {
     async fn root_startup_rollforward_is_linear_and_cannot_cross_a_bound_owner() {
         let run = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         let binding = run.path().join("binding.json");
         let manifest = run.path().join("recovery.sqlite");
         let old_owner = tidepool_runtime::session::RecoveryPublicOwner::new(
@@ -2721,13 +2814,17 @@ mod tests {
             .await
             .is_ok());
         drop(journal);
-        ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+        ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
     }
     #[tokio::test]
     async fn dropped_reply_preserves_admitted_write_and_owner_drains() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         let (entered_tx, entered) = tokio::sync::oneshot::channel();
         let (resume, paused) = std::sync::mpsc::channel();
         journal
@@ -2771,7 +2868,9 @@ mod tests {
                 fenced: false
             }
         );
-        let recovered = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+        let recovered = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         assert_eq!(recovered.records().await.unwrap()[0].admission.actor, actor);
     }
 
@@ -2779,7 +2878,9 @@ mod tests {
     async fn append_failure_permanently_fences_even_after_path_repair() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         let path = directory.path().join("actors.jsonl");
         let retained = directory.path().join("retained.jsonl");
         std::fs::rename(&path, &retained).unwrap();
@@ -2803,7 +2904,9 @@ mod tests {
         assert!(journal.validated_records().await.is_err());
         assert!(journal.records().await.unwrap().is_empty());
         drop(journal);
-        let recovered = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+        let recovered = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         recovered
             .admit(actor, &descriptor("owner"), &[])
             .await
@@ -2818,7 +2921,7 @@ mod tests {
             runtime.block_on(async {
                 let directory = tempfile::tempdir().unwrap();
                 let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-                let mut journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+                let mut journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").await.unwrap();
                 let actor = ActorRef::first(ActorId(53));
                 let binding = directory.path().join("binding.json");
                 let terminal = crate::ActorTerminal::new(ActorExitKind::Completed, "done");
@@ -2864,7 +2967,7 @@ mod tests {
                         },
                         5 => {
                             drop(journal);
-                            journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+                            journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").await.unwrap();
                             (true, true, false)
                         }
                         _ => {
@@ -2898,7 +3001,9 @@ mod tests {
     async fn owner_crash_reports_termination_and_refuses_later_commands() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         let mut status = journal.owner_status();
         let (reply, result) = tokio::sync::oneshot::channel();
         journal.commands.send(Command::Crash { reply }).unwrap();
@@ -2925,7 +3030,9 @@ mod tests {
         use std::io::Write;
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
         let path = directory.path().join("actors.jsonl");
         let original = std::fs::read(&path).unwrap();
         let mut file = std::fs::OpenOptions::new()
