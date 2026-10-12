@@ -3726,6 +3726,57 @@ mod tests {
     }
 
     #[test]
+    fn runtime_state_writes_do_not_change_source_capture_or_signature() {
+        let project = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let root = project.path().join(".exomonad");
+        std::fs::create_dir_all(root.join("Project/state")).unwrap();
+        let authored = root.join("Project/Work.hs");
+        std::fs::write(&authored, "module Project.Work where\nwork = 1\n").unwrap();
+        std::fs::write(root.join("Project/state/extra.h"), "#define EXTRA 1\n").unwrap();
+        let roots = [root.clone()];
+        let layer = SourceLayer::new(run.path());
+        let before = layer.observe_from_roots("state-test", &roots).unwrap();
+        let signature = super::super::workspace::sources_signature(&roots).unwrap();
+
+        let memory = root.join("state/Scratch.hs");
+        std::fs::create_dir_all(memory.parent().unwrap()).unwrap();
+        std::fs::write(&memory, "module Scratch where\nscratch = 2\n").unwrap();
+        assert_eq!(
+            layer.observe_from_roots("state-test", &roots).unwrap(),
+            before
+        );
+        assert_eq!(
+            super::super::workspace::sources_signature(&roots).unwrap(),
+            signature
+        );
+        let captured = layer.capture_from_roots("state-test", &roots).unwrap();
+        assert_eq!(captured.revision(), &before);
+        assert!(!captured.directory.join("0/state").exists());
+        assert!(captured.directory.join("0/Project/Work.hs").is_file());
+        assert!(captured.directory.join("0/Project/state/extra.h").is_file());
+        assert_eq!(
+            std::fs::read_to_string(&memory).unwrap(),
+            "module Scratch where\nscratch = 2\n"
+        );
+
+        std::fs::write(&authored, "module Project.Work where\nwork = 3\n").unwrap();
+        assert_ne!(
+            layer
+                .observe_from_roots("state-test", &roots)
+                .unwrap()
+                .identity,
+            before.identity
+        );
+        assert_ne!(
+            super::super::workspace::sources_signature(&roots).unwrap(),
+            signature
+        );
+        let changed = layer.capture_from_roots("state-test", &roots).unwrap();
+        assert_ne!(changed.revision().identity, before.identity);
+    }
+
+    #[test]
     fn source_observation_rejects_partial_and_symlinked_inputs_without_writes() {
         let run = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();

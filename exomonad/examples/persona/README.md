@@ -34,8 +34,9 @@ Its synchronous notebook includes context editing, record actors, hosted agents,
 typed requests, watches, inspection and scoped cleanup. It omits commands and
 raw HTTP. `Persona.Spec.helperSpec` provides a starting helper profile that
 returns findings rather than writing shared memory or mounting human forms.
-The Fs handlers resolve all file operations beneath `.exomonad/state`, outside
-the source roots. The host currently grants the general effect vocabulary;
+The Fs handlers resolve all file operations beneath `.exomonad/state`, which
+source capture and drift inspection exclude. The host currently grants the
+general effect vocabulary;
 the installed notebook narrows it. This is a tool capability boundary, not a
 separate OS user or process sandbox.
 

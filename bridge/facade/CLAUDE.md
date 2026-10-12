@@ -14,6 +14,10 @@ launchers. Provider transport belongs to the pinned Harness runtime, actor
 identity and authority to `exomonad-actor`, and compilation/resident-machine
 mechanics to `tidepool-runtime`.
 
+Workspace source capture, inspection and drift signatures exclude the exact
+`.exomonad/state` tree used for durable memory, including when `.exomonad` is
+a declared source root. Other authored directories named `state` remain inputs.
+
 Native Codex goals are unavailable to every Exomonad actor. Worker launch resolution fills
 omitted effort from host configuration and preserves explicit overrides. The
 prompt catalog freezes one shared base and API guide at startup; do not
