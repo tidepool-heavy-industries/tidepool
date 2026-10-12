@@ -585,6 +585,20 @@ mod readiness_tests {
         assert_eq!(window(CommandPosition::OutputSlice(3, -5), 10), (3, 3));
     }
 
+    proptest::proptest! {
+        #[test]
+        fn requested_output_slices_advance_in_original_bytes(
+            offset in 0_i64..=i64::MAX,
+            count in 1_i64..=65536,
+            _available in proptest::prelude::any::<u64>(),
+        ) {
+            let (start, end) = window(CommandPosition::OutputSlice(offset, count), _available);
+            proptest::prop_assert_eq!(start, offset as u64);
+            proptest::prop_assert_eq!(end, start + count as u64);
+            proptest::prop_assert!(end > start);
+        }
+    }
+
     #[tokio::test]
     async fn retained_slices_advance_beyond_the_page_budget_and_stop_at_eof() {
         let directory = tempfile::tempdir().unwrap();
