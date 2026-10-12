@@ -5489,18 +5489,23 @@ where
     }
 
     /// Admit actor-owned decisions before transferring the native or service wait.
-    async fn prepare_independent_effect(
-        &mut self,
+    /// Construct each preparation branch before polling it so the dispatch
+    /// frame does not remain on the executor stack across an await.
+    fn prepare_independent_effect<'a>(
+        &'a mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
         effect_owner: &CurrentEffectOwner<'_>,
         boundary: ResidentActorBoundary,
-    ) -> Result<
-        futures_util::future::BoxFuture<
-            'static,
-            Result<ResidentOutcome, ResidentActorWorkbenchError>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<
+            futures_util::future::BoxFuture<
+                'static,
+                Result<ResidentOutcome, ResidentActorWorkbenchError>,
+            >,
+            ResidentActorBoundary,
         >,
-        ResidentActorBoundary,
     > {
         let environment = self.environment.clone();
         let kernel = kernel.clone();
@@ -5590,38 +5595,45 @@ where
                 target,
                 definition,
             } => {
-                let authorized = kernel.authorize_control(target).await;
                 let installed = self.installed_tools.clone();
                 let installation_context = self.context(context.actor);
                 let allowed = descriptor.capabilities().effect_keys().to_vec();
-                Box::pin(async move {
-                    let authorized = authorized.map_err(ResidentActorWorkbenchError::Directory)?;
-                    let result = if !authorized {
-                        Err(crate::SpecReplacementError::Unauthorized)
-                    } else if target == context.actor {
-                        install_explicit_replacement(
-                            environment.clone(),
-                            installation_context,
-                            installed,
-                            allowed,
-                            definition,
-                        )
-                        .await
-                    } else if let Some(actor) = kernel
-                        .resolve(target)
-                        .await
-                        .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
-                        .filter(|actor| actor.terminal().get().is_none())
-                    {
-                        actor.replace_spec(definition).await
-                    } else {
-                        Err(crate::SpecReplacementError::Unavailable)
-                    };
-                    environment
-                        .runner
-                        .resume_spec_replacement(context, continuation, result)
-                        .await
-                })
+                return Box::pin(async move {
+                    let authorized = kernel.authorize_control(target).await;
+                    let operation: futures_util::future::BoxFuture<
+                        'static,
+                        Result<ResidentOutcome, ResidentActorWorkbenchError>,
+                    > = Box::pin(async move {
+                        let authorized =
+                            authorized.map_err(ResidentActorWorkbenchError::Directory)?;
+                        let result = if !authorized {
+                            Err(crate::SpecReplacementError::Unauthorized)
+                        } else if target == context.actor {
+                            install_explicit_replacement(
+                                environment.clone(),
+                                installation_context,
+                                installed,
+                                allowed,
+                                definition,
+                            )
+                            .await
+                        } else if let Some(actor) = kernel
+                            .resolve(target)
+                            .await
+                            .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+                            .filter(|actor| actor.terminal().get().is_none())
+                        {
+                            actor.replace_spec(definition).await
+                        } else {
+                            Err(crate::SpecReplacementError::Unavailable)
+                        };
+                        environment
+                            .runner
+                            .resume_spec_replacement(context, continuation, result)
+                            .await
+                    });
+                    Ok(operation)
+                });
             }
 
             ResidentActorBoundary::DisplayAllowanceGranted {
@@ -5670,12 +5682,18 @@ where
                 owner,
                 source,
             } => {
-                let result = self.attach_source(&kernel, &context, owner, source).await;
-                Box::pin(async move {
-                    environment
-                        .runner
-                        .resume_value(context, continuation, result)
-                        .await
+                return Box::pin(async move {
+                    let result = self.attach_source(&kernel, &context, owner, source).await;
+                    let operation: futures_util::future::BoxFuture<
+                        'static,
+                        Result<ResidentOutcome, ResidentActorWorkbenchError>,
+                    > = Box::pin(async move {
+                        environment
+                            .runner
+                            .resume_value(context, continuation, result)
+                            .await
+                    });
+                    Ok(operation)
                 })
             }
             ResidentActorBoundary::ActorContext(continuation) => Box::pin(async move {
@@ -6047,9 +6065,9 @@ where
                     .resume_watch_forget(context.clone(), forget.continuation, outcome)
                     .await
             }),
-            other => return Err(other),
+            other => return Box::pin(std::future::ready(Err(other))),
         };
-        Ok(operation)
+        Box::pin(std::future::ready(Ok(operation)))
     }
 
     async fn expand_display(
