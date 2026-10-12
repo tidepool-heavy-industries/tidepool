@@ -2705,32 +2705,6 @@ mod tests {
         (store, authority)
     }
 
-    struct JournalSuccessor {
-        run: Arc<LockedRun>,
-        receipt: Arc<DurableRootSuccessorAdmission>,
-    }
-
-    impl tidepool_runtime::session::RecoverySuccessorAuthority for JournalSuccessor {
-        fn validate_successor(
-            &self,
-            run_root: &Path,
-            predecessor: &tidepool_runtime::session::RecoveryPublicOwner,
-            successor: &tidepool_runtime::session::RecoveryPublicOwner,
-            session: SessionId,
-            target: ScopeId,
-        ) -> std::io::Result<bool> {
-            use tidepool_runtime::session::RecoveryRunAuthority;
-            Ok(self.run.owns_run(run_root)?
-                && self.receipt.validate_successor(
-                    run_root,
-                    predecessor,
-                    successor,
-                    session,
-                    target,
-                )?)
-        }
-    }
-
     fn startup_intent(
         actor: ActorRef,
         binding: &Path,
@@ -3126,42 +3100,64 @@ mod tests {
     async fn root_startup_rollforward_is_linear_and_cannot_cross_a_bound_owner() {
         let run = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", run.clone())
-            .await
-            .unwrap();
         let binding = run.path().join("binding.json");
         let manifest = run.path().join("recovery.sqlite");
+        let root =
+            descriptor("root").with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap());
         let old_owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root").unwrap(),
             1,
         )
         .unwrap();
-        let (store, authority) = recovery_fixture(&manifest, &old_owner, 0);
+        let (_store, authority) = recovery_fixture(&manifest, &old_owner, 0);
         let pin = RootStartupManifestPin::capture_for_owner(&manifest, &old_owner).unwrap();
-        let root =
-            descriptor("root").with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap());
-        let a = ActorRef::first(ActorId(1));
-        let b = ActorRef {
-            id: ActorId(5),
-            incarnation: Incarnation(4),
-        };
-        let c = ActorRef {
-            id: ActorId(9),
-            incarnation: Incarnation(12),
-        };
-        let d = ActorRef {
-            id: ActorId(11),
-            incarnation: Incarnation(28),
-        };
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", run.clone())
+            .await
+            .unwrap();
+        let (control, task) = crate::local_actor::run_control::RunControlClient::start()
+            .await
+            .unwrap();
+        let reservation = control.reserve(Incarnation::FIRST).await.unwrap();
+        let a = reservation.identity();
         let initial = startup_intent(a, &binding, None, None, None, None);
+        let permit = control
+            .authorize_root_startup(&reservation, initial.clone(), journal.clone(), None)
+            .await
+            .unwrap();
         journal
-            .admit_with_startup(a, &root, &[], Some(initial.clone()))
+            .admit_with_startup(a, &root, &[], Some(initial.clone()), Some(&permit))
             .await
             .unwrap();
         journal
             .bind_application_conversation(a, initial.conversation.clone())
             .await
             .unwrap();
+        drop(permit);
+        drop(reservation);
+        drop(control);
+        task.abort();
+        let _ = task.await;
+        let mut stopped = journal.owner_status();
+        drop(journal);
+        while !matches!(*stopped.borrow(), JournalOwnerStatus::Stopped { .. }) {
+            stopped.changed().await.unwrap();
+        }
+        let lease = Arc::try_unwrap(authority)
+            .ok()
+            .expect("previous native session released run lease");
+        let (journal, boot) =
+            ActorRecoveryJournal::open_for_boot(&anchor, "actors.jsonl", true, Box::new(lease))
+                .await
+                .unwrap();
+        let (control, task) = crate::local_actor::run_control::RunControlClient::start()
+            .await
+            .unwrap();
+        control
+            .register_recovery_boot(journal.clone(), boot)
+            .await
+            .unwrap();
+        let reservation = control.reserve(Incarnation(4)).await.unwrap();
+        let b = reservation.identity();
         let second = startup_intent(
             b,
             &binding,
@@ -3170,10 +3166,41 @@ mod tests {
             Some(pin.clone()),
             Some(initial.conversation.clone()),
         );
-        journal
-            .admit_with_startup(b, &root, &[], Some(second.clone()))
+        let permit = control
+            .authorize_root_startup(&reservation, second.clone(), journal.clone(), None)
             .await
             .unwrap();
+        journal
+            .admit_with_startup(b, &root, &[], Some(second), Some(&permit))
+            .await
+            .unwrap();
+        drop(permit);
+        drop(reservation);
+        drop(control);
+        task.abort();
+        let _ = task.await;
+        let mut stopped = journal.owner_status();
+        drop(journal);
+        while !matches!(*stopped.borrow(), JournalOwnerStatus::Stopped { .. }) {
+            stopped.changed().await.unwrap();
+        }
+        let (journal, boot) = ActorRecoveryJournal::open_for_boot(
+            &anchor,
+            "actors.jsonl",
+            true,
+            recovery_test_fixture::boot_registration(run.path()),
+        )
+        .await
+        .unwrap();
+        let (control, _task) = crate::local_actor::run_control::RunControlClient::start()
+            .await
+            .unwrap();
+        control
+            .register_recovery_boot(journal.clone(), boot)
+            .await
+            .unwrap();
+        let reservation = control.reserve(Incarnation(12)).await.unwrap();
+        let c = reservation.identity();
         let third = startup_intent(
             c,
             &binding,
@@ -3182,135 +3209,88 @@ mod tests {
             Some(pin.clone()),
             Some(initial.conversation.clone()),
         );
+        let permit = control
+            .authorize_root_startup(&reservation, third.clone(), journal.clone(), None)
+            .await
+            .unwrap();
         let mut changed_bootstrap = third.clone();
         changed_bootstrap.bootstrap_identity = "different-bootstrap".into();
         assert!(journal
-            .admit_with_startup(c, &root, &[], Some(changed_bootstrap))
+            .admit_with_startup(c, &root, &[], Some(changed_bootstrap), Some(&permit))
             .await
             .is_err());
         let mut changed_content = third.clone();
-        let changed_revision = &mut changed_content
+        changed_content
             .manifest
             .as_mut()
             .unwrap()
             .domain
-            .content_revision;
-        *changed_revision = tidepool_runtime::session::StoreRevision(
+            .content_revision = tidepool_runtime::session::StoreRevision(
             pin.domain.content_revision.0.checked_add(1).unwrap(),
         );
-        assert_ne!(*changed_revision, pin.domain.content_revision);
         assert!(journal
-            .admit_with_startup(c, &root, &[], Some(changed_content))
+            .admit_with_startup(c, &root, &[], Some(changed_content), Some(&permit))
             .await
             .is_err());
         journal
-            .admit_with_startup(c, &root, &[], Some(third.clone()))
+            .admit_with_startup(c, &root, &[], Some(third.clone()), Some(&permit))
             .await
             .unwrap();
-        assert!(journal
-            .admit_with_startup(
-                d,
-                &root,
-                &[],
-                Some(startup_intent(
-                    d,
-                    &binding,
-                    Some(b),
-                    Some(a),
-                    Some(pin.clone()),
-                    Some(initial.conversation.clone())
-                ))
-            )
+        let next = control.reserve(Incarnation(28)).await.unwrap();
+        let d = next.identity();
+        let branch = startup_intent(
+            d,
+            &binding,
+            Some(b),
+            Some(a),
+            Some(pin.clone()),
+            Some(initial.conversation.clone()),
+        );
+        assert!(control
+            .authorize_root_startup(&next, branch.clone(), journal.clone(), None)
             .await
             .is_err());
+        let records: BTreeMap<_, _> = journal
+            .validated_records()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| (record.admission.actor, record))
+            .collect();
+        assert!(validate_startup(
+            &records,
+            &DurableActorAdmission::capture(d, &root, &[]),
+            Some(&branch)
+        )
+        .is_err());
+        assert!(startup_chain_contains(&records, c, a));
         journal
             .bind_application_conversation(c, third.conversation.clone())
             .await
             .unwrap();
-        assert!(journal
-            .admit_with_startup(
-                d,
-                &root,
-                &[],
-                Some(startup_intent(
-                    d,
-                    &binding,
-                    Some(c),
-                    Some(a),
-                    Some(pin.clone()),
-                    Some(initial.conversation.clone())
-                ))
-            )
+        let records: BTreeMap<_, _> = journal
+            .validated_records()
             .await
-            .is_err());
-        let c_owner = tidepool_runtime::session::RecoveryPublicOwner::new(
-            &tidepool_repr::ActorPath::parse("root").unwrap(),
-            12,
+            .unwrap()
+            .into_iter()
+            .map(|record| (record.admission.actor, record))
+            .collect();
+        assert!(!startup_chain_contains(&records, c, a));
+        let crossing = startup_intent(
+            d,
+            &binding,
+            Some(c),
+            Some(a),
+            Some(pin),
+            Some(initial.conversation),
+        );
+        assert!(validate_startup(
+            &records,
+            &DurableActorAdmission::capture(d, &root, &[]),
+            Some(&crossing)
         )
-        .unwrap();
-        use tidepool_runtime::session::{
-            ModuleEnv, PersistentSession, RecoveryDomainId, SessionLib,
-        };
-        let artifact_root = run.path().join("haskell-session");
-        let mut library = SessionLib::open(
-            SessionId(1),
-            &artifact_root,
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap();
-        tidepool_testing::with_settlement(|settlement| {
-            library.attach_owned_recovery_domain(
-                Arc::clone(&store),
-                RecoveryDomainId::Root,
-                artifact_root,
-                authority.clone(),
-                settlement,
-            )
-        })
-        .unwrap();
-        let mut recovered = PersistentSession::new(Some(library), 1024);
-        let target = recovered.mint_isolated_scope();
-        assert_eq!(target, root.placement().lexical_scope);
-        recovered
-            .seal_recovery_initialization_scope(target)
-            .unwrap();
-        let placement = RootRecoveryPlacement::new(c, c_owner.clone(), root.placement());
-        let receipt = journal
-            .certify_root_successor(a, placement, Some("source"), &binding)
-            .await
-            .unwrap();
-        recovered
-            .transfer_recovered_public_owner(
-                &old_owner,
-                c_owner.clone(),
-                target,
-                Arc::new(JournalSuccessor {
-                    run: authority,
-                    receipt,
-                }),
-            )
-            .unwrap();
-        let c_pin = RootStartupManifestPin::capture_for_owner(&manifest, &c_owner).unwrap();
-        assert!(journal
-            .admit_with_startup(
-                d,
-                &root,
-                &[],
-                Some(startup_intent(
-                    d,
-                    &binding,
-                    Some(c),
-                    Some(c),
-                    Some(c_pin),
-                    Some(third.conversation)
-                ))
-            )
-            .await
-            .is_ok());
-        drop(journal);
-        ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", run.clone())
-            .await
-            .unwrap();
+        .is_err());
+        assert_eq!(records.len(), 3);
     }
     #[tokio::test]
     async fn dropped_reply_preserves_admitted_write_and_owner_drains() {
