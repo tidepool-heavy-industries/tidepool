@@ -1,6 +1,5 @@
 //! Canonical Ractor wrapper for Tidepool actor behavior.
 
-use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
