@@ -398,9 +398,12 @@ async fn ready(root: &Path, phase: &str, process: &mut Process) -> serde_json::V
             }
             if let Some(current) = observed_root(root) {
                 if Some(current.admission.actor) != process.1 {
-                    assert!(current.terminal.is_none(),
+                    assert!(
+                        current.terminal.is_none(),
                         "production {phase} actor {} retired before readiness: {:?}",
-                        current.admission.actor, current.terminal);
+                        current.admission.actor,
+                        current.terminal
+                    );
                 }
             }
             if let Ok(bytes) = std::fs::read(root.join(format!("{phase}.ready"))) {
