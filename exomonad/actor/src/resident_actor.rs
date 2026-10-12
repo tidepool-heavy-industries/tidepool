@@ -12929,7 +12929,8 @@ where
         machine,
         fork_workspaces,
         incarnation,
-    );
+    )
+    .await?;
     let (actor, task) = forest.admit_root(descriptor, outcome).await?;
     Ok((actor, task, receiver))
 }
@@ -13255,9 +13256,14 @@ where
     ) -> Result<WorkbenchResponse, crate::ResidentToolError> {
         ActorDisplays::validate_identity(actor, identity)
             .map_err(|error| crate::ResidentToolError::Unavailable(error.to_string()))?;
-        let target = self.directory.resolve(actor).ok_or_else(|| {
-            crate::ResidentToolError::Unavailable("display actor is unavailable".into())
-        })?;
+        let target = self
+            .directory
+            .resolve(actor)
+            .await
+            .map_err(|error| crate::ResidentToolError::Unavailable(error.to_string()))?
+            .ok_or_else(|| {
+                crate::ResidentToolError::Unavailable("display actor is unavailable".into())
+            })?;
         crate::resident_tools::expand_display_response(&target, identity, key).await
     }
 
