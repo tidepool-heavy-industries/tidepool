@@ -2460,6 +2460,7 @@ mod tests {
     }
 
     type ReceivedWorkbench = (
+        Option<crate::kernel::lifecycle::AdmittedKernelLease>,
         Option<Arc<WorkbenchExecutionControl>>,
         ractor::RpcReplyPort<crate::KernelWorkbenchReply>,
     );
@@ -2487,11 +2488,61 @@ mod tests {
             message: Self::Msg,
             sender: &mut Self::State,
         ) -> Result<(), ractor::ActorProcessingErr> {
+            let (message, ingress) = match message {
+                crate::KernelMessage::Admitted(envelope) => {
+                    let (_, message, lease) = envelope.into_parts();
+                    (message, Some(lease))
+                }
+                message => (message, None),
+            };
             if let crate::KernelMessage::Workbench { control, reply, .. } = message {
-                sender.send((control, reply))?;
+                sender.send((ingress, control, reply))?;
             }
             Ok(())
         }
+    }
+
+    async fn register_collector(
+        address: ractor::ActorRef<crate::KernelMessage>,
+    ) -> (
+        crate::LocalActorRef,
+        crate::RetainedActorExit,
+        crate::local_actor::LocalActorDirectory,
+    ) {
+        let (directory, _owner_task) = crate::local_actor::LocalActorDirectory::start()
+            .await
+            .expect("actual control owner");
+        let reservation = directory
+            .reserve(crate::Incarnation::FIRST)
+            .await
+            .expect("actual actor reservation");
+        let identity = reservation.identity();
+        let lifecycle = reservation.lifecycle().clone();
+        let terminal = reservation.terminal().clone();
+        let actor = crate::LocalActorRef::with_identity_admission(
+            address.clone(),
+            terminal.clone(),
+            identity,
+            lifecycle.clone(),
+        );
+        lifecycle
+            .attach_executor(address)
+            .await
+            .expect("exact executor attachment");
+        directory
+            .register_executor(
+                reservation,
+                actor.clone(),
+                std::sync::Weak::new(),
+                crate::local_actor::SpawnOwnership::Independent,
+            )
+            .await
+            .expect("actual executor registration");
+        lifecycle
+            .executor_started()
+            .await
+            .expect("actual collector start");
+        (actor, terminal, directory)
     }
 
     #[tokio::test]
@@ -2501,8 +2552,7 @@ mod tests {
             let (address, actor_task) = ractor::Actor::spawn(None, WorkbenchCollector, send)
                 .await
                 .unwrap();
-            let terminal = crate::RetainedActorExit::new();
-            let actor = crate::LocalActorRef::new(address.clone(), terminal.clone());
+            let (actor, terminal, _directory) = register_collector(address.clone()).await;
             let client = ResidentToolClient::local(actor.clone());
             let invocation = ToolInvocationContext::external(
                 "thread".into(),
@@ -2571,7 +2621,7 @@ mod tests {
         let (address, actor_task) = ractor::Actor::spawn(None, WorkbenchCollector, send)
             .await
             .unwrap();
-        let actor = crate::LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let (actor, _terminal, _directory) = register_collector(address.clone()).await;
         let client = ResidentToolClient::local(actor.clone());
         let invocation = ToolInvocationContext::external(
             "thread".into(),
@@ -2592,7 +2642,7 @@ mod tests {
                     .await
             })
         };
-        let (control, reply) = received.recv().await.unwrap();
+        let (_ingress, control, reply) = received.recv().await.unwrap();
         let control = control.unwrap();
         let execution = control.execution_id(actor.identity());
         let response = WorkbenchResponse {
@@ -2628,7 +2678,7 @@ mod tests {
         let (address, task) = ractor::Actor::spawn(None, WorkbenchCollector, send)
             .await
             .unwrap();
-        let actor = crate::LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let (actor, _terminal, _directory) = register_collector(address.clone()).await;
         let client = ResidentToolClient::local(actor.clone());
         let invocation = ToolInvocationContext::external(
             "thread".into(),
@@ -2647,14 +2697,14 @@ mod tests {
         assert!(!actor.hosted_cell_computing());
 
         let running = dispatch(client.clone(), invocation.clone());
-        let (control, reply) = received.recv().await.unwrap();
+        let (_ingress, control, reply) = received.recv().await.unwrap();
         let control = control.unwrap();
         assert!(actor.hosted_cell_computing());
         assert!(actor.hosted_workbench_waiting(&invocation).is_none());
         let mut second_invocation = invocation.clone();
         second_invocation.call_id = "second-call".into();
         let second = dispatch(client.clone(), second_invocation.clone());
-        let (second_control, second_reply) =
+        let (_second_ingress, second_control, second_reply) =
             tokio::time::timeout(std::time::Duration::from_secs(2), received.recv())
                 .await
                 .expect("second call reaches actor while first is active")
@@ -2707,7 +2757,7 @@ mod tests {
 
         // An execution whose reply is lost is cleared too.
         let torn_down = dispatch(client.clone(), invocation.clone());
-        let (control, reply) = received.recv().await.unwrap();
+        let (_ingress, control, reply) = received.recv().await.unwrap();
         let control = control.unwrap();
         assert!(actor.hosted_cell_computing());
         actor.hosted_cell().complete(&control);
@@ -2717,7 +2767,7 @@ mod tests {
 
         // Dropping the caller leaves the actor's accepted work visible.
         let abandoned = dispatch(client.clone(), invocation.clone());
-        let (control, reply) = received.recv().await.unwrap();
+        let (_ingress, control, reply) = received.recv().await.unwrap();
         let control = control.unwrap();
         abandoned.abort();
         let _ = abandoned.await;
