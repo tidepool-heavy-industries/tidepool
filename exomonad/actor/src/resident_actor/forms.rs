@@ -83,6 +83,7 @@ pub(super) fn service<H, O>(
     continuation: ResidentHole,
     operation: FormOperation,
     publication: crate::FormPublication,
+    observation: crate::ActorRuntimeObservationHandle,
 ) -> futures_util::future::BoxFuture<'static, Result<ResidentOutcome, ResidentActorWorkbenchError>>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -148,10 +149,16 @@ where
                 let result: Result<FormAttempt, FormCause> = async {
                     let mounted = resolve(&environment, &context, realm, &lease)?;
                     let work = work.as_ref().ok_or(FormCause::FormUnauthorized)?;
+                    let mut waiting = None;
                     loop {
                         if mounted.cleanup.is_closed() { return Err(FormCause::FormClosed); }
                         let changed = mounted.cleanup.host.changed();
                         if let Some(attempt) = admitted(interaction_control.as_ref(), work, || mounted.cleanup.host.attempt(context.actor, &mounted.cleanup.mount))? { return Ok(attempt); }
+                        if waiting.is_none() {
+                            waiting = Some(observation.await_form(
+                                mounted.cleanup.mount.clone(), publication.operation.clone(),
+                            ));
+                        }
                         tokio::select! {
                             biased;
                             _ = retirement.wait_requested_shutdown() => { control.request_cancellation(); return Err(FormCause::FormClosed); }

@@ -13,6 +13,67 @@ use harness::{
 };
 use tokio::sync::watch;
 
+fn workbench_observation(
+    posture: &ActorWorkbenchPosture,
+) -> harness::server::browser_contract::HostWorkbenchObservation {
+    use harness::server::browser_contract::{
+        HostWorkbenchObservation as Wire, HostWorkbenchTransfer,
+    };
+    match posture {
+        ActorWorkbenchPosture::Idle => Wire::Idle,
+        ActorWorkbenchPosture::RunningUnit {
+            input_unit_index,
+            total,
+        } => Wire::RunningUnit {
+            input_unit_index: (*input_unit_index as u64).into(),
+            total: (*total as u64).into(),
+        },
+        ActorWorkbenchPosture::AwaitingEffect {
+            input_unit_index,
+            total,
+            effect,
+        } => Wire::AwaitingEffect {
+            input_unit_index: (*input_unit_index as u64).into(),
+            total: (*total as u64).into(),
+            operation: effect.clone(),
+        },
+        ActorWorkbenchPosture::TerminalTransfer { transfer } => Wire::TerminalTransfer {
+            transfer: match transfer {
+                exomonad_actor::ActorWorkbenchTransfer::Reply => HostWorkbenchTransfer::Reply,
+                exomonad_actor::ActorWorkbenchTransfer::CancellationAcknowledgement => {
+                    HostWorkbenchTransfer::CancellationAcknowledgement
+                }
+            },
+        },
+        ActorWorkbenchPosture::Failed => Wire::Failed,
+    }
+}
+
+fn form_waits(node: &ActorGraphNode) -> harness::server::browser_contract::HostFormWaits {
+    use harness::server::browser_contract::{ActorOutputExecution, HostFormWait, HostFormWaits};
+    const MAX_WAITS: usize = 64;
+    HostFormWaits {
+        omitted: (node.form_waits.len().saturating_sub(MAX_WAITS) as u64).into(),
+        waits: node
+            .form_waits
+            .iter()
+            .take(MAX_WAITS)
+            .map(|wait| HostFormWait {
+                mount_id: wait.mount_id.clone(),
+                execution: match &wait.operation {
+                    Some(operation) => ActorOutputExecution::Notebook {
+                        execution: operation.execution.to_string(),
+                        input_unit_index: (operation.input_unit_index as u64).into(),
+                        effect_ordinal: (operation.effect_ordinal as u64).into(),
+                    },
+                    None => ActorOutputExecution::ActorProgram,
+                },
+                since_unix_ms: wait.since_unix_ms.into(),
+            })
+            .collect(),
+    }
+}
+
 pub(super) type LifecycleState = BTreeMap<ActorRef, HostActorLifecycle>;
 
 /// Keep the latest state for each model actor when several drivers update
@@ -184,6 +245,8 @@ impl EmbeddedProjection {
                     (None, None, None)
                 };
             actors.push(HostActorProjection {
+                workbench: Some(workbench_observation(&node.workbench)),
+                form_waits: Some(form_waits(node)),
                 identity,
                 output_origin: Some(
                     (&harness::store::actor_output::ActorOutputOrigin {
@@ -313,6 +376,7 @@ mod tests {
             context_parent: None,
             lifecycle: Some(exomonad_actor::ActorLifecycle::Live),
             workbench: ActorWorkbenchPosture::Idle,
+            form_waits: vec![],
             provider_thread: None,
             provider_turn: None,
             provider_observation_stale: false,

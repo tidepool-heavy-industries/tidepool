@@ -1072,6 +1072,62 @@ async fn published_human_form_example_handles_unbound_host() {
 })).await;
 }
 
+#[tokio::test]
+async fn production_form_wait_and_pending_index_share_exact_execution_and_settlement() {
+    let store = Arc::new(harness::store::Store::memory().unwrap());
+    let host = super::form_output::host(
+        store.clone(),
+        "observed-form".into(),
+        Arc::new(std::sync::OnceLock::new()),
+    );
+    let campaign = TestCampaign::start_with_form_host(host).await;
+    campaign.run_scenario(|campaign| Box::pin(async move {
+        let policy = campaign.root_installation.policy.clone();
+        let actor = campaign.actor.identity();
+        let origin = harness::store::actor_output::ActorOutputOrigin {
+            run: "observed-form".into(), native_actor: actor.id.0,
+            incarnation: actor.incarnation.0,
+        };
+        let call = dispatch_haskell_script(policy.as_ref(),
+            "import qualified Tidepool.Form as F\nanswer <- F.askUser (F.textInput \"Name\" Nothing)");
+        tokio::pin!(call);
+        let wait = loop {
+            tokio::select! {
+                result = &mut call => panic!("form must suspend before submission: {result}"),
+                () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+            }
+            let node = campaign.forest.inspect_host_graph().into_iter()
+                .find(|node| node.actor == actor).unwrap();
+            if let Some(wait) = node.form_waits.first() { break wait.clone(); }
+        };
+        let pending = store.pending_actor_forms(&origin, 0, 64).unwrap();
+        assert_eq!(pending.forms.len(), 1);
+        assert_eq!(pending.forms[0].mount_id, wait.mount_id);
+        let operation = wait.operation.as_ref().expect("notebook-issued wait");
+        let harness::store::actor_output::ActorOutputExecution::Notebook {
+            execution, input_unit_index, effect_ordinal,
+        } = &pending.forms[0].execution else { panic!("notebook-issued opening") };
+        assert_eq!(execution, &operation.execution.to_string());
+        assert_eq!(*input_unit_index, operation.input_unit_index as u64);
+        assert!(*effect_ordinal < operation.effect_ordinal as u64);
+        let form = store.actor_form(&origin, &wait.mount_id).unwrap();
+        let harness::store::presentation::FormNode::Text { id, .. } = form.opening.form.root
+            else { panic!("actual text descriptor") };
+        store.submit_actor_form(&origin, &wait.mount_id, "attempt", &serde_json::json!({id:"Ada"})).unwrap();
+        let submitted = store.pending_actor_forms(&origin, 0, 64).unwrap();
+        assert_eq!(submitted.forms[0].state, harness::store::forms::PendingActorFormState::Submitted);
+        assert_eq!(campaign.forest.inspect_host_graph().into_iter()
+            .find(|node| node.actor == actor).unwrap().form_waits[0], wait);
+        let result = call.await;
+        assert_eq!(result["status"], "committed", "{result}");
+        assert!(campaign.forest.inspect_host_graph().into_iter()
+            .find(|node| node.actor == actor).unwrap().form_waits.is_empty());
+        assert!(store.pending_actor_forms(&origin, 0, 64).unwrap().forms.is_empty());
+        assert_eq!(store.actor_form(&origin, &wait.mount_id).unwrap().state,
+            harness::store::forms::ActorFormState::Answered);
+    })).await;
+}
+
 /// Rich views and form admission share FormHost. Delegate views to the real
 /// durable owner while declining form admission with its typed absent-service cause.
 struct DisplayOnlyHost {
@@ -1245,12 +1301,9 @@ async fn published_lookup_and_reflect_examples_preserve_boundary_results() {
                 let root = campaign.root_installation.policy.clone();
                 let lookup =
                     displayed(campaign, root.as_ref(), PublishedExample::Lookup.source()).await;
-                let rendered_lookup = explicit_display_output(&lookup)["text"]
-                    .as_str()
-                    .unwrap();
+                let rendered_lookup = explicit_display_output(&lookup)["text"].as_str().unwrap();
                 assert!(
-                    rendered_lookup.contains("doc topics")
-                        && !rendered_lookup.contains("<opaque>"),
+                    rendered_lookup.contains("doc topics") && !rendered_lookup.contains("<opaque>"),
                     "the documented lookup presenter must show query results: {lookup}"
                 );
                 let found = displayed(

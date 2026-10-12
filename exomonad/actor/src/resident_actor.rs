@@ -5484,6 +5484,7 @@ where
                 continuation,
                 operation,
                 publication,
+                self.runtime_observation.clone(),
             ),
             ResidentActorBoundary::RichView {
                 continuation,
@@ -12997,6 +12998,7 @@ pub struct ActorGraphNode {
     /// None means neither a retained lifecycle owner nor a recorded exit was available.
     pub lifecycle: Option<crate::ActorLifecycle>,
     pub workbench: crate::ActorWorkbenchPosture,
+    pub form_waits: Vec<crate::ActorFormWaitObservation>,
     pub provider_thread: Option<String>,
     pub provider_turn: Option<exomonad_model::ProviderTurnObservation>,
     pub provider_observation_stale: bool,
@@ -13726,6 +13728,7 @@ where
                                 .map(|a| a.terminal().lifecycle())
                         }),
                     workbench: runtime.workbench_posture,
+                    form_waits: runtime.form_waits,
                     provider_thread: runtime.provider_thread,
                     provider_turn: runtime.provider_turn,
                     provider_observation_stale: runtime.provider_observation_stale,

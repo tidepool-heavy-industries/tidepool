@@ -80,6 +80,7 @@ mod tests {
             context_parent: None,
             lifecycle: Some(exomonad_actor::ActorLifecycle::Live),
             workbench: ActorWorkbenchPosture::Idle,
+            form_waits: vec![],
             provider_thread: None,
             provider_turn: None,
             provider_observation_stale: false,

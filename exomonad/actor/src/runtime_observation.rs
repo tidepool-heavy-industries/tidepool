@@ -90,6 +90,30 @@ pub enum ActorWorkbenchTransfer {
     CancellationAcknowledgement,
 }
 
+/// Issued while the form interpreter is suspended on this exact mount.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ActorFormWaitObservation {
+    #[serde(skip)]
+    lease: uuid::Uuid,
+    pub mount_id: String,
+    pub operation: Option<tidepool_runtime::session::WorkbenchOperationId>,
+    pub since_unix_ms: u64,
+}
+
+pub(crate) struct ActorFormWaitLease {
+    owner: ActorRuntimeObservationHandle,
+    lease: uuid::Uuid,
+}
+impl Drop for ActorFormWaitLease {
+    fn drop(&mut self) {
+        self.owner
+            .inner
+            .write()
+            .form_waits
+            .retain(|wait| wait.lease != self.lease);
+    }
+}
+
 /// Inbound delivery of tracked messages to this actor, as the host's delivery
 /// pump last saw it. The pump republishes it on every tick from the same
 /// state that decides submission, deferral and withdrawal, so a status view
@@ -337,6 +361,7 @@ pub struct ActorRuntimeObservation {
     pub provider_usage_summary: Option<exomonad_model::ProviderUsageSummary>,
     pub latest_turn_usage_summary: Option<exomonad_model::ProviderUsageSummary>,
     pub workbench_posture: ActorWorkbenchPosture,
+    pub form_waits: Vec<ActorFormWaitObservation>,
     pub workspace: Option<ActorWorkspaceObservation>,
     pub launch_capabilities: Option<crate::ActorCapabilities>,
     pub launched_at_unix_ms: Option<i64>,
@@ -800,6 +825,27 @@ impl ActorRuntimeObservationHandle {
 
     pub fn publish_workbench_posture(&self, posture: ActorWorkbenchPosture) {
         self.inner.write().workbench_posture = posture;
+    }
+
+    pub(crate) fn await_form(
+        &self,
+        mount_id: String,
+        operation: Option<tidepool_runtime::session::WorkbenchOperationId>,
+    ) -> ActorFormWaitLease {
+        let lease = uuid::Uuid::new_v4();
+        self.inner
+            .write()
+            .form_waits
+            .push(ActorFormWaitObservation {
+                lease,
+                mount_id,
+                operation,
+                since_unix_ms: unix_time_ms(),
+            });
+        ActorFormWaitLease {
+            owner: self.clone(),
+            lease,
+        }
     }
 
     pub fn publish_inbound_delivery(&self, delivery: InboundDeliveryObservation) {
@@ -1828,6 +1874,35 @@ mod tests {
                 effect: "watch replies".into(),
             }
         );
+    }
+
+    #[test]
+    fn form_wait_leases_preserve_overlapping_waits_and_exact_operation() {
+        use tidepool_runtime::session::{WorkbenchExecutionId, WorkbenchOperationId};
+        let observation = ActorRuntimeObservationHandle::default();
+        let operation = WorkbenchOperationId {
+            execution: WorkbenchExecutionId::from_digest([7; 16]),
+            input_unit_index: 2,
+            effect_ordinal: 4,
+        };
+        let first = observation.await_form("mount".into(), Some(operation.clone()));
+        let second = observation.await_form("mount".into(), Some(operation.clone()));
+        let standalone = observation.await_form("other".into(), None);
+        assert_eq!(observation.snapshot().form_waits.len(), 3);
+        assert_eq!(
+            observation.snapshot().form_waits[0].operation,
+            Some(operation)
+        );
+        let started = observation.snapshot().form_waits[1].since_unix_ms;
+        drop(first);
+        let retained = observation.snapshot().form_waits;
+        assert_eq!(retained.len(), 2);
+        assert_eq!(retained[0].since_unix_ms, started);
+        assert_eq!(retained[0].mount_id, "mount");
+        drop(standalone);
+        assert_eq!(observation.snapshot().form_waits.len(), 1);
+        drop(second);
+        assert!(observation.snapshot().form_waits.is_empty());
     }
 
     #[test]

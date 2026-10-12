@@ -178,12 +178,12 @@ pub use resident_workbench::{
 };
 pub use role::{render_child_budget, ActorCapabilities, ActorEffectKey, DescendantBudget};
 pub use runtime_observation::{
-    ActorActivationKind, ActorRuntimeObservation, ActorRuntimeObservationHandle,
-    ActorSourceDriftObservation, ActorWorkbenchPosture, ActorWorkbenchTransfer,
-    ActorWorkspaceObservation, CacheBoundaryReason, CheckoutGitDrift, FrozenSourceDrift,
-    InboundDeliveryObservation, InboundNext, InboxDelivery, ObservedSource, ProviderUsageSample,
-    SourceDriftTargets, SourceLayerDrift, SourceObservation, TrackedMessageObservation,
-    TrackedMessageState,
+    ActorActivationKind, ActorFormWaitObservation, ActorRuntimeObservation,
+    ActorRuntimeObservationHandle, ActorSourceDriftObservation, ActorWorkbenchPosture,
+    ActorWorkbenchTransfer, ActorWorkspaceObservation, CacheBoundaryReason, CheckoutGitDrift,
+    FrozenSourceDrift, InboundDeliveryObservation, InboundNext, InboxDelivery, ObservedSource,
+    ProviderUsageSample, SourceDriftTargets, SourceLayerDrift, SourceObservation,
+    TrackedMessageObservation, TrackedMessageState,
 };
 pub use start::{
     ActorEffectKeyWire, ActorEffectProfileWire, ActorReplacementDefinition, ActorStartCaptureError,
