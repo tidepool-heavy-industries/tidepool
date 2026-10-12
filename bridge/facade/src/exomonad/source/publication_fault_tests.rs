@@ -2,7 +2,7 @@
 
 #![allow(
     clippy::disallowed_methods,
-    reason = "test-only isolated fault children compile the existing syscall fixture and relaunch this test executable"
+    reason = "test-only isolated fault children use the declared syscall fixture and relaunch this test executable"
 )]
 
 use super::*;
@@ -27,8 +27,17 @@ use tidepool_runtime::session::{
 };
 
 const CHILD_TEST: &str = "exomonad::source::publication_fault_tests::publication_fault_child";
-const DIRECTORY_FAULT: &str =
-    include_str!("../../../../atomic-write/tests/fixtures/directory_fault.c");
+fn directory_fault_library() -> PathBuf {
+    let path = PathBuf::from(
+        std::env::var_os("TIDEPOOL_DIRECTORY_FAULT_LIBRARY")
+            .expect("test runner must supply the declared directory fault library"),
+    );
+    assert!(
+        path.is_file(),
+        "declared directory fault library is missing: {path:?}"
+    );
+    path
+}
 
 fn spec_source() -> String {
     tidepool_testing::fixture_source("bridge/facade/src/actor_host/fixtures/browser_agent_spec.hs")
@@ -459,18 +468,7 @@ fn postrename_fsync_failure_keeps_paired_spec_and_fresh_process_recovers_visible
         owner.layer.ensure_active(&owner.frozen).unwrap();
         owner.ensure_helper_active("run").unwrap();
     }
-    let source = run.path().join("directory_fault.c");
-    let library = run.path().join("directory_fault.so");
-    std::fs::write(&source, DIRECTORY_FAULT).unwrap();
-    assert!(Command::new("cc")
-        .args(["-shared", "-fPIC", "-Wall", "-Werror"])
-        .arg(&source)
-        .arg("-o")
-        .arg(&library)
-        .arg("-ldl")
-        .status()
-        .unwrap()
-        .success());
+    let library = directory_fault_library();
     let hits = run.path().join("directory-fault-hits");
     for phase in ["fault", "recover"] {
         let mut command = Command::new(std::env::current_exe().unwrap());
@@ -508,5 +506,76 @@ fn postrename_fsync_failure_keeps_paired_spec_and_fresh_process_recovers_visible
         let retained_project = project.keep();
         let retained_run = run.keep();
         println!("retained successful fixture project {retained_project:?}, run {retained_run:?}");
+    }
+}
+
+#[test]
+#[ignore = "only invoked by the isolated syscall-fault outer test"]
+fn runtime_preparation_identity_fault_child() {
+    let run = PathBuf::from(std::env::var_os("IDENTITY_FAULT_RUN").unwrap());
+    let workspace = tidepool_atomic_write::DirectoryAnchor::open_existing(&run).unwrap();
+    let entries =
+        tidepool_atomic_write::DirectoryAnchor::open_existing(run.join("entries")).unwrap();
+    let path = run.join("runtime-preparation.json");
+    if std::env::var("IDENTITY_FAULT_PHASE").unwrap() == "fault" {
+        runtime_preparation_identity(&workspace, &entries)
+            .expect_err("publication must report its failed parent fsync");
+        let bytes = std::fs::read(&path).unwrap();
+        let _: RuntimePreparationIdentity = serde_json::from_slice(&bytes).unwrap();
+        runtime_preparation_identity(&workspace, &entries).expect_err(
+            "a visible identity must refuse acquisition while durability is unconfirmed",
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    } else {
+        let bytes = std::fs::read(&path).unwrap();
+        let identity: RuntimePreparationIdentity = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            runtime_preparation_identity(&workspace, &entries).unwrap(),
+            identity.original
+        );
+        assert_eq!(
+            runtime_preparation_identity(&workspace, &entries).unwrap(),
+            identity.original
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn runtime_preparation_identity_retry_confirms_durability_without_reissuing() {
+    let run = tempfile::tempdir().unwrap();
+    std::fs::create_dir(run.path().join("entries")).unwrap();
+    let library = directory_fault_library();
+    let hits = run.path().join("directory-fault-hits");
+    let mut published = None;
+    for phase in ["fault", "recover"] {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command.args(["--ignored", "--exact",
+            "exomonad::source::publication_fault_tests::runtime_preparation_identity_fault_child", "--nocapture"])
+            .env("IDENTITY_FAULT_RUN", run.path())
+            .env("IDENTITY_FAULT_PHASE", phase);
+        if phase == "fault" {
+            command
+                .env("LD_PRELOAD", &library)
+                .env("FAULT_PATH", run.path())
+                .env("FAULT_KIND", "sync")
+                .env("FAULT_LOG", &hits);
+        } else {
+            command
+                .env_remove("LD_PRELOAD")
+                .env_remove("FAULT_PATH")
+                .env_remove("FAULT_KIND")
+                .env_remove("FAULT_LOG");
+        }
+        if let Err(failure) = child(command, phase, run.path()) {
+            panic!("{failure}; retained run {:?}", run.keep());
+        }
+        let bytes = std::fs::read(run.path().join("runtime-preparation.json")).unwrap();
+        if phase == "fault" {
+            assert_eq!(std::fs::read_to_string(&hits).unwrap().lines().count(), 2);
+            published = Some(bytes);
+        } else {
+            assert_eq!(Some(bytes), published);
+        }
     }
 }

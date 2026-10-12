@@ -962,7 +962,6 @@ rust_filegroup(
         "//:actor_skill_exomonad_project_work": ".exomonad/workspace/skills/exomonad-project-work/SKILL.md",
         "//:actor_skill_exomonad_review": ".exomonad/workspace/skills/exomonad-review/SKILL.md",
         "//:facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md": ".exomonad/workspace/skills/exomonad-workbench/SKILL.md",
-        "//bridge/atomic-write:directory_fault_fixture": "bridge/atomic-write/tests/fixtures/directory_fault.c",
         "Cargo.toml": "bridge/facade/Cargo.toml",
         "src/actor_host.rs": "bridge/facade/src/actor_host.rs",
         "src/actor_host/agent_spec_tests.rs": "bridge/facade/src/actor_host/agent_spec_tests.rs",
@@ -2238,6 +2237,7 @@ tidepool_rust_test_cases(
         "TIDEPOOL_KEEP_TEST_LOGS": "1",
     },
     resources = [
+        "//bridge/atomic-write:directory_fault_shared",
         "//bridge/haskell:facade_embedded_sources",
         "//bridge/mcp:effects_generated",
         "//bridge/testing:haskell_test_fixtures",
@@ -2264,6 +2264,7 @@ tidepool_rust_test_cases(
         "TIDEPOOL_BROWSER_DRIVER": "$(location //build/testing/browser:driver_bundle)/driver.mjs",
         "TIDEPOOL_BROWSER_NODE": "$(exe toolchains//:browser_node)",
         "TIDEPOOL_COMPILER_DEPLOYMENT": "$(location //build/package:compiler_deployment)",
+        "TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location //bridge/atomic-write:directory_fault_shared)",
         "TIDEPOOL_EFFECTS_SOURCE_ROOT": "$(location //bridge/mcp:effects_generated)",
         "TIDEPOOL_EXTRACT": "$(exe //tidepool/extract-cmd:tidepool-extract)",
         "TIDEPOOL_EXTRACT_RUNTIME_LIBRARIES": "$(location //build/package:tidepool_extract_runtime_libraries)",

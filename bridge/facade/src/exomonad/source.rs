@@ -838,6 +838,8 @@ fn runtime_preparation_identity(
         Err(error) => return Err(error.into()),
     };
     let identity: RuntimePreparationIdentity = serde_json::from_reader(file)?;
+    // A previous exclusive publication may have failed after making the file visible.
+    tidepool_atomic_write::sync_parent_directory(&path)?;
     Ok(identity.original)
 }
 

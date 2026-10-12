@@ -1263,7 +1263,10 @@ def facade_test_cases(binary):
     prepared_recipe_env, prepared_recipe_resources, _ = test_runtime_inputs("tidepool", "facade_prepared_recipe_contract_test")
     capture_recipe_env, capture_recipe_resources, _ = test_runtime_inputs("tidepool", "facade_recipe_source_capture_test")
     all_env = {**host_env, **prepared_recipe_env, **capture_recipe_env}
-    all_resources = sorted(set(browser_resources + prepared_recipe_resources + capture_recipe_resources))
+    all_paths = {**browser_paths,
+                 "TIDEPOOL_DIRECTORY_FAULT_LIBRARY": "$(location //bridge/atomic-write:directory_fault_shared)"}
+    all_resources = sorted(set(browser_resources + prepared_recipe_resources + capture_recipe_resources
+                               + ["//bridge/atomic-write:directory_fault_shared"]))
     prefix = "actor_host::m1_host_tests::"
     groups = [
         ("facade_source_fixture_tests", [
@@ -1374,7 +1377,7 @@ def facade_test_cases(binary):
         ("facade_browser_test", [prefix +
             "production_browser_executes_resident_haskell_retries_and_controls_root"],
          host_env, browser_paths, browser_resources, True, True, 900),
-        ("tidepool_unit_tests_all", [], all_env, browser_paths, all_resources, True, False, 600),
+        ("tidepool_unit_tests_all", [], all_env, all_paths, all_resources, True, False, 600),
     ]
     rules = []
     for name, tests, env, resource_env, resources, worker, ignored, timeout in groups:
