@@ -217,6 +217,8 @@ impl CaptureFixture {
             .forest
             .directory
             .session_context(issuer.identity())
+            .await
+            .expect("directory context observation")
             .expect("issuer context");
         let (scope, retained) = self
             .forest

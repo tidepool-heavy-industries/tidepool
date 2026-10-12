@@ -247,9 +247,9 @@ struct Fixture {
 
 impl Fixture {
     async fn new(case: u64, failure: bool) -> Self {
-        Self::configured(case, failure, None)
+        Self::configured(case, failure, None).await
     }
-    fn configured(case: u64, failure: bool, authored: Option<AuthoredCase>) -> Self {
+    async fn configured(case: u64, failure: bool, authored: Option<AuthoredCase>) -> Self {
         eval_harness::require_extract();
         let declarations = vec![
             tidepool_mcp::console_decl(),
@@ -543,7 +543,7 @@ async fn compiled_authored_jev_form_dialogue_retains_success_doubt_and_missing_i
     .into_iter()
     .enumerate()
     {
-        let fixture = Fixture::configured(755 + index as u64, false, Some(case));
+        let fixture = Fixture::configured(755 + index as u64, false, Some(case)).await;
         fixture
             .execute(include_str!("jev_authored_dialogue.hs"))
             .await;

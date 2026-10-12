@@ -2471,7 +2471,10 @@ mod tests {
 
     impl ractor::Actor for WorkbenchCollector {
         type Msg = crate::KernelMessage;
-        type State = tokio::sync::mpsc::UnboundedSender<ReceivedWorkbench>;
+        type State = (
+            crate::ActorRef,
+            tokio::sync::mpsc::UnboundedSender<ReceivedWorkbench>,
+        );
         type Arguments = Self::State;
 
         async fn pre_start(
@@ -2490,22 +2493,24 @@ mod tests {
         ) -> Result<(), ractor::ActorProcessingErr> {
             let (message, ingress) = match message {
                 crate::KernelMessage::Admitted(envelope) => {
-                    let (_, message, lease) = envelope.into_parts();
+                    let (message, lease) = envelope.into_parts(sender.0)?;
                     (message, Some(lease))
                 }
                 message => (message, None),
             };
             if let crate::KernelMessage::Workbench { control, reply, .. } = message {
-                sender.send((ingress, control, reply))?;
+                sender.1.send((ingress, control, reply))?;
             }
             Ok(())
         }
     }
 
-    async fn register_collector(
-        address: ractor::ActorRef<crate::KernelMessage>,
+    async fn spawn_collector(
+        sender: tokio::sync::mpsc::UnboundedSender<ReceivedWorkbench>,
     ) -> (
         crate::LocalActorRef,
+        ractor::ActorRef<crate::KernelMessage>,
+        ractor::concurrency::JoinHandle<()>,
         crate::RetainedActorExit,
         crate::local_actor::LocalActorDirectory,
     ) {
@@ -2519,6 +2524,9 @@ mod tests {
         let identity = reservation.identity();
         let lifecycle = reservation.lifecycle().clone();
         let terminal = reservation.terminal().clone();
+        let (address, task) = ractor::Actor::spawn(None, WorkbenchCollector, (identity, sender))
+            .await
+            .expect("actual collector executor");
         let actor = crate::LocalActorRef::with_identity_admission(
             address.clone(),
             terminal.clone(),
@@ -2526,7 +2534,7 @@ mod tests {
             lifecycle.clone(),
         );
         lifecycle
-            .attach_executor(address)
+            .attach_executor(address.clone())
             .await
             .expect("exact executor attachment");
         directory
@@ -2542,17 +2550,14 @@ mod tests {
             .executor_started()
             .await
             .expect("actual collector start");
-        (actor, terminal, directory)
+        (actor, address, task, terminal, directory)
     }
 
     #[tokio::test]
     async fn cancelled_native_observer_rejoins_exact_operation_and_observes_actor_loss() {
         for lose_first_observer in [false, true] {
             let (send, _received) = tokio::sync::mpsc::unbounded_channel();
-            let (address, actor_task) = ractor::Actor::spawn(None, WorkbenchCollector, send)
-                .await
-                .unwrap();
-            let (actor, terminal, _directory) = register_collector(address.clone()).await;
+            let (actor, address, actor_task, terminal, _directory) = spawn_collector(send).await;
             let client = ResidentToolClient::local(actor.clone());
             let invocation = ToolInvocationContext::external(
                 "thread".into(),
@@ -2618,10 +2623,7 @@ mod tests {
     #[tokio::test]
     async fn sealed_cell_cancellation_waits_for_exact_owner_reply_without_mutating_cutoff() {
         let (send, mut received) = tokio::sync::mpsc::unbounded_channel();
-        let (address, actor_task) = ractor::Actor::spawn(None, WorkbenchCollector, send)
-            .await
-            .unwrap();
-        let (actor, _terminal, _directory) = register_collector(address.clone()).await;
+        let (actor, address, actor_task, _terminal, _directory) = spawn_collector(send).await;
         let client = ResidentToolClient::local(actor.clone());
         let invocation = ToolInvocationContext::external(
             "thread".into(),
@@ -2675,10 +2677,7 @@ mod tests {
     #[tokio::test]
     async fn a_dispatched_hosted_cell_is_visible_on_its_actor_until_it_ends() {
         let (send, mut received) = tokio::sync::mpsc::unbounded_channel();
-        let (address, task) = ractor::Actor::spawn(None, WorkbenchCollector, send)
-            .await
-            .unwrap();
-        let (actor, _terminal, _directory) = register_collector(address.clone()).await;
+        let (actor, address, task, _terminal, _directory) = spawn_collector(send).await;
         let client = ResidentToolClient::local(actor.clone());
         let invocation = ToolInvocationContext::external(
             "thread".into(),

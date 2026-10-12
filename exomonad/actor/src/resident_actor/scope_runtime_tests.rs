@@ -656,7 +656,7 @@ impl ScopeFixture {
         }
     }
 
-    fn assert_scoped_request_cancelled_without_target_retirement(&self, owner: ActorRef) {
+    async fn assert_scoped_request_cancelled_without_target_retirement(&self, owner: ActorRef) {
         let status = self.forest.environment.requests.status_for(owner);
         assert!(status.pending_responses.is_empty());
         let request = status
@@ -906,7 +906,9 @@ async fn public_scope_owns_resources_preserves_retention_and_retries_cleanup_wit
     );
     let survivor = fixture.child("scope-retained-child");
     assert!(survivor.terminal().get().is_none());
-    fixture.assert_scoped_request_cancelled_without_target_retirement(parent.identity());
+    fixture
+        .assert_scoped_request_cancelled_without_target_retirement(parent.identity())
+        .await;
     normal.assert_executed_once();
     fixture.assert_scope_membership(parent.identity(), owned.identity(), &normal);
 
@@ -974,7 +976,9 @@ async fn public_scope_body_failure_closes_real_resources_with_independent_cleanu
             .kind,
         ActorExitKind::Cancelled
     );
-    fixture.assert_scoped_request_cancelled_without_target_retirement(parent.identity());
+    fixture
+        .assert_scoped_request_cancelled_without_target_retirement(parent.identity())
+        .await;
     fixture.assert_closed_owner_cleanup(parent.identity());
     backend.assert_executed_once();
     fixture.assert_scope_membership(
@@ -1023,7 +1027,9 @@ async fn public_scope_outer_cancellation_retains_real_cleanup_without_resuming_b
             .kind,
         ActorExitKind::Cancelled
     );
-    fixture.assert_scoped_request_cancelled_without_target_retirement(parent.identity());
+    fixture
+        .assert_scoped_request_cancelled_without_target_retirement(parent.identity())
+        .await;
     fixture.assert_closed_owner_cleanup(parent.identity());
     backend.assert_executed_once();
     fixture.assert_scope_membership(
