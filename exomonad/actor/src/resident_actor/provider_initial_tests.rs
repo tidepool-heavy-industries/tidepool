@@ -178,6 +178,23 @@ impl NativeFixture {
         }
     }
 
+    async fn journal_pending(&self) -> u64 {
+        use crate::kernel::lifecycle::resident::ProviderInitialTestStage;
+        let mut observations = self.admission.lifecycle.observations_for_test();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some((sequence, ProviderInitialTestStage::Journal)) =
+                    observations.borrow_and_update().provider_initial
+                {
+                    return sequence;
+                }
+                observations.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("actual native grant owns journal pending stage")
+    }
+
     async fn pending(&self) {
         let lifecycle = &self.admission.lifecycle;
         let mut observations = lifecycle.observations_for_test();
@@ -306,6 +323,11 @@ async fn provider_publication_drop_and_close_retain_real_journal_commit() {
     })
     .await
     .expect("actual native grant precedes blocked journal work");
+    let sequence = fixture.journal_pending().await;
+    fixture.admission.lifecycle.failed_provider_stage_for_test(
+        sequence,
+        crate::kernel::lifecycle::resident::ProviderInitialTestStage::Beginning,
+    );
     assert!(
         fixture
             .admission
@@ -326,6 +348,15 @@ async fn provider_publication_drop_and_close_retain_real_journal_commit() {
     observer.abort();
     assert!(observer.await.unwrap_err().is_cancelled());
     fixture.admission.lifecycle.close().await.unwrap();
+    assert_eq!(
+        fixture.admission.lifecycle.observation().provider_initial,
+        Some((
+            sequence,
+            crate::kernel::lifecycle::resident::ProviderInitialTestStage::Journal
+        )),
+        "stale Beginning failure cannot settle the actual Journal stage"
+    );
+
     assert!(fixture
         .forest
         .initial_context_wire_observation_for_provider(&fixture.admission)
@@ -448,4 +479,110 @@ async fn provider_publication_known_refusals_preserve_retained_state_and_allow_v
         .await
         .unwrap();
     fixture.forest.shutdown().await;
+}
+
+#[tokio::test]
+async fn owned_observation_worker_panic_settles_only_its_readonly_request() {
+    use crate::kernel::lifecycle::resident::ResidentWorkerFault;
+    let fixture = NativeFixture::start().await;
+    fixture
+        .admission
+        .lifecycle
+        .fault_next_resident_worker_for_test(ResidentWorkerFault::OwnerObservation)
+        .await
+        .unwrap();
+    let answer = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fixture
+            .admission
+            .lifecycle
+            .public_owner(Some(fixture.admission.owner.clone()), true),
+    )
+    .await
+    .expect("read-only worker panic replies instead of stranding the owner");
+    assert!(answer.is_err());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fixture.admission.lifecycle.wait_transactions(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    fixture
+        .forest
+        .initial_context_wire_observation_for_provider(&fixture.admission)
+        .await
+        .unwrap();
+    fixture
+        .admission
+        .native_readiness()
+        .unwrap()
+        .check_ready_async()
+        .await
+        .unwrap();
+    fixture.forest.shutdown().await;
+}
+
+#[tokio::test]
+async fn owned_publication_worker_panic_fences_actual_native_ticket_without_publication() {
+    use crate::kernel::lifecycle::resident::ResidentWorkerFault;
+    let fixture = NativeFixture::start_with_journal(true).await;
+    let journal = fixture.journal.as_ref().unwrap();
+    let before = journal
+        .initial_context(fixture.actor.identity())
+        .await
+        .unwrap();
+    fixture
+        .admission
+        .lifecycle
+        .fault_next_resident_worker_for_test(ResidentWorkerFault::ProviderJournal)
+        .await
+        .unwrap();
+    let answer = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fixture
+            .forest
+            .acknowledge_initial_context_publication_for_provider(
+                &fixture.admission,
+                fixture.operation.as_ref().unwrap(),
+                fixture.publication.clone().unwrap(),
+            ),
+    )
+    .await
+    .expect("owned journal-stage panic reaches correlated settlement");
+    assert!(answer.is_err());
+    assert!(fixture
+        .admission
+        .native_readiness()
+        .unwrap()
+        .check_ready_async()
+        .await
+        .is_err());
+    assert!(fixture
+        .admission
+        .lifecycle
+        .wait_transactions()
+        .await
+        .is_err());
+    assert!(matches!(
+        fixture.admission.lifecycle.observation().native_settlement,
+        crate::kernel::lifecycle::NativeSettlement::NeedsAttention(_)
+    ));
+    assert_eq!(
+        journal
+            .initial_context(fixture.actor.identity())
+            .await
+            .unwrap(),
+        before
+    );
+    assert!(fixture
+        .forest
+        .initial_context_wire_observation_for_provider(&fixture.admission)
+        .await
+        .is_err());
+    let cleanup = fixture.forest.shutdown().await;
+    assert!(
+        cleanup.iter().any(|outcome| !outcome.is_confirmed()),
+        "unknown worker effect cannot certify run retirement"
+    );
 }

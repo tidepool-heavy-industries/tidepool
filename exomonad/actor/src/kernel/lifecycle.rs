@@ -50,6 +50,8 @@ pub enum NativeSettlement {
 
 #[derive(Clone)]
 pub struct LifecycleSnapshot {
+    #[cfg(test)]
+    pub(crate) provider_initial: Option<(u64, resident::ProviderInitialTestStage)>,
     executor: Option<RactorRef<KernelMessage>>,
     pub owner_available: bool,
     source_forward: Option<LifecycleHandle>,
@@ -440,6 +442,8 @@ impl LifecycleHandle {
         supervisor: Option<ractor::ActorCell>,
     ) -> Result<Self, ractor::SpawnErr> {
         let (observations, observe) = watch::channel(LifecycleSnapshot {
+            #[cfg(test)]
+            provider_initial: None,
             executor: None,
             owner_available: true,
             source_forward: None,
@@ -892,6 +896,11 @@ impl LifecycleState {
 
     pub(super) fn publish(&self) {
         self.observations.send_replace(LifecycleSnapshot {
+            #[cfg(test)]
+            provider_initial: self
+                .resident
+                .as_ref()
+                .and_then(resident::provider_initial_pending_for_test),
             executor: self.executor.clone(),
             owner_available: self.owner_available,
             source_forward: self.source_forward.clone(),

@@ -61,6 +61,8 @@ pub(super) struct ResidentState {
     retirement: Option<crate::ActorTerminal>,
     retirement_recorded: bool,
     successor: Option<SuccessorOperation>,
+    #[cfg(test)]
+    worker_fault: Option<WorkerKind>,
 }
 
 impl ResidentState {
@@ -118,7 +120,42 @@ pub(super) fn native_readiness(
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProviderInitialTestStage {
+    Beginning,
+    Journal,
+    Settling,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) enum ResidentWorkerFault {
+    OwnerObservation,
+    ProviderJournal,
+}
+
+#[cfg(test)]
+pub(super) fn provider_initial_pending_for_test(
+    state: &ResidentState,
+) -> Option<(u64, ProviderInitialTestStage)> {
+    let (sequence, Pending::ProviderInitial(pending)) = state.pending.as_ref()? else {
+        return None;
+    };
+    let stage = match pending.kind() {
+        provider_initial::StageKind::Beginning => ProviderInitialTestStage::Beginning,
+        provider_initial::StageKind::Journal => ProviderInitialTestStage::Journal,
+        provider_initial::StageKind::Settling => ProviderInitialTestStage::Settling,
+    };
+    Some((*sequence, stage))
+}
+
 pub(super) enum ResidentCommand {
+    #[cfg(test)]
+    FaultNextWorker {
+        fault: ResidentWorkerFault,
+        reply: RpcReplyPort<Result<(), String>>,
+    },
     Configure {
         context: ActorSessionContext,
         descriptor: ActorDescriptor,
@@ -226,6 +263,47 @@ pub(super) enum Completion {
 }
 
 impl LifecycleHandle {
+    #[cfg(test)]
+    pub(crate) async fn fault_next_resident_worker_for_test(
+        &self,
+        fault: ResidentWorkerFault,
+    ) -> Result<(), String> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.address
+            .cast(LifecycleCommand::Resident(Box::new(
+                ResidentCommand::FaultNextWorker {
+                    fault,
+                    reply: reply.into(),
+                },
+            )))
+            .map_err(|error| error.to_string())?;
+        answer.await.map_err(|error| error.to_string())?
+    }
+
+    #[cfg(test)]
+    pub(crate) fn failed_provider_stage_for_test(
+        &self,
+        sequence: u64,
+        stage: ProviderInitialTestStage,
+    ) {
+        let stage = match stage {
+            ProviderInitialTestStage::Beginning => provider_initial::StageKind::Beginning,
+            ProviderInitialTestStage::Journal => provider_initial::StageKind::Journal,
+            ProviderInitialTestStage::Settling => provider_initial::StageKind::Settling,
+        };
+        self.address
+            .cast(LifecycleCommand::Resident(Box::new(
+                ResidentCommand::Completed {
+                    sequence,
+                    outcome: Completion::ProviderInitial(provider_initial::Completion::Failed {
+                        stage,
+                        error: "test prior-stage failure".into(),
+                    }),
+                },
+            )))
+            .expect("test completion reaches owner");
+    }
+
     pub(crate) async fn provider_initial_observation(
         &self,
         expected: Arc<WorkbenchPublicOwner>,
@@ -427,6 +505,26 @@ pub(super) fn handle(
     command: ResidentCommand,
 ) {
     match command {
+        #[cfg(test)]
+        ResidentCommand::FaultNextWorker { fault, reply } => {
+            let valid = state.refusal().is_none()
+                && state.resident.as_ref().is_some_and(|resident| {
+                    resident.pending.is_none() && resident.worker_fault.is_none()
+                });
+            let result = if valid {
+                state.resident.as_mut().unwrap().worker_fault = Some(match fault {
+                    ResidentWorkerFault::OwnerObservation => WorkerKind::OwnerObservation,
+                    ResidentWorkerFault::ProviderJournal => {
+                        WorkerKind::ProviderInitial(provider_initial::StageKind::Journal)
+                    }
+                });
+                Ok(())
+            } else {
+                Err("test worker fault requires an idle live owner".into())
+            };
+            let _ = reply.send(result);
+        }
+
         ResidentCommand::Configure {
             context,
             descriptor,
@@ -477,6 +575,8 @@ pub(super) fn handle(
                         retirement: None,
                         retirement_recorded: false,
                         successor: None,
+                        #[cfg(test)]
+                        worker_fault: None,
                     });
                 })
             };
@@ -537,64 +637,66 @@ pub(super) fn handle(
             complete(state, address, sequence, outcome)
         }
         ResidentCommand::BeginBinding { origin, reply } => {
-            let result =
-                if state.is_closed() {
-                    Err("successor lifecycle is closing".into())
-                } else if state.resident.as_ref().is_none_or(|resident| {
-                    resident.successor.is_some() || resident.pending.is_some()
-                }) {
-                    Err("successor operation is unavailable or already owned".into())
-                } else {
-                    let sequence = state.next_operation();
-                    let resident = state.resident.as_mut().unwrap();
-                    let owner = match &resident.current.public_owner {
-                        ActorPublicOwnerPlane::DurablePending(owner) => Some(owner.clone()),
-                        ActorPublicOwnerPlane::DurableCommitted(owner) => owner.durable().cloned(),
-                        _ => None,
-                    };
-                    let original = resident
-                        .startup_intent
-                        .as_ref()
-                        .and_then(|intent| intent.manifest.as_ref())
-                        .map(|manifest| &manifest.public_owner.owner);
-                    let origin_matches = match &origin {
-                        BindingOrigin::Fresh => original.is_none(),
-                        BindingOrigin::Successor(owner) => {
-                            original.is_none_or(|original| original == owner)
-                        }
-                    };
-                    if !origin_matches {
-                        let _ = reply.send(Err(
-                            "binding origin differs from original startup manifest".into(),
-                        ));
-                        return;
-                    }
-                    let journal = resident.journal.clone();
-                    owner
-                        .zip(journal)
-                        .ok_or_else(|| {
-                            "successor operation requires its exact durable owner and journal"
-                                .to_owned()
-                        })
-                        .map(|(owner, journal)| {
-                            resident.successor = Some(SuccessorOperation {
-                                sequence,
-                                origin: origin.clone(),
-                                owner: owner.clone(),
-                                stage: SuccessorStage::Reserved,
-                            });
-                            RootBindingOperationClaim {
-                                sequence,
-                                actor: state.identity,
-                                placement: resident.current.context.placement,
-                                owner,
-                                origin,
-                                lifecycle: address.clone(),
-                                journal,
-                                armed: true,
-                            }
-                        })
+            let result = if state.is_closed() {
+                Err("successor lifecycle is closing".into())
+            } else if !matches!(state.native_settlement, super::NativeSettlement::Confirmed)
+                || state
+                    .resident
+                    .as_ref()
+                    .is_none_or(ResidentState::has_pending)
+            {
+                Err("successor operation is unavailable or already owned".into())
+            } else {
+                let sequence = state.next_operation();
+                let resident = state.resident.as_mut().unwrap();
+                let owner = match &resident.current.public_owner {
+                    ActorPublicOwnerPlane::DurablePending(owner) => Some(owner.clone()),
+                    ActorPublicOwnerPlane::DurableCommitted(owner) => owner.durable().cloned(),
+                    _ => None,
                 };
+                let original = resident
+                    .startup_intent
+                    .as_ref()
+                    .and_then(|intent| intent.manifest.as_ref())
+                    .map(|manifest| &manifest.public_owner.owner);
+                let origin_matches = match &origin {
+                    BindingOrigin::Fresh => original.is_none(),
+                    BindingOrigin::Successor(owner) => {
+                        original.is_none_or(|original| original == owner)
+                    }
+                };
+                if !origin_matches {
+                    let _ = reply.send(Err(
+                        "binding origin differs from original startup manifest".into(),
+                    ));
+                    return;
+                }
+                let journal = resident.journal.clone();
+                owner
+                    .zip(journal)
+                    .ok_or_else(|| {
+                        "successor operation requires its exact durable owner and journal"
+                            .to_owned()
+                    })
+                    .map(|(owner, journal)| {
+                        resident.successor = Some(SuccessorOperation {
+                            sequence,
+                            origin: origin.clone(),
+                            owner: owner.clone(),
+                            stage: SuccessorStage::Reserved,
+                        });
+                        RootBindingOperationClaim {
+                            sequence,
+                            actor: state.identity,
+                            placement: resident.current.context.placement,
+                            owner,
+                            origin,
+                            lifecycle: address.clone(),
+                            journal,
+                            armed: true,
+                        }
+                    })
+            };
             if result.is_ok() && state.phase == super::LifecyclePhase::Open {
                 state.phase = super::LifecyclePhase::Installing;
             }
@@ -1284,6 +1386,7 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum WorkerKind {
     ProviderInitial(provider_initial::StageKind),
     OwnerObservation,
@@ -1307,6 +1410,17 @@ fn spawn(
         Pending::Owner(_) => WorkerKind::Owner,
         Pending::Release(_) => WorkerKind::Release,
         Pending::Retirement => WorkerKind::Retirement,
+    };
+    #[cfg(test)]
+    let work = {
+        let resident = state.resident.as_mut().unwrap();
+        if resident.worker_fault.as_ref() == Some(&kind) {
+            resident.worker_fault.take();
+            Box::pin(async { panic!("test owned resident worker panic") })
+                as BoxFuture<'static, Completion>
+        } else {
+            work
+        }
     };
     state.tasks.insert(
         sequence,
