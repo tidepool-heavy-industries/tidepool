@@ -30,7 +30,22 @@ pub(super) enum TransferOutcome {
     Refused(RejectedCapsules),
     Unconfirmed(String),
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TransferDisposition {
+    Awaiting,
+    Refused,
+    Unconfirmed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FailureOrigin {
+    SourceRefused,
+    SourceUnconfirmed,
+    TargetActivation,
+}
+
 struct PendingTransfer {
+    disposition: TransferDisposition,
     leases: Vec<AdmittedKernelLease>,
     retained: Vec<TransferCapsule>,
     reply: Option<RpcReplyPort<Result<(), ReplacementIngressError>>>,
@@ -44,6 +59,7 @@ pub(super) struct TransferState {
     relationship: Option<(ActorRef, ActorRef)>,
     activated: bool,
     pub(super) unconfirmed: Option<String>,
+    failure_origin: Option<FailureOrigin>,
 }
 impl TransferState {
     pub(super) fn has_pending(&self) -> bool {
@@ -74,6 +90,7 @@ pub(super) enum TransferCommand {
         sequence: u64,
         outcome: TransferOutcome,
     },
+    TakeRefused(RpcReplyPort<Result<VecDeque<KernelMessage>, ReplacementIngressError>>),
     Activate {
         grant: ReplacementIngressGrant,
         draining: bool,
@@ -102,6 +119,20 @@ impl LifecycleHandle {
             )
         })?
     }
+    pub(crate) async fn take_refused_transfer_backlog(
+        &self,
+    ) -> Result<VecDeque<KernelMessage>, ReplacementIngressError> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.address
+            .cast(LifecycleCommand::Transfer(Box::new(
+                TransferCommand::TakeRefused(reply.into()),
+            )))
+            .map_err(|error| ReplacementIngressError::Unconfirmed(error.to_string()))?;
+        answer.await.map_err(|_| {
+            ReplacementIngressError::Unconfirmed("refused backlog owner is unavailable".into())
+        })?
+    }
+
     pub(crate) async fn activate_transferred_replacement(
         &self,
         grant: ReplacementIngressGrant,
@@ -156,6 +187,14 @@ pub(super) fn handle(
             );
         }
         TransferCommand::Completed { sequence, outcome } => {
+            if state
+                .transfer
+                .pending
+                .get(&sequence)
+                .is_none_or(|pending| pending.disposition != TransferDisposition::Awaiting)
+            {
+                return;
+            }
             let Some(mut pending) = state.transfer.pending.remove(&sequence) else {
                 return;
             };
@@ -175,8 +214,10 @@ pub(super) fn handle(
                             rejected.detail.clone(),
                         )));
                     }
+                    pending.disposition = TransferDisposition::Refused;
                     pending.retained = rejected.capsules;
                     state.transfer.unconfirmed = Some(rejected.detail);
+                    state.transfer.failure_origin = Some(FailureOrigin::SourceRefused);
                     state.transfer.pending.insert(sequence, pending);
                 }
                 TransferOutcome::Unconfirmed(detail) => {
@@ -184,10 +225,16 @@ pub(super) fn handle(
                         let _ =
                             reply.send(Err(ReplacementIngressError::Unconfirmed(detail.clone())));
                     }
+                    pending.disposition = TransferDisposition::Unconfirmed;
                     state.transfer.unconfirmed = Some(detail);
+                    state.transfer.failure_origin = Some(FailureOrigin::SourceUnconfirmed);
                     state.transfer.pending.insert(sequence, pending);
                 }
             }
+        }
+        TransferCommand::TakeRefused(reply) => {
+            let result = take_refused(state);
+            let _ = reply.send(result);
         }
         TransferCommand::Activate {
             grant,
@@ -201,6 +248,7 @@ pub(super) fn handle(
 fn retain_refused(state: &mut LifecycleState, backlog: VecDeque<KernelMessage>) {
     state.transfer.backlog.extend(backlog);
     state.transfer.unconfirmed = Some("replacement refused before releasing source custody".into());
+    state.transfer.failure_origin = Some(FailureOrigin::SourceRefused);
 }
 fn begin(
     state: &mut LifecycleState,
@@ -229,6 +277,7 @@ fn begin(
     }
     let sequence = state.next_operation();
     let mut pending = PendingTransfer {
+        disposition: TransferDisposition::Awaiting,
         leases: Vec::new(),
         retained: Vec::new(),
         reply: Some(reply),
@@ -449,6 +498,7 @@ fn activate(
             }
             state.transfer.unconfirmed =
                 Some("replacement executor refused activation transport".into());
+            state.transfer.failure_origin = Some(FailureOrigin::TargetActivation);
             Err(ReplacementIngressError::Unconfirmed(
                 "replacement executor refused activation transport".into(),
             ))
@@ -456,9 +506,47 @@ fn activate(
         Err(_) => {
             state.transfer.unconfirmed =
                 Some("replacement activation transport unavailable".into());
+            state.transfer.failure_origin = Some(FailureOrigin::TargetActivation);
             Err(ReplacementIngressError::Unconfirmed(
                 "replacement activation transport unavailable".into(),
             ))
         }
     }
+}
+
+fn take_refused(
+    state: &mut LifecycleState,
+) -> Result<VecDeque<KernelMessage>, ReplacementIngressError> {
+    if state.transfer.failure_origin != Some(FailureOrigin::SourceRefused)
+        || state
+            .transfer
+            .pending
+            .values()
+            .any(|pending| pending.disposition != TransferDisposition::Refused)
+    {
+        return Err(ReplacementIngressError::Unconfirmed(
+            "replacement adoption is not proven refused".into(),
+        ));
+    }
+    let mut backlog = std::mem::take(&mut state.transfer.backlog);
+    for (_, mut pending) in std::mem::take(&mut state.transfer.pending) {
+        for capsule in pending.retained {
+            if let Some(index) = pending
+                .leases
+                .iter()
+                .position(|lease| lease.sequence == capsule.id.sequence)
+            {
+                let lease = pending.leases.remove(index);
+                backlog.push_back(lease.wrap(capsule.message));
+            } else {
+                backlog.push_back(capsule.message);
+            }
+        }
+        // Every externally admitted capsule has its original lease; only
+        // executor-internal staged messages lack an ingress entry.
+        debug_assert!(pending.leases.is_empty());
+    }
+    state.transfer.unconfirmed = None;
+    state.transfer.failure_origin = None;
+    Ok(backlog)
 }
