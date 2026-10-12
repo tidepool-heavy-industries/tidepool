@@ -8,7 +8,7 @@ use harness::{
     engine::ResponsesTransport,
     item::Item,
     model::{AgentPath, RequestId},
-    transport::{ResponsesRequest, ResponsesTurn, TransportError},
+    transport::{PreparedProviderRequest, ResponsesRequest, ResponsesTurn, TransportError},
 };
 use parking_lot::Mutex;
 use serde_json::json;
@@ -214,16 +214,16 @@ impl ResponsesTransport for InterruptedStream {
         ))
     }
 
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(&self, _: PreparedProviderRequest) -> Result<ResponsesTurn, TransportError> {
         panic!("the production driver must use streamed dispatch");
     }
 
     async fn create_streaming(
         &self,
-        request: ResponsesRequest,
+        request: PreparedProviderRequest,
         sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
-        self.inputs.lock().push(request);
+        self.inputs.lock().push(request.request().clone());
         let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
         if attempt > 0 {
             return Ok(final_turn());

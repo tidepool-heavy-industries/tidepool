@@ -2199,7 +2199,11 @@ mod tests {
             ))
         }
 
-        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            request: harness::transport::PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
+            let request = request.request();
             if request.tools_allowed.as_ref().is_some_and(Vec::is_empty) {
                 assert!(request.tools.is_empty());
                 assert!(
@@ -2221,7 +2225,7 @@ mod tests {
             }
             let round = {
                 let mut requests = self.requests.lock().unwrap();
-                requests.push(request);
+                requests.push(request.clone());
                 requests.len()
             };
             let items = if round == 1 {

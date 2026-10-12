@@ -128,28 +128,17 @@ impl harness::engine::ResponsesTransport for TestResponsesTransport {
 
     async fn create(
         &self,
-        request: harness::transport::ResponsesRequest,
+        request: harness::transport::PreparedProviderRequest,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
         self.0.create(request).await
     }
 
     async fn create_streaming(
         &self,
-        request: harness::transport::ResponsesRequest,
+        request: harness::transport::PreparedProviderRequest,
         sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
         self.0.create_streaming(request, sink).await
-    }
-
-    async fn create_streaming_for_request(
-        &self,
-        request_id: &harness::model::RequestId,
-        request: harness::transport::ResponsesRequest,
-        sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
-    ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
-        self.0
-            .create_streaming_for_request(request_id, request, sink)
-            .await
     }
 }
 
