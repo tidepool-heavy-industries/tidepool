@@ -9392,10 +9392,11 @@ where
     pub(crate) async fn run_rooted_application(
         &self,
         context: crate::ActorSessionContext,
-        handler: RootCustody,
+        handler: impl Into<Arc<RootCustody>> + Send + 'static,
         request: Arc<RootCustody>,
         handler_realm: RealmId,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        let handler = handler.into();
         self.access
             .with_compiler_machine(context, move |session, _context, _, settlement| {
                 session
@@ -10455,19 +10456,31 @@ where
             .await
     }
 
-    pub(crate) async fn abandon_cast_handler(
+    /// Retire only the message application; the source-owned receiver remains
+    /// parked with its original handler and captured receiver state.
+    pub(crate) async fn retire_cast_handler(
         &self,
         context: crate::ActorSessionContext,
         receiver_continuation: ResidentHole,
         handler_realm: RealmId,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+    ) -> Result<(), ResidentActorWorkbenchError> {
         self.access
-            .with_compiler_machine(context, move |session, _, _, settlement| {
-                let outcome = session
-                    .resume_classified(receiver_continuation, true, settlement)
-                    .map_err(classify_resumption)?;
+            .with_machine(context, move |session, context, _| {
+                let receiver_realm = context.placement.resource_scope;
+                if handler_realm == receiver_realm
+                    || session.parked_realm(&receiver_continuation) != Some(receiver_realm)
+                {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "cancelled message lost its actor-owned receiver".into(),
+                    ));
+                }
                 let _ = session.close_realm(handler_realm);
-                Ok(outcome)
+                if session.parked_realm(&receiver_continuation) != Some(receiver_realm) {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "message retirement removed its actor-owned receiver".into(),
+                    ));
+                }
+                Ok(())
             })
             .await
     }
@@ -11195,7 +11208,7 @@ where
     Ok(ResidentActorBoundary::Receive(InstalledReceiver {
         site,
         continuation: hole,
-        handler,
+        handler: Arc::new(handler),
     }))
 }
 

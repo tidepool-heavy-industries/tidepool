@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 use tidepool_repr::SessionId;
 use tidepool_runtime::session::{ResidentHole, ResidentParcel, RootCustody};
@@ -8,13 +9,14 @@ use crate::ActorRef;
 /// The installed one-message receiver for an exact actor incarnation.
 ///
 /// The parked authored continuation consumes `next`; the rooted rank-N
-/// handler consumes the next protocol request. Both have move-only Rust
-/// owned handles and therefore live in the actor behavior, not in a parallel
-/// program table; this imposes no linearity discipline on authored Haskell.
+/// handler consumes the next protocol request. Applications borrow the handler
+/// so cancellation can retain this exact receiver and its captured state.
+/// Sharing the Rust owner does not duplicate its machine root.
+#[derive(Clone)]
 pub(crate) struct InstalledReceiver {
     pub(crate) site: u64,
     pub(crate) continuation: ResidentHole,
-    pub(crate) handler: RootCustody,
+    pub(crate) handler: Arc<RootCustody>,
 }
 
 pub(crate) struct KernelValue {
