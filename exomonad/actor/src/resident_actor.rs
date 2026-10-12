@@ -2335,8 +2335,7 @@ struct WorkbenchExecutionFailure {
 }
 
 struct SuspendedCast {
-    site: u64,
-    receiver_continuation: ResidentHole,
+    receiver: InstalledReceiver,
     handler_realm: RealmId,
     cleanup: Option<crate::resident_workbench::ParkedHoleAbortGuard>,
 }
@@ -2356,8 +2355,15 @@ struct AcceptedTerminalTransfer {
 
 struct PendingActorProgram {
     transfer: Option<Arc<AcceptedTerminalTransfer>>,
-    outcome: ResidentOutcome,
-    cleanup: Option<crate::resident_workbench::ParkedHoleAbortGuard>,
+    resumption: ActorResumption,
+}
+
+enum ActorResumption {
+    Program {
+        outcome: ResidentOutcome,
+        cleanup: Option<crate::resident_workbench::ParkedHoleAbortGuard>,
+    },
+    ReceiveAgain(SuspendedCast),
 }
 
 enum InteractivePark {
@@ -5329,16 +5335,19 @@ where
             // bindings, whatever `standing` now reads while the resumed
             // program is stabilized.
             self.outstanding_interactive = None;
-            self.pending_program = Some(PendingActorProgram { transfer: None, outcome, cleanup: None });
+            self.pending_program = Some(PendingActorProgram {
+                transfer: None,
+                resumption: ActorResumption::Program { outcome, cleanup: None },
+            });
             self.pending_reply = Some(claim);
             self.pending_reply_preview = reply_preview;
             if let Some(effects) = effects {
                 self.record_terminal_transfer(effects, request, AcceptedTerminalKind::Reply);
             }
-            let cleanup = self.environment.runner.handoff_actor_continuation(
-                context.clone(), &self.pending_program.as_ref().expect("native reply pending").outcome,
-            )?;
-            self.pending_program.as_mut().expect("native reply pending").cleanup = cleanup;
+            let ActorResumption::Program { outcome, cleanup } = &mut self.pending_program.as_mut().expect("native reply pending").resumption else {
+                unreachable!("native reply advances its source program");
+            };
+            *cleanup = self.environment.runner.handoff_actor_continuation(context.clone(), outcome)?;
             if let Some(suspended) = &mut self.suspended_cast {
                 // The previous Interactive hole was consumed by resume_live;
                 // its successor now has the pending program's exact guard.
@@ -8231,11 +8240,6 @@ where
                 context.placement.resource_scope,
             )
             .await?;
-        let InstalledReceiver {
-            site,
-            continuation: receiver_continuation,
-            handler,
-        } = receiver;
         let request = Arc::new(request.into_custody());
         if self.checkpoint.is_some() && self.active_input.is_none() {
             self.active_input = Some(RetainedActorInput::Mailbox(Arc::clone(&request)));
@@ -8244,7 +8248,12 @@ where
         let mut outcome = self
             .environment
             .runner
-            .run_rooted_application(context.clone(), handler, request, handler_realm)
+            .run_rooted_application(
+                context.clone(),
+                Arc::clone(&receiver.handler),
+                request,
+                handler_realm,
+            )
             .await?;
         if caller.is_some() {
             // The synchronous RPC remains owned while the handler performs
@@ -8286,8 +8295,7 @@ where
                     context,
                     ancestry,
                     SuspendedCast {
-                        site,
-                        receiver_continuation,
+                        receiver: receiver.clone(),
                         handler_realm,
                         cleanup: None,
                     },
@@ -8303,8 +8311,7 @@ where
                 caller,
                 ancestry,
                 suspended: SuspendedCast {
-                    site,
-                    receiver_continuation,
+                    receiver,
                     handler_realm,
                     cleanup: None,
                 },
@@ -8325,13 +8332,17 @@ where
             ancestry,
             suspended:
                 SuspendedCast {
-                    site,
-                    receiver_continuation,
+                    receiver,
                     handler_realm,
                     cleanup: _cleanup,
                 },
             outcome,
         } = settlement;
+        let InstalledReceiver {
+            site,
+            continuation: receiver_continuation,
+            handler: _handler,
+        } = receiver;
         let reply = self
             .environment
             .runner
@@ -8458,27 +8469,30 @@ where
                                     "queued cancellation acknowledgement failed: {error:?}"
                                 ))
                             })?;
-                        let outcome = self
+                        let retired = self
                             .environment
                             .runner
-                            .abandon_cast_handler(
+                            .retire_cast_handler(
                                 context.clone(),
-                                suspended.receiver_continuation,
+                                suspended.receiver.continuation.clone(),
                                 suspended.handler_realm,
                             )
                             .await;
-                        match outcome {
-                            Ok(outcome) => {
+                        match retired {
+                            Ok(()) => {
+                                self.set_standing(
+                                    context.actor,
+                                    ResidentStanding::Receiving(suspended.receiver),
+                                );
                                 let notifications = self
                                     .environment
                                     .requests
                                     .finish_cancellation_acknowledgement(request);
                                 self.publish_watch_notifications(notifications).await;
-                                return self
-                                    .stabilize_program(kernel, context, ancestry, outcome, None)
-                                    .await;
+                                return Ok(KernelStep::Continue(()));
                             }
                             Err(error) => {
+                                self.suspended_cast = Some(suspended);
                                 self.environment
                                     .requests
                                     .rollback_cancellation_acknowledgement(request);
@@ -10432,41 +10446,13 @@ where
                                 &cursor.unit.recovered_bindings,
                             ));
                         };
-                        let outcome = match self
-                            .environment
-                            .runner
-                            .abandon_cast_handler(
-                                context.clone(),
-                                suspended.receiver_continuation.clone(),
-                                suspended.handler_realm,
-                            )
-                            .await
-                        {
-                            Ok(outcome) => outcome,
-                            Err(error) => {
-                                self.suspended_cast = Some(suspended);
-                                self.standing = ResidentStanding::Interactive(awaiting);
-                                self.environment
-                                    .requests
-                                    .rollback_cancellation_acknowledgement(request_id);
-                                return Err(workbench_failure_after_unit(
-                                    &cursor.receipts,
-                                    cursor.index,
-                                    request.items.len(),
-                                    error,
-                                    std::mem::take(&mut cursor.unit.operations),
-                                    &cursor.unit.recovered_bindings,
-                                ));
-                            }
-                        };
                         drop(awaiting);
-                        // The cancellation landed: this request no longer owes
-                        // `respond` bindings.
+                        // The accepted cancellation retains the original receiver
+                        // until finalization retires this message application.
                         self.outstanding_interactive = None;
                         self.pending_program = Some(PendingActorProgram {
                             transfer: None,
-                            outcome,
-                            cleanup: None,
+                            resumption: ActorResumption::ReceiveAgain(suspended),
                         });
                         self.pending_cancellation = Some(request_id);
                         self.record_terminal_transfer(
@@ -10474,31 +10460,6 @@ where
                             request_id,
                             AcceptedTerminalKind::Cancellation,
                         );
-                        let cleanup = self
-                            .environment
-                            .runner
-                            .handoff_actor_continuation(
-                                context.clone(),
-                                &self
-                                    .pending_program
-                                    .as_ref()
-                                    .expect("native cancellation pending")
-                                    .outcome,
-                            )
-                            .map_err(|error| {
-                                workbench_failure_after_unit(
-                                    &cursor.receipts,
-                                    cursor.index,
-                                    request.items.len(),
-                                    error,
-                                    cursor.unit.operations.clone(),
-                                    &cursor.unit.recovered_bindings,
-                                )
-                            })?;
-                        self.pending_program
-                            .as_mut()
-                            .expect("native cancellation pending")
-                            .cleanup = cleanup;
                         let mut receipt = WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
                             index: cursor.index,
@@ -10683,6 +10644,19 @@ where
         effects.terminal_transfer = Some(transfer);
     }
 
+    /// A failed terminal transfer still owes the message's distinct realm.
+    /// Preserve it for the actor's existing shutdown cleanup.
+    fn retain_pending_cast_cleanup(&mut self) {
+        if let Some(PendingActorProgram {
+            resumption: ActorResumption::ReceiveAgain(suspended),
+            ..
+        }) = self.pending_program.take()
+        {
+            debug_assert!(self.suspended_cast.is_none());
+            self.suspended_cast = Some(suspended);
+        }
+    }
+
     fn complete_workbench_finalization(
         &mut self,
         execution_state: &mut WorkbenchExecutionState,
@@ -10706,7 +10680,7 @@ where
                         .and_then(|program| program.transfer.as_ref())
                         .is_some_and(|pending| Arc::ptr_eq(pending, &transfer))
                 {
-                    self.pending_program.take();
+                    self.retain_pending_cast_cleanup();
                     match transfer.kind {
                         AcceptedTerminalKind::Reply => {
                             if self
@@ -12407,15 +12381,59 @@ where
                     .await
                     .map_err(Self::workbench_failure);
             }
-            let PendingActorProgram {
-                outcome, cleanup, ..
-            } = self
-                .pending_program
-                .take()
-                .ok_or_else(|| KernelBehaviorError {
-                    detail: "resident actor resumed without a pending Haskell action".into(),
-                    diagnostic: None,
-                })?;
+            let PendingActorProgram { resumption, .. } =
+                self.pending_program
+                    .take()
+                    .ok_or_else(|| KernelBehaviorError {
+                        detail: "resident actor resumed without a pending Haskell action".into(),
+                        diagnostic: None,
+                    })?;
+            let (outcome, cleanup) = match resumption {
+                ActorResumption::ReceiveAgain(mut suspended) => {
+                    let retired = self
+                        .environment
+                        .runner
+                        .retire_cast_handler(
+                            context.clone(),
+                            suspended.receiver.continuation.clone(),
+                            suspended.handler_realm,
+                        )
+                        .await;
+                    match retired {
+                        Ok(()) => {
+                            if let Some(cleanup) = suspended.cleanup.take() {
+                                cleanup.disarm();
+                            }
+                            self.set_standing(
+                                context.actor,
+                                ResidentStanding::Receiving(suspended.receiver),
+                            );
+                            if let Some(request) = self.pending_cancellation.take() {
+                                let notifications = self
+                                    .environment
+                                    .requests
+                                    .finish_cancellation_acknowledgement(request);
+                                self.publish_watch_notifications(notifications).await;
+                            }
+                            self.runtime_observation
+                                .publish_workbench_posture(crate::ActorWorkbenchPosture::Idle);
+                            return Ok(KernelStep::Continue(()));
+                        }
+                        Err(error) => {
+                            self.suspended_cast = Some(suspended);
+                            if let Some(request) = self.pending_cancellation.take() {
+                                self.environment
+                                    .requests
+                                    .rollback_cancellation_acknowledgement(request);
+                            }
+                            self.runtime_observation
+                                .publish_workbench_posture(crate::ActorWorkbenchPosture::Failed);
+                            return Err(Self::workbench_failure(error));
+                        }
+                    }
+                }
+                ActorResumption::Program { outcome, cleanup } => (outcome, cleanup),
+            };
             let mut handler = self.suspended_cast.take();
             if let Some(handler) = &mut handler {
                 handler.cleanup.take();
@@ -12429,8 +12447,7 @@ where
                         &context,
                         &crate::CallAncestry::begin(context.actor),
                         SuspendedCast {
-                            site: suspended.site,
-                            receiver_continuation: suspended.receiver_continuation.clone(),
+                            receiver: suspended.receiver.clone(),
                             handler_realm: suspended.handler_realm,
                             cleanup: None,
                         },
@@ -12675,7 +12692,7 @@ where
             self.sources.clear();
             let mut retained_errors = invocation_cleanup.into_iter().flatten().collect::<Vec<_>>();
             retained_errors.extend(provider_cleanup_errors);
-            self.pending_program.take();
+            self.retain_pending_cast_cleanup();
             // Checkpoint retirement contributes to the same retained cleanup
             // outcome and deadline as the actor's other machine resources.
             // Published captures remain independently owned by their holders.
