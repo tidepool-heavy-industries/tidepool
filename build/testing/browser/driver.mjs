@@ -564,7 +564,10 @@ async function runJourney(ready) {
           const actorProjection = hostActor(latestSnapshot, actor);
           if (!actorProjection) throw new Error('retire step has no current projected actor identity');
           const sentBeforeRetire = hostOperations.length;
-          await page.getByRole('button', { name: 'Retire', exact: true }).click();
+          const chat = page.getByRole('region', { name: 'Selected worker Chat' });
+          const controls = chat.locator('summary').filter({ hasText: /^Actor controls$/ });
+          if (await controls.locator('..').getAttribute('open') === null) await controls.click();
+          await chat.getByRole('button', { name: 'Retire', exact: true }).click();
           await waitForHostOperations(sentBeforeRetire + 1);
           const retirement = hostOperations.at(-1);
           assert.equal(retirement?.command?.action, 'retire', 'browser did not send a retire operation');
