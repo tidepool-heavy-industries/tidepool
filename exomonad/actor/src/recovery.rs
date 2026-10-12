@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tidepool_atomic_write::DirectoryAnchor;
-use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
+use tidepool_repr::jsonl::{JsonlReadError, SyncPolicy, TailPolicy};
 
 // V9 retains authored initial-context preparation and publication facts.
 // Earlier runs require their matching binaries.
@@ -636,7 +636,7 @@ impl ActorRecoveryJournal {
             |line| parse_row(line).map_err(|error| error.to_string()),
             TailPolicy::Observe,
         )
-        .map_err(std::io::Error::other)?;
+        .map_err(journal_read_error)?;
         Ok(replay(rows)?.0.into_values().collect())
     }
     /// Explicit full inventory with linear copying cost. Selected hot-path
@@ -899,7 +899,7 @@ impl JournalOwner {
             |line| parse_row(line).map_err(|error| error.to_string()),
             TailPolicy::Repair,
         )
-        .map_err(std::io::Error::other)?;
+        .map_err(journal_read_error)?;
         if let Some(torn) = torn {
             tracing::warn!(path = %path.display(), line = torn.line_no, reason = %torn.reason,
                 "repaired torn actor lifecycle journal tail");
@@ -1029,7 +1029,7 @@ impl JournalOwner {
                 |line| parse_row(line).map_err(|error| error.to_string()),
                 TailPolicy::Observe,
             )
-            .map_err(std::io::Error::other)?;
+            .map_err(journal_read_error)?;
             let (records, sequence, created) = replay(rows)?;
             if torn.is_some()
                 || !created
@@ -1368,6 +1368,15 @@ impl JournalOwner {
         Ok(())
     }
 }
+fn journal_read_error(error: JsonlReadError) -> std::io::Error {
+    match error {
+        JsonlReadError::Io(error) => error,
+        malformed @ JsonlReadError::MalformedRow { .. } => {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, malformed)
+        }
+    }
+}
+
 fn append(path: &Path, state: &mut State, event: EventKind) -> std::io::Result<()> {
     let row = Row {
         version: VERSION,
