@@ -2306,8 +2306,8 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                 .iter()
                 .all(|claim| claim.state == harness::store::ClaimState::Settled));
 
-            // The interrupted stream is real Engine input. Explicit host input recovers
-            // its retained lineage without dispatching the settled Haskell call again.
+            // The interrupted stream retains a durable block. Queued input becomes
+            // eligible only after the browser owner explicitly authorizes recovery.
             transport
                 .sender
                 .send(PreflightStep::InterruptStream)
@@ -2369,6 +2369,15 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                 .await
                 .unwrap();
             assert_eq!(wake.status(), reqwest::StatusCode::ACCEPTED);
+            assert_eq!(transport.requests.lock().len(), requests_before);
+            assert!(matches!(
+                host.runtime
+                    .store()
+                    .embedded_inference_state(&target)
+                    .unwrap(),
+                harness::embedding::HostInferenceState::Blocked { .. }
+            ));
+            host.http_recover_blocked(&target).await.unwrap();
             let recovered = host
                 .context
                 .while_root_live(

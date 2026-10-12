@@ -94,30 +94,6 @@ async fn wait_head(host: &HostedTestRuntime, previous: Option<&RequestId>) -> Re
     .expect("production driver must settle its actual durable round")
 }
 
-async fn command_receipt(
-    host: &HostedTestRuntime,
-    run: &str,
-    operation: harness::embedding::ClientOperationId,
-) -> harness::server::CommandReceiptOutcome {
-    host.while_host_running(tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if let Some(receipt) = host
-                .runtime
-                .store()
-                .embedded_command(run, operation)
-                .unwrap()
-                .and_then(|record| record.receipt)
-            {
-                return receipt.outcome;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }))
-    .await
-    .expect("host must remain available until its exact command settles")
-    .expect("the browser command must settle its durable receipt")
-}
-
 #[tokio::test]
 async fn driver_reopens_retained_final_without_provider_then_waits_for_explicit_input() {
     let files = tempfile::tempdir().unwrap();
@@ -465,7 +441,9 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
                     .await
                     .unwrap();
                 assert!(matches!(
-                    command_receipt(&host, &conversation.identity().run, operation_id).await,
+                    host.command_receipt(&conversation.identity().run, operation_id)
+                        .await
+                        .unwrap(),
                     harness::server::CommandReceiptOutcome::RecoveryAuthorized { .. }
                 ));
                 let successor = wait_head(&host, None).await;
@@ -475,7 +453,9 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
                 let stale_operation = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
                 host.http_command(stale_operation, command).await.unwrap();
                 assert!(matches!(
-                    command_receipt(&host, &conversation.identity().run, stale_operation).await,
+                    host.command_receipt(&conversation.identity().run, stale_operation)
+                        .await
+                        .unwrap(),
                     harness::server::CommandReceiptOutcome::Refused { .. }
                 ));
                 assert_eq!(
@@ -596,7 +576,9 @@ async fn blocked_actor_can_be_retired_through_its_browser_owner_without_inferenc
             .await
             .unwrap();
             assert!(matches!(
-                command_receipt(host, &conversation.identity().run, interrupted).await,
+                host.command_receipt(&conversation.identity().run, interrupted)
+                    .await
+                    .unwrap(),
                 harness::server::CommandReceiptOutcome::Refused { .. }
             ));
             let retire = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
@@ -609,7 +591,9 @@ async fn blocked_actor_can_be_retired_through_its_browser_owner_without_inferenc
             .await
             .unwrap();
             assert!(matches!(
-                command_receipt(host, &conversation.identity().run, retire).await,
+                host.command_receipt(&conversation.identity().run, retire)
+                    .await
+                    .unwrap(),
                 harness::server::CommandReceiptOutcome::ControlRequested {
                     control: harness::server::CommandControl::Retire,
                     ..

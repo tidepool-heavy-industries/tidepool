@@ -704,7 +704,7 @@ impl ResponsesTransport for RejectFirstRequest {
             response_id: "explicit-successor".into(),
             items: vec![harness::item::Item(json!({
                 "type":"message", "role":"assistant", "phase":"final_answer",
-                "content":[{"type":"output_text","text":"explicit input recovered"}]
+                "content":[{"type":"output_text","text":"explicit recovery completed"}]
             }))],
             usage: Usage::default(),
         })
@@ -712,7 +712,7 @@ impl ResponsesTransport for RejectFirstRequest {
 }
 
 #[tokio::test]
-async fn production_host_preserves_rejected_request_and_waits_for_explicit_input() {
+async fn production_host_preserves_rejected_request_until_explicit_recovery() {
     for authentication in [false, true] {
         rejected_request_host_case(authentication, false).await;
     }
@@ -992,7 +992,7 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
     assert_eq!(
         transport.requests.lock().len(),
         if tool_before_rejection { 2 } else { 1 },
-        "provider rejection retried without input"
+        "provider rejection retried without explicit recovery"
     );
     assert!(fixture.context.actor.terminal().get().is_none());
     assert_eq!(fixture.context.actor.identity(), actor);
@@ -1043,6 +1043,15 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
         .await
         .unwrap();
     assert_eq!(accepted.status(), reqwest::StatusCode::ACCEPTED);
+    assert_eq!(
+        transport.requests.lock().len(),
+        if tool_before_rejection { 2 } else { 1 }
+    );
+    assert!(matches!(
+        store.embedded_inference_state(&target).unwrap(),
+        harness::embedding::HostInferenceState::Blocked { .. }
+    ));
+    fixture.http_recover_blocked(&target).await.unwrap();
     let successor = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             let head = store.agent(&target.actor).unwrap().unwrap().head_request;
@@ -1053,7 +1062,7 @@ async fn rejected_request_host_case(authentication: bool, tool_before_rejection:
         }
     })
     .await
-    .expect("explicit followup did not complete");
+    .expect("authorized recovery did not complete");
     assert_eq!(
         store.request(&successor).unwrap().unwrap().parent,
         Some(failed_head)

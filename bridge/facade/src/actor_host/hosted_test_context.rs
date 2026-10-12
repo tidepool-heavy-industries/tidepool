@@ -1097,6 +1097,60 @@ impl HostedTestRuntime {
         self.context.http_command(operation_id, command).await
     }
 
+    pub(super) async fn command_receipt(
+        &self,
+        run: &str,
+        operation: harness::embedding::ClientOperationId,
+    ) -> Result<harness::server::CommandReceiptOutcome, String> {
+        self.while_host_running(tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(receipt) = self
+                    .runtime
+                    .store()
+                    .embedded_command(run, operation)
+                    .map_err(|error| error.to_string())?
+                    .and_then(|record| record.receipt)
+                {
+                    return Ok(receipt.outcome);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }))
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|_| "the browser command did not settle its durable receipt".to_owned())?
+    }
+
+    pub(super) async fn http_recover_blocked(
+        &self,
+        target: &harness::embedding::HostIdentity,
+    ) -> Result<(), String> {
+        let state = self
+            .runtime
+            .store()
+            .embedded_inference_state(target)
+            .map_err(|error| error.to_string())?;
+        let harness::embedding::HostInferenceState::Blocked { block } = state else {
+            return Err(format!(
+                "explicit recovery requires a durable block, got {state:?}"
+            ));
+        };
+        let operation_id = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
+        self.http_command(
+            operation_id,
+            harness::server::HostCommand::Recover {
+                target: target.clone(),
+                expected_block: block,
+                mode: harness::embedding::RecoveryMode::Exact,
+            },
+        )
+        .await?;
+        match self.command_receipt(&target.run, operation_id).await? {
+            harness::server::CommandReceiptOutcome::RecoveryAuthorized { .. } => Ok(()),
+            outcome => Err(format!("explicit recovery was not authorized: {outcome:?}")),
+        }
+    }
+
     pub(super) async fn cell_settlement_diagnostic(&self, call_id: &str) -> String {
         let call = harness::model::CallId(call_id.into());
         let store = self.runtime.store();

@@ -19,6 +19,13 @@ does not replace the requested progress. Browser-provider barriers should
 likewise reject an unexpected delivered result instead of waiting for a
 second result on an already settled call.
 
+Ordinary input queues while inference is blocked. Recovery scenarios use the
+actual `HostInferenceState::Blocked` token and the browser command owner, then
+observe its durable `RecoveryAuthorized` receipt before expecting another
+provider request. Use `HostedTestRuntime::http_recover_blocked`; a successful
+input receipt does not establish recovery. User interruption follows its own
+cancellation settlement and must not be treated as a blocked provider failure.
+
 Host liveness observation must support nested and concurrent barriers. Share
 the retained terminal observation of the host's single readiness receiver;
 never hold that receiver's mutex across a caller's progress future. Test
