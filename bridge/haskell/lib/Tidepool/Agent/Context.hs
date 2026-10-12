@@ -28,6 +28,10 @@ module Tidepool.Agent.Context
   , blockKind
   , blockProvenance
   , toNotes
+  , InitialContextIdentity (..)
+  , InitialContextPublicationReceipt (..)
+  , InitialContextObservation (..)
+  , getInitialContext
   , getContext
   , putContext
   , modifyContext
@@ -52,6 +56,9 @@ import Tidepool.Effects.Core
   , ContextTextSelector (..)
   , ContextVisibleText (..)
   , ContextReadWrite (..)
+  , InitialContextIdentity (..)
+  , InitialContextPublicationReceipt (..)
+  , InitialContextObservation (..)
   , ForkEffort (..)
   , ContextReference
   , ContextRole (..)
@@ -159,6 +166,14 @@ toNotes selected (Context document) =
           , contextVisibleTextEditable visibleText
           ]
     asNote block = block
+
+-- | Observe startup's retained result and historical publication receipt.
+-- This performs no startup effects and does not claim its text is still active.
+-- 'InitialContextPublished' identifies one exact authored block: read current
+-- context and replace that reference, refusing a missing target. Editing an
+-- existing block preserves its reference through the context owner's provenance.
+getInitialContext :: Member ContextReadWrite effects => Eff effects InitialContextObservation
+getInitialContext = send GetInitialContextWith
 
 getContext :: Member ContextReadWrite effects => Eff effects Context
 getContext = Context <$> send GetContextWith

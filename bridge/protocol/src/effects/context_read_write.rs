@@ -45,6 +45,12 @@ pub fn context_read_write() -> Effect {
         errors: None,
         verbs: vec![
             verb(
+                "GetInitialContextWith",
+                "get_initial_context_with",
+                vec![],
+                HsType::Named("InitialContextObservation"),
+            ),
+            verb(
                 "GetContextWith",
                 "get_context_with",
                 vec![],
@@ -78,6 +84,13 @@ pub fn context_read_write() -> Effect {
             ),
         ],
         helpers: vec![
+            Helper {
+                name: "getInitialContext",
+                ctor: Some("GetInitialContextWith"),
+                substrate: false,
+                doc: &["Observe retained startup evidence without rerunning initialization or editing context."],
+                body: HelperBody::Nullary,
+            },
             Helper {
                 name: "getContext",
                 ctor: Some("GetContextWith"),
@@ -116,6 +129,68 @@ pub fn context_read_write() -> Effect {
 
 fn type_defs() -> Vec<TypeDef> {
     vec![
+        TypeDef {
+            name: "InitialContextIdentity",
+            wire_rust: Some("InitialContextIdentity"),
+            haskell_module: None,
+            shape: TypeShape::Record {
+                fields: vec![
+                    field("initialContextOperation", "operation", HsType::Text),
+                    field("initialContextActor", "actor", HsType::Tuple(vec![HsType::Int, HsType::Int])),
+                    field("initialContextSpecInstall", "spec_install", HsType::Int),
+                    field("initialContextSpecRevision", "spec_revision", HsType::maybe(HsType::Text)),
+                    field("initialContextSpecEntry", "spec_entry", HsType::maybe(HsType::Text)),
+                    field("initialContextSpecSource", "spec_source", HsType::Text),
+                ],
+            },
+            json: JsonInstance::None,
+            derives: WIRE,
+            domain: None,
+            doc: &["Owner-issued startup operation, actor, installed spec and exact source identity."],
+        },
+        TypeDef {
+            name: "InitialContextPublicationReceipt",
+            wire_rust: Some("InitialContextPublicationReceipt"),
+            haskell_module: None,
+            shape: TypeShape::Record {
+                fields: vec![
+                    field("initialContextRun", "run", HsType::Text),
+                    field("initialContextActorPath", "actor_path", HsType::Text),
+                    field("initialContextConversationIncarnation", "conversation_incarnation", HsType::Text),
+                    field("initialContextRequest", "request", HsType::Text),
+                    field("initialContextCallerReference", "caller_reference", HsType::maybe(HsType::Named("ContextReference"))),
+                ],
+            },
+            json: JsonInstance::None,
+            derives: WIRE,
+            domain: None,
+            doc: &["Historical publication association and independently preserved caller seed reference."],
+        },
+        TypeDef {
+            name: "InitialContextObservation",
+            wire_rust: Some("InitialContextObservation"),
+            haskell_module: None,
+            shape: TypeShape::Sum {
+                variants: vec![
+                    startup_variant("InitialContextAbsent", vec![]),
+                    startup_variant("InitialContextCaptured", vec![]),
+                    startup_variant("InitialContextPreparing", vec![HsType::Named("InitialContextIdentity")]),
+                    startup_variant("InitialContextRetained", vec![HsType::Named("InitialContextIdentity"), HsType::Text]),
+                    startup_variant("InitialContextPublishedEmpty", vec![HsType::Named("InitialContextIdentity"), HsType::Named("InitialContextPublicationReceipt")]),
+                    startup_variant("InitialContextPublished", vec![HsType::Named("InitialContextIdentity"), HsType::Named("InitialContextPublicationReceipt"), HsType::Text, HsType::Named("ContextReference")]),
+                    startup_variant("InitialContextFailed", vec![HsType::Named("InitialContextIdentity"), HsType::Text]),
+                    startup_variant("InitialContextCancelled", vec![HsType::Named("InitialContextIdentity")]),
+                    startup_variant("InitialContextUncertain", vec![HsType::Named("InitialContextIdentity"), HsType::Text]),
+                ],
+            },
+            json: JsonInstance::None,
+            derives: WIRE,
+            domain: None,
+            doc: &[
+                "Retained startup status, with successful empty output distinct from an absent hook and failure.",
+                "Published text is historical evidence; read current context before replacing its exact issued reference.",
+            ],
+        },
         TypeDef {
             name: "ContextReference",
             wire_rust: Some("ContextReference"),
@@ -266,6 +341,14 @@ fn type_defs() -> Vec<TypeDef> {
             doc: &["The complete ordered context document for one admitted invocation."],
         },
     ]
+}
+
+fn startup_variant(ctor: &'static str, fields: Vec<HsType>) -> SumVariant {
+    SumVariant {
+        ctor,
+        fields: VariantFields::Positional(fields),
+        doc: &[],
+    }
 }
 
 fn field(hs_name: &'static str, rust_name: &'static str, ty: HsType) -> RecordField {
