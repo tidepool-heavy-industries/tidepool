@@ -7522,10 +7522,12 @@ mod tests {
         assert!(returned.diagnostic.as_ref().unwrap().message.len() <= 16 * 1024);
         assert_eq!(actor.terminal().get(), Some(returned.clone()));
         assert_eq!(*callbacks.lock(), vec![returned.clone(), returned.clone()]);
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor =
             tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = crate::ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = crate::ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
+            .await
+            .unwrap();
         let descriptor = crate::ActorDescriptor::new(
             "raw-terminal",
             crate::ActorPlacement {
@@ -7534,9 +7536,15 @@ mod tests {
                 resource_scope: tidepool_codegen::suspension::RealmId(1),
             },
         );
-        journal.admit(actor.identity(), &descriptor, &[]).unwrap();
-        journal.retire(actor.identity(), original).unwrap();
-        assert_eq!(journal.records()[0].terminal, Some(returned.clone()));
+        journal
+            .admit(actor.identity(), &descriptor, &[])
+            .await
+            .unwrap();
+        journal.retire(actor.identity(), original).await.unwrap();
+        assert_eq!(
+            journal.records().await.unwrap()[0].terminal,
+            Some(returned.clone())
+        );
         assert_eq!(
             actor
                 .shutdown(ActorTerminal::new(
@@ -7977,10 +7985,11 @@ mod tests {
         assert_eq!(repeated, terminal);
         assert_eq!(child.terminal().get(), Some(terminal.clone()));
 
-        let directory = tempfile::tempdir().expect("durable lifecycle directory");
+        let directory = Arc::new(tempfile::tempdir().expect("durable lifecycle directory"));
         let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path())
             .expect("durable lifecycle anchor");
-        let journal = crate::ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = crate::ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
+            .await
             .expect("original lifecycle owner");
         let descriptor = crate::ActorDescriptor::new(
             "compiler-failure-child",
@@ -7992,23 +8001,29 @@ mod tests {
         );
         journal
             .admit(child.identity(), &descriptor, &[])
+            .await
             .expect("record exact child identity");
         journal
             .retire(child.identity(), terminal.clone())
+            .await
             .expect("persist original terminal");
         journal
             .retire(child.identity(), terminal.clone())
+            .await
             .expect("idempotent same retirement");
         assert!(journal
             .retire(
                 child.identity(),
                 ActorTerminal::new(ActorExitKind::Cancelled, "later cleanup",)
             )
+            .await
             .is_err());
         drop(journal);
-        let journal = crate::ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
-            .expect("reopen typed diagnostic evidence");
-        assert_eq!(journal.records()[0].terminal, Some(terminal));
+        let journal =
+            crate::ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", directory.clone())
+                .await
+                .expect("reopen typed diagnostic evidence");
+        assert_eq!(journal.records().await.unwrap()[0].terminal, Some(terminal));
 
         let (reply, receive) = oneshot::channel();
         owner
