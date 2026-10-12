@@ -1979,7 +1979,7 @@ pub(crate) mod recovery_test_fixture {
 
     impl RecoveryBootRegistration for LockedRun {
         fn into_run(self: Box<Self>) -> Arc<dyn RecoveryRunAuthority> {
-            Arc::from(self)
+            Arc::new(*self)
         }
     }
     pub(super) fn boot_registration(root: &Path) -> Box<dyn RecoveryBootRegistration> {
