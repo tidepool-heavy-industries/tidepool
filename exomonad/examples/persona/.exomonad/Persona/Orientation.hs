@@ -20,7 +20,7 @@ import qualified Persona.Memory as Memory
 data Policy = Policy
   { occasion :: Text
   , limits :: A.Limits
-  , view :: A.Collection -> A.View
+  , attentionView :: A.Collection -> A.View
   }
 
 -- No first human message is available at startup. Later notebook calls can
@@ -29,12 +29,12 @@ arrival :: Policy
 arrival = Policy
   { occasion = "Prepare a general orientation for this fresh conversation from available memory."
   , limits = A.Limits 1 16384
-  , view = A.continuity
+  , attentionView = A.continuity
   }
 
 prepare :: Members '[FsRead, FsWrite, Jev] effects
   => Policy -> Eff effects (Either Context.PreparationError (Collection.Loaded, A.Prepared))
-prepare policy = Context.prepare (limits policy) (occasion policy) (view policy)
+prepare policy = Context.prepare (limits policy) (occasion policy) (attentionView policy)
 
 -- | Inspect or save the same evidence before encoding it at the runtime boundary.
 inspection :: StartupInput -> Policy -> Collection.Loaded -> A.Prepared -> Value

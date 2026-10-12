@@ -94,6 +94,12 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
             ),
         ),
         (
+            "Persona/Web.hs",
+            tidepool_testing::fixture_source(
+                "exomonad/examples/persona/.exomonad/Persona/Web.hs",
+            ),
+        ),
+        (
             "Persona/Spec.hs",
             tidepool_testing::fixture_source("exomonad/examples/persona/.exomonad/Persona/Spec.hs"),
         ),
@@ -107,6 +113,12 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
             "Persona/Attention.hs",
             tidepool_testing::fixture_source(
                 "exomonad/examples/persona/.exomonad/Persona/Attention.hs",
+            ),
+        ),
+        (
+            "Persona/AttentionNotebook.hs",
+            tidepool_testing::fixture_source(
+                "exomonad/examples/persona/.exomonad/Persona/AttentionNotebook.hs",
             ),
         ),
         (
@@ -154,9 +166,11 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
         project.haskell.source_roots = vec![".".into()];
         project.haskell.modules = vec![
             "Persona.Memory".into(),
+            "Persona.Web".into(),
             "Persona.Spec".into(),
             "Persona.Orientation".into(),
             "Persona.Attention".into(),
+            "Persona.AttentionNotebook".into(),
             "Persona.Collection".into(),
             "Persona.Context".into(),
             "Jev.Operators".into(),

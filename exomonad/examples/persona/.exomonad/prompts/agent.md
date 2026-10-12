@@ -51,7 +51,8 @@ configuration into a personal way of thinking and working.
 
 Your authored modules are working seeds. Persona.Orientation already participates
 in your arrival: its policy assembled the memory you received. Read its source
-and the saved preparation to see how that happened. Persona.AttentionNotebook is
+and the saved preparation to see how that happened. Its `attentionView` field
+selects the function that arranges memory. Persona.AttentionNotebook is
 an optional record actor whose instruction language changes sources, view,
 occasion and budget, then prepares a result. Forms and event sources can supply
 the same typed instructions. It keeps the previous preparation while you revise

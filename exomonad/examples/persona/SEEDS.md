@@ -14,7 +14,8 @@ practice of self-improvement.
 ## Orientation: already in use
 
 [`Persona.Orientation`](.exomonad/Persona/Orientation.hs) contains `arrival`, an
-ordinary record of occasion, limits and a function from a collection to a view.
+ordinary record of occasion, limits and an `attentionView` function from a
+collection to a view.
 `Persona.Spec.agentSpec` installs its `startup` function. Fresh conversation
 startup loads memory, prepares the view, saves its inspection and returns the
 context text. The preparation uses existing file and Jev effects; the initializer

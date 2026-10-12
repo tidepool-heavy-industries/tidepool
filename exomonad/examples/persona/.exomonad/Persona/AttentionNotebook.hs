@@ -65,7 +65,7 @@ notebook collection policy = Notebook collection policy Nothing True
 
 snapshot :: Notebook -> Snapshot
 snapshot (Notebook collection policy previousResult changed) = Snapshot
-  collection (O.occasion policy) (O.limits policy) (O.view policy collection)
+  collection (O.occasion policy) (O.limits policy) (O.attentionView policy collection)
   previousResult changed
 
 -- The same interpreter runs in a notebook cell or a record-actor handler.
@@ -78,12 +78,12 @@ execute instructions = mapM_ step instructions >> (snapshot <$> get)
       Notebook collection policy previousResult _ <- get
       case instruction of
         Sources next -> put (Notebook next policy previousResult True)
-        View next -> put (Notebook collection (policy {O.view = next}) previousResult True)
+        View next -> put (Notebook collection (policy {O.attentionView = next}) previousResult True)
         Occasion next -> put (Notebook collection (policy {O.occasion = next}) previousResult True)
         Budget next -> put (Notebook collection (policy {O.limits = next}) previousResult True)
         Prepare -> do
           result <- Context.prepareView (O.limits policy) (O.occasion policy)
-            collection (O.view policy collection)
+            collection (O.attentionView policy collection)
           put (Notebook collection policy (Just result) False)
 
 data AttentionActor mode = AttentionActor
