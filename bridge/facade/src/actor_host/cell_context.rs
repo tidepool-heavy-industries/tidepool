@@ -14,11 +14,16 @@ use tidepool_effect::{error::EffectError, DeferredEffect, Response};
 use tidepool_repr::{DataConTable, PrincipalId};
 use tidepool_runtime::session::WorkbenchExecutionId;
 
+pub(super) type InitialContextObserver = Arc<
+    dyn Fn() -> Result<tidepool_bridge_effects::InitialContextObservation, String> + Send + Sync,
+>;
+
 pub(super) type ModelResolver = Arc<dyn Fn(&str) -> Result<String, String> + Send + Sync>;
 
 pub(super) struct EmbeddedContextBinding {
     invocation: ToolInvocationContext,
     model: ModelResolver,
+    initial_context: InitialContextObserver,
     state: Arc<Mutex<DraftState>>,
 }
 
@@ -54,10 +59,12 @@ impl EmbeddedContextBinding {
         invocation: ToolInvocationContext,
         snapshot: &ContextSnapshot,
         model: ModelResolver,
+        initial_context: InitialContextObserver,
     ) -> Self {
         Self {
             invocation,
             model,
+            initial_context,
             state: Arc::new(Mutex::new(DraftState {
                 lifecycle: DraftLifecycle::Waiting,
                 draft: ContextDraft {
@@ -145,6 +152,7 @@ impl HostedContextBinding for EmbeddedContextBinding {
     ) -> DeferredEffect {
         let state = self.state.clone();
         let model = self.model.clone();
+        let initial_context = self.initial_context.clone();
         DeferredEffect::blocking(move || {
             let mut state = state.lock();
             match &state.lifecycle {
@@ -158,6 +166,9 @@ impl HostedContextBinding for EmbeddedContextBinding {
                 }
             }
             match request {
+                ContextReq::GetInitialContextWith => initial_context()
+                    .map(Response::new)
+                    .map_err(EffectError::Handler),
                 ContextReq::GetContextWith => Ok(Response::new(super::context_wire::to_wire(
                     &state.draft.document,
                 ))),
@@ -236,6 +247,9 @@ mod tests {
                 namespace: None,
             },
             model: Arc::new(|model| Ok(model.into())),
+            initial_context: Arc::new(|| {
+                Ok(tidepool_bridge_effects::InitialContextObservation::InitialContextAbsent)
+            }),
             state: Arc::new(Mutex::new(DraftState {
                 lifecycle: DraftLifecycle::Waiting,
                 draft: ContextDraft {
@@ -259,6 +273,64 @@ mod tests {
             panic!("context service must retain its blocking request owner");
         };
         work.into_inner().unwrap()()
+    }
+
+    #[test]
+    fn startup_observation_checks_current_authority_and_never_stages_edits() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut binding = binding();
+        let observations = Arc::new(AtomicUsize::new(0));
+        let counted = observations.clone();
+        binding.initial_context = Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(tidepool_bridge_effects::InitialContextObservation::InitialContextAbsent)
+        });
+        binding.state.lock().changed = false;
+        let execution = WorkbenchExecutionId::from_digest([13; 16]);
+        let principal = PrincipalId::new(1, 1);
+        assert!(prepare_result(&binding, ContextReq::GetInitialContextWith, principal).is_err());
+        binding
+            .admit(&execution, &binding.invocation, principal)
+            .unwrap();
+        assert!(prepare_result(
+            &binding,
+            ContextReq::GetInitialContextWith,
+            PrincipalId::new(2, 1)
+        )
+        .is_err());
+        for _ in 0..2 {
+            assert!(prepare_result(&binding, ContextReq::GetInitialContextWith, principal).is_ok());
+        }
+        assert_eq!(observations.load(Ordering::SeqCst), 2);
+        binding.finish(CellExit {
+            execution,
+            cause: CellExitCause::FullReturn,
+            cleanup_confirmed: true,
+        });
+        assert!(matches!(
+            binding
+                .completion(JobOutput::Completed(Ok(serde_json::json!(true))))
+                .unwrap()
+                .context,
+            ContextDisposition::Unedited
+        ));
+        assert!(prepare_result(&binding, ContextReq::GetInitialContextWith, principal).is_err());
+        assert_eq!(observations.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn unreadable_startup_receipt_fails_without_claiming_an_absent_hook() {
+        let mut binding = binding();
+        binding.initial_context = Arc::new(|| Err("startup journal unavailable".into()));
+        let execution = WorkbenchExecutionId::from_digest([14; 16]);
+        let principal = PrincipalId::new(1, 1);
+        binding
+            .admit(&execution, &binding.invocation, principal)
+            .unwrap();
+        assert!(
+            matches!(prepare_result(&binding, ContextReq::GetInitialContextWith, principal),
+            Err(EffectError::Handler(detail)) if detail == "startup journal unavailable")
+        );
     }
 
     #[test]
