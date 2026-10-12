@@ -170,6 +170,7 @@ enum ReservationPhase {
 struct ReservationRecord {
     phase: ReservationPhase,
     purpose: ReservationPurpose,
+    startup: Option<crate::RootStartupIntent>,
     terminal: RetainedActorExit,
     lifecycle: Option<crate::kernel::LifecycleHandle>,
     reply: Option<oneshot::Sender<Result<ActorReservation, DirectoryError>>>,
@@ -356,6 +357,12 @@ impl RunState {
 }
 
 pub(super) enum RunControlMessage {
+    SelectStartup {
+        actor: ActorRef,
+        intent: crate::RootStartupIntent,
+        recovery: Option<Arc<RootStartupRecoveryAuthority>>,
+        reply: oneshot::Sender<Result<StartupPredecessorAuthority, DirectoryError>>,
+    },
     PreparationLost {
         id: u64,
     },
@@ -578,6 +585,7 @@ fn begin_reservation(
         ReservationRecord {
             phase: ReservationPhase::Creating,
             purpose,
+            startup: None,
             terminal: terminal.clone(),
             lifecycle: None,
             reply: Some(reply),
@@ -623,6 +631,58 @@ impl Actor for RunControl {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            RunControlMessage::SelectStartup {
+                actor,
+                intent,
+                recovery,
+                reply,
+            } => {
+                let result = (|| {
+                    if !matches!(state.phase, RunPhase::Running) {
+                        return Err(DirectoryError::Closed);
+                    }
+                    let record = state
+                        .reservations
+                        .get(&actor)
+                        .ok_or(DirectoryError::Unauthorized { actor })?;
+                    if !matches!(record.phase, ReservationPhase::Ready)
+                        || !matches!(record.purpose, ReservationPurpose::Root)
+                        || record.startup.is_some()
+                    {
+                        return Err(DirectoryError::Unauthorized { actor });
+                    }
+                    if intent.predecessor.is_some()
+                        && state.reservations.values().any(|record| {
+                            record
+                                .startup
+                                .as_ref()
+                                .is_some_and(|selected| selected.predecessor == intent.predecessor)
+                        })
+                    {
+                        return Err(DirectoryError::Unauthorized { actor });
+                    }
+                    let predecessor = match intent.predecessor {
+                        None => StartupPredecessorAuthority::Initial,
+                        Some(previous) => match state
+                            .reservations
+                            .get(&previous)
+                            .and_then(|record| record.lifecycle.clone())
+                        {
+                            Some(owner) => StartupPredecessorAuthority::Live(owner),
+                            None => StartupPredecessorAuthority::Recovered(
+                                recovery.ok_or(DirectoryError::Unauthorized { actor })?,
+                            ),
+                        },
+                    };
+                    state
+                        .reservations
+                        .get_mut(&actor)
+                        .expect("validated reservation")
+                        .startup = Some(intent);
+                    Ok(predecessor)
+                })();
+                let _ = reply.send(result);
+            }
             RunControlMessage::PreparationLost { id } => {
                 if let Some(record) = state.preparations.get_mut(&id) {
                     record.phase = PreparationPhase::Settled(
@@ -1409,6 +1469,40 @@ impl RunControlClient {
             .send_message(message(reply))
             .map_err(|_| DirectoryError::Unavailable)?;
         receiver.await.map_err(|_| DirectoryError::Unavailable)
+    }
+    pub(crate) async fn authorize_root_startup(
+        &self,
+        reservation: &ActorReservation,
+        intent: crate::RootStartupIntent,
+        journal: Arc<crate::ActorRecoveryJournal>,
+        recovery: Option<Arc<RootStartupRecoveryAuthority>>,
+    ) -> Result<RootStartupAdmission, DirectoryError> {
+        let actor = reservation.identity();
+        let predecessor = self
+            .ask(|reply| RunControlMessage::SelectStartup {
+                actor,
+                intent: intent.clone(),
+                recovery,
+                reply,
+            })
+            .await??;
+        let operation: preparation::RootOperation = Box::new(move |_ticket| {
+            Box::pin(async move {
+                let result = startup::authorize(actor, intent, journal, predecessor)
+                    .await
+                    .map(preparation::RootAdmissionOutcome::StartupPermit)
+                    .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
+                (result, crate::CleanupComponentOutcome::Confirmed)
+            })
+        });
+        match self.prepare_root(operation).await? {
+            Ok(preparation::RootAdmissionOutcome::StartupPermit(permit)) => Ok(permit),
+            Err(error) => Err(error
+                .downcast::<DirectoryError>()
+                .map(|error| *error)
+                .unwrap_or(DirectoryError::Unavailable)),
+            _ => Err(DirectoryError::Unavailable),
+        }
     }
     pub(crate) async fn reserve_worker(
         &self,

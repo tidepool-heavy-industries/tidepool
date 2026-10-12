@@ -2,6 +2,7 @@
 use super::*;
 
 pub(crate) enum RootAdmissionOutcome {
+    StartupPermit(super::RootStartupAdmission),
     Actor(LocalActorRef, ractor::concurrency::JoinHandle<()>),
     Workbench(LocalActorRef),
     Pending(
@@ -14,6 +15,7 @@ pub(crate) enum RootAdmissionOutcome {
 impl RootAdmissionOutcome {
     fn custody(&self) -> ProducedCustody {
         match self {
+            Self::StartupPermit(_) => ProducedCustody::NoResource,
             Self::Actor(actor, _) | Self::Workbench(actor) | Self::Pending(actor, _, _) => {
                 ProducedCustody::Resident(actor.clone())
             }
@@ -23,12 +25,14 @@ impl RootAdmissionOutcome {
 }
 #[derive(Clone)]
 enum ProducedCustody {
+    NoResource,
     Resident(LocalActorRef),
     NativeResource(ResourceChild),
 }
 impl ProducedCustody {
     async fn retire(self) -> crate::CleanupComponentOutcome {
         match self {
+            Self::NoResource => crate::CleanupComponentOutcome::Confirmed,
             Self::Resident(actor) => {
                 let cleanup =
                     crate::resident_actor::shutdown_forest_root(&actor, SHUTDOWN_BUDGET).await;
