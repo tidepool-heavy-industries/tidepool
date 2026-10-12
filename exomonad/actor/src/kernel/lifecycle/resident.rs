@@ -1,5 +1,7 @@
 //! Startup and public-owner transitions owned by the incarnation coordinator.
 
+mod provider_initial;
+
 use super::{LifecycleCommand, LifecycleHandle, LifecycleState};
 use crate::initial_context::InitialContextEvent;
 use crate::resident_actor::{ActorPublicOwnerPlane, WorkbenchPublicOwner};
@@ -157,6 +159,7 @@ pub(super) enum ResidentCommand {
 }
 
 pub(super) enum Request {
+    ProviderInitial(provider_initial::Request),
     ObserveOwner {
         expected: Option<Arc<WorkbenchPublicOwner>>,
         provider: bool,
@@ -201,6 +204,7 @@ pub(crate) struct InitialExecution {
 }
 
 enum Pending {
+    ProviderInitial(provider_initial::Pending),
     OwnerObservation {
         owner: Arc<WorkbenchPublicOwner>,
         reply: RpcReplyPort<Result<Arc<WorkbenchPublicOwner>, String>>,
@@ -212,6 +216,7 @@ enum Pending {
 }
 
 pub(super) enum Completion {
+    ProviderInitial(provider_initial::Completion),
     OwnerObservation(Result<(), String>),
     Initial(Result<InitialTransition, String>),
     InitialRefused(String),
@@ -221,6 +226,46 @@ pub(super) enum Completion {
 }
 
 impl LifecycleHandle {
+    pub(crate) async fn provider_initial_observation(
+        &self,
+        expected: Arc<WorkbenchPublicOwner>,
+    ) -> Result<InitialContextObservation, String> {
+        self.provider_initial(expected, provider_initial::Operation::Observe)
+            .await
+    }
+
+    pub(crate) async fn provider_initial_acknowledge(
+        &self,
+        expected: Arc<WorkbenchPublicOwner>,
+        operation: tidepool_runtime::session::WorkbenchExecutionId,
+        publication: crate::InitialContextPublication,
+    ) -> Result<InitialContextObservation, String> {
+        self.provider_initial(
+            expected,
+            provider_initial::Operation::Acknowledge {
+                operation,
+                publication,
+            },
+        )
+        .await
+    }
+
+    async fn provider_initial(
+        &self,
+        expected: Arc<WorkbenchPublicOwner>,
+        operation: provider_initial::Operation,
+    ) -> Result<InitialContextObservation, String> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.send_resident(Request::ProviderInitial(provider_initial::Request {
+            expected,
+            operation,
+            reply: reply.into(),
+        }))?;
+        answer
+            .await
+            .map_err(|_| "provider initial-context owner ended before settlement".to_owned())?
+    }
+
     pub(crate) async fn public_owner(
         &self,
         expected: Option<Arc<WorkbenchPublicOwner>>,
@@ -692,6 +737,9 @@ pub(super) fn handle(
 
 fn refuse(request: Request, detail: &str) {
     match request {
+        Request::ProviderInitial(request) => {
+            let _ = request.reply.send(Err(detail.into()));
+        }
         Request::ObserveOwner { reply, .. } => {
             let _ = reply.send(Err(detail.into()));
         }
@@ -716,6 +764,10 @@ fn complete(
     sequence: u64,
     outcome: Completion,
 ) {
+    if let Completion::ProviderInitial(outcome) = outcome {
+        provider_initial::complete(state, address, sequence, outcome);
+        return;
+    }
     let Some(resident) = &mut state.resident else {
         return;
     };
@@ -940,6 +992,12 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
         let intent = resident.startup_intent.clone();
         let sequence = state.next_operation();
         let (pending, work): (Pending, BoxFuture<'static, Completion>) = match request {
+            Request::ProviderInitial(request) => {
+                let Some(work) = provider_initial::begin(state, sequence, request) else {
+                    continue;
+                };
+                work
+            }
             Request::ObserveOwner {
                 expected,
                 provider,
@@ -1235,6 +1293,7 @@ fn spawn(
 ) {
     let address = address.clone();
     let kind = match &state.resident.as_ref().unwrap().pending.as_ref().unwrap().1 {
+        Pending::ProviderInitial(_) => 6,
         Pending::OwnerObservation { .. } => 4,
         Pending::Initial(_) => 0,
         Pending::Owner(_) => 1,
@@ -1250,6 +1309,9 @@ fn spawn(
                     let error =
                         "resident owner task panicked before confirmed settlement".to_owned();
                     match kind {
+                        6 => {
+                            Completion::ProviderInitial(provider_initial::Completion::Failed(error))
+                        }
                         0 => Completion::Initial(Err(error)),
                         1 => Completion::Owner(Err(error)),
                         2 => Completion::Release(Err(error)),
