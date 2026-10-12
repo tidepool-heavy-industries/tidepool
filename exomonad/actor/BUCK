@@ -340,9 +340,12 @@ rust_filegroup(
         "src/resident_actor/request_wait.rs": "exomonad/actor/src/resident_actor/request_wait.rs",
         "src/resident_actor/request_wait_tests.rs": "exomonad/actor/src/resident_actor/request_wait_tests.rs",
         "src/resident_actor/scope_runtime_cancel.hs": "exomonad/actor/src/resident_actor/scope_runtime_cancel.hs",
+        "src/resident_actor/scope_runtime_cancel_queued.hs": "exomonad/actor/src/resident_actor/scope_runtime_cancel_queued.hs",
         "src/resident_actor/scope_runtime_declarations.hs": "exomonad/actor/src/resident_actor/scope_runtime_declarations.hs",
         "src/resident_actor/scope_runtime_failure.hs": "exomonad/actor/src/resident_actor/scope_runtime_failure.hs",
         "src/resident_actor/scope_runtime_normal.hs": "exomonad/actor/src/resident_actor/scope_runtime_normal.hs",
+        "src/resident_actor/scope_runtime_observe_again.hs": "exomonad/actor/src/resident_actor/scope_runtime_observe_again.hs",
+        "src/resident_actor/scope_runtime_request_again.hs": "exomonad/actor/src/resident_actor/scope_runtime_request_again.hs",
         "src/resident_actor/scope_runtime_setup.hs": "exomonad/actor/src/resident_actor/scope_runtime_setup.hs",
         "src/resident_actor/scope_runtime_tests.rs": "exomonad/actor/src/resident_actor/scope_runtime_tests.rs",
         "src/resident_actor/scope_runtime_uncertain.hs": "exomonad/actor/src/resident_actor/scope_runtime_uncertain.hs",
@@ -401,6 +404,7 @@ tidepool_rust_binary(
     srcs_filegroup = ":exomonad_actor_unit_tests_sources",
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
+        "//bridge/handlers:tidepool_handlers",
         "//bridge/mcp:tidepool_mcp",
         "//bridge/protocol:tidepool_protocol",
         "//bridge/test-data:tidepool_test_data",
@@ -632,6 +636,7 @@ rust_filegroup(
         "tests/resident_local_actor/command_retain_binding_failure_cell.hs": "exomonad/actor/tests/resident_local_actor/command_retain_binding_failure_cell.hs",
         "tests/resident_local_actor/completion_progress.rs": "exomonad/actor/tests/resident_local_actor/completion_progress.rs",
         "tests/resident_local_actor/conflicting_join_cell.hs": "exomonad/actor/tests/resident_local_actor/conflicting_join_cell.hs",
+        "tests/resident_local_actor/green_reply_policy.hs": "exomonad/actor/tests/resident_local_actor/green_reply_policy.hs",
         "tests/resident_local_actor/interleaved_bind_cell.hs": "exomonad/actor/tests/resident_local_actor/interleaved_bind_cell.hs",
         "tests/resident_local_actor/join_base.hs": "exomonad/actor/tests/resident_local_actor/join_base.hs",
         "tests/resident_local_actor/notebook_policy.hs": "exomonad/actor/tests/resident_local_actor/notebook_policy.hs",
@@ -656,6 +661,7 @@ tidepool_rust_isolated_test(
     srcs_filegroup = ":actor_sources",
     deps = [
         "//bridge/atomic-write:tidepool_atomic_write",
+        "//bridge/handlers:tidepool_handlers",
         "//bridge/mcp:tidepool_mcp",
         "//bridge/protocol:tidepool_protocol",
         "//bridge/test-data:tidepool_test_data",
@@ -887,9 +893,12 @@ filegroup(
         "exomonad/actor/src/resident_actor/request_wait.rs": "src/resident_actor/request_wait.rs",
         "exomonad/actor/src/resident_actor/request_wait_tests.rs": "src/resident_actor/request_wait_tests.rs",
         "exomonad/actor/src/resident_actor/scope_runtime_cancel.hs": "src/resident_actor/scope_runtime_cancel.hs",
+        "exomonad/actor/src/resident_actor/scope_runtime_cancel_queued.hs": "src/resident_actor/scope_runtime_cancel_queued.hs",
         "exomonad/actor/src/resident_actor/scope_runtime_declarations.hs": "src/resident_actor/scope_runtime_declarations.hs",
         "exomonad/actor/src/resident_actor/scope_runtime_failure.hs": "src/resident_actor/scope_runtime_failure.hs",
         "exomonad/actor/src/resident_actor/scope_runtime_normal.hs": "src/resident_actor/scope_runtime_normal.hs",
+        "exomonad/actor/src/resident_actor/scope_runtime_observe_again.hs": "src/resident_actor/scope_runtime_observe_again.hs",
+        "exomonad/actor/src/resident_actor/scope_runtime_request_again.hs": "src/resident_actor/scope_runtime_request_again.hs",
         "exomonad/actor/src/resident_actor/scope_runtime_setup.hs": "src/resident_actor/scope_runtime_setup.hs",
         "exomonad/actor/src/resident_actor/scope_runtime_tests.rs": "src/resident_actor/scope_runtime_tests.rs",
         "exomonad/actor/src/resident_actor/scope_runtime_uncertain.hs": "src/resident_actor/scope_runtime_uncertain.hs",
@@ -940,6 +949,7 @@ filegroup(
         "exomonad/actor/tests/resident_local_actor/command_retain_binding_failure_cell.hs": "tests/resident_local_actor/command_retain_binding_failure_cell.hs",
         "exomonad/actor/tests/resident_local_actor/completion_progress.rs": "tests/resident_local_actor/completion_progress.rs",
         "exomonad/actor/tests/resident_local_actor/conflicting_join_cell.hs": "tests/resident_local_actor/conflicting_join_cell.hs",
+        "exomonad/actor/tests/resident_local_actor/green_reply_policy.hs": "tests/resident_local_actor/green_reply_policy.hs",
         "exomonad/actor/tests/resident_local_actor/interleaved_bind_cell.hs": "tests/resident_local_actor/interleaved_bind_cell.hs",
         "exomonad/actor/tests/resident_local_actor/join_base.hs": "tests/resident_local_actor/join_base.hs",
         "exomonad/actor/tests/resident_local_actor/notebook_policy.hs": "tests/resident_local_actor/notebook_policy.hs",
@@ -1235,6 +1245,13 @@ export_file(
 )
 
 export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f73636f70655f72756e74696d655f63616e63656c5f7175657565642e6873",
+    src = "src/resident_actor/scope_runtime_cancel_queued.hs",
+    out = "scope_runtime_cancel_queued.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
     name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f73636f70655f72756e74696d655f6465636c61726174696f6e732e6873",
     src = "src/resident_actor/scope_runtime_declarations.hs",
     out = "scope_runtime_declarations.hs",
@@ -1252,6 +1269,20 @@ export_file(
     name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f73636f70655f72756e74696d655f6e6f726d616c2e6873",
     src = "src/resident_actor/scope_runtime_normal.hs",
     out = "scope_runtime_normal.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f73636f70655f72756e74696d655f6f6273657276655f616761696e2e6873",
+    src = "src/resident_actor/scope_runtime_observe_again.hs",
+    out = "scope_runtime_observe_again.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f7265736964656e745f6163746f722f73636f70655f72756e74696d655f726571756573745f616761696e2e6873",
+    src = "src/resident_actor/scope_runtime_request_again.hs",
+    out = "scope_runtime_request_again.hs",
     visibility = ["PUBLIC"],
 )
 
@@ -1378,6 +1409,13 @@ export_file(
     name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f636f6e666c696374696e675f6a6f696e5f63656c6c2e6873",
     src = "tests/resident_local_actor/conflicting_join_cell.hs",
     out = "conflicting_join_cell.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f677265656e5f7265706c795f706f6c6963792e6873",
+    src = "tests/resident_local_actor/green_reply_policy.hs",
+    out = "green_reply_policy.hs",
     visibility = ["PUBLIC"],
 )
 

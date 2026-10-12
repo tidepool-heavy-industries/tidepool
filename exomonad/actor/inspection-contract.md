@@ -7,6 +7,12 @@ expose values. Request inspection distinguishes pending, ready, unavailable,
 and stale/released handles. A watch can settle as ready while reporting failed
 dependencies, or become unavailable when a required dependency was released.
 
+Forest graph nodes carry one optional lifecycle snapshot from `RetainedActorExit`.
+`Live` does not establish application readiness; `Paused` retains its cause;
+`Exited` retains the terminal outcome. If neither the lifecycle owner nor a
+recorded exit is available, the lifecycle is unknown. The graph's `terminal()`
+accessor derives from that same snapshot, without waiting for an actor turn.
+
 `observe_watch` has one deliberate acknowledgment effect: after returning a
 settled ready or unavailable state to its owner, it records that the owner has
 seen the transition so a queued duplicate notice can be suppressed. Foreign

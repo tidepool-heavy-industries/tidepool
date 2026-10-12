@@ -133,7 +133,7 @@ impl EmbeddedProjection {
                 continue;
             }
             let identity = self.identity(run, node.actor);
-            let lifecycle = match node.terminal.as_ref().map(|terminal| terminal.kind) {
+            let lifecycle = match node.terminal().map(|terminal| terminal.kind) {
                 Some(ActorExitKind::Completed | ActorExitKind::Cancelled) => {
                     HostActorLifecycle::Retired
                 }
@@ -234,7 +234,7 @@ impl EmbeddedProjection {
     ) -> Result<(), harness::store::StoreError> {
         for node in nodes {
             if let Some(observation) = self.conversations.get_mut(&node.actor) {
-                observation.inference = if node.terminal.is_some() || observation.frozen {
+                observation.inference = if node.terminal().is_some() || observation.frozen {
                     None
                 } else {
                     match inference_for(&observation.identity) {
@@ -302,7 +302,7 @@ mod tests {
             creator: parent,
             supervisor_parent: parent,
             context_parent: None,
-            terminal: None,
+            lifecycle: Some(exomonad_actor::ActorLifecycle::Live),
             workbench: ActorWorkbenchPosture::Idle,
             provider_thread: None,
             provider_turn: None,
@@ -392,11 +392,11 @@ mod tests {
             actors.borrow()[0].inference,
             Some(HostInferenceState::Blocked { block })
         );
-        root.terminal = Some(ActorTerminal {
+        root.lifecycle = Some(exomonad_actor::ActorLifecycle::Exited(ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "runtime failed".into(),
             diagnostic: None,
-        });
+        }));
         projection
             .publish(
                 &control,
@@ -449,6 +449,44 @@ mod tests {
     }
 
     #[test]
+    fn paused_lifecycle_preserves_browser_projection_classification() {
+        for lifecycle in [
+            None,
+            Some(exomonad_actor::ActorLifecycle::Live),
+            Some(exomonad_actor::ActorLifecycle::Paused(
+                "retained input".into(),
+            )),
+        ] {
+            let mut root = node(1, None, false);
+            root.lifecycle = lifecycle;
+            let mut projection = EmbeddedProjection::default();
+            let mut states = LifecycleState::new();
+            for (state, expected) in [
+                (None, HostActorLifecycle::Waiting),
+                (
+                    Some(HostActorLifecycle::Running),
+                    HostActorLifecycle::Running,
+                ),
+            ] {
+                if let Some(state) = state {
+                    states.insert(root.actor, state);
+                }
+                let (actors, _) = projection
+                    .projection(
+                        "run",
+                        &[root.clone()],
+                        &states,
+                        |_| None,
+                        |_| Ok(None),
+                        |_| true,
+                    )
+                    .unwrap();
+                assert_eq!(actors[0].lifecycle, expected);
+            }
+        }
+    }
+
+    #[test]
     fn terminal_root_remains_projected_with_a_live_child() {
         let mut projection = EmbeddedProjection::default();
         let root_identity = HostIdentity {
@@ -465,11 +503,11 @@ mod tests {
         projection.attached(actor(2), &child_identity);
 
         let mut root = node(1, None, true);
-        root.terminal = Some(ActorTerminal {
+        root.lifecycle = Some(exomonad_actor::ActorLifecycle::Exited(ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "root completed".into(),
             diagnostic: None,
-        });
+        }));
         let child = node(2, Some(actor(1)), true);
         let (actors, conversations) = projection
             .projection(
@@ -536,11 +574,11 @@ mod tests {
             )
             .unwrap();
         assert_eq!(actors[0].active_round, None);
-        root.terminal = Some(ActorTerminal {
+        root.lifecycle = Some(exomonad_actor::ActorLifecycle::Exited(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "retired".into(),
             diagnostic: None,
-        });
+        }));
         let (actors, _) = projection
             .projection(
                 "run",
@@ -590,11 +628,11 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(actors[0].model_head_request.as_deref(), Some("first-head"));
-            root.terminal = Some(ActorTerminal {
+            root.lifecycle = Some(exomonad_actor::ActorLifecycle::Exited(ActorTerminal {
                 kind,
                 summary: "terminal".into(),
                 diagnostic: None,
-            });
+            }));
             let (actors, _) = projection
                 .projection(
                     "run",
@@ -637,11 +675,11 @@ mod tests {
         };
         projection.attached(actor(1), &identity);
         let mut root = node(1, None, true);
-        root.terminal = Some(ActorTerminal {
+        root.lifecycle = Some(exomonad_actor::ActorLifecycle::Exited(ActorTerminal {
             kind: ActorExitKind::Cancelled,
             summary: "cancelled".into(),
             diagnostic: None,
-        });
+        }));
         let (actors, _) = projection
             .projection(
                 "run",

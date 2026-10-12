@@ -916,3 +916,74 @@ impl tidepool_effect::dispatch::DispatchEffect<tidepool_mcp::CapturedOutput>
         })
     }
 }
+
+#[tokio::test]
+async fn host_graph_retains_paused_owner_lifecycle_and_recorded_exit() {
+    let fixture = Fixture::new();
+    let forest = &fixture.forest;
+    let placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    let (actor, task) = crate::local_actor::spawn_local_actor_in_directory(
+        None,
+        fixture.behavior(ActorDescriptor::new("observed-lifecycle", placement)),
+        forest.incarnation,
+        forest.directory.clone(),
+    )
+    .await
+    .unwrap();
+    let identity = actor.identity();
+    let snapshot = || {
+        forest
+            .inspect_host_graph()
+            .into_iter()
+            .find(|node| node.actor == identity)
+            .unwrap()
+    };
+    assert_eq!(snapshot().lifecycle, Some(crate::ActorLifecycle::Live));
+    // The graph reads the same retained owner used by failed handler publication.
+    actor
+        .terminal()
+        .publish_paused("retained handler input".into());
+    let paused = snapshot();
+    assert_eq!(
+        paused.lifecycle,
+        Some(crate::ActorLifecycle::Paused(
+            "retained handler input".into()
+        ))
+    );
+    assert!(paused.terminal().is_none());
+    let encoded = serde_json::to_value(&paused).unwrap();
+    assert_eq!(encoded["lifecycle"]["Paused"], "retained handler input");
+    assert!(encoded.get("terminal").is_none());
+    let terminal = ActorTerminal::new(ActorExitKind::Cancelled, "test finished");
+    actor.shutdown(terminal.clone()).await.unwrap();
+    task.await.unwrap();
+    let exited = snapshot();
+    assert_eq!(
+        exited.lifecycle,
+        Some(crate::ActorLifecycle::Exited(terminal.clone()))
+    );
+    assert_eq!(exited.terminal(), Some(&terminal));
+    let without_directory = Forest {
+        environment: forest.environment.clone(),
+        directory: crate::LocalActorDirectory::default(),
+        session: forest.session,
+        incarnation: forest.incarnation,
+    };
+    assert_eq!(
+        without_directory.inspect_host_graph()[0].terminal(),
+        Some(&terminal)
+    );
+    forest
+        .environment
+        .actors
+        .lock()
+        .get_mut(&identity)
+        .unwrap()
+        .terminal = None;
+    assert_eq!(without_directory.inspect_host_graph()[0].lifecycle, None);
+}

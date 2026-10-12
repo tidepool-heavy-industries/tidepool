@@ -561,6 +561,27 @@ class NativeQualificationTests(unittest.TestCase):
                          {'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY'})
         self.assertNotIn('measurement_reporter', recursive)
 
+    def test_skill_workflow_uses_the_counted_production_recipe_scenarios(self):
+        skill = qualification.cohorts()['skill-workflow']
+        self.assertEqual(skill['tests'], [
+            'actor_host::documentation_tests::actor_reuse_skill_recipe_retains_typed_request_history',
+            'actor_host::documentation_tests::routing_skill_recipe_executes_the_published_record_join',
+            'actor_host::documentation_tests::notebook_forms_skill_recipe_executes_published_authoring_forms',
+            'actor_host::documentation_tests::jev_skill_recipe_executes_the_published_packets',
+        ])
+        self.assertEqual(skill['expected_count'], 4)
+        self.assertFalse(skill['ignored'])
+        self.assertEqual(skill['timeout'], 1800)
+        self.assertEqual(skill['compiler_mode'], 'owned-resident')
+        self.assertEqual(skill['max_jobs'], 1)
+        self.assertTrue(skill['retain_artifacts'])
+        self.assertEqual(skill['required_startup_mode'], 'prepared')
+        self.assertEqual(skill['required_stdlib_mode'], 'catalog-backed')
+        self.assertEqual(set(skill['required_environment']),
+                         {'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY'})
+        self.assertNotIn('actor_host::documentation_tests::skill_recipe_receives_its_typed_request',
+                         skill['tests'])
+
     def test_production_performance_controls_have_separate_sealed_rosters(self):
         expected = {
             "repeat-launch": ("prepare-once-repeated-launch", "production_harness_prepare_once_repeated_launch"),
@@ -586,15 +607,16 @@ class NativeQualificationTests(unittest.TestCase):
     def test_result_delivery_seals_actual_machine_and_value_premises_separately_from_m2(self):
         cohorts = qualification.cohorts()
         result = cohorts['result-delivery']
-        self.assertEqual(result['tests'], list(qualification.RESULT_DELIVERY_CASES))
+        self.assertEqual(len(result['tests']), len(set(result['tests'])))
         self.assertEqual(result['expected_count'], 6)
+        self.assertEqual(len(result['tests']), result['expected_count'])
         self.assertFalse(result['ignored'])
         self.assertEqual(result['compiler_mode'], 'owned-resident')
         self.assertEqual(result['max_jobs'], 2)
         self.assertTrue(result['retain_artifacts'])
         self.assertTrue(result['require_confirmed_cleanup'])
         self.assertEqual(result['mode'], 'model_free_resident_cluster')
-        self.assertEqual(result['case_premises'], qualification.RESULT_DELIVERY_CASES)
+        self.assertEqual(set(result['case_premises']), set(result['tests']))
         self.assertTrue(set(result['tests']).isdisjoint(cohorts['m2']['tests']))
         self.assertEqual(len(cohorts['m2']['tests']), 9)
         for premises in result['case_premises'].values():

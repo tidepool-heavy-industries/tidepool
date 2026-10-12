@@ -282,6 +282,70 @@ impl exomonad_actor::JevBackend for FixtureJev {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum DeploymentObservation<T> {
+    Observed(T),
+    Deadline,
+    ChannelClosed,
+}
+
+impl<T> DeploymentObservation<T> {
+    pub fn is_deadline(&self) -> bool {
+        matches!(self, Self::Deadline)
+    }
+
+    fn phase(&self) -> &'static str {
+        match self {
+            Self::Observed(_) => "received an event",
+            Self::Deadline => "deadline elapsed",
+            Self::ChannelClosed => "channel closed",
+        }
+    }
+
+    pub fn expect_observed(self, what: &str) -> T {
+        match self {
+            Self::Observed(value) => value,
+            other => panic!("{what}: deployment observation {}", other.phase()),
+        }
+    }
+}
+
+async fn observe_deployment<E, T>(
+    deployments: &mut tokio::sync::mpsc::Receiver<E>,
+    pending: &mut std::collections::VecDeque<E>,
+    timeout: Duration,
+    mut pick: impl FnMut(E) -> Result<T, E>,
+) -> DeploymentObservation<T> {
+    let mut rejected = std::collections::VecDeque::new();
+    while let Some(event) = pending.pop_front() {
+        match pick(event) {
+            Ok(value) => {
+                rejected.append(pending);
+                *pending = rejected;
+                return DeploymentObservation::Observed(value);
+            }
+            Err(event) => rejected.push_back(event),
+        }
+    }
+    *pending = rejected;
+    match tokio::time::timeout(timeout, async {
+        loop {
+            match deployments.recv().await {
+                Some(event) => match pick(event) {
+                    Ok(value) => return DeploymentObservation::Observed(value),
+                    Err(event) => pending.push_back(event),
+                },
+                None => return DeploymentObservation::ChannelClosed,
+            }
+        }
+    })
+    .await
+    {
+        Ok(observation) => observation,
+        Err(_) => DeploymentObservation::Deadline,
+    }
+}
+
 pub(super) struct TestCampaign {
     pub config: ActorHostConfig,
     pub _repository: exomonad_worktree::testing::TestRepo,
@@ -491,12 +555,29 @@ impl TestCampaign {
     ) -> R {
         let campaign = tokio::sync::Mutex::new(Some(self));
         let observation = std::cell::RefCell::new(None);
+        let graph_report = std::cell::RefCell::new(Ok(()));
         let diagnostics =
             super::hosted_test_context::HostedTestDiagnostics::root_from_environment();
         let (scenario, cleanup, report_errors) = super::hosted_test_context::settle_scenario(
             async {
                 let mut owner = campaign.lock().await;
-                scenario(owner.as_mut().expect("scenario owns its campaign")).await
+                let owner = owner.as_mut().expect("scenario owns its campaign");
+                let result = futures_util::FutureExt::catch_unwind(
+                    std::panic::AssertUnwindSafe(scenario(owner)),
+                ).await;
+                match result {
+                    Ok(result) => result,
+                    Err(payload) => {
+                        if let Ok(Some(root)) = &diagnostics {
+                            graph_report.replace(
+                                super::hosted_test_context::HostedTestDiagnostics::report_host_graph(
+                                    root, &owner.forest.inspect_host_graph(),
+                                ),
+                            );
+                        }
+                        std::panic::resume_unwind(payload)
+                    }
+                }
             },
             async {
                 let owner = campaign
@@ -514,7 +595,7 @@ impl TestCampaign {
             },
             |scenario, cleanup| match &diagnostics {
                 Ok(Some(root)) => {
-                    super::hosted_test_context::HostedTestDiagnostics::report_model_free(
+                    let report = super::hosted_test_context::HostedTestDiagnostics::report_model_free(
                         root,
                         scenario,
                         cleanup,
@@ -522,7 +603,12 @@ impl TestCampaign {
                             .borrow()
                             .as_ref()
                             .map(|outcome| format!("{outcome:?}")),
-                    )
+                    );
+                    match (&*graph_report.borrow(), report) {
+                        (Err(graph), Err(report)) => Err(format!("{graph}; {report}")),
+                        (Err(graph), Ok(())) => Err(graph.clone()),
+                        (Ok(()), report) => report,
+                    }
                 }
                 Ok(None) => Ok(()),
                 Err(error) => Err(error.clone()),
@@ -599,62 +685,34 @@ impl TestCampaign {
         .await
     }
 
-    /// Await the next deployment matching `pick`, scanning previously parked
-    /// deployments first (in arrival order) so legitimate interleaving with
-    /// other deployment kinds never loses one. A deployment `pick` rejects
-    /// is parked, never dropped, so a later call can still consume it.
-    ///
-    /// Panics naming `what` and the kinds still parked if the channel closes
-    /// or `timeout` elapses first.
+    /// Select an event without discarding unrelated deployments or conflating
+    /// an elapsed observation deadline with a closed producer channel.
+    pub async fn observe_deployment<T>(
+        &mut self,
+        timeout: Duration,
+        pick: impl FnMut(LocalResidentDeployment) -> Result<T, LocalResidentDeployment>,
+    ) -> DeploymentObservation<T> {
+        observe_deployment(&mut self.deployments, &mut self.pending, timeout, pick).await
+    }
+
+    /// Require the named deployment, retaining the failed observation phase
+    /// and nonblocking actor terminal snapshot in the assertion diagnostic.
     pub async fn next_deployment<T>(
         &mut self,
         what: &str,
         timeout: Duration,
         pick: impl FnMut(LocalResidentDeployment) -> Result<T, LocalResidentDeployment>,
     ) -> T {
-        self.next_deployment_opt(timeout, pick)
-            .await
-            .unwrap_or_else(|| {
-                panic!(
-                    "{what}: timed out or the deployment channel closed; still pending: {:?}{}",
-                    self.pending_kinds(),
-                    self.pending_retirements()
-                )
-            })
-    }
-
-    /// As [`Self::next_deployment`], but `None` on timeout or channel close
-    /// instead of panicking — for callers that treat "nothing matched in
-    /// time" as a legitimate outcome (e.g. asserting silence).
-    pub async fn next_deployment_opt<T>(
-        &mut self,
-        timeout: Duration,
-        mut pick: impl FnMut(LocalResidentDeployment) -> Result<T, LocalResidentDeployment>,
-    ) -> Option<T> {
-        let mut rescan = std::collections::VecDeque::new();
-        while let Some(event) = self.pending.pop_front() {
-            match pick(event) {
-                Ok(value) => {
-                    self.pending.extend(rescan);
-                    return Some(value);
-                }
-                Err(event) => rescan.push_back(event),
-            }
+        match self.observe_deployment(timeout, pick).await {
+            DeploymentObservation::Observed(value) => value,
+            failure => panic!(
+                "{what}: deployment observation {}; pending: {:?}{}; root terminal: {:?}",
+                failure.phase(),
+                self.pending_kinds(),
+                self.pending_retirements(),
+                self.actor.terminal().get(),
+            ),
         }
-        self.pending = rescan;
-        tokio::time::timeout(timeout, async {
-            loop {
-                match self.deployments.recv().await {
-                    Some(event) => match pick(event) {
-                        Ok(value) => return Some(value),
-                        Err(event) => self.pending.push_back(event),
-                    },
-                    None => return None,
-                }
-            }
-        })
-        .await
-        .unwrap_or(None)
     }
 
     /// Assert that no parked or currently-buffered deployment matches
@@ -671,11 +729,19 @@ impl TestCampaign {
                 event.kind()
             );
         }
-        while let Ok(event) = self.deployments.try_recv() {
-            if pick(&event) {
-                panic!("{what}: published {}", event.kind());
+        loop {
+            match self.deployments.try_recv() {
+                Ok(event) => {
+                    let matched = pick(&event);
+                    let kind = event.kind();
+                    self.pending.push_back(event);
+                    assert!(!matched, "{what}: published {kind}");
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    panic!("{what}: deployment channel closed; silence is unqualified")
+                }
             }
-            self.pending.push_back(event);
         }
     }
 
@@ -690,7 +756,6 @@ impl TestCampaign {
         drained
     }
 
-    /// Kinds of every deployment currently parked, for diagnostics.
     /// Why each parked retirement ended, so a timeout names the cause
     /// instead of only the event kinds.
     fn pending_retirements(&self) -> String {
@@ -1829,6 +1894,221 @@ pub(super) fn hosted_test_settings(
 mod tests {
     use super::*;
     use std::future::Future;
+
+    #[tokio::test]
+    async fn deployment_pending_selection_preserves_fifo() {
+        let (_sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let mut pending = std::collections::VecDeque::from([1_u8, 2, 3]);
+        let observed = observe_deployment(&mut receiver, &mut pending, Duration::ZERO, |event| {
+            if event == 2 {
+                Ok(event)
+            } else {
+                Err(event)
+            }
+        })
+        .await;
+        assert_eq!(observed, DeploymentObservation::Observed(2));
+        assert_eq!(pending.into_iter().collect::<Vec<_>>(), vec![1, 3]);
+    }
+
+    #[tokio::test]
+    async fn deployment_observation_distinguishes_deadline_and_closed_channel() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<u8>(4);
+        let mut pending = std::collections::VecDeque::new();
+        let deadline = observe_deployment(&mut receiver, &mut pending, Duration::ZERO, Ok).await;
+        assert_eq!(deadline, DeploymentObservation::Deadline);
+        assert!(deadline.is_deadline());
+        drop(sender);
+        let closed = observe_deployment(&mut receiver, &mut pending, Duration::ZERO, Ok).await;
+        assert_eq!(closed, DeploymentObservation::ChannelClosed);
+        assert!(
+            !closed.is_deadline(),
+            "a dead producer cannot establish silence"
+        );
+    }
+
+    #[tokio::test]
+    async fn deployment_late_observer_reads_retained_and_buffered_events_after_close() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let mut pending = std::collections::VecDeque::from([1_u8]);
+        sender.send(2).await.unwrap();
+        drop(sender);
+        assert_eq!(
+            observe_deployment(&mut receiver, &mut pending, Duration::ZERO, |event| {
+                if event == 2 {
+                    Ok(event)
+                } else {
+                    Err(event)
+                }
+            })
+            .await,
+            DeploymentObservation::Observed(2)
+        );
+        assert_eq!(
+            observe_deployment(&mut receiver, &mut pending, Duration::ZERO, Ok).await,
+            DeploymentObservation::Observed(1)
+        );
+        assert_eq!(
+            observe_deployment(&mut receiver, &mut pending, Duration::ZERO, Ok).await,
+            DeploymentObservation::ChannelClosed
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_deployment_observer_preserves_interleaved_events() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let mut pending = std::collections::VecDeque::from([1_u8]);
+        sender.send(2).await.unwrap();
+        let mut waiting = Box::pin(observe_deployment(
+            &mut receiver,
+            &mut pending,
+            Duration::from_secs(30),
+            |event| if event == 9 { Ok(event) } else { Err(event) },
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(waiting.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(waiting);
+        sender.send(3).await.unwrap();
+        drop(sender);
+        for expected in [1, 2, 3] {
+            assert_eq!(
+                observe_deployment(&mut receiver, &mut pending, Duration::ZERO, Ok).await,
+                DeploymentObservation::Observed(expected)
+            );
+        }
+        assert_eq!(
+            observe_deployment(&mut receiver, &mut pending, Duration::ZERO, Ok).await,
+            DeploymentObservation::ChannelClosed
+        );
+    }
+
+    #[test]
+    fn deployment_histories_match_independent_fifo_model() {
+        use proptest::prelude::*;
+        use proptest::test_runner::{Config, TestRunner};
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let mut config = Config {
+            cases: 96,
+            ..Config::default()
+        };
+        if let Some(path) = option_env!("TIDEPOOL_PROPTEST_REGRESSIONS") {
+            config.failure_persistence = Some(Box::new(
+                proptest::test_runner::FileFailurePersistence::Direct(path),
+            ));
+        }
+        let config = proptest::test_runner::contextualize_config(config);
+        let completed = std::cell::Cell::new(0_usize);
+        let coverage = std::cell::Cell::new([0_usize; 4]);
+        TestRunner::new(config)
+            .run(
+                &proptest::collection::vec((0_usize..4, 0_u8..3), 1..48),
+                |operations| {
+                    runtime.block_on(async {
+                        let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
+                        let mut sender = Some(sender);
+                        let mut pending =
+                            std::collections::VecDeque::from([(0_usize, 0_u8), (1, 1), (2, 0)]);
+                        let mut model = vec![(0_usize, 0_u8), (1, 1), (2, 0)];
+                        // The independent oracle removes a selected entry in place.
+                        let selected =
+                            model.remove(model.iter().position(|event| event.1 == 1).unwrap());
+                        prop_assert_eq!(
+                            observe_deployment(
+                                &mut receiver,
+                                &mut pending,
+                                Duration::ZERO,
+                                |event| if event.1 == 1 { Ok(event) } else { Err(event) }
+                            )
+                            .await,
+                            DeploymentObservation::Observed(selected)
+                        );
+                        prop_assert_eq!(pending.iter().copied().collect::<Vec<_>>(), model.clone());
+                        let mut next_id = 3;
+                        for (operation, kind) in operations {
+                            let mut counts = coverage.get();
+                            counts[operation] += 1;
+                            coverage.set(counts);
+                            match operation {
+                                0 => {
+                                    if let Some(sender) = &sender {
+                                        let event = (next_id, kind);
+                                        next_id += 1;
+                                        sender.send(event).await.unwrap();
+                                        model.push(event);
+                                    }
+                                }
+                                1 => {
+                                    let expected =
+                                        match model.iter().position(|event| event.1 == kind) {
+                                            Some(index) => {
+                                                DeploymentObservation::Observed(model.remove(index))
+                                            }
+                                            None if sender.is_none() => {
+                                                DeploymentObservation::ChannelClosed
+                                            }
+                                            None => DeploymentObservation::Deadline,
+                                        };
+                                    let observed = observe_deployment(
+                                        &mut receiver,
+                                        &mut pending,
+                                        Duration::ZERO,
+                                        |event| {
+                                            if event.1 == kind {
+                                                Ok(event)
+                                            } else {
+                                                Err(event)
+                                            }
+                                        },
+                                    )
+                                    .await;
+                                    prop_assert_eq!(observed, expected);
+                                }
+                                2 => {
+                                    if sender.is_some() {
+                                        let mut waiting = Box::pin(observe_deployment(
+                                            &mut receiver,
+                                            &mut pending,
+                                            Duration::from_secs(30),
+                                            |event| -> Result<(usize, u8), _> { Err(event) },
+                                        ));
+                                        std::future::poll_fn(|cx| {
+                                            assert!(waiting.as_mut().poll(cx).is_pending());
+                                            std::task::Poll::Ready(())
+                                        })
+                                        .await;
+                                        drop(waiting);
+                                    }
+                                }
+                                3 => {
+                                    sender.take();
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let mut remaining = pending.into_iter().collect::<Vec<_>>();
+                        while let Ok(event) = receiver.try_recv() {
+                            remaining.push(event);
+                        }
+                        prop_assert_eq!(remaining, model);
+                        Ok(())
+                    })?;
+                    completed.set(completed.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        eprintln!(
+            "deployment histories: completed={}, send/observe/cancel/close={:?}",
+            completed.get(),
+            coverage.get()
+        );
+    }
 
     async fn applied_capture_retains_production_cell(profile: CampaignTraceProfile) {
         let directory = tempfile::tempdir().unwrap();

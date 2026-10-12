@@ -2335,8 +2335,7 @@ struct WorkbenchExecutionFailure {
 }
 
 struct SuspendedCast {
-    site: u64,
-    receiver_continuation: ResidentHole,
+    receiver: InstalledReceiver,
     handler_realm: RealmId,
     cleanup: Option<crate::resident_workbench::ParkedHoleAbortGuard>,
 }
@@ -2356,8 +2355,15 @@ struct AcceptedTerminalTransfer {
 
 struct PendingActorProgram {
     transfer: Option<Arc<AcceptedTerminalTransfer>>,
-    outcome: ResidentOutcome,
-    cleanup: Option<crate::resident_workbench::ParkedHoleAbortGuard>,
+    resumption: ActorResumption,
+}
+
+enum ActorResumption {
+    Program {
+        outcome: ResidentOutcome,
+        cleanup: Option<crate::resident_workbench::ParkedHoleAbortGuard>,
+    },
+    ReceiveAgain(SuspendedCast),
 }
 
 enum InteractivePark {
@@ -3093,7 +3099,7 @@ struct WorkbenchFragmentExecution {
     fragment: Option<ResidentWorkbenchFragment>,
     outcome: Option<ResidentOutcome>,
     scopes: Vec<scopes::ScopeFrame>,
-    green: Option<green::GreenInvocation<green_notebook::EffectCompletion>>,
+    execution: green::InvocationExecution<green_notebook::EffectCompletion>,
 }
 
 impl WorkbenchFragmentExecution {
@@ -3107,7 +3113,7 @@ impl WorkbenchFragmentExecution {
             fragment: Some(fragment),
             outcome: Some(outcome.into()),
             scopes: Vec::new(),
-            green: None,
+            execution: Default::default(),
         }
     }
 }
@@ -5329,16 +5335,19 @@ where
             // bindings, whatever `standing` now reads while the resumed
             // program is stabilized.
             self.outstanding_interactive = None;
-            self.pending_program = Some(PendingActorProgram { transfer: None, outcome, cleanup: None });
+            self.pending_program = Some(PendingActorProgram {
+                transfer: None,
+                resumption: ActorResumption::Program { outcome, cleanup: None },
+            });
             self.pending_reply = Some(claim);
             self.pending_reply_preview = reply_preview;
             if let Some(effects) = effects {
                 self.record_terminal_transfer(effects, request, AcceptedTerminalKind::Reply);
             }
-            let cleanup = self.environment.runner.handoff_actor_continuation(
-                context.clone(), &self.pending_program.as_ref().expect("native reply pending").outcome,
-            )?;
-            self.pending_program.as_mut().expect("native reply pending").cleanup = cleanup;
+            let ActorResumption::Program { outcome, cleanup } = &mut self.pending_program.as_mut().expect("native reply pending").resumption else {
+                unreachable!("native reply advances its source program");
+            };
+            *cleanup = self.environment.runner.handoff_actor_continuation(context.clone(), outcome)?;
             if let Some(suspended) = &mut self.suspended_cast {
                 // The previous Interactive hole was consumed by resume_live;
                 // its successor now has the pending program's exact guard.
@@ -8231,11 +8240,6 @@ where
                 context.placement.resource_scope,
             )
             .await?;
-        let InstalledReceiver {
-            site,
-            continuation: receiver_continuation,
-            handler,
-        } = receiver;
         let request = Arc::new(request.into_custody());
         if self.checkpoint.is_some() && self.active_input.is_none() {
             self.active_input = Some(RetainedActorInput::Mailbox(Arc::clone(&request)));
@@ -8244,7 +8248,12 @@ where
         let mut outcome = self
             .environment
             .runner
-            .run_rooted_application(context.clone(), handler, request, handler_realm)
+            .run_rooted_application(
+                context.clone(),
+                Arc::clone(&receiver.handler),
+                request,
+                handler_realm,
+            )
             .await?;
         if caller.is_some() {
             // The synchronous RPC remains owned while the handler performs
@@ -8286,8 +8295,7 @@ where
                     context,
                     ancestry,
                     SuspendedCast {
-                        site,
-                        receiver_continuation,
+                        receiver: receiver.clone(),
                         handler_realm,
                         cleanup: None,
                     },
@@ -8303,8 +8311,7 @@ where
                 caller,
                 ancestry,
                 suspended: SuspendedCast {
-                    site,
-                    receiver_continuation,
+                    receiver,
                     handler_realm,
                     cleanup: None,
                 },
@@ -8325,13 +8332,17 @@ where
             ancestry,
             suspended:
                 SuspendedCast {
-                    site,
-                    receiver_continuation,
+                    receiver,
                     handler_realm,
                     cleanup: _cleanup,
                 },
             outcome,
         } = settlement;
+        let InstalledReceiver {
+            site,
+            continuation: receiver_continuation,
+            handler: _handler,
+        } = receiver;
         let reply = self
             .environment
             .runner
@@ -8458,27 +8469,30 @@ where
                                     "queued cancellation acknowledgement failed: {error:?}"
                                 ))
                             })?;
-                        let outcome = self
+                        let retired = self
                             .environment
                             .runner
-                            .abandon_cast_handler(
+                            .retire_cast_handler(
                                 context.clone(),
-                                suspended.receiver_continuation,
+                                suspended.receiver.continuation.clone(),
                                 suspended.handler_realm,
                             )
                             .await;
-                        match outcome {
-                            Ok(outcome) => {
+                        match retired {
+                            Ok(()) => {
+                                self.set_standing(
+                                    context.actor,
+                                    ResidentStanding::Receiving(suspended.receiver),
+                                );
                                 let notifications = self
                                     .environment
                                     .requests
                                     .finish_cancellation_acknowledgement(request);
                                 self.publish_watch_notifications(notifications).await;
-                                return self
-                                    .stabilize_program(kernel, context, ancestry, outcome, None)
-                                    .await;
+                                return Ok(KernelStep::Continue(()));
                             }
                             Err(error) => {
+                                self.suspended_cast = Some(suspended);
                                 self.environment
                                     .requests
                                     .rollback_cancellation_acknowledgement(request);
@@ -8522,13 +8536,11 @@ where
             if !execution_state.park_effects {
                 if let Some(request) = current.native_start.take() {
                     current.native_result = Some(
-                        owned_workbench::advance_fragment(
-                            workbench,
-                            &self.environment.runner,
-                            context.clone(),
-                            request,
-                        )
-                        .await,
+                        current
+                            .execution
+                            .native(&self.environment, context)
+                            .advance_fragment(workbench, request)
+                            .await,
                     );
                 }
             }
@@ -8581,11 +8593,7 @@ where
                             continue;
                         }
                         None if !current.scopes.is_empty()
-                            || current
-                                .green
-                                .as_ref()
-                                .and_then(green::GreenInvocation::active_realm)
-                                .is_some() =>
+                            || current.execution.active_realm().is_some() =>
                         {
                             owned_workbench::WorkbenchFragmentRequest::Scoped {
                                 fragment: current
@@ -8597,12 +8605,7 @@ where
                                     .scopes
                                     .last()
                                     .map(|scope| scope.realm)
-                                    .or_else(|| {
-                                        current
-                                            .green
-                                            .as_ref()
-                                            .and_then(green::GreenInvocation::active_realm)
-                                    })
+                                    .or_else(|| current.execution.active_realm())
                                     .expect("active native resource scope"),
                             }
                         }
@@ -8628,13 +8631,11 @@ where
                         }
                         continue;
                     }
-                    owned_workbench::advance_fragment(
-                        workbench,
-                        &self.environment.runner,
-                        context.clone(),
-                        request,
-                    )
-                    .await?
+                    current
+                        .execution
+                        .native(&self.environment, context)
+                        .advance_fragment(workbench, request)
+                        .await?
                 }
             };
             match native {
@@ -8668,19 +8669,12 @@ where
                         .scopes
                         .last()
                         .map(|frame| frame.work.clone())
-                        .or_else(|| {
-                            current
-                                .green
-                                .as_ref()
-                                .and_then(green::GreenInvocation::active_work)
-                        }) {
+                        .or_else(|| current.execution.active_work())
+                    {
                         Some(work) => CurrentEffectOwner::Scoped {
                             base: Box::new(CurrentEffectOwner::Workbench(execution_state)),
                             scope: work,
-                            wait_control: current
-                                .green
-                                .as_ref()
-                                .and_then(green::GreenInvocation::active_wait_control),
+                            wait_control: current.execution.active_wait_control(),
                         },
                         None => CurrentEffectOwner::Workbench(execution_state),
                     };
@@ -8701,11 +8695,7 @@ where
                             );
                         }
                         ResidentActorBoundary::Completed
-                            if current
-                                .green
-                                .as_ref()
-                                .and_then(green::GreenInvocation::active_realm)
-                                .is_some()
+                            if current.execution.active_realm().is_some()
                                 && current.scopes.is_empty() =>
                         {
                             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -8919,9 +8909,10 @@ where
                         });
                         return Ok(FragmentAdvance::ParkEffect);
                     }
-                    let (boundary, mut display) = self
-                        .prepare_display_boundary(
-                            context,
+                    let (boundary, mut display) = current
+                        .execution
+                        .native(&self.environment, context)
+                        .prepare_display(
                             boundary,
                             display_character_allowance(*unit.display_remaining),
                             unit.execution.map(|execution| WorkbenchOperationId {
@@ -9067,13 +9058,10 @@ where
                                     return Ok(FragmentAdvance::ParkNative);
                                 }
                                 current.outcome = Some(
-                                    self.environment
-                                        .runner
-                                        .resume_reply_rejection(
-                                            context.clone(),
-                                            attempt.continuation,
-                                            error,
-                                        )
+                                    current
+                                        .execution
+                                        .native(&self.environment, context)
+                                        .resume_reply_rejection(attempt.continuation, error)
                                         .await?,
                                 );
                                 continue;
@@ -9149,10 +9137,10 @@ where
                                         return Ok(FragmentAdvance::ParkNative);
                                     }
                                     current.outcome = Some(
-                                        self.environment
-                                            .runner
+                                        current
+                                            .execution
+                                            .native(&self.environment, context)
                                             .resume_reply_rejection(
-                                                context.clone(),
                                                 acknowledgement.continuation,
                                                 error,
                                             )
@@ -9198,24 +9186,25 @@ where
                                 _ => None,
                             };
                             if let Some((job, presentation)) = presentation {
-                                let prepared = command_presentation::prepare(
-                                    &self.environment.commands,
-                                    context,
-                                    workbench,
-                                    command_presentation::CommandPresentationRequest {
-                                        job,
-                                        presentation,
-                                        summarize: !unit.named_tool
-                                            && next_fragment.summarizes_bound_commands(),
-                                        named_tool: unit.named_tool,
-                                        display_remaining: *unit.display_remaining,
-                                    },
-                                    self.descriptor
-                                        .capabilities()
-                                        .effect_keys()
-                                        .contains(&crate::ActorEffectKey::Commands),
-                                )
-                                .await?;
+                                let prepared = current
+                                    .execution
+                                    .native(&self.environment, context)
+                                    .prepare_command_presentation(
+                                        workbench,
+                                        command_presentation::CommandPresentationRequest {
+                                            job,
+                                            presentation,
+                                            summarize: !unit.named_tool
+                                                && next_fragment.summarizes_bound_commands(),
+                                            named_tool: unit.named_tool,
+                                            display_remaining: *unit.display_remaining,
+                                        },
+                                        self.descriptor
+                                            .capabilities()
+                                            .effect_keys()
+                                            .contains(&crate::ActorEffectKey::Commands),
+                                    )
+                                    .await?;
                                 prepared.apply(
                                     &self.environment.commands,
                                     context.actor,
@@ -9231,10 +9220,13 @@ where
                                     request,
                                 } => {
                                     let exec_started = std::time::Instant::now();
-                                    let resolved = self
+                                    let environment = self.environment.clone();
+                                    let resolved = current
+                                        .execution
+                                        .native(&environment, context)
                                         .resolve_command(
+                                            self,
                                             kernel,
-                                            context,
                                             continuation,
                                             request,
                                             Some(execution_state.invocation_work.as_ref()),
@@ -9257,17 +9249,18 @@ where
                                 }
                                 boundary => {
                                     let ancestry = crate::CallAncestry::begin(context.actor);
-                                    let operation = self.resolve_effect(
-                                        kernel,
-                                        context,
-                                        effect_owner.clone(),
-                                        &ancestry,
-                                        boundary,
-                                    );
-                                    let outcome = match current.green.as_mut() {
-                                        Some(green) => green.progress_while(operation).await,
-                                        None => operation.await,
-                                    };
+                                    let environment = self.environment.clone();
+                                    let outcome = current
+                                        .execution
+                                        .native(&environment, context)
+                                        .resolve_effect(
+                                            self,
+                                            kernel,
+                                            effect_owner.clone(),
+                                            &ancestry,
+                                            boundary,
+                                        )
+                                        .await;
                                     (outcome, None)
                                 }
                             };
@@ -10432,41 +10425,13 @@ where
                                 &cursor.unit.recovered_bindings,
                             ));
                         };
-                        let outcome = match self
-                            .environment
-                            .runner
-                            .abandon_cast_handler(
-                                context.clone(),
-                                suspended.receiver_continuation.clone(),
-                                suspended.handler_realm,
-                            )
-                            .await
-                        {
-                            Ok(outcome) => outcome,
-                            Err(error) => {
-                                self.suspended_cast = Some(suspended);
-                                self.standing = ResidentStanding::Interactive(awaiting);
-                                self.environment
-                                    .requests
-                                    .rollback_cancellation_acknowledgement(request_id);
-                                return Err(workbench_failure_after_unit(
-                                    &cursor.receipts,
-                                    cursor.index,
-                                    request.items.len(),
-                                    error,
-                                    std::mem::take(&mut cursor.unit.operations),
-                                    &cursor.unit.recovered_bindings,
-                                ));
-                            }
-                        };
                         drop(awaiting);
-                        // The cancellation landed: this request no longer owes
-                        // `respond` bindings.
+                        // The accepted cancellation retains the original receiver
+                        // until finalization retires this message application.
                         self.outstanding_interactive = None;
                         self.pending_program = Some(PendingActorProgram {
                             transfer: None,
-                            outcome,
-                            cleanup: None,
+                            resumption: ActorResumption::ReceiveAgain(suspended),
                         });
                         self.pending_cancellation = Some(request_id);
                         self.record_terminal_transfer(
@@ -10474,31 +10439,6 @@ where
                             request_id,
                             AcceptedTerminalKind::Cancellation,
                         );
-                        let cleanup = self
-                            .environment
-                            .runner
-                            .handoff_actor_continuation(
-                                context.clone(),
-                                &self
-                                    .pending_program
-                                    .as_ref()
-                                    .expect("native cancellation pending")
-                                    .outcome,
-                            )
-                            .map_err(|error| {
-                                workbench_failure_after_unit(
-                                    &cursor.receipts,
-                                    cursor.index,
-                                    request.items.len(),
-                                    error,
-                                    cursor.unit.operations.clone(),
-                                    &cursor.unit.recovered_bindings,
-                                )
-                            })?;
-                        self.pending_program
-                            .as_mut()
-                            .expect("native cancellation pending")
-                            .cleanup = cleanup;
                         let mut receipt = WorkbenchItemReceipt {
                             diagnostics: Vec::new(),
                             index: cursor.index,
@@ -10683,6 +10623,19 @@ where
         effects.terminal_transfer = Some(transfer);
     }
 
+    /// A failed terminal transfer still owes the message's distinct realm.
+    /// Preserve it for the actor's existing shutdown cleanup.
+    fn retain_pending_cast_cleanup(&mut self) {
+        if let Some(PendingActorProgram {
+            resumption: ActorResumption::ReceiveAgain(suspended),
+            ..
+        }) = self.pending_program.take()
+        {
+            debug_assert!(self.suspended_cast.is_none());
+            self.suspended_cast = Some(suspended);
+        }
+    }
+
     fn complete_workbench_finalization(
         &mut self,
         execution_state: &mut WorkbenchExecutionState,
@@ -10706,7 +10659,7 @@ where
                         .and_then(|program| program.transfer.as_ref())
                         .is_some_and(|pending| Arc::ptr_eq(pending, &transfer))
                 {
-                    self.pending_program.take();
+                    self.retain_pending_cast_cleanup();
                     match transfer.kind {
                         AcceptedTerminalKind::Reply => {
                             if self
@@ -11750,15 +11703,9 @@ where
                 })?;
             let mut cursor =
                 green_tool::ToolCursor::new(work, control, self.checkpoint_publication.clone());
-            let mut outcome = self
-                .environment
-                .runner
-                .resume_tool_invocation(
-                    context.clone(),
-                    awaiting.continuation,
-                    invocation.name,
-                    arguments,
-                )
+            let mut outcome = cursor
+                .native(&self.environment, &context)
+                .resume_tool_invocation(awaiting.continuation, invocation.name, arguments)
                 .await
                 .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
             let mut result = None;
@@ -11768,11 +11715,8 @@ where
                     .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                 let realm = cursor.realm(context.placement.resource_scope);
                 let boundary = cursor
-                    .progress_while(self.environment.runner.capture_boundary(
-                        context.clone(),
-                        outcome,
-                        realm,
-                    ))
+                    .native(&self.environment, &context)
+                    .capture_boundary(outcome, realm)
                     .await
                     .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                 if !cursor.is_main_terminal()
@@ -11799,11 +11743,8 @@ where
                             });
                         }
                         outcome = cursor
-                            .progress_while(
-                                self.environment
-                                    .runner
-                                    .resume_unit(context.clone(), reply.continuation),
-                            )
+                            .native(&self.environment, &context)
+                            .resume_unit(reply.continuation)
                             .await
                             .map_err(|error| Self::tool_invocation_failure(context.actor, error))?;
                     }
@@ -12407,15 +12348,59 @@ where
                     .await
                     .map_err(Self::workbench_failure);
             }
-            let PendingActorProgram {
-                outcome, cleanup, ..
-            } = self
-                .pending_program
-                .take()
-                .ok_or_else(|| KernelBehaviorError {
-                    detail: "resident actor resumed without a pending Haskell action".into(),
-                    diagnostic: None,
-                })?;
+            let PendingActorProgram { resumption, .. } =
+                self.pending_program
+                    .take()
+                    .ok_or_else(|| KernelBehaviorError {
+                        detail: "resident actor resumed without a pending Haskell action".into(),
+                        diagnostic: None,
+                    })?;
+            let (outcome, cleanup) = match resumption {
+                ActorResumption::ReceiveAgain(mut suspended) => {
+                    let retired = self
+                        .environment
+                        .runner
+                        .retire_cast_handler(
+                            context.clone(),
+                            suspended.receiver.continuation.clone(),
+                            suspended.handler_realm,
+                        )
+                        .await;
+                    match retired {
+                        Ok(()) => {
+                            if let Some(cleanup) = suspended.cleanup.take() {
+                                cleanup.disarm();
+                            }
+                            self.set_standing(
+                                context.actor,
+                                ResidentStanding::Receiving(suspended.receiver),
+                            );
+                            if let Some(request) = self.pending_cancellation.take() {
+                                let notifications = self
+                                    .environment
+                                    .requests
+                                    .finish_cancellation_acknowledgement(request);
+                                self.publish_watch_notifications(notifications).await;
+                            }
+                            self.runtime_observation
+                                .publish_workbench_posture(crate::ActorWorkbenchPosture::Idle);
+                            return Ok(KernelStep::Continue(()));
+                        }
+                        Err(error) => {
+                            self.suspended_cast = Some(suspended);
+                            if let Some(request) = self.pending_cancellation.take() {
+                                self.environment
+                                    .requests
+                                    .rollback_cancellation_acknowledgement(request);
+                            }
+                            self.runtime_observation
+                                .publish_workbench_posture(crate::ActorWorkbenchPosture::Failed);
+                            return Err(Self::workbench_failure(error));
+                        }
+                    }
+                }
+                ActorResumption::Program { outcome, cleanup } => (outcome, cleanup),
+            };
             let mut handler = self.suspended_cast.take();
             if let Some(handler) = &mut handler {
                 handler.cleanup.take();
@@ -12429,8 +12414,7 @@ where
                         &context,
                         &crate::CallAncestry::begin(context.actor),
                         SuspendedCast {
-                            site: suspended.site,
-                            receiver_continuation: suspended.receiver_continuation.clone(),
+                            receiver: suspended.receiver.clone(),
                             handler_realm: suspended.handler_realm,
                             cleanup: None,
                         },
@@ -12675,7 +12659,7 @@ where
             self.sources.clear();
             let mut retained_errors = invocation_cleanup.into_iter().flatten().collect::<Vec<_>>();
             retained_errors.extend(provider_cleanup_errors);
-            self.pending_program.take();
+            self.retain_pending_cast_cleanup();
             // Checkpoint retirement contributes to the same retained cleanup
             // outcome and deadline as the actor's other machine resources.
             // Published captures remain independently owned by their holders.
@@ -12945,7 +12929,8 @@ pub struct ActorGraphNode {
     pub creator: Option<ActorRef>,
     pub supervisor_parent: Option<ActorRef>,
     pub context_parent: Option<ActorRef>,
-    pub terminal: Option<ActorTerminal>,
+    /// None means neither a retained lifecycle owner nor a recorded exit was available.
+    pub lifecycle: Option<crate::ActorLifecycle>,
     pub workbench: crate::ActorWorkbenchPosture,
     pub provider_thread: Option<String>,
     pub provider_turn: Option<exomonad_model::ProviderTurnObservation>,
@@ -12953,6 +12938,16 @@ pub struct ActorGraphNode {
     pub bound_worktree: Option<String>,
     pub active_requests: Vec<crate::RequestId>,
     pub queued_requests: Vec<crate::RequestId>,
+}
+
+impl ActorGraphNode {
+    #[must_use]
+    pub fn terminal(&self) -> Option<&ActorTerminal> {
+        match self.lifecycle.as_ref() {
+            Some(crate::ActorLifecycle::Exited(terminal)) => Some(terminal),
+            _ => None,
+        }
+    }
 }
 
 /// Host-owned routing and resident execution domain. Every root uses the same
@@ -13656,11 +13651,15 @@ where
                     creator: record.descriptor.creator(),
                     supervisor_parent: record.descriptor.supervisor_parent(),
                     context_parent: record.descriptor.context_parent(),
-                    terminal: record.terminal.clone().or_else(|| {
-                        self.directory
-                            .resolve(*actor)
-                            .and_then(|a| a.terminal().get())
-                    }),
+                    lifecycle: record
+                        .terminal
+                        .clone()
+                        .map(crate::ActorLifecycle::Exited)
+                        .or_else(|| {
+                            self.directory
+                                .resolve(*actor)
+                                .map(|a| a.terminal().lifecycle())
+                        }),
                     workbench: runtime.workbench_posture,
                     provider_thread: runtime.provider_thread,
                     provider_turn: runtime.provider_turn,

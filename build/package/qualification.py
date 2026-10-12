@@ -238,8 +238,13 @@ def cohorts() -> dict:
                 "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
                 "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY"]},
             "skill-workflow": {
-                "tests": ["actor_host::documentation_tests::skill_recipe_receives_its_typed_request"],
-                "expected_count": 1, "ignored": False, "timeout": 1800,
+                "tests": [
+                    "actor_host::documentation_tests::actor_reuse_skill_recipe_retains_typed_request_history",
+                    "actor_host::documentation_tests::routing_skill_recipe_executes_the_published_record_join",
+                    "actor_host::documentation_tests::notebook_forms_skill_recipe_executes_published_authoring_forms",
+                    "actor_host::documentation_tests::jev_skill_recipe_executes_the_published_packets",
+                ],
+                "expected_count": 4, "ignored": False, "timeout": 1800,
                 "compiler_mode": "owned-resident", "max_jobs": 1,
                 "retain_artifacts": True,
                 "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",

@@ -26,5 +26,6 @@ _ <- do
         case (child, command, request) of
           (Left _, Left _, Left _) -> pure True
           _ -> Effects.error "closed scope admitted new work"
-      _ -> Effects.error "normal scope body or cleanup failed"
+      (Left failure, cleanup) -> Effects.error ("normal scope body failed: " <> tshow (failure, cleanup))
+      (Right _, Left failure) -> Effects.error ("normal scope cleanup failed: " <> tshow failure)
   say (tshow result)

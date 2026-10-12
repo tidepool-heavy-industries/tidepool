@@ -5,19 +5,33 @@ let scopeSpec :: AgentSpec ScopeTools '[]
               tool "Read a retained scope child closure." $ \_ -> pure (73 :: Int)
           }
       }
-let definition :: Mailbox.ActorDefinition () AgentProtocol ()
-    definition = Mailbox.ActorDefinition
-      { Mailbox.label = "scope-request-target"
-      , Mailbox.effectProfile = Mailbox.Selected (knownEffects @'[])
-      , Mailbox.initialization = \() -> pure ()
-      , Mailbox.behavior = \() () ->
-          Mailbox.serve @() @AgentProtocol ()
-            (\() (RunRequest _) -> pure ((), ()))
-      , Mailbox.onShutdown = const (pure ())
+let targetSpec :: AgentSpec ScopeTargetTools '[Replies]
+    targetSpec = defaultSpec
+      { specTools = ScopeTargetTools
+          { acknowledge = presentWith presentDisplay $
+              tool "Acknowledge the active request cancellation." $ \_ -> do
+                request <- Reply.currentRequest @() @Int
+                _ <- case Reply.requestReplyOf request of
+                  Nothing -> Tidepool.Prelude.error "cooperative target has no active request"
+                  Just reply -> Reply.acknowledgeCancellation reply
+                pure ()
+          , respond = presentWith presentDisplay $
+              tool "Answer the active request." $ \argument -> do
+                request <- Reply.currentRequest @() @Int
+                _ <- case Reply.requestReplyOf request of
+                  Nothing -> Tidepool.Prelude.error "cooperative target has no active request"
+                  Just reply -> Reply.reply reply (sentinel argument)
+                pure ()
+          }
       }
 scopeTarget <- do
-  actor <- Mailbox.startActor definition ()
-  pure (AgentRef.AgentRef actor Nothing)
+  spawned <- Spawn.spawnSubagent
+    (Spawn.FreshCtx "Cooperative borrowed request target") Spawn.SameDir
+    ((Spawn.defaultSpawnOptions targetSpec)
+      { Spawn.spawnLabel = Just "scope-request-target" })
+  case spawned of
+    Left failure -> Effects.error ("request target admission refused: " <> tshow failure)
+    Right target -> pure target
 let spawnScoped
       :: forall effects. Member Core.AgentLaunch effects
       => Scope.Scope -> Text -> Eff effects (Either Spawn.SpawnError AgentRef.AgentRef)

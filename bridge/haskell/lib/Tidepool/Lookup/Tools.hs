@@ -9,7 +9,7 @@
 module Tidepool.Lookup.Tools
   ( LookupTools (..), LookupArguments (..), Selection,
     tools, toolsWith, executeWith, packCandidates, rankCandidates,
-    renderResult, candidateText,
+    renderBatch, renderResult, candidateText,
   ) where
 
 import Prelude hiding (lookup)
