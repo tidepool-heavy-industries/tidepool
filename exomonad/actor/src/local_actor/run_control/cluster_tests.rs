@@ -63,6 +63,51 @@ async fn seal_overtaking_prepared_input_coordinator_preserves_cleanup_reservatio
     task.await.unwrap();
 }
 
+#[tokio::test]
+async fn finalizing_run_refuses_late_prepared_submission_without_running_producer() {
+    let (control, task) = RunControlClient::start().await.unwrap();
+    control.seal().await.unwrap();
+    assert!(matches!(
+        control.settle_preparations(Duration::from_secs(2)).await,
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    assert!(matches!(
+        control.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    let grants = control
+        .ask(|reply| RunControlMessage::FinishRun {
+            members: Vec::new(),
+            reply,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(grants.is_empty());
+    let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = started.clone();
+    let producer: RootOperation = Box::new(move |_ticket| {
+        Box::pin(async move {
+            observed.store(true, std::sync::atomic::Ordering::SeqCst);
+            (
+                Err(std::io::Error::other("refused producer executed").into()),
+                crate::CleanupComponentOutcome::Confirmed,
+            )
+        })
+    });
+    assert!(matches!(
+        control.prepare_existing_input(producer).await,
+        Err(DirectoryError::Closed)
+    ));
+    assert!(matches!(
+        control.reserve_existing_input(crate::Incarnation(1)).await,
+        Err(DirectoryError::Closed)
+    ));
+    assert!(!started.load(std::sync::atomic::Ordering::SeqCst));
+    control.finish_run().await.unwrap();
+    task.await.unwrap();
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(32))]
     #[test]
