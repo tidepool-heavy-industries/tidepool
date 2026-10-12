@@ -816,7 +816,9 @@ where
     } = resume;
     if let Some(child) = failed_child {
         if let Some(invocation) = &invocation_work {
-            invocation.retain_aborted_children(&kernel, &[child.identity()]);
+            invocation
+                .retain_aborted_children(&kernel, &[child.identity()])
+                .await;
         }
         let cleanup = child
             .shutdown_with_cleanup(ActorTerminal {
