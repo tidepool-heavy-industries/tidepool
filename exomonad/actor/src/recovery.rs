@@ -6,7 +6,6 @@
 //! the resident heap.
 
 use crate::{ActorDescriptor, ActorPlacement, ActorRef};
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -60,11 +59,11 @@ impl RootRecoveryPlacement {
 /// Opaque proof of the actual journal's complete predecessor and durably
 /// prepared successor. A copied admission DTO cannot create this receipt.
 pub struct DurableRootSuccessorAdmission {
-    journal: Arc<ActorRecoveryJournal>,
+    path: PathBuf,
+    old: DurableActorRecord,
+    new: DurableActorRecord,
     predecessor: ActorRef,
     successor: RootRecoveryPlacement,
-    source: Option<String>,
-    binding_path: PathBuf,
 }
 
 impl DurableRootSuccessorAdmission {
@@ -74,38 +73,24 @@ impl DurableRootSuccessorAdmission {
     pub fn successor(&self) -> &RootRecoveryPlacement {
         &self.successor
     }
-    /// Validate the exact persisted backend transition using the retained
-    /// journal, rather than caller-constructed actor or conversation tuples.
+    /// Validate the exact facts captured by journal certification. Current
+    /// transition authority remains with the native owner.
     pub fn validate_embedded_binding(
         &self,
         run_root: &Path,
         predecessor: &ApplicationConversation,
         successor: &ApplicationConversation,
     ) -> std::io::Result<bool> {
-        let state = self.journal.state.lock();
-        self.journal.validate_root_successor(
-            &state,
-            self.predecessor,
-            &self.successor,
-            self.source.as_deref(),
-            &self.binding_path,
-        )?;
         let canonical = run_root.canonicalize()?;
-        if self.journal.path.canonicalize()?.parent() != Some(canonical.as_path()) {
+        if self.path.canonicalize()?.parent() != Some(canonical.as_path()) {
             return Ok(false);
         }
-        let old = state
-            .records
-            .get(&self.predecessor)
-            .and_then(|record| record.application.as_ref());
-        let new = state
-            .records
-            .get(&self.successor.actor)
-            .and_then(|record| record.application.as_ref());
-        Ok(state
-            .records
-            .get(&self.successor.actor)
-            .and_then(|record| record.startup.as_ref())
+        let old = self.old.application.as_ref();
+        let new = self.new.application.as_ref();
+        Ok(self
+            .new
+            .startup
+            .as_ref()
             .and_then(|startup| startup.store_predecessor.as_ref())
             == Some(predecessor)
             && old.is_some()
@@ -128,35 +113,25 @@ impl DurableRootSuccessorAdmission {
         }
         let run_root = run_root.canonicalize()?;
         if self
-            .journal
             .path
             .parent()
             .map(Path::canonicalize)
             .transpose()?
             .as_ref()
             != Some(&run_root)
-            || self.journal.path.canonicalize()?
+            || self.path.canonicalize()?
                 != run_root.join(
-                    self.journal
-                        .path
+                    self.path
                         .file_name()
                         .ok_or_else(|| std::io::Error::other("journal has no file name"))?,
                 )
         {
             return Ok(false);
         }
-        let state = self.journal.state.lock();
-        self.journal.validate_root_successor(
-            &state,
-            self.predecessor,
-            &self.successor,
-            self.source.as_deref(),
-            &self.binding_path,
-        )?;
-        let manifest = state
-            .records
-            .get(&self.successor.actor)
-            .and_then(|record| record.startup.as_ref())
+        let manifest = self
+            .new
+            .startup
+            .as_ref()
             .and_then(|startup| startup.manifest.as_ref())
             .ok_or_else(|| {
                 std::io::Error::other("successor startup has no exact manifest revision pin")
@@ -164,11 +139,7 @@ impl DurableRootSuccessorAdmission {
         if !manifest.validate(&run_root)? {
             return Ok(false);
         }
-        let old = state
-            .records
-            .get(&self.predecessor)
-            .ok_or_else(|| std::io::Error::other("predecessor admission is absent"))?;
-        Ok(owner_for_admission(&old.admission).as_ref() == Some(predecessor))
+        Ok(owner_for_admission(&self.old.admission).as_ref() == Some(predecessor))
     }
 }
 
@@ -422,37 +393,473 @@ struct State {
     uncertain: bool,
 }
 
-/// Single-owner durable lifecycle writer for one run.
+/// A channel handle to one dedicated, supervised blocking journal owner.
 pub struct ActorRecoveryJournal {
-    path: PathBuf,
-    state: Mutex<State>,
+    commands: std::sync::mpsc::Sender<Command>,
+    status: tokio::sync::watch::Receiver<JournalOwnerStatus>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JournalOwnerStatus {
+    Running,
+    Fenced,
+    Stopped { clean: bool, fenced: bool },
 }
 
 impl ActorRecoveryJournal {
-    pub fn certify_root_successor(
-        self: &Arc<Self>,
+    fn start(mut owner: JournalOwner) -> std::io::Result<Arc<Self>> {
+        let (commands, incoming) = std::sync::mpsc::channel();
+        let (status_tx, status) = tokio::sync::watch::channel(JournalOwnerStatus::Running);
+        std::thread::Builder::new()
+            .name("actor-journal-owner".into())
+            .spawn(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    while let Ok(command) = incoming.recv() {
+                        macro_rules! complete {
+                            ($reply:expr, $operation:expr) => {{
+                                let outcome = $operation;
+                                if owner.state.uncertain {
+                                    status_tx.send_replace(JournalOwnerStatus::Fenced);
+                                }
+                                let _ = $reply.send(outcome);
+                            }};
+                        }
+                        match command {
+                            Command::Records { reply } => {
+                                complete!(reply, Ok(owner.records()));
+                            }
+                            Command::ValidatedRecords { reply } => {
+                                complete!(reply, owner.validated_records());
+                            }
+                            Command::Conversation { actor, reply } => {
+                                complete!(reply, owner.active_application_conversation(actor));
+                            }
+                            Command::InitialContext { actor, reply } => {
+                                complete!(reply, owner.initial_context(actor));
+                            }
+                            Command::RecordInitialContext {
+                                actor,
+                                change,
+                                reply,
+                            } => {
+                                complete!(reply, owner.record_initial_context(actor, change));
+                            }
+                            Command::PublicationMatches {
+                                actor,
+                                operation,
+                                conversation,
+                                reply,
+                            } => {
+                                complete!(
+                                    reply,
+                                    owner.initial_context_publication_matches(
+                                        actor,
+                                        &operation,
+                                        &conversation
+                                    )
+                                );
+                            }
+                            Command::Admit {
+                                admission,
+                                startup,
+                                reply,
+                            } => {
+                                complete!(reply, owner.admit_with_startup(admission, startup));
+                            }
+                            Command::Retire {
+                                actor,
+                                terminal,
+                                reply,
+                            } => {
+                                complete!(reply, owner.retire(actor, terminal));
+                            }
+                            Command::Prepare {
+                                actor,
+                                binding_path,
+                                accepted_source,
+                                intended_conversation,
+                                reply,
+                            } => {
+                                complete!(
+                                    reply,
+                                    owner.prepare_application_with_intent(
+                                        actor,
+                                        binding_path,
+                                        accepted_source,
+                                        intended_conversation
+                                    )
+                                );
+                            }
+                            Command::Bind {
+                                actor,
+                                conversation,
+                                reply,
+                            } => {
+                                complete!(
+                                    reply,
+                                    owner.bind_application_conversation(actor, conversation)
+                                );
+                            }
+                            Command::Certify {
+                                predecessor,
+                                successor,
+                                expected_source,
+                                canonical_binding_path,
+                                reply,
+                            } => {
+                                complete!(
+                                    reply,
+                                    owner.certify(
+                                        predecessor,
+                                        successor,
+                                        expected_source,
+                                        canonical_binding_path
+                                    )
+                                );
+                            }
+                        }
+
+                        if owner.state.uncertain {
+                            status_tx.send_replace(JournalOwnerStatus::Fenced);
+                        }
+                    }
+                }));
+                status_tx.send_replace(JournalOwnerStatus::Stopped {
+                    clean: outcome.is_ok(),
+                    fenced: owner.state.uncertain,
+                });
+                if outcome.is_err() {
+                    tracing::error!("actor journal owner terminated unexpectedly");
+                }
+            })?;
+        Ok(Arc::new(Self { commands, status }))
+    }
+    pub fn owner_status(&self) -> tokio::sync::watch::Receiver<JournalOwnerStatus> {
+        self.status.clone()
+    }
+    async fn request<T: Send>(
+        &self,
+        command: impl FnOnce(tokio::sync::oneshot::Sender<std::io::Result<T>>) -> Command + Send,
+    ) -> std::io::Result<T> {
+        let (reply, result) = tokio::sync::oneshot::channel();
+        self.commands
+            .send(command(reply))
+            .map_err(|_| std::io::Error::other("actor journal owner unavailable"))?;
+        result.await.map_err(|_| {
+            std::io::Error::other("actor journal owner terminated without completion")
+        })?
+    }
+    pub fn open(
+        anchor: &DirectoryAnchor,
+        relative_file: impl AsRef<Path>,
+    ) -> std::io::Result<Arc<Self>> {
+        Self::open_with_mode(anchor, relative_file.as_ref(), false)
+    }
+    pub fn open_existing(
+        anchor: &DirectoryAnchor,
+        relative_file: impl AsRef<Path>,
+    ) -> std::io::Result<Arc<Self>> {
+        Self::open_with_mode(anchor, relative_file.as_ref(), true)
+    }
+    fn open_with_mode(
+        anchor: &DirectoryAnchor,
+        relative_file: &Path,
+        require_existing: bool,
+    ) -> std::io::Result<Arc<Self>> {
+        let path = anchor
+            .resolve(relative_file)
+            .map_err(std::io::Error::from)?;
+        if let Some(parent) = relative_file.parent() {
+            anchor
+                .create_dir_all(parent)
+                .map_err(std::io::Error::from)?;
+        }
+        let existed = path.try_exists()?;
+        if require_existing && !existed {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "recovered host has no actor lifecycle journal",
+            ));
+        }
+        let (rows, torn) = tidepool_repr::jsonl::read_tail(
+            &path,
+            |line| parse_row(line).map_err(|error| error.to_string()),
+            TailPolicy::Repair,
+        )
+        .map_err(std::io::Error::other)?;
+        if let Some(torn) = torn {
+            tracing::warn!(path = %path.display(), line = torn.line_no, reason = %torn.reason,
+                "repaired torn actor lifecycle journal tail");
+        }
+        let (records, expected, created) = replay(rows)?;
+        if existed && !created {
+            return Err(std::io::Error::other(
+                "actor lifecycle journal lacks a durable creation marker",
+            ));
+        }
+        let mut owner = JournalOwner {
+            path: path.clone(),
+            state: State {
+                next_sequence: expected,
+                records,
+                uncertain: false,
+            },
+        };
+        if !existed {
+            append(&path, &mut owner.state, EventKind::Created {})?;
+        }
+        Self::start(owner)
+    }
+    pub fn read_observed(path: &std::path::Path) -> std::io::Result<Vec<DurableActorRecord>> {
+        let (rows, _torn) = tidepool_repr::jsonl::read_tail(
+            path,
+            |line| parse_row(line).map_err(|error| error.to_string()),
+            TailPolicy::Observe,
+        )
+        .map_err(std::io::Error::other)?;
+        Ok(replay(rows)?.0.into_values().collect())
+    }
+    pub async fn records(&self) -> std::io::Result<Vec<DurableActorRecord>> {
+        self.request(|reply| Command::Records { reply }).await
+    }
+    pub async fn validated_records(&self) -> std::io::Result<Vec<DurableActorRecord>> {
+        self.request(|reply| Command::ValidatedRecords { reply })
+            .await
+    }
+    pub async fn active_application_conversation(
+        &self,
+        actor: ActorRef,
+    ) -> std::io::Result<Option<ApplicationConversation>> {
+        self.request(|reply| Command::Conversation { actor, reply })
+            .await
+    }
+    pub async fn initial_context(
+        &self,
+        actor: ActorRef,
+    ) -> std::io::Result<Option<crate::InitialContextObservation>> {
+        self.request(|reply| Command::InitialContext { actor, reply })
+            .await
+    }
+    pub(crate) async fn record_initial_context(
+        &self,
+        actor: ActorRef,
+        change: crate::initial_context::InitialContextEvent,
+    ) -> std::io::Result<crate::InitialContextObservation> {
+        self.request(|reply| Command::RecordInitialContext {
+            actor,
+            change,
+            reply,
+        })
+        .await
+    }
+    pub(crate) async fn initial_context_publication_matches(
+        &self,
+        actor: ActorRef,
+        operation: &tidepool_runtime::session::WorkbenchExecutionId,
+        conversation: &ApplicationConversation,
+    ) -> std::io::Result<bool> {
+        self.request(|reply| Command::PublicationMatches {
+            actor,
+            operation: operation.clone(),
+            conversation: conversation.clone(),
+            reply,
+        })
+        .await
+    }
+    pub(crate) async fn retire(
+        &self,
+        actor: ActorRef,
+        terminal: crate::ActorTerminal,
+    ) -> std::io::Result<()> {
+        self.request(|reply| Command::Retire {
+            actor,
+            terminal,
+            reply,
+        })
+        .await
+    }
+    pub async fn prepare_application_with_intent(
+        &self,
+        actor: ActorRef,
+        binding_path: PathBuf,
+        accepted_source: Option<String>,
+        intended_conversation: Option<ApplicationConversation>,
+    ) -> std::io::Result<()> {
+        self.request(|reply| Command::Prepare {
+            actor,
+            binding_path,
+            accepted_source,
+            intended_conversation,
+            reply,
+        })
+        .await
+    }
+    pub async fn bind_application_conversation(
+        &self,
+        actor: ActorRef,
+        conversation: ApplicationConversation,
+    ) -> std::io::Result<()> {
+        self.request(|reply| Command::Bind {
+            actor,
+            conversation,
+            reply,
+        })
+        .await
+    }
+    pub async fn certify_root_successor(
+        &self,
         predecessor: ActorRef,
         successor: RootRecoveryPlacement,
         expected_source: Option<&str>,
         canonical_binding_path: &Path,
     ) -> std::io::Result<Arc<DurableRootSuccessorAdmission>> {
-        let state = self.state.lock();
-        self.validate_root_successor(
-            &state,
-            predecessor,
-            &successor,
-            expected_source,
-            canonical_binding_path,
-        )?;
-        Ok(Arc::new(DurableRootSuccessorAdmission {
-            journal: Arc::clone(self),
+        self.request(|reply| Command::Certify {
             predecessor,
             successor,
-            source: expected_source.map(str::to_owned),
-            binding_path: canonical_binding_path.to_owned(),
+            expected_source: expected_source.map(str::to_owned),
+            canonical_binding_path: canonical_binding_path.to_owned(),
+            reply,
+        })
+        .await
+    }
+    pub(crate) async fn admit(
+        &self,
+        actor: ActorRef,
+        descriptor: &ActorDescriptor,
+        launch_worktrees: &[String],
+    ) -> std::io::Result<()> {
+        self.admit_with_startup(actor, descriptor, launch_worktrees, None)
+            .await
+    }
+    pub(crate) async fn admit_with_startup(
+        &self,
+        actor: ActorRef,
+        descriptor: &ActorDescriptor,
+        launch_worktrees: &[String],
+        startup: Option<RootStartupIntent>,
+    ) -> std::io::Result<()> {
+        let admission = DurableActorAdmission::capture(actor, descriptor, launch_worktrees);
+        self.request(|reply| Command::Admit {
+            admission,
+            startup,
+            reply,
+        })
+        .await
+    }
+    pub async fn prepare_application(
+        &self,
+        actor: ActorRef,
+        binding_path: PathBuf,
+        accepted_source: Option<String>,
+    ) -> std::io::Result<()> {
+        self.prepare_application_with_intent(actor, binding_path, accepted_source, None)
+            .await
+    }
+    pub async fn bind_application(
+        &self,
+        actor: ActorRef,
+        thread_id: String,
+    ) -> std::io::Result<()> {
+        self.bind_application_conversation(actor, ApplicationConversation::Codex { thread_id })
+            .await
+    }
+}
+
+enum Command {
+    Records {
+        reply: tokio::sync::oneshot::Sender<std::io::Result<Vec<DurableActorRecord>>>,
+    },
+    ValidatedRecords {
+        reply: tokio::sync::oneshot::Sender<std::io::Result<Vec<DurableActorRecord>>>,
+    },
+    Conversation {
+        actor: ActorRef,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<Option<ApplicationConversation>>>,
+    },
+    InitialContext {
+        actor: ActorRef,
+        reply:
+            tokio::sync::oneshot::Sender<std::io::Result<Option<crate::InitialContextObservation>>>,
+    },
+    RecordInitialContext {
+        actor: ActorRef,
+        change: crate::initial_context::InitialContextEvent,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<crate::InitialContextObservation>>,
+    },
+    PublicationMatches {
+        actor: ActorRef,
+        operation: tidepool_runtime::session::WorkbenchExecutionId,
+        conversation: ApplicationConversation,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<bool>>,
+    },
+    Admit {
+        admission: DurableActorAdmission,
+        startup: Option<RootStartupIntent>,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<()>>,
+    },
+    Retire {
+        actor: ActorRef,
+        terminal: crate::ActorTerminal,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<()>>,
+    },
+    Prepare {
+        actor: ActorRef,
+        binding_path: PathBuf,
+        accepted_source: Option<String>,
+        intended_conversation: Option<ApplicationConversation>,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<()>>,
+    },
+    Bind {
+        actor: ActorRef,
+        conversation: ApplicationConversation,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<()>>,
+    },
+    Certify {
+        predecessor: ActorRef,
+        successor: RootRecoveryPlacement,
+        expected_source: Option<String>,
+        canonical_binding_path: PathBuf,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<Arc<DurableRootSuccessorAdmission>>>,
+    },
+}
+
+struct JournalOwner {
+    path: PathBuf,
+    state: State,
+}
+impl JournalOwner {
+    fn certify(
+        &mut self,
+        predecessor: ActorRef,
+        successor: RootRecoveryPlacement,
+        source: Option<String>,
+        binding_path: PathBuf,
+    ) -> std::io::Result<Arc<DurableRootSuccessorAdmission>> {
+        self.validate_root_successor(
+            &self.state,
+            predecessor,
+            &successor,
+            source.as_deref(),
+            &binding_path,
+        )?;
+        Ok(Arc::new(DurableRootSuccessorAdmission {
+            path: self.path.clone(),
+            predecessor,
+            old: self
+                .state
+                .records
+                .get(&predecessor)
+                .expect("validated predecessor")
+                .clone(),
+            new: self
+                .state
+                .records
+                .get(&successor.actor)
+                .expect("validated successor")
+                .clone(),
+            successor,
         }))
     }
-
     fn validate_root_successor(
         &self,
         state: &State,
@@ -531,123 +938,38 @@ impl ActorRecoveryJournal {
         }
         Ok(records)
     }
-
-    /// Observe the retained writer's exact durable readback without tail repair.
-    pub fn validated_records(&self) -> std::io::Result<Vec<DurableActorRecord>> {
-        let state = self.state.lock();
+    pub fn validated_records(&mut self) -> std::io::Result<Vec<DurableActorRecord>> {
+        let state = &self.state;
         Ok(self
             .validated_state_records(&state)?
             .into_values()
             .collect())
     }
-
-    pub fn open(
-        anchor: &DirectoryAnchor,
-        relative_file: impl AsRef<Path>,
-    ) -> std::io::Result<Arc<Self>> {
-        Self::open_with_mode(anchor, relative_file.as_ref(), false)
-    }
-
-    /// Reopen lifecycle evidence for a later host incarnation.
-    ///
-    /// Recovery must not silently replace a lost journal with an empty owner:
-    /// that would admit a fresh root while the prior actor identities and
-    /// external resources remain unaccounted for.
-    pub fn open_existing(
-        anchor: &DirectoryAnchor,
-        relative_file: impl AsRef<Path>,
-    ) -> std::io::Result<Arc<Self>> {
-        Self::open_with_mode(anchor, relative_file.as_ref(), true)
-    }
-
-    fn open_with_mode(
-        anchor: &DirectoryAnchor,
-        relative_file: &Path,
-        require_existing: bool,
-    ) -> std::io::Result<Arc<Self>> {
-        let path = anchor
-            .resolve(relative_file)
-            .map_err(std::io::Error::from)?;
-        if let Some(parent) = relative_file.parent() {
-            anchor
-                .create_dir_all(parent)
-                .map_err(std::io::Error::from)?;
-        }
-        let existed = path.try_exists()?;
-        if require_existing && !existed {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "recovered host has no actor lifecycle journal",
-            ));
-        }
-        let (rows, torn) = tidepool_repr::jsonl::read_tail(
-            &path,
-            |line| parse_row(line).map_err(|error| error.to_string()),
-            TailPolicy::Repair,
-        )
-        .map_err(std::io::Error::other)?;
-        if let Some(torn) = torn {
-            tracing::warn!(path = %path.display(), line = torn.line_no, reason = %torn.reason,
-                "repaired torn actor lifecycle journal tail");
-        }
-        let (records, expected, created) = replay(rows)?;
-        if existed && !created {
-            return Err(std::io::Error::other(
-                "actor lifecycle journal lacks a durable creation marker",
-            ));
-        }
-        let journal = Arc::new(Self {
-            path,
-            state: Mutex::new(State {
-                next_sequence: expected,
-                records,
-                uncertain: false,
-            }),
-        });
-        if !existed {
-            let mut state = journal.state.lock();
-            journal.append(&mut state, EventKind::Created {})?;
-        }
-        Ok(journal)
-    }
-
-    /// Replays the journal at `path` for an observer of a live run: the file is
-    /// neither created nor repaired, and a torn final row is left in place and
-    /// excluded from the returned records.
-    pub fn read_observed(path: &std::path::Path) -> std::io::Result<Vec<DurableActorRecord>> {
-        let (rows, _torn) = tidepool_repr::jsonl::read_tail(
-            path,
-            |line| parse_row(line).map_err(|error| error.to_string()),
-            TailPolicy::Observe,
-        )
-        .map_err(std::io::Error::other)?;
-        Ok(replay(rows)?.0.into_values().collect())
-    }
-
-    /// Resolve one live incarnation without copying the run's other records.
     pub fn active_application_conversation(
-        &self,
+        &mut self,
         actor: ActorRef,
-    ) -> Option<ApplicationConversation> {
-        let state = self.state.lock();
-        let record = state.records.get(&actor)?;
+    ) -> std::io::Result<Option<ApplicationConversation>> {
+        let state = &self.state;
+        ensure_writable(state)?;
+        let Some(record) = state.records.get(&actor) else {
+            return Ok(None);
+        };
         if record.terminal.is_some() {
-            return None;
+            return Ok(None);
         }
-        record.application.as_ref()?.conversation.clone()
+        Ok(record
+            .application
+            .as_ref()
+            .and_then(|app| app.conversation.clone()))
     }
-
-    pub fn records(&self) -> Vec<DurableActorRecord> {
-        self.state.lock().records.values().cloned().collect()
+    pub fn records(&mut self) -> Vec<DurableActorRecord> {
+        self.state.records.values().cloned().collect()
     }
-
-    /// Find the original preparation through the exact admitted root chain.
-    /// A successor never substitutes its own spec for retained startup output.
     pub fn initial_context(
-        &self,
+        &mut self,
         actor: ActorRef,
     ) -> std::io::Result<Option<crate::InitialContextObservation>> {
-        let state = self.state.lock();
+        let state = &self.state;
         ensure_writable(&state)?;
         let mut next = Some(actor);
         while let Some(owner) = next {
@@ -669,13 +991,12 @@ impl ActorRecoveryJournal {
         }
         Ok(None)
     }
-
     pub(crate) fn record_initial_context(
-        &self,
+        &mut self,
         actor: ActorRef,
         change: crate::initial_context::InitialContextEvent,
     ) -> std::io::Result<crate::InitialContextObservation> {
-        let mut state = self.state.lock();
+        let state = &mut self.state;
         ensure_writable(&state)?;
         validate_initial_context_event(actor, &change)?;
         let record = state.records.get(&actor).ok_or_else(|| {
@@ -684,7 +1005,11 @@ impl ActorRecoveryJournal {
         let mut next = record.initial_context.clone();
         crate::initial_context::apply_event(&mut next, change.clone())?;
         if next != record.initial_context {
-            self.append(&mut state, EventKind::InitialContext { actor, change })?;
+            append(
+                &self.path,
+                state,
+                EventKind::InitialContext { actor, change },
+            )?;
             state
                 .records
                 .get_mut(&actor)
@@ -695,14 +1020,13 @@ impl ActorRecoveryJournal {
             std::io::Error::other("initial context transition produced no observation")
         })
     }
-
     pub(crate) fn initial_context_publication_matches(
-        &self,
+        &mut self,
         actor: ActorRef,
         operation: &tidepool_runtime::session::WorkbenchExecutionId,
         conversation: &ApplicationConversation,
     ) -> std::io::Result<bool> {
-        let state = self.state.lock();
+        let state = &self.state;
         ensure_writable(&state)?;
         let current = state
             .records
@@ -739,69 +1063,13 @@ impl ActorRecoveryJournal {
         }
         Ok(false)
     }
-
-    pub(crate) fn admit(
-        &self,
-        actor: ActorRef,
-        descriptor: &ActorDescriptor,
-        launch_worktrees: &[String],
-    ) -> std::io::Result<()> {
-        self.admit_with_startup(actor, descriptor, launch_worktrees, None)
-    }
-
-    pub(crate) fn admit_with_startup(
-        &self,
-        actor: ActorRef,
-        descriptor: &ActorDescriptor,
-        launch_worktrees: &[String],
-        startup: Option<RootStartupIntent>,
-    ) -> std::io::Result<()> {
-        let admission = DurableActorAdmission::capture(actor, descriptor, launch_worktrees);
-        let mut state = self.state.lock();
-        ensure_writable(&state)?;
-        match state.records.get(&actor) {
-            Some(existing)
-                if existing.admission == admission
-                    && existing.startup == startup
-                    && existing.terminal.is_none() =>
-            {
-                return Ok(());
-            }
-            Some(_) => {
-                return Err(std::io::Error::other(format!(
-                    "actor identity {actor} was reused with different durable parameters"
-                )));
-            }
-            None => {}
-        }
-        validate_startup(&state.records, &admission, startup.as_ref())?;
-        self.append(
-            &mut state,
-            EventKind::Admitted {
-                admission: Box::new(admission.clone()),
-                startup: startup.clone(),
-            },
-        )?;
-        state.records.insert(
-            actor,
-            DurableActorRecord {
-                admission,
-                application: startup.as_ref().map(RootStartupIntent::application),
-                startup,
-                terminal: None,
-                initial_context: None,
-            },
-        );
-        Ok(())
-    }
-
     pub(crate) fn retire(
-        &self,
+        &mut self,
         actor: ActorRef,
         terminal: crate::ActorTerminal,
     ) -> std::io::Result<()> {
         let terminal = terminal.bound_diagnostic();
-        let mut state = self.state.lock();
+        let state = &mut self.state;
         ensure_writable(&state)?;
         let record = state.records.get(&actor).ok_or_else(|| {
             std::io::Error::other(format!("actor {actor} retired without durable admission"))
@@ -815,8 +1083,9 @@ impl ActorRecoveryJournal {
             }
             None => {}
         }
-        self.append(
-            &mut state,
+        append(
+            &self.path,
+            state,
             EventKind::Retired {
                 actor,
                 terminal: terminal.clone(),
@@ -829,24 +1098,14 @@ impl ActorRecoveryJournal {
             .terminal = Some(terminal);
         Ok(())
     }
-
-    pub fn prepare_application(
-        &self,
-        actor: ActorRef,
-        binding_path: PathBuf,
-        accepted_source: Option<String>,
-    ) -> std::io::Result<()> {
-        self.prepare_application_with_intent(actor, binding_path, accepted_source, None)
-    }
-
     pub fn prepare_application_with_intent(
-        &self,
+        &mut self,
         actor: ActorRef,
         binding_path: PathBuf,
         accepted_source: Option<String>,
         intended_conversation: Option<ApplicationConversation>,
     ) -> std::io::Result<()> {
-        let mut state = self.state.lock();
+        let state = &mut self.state;
         ensure_writable(&state)?;
         let record = state.records.get(&actor).ok_or_else(|| {
             std::io::Error::other(format!(
@@ -874,8 +1133,9 @@ impl ActorRecoveryJournal {
             }
             None => {}
         }
-        self.append(
-            &mut state,
+        append(
+            &self.path,
+            state,
             EventKind::ApplicationPrepared {
                 actor,
                 binding_path: binding_path.clone(),
@@ -897,17 +1157,12 @@ impl ActorRecoveryJournal {
         });
         Ok(())
     }
-
-    pub fn bind_application(&self, actor: ActorRef, thread_id: String) -> std::io::Result<()> {
-        self.bind_application_conversation(actor, ApplicationConversation::Codex { thread_id })
-    }
-
     pub fn bind_application_conversation(
-        &self,
+        &mut self,
         actor: ActorRef,
         conversation: ApplicationConversation,
     ) -> std::io::Result<()> {
-        let mut state = self.state.lock();
+        let state = &mut self.state;
         ensure_writable(&state)?;
         if state
             .records
@@ -937,8 +1192,9 @@ impl ActorRecoveryJournal {
             }
             None => {}
         }
-        self.append(
-            &mut state,
+        append(
+            &self.path,
+            state,
             EventKind::ApplicationBound {
                 actor,
                 conversation: conversation.clone(),
@@ -954,27 +1210,67 @@ impl ActorRecoveryJournal {
             .conversation = Some(conversation);
         Ok(())
     }
-
-    fn append(&self, state: &mut State, event: EventKind) -> std::io::Result<()> {
-        let row = Row {
-            version: VERSION,
-            sequence: state.next_sequence,
-            event,
-        };
-        let encoded = serde_json::to_string(&row).map_err(std::io::Error::other)?;
-        if let Err(error) =
-            tidepool_repr::jsonl::append_new_line(&self.path, &encoded, SyncPolicy::All)
-        {
-            // The row may be visible. This handle cannot safely append again;
-            // restart and exclusive replay are the only reconciliation path.
-            state.uncertain = true;
-            return Err(error);
+    fn admit_with_startup(
+        &mut self,
+        admission: DurableActorAdmission,
+        startup: Option<RootStartupIntent>,
+    ) -> std::io::Result<()> {
+        let actor = admission.actor;
+        let state = &mut self.state;
+        ensure_writable(&state)?;
+        match state.records.get(&actor) {
+            Some(existing)
+                if existing.admission == admission
+                    && existing.startup == startup
+                    && existing.terminal.is_none() =>
+            {
+                return Ok(());
+            }
+            Some(_) => {
+                return Err(std::io::Error::other(format!(
+                    "actor identity {actor} was reused with different durable parameters"
+                )));
+            }
+            None => {}
         }
-        state.next_sequence += 1;
+        validate_startup(&state.records, &admission, startup.as_ref())?;
+        append(
+            &self.path,
+            state,
+            EventKind::Admitted {
+                admission: Box::new(admission.clone()),
+                startup: startup.clone(),
+            },
+        )?;
+        state.records.insert(
+            actor,
+            DurableActorRecord {
+                admission,
+                application: startup.as_ref().map(RootStartupIntent::application),
+                startup,
+                terminal: None,
+                initial_context: None,
+            },
+        );
         Ok(())
     }
 }
-
+fn append(path: &Path, state: &mut State, event: EventKind) -> std::io::Result<()> {
+    let row = Row {
+        version: VERSION,
+        sequence: state.next_sequence,
+        event,
+    };
+    let encoded = serde_json::to_string(&row).map_err(std::io::Error::other)?;
+    if let Err(error) = tidepool_repr::jsonl::append_new_line(path, &encoded, SyncPolicy::All) {
+        // The row may be visible. This handle cannot safely append again;
+        // restart and exclusive replay are the only reconciliation path.
+        state.uncertain = true;
+        return Err(error);
+    }
+    state.next_sequence += 1;
+    Ok(())
+}
 fn validate_startup(
     records: &BTreeMap<ActorRef, DurableActorRecord>,
     admission: &DurableActorAdmission,
@@ -1509,8 +1805,8 @@ mod tests {
     use tidepool_codegen::suspension::RealmId;
     use tidepool_repr::SessionId;
 
-    #[test]
-    fn created_rows_refuse_surplus_fields_without_rewriting_recovery_bytes() {
+    #[tokio::test]
+    async fn created_rows_refuse_surplus_fields_without_rewriting_recovery_bytes() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
@@ -1520,7 +1816,7 @@ mod tests {
         let valid_bytes = format!("{valid}\n");
         std::fs::write(&path, &valid_bytes).unwrap();
         let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
-        assert!(journal.records().is_empty());
+        assert!(journal.records().await.unwrap().is_empty());
         drop(journal);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), valid_bytes);
         let valid: serde_json::Value = serde_json::from_str(&valid).unwrap();
@@ -1553,8 +1849,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn terminal_without_diagnostic_remains_readable() {
+    #[tokio::test]
+    async fn terminal_without_diagnostic_remains_readable() {
         let line = serde_json::to_string(&Row {
             version: VERSION,
             sequence: 3,
@@ -1584,8 +1880,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cold_replay_preserves_optional_authored_labels_and_derives_display() {
+    #[tokio::test]
+    async fn cold_replay_preserves_optional_authored_labels_and_derives_display() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
@@ -1601,12 +1897,14 @@ mod tests {
             )
             .with_actor_path(tidepool_repr::ActorPath::parse("first-assignment").unwrap())
             .with_actor_path(path);
-            journal.admit(actor, &descriptor, &[]).unwrap();
+            journal.admit(actor, &descriptor, &[]).await.unwrap();
         }
         drop(journal);
         let records = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
             .unwrap()
-            .records();
+            .records()
+            .await
+            .unwrap();
         assert_eq!(records[0].admission.label, None);
         assert_eq!(records[0].admission.display_label(), "spawn-0");
         assert_eq!(records[1].admission.label.as_deref(), Some(""));
@@ -1619,8 +1917,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn embedded_application_intent_and_binding_survive_cold_reopen() {
+    #[tokio::test]
+    async fn embedded_application_intent_and_binding_survive_cold_reopen() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let actor = ActorRef {
@@ -1628,7 +1926,10 @@ mod tests {
             incarnation: Incarnation(3),
         };
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
-        journal.admit(actor, &descriptor("worker"), &[]).unwrap();
+        journal
+            .admit(actor, &descriptor("worker"), &[])
+            .await
+            .unwrap();
         let expected = ApplicationConversation::Embedded {
             run: "run".into(),
             agent_path: "/root/a7_i3".into(),
@@ -1641,9 +1942,11 @@ mod tests {
                 Some("source".into()),
                 Some(expected.clone()),
             )
+            .await
             .unwrap();
         assert!(journal
             .bind_application(actor, "fake-codex-thread".into())
+            .await
             .is_err());
         let changed = ApplicationConversation::Embedded {
             run: "run".into(),
@@ -1652,10 +1955,11 @@ mod tests {
         };
         assert!(journal
             .bind_application_conversation(actor, changed)
+            .await
             .is_err());
         drop(journal);
         let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
-        assert!(journal.records()[0]
+        assert!(journal.records().await.unwrap()[0]
             .application
             .as_ref()
             .unwrap()
@@ -1663,20 +1967,22 @@ mod tests {
             .is_none());
         journal
             .bind_application_conversation(actor, expected.clone())
+            .await
             .unwrap();
         journal
             .bind_application_conversation(actor, expected.clone())
+            .await
             .unwrap();
         drop(journal);
         let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
-        let record = journal.records().remove(0);
+        let record = journal.records().await.unwrap().remove(0);
         let application = record.application.unwrap();
         assert_eq!(application.intended_conversation, Some(expected.clone()));
         assert_eq!(application.conversation, Some(expected));
     }
 
-    #[test]
-    fn old_journal_versions_are_unsupported_and_remain_untouched() {
+    #[tokio::test]
+    async fn old_journal_versions_are_unsupported_and_remain_untouched() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         for version in [1, 2, 3, 4, 5, 6, 7, 8] {
@@ -1699,8 +2005,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cold_replay_refuses_binding_after_terminal_publication() {
+    #[tokio::test]
+    async fn cold_replay_refuses_binding_after_terminal_publication() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
@@ -1709,20 +2015,28 @@ mod tests {
             incarnation: Incarnation(3),
         };
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
-        journal.admit(actor, &descriptor("worker"), &[]).unwrap();
+        journal
+            .admit(actor, &descriptor("worker"), &[])
+            .await
+            .unwrap();
         journal
             .prepare_application(actor, directory.path().join("binding.json"), None)
+            .await
             .unwrap();
         journal
             .retire(
                 actor,
                 crate::ActorTerminal::new(ActorExitKind::Completed, "done"),
             )
+            .await
             .unwrap();
-        assert!(journal.bind_application(actor, "thread".into()).is_err());
+        assert!(journal
+            .bind_application(actor, "thread".into())
+            .await
+            .is_err());
         let row = Row {
             version: VERSION,
-            sequence: journal.state.lock().next_sequence,
+            sequence: 5,
             event: EventKind::ApplicationBound {
                 actor,
                 conversation: ApplicationConversation::Codex {
@@ -1751,8 +2065,8 @@ mod tests {
         )
     }
 
-    #[test]
-    fn lifecycle_reopens_with_active_and_terminal_records() {
+    #[tokio::test]
+    async fn lifecycle_reopens_with_active_and_terminal_records() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
@@ -1763,6 +2077,7 @@ mod tests {
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         journal
             .admit(actor, &descriptor("worker"), &["tree-1".into()])
+            .await
             .unwrap();
         drop(journal);
         let stored = std::fs::read_to_string(&path).unwrap();
@@ -1771,7 +2086,7 @@ mod tests {
             parse_row(row).unwrap();
         }
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
-        let records = journal.records();
+        let records = journal.records().await.unwrap();
         assert_eq!(records.len(), 1, "stored rows: {stored}");
         assert_eq!(records[0].admission.actor, actor);
         assert_eq!(records[0].admission.launch_worktrees, ["tree-1"]);
@@ -1783,20 +2098,25 @@ mod tests {
                 directory.path().join("binding.json"),
                 Some("source-a".into()),
             )
+            .await
             .unwrap();
         journal
             .bind_application(actor, "conversation-7".into())
+            .await
             .unwrap();
         journal
             .retire(
                 actor,
                 crate::ActorTerminal::new(ActorExitKind::Completed, "done"),
             )
+            .await
             .unwrap();
         drop(journal);
         let records = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
             .unwrap()
-            .records();
+            .records()
+            .await
+            .unwrap();
         assert_eq!(
             records[0]
                 .application
@@ -1810,14 +2130,15 @@ mod tests {
         assert_eq!(records[0].terminal.as_ref().unwrap().summary, "done");
     }
 
-    #[test]
-    fn observed_read_leaves_a_live_journal_and_its_torn_tail_untouched() {
+    #[tokio::test]
+    async fn observed_read_leaves_a_live_journal_and_its_torn_tail_untouched() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         journal
             .admit(ActorRef::first(ActorId(4)), &descriptor("observed"), &[])
+            .await
             .unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
         bytes.extend_from_slice(b"{\"version\":2,\"sequence\":3,");
@@ -1833,39 +2154,49 @@ mod tests {
         assert!(!missing.exists());
     }
 
-    #[test]
-    fn identity_reuse_with_changed_parameters_is_rejected() {
+    #[tokio::test]
+    async fn identity_reuse_with_changed_parameters_is_rejected() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         let actor = ActorRef::first(ActorId(2));
-        journal.admit(actor, &descriptor("first"), &[]).unwrap();
+        journal
+            .admit(actor, &descriptor("first"), &[])
+            .await
+            .unwrap();
         let error = journal
             .admit(actor, &descriptor("changed"), &[])
+            .await
             .unwrap_err();
         assert!(error.to_string().contains("reused"));
     }
 
-    #[test]
-    fn every_application_publication_boundary_reopens_without_inventing_progress() {
+    #[tokio::test]
+    async fn every_application_publication_boundary_reopens_without_inventing_progress() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let binding = directory.path().join("binding.json");
         let actor = ActorRef::first(ActorId(9));
 
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
-        journal.admit(actor, &descriptor("worker"), &[]).unwrap();
+        journal
+            .admit(actor, &descriptor("worker"), &[])
+            .await
+            .unwrap();
         drop(journal);
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
-        assert!(journal.records()[0].application.is_none());
+        assert!(journal.records().await.unwrap()[0].application.is_none());
 
         journal
             .prepare_application(actor, binding.clone(), Some("source-revision".into()))
+            .await
             .unwrap();
         drop(journal);
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         let prepared = journal
             .records()
+            .await
+            .unwrap()
             .into_iter()
             .next()
             .unwrap()
@@ -1877,11 +2208,12 @@ mod tests {
 
         journal
             .bind_application(actor, "conversation-9".into())
+            .await
             .unwrap();
         drop(journal);
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         assert_eq!(
-            journal.records()[0]
+            journal.records().await.unwrap()[0]
                 .application
                 .as_ref()
                 .unwrap()
@@ -1892,8 +2224,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn recovered_host_requires_the_original_lifecycle_owner() {
+    #[tokio::test]
+    async fn recovered_host_requires_the_original_lifecycle_owner() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         assert_eq!(
@@ -1916,8 +2248,8 @@ mod tests {
         ActorRecoveryJournal::open_existing(&anchor, "initialized.jsonl").unwrap();
     }
 
-    #[test]
-    fn anchored_open_refuses_escape_before_mutation_and_retries_failed_parent_creation() {
+    #[tokio::test]
+    async fn anchored_open_refuses_escape_before_mutation_and_retries_failed_parent_creation() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
 
@@ -1935,7 +2267,7 @@ mod tests {
 
         let journal = ActorRecoveryJournal::open(&anchor, "nested/actors.jsonl").unwrap();
         assert!(directory.path().join("nested/actors.jsonl").is_file());
-        assert_eq!(journal.records().len(), 0);
+        assert_eq!(journal.records().await.unwrap().len(), 0);
     }
 
     fn recovery_fixture(
@@ -2032,8 +2364,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn root_startup_admission_and_exact_intent_reopen_atomically() {
+    #[tokio::test]
+    async fn root_startup_admission_and_exact_intent_reopen_atomically() {
         let run = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
         let path = run.path().join("actors.jsonl");
@@ -2051,22 +2383,26 @@ mod tests {
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
         journal
             .admit_with_startup(actor, &root, &[], Some(intent.clone()))
+            .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
         drop(journal);
         let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
-        let record = &journal.records()[0];
+        let record = &journal.records().await.unwrap()[0];
         assert_eq!(record.startup.as_ref(), Some(&intent));
         assert_eq!(record.application.as_ref(), Some(&intent.application()));
         assert!(record.application.as_ref().unwrap().conversation.is_none());
         journal
             .bind_application_conversation(actor, intent.conversation.clone())
+            .await
             .unwrap();
         drop(journal);
         assert_eq!(
             ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
                 .unwrap()
-                .records()[0]
+                .records()
+                .await
+                .unwrap()[0]
                 .application
                 .as_ref()
                 .unwrap()
@@ -2076,8 +2412,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn root_successor_receipt_requires_latest_prepared_journal_and_owned_placement() {
+    #[tokio::test]
+    async fn root_successor_receipt_requires_latest_prepared_journal_and_owned_placement() {
         let run = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
@@ -2099,9 +2435,11 @@ mod tests {
         let initial = startup_intent(old, &binding, None, None, None, None);
         journal
             .admit_with_startup(old, &root, &[], Some(initial.clone()))
+            .await
             .unwrap();
         journal
             .bind_application_conversation(old, initial.conversation.clone())
+            .await
             .unwrap();
         let old_owner = tidepool_runtime::session::RecoveryPublicOwner::new(&path, 1).unwrap();
         let (store, _authority) = recovery_fixture(&manifest, &old_owner, 7);
@@ -2115,9 +2453,11 @@ mod tests {
         );
         journal
             .admit_with_startup(next, &root, &[], Some(successor))
+            .await
             .unwrap();
         let proof = journal
             .certify_root_successor(old, placement.clone(), Some("source"), &binding)
+            .await
             .unwrap();
         assert!(proof
             .validate_successor(
@@ -2134,6 +2474,8 @@ mod tests {
                 &initial.conversation,
                 &journal
                     .records()
+                    .await
+                    .unwrap()
                     .into_iter()
                     .find(|record| record.admission.actor == next)
                     .unwrap()
@@ -2162,6 +2504,7 @@ mod tests {
             .unwrap());
         assert!(journal
             .certify_root_successor(old, placement.clone(), Some("different-source"), &binding)
+            .await
             .is_err());
         let revision = store
             .read_domain(tidepool_runtime::session::RecoveryDomainId::Root)
@@ -2187,8 +2530,8 @@ mod tests {
             .unwrap());
     }
 
-    #[test]
-    fn root_startup_rollforward_is_linear_and_cannot_cross_a_bound_owner() {
+    #[tokio::test]
+    async fn root_startup_rollforward_is_linear_and_cannot_cross_a_bound_owner() {
         let run = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
@@ -2219,9 +2562,11 @@ mod tests {
         let initial = startup_intent(a, &binding, None, None, None, None);
         journal
             .admit_with_startup(a, &root, &[], Some(initial.clone()))
+            .await
             .unwrap();
         journal
             .bind_application_conversation(a, initial.conversation.clone())
+            .await
             .unwrap();
         let second = startup_intent(
             b,
@@ -2233,6 +2578,7 @@ mod tests {
         );
         journal
             .admit_with_startup(b, &root, &[], Some(second.clone()))
+            .await
             .unwrap();
         let third = startup_intent(
             c,
@@ -2246,6 +2592,7 @@ mod tests {
         changed_bootstrap.bootstrap_identity = "different-bootstrap".into();
         assert!(journal
             .admit_with_startup(c, &root, &[], Some(changed_bootstrap))
+            .await
             .is_err());
         let mut changed_content = third.clone();
         let changed_revision = &mut changed_content
@@ -2260,9 +2607,11 @@ mod tests {
         assert_ne!(*changed_revision, pin.domain.content_revision);
         assert!(journal
             .admit_with_startup(c, &root, &[], Some(changed_content))
+            .await
             .is_err());
         journal
             .admit_with_startup(c, &root, &[], Some(third.clone()))
+            .await
             .unwrap();
         assert!(journal
             .admit_with_startup(
@@ -2278,9 +2627,11 @@ mod tests {
                     Some(initial.conversation.clone())
                 ))
             )
+            .await
             .is_err());
         journal
             .bind_application_conversation(c, third.conversation.clone())
+            .await
             .unwrap();
         assert!(journal
             .admit_with_startup(
@@ -2296,6 +2647,7 @@ mod tests {
                     Some(initial.conversation.clone())
                 ))
             )
+            .await
             .is_err());
         let c_owner = tidepool_runtime::session::RecoveryPublicOwner::new(
             &tidepool_repr::ActorPath::parse("root").unwrap(),
@@ -2331,6 +2683,7 @@ mod tests {
         let placement = RootRecoveryPlacement::new(c, c_owner.clone(), root.placement());
         let receipt = journal
             .certify_root_successor(a, placement, Some("source"), &binding)
+            .await
             .unwrap();
         recovered
             .transfer_recovered_public_owner(
@@ -2358,8 +2711,159 @@ mod tests {
                     Some(third.conversation)
                 ))
             )
+            .await
             .is_ok());
         drop(journal);
         ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+    }
+    #[tokio::test]
+    async fn dropped_reply_preserves_admitted_write_and_owner_drains() {
+        let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let actor = ActorRef::first(ActorId(51));
+        let admission = DurableActorAdmission::capture(actor, &descriptor("owner"), &[]);
+        let (reply, abandoned) = tokio::sync::oneshot::channel();
+        journal
+            .commands
+            .send(Command::Admit {
+                admission,
+                startup: None,
+                reply,
+            })
+            .unwrap();
+        drop(abandoned);
+        assert_eq!(journal.records().await.unwrap()[0].admission.actor, actor);
+        let mut status = journal.owner_status();
+        drop(journal);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !matches!(*status.borrow(), JournalOwnerStatus::Stopped { .. }) {
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            *status.borrow(),
+            JournalOwnerStatus::Stopped {
+                clean: true,
+                fenced: false
+            }
+        );
+        let recovered = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+        assert_eq!(recovered.records().await.unwrap()[0].admission.actor, actor);
+    }
+
+    #[tokio::test]
+    async fn append_failure_permanently_fences_even_after_path_repair() {
+        let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let path = directory.path().join("actors.jsonl");
+        let retained = directory.path().join("retained.jsonl");
+        std::fs::rename(&path, &retained).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let actor = ActorRef::first(ActorId(52));
+        assert!(journal
+            .admit(actor, &descriptor("owner"), &[])
+            .await
+            .is_err());
+        assert_eq!(*journal.owner_status().borrow(), JournalOwnerStatus::Fenced);
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::rename(&retained, &path).unwrap();
+        assert!(journal
+            .admit(actor, &descriptor("owner"), &[])
+            .await
+            .is_err());
+        assert!(journal
+            .active_application_conversation(actor)
+            .await
+            .is_err());
+        assert!(journal.validated_records().await.is_err());
+        assert!(journal.records().await.unwrap().is_empty());
+        drop(journal);
+        let recovered = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+        recovered
+            .admit(actor, &descriptor("owner"), &[])
+            .await
+            .unwrap();
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(32))]
+        #[test]
+        fn journal_histories_match_independent_lifecycle_model(steps in proptest::collection::vec(0u8..7, 1..48)) {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async {
+                let directory = tempfile::tempdir().unwrap();
+                let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+                let mut journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+                let actor = ActorRef::first(ActorId(53));
+                let binding = directory.path().join("binding.json");
+                let terminal = crate::ActorTerminal::new(ActorExitKind::Completed, "done");
+                let (mut admitted, mut prepared, mut bound, mut retired) = (false, false, false, false);
+                let mut durable_events = 1;
+                let mut alternate_binding = false;
+                for step in steps {
+                    let (actual, expected, changed) = match step {
+                        0 => {
+                            let expected = !retired;
+                            let changed = expected && !admitted;
+                            let actual = journal.admit(actor, &descriptor("owner"), &[]).await.is_ok();
+                            if expected { admitted = true; }
+                            (actual, expected, changed)
+                        }
+                        1 => {
+                            let expected = admitted && !retired;
+                            let changed = expected && !prepared;
+                            let actual = journal.prepare_application(actor, binding.clone(), None).await.is_ok();
+                            if expected { prepared = true; }
+                            (actual, expected, changed)
+                        }
+                        2 => {
+                            let expected = prepared && !retired && (!bound || !alternate_binding);
+                            let changed = expected && !bound;
+                            let actual = journal.bind_application(actor, "conversation".into()).await.is_ok();
+                            if expected { bound = true; }
+                            (actual, expected, changed)
+                        }
+                        3 => {
+                            let expected = admitted;
+                            let changed = expected && !retired;
+                            let actual = journal.retire(actor, terminal.clone()).await.is_ok();
+                            if expected { retired = true; }
+                            (actual, expected, changed)
+                        }
+                        4 => {
+                            let expected = prepared && !retired && (!bound || alternate_binding);
+                            let changed = expected && !bound;
+                            let actual = journal.bind_application(actor, "conflicting".into()).await.is_ok();
+                            if expected { bound = true; alternate_binding = true; }
+                            (actual, expected, changed)
+                        },
+                        5 => {
+                            drop(journal);
+                            journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").unwrap();
+                            (true, true, false)
+                        }
+                        _ => {
+                            let observed = journal.active_application_conversation(actor).await.unwrap();
+                            assert_eq!(observed.is_some(), bound && !retired);
+                            (true, true, false)
+                        }
+                    };
+                    if changed { durable_events += 1; }
+                    assert_eq!(actual, expected, "step {step}");
+                    let records = journal.records().await.unwrap();
+                    assert_eq!(records.len(), usize::from(admitted));
+                    if let Some(record) = records.first() {
+                        assert_eq!(record.application.is_some(), prepared);
+                        assert_eq!(record.application.as_ref().is_some_and(|app| app.conversation.is_some()), bound);
+                        assert_eq!(record.terminal.is_some(), retired);
+                    }
+                    assert_eq!(std::fs::read_to_string(directory.path().join("actors.jsonl")).unwrap().lines().count(), durable_events);
+                }
+            });
+        }
     }
 }
