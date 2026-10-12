@@ -72,6 +72,7 @@ impl RootDelivery {
 
 pub(super) enum PreparationMessage {
     RetireResources {
+        owner: ResourceLifetime,
         resources: Vec<(ractor::ActorId, ResourceChild)>,
     },
     ReserveActor {
@@ -124,11 +125,12 @@ impl Actor for PreparationSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
-            PreparationMessage::RetireResources { resources } => {
+            PreparationMessage::RetireResources { owner, resources } => {
                 match Actor::spawn_linked(
                     None,
                     ResourceRetirementWorker,
                     ResourceRetirementArguments {
+                        owner,
                         resources,
                         control: state.control.clone(),
                     },
@@ -417,6 +419,7 @@ impl Actor for ReservationStarter {
 
 struct ResourceRetirementWorker;
 struct ResourceRetirementArguments {
+    owner: ResourceLifetime,
     resources: Vec<(ractor::ActorId, ResourceChild)>,
     control: RactorRef<RunControlMessage>,
 }
@@ -465,7 +468,10 @@ impl Actor for ResourceRetirementWorker {
         }
         let _ = state
             .control
-            .send_message(RunControlMessage::RunResourcesSettled { outcomes });
+            .send_message(RunControlMessage::RunResourcesSettled {
+                owner: state.owner,
+                outcomes,
+            });
         myself.stop(None);
         Ok(())
     }
