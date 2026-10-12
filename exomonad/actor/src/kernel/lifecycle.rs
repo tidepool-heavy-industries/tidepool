@@ -362,13 +362,40 @@ impl Drop for NativeProviderTurnLease {
 /// The lifecycle owner issues this only after exact executor cleanup and
 /// configured resident retirement have both settled successfully.
 #[derive(Debug, Clone)]
+enum RetirementDomain {
+    NonResident,
+    Resident,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct SuccessorDrainReceipt {
+    domain: RetirementDomain,
     predecessor: ActorRef,
     terminal: ActorTerminal,
     cleanup: crate::ResidentCleanupOutcome,
 }
 
 impl SuccessorDrainReceipt {
+    pub(crate) fn confirms_actor_retirement(&self) -> bool {
+        match self.domain {
+            RetirementDomain::Resident => self.cleanup.is_confirmed(),
+            RetirementDomain::NonResident => {
+                matches!(
+                    self.cleanup.hook(),
+                    crate::CleanupComponentOutcome::Confirmed
+                ) && matches!(
+                    self.cleanup.children(),
+                    crate::CleanupComponentOutcome::Confirmed
+                ) && matches!(
+                    self.cleanup.realm(),
+                    crate::CleanupComponentOutcome::Unsupported
+                )
+            }
+        }
+    }
+    pub(crate) fn confirms_resident_retirement(&self) -> bool {
+        matches!(self.domain, RetirementDomain::Resident) && self.cleanup.is_confirmed()
+    }
     pub(crate) fn predecessor(&self) -> ActorRef {
         self.predecessor
     }
@@ -991,9 +1018,26 @@ impl Actor for LifecycleCoordinator {
                             && matches!(state.native_settlement, NativeSettlement::Confirmed)
                             && state.transfer.unconfirmed.is_none()
                             && cleanup.actor() == state.identity
-                            && cleanup.is_confirmed() =>
+                            && if state.resident.is_some() {
+                                cleanup.is_confirmed()
+                            } else {
+                                matches!(cleanup.hook(), crate::CleanupComponentOutcome::Confirmed)
+                                    && matches!(
+                                        cleanup.children(),
+                                        crate::CleanupComponentOutcome::Confirmed
+                                    )
+                                    && matches!(
+                                        cleanup.realm(),
+                                        crate::CleanupComponentOutcome::Unsupported
+                                    )
+                            } =>
                     {
                         Ok(SuccessorDrainReceipt {
+                            domain: if state.resident.is_some() {
+                                RetirementDomain::Resident
+                            } else {
+                                RetirementDomain::NonResident
+                            },
                             predecessor: state.identity,
                             terminal,
                             cleanup,
