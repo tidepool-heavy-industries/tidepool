@@ -65,6 +65,9 @@ proptest::proptest! {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             let (owner, executor) = opened().await;
+            let initial = owner.transaction().await.unwrap();
+            let mut settled_sequence = initial.sequence;
+            drop(initial);
             let mut open = true;
             let mut held: [Option<ActorAdmissionLease>; 4] = std::array::from_fn(|_| None);
             for (operation, slot) in steps {
@@ -77,10 +80,10 @@ proptest::proptest! {
                     1 => { held[slot].take(); }
                     2 => { owner.close().await.unwrap(); open = false; }
                     _ => {
-                        // The stale sequence was never issued. It cannot close,
-                        // reopen, or release a live operation.
+                        // Replay a previously issued, completed operation.
+                        // It cannot reopen or release a live operation.
                         owner.address.cast(LifecycleCommand::NativeCompleted {
-                            sequence: u64::MAX, outcome: Ok(()),
+                            sequence: settled_sequence, outcome: Ok(()),
                         }).unwrap();
                     }
                 }
@@ -91,6 +94,7 @@ proptest::proptest! {
                 let snapshot = owner.observation();
                 assert_eq!(snapshot.phase, if open { LifecyclePhase::Open } else { LifecyclePhase::Closing });
                 assert_eq!(snapshot.transactions, held.iter().filter(|lease| lease.is_some()).count() + usize::from(open));
+                if let Ok(lease) = &barrier { settled_sequence = lease.sequence; }
                 drop(barrier);
             }
             drop(held);
