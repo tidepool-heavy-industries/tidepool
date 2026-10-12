@@ -414,6 +414,10 @@ impl ActorRecoveryJournal {
                             }};
                         }
                         match command {
+                            #[cfg(test)]
+                            Command::Crash { reply: _reply } => {
+                                panic!("injected journal owner crash")
+                            }
                             Command::Records { reply } => {
                                 complete!(reply, Ok(owner.records()));
                             }
@@ -755,6 +759,10 @@ impl ActorRecoveryJournal {
 }
 
 enum Command {
+    #[cfg(test)]
+    Crash {
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
     Records {
         reply: tokio::sync::oneshot::Sender<std::io::Result<Vec<DurableActorRecord>>>,
     },
@@ -824,13 +832,7 @@ impl JournalOwner {
         source: Option<String>,
         binding_path: PathBuf,
     ) -> std::io::Result<Arc<DurableRootSuccessorAdmission>> {
-        self.validate_root_successor(
-            &self.state,
-            predecessor,
-            &successor,
-            source.as_deref(),
-            &binding_path,
-        )?;
+        self.validate_root_successor(predecessor, &successor, source.as_deref(), &binding_path)?;
         let old = self
             .state
             .records
@@ -855,14 +857,13 @@ impl JournalOwner {
     }
 
     fn validate_root_successor(
-        &self,
-        state: &State,
+        &mut self,
         predecessor: ActorRef,
         successor: &RootRecoveryPlacement,
         expected_source: Option<&str>,
         binding_path: &Path,
     ) -> std::io::Result<()> {
-        let records = self.validated_state_records(state)?;
+        let records = self.validated_state_records()?;
         let old = records
             .get(&predecessor)
             .ok_or_else(|| std::io::Error::other("root predecessor admission is absent"))?;
@@ -911,33 +912,35 @@ impl JournalOwner {
         Ok(())
     }
     fn validated_state_records(
-        &self,
-        state: &State,
+        &mut self,
     ) -> std::io::Result<BTreeMap<ActorRef, DurableActorRecord>> {
-        ensure_writable(state)?;
-        // Observe the actual file without tail repair; another append or a torn
-        // write cannot be hidden by this process's retained in-memory records.
-        let (rows, torn) = tidepool_repr::jsonl::read_tail(
-            &self.path,
-            |line| parse_row(line).map_err(|error| error.to_string()),
-            TailPolicy::Observe,
-        )
-        .map_err(std::io::Error::other)?;
-        let (records, sequence, created) = replay(rows)?;
-        if torn.is_some() || !created || sequence != state.next_sequence || records != state.records
-        {
-            return Err(std::io::Error::other(
-                "root successor journal changed or has uncertain durable evidence",
-            ));
+        ensure_writable(&self.state)?;
+        let observed = (|| {
+            let (rows, torn) = tidepool_repr::jsonl::read_tail(
+                &self.path,
+                |line| parse_row(line).map_err(|error| error.to_string()),
+                TailPolicy::Observe,
+            )
+            .map_err(std::io::Error::other)?;
+            let (records, sequence, created) = replay(rows)?;
+            if torn.is_some()
+                || !created
+                || sequence != self.state.next_sequence
+                || records != self.state.records
+            {
+                return Err(std::io::Error::other(
+                    "root successor journal changed or has uncertain durable evidence",
+                ));
+            }
+            Ok(records)
+        })();
+        if observed.is_err() {
+            self.state.uncertain = true;
         }
-        Ok(records)
+        observed
     }
     pub fn validated_records(&mut self) -> std::io::Result<Vec<DurableActorRecord>> {
-        let state = &self.state;
-        Ok(self
-            .validated_state_records(&state)?
-            .into_values()
-            .collect())
+        Ok(self.validated_state_records()?.into_values().collect())
     }
     pub fn active_application_conversation(
         &mut self,
@@ -2859,5 +2862,54 @@ mod tests {
                 }
             });
         }
+    }
+    #[tokio::test]
+    async fn owner_crash_reports_termination_and_refuses_later_commands() {
+        let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let mut status = journal.owner_status();
+        let (reply, result) = tokio::sync::oneshot::channel();
+        journal.commands.send(Command::Crash { reply }).unwrap();
+        assert!(result.await.is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !matches!(*status.borrow(), JournalOwnerStatus::Stopped { .. }) {
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            *status.borrow(),
+            JournalOwnerStatus::Stopped {
+                clean: false,
+                fenced: false
+            }
+        );
+        assert!(journal.records().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn uncertain_readback_permanently_fences_writer() {
+        use std::io::Write;
+        let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let path = directory.path().join("actors.jsonl");
+        let original = std::fs::read(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"{torn").unwrap();
+        file.sync_all().unwrap();
+        assert!(journal.validated_records().await.is_err());
+        assert_eq!(*journal.owner_status().borrow(), JournalOwnerStatus::Fenced);
+        std::fs::write(&path, original).unwrap();
+        assert!(journal.validated_records().await.is_err());
+        assert!(journal
+            .admit(ActorRef::first(ActorId(54)), &descriptor("owner"), &[])
+            .await
+            .is_err());
     }
 }
