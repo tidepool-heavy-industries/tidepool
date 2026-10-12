@@ -10872,6 +10872,24 @@ where
         session_id: tidepool_repr::SessionId,
         compiled: Arc<tidepool_runtime::session::CompiledTurn>,
     ) -> Result<(crate::ActorPlacement, ResidentOutcome), ResidentActorWorkbenchError> {
+        self.prepare_root_program_inner(session_id, compiled, None)
+            .await
+    }
+    pub(crate) async fn prepare_root_program_tracked(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        compiled: Arc<tidepool_runtime::session::CompiledTurn>,
+        publisher: crate::local_actor::run_control::RootPlacementPublisher,
+    ) -> Result<(crate::ActorPlacement, ResidentOutcome), ResidentActorWorkbenchError> {
+        self.prepare_root_program_inner(session_id, compiled, Some(publisher))
+            .await
+    }
+    pub(crate) async fn prepare_root_program_inner(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        compiled: Arc<tidepool_runtime::session::CompiledTurn>,
+        publisher: Option<crate::local_actor::run_control::RootPlacementPublisher>,
+    ) -> Result<(crate::ActorPlacement, ResidentOutcome), ResidentActorWorkbenchError> {
         let owner = CompilerCloseOwner::current()?;
         self.access
             .with_host_machine("root", session_id, None, move |session, _| {
@@ -10881,6 +10899,16 @@ where
                         resource_scope: RealmId::fresh(),
                         lexical_scope: session.mint_isolated_scope(),
                     };
+                    if let Some(publisher) = &publisher {
+                        if let Err(error) = publisher.publish(placement) {
+                            session.close_realm(placement.resource_scope);
+                            session.retire_scope(placement.lexical_scope);
+                            publisher.release(placement);
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                error.to_string(),
+                            ));
+                        }
+                    }
                     let prepared = (|| {
                         session
                             .set_actor_execution(
@@ -10903,6 +10931,9 @@ where
                         Err(error) => {
                             session.close_realm(placement.resource_scope);
                             session.retire_scope(placement.lexical_scope);
+                            if let Some(publisher) = &publisher {
+                                publisher.release(placement);
+                            }
                             return Err(error);
                         }
                     };
@@ -10947,13 +10978,39 @@ where
         &self,
         session_id: tidepool_repr::SessionId,
     ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
+        self.provision_root_scope_inner(session_id, None).await
+    }
+    pub(crate) async fn provision_root_scope_tracked(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        publisher: crate::local_actor::run_control::RootPlacementPublisher,
+    ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
+        self.provision_root_scope_inner(session_id, Some(publisher))
+            .await
+    }
+    pub(crate) async fn provision_root_scope_inner(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        publisher: Option<crate::local_actor::run_control::RootPlacementPublisher>,
+    ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
         self.access
             .with_host_machine("root", session_id, None, move |session, _| {
-                Ok(crate::ActorPlacement {
+                let placement = crate::ActorPlacement {
                     session: session_id,
                     resource_scope: RealmId::fresh(),
                     lexical_scope: session.mint_isolated_scope(),
-                })
+                };
+                if let Some(publisher) = &publisher {
+                    if let Err(error) = publisher.publish(placement) {
+                        session.close_realm(placement.resource_scope);
+                        session.retire_scope(placement.lexical_scope);
+                        publisher.release(placement);
+                        return Err(ResidentActorWorkbenchError::ActorProtocol(
+                            error.to_string(),
+                        ));
+                    }
+                }
+                Ok(placement)
             })
             .await
     }

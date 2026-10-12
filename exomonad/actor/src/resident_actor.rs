@@ -13667,12 +13667,29 @@ where
         let incarnation = self.incarnation;
         let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
             Box::pin(async move {
+                let runner = environment.runner.clone();
+                let publisher = ticket.placement_publisher(Arc::new(move |placement| {
+                    let runner = runner.clone();
+                    Box::pin(async move {
+                        match runner
+                            .retire_root_placement_wait(
+                                placement,
+                                Some(std::time::Duration::from_secs(30)),
+                            )
+                            .await
+                        {
+                            Ok(()) => crate::CleanupComponentOutcome::Confirmed,
+                            Err(error) => {
+                                crate::CleanupComponentOutcome::Unconfirmed(error.to_string())
+                            }
+                        }
+                    })
+                }));
                 let result = async {
                     let (placement, outcome) = environment
                         .runner
-                        .prepare_root_program(session, compiled)
+                        .prepare_root_program_tracked(session, compiled, publisher)
                         .await?;
-                    ticket.placement_prepared(placement);
                     let current = |actor: ActorRef| ActorRef {
                         id: actor.id,
                         incarnation: incarnation,
@@ -13711,9 +13728,15 @@ where
                             ),
                         ),
                         Err(error) => {
-                            if crate::local_actor::startup_cleanup(&error).is_none() {
-                                environment.runner.retire_root_placement(placement).await?;
-                                ticket.placement_released(placement);
+                            match crate::local_actor::startup_cleanup(&error) {
+                                Some(cleanup) if cleanup.is_confirmed() => {
+                                    let _ = ticket.placement_released(placement);
+                                }
+                                Some(_) => {}
+                                None => {
+                                    environment.runner.retire_root_placement(placement).await?;
+                                    let _ = ticket.placement_released(placement);
+                                }
                             }
                             Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
                         }
@@ -13820,12 +13843,29 @@ where
         let session = self.session;
         let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
             Box::pin(async move {
+                let runner = environment.runner.clone();
+                let publisher = ticket.placement_publisher(Arc::new(move |placement| {
+                    let runner = runner.clone();
+                    Box::pin(async move {
+                        match runner
+                            .retire_root_placement_wait(
+                                placement,
+                                Some(std::time::Duration::from_secs(30)),
+                            )
+                            .await
+                        {
+                            Ok(()) => crate::CleanupComponentOutcome::Confirmed,
+                            Err(error) => {
+                                crate::CleanupComponentOutcome::Unconfirmed(error.to_string())
+                            }
+                        }
+                    })
+                }));
                 let result = async {
                     let (placement, outcome) = environment
                         .runner
-                        .prepare_root_program(session, compiled)
+                        .prepare_root_program_tracked(session, compiled, publisher)
                         .await?;
-                    ticket.placement_prepared(placement);
                     let descriptor = ActorDescriptor::new(label, placement).with_capabilities(role);
                     let mut behavior =
                         ResidentKernelBehavior::prepared(descriptor, environment.clone(), outcome);
@@ -13846,9 +13886,15 @@ where
                             ),
                         ),
                         Err(error) => {
-                            if crate::local_actor::startup_cleanup(&error).is_none() {
-                                environment.runner.retire_root_placement(placement).await?;
-                                ticket.placement_released(placement);
+                            match crate::local_actor::startup_cleanup(&error) {
+                                Some(cleanup) if cleanup.is_confirmed() => {
+                                    let _ = ticket.placement_released(placement);
+                                }
+                                Some(_) => {}
+                                None => {
+                                    environment.runner.retire_root_placement(placement).await?;
+                                    let _ = ticket.placement_released(placement);
+                                }
                             }
                             Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
                         }
@@ -13928,9 +13974,29 @@ where
         let session = self.session;
         let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
             Box::pin(async move {
+                let runner = environment.runner.clone();
+                let publisher = ticket.placement_publisher(Arc::new(move |placement| {
+                    let runner = runner.clone();
+                    Box::pin(async move {
+                        match runner
+                            .retire_root_placement_wait(
+                                placement,
+                                Some(std::time::Duration::from_secs(30)),
+                            )
+                            .await
+                        {
+                            Ok(()) => crate::CleanupComponentOutcome::Confirmed,
+                            Err(error) => {
+                                crate::CleanupComponentOutcome::Unconfirmed(error.to_string())
+                            }
+                        }
+                    })
+                }));
                 let result = async {
-                    let placement = environment.runner.provision_root_scope(session).await?;
-                    ticket.placement_prepared(placement);
+                    let placement = environment
+                        .runner
+                        .provision_root_scope_tracked(session, publisher)
+                        .await?;
                     let descriptor = ActorDescriptor::new(label, placement).with_capabilities(role);
                     let mut behavior = ResidentKernelBehavior::with_boot(
                         descriptor,
@@ -13951,9 +14017,15 @@ where
                             crate::local_actor::run_control::RootAdmissionOutcome::Workbench(actor),
                         ),
                         Err(error) => {
-                            if crate::local_actor::startup_cleanup(&error).is_none() {
-                                environment.runner.retire_root_placement(placement).await?;
-                                ticket.placement_released(placement);
+                            match crate::local_actor::startup_cleanup(&error) {
+                                Some(cleanup) if cleanup.is_confirmed() => {
+                                    let _ = ticket.placement_released(placement);
+                                }
+                                Some(_) => {}
+                                None => {
+                                    environment.runner.retire_root_placement(placement).await?;
+                                    let _ = ticket.placement_released(placement);
+                                }
                             }
                             Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
                         }

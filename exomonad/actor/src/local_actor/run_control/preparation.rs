@@ -25,6 +25,14 @@ impl RootAdmissionOutcome {
 }
 #[derive(Clone)]
 enum ProducedCustody {
+    Placement {
+        placement: crate::ActorPlacement,
+        cleanup: Arc<
+            dyn Fn(crate::ActorPlacement) -> BoxFuture<'static, crate::CleanupComponentOutcome>
+                + Send
+                + Sync,
+        >,
+    },
     NoResource,
     Resident(LocalActorRef),
     NativeResource(ResourceChild),
@@ -32,6 +40,7 @@ enum ProducedCustody {
 impl ProducedCustody {
     async fn retire(self) -> crate::CleanupComponentOutcome {
         match self {
+            Self::Placement { placement, cleanup } => cleanup(placement).await,
             Self::NoResource => crate::CleanupComponentOutcome::Confirmed,
             Self::Resident(actor) => {
                 let cleanup =
@@ -76,8 +85,69 @@ pub(crate) type RootOperation = Box<
 pub(crate) struct RootPreparationTicket {
     pub(crate) id: u64,
     owner: RactorRef<RunControlMessage>,
+    supervisor: RactorRef<PreparationMessage>,
+}
+/// Immutable placement facts are published by the native mint operation.
+#[derive(Clone)]
+pub(crate) struct RootPlacementPublisher {
+    id: u64,
+    owner: RactorRef<RunControlMessage>,
+    supervisor: RactorRef<PreparationMessage>,
+    cleanup: Arc<
+        dyn Fn(crate::ActorPlacement) -> BoxFuture<'static, crate::CleanupComponentOutcome>
+            + Send
+            + Sync,
+    >,
+}
+impl RootPlacementPublisher {
+    pub(crate) fn publish(&self, placement: crate::ActorPlacement) -> Result<(), DirectoryError> {
+        self.supervisor
+            .send_message(PreparationMessage::NativePlacement {
+                id: self.id,
+                custody: ProducedCustody::Placement {
+                    placement,
+                    cleanup: self.cleanup.clone(),
+                },
+            })
+            .map_err(|_| DirectoryError::Unavailable)?;
+        self.owner
+            .send_message(RunControlMessage::PlacementPrepared {
+                id: self.id,
+                placement,
+            })
+            .map_err(|_| DirectoryError::Unavailable)
+    }
+    pub(crate) fn release(&self, placement: crate::ActorPlacement) {
+        let _ = self
+            .supervisor
+            .send_message(PreparationMessage::NativePlacementReleased {
+                id: self.id,
+                placement,
+            });
+        let _ = self
+            .owner
+            .send_message(RunControlMessage::PlacementReleased {
+                id: self.id,
+                placement,
+            });
+    }
 }
 impl RootPreparationTicket {
+    pub(crate) fn placement_publisher(
+        &self,
+        cleanup: Arc<
+            dyn Fn(crate::ActorPlacement) -> BoxFuture<'static, crate::CleanupComponentOutcome>
+                + Send
+                + Sync,
+        >,
+    ) -> RootPlacementPublisher {
+        RootPlacementPublisher {
+            id: self.id,
+            owner: self.owner.clone(),
+            supervisor: self.supervisor.clone(),
+            cleanup,
+        }
+    }
     pub(crate) fn placement_prepared(
         &self,
         placement: crate::ActorPlacement,
@@ -93,6 +163,12 @@ impl RootPreparationTicket {
         &self,
         placement: crate::ActorPlacement,
     ) -> Result<(), DirectoryError> {
+        let _ = self
+            .supervisor
+            .send_message(PreparationMessage::NativePlacementReleased {
+                id: self.id,
+                placement,
+            });
         self.owner
             .send_message(RunControlMessage::PlacementReleased {
                 id: self.id,
@@ -115,6 +191,14 @@ impl RootDelivery {
 }
 
 pub(super) enum PreparationMessage {
+    NativePlacement {
+        id: u64,
+        custody: ProducedCustody,
+    },
+    NativePlacementReleased {
+        id: u64,
+        placement: crate::ActorPlacement,
+    },
     RetireResources {
         owner: ResourceLifetime,
         resources: Vec<(ractor::ActorId, ResourceChild)>,
@@ -167,6 +251,7 @@ enum WorkerKind {
         id: u64,
         compiler: RetainedActorExit,
         produced: Option<ProducedCustody>,
+        native: Option<ProducedCustody>,
     },
     Reserve {
         identity: ActorRef,
@@ -208,6 +293,12 @@ impl Actor for PreparationSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            PreparationMessage::NativePlacement { id, custody } => {
+                for worker in state.workers.values_mut() { if let WorkerKind::Root { id: issued, native, .. } = &mut worker.kind { if *issued == id { *native = Some(custody.clone()); } } }
+            }
+            PreparationMessage::NativePlacementReleased { id, placement } => {
+                for worker in state.workers.values_mut() { if let WorkerKind::Root { id: issued, native, .. } = &mut worker.kind { if *issued == id && matches!(native, Some(ProducedCustody::Placement { placement: exact, .. }) if *exact == placement) { *native = None; } } }
+            }
             PreparationMessage::RetireResources { owner, resources } => {
                 let arguments = ResourceRetirementArguments { owner, resources: resources.clone(), supervisor: myself.clone() };
                 match Actor::spawn_linked(None, ResourceRetirementWorker, arguments, myself.get_cell()).await {
@@ -232,7 +323,7 @@ impl Actor for PreparationSupervisor {
                 let arguments = RootWorkerArguments { id, operation: Some(operation), compiler: compiler.clone(), reply: Some(reply), control: state.control.clone(), supervisor: myself.clone() };
                 match Actor::spawn_linked(None, RootWorker, arguments, myself.get_cell()).await {
                     Ok((worker, task)) => {
-                        state.workers.insert(worker.get_id(), TrackedWorker { cell: worker.get_cell(), kind: WorkerKind::Root { id, compiler, produced: None }, terminal: false, reported: false });
+                        state.workers.insert(worker.get_id(), TrackedWorker { cell: worker.get_cell(), kind: WorkerKind::Root { id, compiler, produced: None, native: None }, terminal: false, reported: false });
                         drop(task); let _ = worker.send_message(RootWorkerMessage::Execute);
                     }
                     Err(error) => { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome: crate::CleanupComponentOutcome::Unconfirmed(format!("root preparation worker failed to start: {error}")) }); }
@@ -249,7 +340,15 @@ impl Actor for PreparationSupervisor {
             }
             PreparationMessage::WorkerSettled { id, outcome } => {
                 for worker in state.workers.values_mut() { if matches!(&worker.kind, WorkerKind::Root { id: issued, .. } if *issued == id) { worker.reported = true; } }
-                let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome });
+                let custody = state.workers.values_mut().find_map(|worker| match &mut worker.kind { WorkerKind::Root { id: issued, produced, native, .. } if *issued == id && produced.is_none() => native.take(), _ => None });
+                if let Some(custody) = custody {
+                    let compiler = state.workers.values().find_map(|worker| match &worker.kind { WorkerKind::Root { id: issued, compiler, .. } if *issued == id => Some(compiler.clone()), _ => None });
+                    let arguments = AbandonedCleanupArguments { id, custody: custody.clone(), supervisor: myself.clone(), prior: outcome.clone(), compiler };
+                    match Actor::spawn_linked(None, AbandonedCleanupWorker, arguments, myself.get_cell()).await {
+                        Ok((cleanup, task)) => { state.workers.insert(cleanup.get_id(), TrackedWorker { cell: cleanup.get_cell(), kind: WorkerKind::Abandoned { id, custody }, terminal: false, reported: false }); drop(task); let _ = cleanup.send_message(()); }
+                        Err(error) => { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome: crate::CleanupComponentOutcome::Unconfirmed(format!("native placement cleanup worker failed to start: {error}; original {outcome:?}")) }); }
+                    }
+                } else { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome }); }
             }
             PreparationMessage::ReservationReady { actor, lifecycle } => {
                 for worker in state.workers.values_mut() { if matches!(&worker.kind, WorkerKind::Reserve { identity, .. } if *identity == actor) { worker.reported = true; } }
@@ -269,11 +368,11 @@ impl Actor for PreparationSupervisor {
                 let Some(record) = state.workers.get_mut(&worker) else { return Ok(()); };
                 if record.reported { state.workers.remove(&worker); return Ok(()); }
                 match &mut record.kind {
-                    WorkerKind::Root { id, compiler, produced } => {
+                    WorkerKind::Root { id, compiler, produced, native } => {
                         compiler.request_shutdown(ActorTerminal::new(ActorExitKind::Cancelled, "root preparation worker lost"));
                         let id = *id;
-                        if let Some(custody) = produced.take() {
-                            let arguments = AbandonedCleanupArguments { id, custody: custody.clone(), supervisor: myself.clone() };
+                        if let Some(custody) = produced.take().or_else(|| native.take()) {
+                            let arguments = AbandonedCleanupArguments { id, custody: custody.clone(), supervisor: myself.clone(), prior: crate::CleanupComponentOutcome::Unconfirmed("root producer exited before its completion receipt".into()), compiler: Some(compiler.clone()) };
                             match Actor::spawn_linked(None, AbandonedCleanupWorker, arguments, myself.get_cell()).await {
                                 Ok((cleanup, task)) => { state.workers.insert(cleanup.get_id(), TrackedWorker { cell: cleanup.get_cell(), kind: WorkerKind::Abandoned { id, custody }, terminal: false, reported: false }); drop(task); let _ = cleanup.send_message(()); }
                                 Err(error) => { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome: crate::CleanupComponentOutcome::Unconfirmed(format!("abandoned root cleanup worker failed to start: {error}")) }); }
@@ -352,6 +451,7 @@ impl Actor for RootWorker {
         let ticket = RootPreparationTicket {
             id: state.id,
             owner: state.control.clone(),
+            supervisor: state.supervisor.clone(),
         };
         let owner =
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(state.compiler.clone());
@@ -370,6 +470,25 @@ impl Actor for RootWorker {
                 "root preparation panicked before cleanup settlement".into(),
             ),
             Ok((result, settled)) => {
+                let settled = if let Some(cleanup) = result
+                    .as_ref()
+                    .err()
+                    .and_then(|error| error.downcast_ref::<ractor::SpawnErr>())
+                    .and_then(crate::local_actor::startup_cleanup)
+                {
+                    if cleanup.is_confirmed() {
+                        settled
+                    } else {
+                        combine_cleanup(
+                            settled,
+                            crate::CleanupComponentOutcome::Unconfirmed(format!(
+                                "root startup cleanup: {cleanup:?}"
+                            )),
+                        )
+                    }
+                } else {
+                    settled
+                };
                 let custody = result.as_ref().ok().map(RootAdmissionOutcome::custody);
                 if let Some(custody) = &custody {
                     let (retained, receipt) = oneshot::channel();
@@ -524,6 +643,8 @@ impl Actor for ResourceRetirementWorker {
 
 struct AbandonedCleanupWorker;
 struct AbandonedCleanupArguments {
+    prior: crate::CleanupComponentOutcome,
+    compiler: Option<RetainedActorExit>,
     id: u64,
     custody: ProducedCustody,
     supervisor: RactorRef<PreparationMessage>,
@@ -545,7 +666,19 @@ impl Actor for AbandonedCleanupWorker {
         _: (),
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let outcome = state.custody.clone().retire().await;
+        let outcome = combine_cleanup(state.prior.clone(), state.custody.clone().retire().await);
+        let outcome = if state.compiler.as_ref().is_none_or(|compiler| {
+            compiler
+                .compiler_close_observations()
+                .iter()
+                .all(|close| close.is_confirmed())
+        }) {
+            outcome
+        } else {
+            crate::CleanupComponentOutcome::Unconfirmed(format!(
+                "native cleanup {outcome:?}; compiler settlement remains unconfirmed"
+            ))
+        };
         let _ = state
             .supervisor
             .send_message(PreparationMessage::AbandonedCleanupSettled {

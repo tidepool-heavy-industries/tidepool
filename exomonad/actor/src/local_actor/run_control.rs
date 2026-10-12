@@ -12,7 +12,8 @@ pub(crate) use startup::{
 mod transfers;
 use preparation::{PreparationMessage, PreparationSupervisor, RootDelivery};
 pub(crate) use preparation::{
-    RootAdmissionOutcome, RootOperation, RootOperationResult, RootPreparationTicket,
+    RootAdmissionOutcome, RootOperation, RootOperationResult, RootPlacementPublisher,
+    RootPreparationTicket,
 };
 use transfers::{ResourceTransfer, WorkerTransfer};
 pub(crate) use transfers::{ResourceTransferReservation, WorkerTransferReservation};
