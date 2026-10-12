@@ -18,7 +18,8 @@ use transfers::{ResourceTransfer, WorkerTransfer};
 pub(crate) use transfers::{ResourceTransferReservation, WorkerTransferReservation};
 
 pub(super) struct ActorAuthority {
-    descriptor: crate::ActorDescriptor,
+    creator: Option<ActorRef>,
+    supervisor_parent: Option<ActorRef>,
     forest_control: bool,
     observation_roots: HashSet<ActorRef>,
 }
@@ -47,15 +48,9 @@ fn in_authority_tree(
             return false;
         };
         let parent = if creation {
-            authority
-                .descriptor
-                .creator()
-                .or(authority.descriptor.supervisor_parent())
+            authority.creator.or(authority.supervisor_parent)
         } else {
-            authority
-                .descriptor
-                .supervisor_parent()
-                .or(authority.descriptor.creator())
+            authority.supervisor_parent.or(authority.creator)
         };
         let Some(parent) = parent else {
             return false;
@@ -796,7 +791,8 @@ impl Actor for RunControl {
                         Err(DirectoryError::AlreadyRegistered { actor })
                     } else {
                         entry.authority = Some(ActorAuthority {
-                            descriptor,
+                            creator: descriptor.creator(),
+                            supervisor_parent: descriptor.supervisor_parent(),
                             forest_control,
                             observation_roots: HashSet::new(),
                         });
@@ -1016,6 +1012,11 @@ impl Actor for RunControl {
                         if entry.spawn_ownership == SpawnOwnership::Supervised(predecessor) {
                             entry.actor.address().get_cell().link(target.clone());
                             entry.spawn_ownership = SpawnOwnership::Supervised(successor);
+                            if let Some(authority) = entry.authority.as_mut() {
+                                if authority.supervisor_parent == Some(predecessor) {
+                                    authority.supervisor_parent = Some(successor);
+                                }
+                            }
                         }
                     }
                     for resource in state.resources.values_mut() {
