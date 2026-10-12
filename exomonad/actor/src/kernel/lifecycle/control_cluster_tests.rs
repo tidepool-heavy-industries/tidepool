@@ -41,6 +41,21 @@ async fn close_preserves_accepted_lease_and_refuses_new_admission() {
     owner.address.stop(None);
 }
 
+#[tokio::test]
+async fn lost_admission_observer_releases_its_exact_lease_without_reopening() {
+    let (owner, executor) = opened().await;
+    let (reply, observer) = tokio::sync::oneshot::channel();
+    owner.address.cast(LifecycleCommand::Transaction(reply.into())).unwrap();
+    drop(observer);
+    owner.close().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), owner.wait_transactions()).await.unwrap();
+    assert_eq!(owner.observation().transactions, 0);
+    assert_eq!(owner.observation().phase, LifecyclePhase::Closing);
+    assert!(matches!(owner.transaction().await, Err(KernelCallFailure::MailboxClosed(_))));
+    executor.stop(None);
+    owner.address.stop(None);
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(64))]
     #[test]
