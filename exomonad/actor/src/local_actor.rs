@@ -2093,7 +2093,6 @@ where
         });
         let startup_admission = arguments.startup_admission;
         let mut startup_refusal = arguments.startup_refusal;
-        let cleanup_only_executor = arguments.reservation.cleanup_only();
         let mut state = Box::new(LocalActorState {
             replacement: None,
             drain: DrainState::Open,
@@ -2108,16 +2107,21 @@ where
             deferred_mailbox: VecDeque::new(),
             mailbox_drain_scheduled: false,
         });
-        if cleanup_only_executor || startup_refusal.is_none() {
-            // Retain the actual executor cell before cleanup. Attachment refusal
-            // must also settle the already-owned behavior's native resources.
-            if let Err(error) = state
+        // Refused startup retains its actual cell without reopening a closing
+        // coordinator. Ordinary startup still requires Starting admission.
+        let attachment = if startup_refusal.is_some() {
+            state
+                .lifecycle
+                .attach_cleanup_executor(state.context.myself.clone())
+                .await
+        } else {
+            state
                 .lifecycle
                 .attach_executor(state.context.myself.clone())
                 .await
-            {
-                startup_refusal = Some(StartupFailureCause::Lifecycle(error));
-            }
+        };
+        if let Err(error) = attachment {
+            startup_refusal = Some(StartupFailureCause::Lifecycle(error));
         }
         if let Some(cause) = startup_refusal {
             finish_actor(
