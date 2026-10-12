@@ -45,10 +45,16 @@ pub use recovery_hydration::{
     RecoveredDomainPresence, RecoveryRunAuthority, RecoverySuccessorAuthority,
 };
 pub use recovery_store::{
-    DomainSnapshotRoot, PublicSurfaceRoot, RecoveryDomainId, RecoveryDomainState,
+    DomainSnapshotRoot, NativeStoreStatus, ProviderTransition, PublicSurfaceRoot, RecoveryDomainId, RecoveryDomainState,
     RecoveryPublicOwnerState, RecoverySnapshotIdentity, RunRecoveryStore, StoreDisposition,
     StoreError, StoreErrorKind, StoreRefusal, StoreRevision,
 };
+fn complete_native_transition(ticket: Option<recovery_store::OwnedTransition>) -> Result<(), SessionError> {
+    ticket.map(recovery_store::OwnedTransition::complete_blocking).transpose()
+        .map(|_| ())
+        .map_err(|error| SessionError::RecoveryStore(Box::new(error)))
+}
+
 pub mod registry;
 pub mod render;
 pub mod resident;
@@ -1507,7 +1513,7 @@ impl SessionLib {
             .as_ref()
             .is_some_and(|lease| lease.covers(end))
         {
-            let _admission = match state.store.lease_admission() {
+            let admission = match state.store.begin_native_transition() {
                 Ok(admission) => admission,
                 Err(error) => {
                     self.generation_lease = None;
@@ -1515,7 +1521,9 @@ impl SessionLib {
                 }
             };
             self.local_generation_issued = true;
-            return Ok(self.log.commit_reservations(prepared));
+            let reserved = self.log.commit_reservations(prepared);
+            complete_native_transition(Some(admission))?;
+            return Ok(reserved);
         }
         let ceiling = state.allocation_ceiling;
         if self.log.generation() > ceiling {
@@ -1537,7 +1545,7 @@ impl SessionLib {
             .durable_graph
             .as_ref()
             .expect("attached store preflighted");
-        let _admission = match state.store.lease_admission() {
+        let admission = match state.store.begin_native_transition() {
             Ok(admission) => admission,
             Err(error) => {
                 self.generation_lease = None;
@@ -1546,7 +1554,9 @@ impl SessionLib {
         };
         self.generation_lease = Some(generation_lease::GenerationRangeLease::confirmed(ceiling));
         self.local_generation_issued = true;
-        Ok(self.log.commit_reservations(prepared))
+        let reserved = self.log.commit_reservations(prepared);
+        complete_native_transition(Some(admission))?;
+        Ok(reserved)
     }
 
     fn extend_generation_ceiling(
@@ -2543,9 +2553,9 @@ impl SessionLib {
             tip.tip = staged.generation;
             tip.exact_context = next_context;
             let store = self.held_recovery_store()?;
-            let _admission = store
+            let admission = store
                 .as_ref()
-                .map(|store| store.lease_admission())
+                .map(|store| store.begin_native_transition())
                 .transpose()
                 .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
             self.log.activate_prepared_commit(prepared);
@@ -2553,7 +2563,9 @@ impl SessionLib {
                 .tips
                 .get_mut(&staged.scope)
                 .expect("prepared authored tip") = tip;
-            return Ok(activate(staged.generation));
+            let activated = activate(staged.generation);
+            complete_native_transition(admission)?;
+            return Ok(activated);
         }
         let generation = self.push_turn_in(staged.scope, staged.turn)?;
         Ok(activate(generation))
@@ -2737,11 +2749,12 @@ impl SessionLib {
             let store = self
                 .held_recovery_store()?
                 .expect("attached store preflighted");
-            let _admission = store
-                .lease_admission()
+            let admission = store
+                .begin_native_transition()
                 .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
             assert!(self.log.commit_reserved_authored(generation, turn));
             self.set_scope_tip_in(scope, generation);
+            complete_native_transition(Some(admission))?;
             Ok(generation)
         } else {
             self.next_module()?;

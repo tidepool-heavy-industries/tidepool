@@ -2,12 +2,12 @@
 //! SQL owns only their roots, public ownership, and allocation ceilings.
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use cid::Cid;
 use fvm_ipld_blockstore::Blockstore;
-use parking_lot::{Mutex, MutexGuard};
+
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
 };
@@ -189,22 +189,19 @@ struct StoreConnection {
     #[cfg(test)]
     fault: Option<StoreFault>,
 }
-/// All machines in a run share this owner. An old owner never loses its fence;
-/// authenticated reopen constructs a new owner after retiring its consumers.
-#[derive(Clone)]
-pub struct RunRecoveryStore {
+struct NativeStorage {
     path: Arc<PathBuf>,
     database_id: [u8; 16],
     physical_identity: (u64, u64),
-    connection: Arc<Mutex<StoreConnection>>,
-    transactions: Arc<AtomicU64>,
-    block_writes: Arc<AtomicU64>,
-    block_bytes: Arc<AtomicU64>,
-    recovery_required: Arc<tokio::sync::Notify>,
+    connection: RefCell<StoreConnection>,
+    transactions: Cell<u64>,
+    block_writes: Cell<u64>,
+    block_bytes: Cell<u64>,
 }
-pub struct RunStoreAdmissionGuard<'a> {
-    _connection: MutexGuard<'a, StoreConnection>,
-}
+
+mod owner;
+pub use owner::{NativeStoreStatus, ProviderTransition, RunRecoveryStore};
+pub(crate) use owner::{NativeInstallationReceipt, OwnedTransition};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RecoveryStoreWork {
@@ -221,7 +218,7 @@ pub(crate) enum StoreFault {
     RollbackError,
 }
 
-impl RunRecoveryStore {
+impl NativeStorage {
     /// New-file creation is explicit. An existing legacy or incompatible store
     /// is never changed into an empty recovery domain.
     pub fn create(path: &Path) -> Result<Self, StoreError> {
@@ -315,16 +312,15 @@ impl RunRecoveryStore {
             path: Arc::new(path.to_path_buf()),
             database_id,
             physical_identity,
-            connection: Arc::new(Mutex::new(StoreConnection {
+            connection: RefCell::new(StoreConnection {
                 connection,
                 fence: None,
                 #[cfg(test)]
                 fault: None,
-            })),
-            transactions: Arc::new(AtomicU64::new(0)),
-            block_writes: Arc::new(AtomicU64::new(0)),
-            block_bytes: Arc::new(AtomicU64::new(0)),
-            recovery_required: Arc::new(tokio::sync::Notify::new()),
+            }),
+            transactions: Cell::new(0),
+            block_writes: Cell::new(0),
+            block_bytes: Cell::new(0),
         })
     }
     pub fn path(&self) -> &Path {
@@ -333,34 +329,9 @@ impl RunRecoveryStore {
     pub fn database_id(&self) -> [u8; 16] {
         self.database_id
     }
-    pub fn is_recovery_required(&self) -> bool {
-        self.connection.lock().fence.is_some()
-    }
-    /// Wait for this run owner's permanent fence, including a fence established
-    /// before the observer started waiting. No storage observation is needed.
-    pub async fn wait_recovery_required(&self) -> StoreError {
-        loop {
-            let notified = self.recovery_required.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if let Some(error) = self.connection.lock().fence.clone() {
-                return error;
-            }
-            notified.await;
-        }
-    }
-    pub fn ensure_ready(&self) -> Result<(), StoreError> {
-        self.lease_admission().map(drop)
-    }
-    pub fn lease_admission(&self) -> Result<RunStoreAdmissionGuard<'_>, StoreError> {
-        let connection = self.connection.lock();
-        if let Some(error) = &connection.fence {
-            return Err(error.clone());
-        }
-        self.validate_physical_identity()?;
-        Ok(RunStoreAdmissionGuard {
-            _connection: connection,
-        })
+    fn ensure_ready(&self) -> Result<(), StoreError> {
+        if let Some(error) = &self.connection.borrow().fence { return Err(error.clone()); }
+        self.validate_physical_identity()
     }
     fn validate_physical_identity(&self) -> Result<(), StoreError> {
         if physical_identity(self.path())? != self.physical_identity {
@@ -374,21 +345,21 @@ impl RunRecoveryStore {
     }
     pub fn work(&self) -> RecoveryStoreWork {
         RecoveryStoreWork {
-            transactions: self.transactions.load(Ordering::Relaxed),
-            block_writes: self.block_writes.load(Ordering::Relaxed),
-            block_bytes: self.block_bytes.load(Ordering::Relaxed),
+            transactions: self.transactions.get(),
+            block_writes: self.block_writes.get(),
+            block_bytes: self.block_bytes.get(),
         }
     }
     #[cfg(test)]
     pub(crate) fn inject_fault(&self, fault: StoreFault) {
-        self.connection.lock().fault = Some(fault);
+        self.connection.borrow_mut().fault = Some(fault);
     }
 
     pub fn read_domain(
         &self,
         domain: RecoveryDomainId,
     ) -> Result<Option<RecoveryDomainState>, StoreError> {
-        let owner = self.connection.lock();
+        let owner = self.connection.borrow();
         if let Some(error) = &owner.fence {
             return Err(error.clone());
         }
@@ -400,7 +371,7 @@ impl RunRecoveryStore {
         domain: RecoveryDomainId,
         owner: &RecoveryPublicOwner,
     ) -> Result<Option<RecoveryPublicOwnerState>, StoreError> {
-        let connection = self.connection.lock();
+        let connection = self.connection.borrow();
         if let Some(error) = &connection.fence {
             return Err(error.clone());
         }
@@ -412,7 +383,7 @@ impl RunRecoveryStore {
         &self,
         domain: RecoveryDomainId,
     ) -> Result<Vec<RecoveryPublicOwnerState>, StoreError> {
-        let connection = self.connection.lock();
+        let connection = self.connection.borrow();
         if let Some(error) = &connection.fence {
             return Err(error.clone());
         }
@@ -444,7 +415,7 @@ impl RunRecoveryStore {
             .map_err(|error| sql_store_error(self.path(), error))
     }
     pub fn has_public_owners(&self, domain: RecoveryDomainId) -> Result<bool, StoreError> {
-        let connection = self.connection.lock();
+        let connection = self.connection.borrow();
         if let Some(error) = &connection.fence {
             return Err(error.clone());
         }
@@ -463,7 +434,7 @@ impl RunRecoveryStore {
         domain: RecoveryDomainId,
         owner: Option<&RecoveryPublicOwner>,
     ) -> Result<Option<RecoverySnapshotIdentity>, StoreError> {
-        let connection = self.connection.lock();
+        let connection = self.connection.borrow();
         if let Some(error) = &connection.fence {
             return Err(error.clone());
         }
@@ -529,17 +500,7 @@ impl RunRecoveryStore {
         }, &[])
     }
 
-    pub(crate) fn publish(
-        &self,
-        prepared: PreparedRecoveryWrite,
-    ) -> StoreDisposition<RecoveryDomainState> {
-        self.publish_and_install(prepared, |state| state)
-    }
-    pub(crate) fn publish_and_install<T>(
-        &self,
-        prepared: PreparedRecoveryWrite,
-        install: impl FnOnce(RecoveryDomainState) -> T,
-    ) -> StoreDisposition<T> {
+    fn publish(&self, prepared: PreparedRecoveryWrite) -> StoreDisposition<RecoveryDomainState> {
         let owner_keys = prepared
             .public_changes
             .iter()
@@ -551,7 +512,7 @@ impl RunRecoveryStore {
                 })
             })
             .collect::<Vec<_>>();
-        self.transact_and_install(|transaction| {
+        self.transact(|transaction| {
             let current = read_domain(transaction, prepared.domain_id).map_err(sql_refusal)?.ok_or(StoreRefusal::DomainMissing)?;
             if current.revision != prepared.expected_revision { return Err(StoreRefusal::StaleRevision); }
             let revision = increment(current.revision)?;
@@ -563,41 +524,19 @@ impl RunRecoveryStore {
                 revision.0.to_be_bytes().as_slice(), content_revision.0.to_be_bytes().as_slice(), prepared.allocation_ceiling.0.to_be_bytes().as_slice(), prepared.snapshot_root.cid().to_bytes(), prepared.domain_id.bytes().as_slice(), prepared.expected_revision.0.to_be_bytes().as_slice()]).map_err(sql_refusal)?;
             if updated != 1 { return Err(StoreRefusal::StaleRevision); }
             Ok(RecoveryDomainState { revision, content_revision, allocation_ceiling: prepared.allocation_ceiling, snapshot_root: prepared.snapshot_root.clone(), ..current })
-        }, &prepared.blocks,install)
+        }, &prepared.blocks)
     }
 
     /// This structurally distinct operation retains both immutable roots and
     /// the semantic content revision. No caller-selected boolean can claim a
     /// content-changing publication is an owner transfer.
-    pub(crate) fn transfer_owner(
-        &self,
-        domain: RecoveryDomainId,
-        expected: StoreRevision,
-        previous: &RecoveryPublicOwnerState,
-        successor: RecoveryPublicOwner,
-        successor_epoch: u64,
+    fn transfer_owner(
+        &self, domain: RecoveryDomainId, expected: StoreRevision,
+        previous: &RecoveryPublicOwnerState, successor: RecoveryPublicOwner, successor_epoch: u64,
     ) -> StoreDisposition<RecoveryDomainState> {
-        self.transfer_owner_and_install(
-            domain,
-            expected,
-            previous,
-            successor,
-            successor_epoch,
-            |state| state,
-        )
-    }
-    pub(crate) fn transfer_owner_and_install<T>(
-        &self,
-        domain: RecoveryDomainId,
-        expected: StoreRevision,
-        previous: &RecoveryPublicOwnerState,
-        successor: RecoveryPublicOwner,
-        successor_epoch: u64,
-        install: impl FnOnce(RecoveryDomainState) -> T,
-    ) -> StoreDisposition<T> {
         let previous_key = owner_bytes(&previous.owner);
         let successor_key = owner_bytes(&successor);
-        self.transact_and_install(
+        self.transact(
             |transaction| {
                 let current = read_domain(transaction, domain)
                     .map_err(sql_refusal)?
@@ -651,23 +590,13 @@ impl RunRecoveryStore {
                 })
             },
             &[],
-            install,
         )
     }
 
     fn transact<T>(
-        &self,
-        action: impl FnOnce(&Transaction<'_>) -> Result<T, StoreRefusal>,
+        &self, action: impl FnOnce(&Transaction<'_>) -> Result<T, StoreRefusal>,
         blocks: &[(Cid, Arc<[u8]>)],
     ) -> StoreDisposition<T> {
-        self.transact_and_install(action, blocks, |value| value)
-    }
-    fn transact_and_install<T, R>(
-        &self,
-        action: impl FnOnce(&Transaction<'_>) -> Result<T, StoreRefusal>,
-        blocks: &[(Cid, Arc<[u8]>)],
-        install: impl FnOnce(T) -> R,
-    ) -> StoreDisposition<R> {
         for (cid, bytes) in blocks {
             if let Err(error) = tidepool_toolchain::exact_context::verify_block(cid, bytes) {
                 return StoreDisposition::Refused(StoreRefusal::Storage(store_error(
@@ -677,7 +606,7 @@ impl RunRecoveryStore {
                 )));
             }
         }
-        let mut owner = self.connection.lock();
+        let mut owner = self.connection.borrow_mut();
         if let Some(error) = &owner.fence {
             return StoreDisposition::RecoveryRequired(error.clone());
         }
@@ -686,7 +615,7 @@ impl RunRecoveryStore {
         }
         #[cfg(test)]
         let fault = owner.fault.take();
-        self.transactions.fetch_add(1, Ordering::Relaxed);
+        self.transactions.set(self.transactions.get() + 1);
         let result = transact(
             &mut owner.connection,
             action,
@@ -694,7 +623,7 @@ impl RunRecoveryStore {
             fault,
         );
         match result {
-            TransactionResult::Committed(value) => StoreDisposition::Committed(install(value)),
+            TransactionResult::Committed(value) => StoreDisposition::Committed(value),
             TransactionResult::Refused(mut refusal) => {
                 if let StoreRefusal::Storage(error) = &mut refusal {
                     if error.path.as_os_str().is_empty() {
@@ -706,16 +635,15 @@ impl RunRecoveryStore {
             TransactionResult::RecoveryRequired(detail) => {
                 let error = store_error(self.path(), StoreErrorKind::RecoveryRequired, detail);
                 owner.fence = Some(error.clone());
-                self.recovery_required.notify_waiters();
                 StoreDisposition::RecoveryRequired(error)
             }
         }
     }
 }
 
-impl Blockstore for RunRecoveryStore {
+impl Blockstore for NativeStorage {
     fn get(&self, cid: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
-        let owner = self.connection.lock();
+        let owner = self.connection.borrow();
         if let Some(error) = &owner.fence {
             return Err(error.clone().into());
         }
@@ -830,8 +758,8 @@ fn sql_store_error(path: &Path, error: rusqlite::Error) -> StoreError {
 fn insert_blocks(
     transaction: &Transaction<'_>,
     blocks: &[(Cid, Arc<[u8]>)],
-    writes: &AtomicU64,
-    written_bytes: &AtomicU64,
+    writes: &Cell<u64>,
+    written_bytes: &Cell<u64>,
 ) -> rusqlite::Result<()> {
     let mut insert = transaction.prepare_cached(
         "INSERT INTO blocks(cid,bytes) VALUES(?1,?2) ON CONFLICT(cid) DO NOTHING",
@@ -845,8 +773,8 @@ fn insert_blocks(
                 return Err(rusqlite::Error::InvalidQuery);
             }
         } else {
-            writes.fetch_add(1, Ordering::Relaxed);
-            written_bytes.fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            writes.set(writes.get() + 1);
+            written_bytes.set(written_bytes.get() + bytes.len() as u64);
         }
     }
     Ok(())
@@ -1159,10 +1087,7 @@ mod tests {
         assert_eq!(observed.content_revision, StoreRevision(1));
         assert_eq!(observed.snapshot_root, root.snapshot_root);
         assert_eq!(store.database_id(), reopened.database_id());
-        let linked: (String, String) = reopened
-            .connection
-            .lock()
-            .connection
+        let linked: (String, String) = Connection::open(reopened.path()).unwrap()
             .query_row("SELECT sqlite_version(),sqlite_source_id()", [], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
@@ -1304,11 +1229,11 @@ mod tests {
             if fault == StoreFault::BeforeCommit {
                 assert!(matches!(outcome, StoreDisposition::Refused(_)));
                 assert!(!store.is_recovery_required());
-                assert!(store.lease_admission().is_ok());
+                assert!(store.begin_native_transition().unwrap().complete_blocking().is_ok());
             } else {
                 assert!(matches!(outcome, StoreDisposition::RecoveryRequired(_)));
                 assert!(store.is_recovery_required());
-                assert!(store.lease_admission().is_err());
+                assert!(store.begin_native_transition().is_err());
                 assert!(matches!(
                     store.reserve_ceiling(sibling_id, sibling.revision, Generation(10)),
                     StoreDisposition::RecoveryRequired(_)
@@ -1340,10 +1265,7 @@ mod tests {
     fn keyed_reads_refuse_corruption_and_contract_refusal_does_not_change_journal() {
         let (_directory, store) = store();
         let domain = domain(&store, RecoveryDomainId::Root, 0);
-        store
-            .connection
-            .lock()
-            .connection
+        Connection::open(store.path()).unwrap()
             .execute(
                 "UPDATE blocks SET bytes=?1 WHERE cid=?2",
                 params![vec![1u8, 2, 3], domain.snapshot_root.cid().to_bytes()],
@@ -1421,15 +1343,14 @@ mod tests {
     fn strict_blob_constraints_refuse_text_and_missing_read_is_noncreating() {
         let (directory, store) = store();
         let domain = domain(&store, RecoveryDomainId::Root, 0);
-        let owner = store.connection.lock();
-        assert!(owner
-            .connection
+        let connection = Connection::open(store.path()).unwrap();
+        assert!(connection
             .execute(
                 "UPDATE recovery_domains SET ceiling='00000000' WHERE domain=?1",
                 [RecoveryDomainId::Root.bytes().as_slice()]
             )
             .is_err());
-        drop(owner);
+        drop(connection);
         assert_eq!(
             store.read_domain(RecoveryDomainId::Root).unwrap().unwrap(),
             domain
@@ -1505,6 +1426,44 @@ mod tests {
     }
 
     #[test]
+    fn durable_native_installation_requires_ack_and_abandonment_fences() {
+        let (_directory, store) = store();
+        let state = domain(&store, RecoveryDomainId::Root, 64);
+        let (root, blocks) = blocks(&("installed candidate", 3u64));
+        let StoreDisposition::Committed(receipt) = store.commit_publication(PreparedRecoveryWrite {
+            domain_id: RecoveryDomainId::Root,
+            expected_revision: state.revision,
+            snapshot_root: DomainSnapshotRoot::new(root),
+            allocation_ceiling: state.allocation_ceiling,
+            blocks,
+            public_changes: Vec::new(),
+        }) else { panic!("real durable publication must commit"); };
+        assert_eq!(store.status(), NativeStoreStatus::Installing);
+        assert_eq!(receipt.state.revision, StoreRevision(1));
+        drop(receipt);
+        assert!(matches!(store.status(), NativeStoreStatus::Fenced(_)));
+        assert!(store.begin_native_transition().is_err());
+        assert!(store.read_domain(RecoveryDomainId::Root).is_err());
+        let reopened = RunRecoveryStore::open(store.path()).unwrap();
+        assert_eq!(reopened.read_domain(RecoveryDomainId::Root).unwrap().unwrap().snapshot_root.cid(), &root);
+        assert_eq!(reopened.status(), NativeStoreStatus::Ready);
+    }
+
+    #[test]
+    fn durable_native_transition_has_explicit_completion_and_no_drop_success() {
+        let (_directory, store) = store();
+        domain(&store, RecoveryDomainId::Root, 64);
+        let ticket = store.begin_native_transition().unwrap();
+        assert_eq!(store.status(), NativeStoreStatus::Pending);
+        ticket.complete_blocking().unwrap();
+        assert_eq!(store.status(), NativeStoreStatus::Ready);
+        let abandoned = store.begin_native_transition().unwrap();
+        drop(abandoned);
+        assert!(matches!(store.status(), NativeStoreStatus::Fenced(_)));
+        assert!(store.begin_native_transition().is_err());
+    }
+
+    #[test]
     fn confirmed_commit_installs_once_under_run_guard_and_faults_never_install() {
         for fault in [
             None,
@@ -1529,8 +1488,8 @@ mod tests {
                 },
                 |state| {
                     assert!(
-                        store.connection.try_lock().is_none(),
-                        "the run guard must cover resident activation"
+                        store.status() == NativeStoreStatus::Installing,
+                        "native installation stays pending until resident activation acknowledgement"
                     );
                     installed += 1;
                     state

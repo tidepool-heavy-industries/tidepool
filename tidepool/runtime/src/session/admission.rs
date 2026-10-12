@@ -41,6 +41,26 @@ impl RuntimeDurablePublicReadiness {
                 .upgrade()
                 .is_some_and(|store| store.ensure_ready().is_ok())
     }
+    pub async fn begin_provider_transition(&self) -> Result<super::ProviderTransition, SessionError> {
+        let attachment = self.attachment.upgrade().ok_or(SessionError::WrongPublicManifestTicket)?;
+        let store = self.store.upgrade().ok_or(SessionError::WrongPublicManifestTicket)?;
+        let ticket = store.begin_provider_transition().await
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+        if self.owner.epoch() != self.owner_epoch {
+            ticket.refuse().await.map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        Ok(ticket.retain_attachment(attachment))
+    }
+
+    pub async fn check_ready_async(&self) -> Result<(), SessionError> {
+        let _attachment = self.attachment.upgrade().ok_or(SessionError::WrongPublicManifestTicket)?;
+        let store = self.store.upgrade().ok_or(SessionError::WrongPublicManifestTicket)?;
+        store.ensure_ready_async().await.map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+        if self.owner.epoch() != self.owner_epoch { return Err(SessionError::WrongPublicManifestTicket); }
+        Ok(())
+    }
+
     /// Admit a short synchronous native operation through this exact owner.
     /// Preparation and asynchronous work must occur outside this closure.
     pub fn with_admission<T>(&self, operation: impl FnOnce() -> T) -> Result<T, SessionError> {
@@ -52,13 +72,16 @@ impl RuntimeDurablePublicReadiness {
             .store
             .upgrade()
             .ok_or(SessionError::WrongPublicManifestTicket)?;
-        let _admission = store
-            .lease_admission()
+        let admission = store
+            .begin_native_transition()
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         if self.owner.epoch() != self.owner_epoch {
+            super::complete_native_transition(Some(admission))?;
             return Err(SessionError::WrongPublicManifestTicket);
         }
-        Ok(operation())
+        let result = operation();
+        super::complete_native_transition(Some(admission))?;
+        Ok(result)
     }
     pub fn session(&self) -> super::SessionId {
         self.session
@@ -1098,12 +1121,13 @@ impl RuntimeCheckedPrefix {
             execution: execution.clone(),
             scope,
         });
-        let _admission = store
+        let admission = store
             .as_ref()
-            .map(|store| store.lease_admission())
+            .map(|store| store.begin_native_transition())
             .transpose()
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         state.in_flight = Some(execution);
+        super::complete_native_transition(admission)?;
         Ok(prepared)
     }
 }
@@ -1641,13 +1665,14 @@ impl PersistentSession {
         execution.validate_runtime_admission(admission.digest(), prefix.admission.digest())?;
         execution.validate_required_native_imports(state.snapshot.actual_retained_imports())?;
         execution.validate_settled_native_bindings(state.snapshot.settled_native_bindings())?;
-        let _admission = store
+        let admission = store
             .as_ref()
-            .map(|store| store.lease_admission())
+            .map(|store| store.begin_native_transition())
             .transpose()
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         // Mounting a host payload never executes or completes the placeholder.
         state.reservation = None;
+        super::complete_native_transition(admission)?;
         Ok(())
     }
 
@@ -1749,13 +1774,14 @@ impl PersistentSession {
             observation_name,
             digest,
         });
-        let _admission = store
+        let admission = store
             .as_ref()
-            .map(|store| store.lease_admission())
+            .map(|store| store.begin_native_transition())
             .transpose()
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         state.reservation = Some(reservation);
         drop(state);
+        super::complete_native_transition(admission)?;
         Ok(prepared)
     }
     /// Adopt the compiler-owned original declaration from this same checked
@@ -2250,15 +2276,17 @@ impl PersistentSession {
             .public_visibility_snapshot_in(public_scope)
             .ok_or(SessionError::DeadScope(public_scope))?;
         let private_scope = {
-            let _admission = store
+            let admission = store
                 .as_ref()
-                .map(|store| store.lease_admission())
+                .map(|store| store.begin_native_transition())
                 .transpose()
                 .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
             self.lib_mut()
                 .seed_scope(public_scope, admitted.declaration_tip);
-            self.mint_detached_scope(public_scope)
-                .ok_or(SessionError::DeadScope(public_scope))?
+            let private_scope = self.mint_detached_scope(public_scope)
+                .ok_or(SessionError::DeadScope(public_scope))?;
+            super::complete_native_transition(admission)?;
+            private_scope
         };
         let scope_lease = Arc::new(RuntimeLexicalScopeLease {
             owner: self.admission_owner().clone(),
@@ -2285,11 +2313,12 @@ impl PersistentSession {
             completed_values: parking_lot::Mutex::new(std::collections::HashMap::new()),
             final_intent: OnceLock::new(),
         };
-        let _admission = store
+        let admission = store
             .as_ref()
-            .map(|store| store.lease_admission())
+            .map(|store| store.begin_native_transition())
             .transpose()
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+        super::complete_native_transition(admission)?;
         Ok(prepared)
     }
 
@@ -2520,12 +2549,13 @@ impl PersistentSession {
         // compiler offer captures it. Bootstrap adopts this identity rather
         // than invalidating another independently admitted private cell.
         {
-            let _admission = store
+            let admission = store
                 .as_ref()
-                .map(|store| store.lease_admission())
+                .map(|store| store.begin_native_transition())
                 .transpose()
                 .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
             self.ensure_machine_incarnation();
+            super::complete_native_transition(admission)?;
         }
         let visibility = self
             .public_visibility_snapshot_in(scope)
@@ -2579,12 +2609,14 @@ impl PersistentSession {
                 .map_err(|_| SessionError::StaleStagedDeclaration)?;
         }
         let retained_scope = {
-            let _admission = store
+            let admission = store
                 .as_ref()
-                .map(|store| store.lease_admission())
+                .map(|store| store.begin_native_transition())
                 .transpose()
                 .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-            self.retain_lexical_scope(scope)?
+            let retained = self.retain_lexical_scope(scope)?;
+            super::complete_native_transition(admission)?;
+            retained
         };
         if self.lib().durable_graph.is_some() {
             reserved_generations = self
@@ -2777,12 +2809,13 @@ impl PersistentSession {
             include_paths,
             digest,
         });
-        let _admission = store
+        let admission = store
             .as_ref()
-            .map(|store| store.lease_admission())
+            .map(|store| store.begin_native_transition())
             .transpose()
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         self.set_val_gen(last_value_generation);
+        super::complete_native_transition(admission)?;
         Ok(prepared)
     }
 
