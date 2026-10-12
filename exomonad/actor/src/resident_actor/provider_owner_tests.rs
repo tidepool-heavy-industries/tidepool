@@ -175,7 +175,7 @@ async fn pending_durable_actor_refuses_provider_and_cell_admission_after_failed_
         .is_err());
     let error = tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        crate::resident_tools::ResidentToolClient::local(actor).dispatch_workbench(
+        crate::resident_tools::ResidentToolClient::local(actor.clone()).dispatch_workbench(
             tidepool_runtime::session::WorkbenchRequest::from_cell_input("undefined"),
             None,
         ),
@@ -184,9 +184,13 @@ async fn pending_durable_actor_refuses_provider_and_cell_admission_after_failed_
     .expect("pending durable admission refuses without compiler work")
     .expect_err("pending actor cannot begin compiler work");
     assert!(
+        actor.terminal().get().is_none(),
+        "an unavailable public owner is not an exited actor"
+    );
+    assert!(
         matches!(&error, crate::ResidentToolError::Invocation(
-        KernelInvocationFailure::Rejected { detail, .. }
-    ) if detail == "durable actor public surface is not initialized"),
+        KernelInvocationFailure::Rejected { actor: refused, detail, .. }
+    ) if *refused == actor.identity() && !detail.is_empty()),
         "actual pending-owner refusal: {error:?}"
     );
     forest.shutdown().await;

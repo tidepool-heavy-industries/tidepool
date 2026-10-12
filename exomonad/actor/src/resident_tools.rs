@@ -671,9 +671,18 @@ fn hosted_admission_failure(
             detail: "actor mailbox admission is closed".into(),
             diagnostic: None,
         },
-        crate::KernelCallFailure::TargetExited(_)
-        | crate::KernelCallFailure::TargetUnavailable(_) => {
+        crate::KernelCallFailure::TargetExited(_) => {
             crate::KernelInvocationFailure::ActorExited(actor)
+        }
+        failure @ (crate::KernelCallFailure::TargetUnavailable(_)
+        | crate::KernelCallFailure::InstallationPending(_)
+        | crate::KernelCallFailure::RetirementPending(_)) => {
+            crate::KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
+                actor,
+                detail: failure.to_string(),
+                diagnostic: None,
+            }
         }
         failure => crate::KernelInvocationFailure::Failed {
             receipts: Vec::new(),
