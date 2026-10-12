@@ -128,6 +128,7 @@ pub(super) struct RunState {
     next_preparation: u64,
     preparation_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
     reservations: HashMap<ActorRef, ReservationRecord>,
+    recovery_boot: Option<Arc<RootStartupRecoveryAuthority>>,
     resource_retirement: ResourceRetirement,
     resource_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
     actor_resource_retirements: HashMap<
@@ -155,6 +156,7 @@ impl Default for RunState {
             next_preparation: 0,
             preparation_waiters: Vec::new(),
             reservations: HashMap::new(),
+            recovery_boot: None,
             resource_retirement: ResourceRetirement::Available,
             resource_waiters: Vec::new(),
             actor_resource_retirements: HashMap::new(),
@@ -435,6 +437,11 @@ impl RunState {
 }
 
 pub(super) enum RunControlMessage {
+    RegisterRecoveryBoot {
+        journal: Arc<crate::ActorRecoveryJournal>,
+        registration: crate::JournalBootRegistration,
+        reply: oneshot::Sender<Result<(), DirectoryError>>,
+    },
     CreationDescendant {
         owner: ActorRef,
         target: ActorRef,
@@ -732,6 +739,27 @@ impl Actor for RunControl {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            RunControlMessage::RegisterRecoveryBoot {
+                journal,
+                registration,
+                reply,
+            } => {
+                let result = if state.phase != RunPhase::Running {
+                    Err(DirectoryError::Closed)
+                } else if state.recovery_boot.is_some()
+                    || !state.reservations.is_empty()
+                    || !state.entries.is_empty()
+                {
+                    Err(DirectoryError::Unavailable)
+                } else {
+                    startup::RootStartupRecoveryAuthority::from_boot(journal, registration).map(
+                        |authority| {
+                            state.recovery_boot = Some(Arc::new(authority));
+                        },
+                    )
+                };
+                let _ = reply.send(result);
+            }
             RunControlMessage::CreationDescendant {
                 owner,
                 target,
@@ -846,7 +874,9 @@ impl Actor for RunControl {
                         {
                             Some(owner) => StartupPredecessorAuthority::Live(owner),
                             None => StartupPredecessorAuthority::Recovered(
-                                recovery.ok_or(DirectoryError::Unauthorized { actor })?,
+                                recovery
+                                    .or_else(|| state.recovery_boot.clone())
+                                    .ok_or(DirectoryError::Unauthorized { actor })?,
                             ),
                         },
                     };
@@ -1667,6 +1697,18 @@ impl RunControlClient {
             .send_message(message(reply))
             .map_err(|_| DirectoryError::Unavailable)?;
         receiver.await.map_err(|_| DirectoryError::Unavailable)
+    }
+    pub(crate) async fn register_recovery_boot(
+        &self,
+        journal: Arc<crate::ActorRecoveryJournal>,
+        registration: crate::JournalBootRegistration,
+    ) -> Result<(), DirectoryError> {
+        self.ask(|reply| RunControlMessage::RegisterRecoveryBoot {
+            journal,
+            registration,
+            reply,
+        })
+        .await?
     }
     pub(crate) async fn creation_descendant(
         &self,

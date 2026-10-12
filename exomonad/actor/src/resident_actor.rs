@@ -13531,6 +13531,21 @@ where
         self
     }
 
+    /// Consume the exact reopened journal boot prefix before issuing actor identities.
+    pub async fn register_recovery_boot(
+        &self,
+        registration: crate::JournalBootRegistration,
+    ) -> Result<(), crate::DirectoryError> {
+        let journal = self
+            .environment
+            .recovery
+            .clone()
+            .ok_or(crate::DirectoryError::Unavailable)?;
+        self.directory
+            .register_recovery_boot(journal, registration)
+            .await
+    }
+
     /// Keep logical IDs from being consumed by unrelated new actors while
     /// restart reconciliation decides which durable actors can be restored.
     pub async fn fence_recovery_identities(
