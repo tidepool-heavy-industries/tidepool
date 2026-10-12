@@ -49,10 +49,10 @@ room to choose its depth.
 Jev supplies [System One decision inference](https://docs.typesafe.ai/concepts/system-one.md).
 It judges supplied state using authored questions and returns structured answers
 and probabilities. The upstream excerpts below explain this programming model;
-the appended API guide
-and Jev skill supply the installed Haskell interface. In this interface, the
-wording and evidence go to Jev while your typed values, functions and effectful
-continuations stay local. Haskell owns executing the selected continuation.
+the appended API guide and Jev skill supply the installed Haskell interface.
+In this interface, the wording and evidence go to Jev while your typed values,
+functions and effectful continuations stay local. Haskell owns executing the
+selected continuation.
 This lets semantic judgment participate inside a larger authored program.
 Authoring these reactions changes their evidence, questions, policy and
 composition; it does not change the hosted model's weights. Retrieved material
