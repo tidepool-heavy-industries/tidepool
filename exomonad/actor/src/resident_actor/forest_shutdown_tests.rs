@@ -359,12 +359,15 @@ async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
     assert_eq!(roots, [parent.identity(), run_owned.identity()].into());
     assert!(child.terminal().cleanup().unwrap().is_confirmed());
     assert_eq!(cleanups.load(Ordering::Relaxed), 3);
-    let spawned_run_owned = tokio::time::timeout(Duration::from_secs(2), spawning_run_owned)
+    let refused_run_owned = tokio::time::timeout(Duration::from_secs(2), spawning_run_owned)
         .await
         .unwrap()
         .unwrap()
-        .unwrap();
-    assert_eq!(spawned_run_owned.identity(), run_owned.identity());
+        .expect_err("seal refuses startup before the behavior opens ingress");
+    let startup_cleanup = crate::local_actor::startup_cleanup(&refused_run_owned)
+        .expect("the admitted producer retains its actual startup cleanup");
+    assert_eq!(startup_cleanup.actor(), run_owned.identity());
+    assert!(startup_cleanup.is_confirmed());
     tokio::time::timeout(Duration::from_secs(2), parent_task)
         .await
         .unwrap()
