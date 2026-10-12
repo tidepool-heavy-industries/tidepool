@@ -30,6 +30,9 @@ pub enum ActorEffectKey {
     Lookup,
     RepoEvent,
     Journal,
+    Web,
+    FsRead,
+    FsWrite,
     /// Reloading the source layer the holder's own cells compile against. The
     /// root's layer is the run's; an actor launched with a checkout has its
     /// own, captured from that checkout. The key names the verb, never the
@@ -66,6 +69,9 @@ impl ActorEffectKey {
             Self::Lookup => "Lookup",
             Self::RepoEvent => "RepoEvent",
             Self::Journal => "Journal",
+            Self::Web => "Web",
+            Self::FsRead => "FsRead",
+            Self::FsWrite => "FsWrite",
             Self::Source => "Source",
         }
     }

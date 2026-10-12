@@ -28,6 +28,17 @@ pub use crate::generated::source::{SourceError, SourceReq};
 /// the program. The service answers each actor about exactly the layer that
 /// actor's own cells compile against.
 pub trait SourceReloadService: Send + Sync {
+    /// Active captured bytes, paired with their issuing revision.
+    fn read_module(
+        &self,
+        _caller: tidepool_repr::PrincipalId,
+        _name: &str,
+    ) -> Result<(String, String), SourceError> {
+        Err(SourceError::SourceUnavailable(
+            "active module reading is not installed".into(),
+        ))
+    }
+
     /// Capture `caller`'s own source roots, check the affected module graph,
     /// and publish it into `caller`'s own layer if — and only if — all of it
     /// compiles. `also_check` names additional modules to pull into the
@@ -90,6 +101,17 @@ impl SourceHandler {
         cx.respond(
             self.service()
                 .and_then(|service| service.reload(cx.principal(), &also_check, intent.as_deref())),
+        )
+    }
+
+    pub(crate) fn source_read_module(
+        &mut self,
+        cx: &tidepool_effect::dispatch::EffectContext<'_, tidepool_mcp::CapturedOutput>,
+        name: String,
+    ) -> Result<tidepool_effect::Response, tidepool_effect::error::EffectError> {
+        cx.respond(
+            self.service()
+                .and_then(|service| service.read_module(cx.principal(), &name)),
         )
     }
 

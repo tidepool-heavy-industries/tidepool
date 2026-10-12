@@ -1,0 +1,19 @@
+[defaults]
+model = "gpt-6-astra"
+effort = "medium"
+
+[models]
+astra = "gpt-6-astra"
+sol = "gpt-6.1-sol"
+luna = "gpt-6-luna"
+
+[haskell]
+source_roots = [".", "workspace"]
+modules = ["Persona.Memory", "Persona.Web"]
+spec = "AgentSpec.agentSpec"
+
+[haskell.flake_sources]
+jev-dsl = ["core"]
+
+[prompts]
+agent = "prompts/agent.md"

@@ -4,7 +4,7 @@
 -- | Human dialogue is ordinary Eff. Each ask mounts one pure Form and keeps
 -- its decoder and original payloads until that lease settles.
 module Tidepool.Form
-  ( Form, Option, option, choice, choices, branches
+  ( Form, Option, option, choice, choices, branches, branchesMany, slider
   , textInput, intInput, numberInput, boolInput, optional
   , present, section, refine, validate, validateForm, ValidationError(..)
   , AutoForm, autoForm, edit

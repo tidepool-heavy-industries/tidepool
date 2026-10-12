@@ -27,5 +27,8 @@ pub const DEFAULT_ACTOR_EFFECTS: &[ActorEffectKey] = &[
     ActorEffectKey::Lookup,
     ActorEffectKey::Source,
     ActorEffectKey::Journal,
+    ActorEffectKey::Web,
+    ActorEffectKey::FsRead,
+    ActorEffectKey::FsWrite,
     ActorEffectKey::RepoEvent,
 ];

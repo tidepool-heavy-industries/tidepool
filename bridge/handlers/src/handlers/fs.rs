@@ -1626,3 +1626,14 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+impl tidepool_mcp::InstalledEffectSupport for FsReadHandler {
+    fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        vec![exomonad_tool::ActorEffectKey::FsRead.into()]
+    }
+}
+impl tidepool_mcp::InstalledEffectSupport for FsWriteHandler {
+    fn installed_effect_support(&self) -> Vec<exomonad_tool::ToolEffectKey> {
+        vec![exomonad_tool::ActorEffectKey::FsWrite.into()]
+    }
+}

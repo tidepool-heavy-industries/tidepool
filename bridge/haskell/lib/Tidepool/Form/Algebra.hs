@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 -- | One pure answer description. Its constructor functions and option payloads
 -- remain in Haskell; only controls and occurrence identities cross the wire.
-module Tidepool.Form.Algebra (Form(..), Control(..), Option, option, optionView, optionValue, choice, choices, branches, ValidationError(..), textInput, intInput, numberInput, boolInput, present, section, refine, validate, validateForm, optional) where
+module Tidepool.Form.Algebra (Form(..), Control(..), Option, option, optionView, optionValue, choice, choices, branches, branchesMany, slider, ValidationError(..), textInput, intInput, numberInput, boolInput, present, section, refine, validate, validateForm, optional) where
 import Prelude
 import Data.Text (Text)
 import Data.List.NonEmpty (NonEmpty(..))
@@ -12,6 +12,7 @@ data Control a where
   TextControl :: Maybe Text -> Control Text
   IntControl :: Maybe Int -> Control Int
   NumberControl :: Maybe Double -> Control Double
+  SliderControl :: Double -> Double -> Double -> Control Double
   BoolControl :: Maybe Bool -> Control Bool
 
 data Option a = Option View a
@@ -29,6 +30,7 @@ data Form a where
   Choice :: Text -> NonEmpty (Option a) -> Maybe Int -> Form a
   Many :: Text -> [Option a] -> [Int] -> Form [a]
   Alternatives :: Text -> NonEmpty (Option (Form a)) -> Maybe Int -> Form a
+  AlternativesMany :: Text -> [Option (Form a)] -> Form [a]
   Present :: View -> Form ()
   Section :: Text -> Form a -> Form a
   Refine :: Bool -> (a -> Either [Text] b) -> Form a -> Form b
@@ -63,3 +65,17 @@ validateForm :: (a -> [Text]) -> Form a -> Form a
 validateForm f = Refine True (\a -> case f a of [] -> Right a; es -> Left es)
 optional :: Form a -> Form (Maybe a)
 optional x = branches "Optional" (option (PlainText "Absent") (pure Nothing) :| [option (PlainText "Present") (Just <$> x)])
+
+-- | A finite bounded range with an explicit initial answer. Invalid authored
+-- bounds are refused before any form is mounted.
+slider :: Text -> Double -> Double -> Double -> Either Text (Form Double)
+slider label lower upper initial
+  | any (\x -> isNaN x || isInfinite x) [lower, upper, initial] = Left "Slider bounds and initial value must be finite"
+  | lower >= upper = Left "Slider lower bound must be less than its upper bound"
+  | initial < lower || initial > upper = Left "Slider initial value is outside its bounds"
+  | otherwise = Right (Input label (SliderControl lower upper initial))
+
+-- | Independently reveal and answer zero or more branches. Answers follow
+-- authored option order, regardless of the order in which boxes were selected.
+branchesMany :: Text -> [Option (Form a)] -> Form [a]
+branchesMany = AlternativesMany

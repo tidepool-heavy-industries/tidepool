@@ -425,6 +425,10 @@ fn context_types() -> Vec<TypeDef> {
                     "EffectRepoEvent",
                     "EffectSource",
                     "EffectJournal",
+    "EffectWeb",
+    "EffectFsRead",
+    "EffectFsWrite",
+
                 ]
                 .into_iter()
                 .map(|ctor| SumVariant {

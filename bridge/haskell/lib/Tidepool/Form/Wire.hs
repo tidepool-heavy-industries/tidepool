@@ -45,6 +45,7 @@ compile n (Input label control) =
         TextControl seed -> prepareInput "text" key label seed
         IntControl seed -> prepareInteger key label seed
         NumberControl seed -> prepareNumber key label seed
+        SliderControl lower upper seed -> prepareSlider key label lower upper seed
         BoolControl seed -> prepareInput "bool" key label seed
   in (result,n+1)
 compile n (Choice label options initial) =
@@ -85,6 +86,29 @@ compile n (Alternatives label options initial) =
         Right i -> let (o,PreparedForm _ _ r _) = compiled !! i in Column [Caption (optionView o) label,r v]
         Left _ -> Column []
       keys v = key : case selected v of Right i -> let (_,PreparedForm _ _ _ k) = compiled !! i in k v; Left _ -> []
+  in (PreparedForm descriptor decode render keys,next)
+compile n (AlternativesMany label options) =
+  let key = fieldId n
+      (compiled,next) = compileBranches (n+1) options
+      descriptor = object ["kind" .= ("alternatives_many"::Text), "id" .= key, "label" .= label,
+        "initial" .= ([] :: [Text]), "options" .= [object ["id" .= optionId i, "label" .= optionLabel o,
+        "presentation" .= encodeView 8192 (optionView o), "form" .= v] | (i,(o,PreparedForm v _ _ _)) <- zip [0..] compiled]]
+      selected v = do
+        value <- readField key v
+        case value of
+          Array xs -> do
+            indices <- traverse (optionIndex key (length compiled)) xs
+            if length indices == length (unique indices) then Right indices
+            else Left [ValidationError (Just key) "An option was selected more than once"]
+          _ -> Left [ValidationError (Just key) "Expected a list of option identities"]
+      active v = do indices <- selected v; pure [p | (i,p) <- zip [0..] compiled, i `elem` indices]
+      decode v = do
+        ps <- active v
+        foldr (applyResults . fmap (:)) (Right []) [d v | (_,PreparedForm _ d _ _) <- ps]
+      render v = case active v of
+        Right ps -> Caption (Column [Column [optionView o,r v] | (o,PreparedForm _ _ r _) <- ps]) label
+        Left _ -> Column []
+      keys v = key : either (const []) (concatMap (\(_,PreparedForm _ _ _ k) -> k v)) (active v)
   in (PreparedForm descriptor decode render keys,next)
 compile n (Present view) = (PreparedForm (object ["kind" .= ("view"::Text),"presentation" .= encodeView 8192 view]) (const (Right ())) (const view) (const []),n)
 compile n (Section label child) =
@@ -177,3 +201,14 @@ prepareInteger key label seed = PreparedForm
     decimal digits = unsigned digits
     unsigned [] = False
     unsigned digits = all (\c -> c >= '0' && c <= '9') digits
+
+prepareSlider :: Text -> Text -> Double -> Double -> Double -> PreparedForm Double
+prepareSlider key label lower upper seed =
+  let PreparedForm _ decode render keys = prepareNumber key label (Just seed)
+      descriptor = object ["kind" .= ("slider" :: Text), "id" .= key, "label" .= label,
+        "minimum" .= lower, "maximum" .= upper, "initial" .= seed]
+      bounded draft = do
+        value <- decode draft
+        if value < lower || value > upper then Left [ValidationError (Just key) "Slider value is outside its bounds"]
+        else Right value
+  in PreparedForm descriptor bounded render keys

@@ -1868,6 +1868,44 @@ fn unreadable(error: Box<dyn std::error::Error>) -> tidepool_handlers::SourceErr
 }
 
 impl tidepool_handlers::SourceReloadService for ExomonadSourceReload {
+    fn read_module(
+        &self,
+        caller: PrincipalId,
+        name: &str,
+    ) -> std::result::Result<(String, String), tidepool_handlers::SourceError> {
+        let _one_at_a_time = self.gate.lock();
+        match self.scope(caller) {
+            ActorSourceScope::Checkpoint(_) => {
+                return Err(tidepool_handlers::SourceError::SourceUnavailable(
+                    "checkpoint module reading is not installed".into(),
+                ))
+            }
+            ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {}
+        }
+        let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
+        if !active.modules.iter().any(|(module, _)| module == name) {
+            return Err(tidepool_handlers::SourceError::SourceUnreadable(format!(
+                "module {name} is not in active revision {}",
+                active.identity
+            )));
+        }
+        // Membership in the captured manifest authorizes the module; the
+        // include-root order is the same first-wins order used by compilation.
+        for root in self.layer.active_include_paths().map_err(unreadable)? {
+            for extension in ["hs", "lhs"] {
+                let path = root.join(name.replace('.', "/")).with_extension(extension);
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => return Ok((active.identity, text)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(unreadable(error.into())),
+                }
+            }
+        }
+        Err(tidepool_handlers::SourceError::SourceUnreadable(format!(
+            "active module {name} has no retained source"
+        )))
+    }
+
     fn reload(
         &self,
         caller: PrincipalId,
@@ -4689,6 +4727,33 @@ mod tests {
         assert_ne!(work(&status.disk), before);
         assert_eq!(status.disk.generation, 0, "an unpublished snapshot");
         drop(run);
+    }
+
+    #[test]
+    fn source_module_read_retains_active_identity_and_refuses_unlisted_paths() {
+        use tidepool_handlers::SourceReloadService;
+        let (project, _run, reload) = cooperating_pair();
+        let before = reload
+            .read_module(PrincipalId::SYSTEM, "Project.Work")
+            .unwrap();
+        let status = reload.status(PrincipalId::SYSTEM).unwrap();
+        assert_eq!(before.0, status.active.identity);
+        assert!(before.1.contains("module Project.Work"));
+        write_work(project.path(), "evidenceValue + 0 `seq` evidenceValue");
+        assert_eq!(
+            reload
+                .read_module(PrincipalId::SYSTEM, "Project.Work")
+                .unwrap(),
+            before
+        );
+        let pending = reload.status(PrincipalId::SYSTEM).unwrap();
+        assert_ne!(pending.disk.identity, before.0);
+        for unlisted in ["../config", "/etc/passwd", "Project.Missing"] {
+            assert!(matches!(
+                reload.read_module(PrincipalId::SYSTEM, unlisted),
+                Err(tidepool_handlers::SourceError::SourceUnreadable(_))
+            ));
+        }
     }
 
     #[test]
