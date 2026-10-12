@@ -437,7 +437,11 @@ async fn sealed_forest_returns_typed_actual_owner_startup_cleanup() {
     assert!(forest.environment.actors.lock().is_empty());
     assert!(!fixture.scope_is_live(placement));
     let outcomes = forest.shutdown().await;
-    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "sealed prepared shutdown outcomes: {outcomes:?}"
+    );
     assert!(matches!(
         outcomes.as_slice(),
         [crate::ForestRootShutdown::RunResources(
