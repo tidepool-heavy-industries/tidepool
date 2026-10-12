@@ -2590,6 +2590,188 @@ mod tests {
 
     use super::*;
 
+    fn runtime_reload_for_run(
+        project: &Path,
+        run: Arc<tempfile::TempDir>,
+    ) -> Result<ExomonadSourceReload> {
+        let frozen = FrozenWorkspace::load(project, run.path())?;
+        ExomonadSourceReload::new_owned(
+            frozen,
+            project.to_path_buf(),
+            run.path().to_path_buf(),
+            crate::haskell_sources::ensure_exomonad_haskell()?,
+            SourceRootOwner::Temporary(run),
+        )
+    }
+
+    fn fresh_preparation(reload: &ExomonadSourceReload) -> uuid::Uuid {
+        match &reload.fresh_entry_storage {
+            exomonad_actor::SourceEntryStorage::FreshCompilation { preparation, .. } => {
+                *preparation
+            }
+            _ => panic!("fresh runtime storage must retain its issuing preparation"),
+        }
+    }
+
+    #[test]
+    fn runtime_preparation_survives_host_replacement_after_entry_allocation() {
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let construct = || {
+            let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+            let root = tidepool_atomic_write::DirectoryAnchor::open_existing(run.path()).unwrap();
+            let lease = Arc::new(crate::actor_host::HostIncarnationLease::claim(&root).unwrap());
+            ExomonadSourceReload::new_owned(
+                frozen,
+                project.path().to_path_buf(),
+                run.path().to_path_buf(),
+                crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+                SourceRootOwner::Host(lease),
+            )
+            .unwrap()
+        };
+        let first = construct();
+        let issued = fresh_preparation(&first);
+        let original = first
+            .fresh_entry_storage
+            .directory()
+            .join("a".repeat(64))
+            .join(issued.to_string());
+        std::fs::create_dir_all(&original).unwrap();
+        std::fs::write(original.join("Expr.hs"), "module Expr where\nvalue = ()\n").unwrap();
+        let identity = run.path().join("workspace/runtime-preparation.json");
+        let first_bytes = std::fs::read(&identity).ok();
+        drop(first);
+
+        let recovered = construct();
+        assert_eq!(fresh_preparation(&recovered), issued);
+        assert_eq!(Some(std::fs::read(&identity).unwrap()), first_bytes);
+        assert!(original.join("Expr.hs").is_file());
+    }
+
+    #[test]
+    fn runtime_preparation_is_stable_within_a_run_and_distinct_between_runs() {
+        let (project, first_run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let first_run = Arc::new(first_run);
+        let other_run = Arc::new(tempfile::tempdir().unwrap());
+        let first = runtime_reload_for_run(project.path(), Arc::clone(&first_run)).unwrap();
+        let same = runtime_reload_for_run(project.path(), first_run).unwrap();
+        let other = runtime_reload_for_run(project.path(), other_run).unwrap();
+        assert_eq!(fresh_preparation(&first), fresh_preparation(&same));
+        assert_ne!(fresh_preparation(&first), fresh_preparation(&other));
+    }
+
+    #[test]
+    fn runtime_preparation_refuses_malformed_and_unknown_identity_fields() {
+        for bytes in [
+            b"{".to_vec(),
+            br#"{"original":"not-a-uuid"}"#.to_vec(),
+            serde_json::to_vec(&serde_json::json!({
+                "original": uuid::Uuid::new_v4(),
+                "unissued": true,
+            }))
+            .unwrap(),
+        ] {
+            let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+            let run = Arc::new(run);
+            FrozenWorkspace::load(project.path(), run.path()).unwrap();
+            let identity = run.path().join("workspace/runtime-preparation.json");
+            std::fs::write(&identity, &bytes).unwrap();
+            assert!(runtime_reload_for_run(project.path(), Arc::clone(&run)).is_err());
+            assert_eq!(std::fs::read(&identity).unwrap(), bytes);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn runtime_preparation_refuses_alias_and_directory_identity() {
+        for alias in [true, false] {
+            let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+            let run = Arc::new(run);
+            FrozenWorkspace::load(project.path(), run.path()).unwrap();
+            let identity = run.path().join("workspace/runtime-preparation.json");
+            let target = run.path().join("foreign-preparation.json");
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "original": uuid::Uuid::new_v4(),
+            }))
+            .unwrap();
+            std::fs::write(&target, &bytes).unwrap();
+            if alias {
+                std::os::unix::fs::symlink(&target, &identity).unwrap();
+            } else {
+                std::fs::create_dir(&identity).unwrap();
+            }
+            assert!(runtime_reload_for_run(project.path(), Arc::clone(&run)).is_err());
+            assert_eq!(std::fs::read(&target).unwrap(), bytes);
+            let metadata = std::fs::symlink_metadata(&identity).unwrap();
+            assert_eq!(metadata.file_type().is_symlink(), alias);
+            assert_eq!(metadata.is_dir(), !alias);
+        }
+    }
+
+    #[test]
+    fn runtime_preparation_refuses_legacy_entries_without_issuing_identity() {
+        let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+        let run = Arc::new(run);
+        FrozenWorkspace::load(project.path(), run.path()).unwrap();
+        let retained = run.path().join("workspace/entries/legacy-original");
+        std::fs::create_dir_all(&retained).unwrap();
+        std::fs::write(retained.join("retained"), "original evidence").unwrap();
+        for _ in 0..2 {
+            assert!(runtime_reload_for_run(project.path(), Arc::clone(&run)).is_err());
+            assert!(!run
+                .path()
+                .join("workspace/runtime-preparation.json")
+                .exists());
+            assert_eq!(
+                std::fs::read_to_string(retained.join("retained")).unwrap(),
+                "original evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_source_owner_preserves_declared_preparation_without_runtime_identity() {
+        use super::super::workspace::WorkspacePreparation;
+        for completed in [false, true] {
+            let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
+            let mut frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
+            let original = uuid::Uuid::new_v4();
+            let anchor = Arc::new(
+                tidepool_atomic_write::DirectoryAnchor::open_existing(run.path()).unwrap(),
+            );
+            frozen.preparation = Some(if completed {
+                frozen.prepared_deployment = Some(Arc::clone(&anchor));
+                WorkspacePreparation::Completed {
+                    original,
+                    revision: "a".repeat(64),
+                    coverage: Vec::new(),
+                }
+            } else {
+                WorkspacePreparation::Preparing { original }
+            });
+            let reload = ExomonadSourceReload::new_owned(
+                frozen,
+                project.path().to_path_buf(),
+                run.path().to_path_buf(),
+                crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
+                SourceRootOwner::Prepared(anchor),
+            )
+            .unwrap();
+            assert_eq!(fresh_preparation(&reload), original);
+            assert!(!run
+                .path()
+                .join("workspace/runtime-preparation.json")
+                .exists());
+            assert_eq!(
+                matches!(
+                    reload.entry_storage,
+                    exomonad_actor::SourceEntryStorage::CompletedOriginal { .. }
+                ),
+                completed,
+            );
+        }
+    }
+
     #[test]
     fn retained_revision_reuses_manifests_and_preserves_original_after_publication() {
         let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
