@@ -17,13 +17,23 @@ pub(super) fn run_conversation_reader(
     store: Arc<Store>,
     recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
 ) -> ConversationReader {
-    conversation_reader(
-        store,
-        Arc::new(move |actor| {
-            let conversation = recovery.active_application_conversation(actor)?;
-            super::embedded_recovery::identity_from_conversation(&conversation).ok()
-        }),
-    )
+    Arc::new(move |actor, count| {
+        let store = store.clone();
+        let recovery = recovery.clone();
+        Box::pin(async move {
+            if count == 0 {
+                return Ok(Vec::new());
+            }
+            let conversation = recovery
+                .active_application_conversation(actor)
+                .await
+                .map_err(unreadable)?
+                .ok_or(ConversationUnavailable::Unbound)?;
+            let identity = super::embedded_recovery::identity_from_conversation(&conversation)
+                .map_err(unreadable)?;
+            read_conversation(&store, &identity, count)
+        })
+    })
 }
 
 pub(super) fn conversation_reader(
@@ -40,12 +50,20 @@ pub(super) fn conversation_reader(
             let Some(identity) = identity_for(actor) else {
                 return Err(ConversationUnavailable::Unbound);
             };
-            let history = store
-                .embedded_conversation_history(&identity)
-                .map_err(unreadable)?;
-            Ok(recent_turns(history, count))
+            read_conversation(&store, &identity, count)
         })
     })
+}
+
+fn read_conversation(
+    store: &Store,
+    identity: &HostIdentity,
+    count: usize,
+) -> Result<Vec<ConversationTurn>, ConversationUnavailable> {
+    let history = store
+        .embedded_conversation_history(identity)
+        .map_err(unreadable)?;
+    Ok(recent_turns(history, count))
 }
 
 fn unreadable(error: impl std::fmt::Display) -> ConversationUnavailable {

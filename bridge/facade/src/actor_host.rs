@@ -2063,13 +2063,15 @@ async fn run_owned(
             &config.run_directory,
             "actor-lifecycle.v2.jsonl",
         )
+        .await
     } else {
         exomonad_actor::ActorRecoveryJournal::open_existing(
             &config.run_directory,
             "actor-lifecycle.v2.jsonl",
         )
+        .await
     }?;
-    let prior_actor_records = actor_recovery.records();
+    let prior_actor_records = actor_recovery.records().await?;
 
     let run_journal_mode = run_journal_mode(
         host_incarnation.incarnation(),
@@ -2127,7 +2129,7 @@ async fn run_owned(
             settlement,
         )
     })?;
-    let prior_actor_records = actor_recovery.records();
+    let prior_actor_records = actor_recovery.records().await?;
     let accepted_source = active_source_identity(&run_root, config.workspace_inputs.is_some())?;
     let (descriptor, machine, entry) = root.into_parts();
     let prepared_validation = config
@@ -2166,7 +2168,8 @@ async fn run_owned(
         machine,
         Some(worktree_admission.clone()),
         host_incarnation.incarnation(),
-    );
+    )
+    .await?;
     let mut forest = forest
         .with_usage_pointers(exomonad_actor::UsagePointerTable::discover(
             &config.workspace,
@@ -2223,6 +2226,7 @@ async fn run_owned(
                 .map(|record| record.admission.actor.id)
                 .chain(recovered_root.map(|(_, actor)| actor.id)),
         )
+        .await
         .map_err(runtime_error)?;
     let mut startup_intent = embedded_startup.intent(
         &run_root,
@@ -3957,14 +3961,16 @@ pub(crate) async fn prepare_workspace_toolsets(
         settings.concurrent_jobs,
     )?;
     let recovery =
-        exomonad_actor::ActorRecoveryJournal::open(&runtime_directory, "actor-lifecycle.v2.jsonl")?;
+        exomonad_actor::ActorRecoveryJournal::open(&runtime_directory, "actor-lifecycle.v2.jsonl")
+            .await?;
     let (forest, _) = ResidentForest::new(
         workbench.clone(),
         tidepool_runtime::session::fresh_session_id(),
         machine,
         None,
         exomonad_actor::Incarnation::FIRST,
-    );
+    )
+    .await?;
     let forest = with_host_interpreters(
         forest,
         &config,

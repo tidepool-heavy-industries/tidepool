@@ -177,7 +177,8 @@ impl ModelFreeSession {
                 runtime_namespace(session_root.path()),
             ))),
             exomonad_actor::Incarnation::FIRST,
-        );
+        )
+        .await?;
         let returned_child_session_factory = Arc::clone(&child_session_factory);
         let mut forest = forest
             .with_usage_pointers(exomonad_actor::UsagePointerTable::discover(

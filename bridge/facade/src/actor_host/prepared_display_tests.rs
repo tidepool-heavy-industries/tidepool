@@ -128,7 +128,9 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
             machine,
             None,
             exomonad_actor::Incarnation::FIRST,
-        );
+        )
+        .await
+        .unwrap();
         // No receiver/provider has been started. The timeout only detects the
         // circular admission dependency, not a performance threshold.
         let (actor, task) = tokio::time::timeout(

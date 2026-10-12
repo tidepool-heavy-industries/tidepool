@@ -563,8 +563,9 @@ async fn startup_refusal(cancel: bool) {
         &context.config.run_directory,
         "actor-lifecycle.v2.jsonl",
     )
+    .await
     .unwrap();
-    let after = journal.initial_context(identity).unwrap().unwrap();
+    let after = journal.initial_context(identity).await.unwrap().unwrap();
     if cancel {
         assert_eq!(after.state, InitialContextState::Cancelled);
     } else {
@@ -635,10 +636,12 @@ async fn startup_refusal(cancel: bool) {
         &successor.config.run_directory,
         "actor-lifecycle.v2.jsonl",
     )
+    .await
     .unwrap();
     assert_eq!(
         restored
             .initial_context(successor.actor.identity())
+            .await
             .unwrap()
             .unwrap(),
         after

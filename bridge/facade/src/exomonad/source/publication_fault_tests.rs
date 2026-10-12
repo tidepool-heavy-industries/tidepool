@@ -167,7 +167,9 @@ async fn actor_case(project: &Path, run: &Path, fault: bool) {
         machine,
         None,
         exomonad_actor::Incarnation::FIRST,
-    );
+    )
+    .await
+    .unwrap();
     forest.set_source_layers(layers.clone());
     let (actor, task) = forest
         .admit_root(

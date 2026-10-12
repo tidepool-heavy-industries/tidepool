@@ -303,3 +303,32 @@ async fn reflection_includes_streamed_active_request_then_records_response_compl
         Err(exomonad_actor::ConversationUnavailable::Unreadable(_))
     ));
 }
+
+#[tokio::test]
+async fn journal_backed_reflection_distinguishes_missing_binding_from_fenced_owner() {
+    let directory = tempfile::tempdir().unwrap();
+    let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
+    let journal = exomonad_actor::ActorRecoveryJournal::open(&anchor, "actor-lifecycle.v2.jsonl")
+        .await
+        .unwrap();
+    let actor = ActorRef::first(ActorId(0));
+    let reader = super::embedded_reflect::run_conversation_reader(
+        Arc::new(Store::memory().unwrap()),
+        Arc::clone(&journal),
+    );
+    assert!(matches!(
+        (reader)(actor, 1).await,
+        Err(exomonad_actor::ConversationUnavailable::Unbound)
+    ));
+
+    std::fs::write(
+        directory.path().join("actor-lifecycle.v2.jsonl"),
+        b"invalid journal\n",
+    )
+    .unwrap();
+    assert!(journal.validated_records().await.is_err());
+    assert!(matches!(
+        (reader)(actor, 1).await,
+        Err(exomonad_actor::ConversationUnavailable::Unreadable(_))
+    ));
+}
