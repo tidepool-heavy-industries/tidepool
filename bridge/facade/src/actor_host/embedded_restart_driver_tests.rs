@@ -21,7 +21,31 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+async fn observe_provider_round<F: std::future::Future>(
+    failure: oneshot::Receiver<String>,
+    round: F,
+) -> Result<F::Output, String> {
+    tokio::select! {
+        biased;
+        failure = failure => Err(failure.unwrap_or_else(|_| "provider failure observer closed".into())),
+        round = round => Ok(round),
+    }
+}
+
+#[tokio::test]
+async fn provider_fixture_failure_interrupts_pending_round_observation() {
+    let (failure, observed) = oneshot::channel();
+    failure.send("original command refusal".into()).unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        observe_provider_round(observed, std::future::pending::<()>()),
+    )
+    .await
+    .expect("provider failure must interrupt an indefinitely pending round");
+    assert_eq!(result, Err("original command refusal".into()));
+}
 
 fn retained_config(config: &mut ActorHostConfig, workspace: &Path, run_root: &Path) {
     config.workspace = workspace.to_path_buf();
@@ -186,6 +210,16 @@ struct InterruptedStream {
     calls: Arc<AtomicUsize>,
     emit_call: bool,
     effect_path: Option<std::path::PathBuf>,
+    failure: Mutex<Option<oneshot::Sender<String>>>,
+}
+
+impl InterruptedStream {
+    fn failed(&self, detail: String) -> TransportError {
+        if let Some(failure) = self.failure.lock().take() {
+            let _ = failure.send(detail.clone());
+        }
+        TransportError::Stream(detail)
+    }
 }
 
 fn final_turn() -> ResponsesTurn {
@@ -256,31 +290,31 @@ impl ResponsesTransport for InterruptedStream {
                         if let Some(output) =
                             runtime.scheduler().output(&claim.operation).await.unwrap()
                         {
-                            assert!(
-                                matches!(output, harness::turn::JobOutput::Completed(Ok(_))),
-                                "{output:?}"
-                            );
+                            if !matches!(output, harness::turn::JobOutput::Completed(Ok(_))) {
+                                return Err(format!("admitted notebook failed: {output:?}"));
+                            }
                             if runtime
                                 .store()
                                 .replay_output_operation(&claim.operation)
                                 .unwrap()
                                 .is_some()
                             {
-                                assert_eq!(
-                                    std::fs::read(self.effect_path.as_ref().unwrap())
-                                        .unwrap_or_else(|error| panic!("effect witness: {error}; retained notebook output: {output:?}")),
-                                    b"x",
-                                    "the admitted command must execute exactly once before EOF"
-                                );
+                                let witness = std::fs::read(self.effect_path.as_ref().unwrap())
+                                    .map_err(|error| format!("effect witness: {error}; retained notebook output: {output:?}"))?;
+                                if witness != b"x" {
+                                    return Err(format!("effect witness must be exactly one execution, got {witness:?}; retained notebook output: {output:?}"));
+                                }
                                 break;
                             }
                         }
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
+                Ok::<(), String>(())
             })
             .await
-            .expect("actual admitted effect must complete and persist before the streamed EOF");
+            .unwrap_or_else(|_| Err("admitted effect did not settle before EOF".into()))
+            .map_err(|detail| self.failed(detail))?;
         }
         response.finish()
     }
@@ -299,11 +333,25 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
         let run_root = files.path().join("run");
         let inputs = Arc::new(Mutex::new(Vec::new()));
         let calls = Arc::new(AtomicUsize::new(0));
+        let (failure, observed_failure) = oneshot::channel();
         let host = HostedTestRuntime::start_with_factory(
             &settings,
             |config| {
                 retained_config(config, repository.path(), &run_root);
                 configure_command_path(config);
+                if emit_call {
+                    let owner = exomonad_node::command_resources::CommandResources::delegated(
+                        exomonad_node::command_resources::CommandResourcePolicy {
+                            general_bytes: 2 * exomonad_node::command_resources::GIB,
+                            protected_bytes: 0,
+                            swap_max_bytes: 0,
+                            ..Default::default()
+                        },
+                    )
+                    .expect("the isolated test delegates production command resources");
+                    config.command_resources =
+                        Some(exomonad_node::command_resources::CommandResourceClient::local(owner));
+                }
             },
             {
                 let inputs = Arc::clone(&inputs);
@@ -316,144 +364,154 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
                         calls,
                         emit_call,
                         effect_path: Some(effect_path),
+                        failure: Mutex::new(Some(failure)),
                     })
                 }
             },
         )
         .await
         .unwrap();
-        host.input("first explicit input").await.unwrap();
-        let conversation = host
-            .context
-            .binding(host.context.actor.identity())
-            .unwrap()
-            .conversation()
-            .unwrap();
-        let interrupted = tokio::time::timeout(Duration::from_secs(300), async {
-            loop {
-                let frontier = host
+        host.run_scenario(|host| {
+            Box::pin(async move {
+                host.input("first explicit input").await.unwrap();
+                let conversation = host
+                    .context
+                    .binding(host.context.actor.identity())
+                    .unwrap()
+                    .conversation()
+                    .unwrap();
+                let interrupted = observe_provider_round(
+                    observed_failure,
+                    tokio::time::timeout(Duration::from_secs(300), async {
+                        loop {
+                            let frontier = host
+                                .runtime
+                                .store()
+                                .embedded_round_frontier(conversation.identity())
+                                .unwrap();
+                            if frontier.pending_interruption.is_some()
+                                && conversation.active_round().is_none()
+                            {
+                                break frontier;
+                            }
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    }),
+                )
+                .await
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .expect("cleanup-confirmed EOF must leave the actual actor attached and idle");
+                assert!(host.context.actor.terminal().get().is_none());
+                assert!(interrupted.settled_head.is_none());
+                let pending = interrupted.pending_head.unwrap();
+                assert!(host
                     .runtime
                     .store()
-                    .embedded_round_frontier(conversation.identity())
+                    .events(Some(&pending))
+                    .unwrap()
+                    .iter()
+                    .any(|event| event.kind == "model_interrupted"));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_eq!(
+                    host.runtime
+                        .store()
+                        .embedded_round_frontier(conversation.identity())
+                        .unwrap()
+                        .pending_head,
+                    Some(pending.clone())
+                );
+                assert!(host.context.actor.terminal().get().is_none());
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                conversation
+                    .input("explicit-next", "operator", "continue explicitly")
+                    .await
                     .unwrap();
-                if frontier.pending_interruption.is_some() && conversation.active_round().is_none()
-                {
-                    break frontier;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    1,
+                    "ordinary input must not release the durable inference block"
+                );
+                let harness::embedding::HostInferenceState::Blocked { block } = host
+                    .runtime
+                    .store()
+                    .embedded_inference_state(conversation.identity())
+                    .unwrap()
+                else {
+                    panic!("the actual interruption must remain blocked");
+                };
+                let operation_id = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
+                let command = harness::server::HostCommand::Recover {
+                    target: conversation.identity().clone(),
+                    expected_block: block,
+                    mode: harness::embedding::RecoveryMode::Exact,
+                };
+                host.http_command(operation_id, command.clone())
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    command_receipt(&host, &conversation.identity().run, operation_id).await,
+                    harness::server::CommandReceiptOutcome::RecoveryAuthorized { .. }
+                ));
+                let successor = wait_head(&host, None).await;
+                host.http_command(operation_id, command.clone())
+                    .await
+                    .unwrap();
+                let stale_operation = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
+                host.http_command(stale_operation, command).await.unwrap();
+                assert!(matches!(
+                    command_receipt(&host, &conversation.identity().run, stale_operation).await,
+                    harness::server::CommandReceiptOutcome::Refused { .. }
+                ));
+                assert_eq!(
+                    calls.load(Ordering::SeqCst),
+                    2,
+                    "retrying recovery must only return its retained receipt"
+                );
+                assert_eq!(
+                    host.runtime
+                        .store()
+                        .request(&successor)
+                        .unwrap()
+                        .unwrap()
+                        .parent,
+                    Some(pending)
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 2);
+                let retained_inputs = inputs.lock();
+                let continued = &retained_inputs[1];
+                for text in ["first explicit input", "continue explicitly"] {
+                    assert_eq!(
+                        continued
+                            .input
+                            .iter()
+                            .filter(|item| item.0["content"] == text)
+                            .count(),
+                        1
+                    );
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
+                if emit_call {
+                    assert_eq!(
+                        continued
+                            .input
+                            .iter()
+                            .filter(|item| item.0["type"] == "custom_tool_call_output"
+                                && item.0["call_id"] == "effect-before-eof")
+                            .count(),
+                        1
+                    );
+                    assert_eq!(
+                        std::fs::read(repository.path().join("restart-effect-executions")).unwrap(),
+                        b"x",
+                        "the actual retained command must never execute again"
+                    );
+                }
+                drop(retained_inputs);
+                drop(conversation);
+            })
         })
-        .await
-        .expect("cleanup-confirmed EOF must leave the actual actor attached and idle");
-        assert!(host.context.actor.terminal().get().is_none());
-        assert!(interrupted.settled_head.is_none());
-        let pending = interrupted.pending_head.unwrap();
-        assert!(host
-            .runtime
-            .store()
-            .events(Some(&pending))
-            .unwrap()
-            .iter()
-            .any(|event| event.kind == "model_interrupted"));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            host.runtime
-                .store()
-                .embedded_round_frontier(conversation.identity())
-                .unwrap()
-                .pending_head,
-            Some(pending.clone())
-        );
-        assert!(host.context.actor.terminal().get().is_none());
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-        conversation
-            .input("explicit-next", "operator", "continue explicitly")
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "ordinary input must not release the durable inference block"
-        );
-        let harness::embedding::HostInferenceState::Blocked { block } = host
-            .runtime
-            .store()
-            .embedded_inference_state(conversation.identity())
-            .unwrap()
-        else {
-            panic!("the actual interruption must remain blocked");
-        };
-        let operation_id = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
-        let command = harness::server::HostCommand::Recover {
-            target: conversation.identity().clone(),
-            expected_block: block,
-            mode: harness::embedding::RecoveryMode::Exact,
-        };
-        host.http_command(operation_id, command.clone())
-            .await
-            .unwrap();
-        assert!(matches!(
-            command_receipt(&host, &conversation.identity().run, operation_id).await,
-            harness::server::CommandReceiptOutcome::RecoveryAuthorized { .. }
-        ));
-        let successor = wait_head(&host, None).await;
-        host.http_command(operation_id, command.clone())
-            .await
-            .unwrap();
-        let stale_operation = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
-        host.http_command(stale_operation, command).await.unwrap();
-        assert!(matches!(
-            command_receipt(&host, &conversation.identity().run, stale_operation).await,
-            harness::server::CommandReceiptOutcome::Refused { .. }
-        ));
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "retrying recovery must only return its retained receipt"
-        );
-        assert_eq!(
-            host.runtime
-                .store()
-                .request(&successor)
-                .unwrap()
-                .unwrap()
-                .parent,
-            Some(pending)
-        );
-        assert_eq!(calls.load(Ordering::SeqCst), 2);
-        let retained_inputs = inputs.lock();
-        let continued = &retained_inputs[1];
-        for text in ["first explicit input", "continue explicitly"] {
-            assert_eq!(
-                continued
-                    .input
-                    .iter()
-                    .filter(|item| item.0["content"] == text)
-                    .count(),
-                1
-            );
-        }
-        if emit_call {
-            assert_eq!(
-                continued
-                    .input
-                    .iter()
-                    .filter(|item| item.0["type"] == "custom_tool_call_output"
-                        && item.0["call_id"] == "effect-before-eof")
-                    .count(),
-                1
-            );
-            assert_eq!(
-                std::fs::read(repository.path().join("restart-effect-executions")).unwrap(),
-                b"x",
-                "the actual retained command must never execute again"
-            );
-        }
-        drop(retained_inputs);
-        drop(conversation);
-        host.stop().await.unwrap();
+        .await;
     }
 }
 
@@ -473,6 +531,7 @@ async fn blocked_actor_can_be_retired_through_its_browser_owner_without_inferenc
                 calls: Arc::clone(&provider_calls),
                 emit_call: false,
                 effect_path: None,
+                failure: Mutex::new(None),
             })
         },
     )
