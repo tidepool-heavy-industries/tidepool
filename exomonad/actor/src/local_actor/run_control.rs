@@ -4,6 +4,8 @@ use std::collections::HashSet;
 use tokio::sync::oneshot;
 #[cfg(test)]
 mod cluster_tests;
+#[cfg(test)]
+mod finalization_tests;
 mod preparation;
 mod startup;
 pub(crate) use startup::{

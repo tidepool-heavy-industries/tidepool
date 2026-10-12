@@ -85,11 +85,14 @@ async fn confirmed_finish_releases_boot_lease_after_journal_and_lifecycle_exit()
         let competing = competitor(&directory);
         assert_excluded(&competing);
         control.seal().await.unwrap();
-        assert!(control
-            .settle_preparations(Duration::from_secs(1))
-            .await
-            .is_confirmed());
-        assert!(control.shutdown_run_resources().await.is_confirmed());
+        assert!(matches!(
+            control.settle_preparations(Duration::from_secs(1)).await,
+            crate::CleanupComponentOutcome::Confirmed
+        ));
+        assert!(matches!(
+            control.shutdown_run_resources().await,
+            crate::CleanupComponentOutcome::Confirmed
+        ));
         control.finish_run().await.unwrap();
         task.await.unwrap();
         // A live external journal handle still owns its writer's lease.
@@ -141,7 +144,10 @@ async fn uncertain_preparation_refuses_finish_and_keeps_actual_boot_lease() {
         control.settle_preparations(Duration::from_secs(1)).await,
         crate::CleanupComponentOutcome::Unconfirmed(_)
     ));
-    assert!(control.shutdown_run_resources().await.is_confirmed());
+    assert!(matches!(
+        control.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Confirmed
+    ));
     let competing = competitor(&directory);
     drop(journal);
     assert!(control.finish_run().await.is_err());
