@@ -9,7 +9,8 @@ use ractor::{ActorRef as RactorRef, RpcReplyPort};
 pub mod lifecycle;
 pub use lifecycle::{
     ActorAdmissionLease, AdmittedKernelEnvelope, LifecycleHandle, NativeProviderAdmission,
-    NativeProviderStartError, NativeProviderTurnLease, ProviderIdleProbe,
+    NativeProviderSettlementError, NativeProviderStartError, NativeProviderTurnLease,
+    ProviderIdleProbe,
 };
 use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse};
 
