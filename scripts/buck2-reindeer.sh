@@ -161,6 +161,12 @@ def parse_harness_lock():
     except (KeyError, OSError, ValueError, tomllib.TOMLDecodeError, json.JSONDecodeError) as error:
         raise SystemExit(f'Cannot select matched harness source: {error}')
 
+def add_import(buck, statement):
+    first = re.search(r'^load\(', buck, re.MULTILINE)
+    if first is None:
+        raise SystemExit('Generated Buck rules lack their configured imports')
+    return buck[:first.start()] + statement + '\n' + buck[first.start():]
+
 def guard_harness_source(buck):
     rev, nar_hash = parse_harness_lock()
     expected_source_path = None
@@ -226,7 +232,7 @@ def guard_harness_source(buck):
     if buck.count(source_reference) != 1:
         raise SystemExit('Cannot select matched harness source: expected one harness crate source reference')
     buck = buck.replace(source_reference, f'srcs = [":{directory_name}"]', 1)
-    buck = 'load("@toolchains//:tidepool.bzl", "checked_harness_source")\n' + buck
+    buck = add_import(buck, 'load("@toolchains//:tidepool.bzl", "checked_harness_source")')
     return buck, directory_name
 with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
     stage = Path(temporary)
@@ -250,7 +256,7 @@ with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
     harness_web_source = harness_fetch
     if harness_fetch:
         if 'load("@prelude//:rules.bzl", "alias", "filegroup")' not in buck:
-            buck = 'load("@prelude//:rules.bzl", "alias", "filegroup")\n' + buck
+            buck = add_import(buck, 'load("@prelude//:rules.bzl", "alias", "filegroup")')
         buck += (
             '\nfilegroup(\n'
             '    name = "matched_harness_source",\n'
