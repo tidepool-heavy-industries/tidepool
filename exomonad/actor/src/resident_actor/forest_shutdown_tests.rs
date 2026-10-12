@@ -427,12 +427,15 @@ async fn sealed_forest_returns_typed_actual_owner_startup_cleanup() {
         Ok(_) => panic!("sealed forest admitted a late workbench"),
         Err(error) => error,
     };
-    let error = error
-        .downcast_ref::<ractor::SpawnErr>()
-        .expect("preserve the typed startup refusal");
-    assert!(crate::local_actor::startup_cleanup(error)
-        .expect("the actual startup owner cleaned its placement")
-        .is_confirmed());
+    assert!(
+        matches!(
+            error.downcast_ref::<crate::local_actor::DirectoryError>(),
+            Some(crate::local_actor::DirectoryError::Closed)
+        ),
+        "late workbench is refused at reservation before native preparation: {error:?}"
+    );
+    assert!(forest.environment.actors.lock().is_empty());
+    assert!(!fixture.scope_is_live(placement));
     let outcomes = forest.shutdown().await;
     assert_eq!(outcomes.len(), 1);
     assert!(matches!(
