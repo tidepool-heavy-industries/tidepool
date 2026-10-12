@@ -1333,6 +1333,8 @@ pub enum HandlingClass {
 /// Which driver-owned handler an [`HandlingClass::OuterDispatch`] verb reaches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OuterEffect {
+    /// Domain web retrieval.
+    Web,
     /// Console — additionally posts its text to the operator feed.
     Console,
     /// Managed worktrees.

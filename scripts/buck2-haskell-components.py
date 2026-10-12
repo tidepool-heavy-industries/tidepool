@@ -145,6 +145,9 @@ def source_location(path):
     if path.is_relative_to(WORKSPACE):
         relative = path.relative_to(WORKSPACE).as_posix()
         return "//exomonad/examples/workspace:authored_haskell_" + normalized_path(relative)
+    persona = ROOT / "exomonad/examples/persona/.exomonad"
+    if path.is_relative_to(persona):
+        return "//exomonad/examples/persona:authored_haskell_" + normalized_path(path.relative_to(persona).as_posix())
     raise ValueError(f"source {path} needs an owning native source export")
 
 
@@ -311,6 +314,8 @@ def render(metadata=None):
                     resolved = path.resolve()
                     relative = ("workspace/.exomonad/" + resolved.relative_to(WORKSPACE).as_posix()
                                 if resolved.is_relative_to(WORKSPACE)
+                                else "persona/.exomonad/" + resolved.relative_to(ROOT / "exomonad/examples/persona/.exomonad").as_posix()
+                                if resolved.is_relative_to(ROOT / "exomonad/examples/persona/.exomonad")
                                 else resolved.relative_to(PACKAGE.resolve()).as_posix())
                     if "Prelude_cbor" not in path.parts:
                         resources[relative] = source_location(path)

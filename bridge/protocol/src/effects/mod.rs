@@ -45,6 +45,7 @@ pub mod reflect;
 pub mod resource_scope;
 pub mod sleep;
 pub mod source;
+pub mod web;
 pub mod worktree;
 pub mod worktree_facades;
 
@@ -69,6 +70,7 @@ pub fn all() -> Vec<Effect> {
         console::console(),
         exec::exec(),
         journal::journal(),
+        web::web(),
         worktree::worktree(),
         event::event(),
         ask_user::ask_user(),

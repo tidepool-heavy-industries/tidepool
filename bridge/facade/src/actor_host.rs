@@ -222,6 +222,11 @@ const APPLICATION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 
 const PROCESS_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
+type ExomonadApplicationStack = HCons<
+    tidepool_handlers::WebHandler,
+    HCons<tidepool_handlers::FsReadHandler, HCons<tidepool_handlers::FsWriteHandler, HNil>>,
+>;
+
 type ExomonadHandlerStack = HCons<
     tidepool_handlers::SourceHandler,
     HCons<
@@ -234,7 +239,10 @@ type ExomonadHandlerStack = HCons<
                     ActorWorktreeRegistryHandler,
                     HCons<
                         ActorWorktreeAllocationHandler,
-                        HCons<ActorWorktreeIntegrationHandler, HCons<ActorWorktreeHandler, HNil>>,
+                        HCons<
+                            ActorWorktreeIntegrationHandler,
+                            HCons<ActorWorktreeHandler, ExomonadApplicationStack>,
+                        >,
                     >,
                 >,
             >,
@@ -244,6 +252,7 @@ type ExomonadHandlerStack = HCons<
 type ExomonadRoot = ResidentActorRoot<ExomonadHandlerStack, CapturedOutput>;
 
 fn host_handlers(
+    state_root: &Path,
     source: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
     journal: tidepool_handlers::JournalHandler,
     events: RepoEventHandler,
@@ -258,6 +267,9 @@ fn host_handlers(
         ActorWorktreeAllocationHandler::new(worktrees.clone()),
         ActorWorktreeIntegrationHandler::new(worktrees.clone()),
         worktrees,
+        tidepool_handlers::WebHandler,
+        tidepool_handlers::FsReadHandler::new(state_root.to_owned()),
+        tidepool_handlers::FsWriteHandler::new(state_root.to_owned()),
     ]
 }
 
@@ -3524,6 +3536,9 @@ fn compile_root(
     embedded_startup: Option<&mut embedded_recovery::EmbeddedStartupRecovery>,
     settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<CompiledRoot, Box<dyn std::error::Error>> {
+    let state_root = config.workspace.join(".exomonad/state");
+    std::fs::create_dir_all(&state_root)?;
+    let child_state_root = state_root.clone();
     let run_root = run_directory.path();
     let CompiledExomonadDriver {
         preamble,
@@ -3660,6 +3675,7 @@ fn compile_root(
         let child_worktree_handler = child_worktree_handler.clone();
         let mut machine = ResidentSession::unbootstrapped(
             host_handlers(
+                &child_state_root,
                 child_source_service.as_ref(),
                 child_journal.clone(),
                 child_event_handler,
@@ -3679,7 +3695,13 @@ fn compile_root(
         Ok(Box::new(machine))
     });
     let mut machine = ResidentSession::unbootstrapped(
-        host_handlers(source, journal, event_handler, worktree_handler),
+        host_handlers(
+            &state_root,
+            source,
+            journal,
+            event_handler,
+            worktree_handler,
+        ),
         CapturedOutput::new(),
         DEFAULT_NURSERY_SIZE,
         Some(library),
@@ -3871,6 +3893,7 @@ pub(crate) async fn prepare_workspace_toolsets(
         runtime_namespace(runtime_directory.path()),
     );
     let handlers = host_handlers(
+        runtime_directory.path(),
         Some(&source),
         tidepool_handlers::JournalHandler::new(tidepool_handlers::SegmentPath::create_exclusive(
             runtime_directory.path().join("journal.jsonl"),

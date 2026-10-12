@@ -96,3 +96,6 @@ actorEffectName key = case key of
   EffectSource -> "Source"
   EffectRepoEvent -> "RepoEvent"
   EffectJournal -> "Journal"
+  EffectWeb -> "Web"
+  EffectFsRead -> "FsRead"
+  EffectFsWrite -> "FsWrite"

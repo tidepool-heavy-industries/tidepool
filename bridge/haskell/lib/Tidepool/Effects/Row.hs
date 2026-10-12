@@ -19,6 +19,9 @@ import Tidepool.Agent.Watch (Watches)
 import Tidepool.Effects.Core
   ( ResourceScopes
   , Journal
+  , Web
+  , FsRead
+  , FsWrite
   , RepoEvent
   , ActorContext
   , AgentControl
@@ -99,3 +102,7 @@ instance KnownEffect RepoEvent where effectWitness = EffectWitness EffectRepoEve
 instance KnownEffect Journal where effectWitness = EffectWitness EffectJournal
 
 instance KnownEffect ResourceScopes where effectWitness = EffectWitness EffectResourceScopes
+
+instance KnownEffect Web where effectWitness = EffectWitness EffectWeb
+instance KnownEffect FsRead where effectWitness = EffectWitness EffectFsRead
+instance KnownEffect FsWrite where effectWitness = EffectWitness EffectFsWrite

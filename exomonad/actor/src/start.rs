@@ -147,6 +147,9 @@ pub enum ActorEffectKeyWire {
     EffectRepoEvent,
     EffectSource,
     EffectJournal,
+    EffectWeb,
+    EffectFsRead,
+    EffectFsWrite,
 }
 
 impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
@@ -177,6 +180,9 @@ impl From<ActorEffectKeyWire> for crate::ActorEffectKey {
             ActorEffectKeyWire::EffectRepoEvent => Self::RepoEvent,
             ActorEffectKeyWire::EffectSource => Self::Source,
             ActorEffectKeyWire::EffectJournal => Self::Journal,
+            ActorEffectKeyWire::EffectWeb => Self::Web,
+            ActorEffectKeyWire::EffectFsRead => Self::FsRead,
+            ActorEffectKeyWire::EffectFsWrite => Self::FsWrite,
         }
     }
 }

@@ -1868,6 +1868,44 @@ fn unreadable(error: Box<dyn std::error::Error>) -> tidepool_handlers::SourceErr
 }
 
 impl tidepool_handlers::SourceReloadService for ExomonadSourceReload {
+    fn read_module(
+        &self,
+        caller: PrincipalId,
+        name: &str,
+    ) -> std::result::Result<(String, String), tidepool_handlers::SourceError> {
+        let _one_at_a_time = self.gate.lock();
+        match self.scope(caller) {
+            ActorSourceScope::Checkpoint(_) => {
+                return Err(tidepool_handlers::SourceError::SourceUnavailable(
+                    "checkpoint module reading is not installed".into(),
+                ))
+            }
+            ActorSourceScope::Run | ActorSourceScope::RunReadOnly => {}
+        }
+        let active = self.layer.ensure_active(&self.frozen).map_err(unreadable)?;
+        if !active.modules.iter().any(|(module, _)| module == name) {
+            return Err(tidepool_handlers::SourceError::SourceUnreadable(format!(
+                "module {name} is not in active revision {}",
+                active.identity
+            )));
+        }
+        // Membership in the captured manifest authorizes the module; the
+        // include-root order is the same first-wins order used by compilation.
+        for root in self.layer.active_include_paths().map_err(unreadable)? {
+            for extension in ["hs", "lhs"] {
+                let path = root.join(name.replace('.', "/")).with_extension(extension);
+                match std::fs::read_to_string(&path) {
+                    Ok(text) => return Ok((active.identity, text)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(unreadable(error.into())),
+                }
+            }
+        }
+        Err(tidepool_handlers::SourceError::SourceUnreadable(format!(
+            "active module {name} has no retained source"
+        )))
+    }
+
     fn reload(
         &self,
         caller: PrincipalId,
@@ -3688,6 +3726,57 @@ mod tests {
     }
 
     #[test]
+    fn runtime_state_writes_do_not_change_source_capture_or_signature() {
+        let project = tempfile::tempdir().unwrap();
+        let run = tempfile::tempdir().unwrap();
+        let root = project.path().join(".exomonad");
+        std::fs::create_dir_all(root.join("Project/state")).unwrap();
+        let authored = root.join("Project/Work.hs");
+        std::fs::write(&authored, "module Project.Work where\nwork = 1\n").unwrap();
+        std::fs::write(root.join("Project/state/extra.h"), "#define EXTRA 1\n").unwrap();
+        let roots = [root.clone()];
+        let layer = SourceLayer::new(run.path());
+        let before = layer.observe_from_roots("state-test", &roots).unwrap();
+        let signature = super::super::workspace::sources_signature(&roots).unwrap();
+
+        let memory = root.join("state/Scratch.hs");
+        std::fs::create_dir_all(memory.parent().unwrap()).unwrap();
+        std::fs::write(&memory, "module Scratch where\nscratch = 2\n").unwrap();
+        assert_eq!(
+            layer.observe_from_roots("state-test", &roots).unwrap(),
+            before
+        );
+        assert_eq!(
+            super::super::workspace::sources_signature(&roots).unwrap(),
+            signature
+        );
+        let captured = layer.capture_from_roots("state-test", &roots).unwrap();
+        assert_eq!(captured.revision(), &before);
+        assert!(!captured.directory.join("0/state").exists());
+        assert!(captured.directory.join("0/Project/Work.hs").is_file());
+        assert!(captured.directory.join("0/Project/state/extra.h").is_file());
+        assert_eq!(
+            std::fs::read_to_string(&memory).unwrap(),
+            "module Scratch where\nscratch = 2\n"
+        );
+
+        std::fs::write(&authored, "module Project.Work where\nwork = 3\n").unwrap();
+        assert_ne!(
+            layer
+                .observe_from_roots("state-test", &roots)
+                .unwrap()
+                .identity,
+            before.identity
+        );
+        assert_ne!(
+            super::super::workspace::sources_signature(&roots).unwrap(),
+            signature
+        );
+        let changed = layer.capture_from_roots("state-test", &roots).unwrap();
+        assert_ne!(changed.revision().identity, before.identity);
+    }
+
+    #[test]
     fn source_observation_rejects_partial_and_symlinked_inputs_without_writes() {
         let run = tempfile::tempdir().unwrap();
         let root = tempfile::tempdir().unwrap();
@@ -4689,6 +4778,33 @@ mod tests {
         assert_ne!(work(&status.disk), before);
         assert_eq!(status.disk.generation, 0, "an unpublished snapshot");
         drop(run);
+    }
+
+    #[test]
+    fn source_module_read_retains_active_identity_and_refuses_unlisted_paths() {
+        use tidepool_handlers::SourceReloadService;
+        let (project, _run, reload) = cooperating_pair();
+        let before = reload
+            .read_module(PrincipalId::SYSTEM, "Project.Work")
+            .unwrap();
+        let status = reload.status(PrincipalId::SYSTEM).unwrap();
+        assert_eq!(before.0, status.active.identity);
+        assert!(before.1.contains("module Project.Work"));
+        write_work(project.path(), "evidenceValue + 0 `seq` evidenceValue");
+        assert_eq!(
+            reload
+                .read_module(PrincipalId::SYSTEM, "Project.Work")
+                .unwrap(),
+            before
+        );
+        let pending = reload.status(PrincipalId::SYSTEM).unwrap();
+        assert_ne!(pending.disk.identity, before.0);
+        for unlisted in ["../config", "/etc/passwd", "Project.Missing"] {
+            assert!(matches!(
+                reload.read_module(PrincipalId::SYSTEM, unlisted),
+                Err(tidepool_handlers::SourceError::SourceUnreadable(_))
+            ));
+        }
     }
 
     #[test]

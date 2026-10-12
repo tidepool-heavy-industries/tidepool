@@ -2474,6 +2474,7 @@ fn pane_environment_from(
         "ANTHROPIC_API_KEY",
         "GEMINI_API_KEY",
         "TYPESAFE_API_KEY",
+        "TAVILY_API_KEY",
         "SSL_CERT_FILE",
         "NIX_SSL_CERT_FILE",
         "SSH_AUTH_SOCK",

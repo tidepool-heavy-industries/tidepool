@@ -60,19 +60,16 @@ async fn prepared_first_display_returns_admission_before_consumer_and_survives_f
         .unwrap()
         .with_validation_include(include.clone());
         let mut machine = ResidentSession::unbootstrapped(
-            hlist![
-                source_handler(None),
+            host_handlers(
+                run_root.path(),
+                None,
                 journal,
                 RepoEventHandler::with_source(
                     Box::new(InertObservationSource),
                     EventConfig::default(),
                 ),
-                ActorBoundWorktreeHandler::new(worktree.clone()),
-                ActorWorktreeRegistryHandler::new(worktree.clone()),
-                ActorWorktreeAllocationHandler::new(worktree.clone()),
-                ActorWorktreeIntegrationHandler::new(worktree.clone()),
                 worktree,
-            ],
+            ),
             CapturedOutput::new(),
             DEFAULT_NURSERY_SIZE,
             Some(library),
