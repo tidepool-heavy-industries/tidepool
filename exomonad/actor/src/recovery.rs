@@ -464,6 +464,20 @@ pub enum JournalOwnerStatus {
 }
 
 impl ActorRecoveryJournal {
+    #[cfg(test)]
+    pub(crate) async fn pause_owner_for_test(&self) -> std::sync::mpsc::Sender<()> {
+        let (entered_tx, entered) = tokio::sync::oneshot::channel();
+        let (resume, paused) = std::sync::mpsc::channel();
+        self.commands
+            .send(Command::Pause {
+                entered: entered_tx,
+                resume: paused,
+            })
+            .expect("journal owner must accept test pause");
+        entered.await.expect("journal owner must enter test pause");
+        resume
+    }
+
     async fn start(
         anchor: DirectoryAnchor,
         relative_file: PathBuf,
