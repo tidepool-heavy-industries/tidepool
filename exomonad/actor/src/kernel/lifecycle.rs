@@ -142,6 +142,10 @@ pub(super) enum LifecycleCommand {
         executor: RactorRef<KernelMessage>,
         reply: RpcReplyPort<Result<(), KernelCallFailure>>,
     },
+    AttachCleanupExecutor {
+        executor: RactorRef<KernelMessage>,
+        reply: RpcReplyPort<Result<(), KernelCallFailure>>,
+    },
     ExecutorStarted(RpcReplyPort<Result<(), KernelCallFailure>>),
     ExecutorRetired,
     FinishRun {
@@ -544,6 +548,19 @@ impl LifecycleHandle {
     ) -> Result<(), KernelCallFailure> {
         let (send, receive) = tokio::sync::oneshot::channel();
         self.send(LifecycleCommand::AttachExecutor {
+            executor,
+            reply: send.into(),
+        })?;
+        self.receive(receive).await?
+    }
+
+    /// Retain physical cleanup custody without opening executor admission.
+    pub(crate) async fn attach_cleanup_executor(
+        &self,
+        executor: RactorRef<KernelMessage>,
+    ) -> Result<(), KernelCallFailure> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.send(LifecycleCommand::AttachCleanupExecutor {
             executor,
             reply: send.into(),
         })?;
@@ -1042,6 +1059,24 @@ impl Actor for LifecycleCoordinator {
                 } else {
                     Err(KernelCallFailure::MailboxClosed(state.identity))
                 };
+                let _ = reply.send(result);
+            }
+            LifecycleCommand::AttachCleanupExecutor { executor, reply } => {
+                let permitted_phase = matches!(
+                    state.phase,
+                    LifecyclePhase::Starting | LifecyclePhase::Closing
+                );
+                let exact = state
+                    .executor
+                    .as_ref()
+                    .is_none_or(|retained| retained.get_id() == executor.get_id());
+                let result = if permitted_phase && exact {
+                    state.executor = Some(executor);
+                    Ok(())
+                } else {
+                    Err(KernelCallFailure::TargetUnavailable(state.identity))
+                };
+                // Retaining a cell does not change lifecycle phase or admit work.
                 let _ = reply.send(result);
             }
             LifecycleCommand::ExecutorStarted(reply) => {
