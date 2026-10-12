@@ -291,6 +291,7 @@ struct ReservationRecord {
     previous_claim: Option<ActorRef>,
     terminal: RetainedActorExit,
     lifecycle: Option<crate::kernel::LifecycleHandle>,
+    executor: Option<ractor::ActorCell>,
     reply: Option<oneshot::Sender<Result<ActorReservation, DirectoryError>>>,
 }
 
@@ -787,6 +788,7 @@ fn begin_reservation_after(
                 .map(crate::kernel::LifecycleHandle::identity),
             terminal: terminal.clone(),
             lifecycle: None,
+            executor: None,
             reply: Some(reply),
         },
     );
@@ -853,12 +855,9 @@ impl Actor for RunControl {
                                     && receipt.confirms_actor_retirement()
                                     && record.terminal.get().as_ref() == Some(receipt.terminal())
                                     && record.terminal.cleanup().as_ref() == Some(receipt.cleanup())
-                                    && state.entries.get(&receipt.predecessor()).is_none_or(
-                                        |entry| {
-                                            entry.actor.address().get_cell().get_status()
-                                                == ActorStatus::Stopped
-                                        },
-                                    )
+                                    && record.executor.as_ref().is_some_and(|executor| {
+                                        executor.get_status() == ActorStatus::Stopped
+                                    })
                             })
                     });
                 let confirmed = state.phase == RunPhase::Retired
@@ -903,10 +902,7 @@ impl Actor for RunControl {
                             .filter(|record| matches!(record.phase, ReservationPhase::Registered))
                             .filter_map(|record| {
                                 record.lifecycle.clone().map(|lifecycle| {
-                                    let cell = state
-                                        .entries
-                                        .get(&lifecycle.identity())
-                                        .map(|entry| entry.actor.address().get_cell());
+                                    let cell = record.executor.clone();
                                     (lifecycle, cell)
                                 })
                             })
@@ -923,9 +919,13 @@ impl Actor for RunControl {
                 if state.phase == RunPhase::Finalizing
                     && state.reservations.values().all(|record| {
                         record
-                            .lifecycle
+                            .executor
                             .as_ref()
-                            .is_none_or(|lifecycle| lifecycle.run_finalized())
+                            .is_none_or(|executor| executor.get_status() == ActorStatus::Stopped)
+                            && record
+                                .lifecycle
+                                .as_ref()
+                                .is_none_or(|lifecycle| lifecycle.run_finalized())
                     })
                 {
                     let supervisor = state.preparation_supervisor.take().map(|supervisor| {
@@ -1798,11 +1798,12 @@ impl Actor for RunControl {
                         .identities
                         .runtime
                         .insert(actor.address().get_id(), identity);
-                    state
+                    let record = state
                         .reservations
                         .get_mut(&identity)
-                        .expect("registration reservation")
-                        .phase = ReservationPhase::Registered;
+                        .expect("registration reservation");
+                    record.executor = Some(actor.address().get_cell());
+                    record.phase = ReservationPhase::Registered;
                     state.entries.insert(
                         identity,
                         DirectoryEntry {
