@@ -427,43 +427,47 @@ async fn compiled_form_choice_preserves_prepared_jev_decoder_and_selected_action
 async fn compiled_form_wait_observation_belongs_to_interpreter_and_clears_on_resume() {
     let fixture = Fixture::new(757, false);
     fixture.host.0.lock().waiting_for_submission = true;
-    let execution = fixture.execute(include_str!("jev_form_runtime_success.hs"));
-    tokio::pin!(execution);
-    let wait = tokio::time::timeout(Duration::from_secs(300), async {
-        loop {
-            tokio::select! {
-                () = &mut execution => panic!("authored form must await a submission"),
-                () = tokio::time::sleep(Duration::from_millis(10)) => {},
+    let wait = {
+        let execution = fixture.execute(include_str!("jev_form_runtime_success.hs"));
+        tokio::pin!(execution);
+        let wait = tokio::time::timeout(Duration::from_secs(300), async {
+            loop {
+                tokio::select! {
+                    () = &mut execution => panic!("authored form must await a submission"),
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {},
+                }
+                let nodes = fixture.forest.inspect_host_graph();
+                if let Some((actor, wait)) = nodes.iter().find_map(|node| {
+                    node.form_waits
+                        .first()
+                        .map(|wait| (node.actor, wait.clone()))
+                }) {
+                    let state = fixture.host.0.lock();
+                    assert_eq!(state.forms[&wait.mount_id].actor, actor);
+                    assert!(state.committed.is_empty());
+                    drop(state);
+                    assert!(wait.since_unix_ms > 0);
+                    assert_eq!(
+                        fixture
+                            .forest
+                            .inspect_host_graph()
+                            .iter()
+                            .find(|node| node.actor == actor)
+                            .unwrap()
+                            .form_waits[0],
+                        wait
+                    );
+                    break wait;
+                }
             }
-            let nodes = fixture.forest.inspect_host_graph();
-            if let Some((actor, wait)) = nodes.iter().find_map(|node| {
-                node.form_waits
-                    .first()
-                    .map(|wait| (node.actor, wait.clone()))
-            }) {
-                let state = fixture.host.0.lock();
-                assert_eq!(state.forms[&wait.mount_id].actor, actor);
-                assert!(state.committed.is_empty());
-                assert!(wait.since_unix_ms > 0);
-                assert_eq!(
-                    fixture
-                        .forest
-                        .inspect_host_graph()
-                        .iter()
-                        .find(|node| node.actor == actor)
-                        .unwrap()
-                        .form_waits[0],
-                    wait
-                );
-                break wait;
-            }
-        }
-    })
-    .await
-    .expect("actual suspended native form");
-    fixture.host.0.lock().waiting_for_submission = false;
-    fixture.host.1.notify_waiters();
-    execution.await;
+        })
+        .await
+        .expect("actual suspended native form");
+        fixture.host.0.lock().waiting_for_submission = false;
+        fixture.host.1.notify_waiters();
+        execution.await;
+        wait
+    };
     assert!(fixture
         .forest
         .inspect_host_graph()
