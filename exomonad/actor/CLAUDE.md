@@ -34,6 +34,18 @@ through `ActorCapabilities::preview_child`. Do not retain a named effect profile
 as a second admission gate. Concrete workspace and provider grants remain
 independent of effect availability.
 
+Authored initial context uses the installed spec dispatcher and an actor-owned
+workbench invocation, with the ordinary admitted effects. The actor journal
+retains preparation, its exact semantic result and receipts, and publication
+separately. Settlement retains the result before releasing its reply; a lost
+host waiter cannot discard a completed seed. A recovered interrupted preparation
+requires reconciliation, never implicit effect replay. Fresh initialization is
+distinct from captured context, resume and spec reload. The host must preserve
+caller seed independently and keep all activating input outside the conversation
+until publication completes. Startup currently refuses form and helper admission
+at their typed continuation boundaries; qualifying other startup effects needs
+execution evidence through their actual services.
+
 Child capture resolves original nominal identities against local declarations
 first, then acquired certified interfaces from the actor's source owner. Narrow
 inherited interfaces through their issuer; copied source and rendered names do

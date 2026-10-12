@@ -3118,7 +3118,8 @@ impl ResidentActorBoundary {
         use tidepool_runtime::session::WorkbenchOperationDisposition;
         match self {
             Self::Context {
-                request: crate::ContextReq::GetContextWith,
+                request:
+                    crate::ContextReq::GetContextWith | crate::ContextReq::GetInitialContextWith,
                 ..
             } => WorkbenchOperationDisposition::Read,
             Self::Context { .. } => WorkbenchOperationDisposition::Staged,

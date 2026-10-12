@@ -677,6 +677,7 @@ impl ActorRecoveryJournal {
     ) -> std::io::Result<crate::InitialContextObservation> {
         let mut state = self.state.lock();
         ensure_writable(&state)?;
+        validate_initial_context_event(actor, &change)?;
         let record = state.records.get(&actor).ok_or_else(|| {
             std::io::Error::other("initial context actor has no durable admission")
         })?;
@@ -1312,10 +1313,29 @@ fn apply_event(
             }
         }
         EventKind::InitialContext { actor, change } => {
+            validate_initial_context_event(actor, &change)?;
             let record = records.get_mut(&actor).ok_or_else(|| {
                 std::io::Error::other("initial context event precedes actor admission")
             })?;
             crate::initial_context::apply_event(&mut record.initial_context, change)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_initial_context_event(
+    actor: ActorRef,
+    change: &crate::initial_context::InitialContextEvent,
+) -> std::io::Result<()> {
+    if let crate::initial_context::InitialContextEvent::Begin { identity, .. } = change {
+        if identity.actor != actor
+            || identity.operation.as_str().is_empty()
+            || identity.spec_install == 0
+            || identity.spec_source.is_empty()
+        {
+            return Err(std::io::Error::other(
+                "initial context identity differs from its issuing actor/install",
+            ));
         }
     }
     Ok(())
