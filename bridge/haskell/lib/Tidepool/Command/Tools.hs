@@ -132,14 +132,22 @@ data CommandToolFacts
         input_bytes :: Int,
         eof :: EofDisposition
       }
+  | OutputPending
+      { session_id :: Text,
+        stream :: OutputStreamFact,
+        requested_offset :: Int
+      }
   | OutputPage
       { session_id :: Text,
         stream :: OutputStreamFact,
         start_offset :: Int,
         end_offset :: Int,
         next_offset :: Int,
-        retained_end :: Int,
-        at_eof :: Bool,
+        retained_start :: Int,
+        available_end :: Int,
+        shown_text_bytes :: Int,
+        omitted_text_bytes :: Int,
+        finished :: Bool,
         lost_bytes :: Int,
         lossy :: Bool,
         payload_lines :: Int,
@@ -249,7 +257,7 @@ toolsWith presenter =
           (writeInputWith presenter),
       readOutput =
         presentWith presentation $ tool
-          "Recover output omitted from a command result or inspect a retained stream by session_id without rerunning, waiting or consuming it. Defaults: stream \"Stdout\", byte offset 0, max_output_bytes 8192; use \"Stderr\" for diagnostics. Offset must be nonnegative; positive byte budgets clamp to 1024..32768 including metadata. Continue from next_offset, not the decoded text length. Current end is not EOF: a running stream may produce more. Pages report retention gaps and lossy decoding; omitted or lost bytes limit what a quiet page can establish. EOF describes this stream, not command success or cleanup. Use write_stdin with no input to observe job state."
+          "Recover output omitted from a command result or inspect a retained stream by session_id without rerunning, waiting or consuming it. Defaults: stream \"Stdout\", byte offset 0, max_output_bytes 8192; use \"Stderr\" for diagnostics. Offset and next_offset are original-stream byte positions; do not derive them from decoded text. If response-budget clipping omits decoded text, next_offset stays at the page start so you can reread it with a larger budget before advancing. Positive byte budgets clamp to 1024..32768 including metadata. A page reports its captured range, retained start and available end, plus decoded text bytes shown or omitted by this response budget. More available, current end while running, EOF, retention loss and lossy UTF-8 are distinct. EOF describes this stream, not command success or cleanup. Use write_stdin with no input to observe job state."
           readRetained,
       cancelCommand =
         presentWith presentation $ tool
@@ -396,6 +404,9 @@ writeInputWith presenter WriteInput {session_id = key, chars = input, close_stdi
             pure $ boundedResult (outputBudget limit) (result (InputReceipt key NotAccepted 0 NotRequested) "Rejected · input not submitted (including chars); EOF not submitted · input control is not authorized")
           Left (Cmd.CommandInputAcceptedCloseUnconfirmed detail) ->
             pure $ boundedResult (outputBudget limit) (result (InputReceipt key Acknowledged (utf8Bytes text) UnconfirmedEof) ("Backend acknowledged the write; child consumption is unknown. EOF unconfirmed: " <> detail <> "\nRetry close-only with write_stdin(close_stdin=true), without chars. Do not resend these bytes."))
+          Left Cmd.CommandJobNotFound ->
+            let message = jobNotFoundGuidance key
+             in pure $ boundedResult (outputBudget limit) (result (InputReceipt key NotAccepted 0 NotRequested) message)
           Left issue -> pure $ boundedResult (outputBudget limit) (result (InputReceipt key Unconfirmed (utf8Bytes text) (if eof then UnconfirmedEof else NotRequested)) ("Input submission unconfirmed: " <> T.pack (show issue) <> "\nInspect the same job before recovery. Do not replay input after an uncertain acknowledgment."))
           Right () ->
             let receipt =
@@ -419,6 +430,9 @@ cancelRetainedWith _presenter CancelCommand {session_id = key, yield_time_ms = w
     Right (Cmd.Observation {waitMilliseconds = waitMilliseconds, outputBytes = budget}) -> do
       receipt <- send (CommandCancelWith key)
       case receipt of
+        Left Cmd.CommandJobNotFound ->
+          let message = jobNotFoundGuidance key
+           in pure $ boundedResult budget (result (Cancellation key NotAcceptedCancellation Nothing Nothing Nothing Nothing) message)
         Left issue ->
           let disposition = case issue of
                 Cmd.CommandUnauthorized -> NotAcceptedCancellation
@@ -455,7 +469,10 @@ readRetained ReadOutput {session_id = key, stream = selected, offset = position,
         Right page | utf8Bytes (Cmd.outputText page) > contentBudget -> read (max 1 (contentBudget `div` 3))
         _ -> pure first
       case pageResult of
-        Left Cmd.CommandOutputPending -> pure $ boundedResult budget (result (OutputPage key (outputStreamFact selectedStream) offset offset offset offset False 0 False 0 False) "No output yet; streams are starting.")
+        Left Cmd.CommandOutputPending -> pure $ boundedResult budget (result (OutputPending key (outputStreamFact selectedStream) offset) "No output page is available yet; streams are starting. The same job remains pending, and no output cursor advanced.")
+        Left Cmd.CommandJobNotFound ->
+          let message = jobNotFoundGuidance key
+           in pure $ boundedResult budget (result (Rejected OpReadOutput (Just key) message NoSideEffect) message)
         Left issue ->
           let detail = T.pack (show issue)
               recovery = readRecovery key selectedStream offset
@@ -464,7 +481,7 @@ readRetained ReadOutput {session_id = key, stream = selected, offset = position,
               shownDetail = boundedErrorDetail detailBudget detail
            in pure $ boundedResult budget (result (Rejected OpReadOutput (Just key) detail NoSideEffect) (prefix <> shownDetail <> recovery))
         Right details -> do
-          let eof = Cmd.outputFinished details && Cmd.outputEnd details == Cmd.outputAvailableEnd details
+          let finished = Cmd.outputFinished details
               stream = outputStreamFact selectedStream
               payload = Cmd.outputText details
               start = Cmd.outputStart details
@@ -473,15 +490,19 @@ readRetained ReadOutput {session_id = key, stream = selected, offset = position,
               retainedStart = Cmd.outputRetainedStart details
               lost = Cmd.outputLostBytes details
               lossy = Cmd.outputLossy details
-              header = streamName selectedStream <> " · bytes " <> number start <> ".." <> number end <> " of " <> number availableEnd <> (if eof then " · EOF" else if end < availableEnd then " · more available" else " · current end") <> (if retainedStart > 0 then " · retained from " <> number retainedStart else "") <> (if lost > 0 then " · lost " <> number lost <> " bytes" else "") <> (if lossy then " · lossy UTF-8" else "") <> "\n"
+              header = streamName selectedStream <> " · captured bytes " <> number start <> ".." <> number end <> " · retained from " <> number retainedStart <> " through " <> number availableEnd <> (if end < availableEnd then " · more available" else if finished then " · EOF" else " · current end · running") <> (if lost > 0 then " · lost " <> number lost <> " bytes" else "") <> (if lossy then " · lossy UTF-8" else "") <> "\n"
               clipped = "\n[payload clipped by max_output_bytes]"
-              pageTail = if eof then "" else "\nnext_offset: " <> number end
-              payloadBudget = max 0 (budget - utf8Bytes (header <> pageTail))
+              payloadBudget = max 0 (budget - 512)
               didClip = utf8Bytes payload > payloadBudget
-              shownPayload = if didClip then utf8Prefix (max 0 (payloadBudget - utf8Bytes clipped)) payload <> clipped else payload
-              text = header <> shownPayload <> pageTail
-              complete = start == 0 && retainedStart == 0 && eof && not lossy && lost == 0 && not didClip
-              page = OutputPage key stream start end end availableEnd eof lost lossy (lineCount payload) complete
+              shownPayload = utf8Prefix (if didClip then max 0 (payloadBudget - utf8Bytes clipped) else payloadBudget) payload
+              omittedPayloadBytes = utf8Bytes payload - utf8Bytes shownPayload
+              budgetLine = "decoded payload text: " <> number (utf8Bytes shownPayload) <> " UTF-8 bytes shown" <> (if omittedPayloadBytes > 0 then "; " <> number omittedPayloadBytes <> " UTF-8 bytes omitted by response budget" else "") <> "\n"
+              shownPayloadWithMarker = shownPayload <> if didClip then clipped else ""
+              nextOffset = if didClip then start else end
+              pageTail = if finished && end == availableEnd && not didClip then "" else "\nnext_offset: " <> number nextOffset
+              text = header <> budgetLine <> shownPayloadWithMarker <> pageTail
+              complete = start == 0 && retainedStart == 0 && finished && end == availableEnd && not lossy && lost == 0 && not didClip
+              page = OutputPage key stream start end nextOffset retainedStart availableEnd (utf8Bytes shownPayload) omittedPayloadBytes finished lost lossy (lineCount shownPayload) complete
           pure (result page text)
 
 defaultPresenter :: (Member Cmd.Commands effects) => ObservationPresenter effects
@@ -490,6 +511,11 @@ defaultPresenter command _ _ options retained = do
   pure shown
   where
     render observed = case Cmd.presentedOutput observed of
+      Left Cmd.CommandJobNotFound ->
+        pure
+          ( observedResult retained (Cmd.presentedStatus observed) Nothing Nothing 0 False
+              (boundedErrorPresentation (Cmd.presentedByteBudget observed) (heading observed <> "\n") (jobNotFoundGuidance (jobKey retained)) "")
+          )
       Left issue ->
         pure
           ( observedResult retained (Cmd.presentedStatus observed) Nothing Nothing 0 False
@@ -567,6 +593,10 @@ readRecovery key selectedStream offset =
     argument = case selectedStream of
       Cmd.Stdout -> "Stdout"
       Cmd.Stderr -> "Stderr"
+
+jobNotFoundGuidance :: Text -> Text
+jobNotFoundGuidance key =
+  "No retained command job exists for session_id=\"" <> key <> "\"; this operation had no effect. Find the existing session_id in the original command receipt or use its retained Cmd.Job binding. Repeating the operation with this identifier cannot succeed."
 
 boundedErrorPresentation :: Int -> Text -> Text -> Text -> Text
 boundedErrorPresentation budget prefix detail recovery =
@@ -672,8 +702,8 @@ boundedResult budget CommandToolResult {facts = semantic, presentation = text}
           boundedFacts = case semantic of
             ObservedCommand {session_id = key, state = currentState, successful = success, outcome = commandOutcome, cleanup = commandCleanup, stdout_end = stdoutEnd, stderr_end = stderrEnd, payload_lines = linesShown, retained_binding = binding} ->
               ObservedCommand key currentState success commandOutcome commandCleanup stdoutEnd stderrEnd linesShown False binding
-            OutputPage {session_id = key, stream = selectedStream, start_offset = start, end_offset = end, next_offset = next, retained_end = retained, at_eof = atEnd, lost_bytes = lost, lossy = isLossy, payload_lines = linesShown} ->
-              OutputPage key selectedStream start end next retained atEnd lost isLossy linesShown False
+            OutputPage {session_id = key, stream = selectedStream, start_offset = start, end_offset = end, next_offset = next, retained_start = retainedStart, available_end = availableEnd, shown_text_bytes = shown, omitted_text_bytes = omitted, finished = isFinished, lost_bytes = lost, lossy = isLossy, payload_lines = linesShown} ->
+              OutputPage key selectedStream start end next retainedStart availableEnd shown omitted isFinished lost isLossy linesShown False
             other -> other
        in CommandToolResult boundedFacts bounded
 

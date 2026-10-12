@@ -579,9 +579,7 @@ impl CommandJobs {
 
     fn shared(&self, id: &str) -> Result<Arc<Shared>, CommandError> {
         let entries = self.entries.lock();
-        let entry = entries
-            .get(id)
-            .ok_or_else(|| CommandError::CommandUnavailable("unknown command job".into()))?;
+        let entry = entries.get(id).ok_or(CommandError::CommandJobNotFound)?;
         Ok(entry.shared.clone())
     }
 

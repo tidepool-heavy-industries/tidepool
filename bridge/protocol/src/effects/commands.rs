@@ -255,6 +255,7 @@ pub fn commands() -> Effect {
                 "CommandError",
                 vec![
                     ("CommandUnavailable", vec![HsType::Text]),
+                    ("CommandJobNotFound", vec![]),
                     ("CommandInvalid", vec![HsType::Text]),
                     ("CommandUnauthorized", vec![]),
                     ("CommandOutputPending", vec![]),

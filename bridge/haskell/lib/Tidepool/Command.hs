@@ -211,6 +211,8 @@ renderCommandError failure = case failure of
     \status and output reads, not control; ask the owner to perform the operation"
   CommandUnavailable detail ->
     "command resource or service unavailable: " <> detail
+  CommandJobNotFound ->
+    "no retained command job exists for this identifier; find the session_id in the original command receipt or retained Cmd.Job binding before reading or cancelling. Repeating this operation with the same unknown identifier cannot succeed"
   CommandInvalid detail -> "the command itself is not runnable: " <> detail
   CommandOutputPending ->
     "the command has not opened its output streams yet; await it, or observe it later"

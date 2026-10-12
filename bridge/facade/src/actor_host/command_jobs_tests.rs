@@ -535,11 +535,6 @@ async fn structured_bash_oversized_output_retains_a_real_job() {
                 let response = running.await.unwrap().unwrap();
                 assert_eq!(response["status"], "committed", "{response}");
                 let output = response["items"][0]["output"].as_str().unwrap();
-                assert!(output.len() < 10 * 1024, "{}", output.len());
-                assert!(
-                    output.contains("BEGIN") && output.contains("END"),
-                    "{output}"
-                );
                 let session = output
                     .split("session_id: ")
                     .nth(1)
@@ -558,50 +553,40 @@ async fn structured_bash_oversized_output_retains_a_real_job() {
                     .await
                     .unwrap();
                 let page_text = page["items"][0]["output"].as_str().unwrap();
-                assert!(
-                    page_text.contains("BEGIN") && page_text.contains("next_offset:"),
-                    "{page_text}"
-                );
                 assert!(page_text.len() <= 8192);
-                assert!(!page_text.contains("END"));
-                let offset: i64 = page_text
-                    .split("next_offset: ")
-                    .nth(1)
-                    .unwrap()
-                    .trim()
-                    .parse()
-                    .unwrap();
+                let first_facts = &page["items"][0]["value"];
+                assert_eq!(first_facts["start_offset"], 0, "{page}");
+                assert_eq!(first_facts["retained_start"], 0, "{page}");
+                assert!(first_facts["end_offset"].as_u64().unwrap() > 0, "{page}");
+                assert!(
+                    first_facts["end_offset"].as_u64().unwrap()
+                        < first_facts["available_end"].as_u64().unwrap(),
+                    "the first page must leave retained bytes available: {page}"
+                );
+                assert_eq!(first_facts["next_offset"], first_facts["end_offset"], "{page}");
                 let next_page = policy
         .dispatch_json_boxed(ToolInvocation {
             context: None,
             name: "read_output".into(),
             arguments: ToolArguments::Structured(
-                serde_json::json!({"session_id":session,"offset":offset,"max_output_bytes":1024}),
+                            serde_json::json!({"session_id":session,"offset":first_facts["next_offset"],"max_output_bytes":1024}),
             ),
         })
         .await
         .unwrap();
-                assert!(
-                    next_page["items"][0]["output"]
-                        .as_str()
-                        .unwrap()
-                        .contains(&format!("bytes {offset}–")),
-                    "{next_page}"
-                );
                 assert!(next_page["items"][0]["output"].as_str().unwrap().len() <= 1024);
-                let binding = response["items"][0]["installedBindings"][0]
-                    .as_str()
-                    .unwrap();
-                assert!(
-                    output.contains(&format!("{binding} :: Cmd.Job")),
-                    "{output}"
+                let second_facts = &next_page["items"][0]["value"];
+                assert_eq!(second_facts["start_offset"], first_facts["next_offset"], "{next_page}");
+                assert!(second_facts["end_offset"].as_u64().unwrap() > second_facts["start_offset"].as_u64().unwrap(), "{next_page}");
+                let second_output = next_page["items"][0]["output"].as_str().unwrap();
+                assert_eq!(
+                    second_facts["shown_text_bytes"].as_u64().unwrap(),
+                    (second_output.matches('λ').count() * "λ".len()) as u64,
+                    "shown byte count must describe decoded payload, not source cursor bytes: {next_page}"
                 );
-                let observed = committed(
-                    campaign,
-                    &format!("saved <- Cmd.readStdout {binding}\nfmap T.length saved"),
-                )
-                .await;
-                assert!(observed.to_string().contains("32011"), "{observed}");
+                assert_eq!(second_facts["omitted_text_bytes"], 0, "{next_page}");
+                assert_eq!(second_facts["next_offset"], second_facts["end_offset"], "{next_page}");
+                assert_eq!(response["items"][0]["installedBindings"].as_array().unwrap().len(), 1);
                 assert_eq!(backend.specs.lock().len(), 1);
             })
         })
@@ -1329,15 +1314,16 @@ async fn bound_command_result_is_summarized_and_remains_readable() {
                 assert_eq!(run["status"], "committed", "{run}");
                 assert_eq!(backend.specs.lock().len(), 1);
 
-                let bound_output = run["items"][0]["output"].as_str().unwrap();
-                assert!(bound_output.contains("command "), "{run}");
-                assert!(bound_output.contains("exit 0"), "{run}");
-                assert!(bound_output.contains("stdout 10000 bytes"), "{run}");
-                assert!(bound_output.contains("stderr 0 bytes"), "{run}");
-                assert!(!bound_output.contains(&"Q".repeat(100)), "{run}");
+                let bindings = run["items"][0]["installedBindings"]
+                    .as_array()
+                    .expect("the returned command result must install its retained job");
+                assert_eq!(bindings.len(), 1, "{run}");
+                let binding = bindings[0].as_str().unwrap();
                 let recovered = committed(
                     campaign,
-                    "if Cmd.stdout paged == Right (T.replicate 10000 \"Q\") && Cmd.stdout paged == Right (T.replicate 10000 \"Q\") then pure () else error \"bound result was not readable twice with complete stdout\"",
+                    &format!(
+                        "if Cmd.stdout paged == Right (T.replicate 10000 \"Q\") && Cmd.stdout {binding} == Right (T.replicate 10000 \"Q\") then pure () else error \"bound result was not readable twice with complete stdout\""
+                    ),
                 )
                 .await;
                 assert_eq!(recovered["status"], "committed", "{recovered}");
@@ -1351,10 +1337,23 @@ async fn bound_command_result_is_summarized_and_remains_readable() {
                     .await
                     .supply(Ok(unbound_backend.clone()));
                 let unbound = unbound_run.await.unwrap();
-                let unbound_output = unbound["items"][0]["output"].as_str().unwrap();
-                assert!(unbound_output.contains("CommandExited 0"), "{unbound}");
-                assert!(!unbound_output.contains("session_id:"), "{unbound}");
-                assert!(unbound_output.contains('U'), "{unbound}");
+                let unbound_bindings = &unbound["items"][0]["installedBindings"];
+                let observations = unbound_bindings
+                    .as_array()
+                    .expect("the expression result must publish its retained observation");
+                assert_eq!(observations.len(), 1, "{unbound}");
+                let observation = observations[0].as_str().unwrap();
+                assert_eq!(unbound["status"], "committed", "{unbound}");
+                let recovered_observation = committed(
+                    campaign,
+                    &format!(
+                        "if Cmd.stdout ({observation} ()) == Right \"U\" then pure () else error \"retained expression result was not readable\""
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    recovered_observation["status"], "committed", "{recovered_observation}"
+                );
                 assert_eq!(backend.specs.lock().len(), 1, "reading reran the command");
                 assert_eq!(unbound_backend.specs.lock().len(), 1);
             })
@@ -2570,8 +2569,13 @@ async fn flat_output_pending_is_distinct_from_empty_and_failure() {
                 backend_request(campaign).await.supply(Ok(backend.clone()));
                 let receipt = started.await.unwrap().unwrap();
                 let output = receipt["items"][0]["output"].as_str().unwrap();
-                assert!(output.contains("No output yet"), "{output}");
-                assert!(!output.contains("Unavailable"), "{output}");
+                assert_eq!(
+                    receipt["items"][0]["installedBindings"]
+                        .as_array()
+                        .unwrap()
+                        .len(),
+                    1
+                );
                 let session = output
                     .split("session_id: ")
                     .nth(1)
@@ -2583,14 +2587,23 @@ async fn flat_output_pending_is_distinct_from_empty_and_failure() {
                 let pending = call("read_output", serde_json::json!({"session_id":session}))
                     .await
                     .unwrap();
-                assert!(pending.to_string().contains("No output yet"), "{pending}");
+                assert_eq!(pending["status"], "committed", "{pending}");
+                let pending_facts = &pending["items"][0]["value"];
+                assert_eq!(pending_facts["requested_offset"], 0, "{pending}");
+                assert!(pending_facts.get("start_offset").is_none(), "{pending}");
+                assert!(pending_facts.get("next_offset").is_none(), "{pending}");
                 backend.output_pending.store(false, Release);
                 *backend.stdout.lock() = String::new();
                 let empty = call("read_output", serde_json::json!({"session_id":session}))
                     .await
                     .unwrap();
-                assert!(empty.to_string().contains("bytes 0–0"), "{empty}");
-                assert!(!empty.to_string().contains("No output yet"), "{empty}");
+                assert_eq!(empty["status"], "committed", "{empty}");
+                let empty_facts = &empty["items"][0]["value"];
+                assert_eq!(empty_facts["start_offset"], 0, "{empty}");
+                assert_eq!(empty_facts["end_offset"], 0, "{empty}");
+                assert_eq!(empty_facts["available_end"], 0, "{empty}");
+                assert_eq!(empty_facts["shown_text_bytes"], 0, "{empty}");
+                assert_eq!(empty_facts["finished"], true, "{empty}");
                 backend.output_unavailable.store(true, Release);
                 let failed = call(
                     "write_stdin",
@@ -2598,17 +2611,39 @@ async fn flat_output_pending_is_distinct_from_empty_and_failure() {
                 )
                 .await
                 .unwrap();
+                assert_eq!(failed["status"], "committed", "{failed}");
+                let unavailable = call("read_output", serde_json::json!({"session_id":session}))
+                    .await
+                    .unwrap();
+                assert_eq!(unavailable["status"], "committed", "{unavailable}");
                 assert!(
-                    failed.to_string().contains("output transport lost"),
-                    "{failed}"
+                    unavailable["items"][0]["value"]["reason"]
+                        .as_str()
+                        .is_some_and(|reason| reason.contains("CommandUnavailable")
+                            && reason.contains("output transport lost")),
+                    "{unavailable}"
                 );
-                let unauthorized =
-                    call("read_output", serde_json::json!({"session_id":"not-owned"}))
-                        .await
-                        .unwrap();
+                let unknown = call("read_output", serde_json::json!({"session_id":"unknown"}))
+                    .await
+                    .unwrap();
+                let read_text = unknown["items"][0]["output"].as_str().unwrap();
                 assert!(
-                    unauthorized.to_string().contains("unknown command job"),
-                    "{unauthorized}"
+                    read_text.contains("No retained command job exists")
+                        && read_text.contains("original command receipt")
+                        && !read_text.contains("read_output(session_id=\"unknown\""),
+                    "{unknown}"
+                );
+                let cancel = call(
+                    "cancel_command",
+                    serde_json::json!({"session_id":"unknown"}),
+                )
+                .await
+                .unwrap();
+                let cancel_text = cancel["items"][0]["output"].as_str().unwrap();
+                assert!(
+                    cancel_text.contains("No retained command job exists")
+                        && !cancel_text.contains("cancel_command(session_id=\"unknown\""),
+                    "{cancel}"
                 );
                 backend.finish.send_replace(true);
             })
