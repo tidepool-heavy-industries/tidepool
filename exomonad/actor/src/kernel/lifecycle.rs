@@ -823,18 +823,24 @@ impl LifecycleHandle {
             .map_err(|_| "idle retirement outcome unavailable".to_string())?
     }
 
+    pub(crate) fn unavailable_failure(&self) -> KernelCallFailure {
+        if self.terminal.get().is_some() {
+            KernelCallFailure::TargetExited(self.identity)
+        } else {
+            KernelCallFailure::TargetUnavailable(self.identity)
+        }
+    }
+
     fn send(&self, command: LifecycleCommand) -> Result<(), KernelCallFailure> {
         self.address
             .cast(command)
-            .map_err(|_| KernelCallFailure::TargetExited(self.identity))
+            .map_err(|_| self.unavailable_failure())
     }
     async fn receive<T>(
         &self,
         receive: tokio::sync::oneshot::Receiver<T>,
     ) -> Result<T, KernelCallFailure> {
-        receive
-            .await
-            .map_err(|_| KernelCallFailure::TargetExited(self.identity))
+        receive.await.map_err(|_| self.unavailable_failure())
     }
 }
 
@@ -1000,7 +1006,13 @@ impl LifecycleState {
         };
         executor
             .cast(KernelMessage::Admitted(envelope))
-            .map_err(|_| KernelCallFailure::TargetExited(self.identity))
+            .map_err(|_| {
+                if self.terminal.get().is_some() {
+                    KernelCallFailure::TargetExited(self.identity)
+                } else {
+                    KernelCallFailure::TargetUnavailable(self.identity)
+                }
+            })
     }
 
     fn provider_error(&self) -> Option<NativeProviderStartError> {

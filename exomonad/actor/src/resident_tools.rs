@@ -1565,8 +1565,8 @@ impl ResidentToolClient {
             Ok(reply) => reply,
             Err(_) => {
                 control.mark_unconfirmed();
-                let reply = control.settle_reply(Err(crate::KernelInvocationFailure::ActorExited(
-                    self.actor.identity(),
+                let reply = control.settle_reply(Err(self.actor.unavailable_invocation(
+                    "admitted workbench reply was lost; cleanup remains unconfirmed",
                 )));
                 if matches!(&reply, Err(crate::KernelInvocationFailure::ActorExited(_))) {
                     return Err(ResidentToolError::Unavailable(

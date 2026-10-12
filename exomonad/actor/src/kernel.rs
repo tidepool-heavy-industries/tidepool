@@ -886,6 +886,45 @@ impl RetirementBatch {
 }
 
 impl LocalActorRef {
+    pub(crate) fn unavailable_invocation(&self, detail: &str) -> KernelInvocationFailure {
+        if self.terminal.get().is_some() {
+            KernelInvocationFailure::ActorExited(self.identity)
+        } else {
+            KernelInvocationFailure::CleanupUnconfirmed {
+                publication: None,
+                actor: self.identity,
+                detail: detail.into(),
+                receipts: Vec::new(),
+            }
+        }
+    }
+
+    fn control_admission_failure(&self, failure: KernelCallFailure) -> KernelInvocationFailure {
+        match failure {
+            KernelCallFailure::TargetExited(_) => KernelInvocationFailure::ActorExited(self.identity),
+            KernelCallFailure::TargetUnavailable(_) => self.unavailable_invocation(
+                "actor control admission outcome is unavailable; inspect retained state before retrying",
+            ),
+            failure @ (KernelCallFailure::MailboxClosed(_)
+            | KernelCallFailure::InstallationPending(_)
+            | KernelCallFailure::RetirementPending(_)) => KernelInvocationFailure::Rejected {
+                actor: self.identity,
+                detail: failure.to_string(),
+                receipts: Vec::new(),
+                diagnostic: None,
+            },
+            KernelCallFailure::Handler { actor, detail, diagnostic } => KernelInvocationFailure::Failed {
+                actor, detail, diagnostic, receipts: Vec::new(),
+            },
+            failure => KernelInvocationFailure::Failed {
+                actor: self.identity,
+                detail: failure.to_string(),
+                receipts: Vec::new(),
+                diagnostic: None,
+            },
+        }
+    }
+
     pub(crate) fn hosted_cell(&self) -> &HostedCellSlot {
         self.lifecycle.hosted_cell()
     }
@@ -997,7 +1036,7 @@ impl LocalActorRef {
                 reply: reply.into(),
             })
             .await
-            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
+            .map_err(|failure| self.control_admission_failure(failure))?;
         receive.await.map_err(|_| KernelInvocationFailure::Failed { receipts: Vec::new(),
             actor: self.identity,
             detail: "replacement outcome unavailable; inspect retained actor state before further action".into(),
@@ -1012,10 +1051,12 @@ impl LocalActorRef {
                 reply: reply.into(),
             })
             .await
-            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
+            .map_err(|failure| self.control_admission_failure(failure))?;
         receive
             .await
-            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?
+            .map_err(|_| {
+                self.unavailable_invocation("admitted actor drain outcome is unavailable")
+            })?
             .map_err(|error| KernelInvocationFailure::Rejected {
                 receipts: Vec::new(),
                 actor: self.identity,
@@ -1136,7 +1177,7 @@ impl LocalActorRef {
         .await?;
         receive
             .await
-            .map_err(|_| KernelCallFailure::TargetExited(self.identity))?
+            .map_err(|_| self.lifecycle.unavailable_failure())?
     }
 
     #[must_use]
@@ -1168,10 +1209,10 @@ impl LocalActorRef {
                 reply: reply.into(),
             })
             .await
-            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
-        receive
-            .await
-            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))
+            .map_err(|failure| self.control_admission_failure(failure))?;
+        receive.await.map_err(|_| {
+            self.unavailable_invocation("admitted actor control outcome is unavailable")
+        })
     }
 
     pub async fn seal_hosted_work(&self) -> Result<crate::HostedWorkSeal, KernelInvocationFailure> {
@@ -1181,10 +1222,10 @@ impl LocalActorRef {
                 reply: reply.into(),
             })
             .await
-            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
-        receive
-            .await
-            .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))
+            .map_err(|failure| self.control_admission_failure(failure))?;
+        receive.await.map_err(|_| {
+            self.unavailable_invocation("admitted actor control outcome is unavailable")
+        })
     }
 
     /// Observe the same actor-owned retirement after waiter loss. A legacy or
@@ -1234,19 +1275,17 @@ impl LocalActorRef {
         {
             // A concurrent bootstrap can finish between recording intent and
             // enqueueing the mailbox operation. Reuse only its published exit.
-            return self
-                .terminal
-                .get()
-                .ok_or(KernelInvocationFailure::ActorExited(self.identity));
+            return self.terminal.get().ok_or_else(|| {
+                self.unavailable_invocation("actor retirement outcome is unavailable")
+            });
         }
         match receive.await {
             Ok(terminal) => Ok(terminal),
             // Bootstrap may observe the request before draining its mailbox.
             // Its lifecycle owner still performs and publishes exact cleanup.
-            Err(_) => self
-                .terminal
-                .get()
-                .ok_or(KernelInvocationFailure::ActorExited(self.identity)),
+            Err(_) => self.terminal.get().ok_or_else(|| {
+                self.unavailable_invocation("actor retirement outcome is unavailable")
+            }),
         }
     }
 
