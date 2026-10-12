@@ -2725,11 +2725,60 @@ async fn workspace_check_ignores_constraints_on_a_later_helper() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "manual full-history diagnostic; the frozen cohort uses focused cases"]
 async fn skill_recipe_receives_its_typed_request() {
     let repository = recipe_workspace(Some(&["Project.SkillChecks.skills"]));
     crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .expect("the published skill recipe must execute with its typed request");
+}
+
+// These production-recipe scenarios form the frozen skill-workflow gate and
+// remain independently selectable. The full-history diagnostic above is
+// optional because its broad module preflight repeats setup across every step.
+fn focused_skill_workspace(recipe: &str) -> tempfile::TempDir {
+    let repository = recipe_workspace(Some(&[recipe]));
+    crate::exomonad::edit_fixture_project_config(&repository.path().join(".exomonad"), |project| {
+        project.haskell.modules = vec![
+            "Exomonad.Contrib.Types".into(),
+            "Exomonad.Contrib.Actors".into(),
+            "Project.Work".into(),
+        ];
+    });
+    super::test_campaign::commit_workspace(repository.path());
+    repository
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn actor_reuse_skill_recipe_retains_typed_request_history() {
+    let repository = focused_skill_workspace("Project.SkillChecks.actorReuse");
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .expect("the actor reuse recipe must retain both typed request histories");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn routing_skill_recipe_executes_the_published_record_join() {
+    let repository = focused_skill_workspace("Project.SkillChecks.routing");
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .expect("the routing recipe must execute the published record join");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn notebook_forms_skill_recipe_executes_published_authoring_forms() {
+    let repository = focused_skill_workspace("Project.SkillChecks.notebookForms");
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .expect("the notebook forms recipe must execute the published authoring forms");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn jev_skill_recipe_executes_the_published_packets() {
+    let repository = focused_skill_workspace("Project.SkillChecks.jev");
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .expect("the Jev recipe must execute the published typed packets");
 }
 
 #[tokio::test(flavor = "multi_thread")]

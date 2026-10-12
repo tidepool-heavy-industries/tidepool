@@ -1,7 +1,7 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.SkillChecks (skills, notebookForms, reviewProvenance) where
+module Project.SkillChecks (skills, actorReuse, routing, jev, notebookForms, reviewProvenance) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
@@ -26,7 +26,24 @@ example actor skill index = exampleBody actor skill index >>= turn actor
 skills :: Member RecipeCheck effects => Eff effects ()
 skills = do
   owner <- root
-  baseline <- git owner ["rev-parse", "HEAD"]
+  worker <- requestRoundTrip owner
+  routingHistory owner
+  actorReuseHistory owner worker
+  notebookExamples owner
+  jevExamples owner
+  checkNotebookForms owner
+
+-- The focused history keeps the initial typed exchange that gives the reused
+-- actor a real prior receipt. The separate startup regression owns the
+-- standalone spawn/activation contract.
+actorReuse :: Member RecipeCheck effects => Eff effects ()
+actorReuse = do
+  owner <- root
+  worker <- requestRoundTrip owner
+  actorReuseHistory owner worker
+
+requestRoundTrip :: Member RecipeCheck effects => CheckActor -> Eff effects Activation
+requestRoundTrip owner = do
   void $ turn owner "let privateSkillNotebook = True\nlet input = \"typed skill request\" :: Text\nRight worker <- spawnSubagent (FreshCtx \"Reply to one typed request.\") SameDir ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"skill-example\" })"
   requestExample <- exampleBody owner "exomonad-agent-work" 0
   -- The model-free recipe drives the reply after request admission, before
@@ -37,52 +54,86 @@ skills = do
   check "typed request activates the explicitly spawned Luna worker" (checkModel worker == Just "gpt-6-luna")
   refuseCell (checkActor worker) "fresh skill worker does not inherit parent notebook declarations"
     "privateSkillNotebook"
-  assertCell (checkActor worker) "the worker receives the typed skill request"
-    "(sessionInput :: Text) == \"typed skill request\""
-  void $ turn (checkActor worker)
-    "import qualified Tidepool.Agent.Reply as SkillReply\nfirstScope <- (SkillReply.currentRequest :: Eff WorkspaceEffects (SkillReply.RequestScope Text Text))\nlet firstSkillRequest = case firstScope of { SkillReply.RequestActive request _ -> SkillReply.requestIdNumber request; _ -> -1 }"
-  assertCell (checkActor worker) "the first skill request has its own active typed identity"
-    "case firstScope of { SkillReply.RequestActive _ active -> active == (sessionInput :: Text); _ -> False }"
+  void $ turn (checkActor worker) $ Text.unlines
+    [ "import qualified Tidepool.Check"
+    , "import qualified Tidepool.Agent.Reply as SkillReply"
+    , "Tidepool.Check.assertThat \"the worker receives the typed skill request\" ((sessionInput :: Text) == \"typed skill request\")"
+    , "firstScope <- (SkillReply.currentRequest :: Eff WorkspaceEffects (SkillReply.RequestScope Text Text))"
+    , "let firstSkillRequest = case firstScope of { SkillReply.RequestActive request _ -> SkillReply.requestIdNumber request; _ -> -1 }"
+    , "Tidepool.Check.assertThat \"the first skill request has its own active typed identity\" (case firstScope of { SkillReply.RequestActive _ active -> active == (sessionInput :: Text); _ -> False })"
+    ]
   void $ turn (checkActor worker) "respond (\"typed result\" :: Text)"
   void $ turn owner (Text.drop 1 replySource)
-  assertCell owner "the published skill awaits the exact request result" "reply == \"typed result\""
-  void $ turn owner "import Tidepool.Agent.Reply (ExecutionReceipt (..), responseExecution)\nimport qualified Tidepool.Actor as Actor\nfirstSkillReceipt <- pollResponse pending"
-  assertCell owner "the first skill receipt belongs to the original request"
-    "case firstSkillReceipt of { ResponseReady receipt -> executionRequest (responseExecution receipt) == requestId pending && responseValue receipt == \"typed result\"; _ -> False }"
-  void $ example owner "exomonad-define-actors" 0
-  awaitCell owner "record skill joins differently typed inputs"
-    "(== Just (\"abc123\",4)) <$> R.call (joined endpoints) ()"
-  void $ turn owner "let resultsWorker = worker\nRight worker <- request @(Outcome Candidate) resultsWorker input defaultRequestOptions"
+  void $ turn owner $ Text.unlines
+    [ "import qualified Tidepool.Check"
+    , "import Tidepool.Agent.Reply (ExecutionReceipt (..), responseExecution)"
+    , "import qualified Tidepool.Actor as Actor"
+    , "Tidepool.Check.assertThat \"the published skill awaits the exact request result\" (reply == \"typed result\")"
+    , "firstSkillReceipt <- pollResponse pending"
+    , "Tidepool.Check.assertThat \"the first skill receipt belongs to the original request\" (case firstSkillReceipt of { ResponseReady receipt -> executionRequest (responseExecution receipt) == requestId pending && responseValue receipt == \"typed result\"; _ -> False })"
+    ]
+  pure worker
+
+actorReuseHistory :: Member RecipeCheck effects => CheckActor -> Activation -> Eff effects ()
+actorReuseHistory owner worker = do
+  void $ turn owner $ Text.unlines
+    [ "import qualified Tidepool.Check"
+    , "let resultsWorker = worker"
+    , "Right worker <- request @(Outcome Candidate) resultsWorker input defaultRequestOptions"
+    , "candidateAdmission <- pollResponse worker"
+    , "display (T.pack (show (requestId pending, requestId worker, candidateAdmission)))"
+    , "Tidepool.Check.assertThat \"the new skill request has a distinct identity without an observed terminal refusal\" (case candidateAdmission of { ResponseUnavailable failure -> error (T.pack (show (requestId pending, requestId worker, failure))); _ -> requestId pending /= requestId worker })"
+    ]
   let resultsWorker = worker
-  void $ turn owner "candidateAdmission <- pollResponse worker\ndisplay (T.pack (show (requestId pending, requestId worker, candidateAdmission)))"
-  assertCell owner "the new skill request has a distinct identity without an observed terminal refusal"
-    "case candidateAdmission of { ResponseUnavailable failure -> error (T.pack (show (requestId pending, requestId worker, failure))); _ -> requestId pending /= requestId worker }"
   reused <- activation
   check "the heterogeneous request activates the same actor incarnation"
     (checkActor reused == checkActor resultsWorker)
   awaitCellBy (checkActor resultsWorker) "the retained actor mounts the new skill request and reply type"
     "\\scope -> case scope of { Right (request, active) -> SkillReply.requestIdNumber request /= firstSkillRequest && active == \"typed skill request\"; _ -> False }"
     "do { scope <- (SkillReply.currentRequest :: Eff WorkspaceEffects (SkillReply.RequestScope Text (Outcome Candidate))); pure (case scope of { SkillReply.RequestActive request active -> Right (request, active); SkillReply.RequestUnavailable failure -> Left failure }) }"
-  void $ turn (checkActor resultsWorker)
-    "candidateScope <- (SkillReply.currentRequest :: Eff WorkspaceEffects (SkillReply.RequestScope Text (Outcome Candidate)))\noldResultScope <- (SkillReply.currentRequest :: Eff WorkspaceEffects (SkillReply.RequestScope Text Text))\ndisplay (T.pack (show (case candidateScope of { SkillReply.RequestActive request active -> Right (request, active); SkillReply.RequestUnavailable failure -> Left failure })))"
-  assertCell (checkActor resultsWorker) "the old result type no longer borrows the active request"
-    "case oldResultScope of { SkillReply.RequestUnavailable SkillReply.RequestTypeMismatch -> True; _ -> False }"
+  void $ turn (checkActor resultsWorker) $ Text.unlines
+    [ "import qualified Tidepool.Check"
+    , "candidateScope <- (SkillReply.currentRequest :: Eff WorkspaceEffects (SkillReply.RequestScope Text (Outcome Candidate)))"
+    , "oldResultScope <- (SkillReply.currentRequest :: Eff WorkspaceEffects (SkillReply.RequestScope Text Text))"
+    , "display (T.pack (show (case candidateScope of { SkillReply.RequestActive request active -> Right (request, active); SkillReply.RequestUnavailable failure -> Left failure })))"
+    , "Tidepool.Check.assertThat \"the old result type no longer borrows the active request\" (case oldResultScope of { SkillReply.RequestUnavailable SkillReply.RequestTypeMismatch -> True; _ -> False })"
+    ]
   void $ example owner "exomonad-define-actors" 1
-  void $ turn owner "candidateBeforeReply <- pollResponse worker\nresultsBeforeReply <- R.call (resultCount (R.client results)) ()\ndisplay (T.pack (show (candidateBeforeReply, resultsBeforeReply)))"
-  assertCell owner "the exact candidate request remains available for its deliberate reply"
-    "case candidateBeforeReply of { ResponseStarting _ -> True; ResponsePending _ -> True; _ -> False }"
+  void $ turn owner $ Text.unlines
+    [ "import qualified Tidepool.Check"
+    , "candidateBeforeReply <- pollResponse worker"
+    , "resultsBeforeReply <- R.call (resultCount (R.client results)) ()"
+    , "display (T.pack (show (candidateBeforeReply, resultsBeforeReply)))"
+    , "Tidepool.Check.assertThat \"the exact candidate request remains available for its deliberate reply\" (case candidateBeforeReply of { ResponseStarting _ -> True; ResponsePending _ -> True; _ -> False })"
+    ]
   void $ turn (checkActor resultsWorker) "respond (Blocked \"skill result\" [] :: Outcome Candidate)"
   awaitCellBy owner "the exact skill request reaches successful typed settlement"
     "\\observed -> case observed of { ResponseReady _ -> True; ResponseUnavailable failure -> error (T.pack (show failure)); _ -> False }"
     "pollResponse worker"
   awaitCellBy owner "record skill observes the real request settlement"
     "(== 1)" "R.call (resultCount (R.client results)) ()"
-  void $ turn owner "candidateReceipt <- pollResponse worker\nresultsExit <- R.finish results\nfirstSkillAfterReuse <- pollResponse pending"
-  assertCell owner "record settlement retains the exact new request, value and actor incarnation"
-    "case (firstSkillReceipt, candidateReceipt, resultsExit) of { (ResponseReady original, ResponseReady receipt, Actor.Completed [Right event]) -> executionRequest (responseExecution receipt) == requestId worker && responseValue receipt == Blocked \"skill result\" [] && event == receipt && executionActorId (responseExecution receipt) == executionActorId (responseExecution original) && executionActorIncarnation (responseExecution receipt) == executionActorIncarnation (responseExecution original); _ -> False }"
-  assertCell owner "reusing an actor preserves the original request receipt"
-    "firstSkillAfterReuse == firstSkillReceipt && requestId pending /= requestId worker"
+  void $ turn owner $ Text.unlines
+    [ "import qualified Tidepool.Check"
+    , "candidateReceipt <- pollResponse worker"
+    , "resultsExit <- R.finish results"
+    , "firstSkillAfterReuse <- pollResponse pending"
+    , "Tidepool.Check.assertThat \"record settlement retains the exact new request, value and actor incarnation\" (case (firstSkillReceipt, candidateReceipt, resultsExit) of { (ResponseReady original, ResponseReady receipt, Actor.Completed [Right event]) -> executionRequest (responseExecution receipt) == requestId worker && responseValue receipt == Blocked \"skill result\" [] && event == receipt && executionActorId (responseExecution receipt) == executionActorId (responseExecution original) && executionActorIncarnation (responseExecution receipt) == executionActorIncarnation (responseExecution original); _ -> False })"
+    , "Tidepool.Check.assertThat \"reusing an actor preserves the original request receipt\" (firstSkillAfterReuse == firstSkillReceipt && requestId pending /= requestId worker)"
+    ]
 
+-- Block zero joins independent record sources. Block one depends on the real
+-- candidate-request settlement, so it remains part of actorReuseHistory.
+routing :: Member RecipeCheck effects => Eff effects ()
+routing = root >>= routingHistory
+
+routingHistory :: Member RecipeCheck effects => CheckActor -> Eff effects ()
+routingHistory owner = do
+  void $ example owner "exomonad-define-actors" 0
+  awaitCell owner "record skill joins differently typed inputs"
+    "(== Just (\"abc123\",4)) <$> R.call (joined endpoints) ()"
+
+notebookExamples :: Member RecipeCheck effects => CheckActor -> Eff effects ()
+notebookExamples owner = do
   -- Execute the published notebook forms in the actual ambient namespace.
   -- File/command examples belong to the command material.
   void $ example owner "exomonad-workbench" 0
@@ -95,9 +146,13 @@ skills = do
   void $ example owner "exomonad-workbench" 4
   void $ example owner "exomonad-workbench" 6
 
-  -- The Jev skill's packets must compile against the real operators and
-  -- resolve to a typed value whether or not an endpoint is configured. Block 0
-  -- gathers previews with commands; the packet that judges them is block 1.
+jev :: Member RecipeCheck effects => Eff effects ()
+jev = root >>= jevExamples
+
+jevExamples :: Member RecipeCheck effects => CheckActor -> Eff effects ()
+jevExamples owner = do
+  -- These packets compile against the real operators and resolve to a typed
+  -- value whether or not an endpoint is configured.
   void $ turn owner "let previews = [(\"README.md\", \"# jev-dsl\\ntyped packets\"), (\"LICENSE\", \"MIT\")] :: [(Text, Text)]"
   void $ example owner "exomonad-jev" 1
   void $ example owner "exomonad-jev" 2
@@ -108,11 +163,14 @@ skills = do
     "case answer of { Left _ -> next == \"jev unavailable; inspecting by hand\"; Right _ -> next `elem` [\"would rerun session::retry_is_bounded\\n\", \"would rerun the suite\\n\", \"reading the failure by hand\", \"rerun unavailable\", \"suite unavailable\"] }"
   void $ example owner "exomonad-jev" 4
 
-  checkNotebookForms owner
-
--- Run the pure authoring forms independently of the worker/review examples.
+-- Run all published notebook examples independently of worker and review flows.
 notebookForms :: Member RecipeCheck effects => Eff effects ()
-notebookForms = root >>= checkNotebookForms
+notebookForms = root >>= notebookWorkflow
+
+notebookWorkflow :: Member RecipeCheck effects => CheckActor -> Eff effects ()
+notebookWorkflow owner = do
+  notebookExamples owner
+  checkNotebookForms owner
 
 checkNotebookForms :: Member RecipeCheck effects => CheckActor -> Eff effects ()
 checkNotebookForms owner = do

@@ -4547,7 +4547,17 @@ where
         self.settle_dropped_custody();
         let counts = self.state.close_realm(realm);
         let survivors = self.state.parked_ids();
-        self.parked.retain(|entry| survivors.contains(&entry.id));
+        let observer = &self.continuation_observer;
+        self.parked.retain(|entry| {
+            if survivors.contains(&entry.id) {
+                true
+            } else {
+                if let Some(observer) = observer {
+                    observer(ResidentContinuationEvent::Retired(entry.name.clone()));
+                }
+                false
+            }
+        });
         counts
     }
 

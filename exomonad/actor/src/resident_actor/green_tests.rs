@@ -203,7 +203,9 @@ async fn parked_frontier_progress_releases_fifo_checkout_before_native_advance()
     tokio::pin!(native);
     assert!(matches!(futures_util::poll!(&mut native), Poll::Pending));
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        green.progress_while(native).await;
+        let mut execution = InvocationExecution::from_green(green);
+        execution.drive(native).await;
+        green = execution.green.take().unwrap();
         assert_eq!(green.pending.len(), 1);
         assert_eq!(green.next().await.unwrap().thread, 1);
         assert!(green.pending.is_empty());
@@ -281,7 +283,9 @@ async fn buffered_frontier_completion_retains_exact_attachment_until_selection_o
             Box::pin(async move { (Err(protocol("original frontier failure")), lease) }),
         );
         for _ in 0..3 {
-            green.progress_while(std::future::ready(())).await;
+            let mut execution = InvocationExecution::from_green(green);
+            execution.drive(std::future::ready(())).await;
+            green = execution.green.take().unwrap();
         }
         assert_eq!(dropped.load(Ordering::SeqCst), 0);
         assert_eq!(green.active, 0);
@@ -300,5 +304,139 @@ async fn buffered_frontier_completion_retains_exact_attachment_until_selection_o
         }
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
         assert!(green.pending.is_empty());
+    }
+}
+
+#[test]
+fn generated_fifo_histories_preserve_cancelled_and_buffered_frontier_ownership() {
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+    use tidepool_runtime::session::registry::{CheckoutRequest, SessionRegistry};
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for partition in 0_u8..8 {
+        let cancel_parent = partition & 1 != 0;
+        let drop_driver = partition & 2 != 0;
+        let cancel_buffered = partition & 4 != 0;
+        let mut seed = [0x6d; 32];
+        seed[0] = partition;
+        let mut config = Config::with_cases(8);
+        config.failure_persistence = None;
+        let mut runner =
+            TestRunner::new_with_rng(config, TestRng::from_seed(RngAlgorithm::ChaCha, &seed));
+        let strategy = (
+            1_usize..7,
+            proptest::collection::vec(any::<bool>(), 6),
+            0_usize..4,
+        );
+        eprintln!("FIFO ownership partition={partition} requested_cases=8 seed={seed:02x?}");
+        runner
+            .run(&strategy, |(count, cancelled, buffer_polls)| {
+                runtime.block_on(async {
+                    let session = tidepool_repr::SessionId(994);
+                    let machines = Arc::new(SessionRegistry::<(), u8>::new());
+                    assert!(machines.insert_idle(session, Box::new(())).is_none());
+                    let (machine, held) = machines.checkout_run(session).unwrap().into_parts();
+                    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+                    let dropped = Arc::new(AtomicUsize::new(0));
+                    let mut green = GreenInvocation::<Released>::default();
+                    for index in 0..count {
+                        let id = index as i64 + 1;
+                        green.threads.insert(id, thread(0));
+                        let queue = machines.clone();
+                        let observed = observed.clone();
+                        let lease = Released(dropped.clone());
+                        green.pending.push(Pending {
+                            thread: id,
+                            future: maybe_done(Box::pin(async move {
+                                let (machine, receipt) = queue
+                                    .checkout_queued(session, CheckoutRequest::Run)
+                                    .await
+                                    .unwrap()
+                                    .into_parts();
+                                observed.lock().unwrap().push(id);
+                                queue.settle_suspended(receipt, machine, Vec::new());
+                                Completion {
+                                    thread: id,
+                                    scopes: Vec::new(),
+                                    result: None,
+                                    attachment: Some(lease),
+                                    terminal: Vec::new(),
+                                }
+                            })),
+                        });
+                    }
+                    assert!(matches!(
+                        futures_util::poll!(Box::pin(green.next())),
+                        Poll::Pending
+                    ));
+                    let mut execution = InvocationExecution::from_green(green);
+                    let native = machines.checkout_queued(session, CheckoutRequest::Run);
+                    tokio::pin!(native);
+                    assert!(matches!(futures_util::poll!(&mut native), Poll::Pending));
+                    if drop_driver {
+                        let mut driving = Box::pin(execution.drive(&mut native));
+                        assert!(matches!(futures_util::poll!(&mut driving), Poll::Pending));
+                        drop(driving);
+                    }
+                    if cancel_parent {
+                        execution.cancel_parent();
+                    } else {
+                        for (index, cancelled) in cancelled.iter().take(count).enumerate() {
+                            if *cancelled {
+                                execution
+                                    .green
+                                    .as_mut()
+                                    .unwrap()
+                                    .remove_descendant_frontiers(index as i64 + 1);
+                            }
+                        }
+                    }
+                    let expected: Vec<_> = (0..count)
+                        .filter(|index| !cancel_parent && !cancelled[*index])
+                        .map(|index| index as i64 + 1)
+                        .collect();
+                    machines.settle_suspended(held, machine, Vec::new());
+                    let checkout = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        execution.drive(&mut native),
+                    )
+                    .await
+                    .expect("original queued survivors precede native advance")
+                    .unwrap();
+                    let (machine, receipt) = checkout.into_parts();
+                    machines.settle_suspended(receipt, machine, Vec::new());
+                    assert_eq!(*observed.lock().unwrap(), expected);
+                    assert_eq!(dropped.load(Ordering::SeqCst), count - expected.len());
+                    for _ in 0..buffer_polls {
+                        execution.drive(std::future::ready(())).await;
+                    }
+                    assert_eq!(
+                        dropped.load(Ordering::SeqCst),
+                        count - expected.len(),
+                        "buffered completion keeps its original attachment"
+                    );
+                    if cancel_buffered {
+                        execution.cancel_parent();
+                    } else {
+                        for id in &expected {
+                            let completion = execution.next().await.unwrap();
+                            assert_eq!(completion.thread, *id);
+                            assert!(completion.attachment.is_some());
+                            drop(completion);
+                        }
+                    }
+                    assert_eq!(
+                        dropped.load(Ordering::SeqCst),
+                        count,
+                        "selection or cancellation releases each original attachment once"
+                    );
+                });
+                Ok(())
+            })
+            .unwrap();
+        eprintln!("FIFO ownership partition={partition} completed_cases=8");
     }
 }

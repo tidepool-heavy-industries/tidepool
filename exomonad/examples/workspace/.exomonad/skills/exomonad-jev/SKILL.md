@@ -299,10 +299,11 @@ draw a `J.many` and a `J.each` from it.
 
 ```haskell
 let candidates = [("retry", "src/Retry.hs: retry loop and backoff" :: Text), ("fetch", "src/Fetch.hs: HTTP client and timeouts")]
+let candidateKeys = map fst candidates
 let packet =
       #best := J.choice "Which file explains the timeout?"
-             (J.alt #none "No file in this set is on the timeout path" ("none", "")
-               J..| J.many #file fst snd candidates)
+             (J.alt #none "No file in this set is on the timeout path" ("none" :: Text)
+               J..| J.many #file id (\key -> maybe key id (lookup key candidates)) candidateKeys)
         :& #per := J.each fst (\(k, d) -> #relevant := J.noul ("Is " <> k <> " (" <> d <> ") on the path the timeout takes?")) candidates
         :& #fixed := J.noul "Given that the retry loop changed yesterday, is the timeout already fixed?"
 answer <- J.ask (J.state (#failure := ("fetch times out after 3 retries" :: Text))) packet

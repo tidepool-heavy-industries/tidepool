@@ -327,6 +327,7 @@
     "exomonad/actor/tests/resident_local_actor/command_retain_binding_cell.hs",
     "exomonad/actor/tests/resident_local_actor/command_retain_binding_failure_cell.hs",
     "exomonad/actor/tests/resident_local_actor/conflicting_join_cell.hs",
+    "exomonad/actor/tests/resident_local_actor/green_reply_policy.hs",
     "exomonad/actor/tests/resident_local_actor/interleaved_bind_cell.hs",
     "exomonad/actor/tests/resident_local_actor/join_base.hs",
     "exomonad/actor/tests/resident_local_actor/notebook_policy.hs",

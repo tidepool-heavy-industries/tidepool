@@ -78,7 +78,7 @@ mod tests {
             creator,
             supervisor_parent: creator,
             context_parent: None,
-            terminal: None,
+            lifecycle: Some(exomonad_actor::ActorLifecycle::Live),
             workbench: ActorWorkbenchPosture::Idle,
             provider_thread: None,
             provider_turn: None,

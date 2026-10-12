@@ -561,6 +561,27 @@ class NativeQualificationTests(unittest.TestCase):
                          {'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY'})
         self.assertNotIn('measurement_reporter', recursive)
 
+    def test_skill_workflow_uses_the_counted_production_recipe_scenarios(self):
+        skill = qualification.cohorts()['skill-workflow']
+        self.assertEqual(skill['tests'], [
+            'actor_host::documentation_tests::actor_reuse_skill_recipe_retains_typed_request_history',
+            'actor_host::documentation_tests::routing_skill_recipe_executes_the_published_record_join',
+            'actor_host::documentation_tests::notebook_forms_skill_recipe_executes_published_authoring_forms',
+            'actor_host::documentation_tests::jev_skill_recipe_executes_the_published_packets',
+        ])
+        self.assertEqual(skill['expected_count'], 4)
+        self.assertFalse(skill['ignored'])
+        self.assertEqual(skill['timeout'], 1800)
+        self.assertEqual(skill['compiler_mode'], 'owned-resident')
+        self.assertEqual(skill['max_jobs'], 1)
+        self.assertTrue(skill['retain_artifacts'])
+        self.assertEqual(skill['required_startup_mode'], 'prepared')
+        self.assertEqual(skill['required_stdlib_mode'], 'catalog-backed')
+        self.assertEqual(set(skill['required_environment']),
+                         {'TIDEPOOL_COMPILER_MODULES', 'TIDEPOOL_PREPARED_ROOT_ENTRY'})
+        self.assertNotIn('actor_host::documentation_tests::skill_recipe_receives_its_typed_request',
+                         skill['tests'])
+
     def test_production_performance_controls_have_separate_sealed_rosters(self):
         expected = {
             "repeat-launch": ("prepare-once-repeated-launch", "production_harness_prepare_once_repeated_launch"),

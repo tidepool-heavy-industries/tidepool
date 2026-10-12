@@ -1637,3 +1637,88 @@ fn fifty_accumulated_session_stubs_read_back_correctly_across_repeat_compiles() 
         );
     }
 }
+
+#[test]
+fn closing_one_realm_notifies_exact_retirement_and_preserves_sibling() {
+    use std::sync::{Arc, Mutex};
+    use tidepool_codegen::suspension::RealmId;
+    use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
+    use tidepool_runtime::session::{ResidentContinuationEvent, SessionRunContext};
+
+    let mut notebook = Notebook::with_effects(&[tidepool_mcp::console_decl()]);
+    let compiled = notebook.prepare_expression("say \"pause\" >> pure (42 :: Int)");
+    let realms = [RealmId::fresh(), RealmId::fresh()];
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = events.clone();
+    let observer: Arc<dyn Fn(ResidentContinuationEvent) + Send + Sync> =
+        Arc::new(move |event| observed.lock().unwrap().push(event));
+    let mut holes = Vec::new();
+    for realm in realms {
+        notebook
+            .session
+            .set_actor_execution(
+                SessionRunContext {
+                    resource_scope: realm,
+                    ..SessionRunContext::ROOT
+                },
+                EffectRunPolicy::SuspendAll,
+                LivePayloadPolicy::HASKELL_EFFECT_VALUE,
+            )
+            .unwrap();
+        let outcome = notebook
+            .session
+            .with_continuation_observer(observer.clone(), |session| {
+                tidepool_testing::with_settlement(|settlement| {
+                    session.run_with_sites("realm_observation", compiled.code(), settlement)
+                })
+                .unwrap()
+            });
+        let ResidentOutcome::Suspended { hole, .. } = outcome else {
+            panic!("actual Console frame must park");
+        };
+        holes.push(hole);
+    }
+    let original = events.lock().unwrap().clone();
+    assert_eq!(
+        original,
+        holes
+            .iter()
+            .map(|hole| ResidentContinuationEvent::Parked(hole.cont_id().to_owned()))
+            .collect::<Vec<_>>()
+    );
+    let counts = notebook
+        .session
+        .with_continuation_observer(observer.clone(), |session| session.close_realm(realms[0]));
+    assert_eq!(counts.0, 1, "the closed realm retires its actual frame");
+    assert_eq!(notebook.session.parked_holes(), [holes[1].cont_id()]);
+    let mut expected = original;
+    expected.push(ResidentContinuationEvent::Retired(
+        holes[0].cont_id().to_owned(),
+    ));
+    assert_eq!(*events.lock().unwrap(), expected);
+    assert_eq!(
+        notebook
+            .session
+            .with_continuation_observer(observer.clone(), |session| session.close_realm(realms[0])),
+        (0, 0)
+    );
+    assert_eq!(
+        *events.lock().unwrap(),
+        expected,
+        "idempotent close reports no second retirement"
+    );
+    let outcome = notebook
+        .session
+        .with_continuation_observer(observer, |session| {
+            tidepool_testing::with_settlement(|settlement| {
+                session.resume_classified(holes[1].clone(), (), settlement)
+            })
+            .unwrap()
+        });
+    assert!(matches!(outcome, ResidentOutcome::Completed { .. }));
+    expected.push(ResidentContinuationEvent::Retired(
+        holes[1].cont_id().to_owned(),
+    ));
+    assert_eq!(*events.lock().unwrap(), expected);
+    assert!(notebook.session.parked_holes().is_empty());
+}

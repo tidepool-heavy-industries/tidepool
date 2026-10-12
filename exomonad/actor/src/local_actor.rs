@@ -8409,6 +8409,10 @@ mod tests {
             crate::KernelInvocationFailure::Rejected { .. }
         ));
         assert!(actor.terminal().get().is_none());
+        assert_eq!(
+            actor.terminal().lifecycle(),
+            ActorLifecycle::Paused("actor cast failed: second cast failed".into())
+        );
 
         actor
             .shutdown(ActorTerminal {

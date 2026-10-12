@@ -68,16 +68,14 @@ where
         current: &mut WorkbenchFragmentExecution,
         boundary: green::GreenBoundary,
     ) -> Result<FragmentAdvance, ResidentActorWorkbenchError> {
-        let mut green = current.green.take().unwrap_or_default();
-        let advance = self.prepare_green_operation(
+        let advance = current.execution.prepare(
+            self,
             kernel,
             context,
             owner,
-            &mut green,
             &mut current.scopes,
             boundary,
         )?;
-        current.green = Some(green);
         match advance {
             GreenAdvance::Start {
                 callback,
@@ -112,12 +110,10 @@ where
             .running
             .as_mut()
             .expect("original async fragment");
-        let green = current
-            .green
-            .as_mut()
-            .expect("invocation-local async frontiers");
         let Some(mut completion) =
-            self.apply_green_frontier(&state.effects.context, green, completion)?
+            current
+                .execution
+                .apply(self, &state.effects.context, completion)?
         else {
             return Ok(false);
         };
