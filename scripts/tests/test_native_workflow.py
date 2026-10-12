@@ -183,12 +183,14 @@ class NativeWorkflowTests(unittest.TestCase):
         adapter_spec.loader.exec_module(adapter)
         control = types.ModuleType("native_control")
         empty = types.ModuleType("native_empty")
+        executed = []
         class Control(unittest.TestCase):
             def test_control(self):
-                self.assertEqual(2 + 2, 4)
+                executed.append("control")
         control.Control = Control
         with patch.dict(os.environ, TIDEPOOL_SCRIPT_TEST_ROOT=str(Path(__file__).parents[2])), patch.dict(sys.modules, native_control=control, native_empty=empty), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(adapter.main(["native_control"]), 0)
+            self.assertEqual(executed, ["control"])
             with self.assertRaises(ValueError):
                 adapter.main(["native_empty"])
 
@@ -198,14 +200,15 @@ class NativeWorkflowTests(unittest.TestCase):
             (root / "scripts/tests").mkdir(parents=True)
             shutil.copyfile(Path(__file__).parents[1] / "unittest-main.py", root / "scripts/unittest-main.py")
             (root / "scripts/tests/import_control.py").write_text(
-                "import unittest\nclass DeclaredControl(unittest.TestCase):\n"
-                "    def test_declared_control(self):\n        self.assertTrue(True)\n")
+                "import unittest\nfrom pathlib import Path\nclass DeclaredControl(unittest.TestCase):\n"
+                "    def test_declared_control(self):\n        Path('executed').write_text('declared-control')\n")
             environment = dict(os.environ, TIDEPOOL_SCRIPT_TEST_ROOT=str(root), PYTHONPATH="")
             result = subprocess.run([sys.executable, str(root / "scripts/unittest-main.py"),
                                      "scripts.tests.import_control"], cwd=root,
                                     env=environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Ran 1 test", result.stderr)
+            self.assertEqual((root / "executed").read_text(), "declared-control")
             environment.pop("TIDEPOOL_SCRIPT_TEST_ROOT")
             refused = subprocess.run([sys.executable, str(root / "scripts/unittest-main.py"),
                                       "scripts.tests.import_control"], cwd=root,

@@ -295,6 +295,25 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   For shared snapshots, cover both repeated identical references and distinct
   snapshots with overlapping contents. Check structural growth and restored
   sharing alongside semantic round trips through the production writer/reader.
+- Construct behavioral fixtures through the owning production APIs. Build the
+  ordered history through ordinary request, update and admission calls; issue
+  claims and captures at the same points as production. Use the real issuer for
+  authority and provenance. Do not bypass those APIs with SQL,
+  private-field writes or forged records, then repair positions or metadata to
+  make the scenario pass. Reuse small helpers that compose the real APIs, and
+  remove obsolete fixture paths instead of adding compatibility machinery.
+  Direct storage manipulation belongs in storage, migration or deliberate
+  corruption tests whose purpose requires it; identify that boundary and keep
+  a valid control constructed through the appropriate owner.
+- Assert an independently observable contract. Check the exact scripted message
+  through its parsed structure, attachment access after owner retirement, or an
+  execution witness from the test body. Do not substitute a substring search
+  over serialized JSON, incidental reference counts or generated names,
+  arithmetic tautologies, or comparison against the same constant or algorithm
+  that produced the result. Exact representations belong in tests of that
+  representation's contract. For a negative case, establish the valid path
+  first and assert the intended typed refusal plus unchanged state where
+  atomicity is promised; an unrelated setup error must not count as success.
 - Compile every changed or directly affected target and run the smallest tests
   that prove its behavior, including meaningful refusal and cleanup controls.
   Each worker runs these checks through the admitted repository commands;

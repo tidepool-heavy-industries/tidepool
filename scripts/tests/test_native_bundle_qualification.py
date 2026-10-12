@@ -607,15 +607,16 @@ class NativeQualificationTests(unittest.TestCase):
     def test_result_delivery_seals_actual_machine_and_value_premises_separately_from_m2(self):
         cohorts = qualification.cohorts()
         result = cohorts['result-delivery']
-        self.assertEqual(result['tests'], list(qualification.RESULT_DELIVERY_CASES))
+        self.assertEqual(len(result['tests']), len(set(result['tests'])))
         self.assertEqual(result['expected_count'], 6)
+        self.assertEqual(len(result['tests']), result['expected_count'])
         self.assertFalse(result['ignored'])
         self.assertEqual(result['compiler_mode'], 'owned-resident')
         self.assertEqual(result['max_jobs'], 2)
         self.assertTrue(result['retain_artifacts'])
         self.assertTrue(result['require_confirmed_cleanup'])
         self.assertEqual(result['mode'], 'model_free_resident_cluster')
-        self.assertEqual(result['case_premises'], qualification.RESULT_DELIVERY_CASES)
+        self.assertEqual(set(result['case_premises']), set(result['tests']))
         self.assertTrue(set(result['tests']).isdisjoint(cohorts['m2']['tests']))
         self.assertEqual(len(cohorts['m2']['tests']), 9)
         for premises in result['case_premises'].values():
