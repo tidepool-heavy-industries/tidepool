@@ -11,7 +11,8 @@ import Control.Monad.Freer (Eff, Members)
 import Jev.Host (jevTransport)
 import Tidepool.Aeson.Value (Value (Bool), object, (.=))
 import Tidepool.Agent.Contract
-import Tidepool.Effects.Core (FsRead, FsWrite, Jev, WriteOutcome (..))
+import Tidepool.Effects.Core (FsRead, FsWrite, Jev)
+import Tidepool.Records (WriteOutcome (..))
 import qualified Tidepool.Effects as E
 
 agentSpec
