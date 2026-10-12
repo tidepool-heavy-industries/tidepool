@@ -3502,10 +3502,10 @@ where
                 summary,
                 diagnostic: None,
             };
-            // Custody of every child and resource already moved to the
-            // successor before this call (the replacement fence transfers
-            // them under `child_admission_closed`); cleanup is confirmed by
-            // that transfer, not by a hook or resource scope this actor still owns.
+            // The RunControl transfer has acknowledged successor custody of
+            // every child and resource before this call. The predecessor's
+            // retained ingress and resource leases prevent retirement from
+            // overtaking that ownership handoff.
             state
                 .terminal
                 .retain_cleanup(crate::ResidentCleanupOutcome {
@@ -3540,10 +3540,11 @@ where
 }
 
 /// The only caller of [`RetainedActorExit::publish`] outside `termination`'s
-/// own tests. `Own` asserts that every child already has an exit: the
-/// snapshot is valid because `child_admission_closed` was set before it was
-/// taken, and `shutdown_children`/the replacement fence's ownership transfer
-/// both already guarantee the property. A violation does not withhold
+/// own tests. `Own` asserts that every retained child already has an exit.
+/// Lifecycle admission has closed and admitted creation and transfer work
+/// has settled before RunControl supplies the child inventory. Child shutdown
+/// or acknowledged successor ownership supplies the corresponding exits.
+/// A violation does not withhold
 /// publication — an owner with no exit at all is worse — it only records the
 /// invariant break.
 fn publish_exit(
