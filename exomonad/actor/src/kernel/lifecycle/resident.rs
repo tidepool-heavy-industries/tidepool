@@ -1074,6 +1074,18 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
                     continue;
                 };
                 let owner = identity.actor;
+                // Validate the pure event against the owner-held observation before
+                // any journal/native handoff. An error here proves no effect occurred.
+                let mut projected = current.initial_context.clone();
+                if let Err(error) = crate::initial_context::apply_event(
+                    &mut projected,
+                    InitialContextEvent::Publish {
+                        publication: publication.clone(),
+                    },
+                ) {
+                    let _ = reply.send(Err(error.to_string()));
+                    continue;
+                }
                 (
                     Pending::Initial(reply),
                     Box::pin(async move {
@@ -1092,10 +1104,8 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
                                     .await
                                     .map_err(|error| error.to_string())?
                             } else {
-                                let mut next = current.initial_context;
-                                crate::initial_context::apply_event(&mut next, event)
-                                    .map_err(|error| error.to_string())?;
-                                next.unwrap()
+                                // Only this already validated local projection is installed.
+                                projected.expect("validated initial publication has an observation")
                             };
                             Ok(InitialTransition {
                                 observation,

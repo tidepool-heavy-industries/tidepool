@@ -1022,6 +1022,16 @@ fn assert_visibility_payload_unchanged(
     actual: &tidepool_runtime::session::PublicVisibilitySnapshot,
     expected: &tidepool_runtime::session::PublicVisibilitySnapshot,
 ) {
+    // This exhaustive shape makes added visibility facts require an explicit oracle.
+    let tidepool_runtime::session::PublicVisibilitySnapshot {
+        scope: _,
+        epoch: _,
+        declaration_tip: _,
+        machine_incarnation: _,
+        bindings: _,
+        source_instances: _,
+        source_selection: _,
+    } = actual;
     assert_eq!(actual.scope, expected.scope, "public scope changed");
     assert_eq!(
         actual.declaration_tip, expected.declaration_tip,
@@ -1058,4 +1068,5 @@ fn assert_visibility_unchanged(
         "public visibility epoch changed"
     );
     assert_visibility_payload_unchanged(actual, expected);
+    assert!(actual == expected, "exact public visibility changed");
 }
