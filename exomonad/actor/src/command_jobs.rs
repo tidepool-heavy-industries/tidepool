@@ -30,12 +30,14 @@ pub(crate) struct CommandCleanupTransfer {
 
 impl CommandCleanupTransfer {
     /// Publish local membership and submit irreversible run-custody completion
-    /// before returning. No local guard survives the completion future.
+    /// before returning. Known enqueue refusal restores cleanup markers while
+    /// their guards remain held; callers restore their local membership on Err
+    /// under the same admission guard. No guard survives the completion future.
     pub(crate) fn publish<T>(
-        self,
+        mut self,
         publish_membership: impl FnOnce(Option<&str>) -> T,
     ) -> Result<(T, BoxFuture<'static, Result<(), CommandError>>), CommandError> {
-        let result = {
+        let (result, completion) = {
             let probe = self.command.source_probe.lock();
             if *probe != self.probe {
                 return Err(CommandError::CommandUnauthorized);
@@ -58,18 +60,24 @@ impl CommandCleanupTransfer {
             for marker in &mut membership {
                 **marker = self.destination.clone();
             }
-            result
-        };
-        let completion: BoxFuture<'static, Result<(), CommandError>> = match self.reservation {
-            Some(reservation) => {
-                let completion = reservation.commit();
-                Box::pin(async move {
-                    completion
-                        .await
-                        .map_err(|error| CommandError::CommandUnavailable(error.to_string()))
-                })
-            }
-            None => Box::pin(async { Ok(()) }),
+            let completion: BoxFuture<'static, Result<(), CommandError>> =
+                match self.reservation.take() {
+                    Some(reservation) => match reservation.try_commit() {
+                        Ok(completion) => Box::pin(async move {
+                            completion.await.map_err(|error| {
+                                CommandError::CommandUnavailable(error.to_string())
+                            })
+                        }),
+                        Err(error) => {
+                            for marker in &mut membership {
+                                **marker = self.expected.clone();
+                            }
+                            return Err(CommandError::CommandUnavailable(error.to_string()));
+                        }
+                    },
+                    None => Box::pin(async { Ok(()) }),
+                };
+            (result, completion)
         };
         Ok((result, completion))
     }

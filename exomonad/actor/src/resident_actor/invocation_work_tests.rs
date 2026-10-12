@@ -2602,3 +2602,43 @@ async fn submitted_command_transfer_survives_unpolled_completion_drop() {
     assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
     fixture.finish().await;
 }
+
+#[tokio::test]
+async fn command_transfer_send_refusal_preserves_source_cleanup_before_observer_drop() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let (job, backend) = fixture.pending_command().await;
+    let transfer = jobs
+        .reserve_cleanup_owner_transfer(
+            &fixture.kernel,
+            owner,
+            &job,
+            &ResourceCleanupOwner::Actor,
+            ResourceCleanupOwner::Run,
+        )
+        .await
+        .unwrap();
+    fixture.directory.stop_owner_for_test().await;
+    let result = transfer.publish(|_| ());
+    assert!(matches!(result, Err(CommandError::CommandUnavailable(_))));
+    drop(result);
+    assert_eq!(
+        jobs.cleanup_owner(owner, &job).unwrap(),
+        ResourceCleanupOwner::Actor
+    );
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
+    assert!(matches!(
+        fixture.directory.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Unconfirmed(_)
+    ));
+    jobs.control(owner, &job, crate::command_jobs::CommandControl::Cancel)
+        .await
+        .unwrap();
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    fixture.actor.address().stop(None);
+    tokio::time::timeout(Duration::from_secs(1), fixture.task)
+        .await
+        .unwrap()
+        .unwrap();
+}

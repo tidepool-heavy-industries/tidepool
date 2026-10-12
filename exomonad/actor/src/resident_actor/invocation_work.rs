@@ -526,7 +526,9 @@ impl InvocationWork {
                 if !state.commands.iter().any(|command| command == id) {
                     return Err(CommandError::CommandUnauthorized);
                 }
-                transfer.publish(|probe| {
+                let commands = state.commands.clone();
+                let detached = state.detached_commands.clone();
+                let result = transfer.publish(|probe| {
                     state
                         .commands
                         .retain(|job| job != id && probe != Some(job.as_str()));
@@ -534,7 +536,12 @@ impl InvocationWork {
                     if let Some(probe) = probe {
                         state.detached_commands.insert(probe.into());
                     }
-                })
+                });
+                if result.is_err() {
+                    state.commands = commands;
+                    state.detached_commands = detached;
+                }
+                result
             })
             .map_err(CommandError::CommandUnavailable)??;
         completion.await
@@ -561,7 +568,9 @@ impl InvocationWork {
             .await?;
         let (_, completion) = self
             .with_admission_state(|state| {
-                transfer.publish(|probe| {
+                let commands = state.commands.clone();
+                let detached = state.detached_commands.clone();
+                let result = transfer.publish(|probe| {
                     if !state.commands.iter().any(|job| job == id) {
                         state.commands.push(id.into());
                     }
@@ -574,7 +583,12 @@ impl InvocationWork {
                     if let Some(probe) = probe {
                         state.detached_commands.remove(probe);
                     }
-                })
+                });
+                if result.is_err() {
+                    state.commands = commands;
+                    state.detached_commands = detached;
+                }
+                result
             })
             .map_err(CommandError::CommandUnavailable)??;
         completion.await
