@@ -3805,7 +3805,11 @@ mod tests {
                 for (parent, birth) in births.iter().enumerate() {
                     for child in &births {
                         assert_eq!(
-                            birth.context.owns_child(child.actor.identity()),
+                            birth
+                                .context
+                                .owns_child(child.actor.identity())
+                                .await
+                                .unwrap(),
                             child.parent == Some(parent),
                             "retired children retain exact cleanup ownership"
                         );
@@ -3815,7 +3819,7 @@ mod tests {
                             ),
                             ..child.actor.identity()
                         };
-                        assert!(!birth.context.owns_child(stale));
+                        assert!(!birth.context.owns_child(stale).await.unwrap());
                     }
                     assert_eq!(birth.actor.terminal().get().is_none(), birth.live);
                 }
@@ -4124,13 +4128,14 @@ mod tests {
             &mut self,
             context: &KernelContext,
         ) -> BoxFuture<'_, Result<KernelStep<()>, KernelBehaviorError>> {
-            if let Some(observations) = &self.start_observations {
-                observations
-                    .lock()
-                    .push((context.clone(), context.supervisor_identity()));
-            }
+            let observations = self.start_observations.clone();
+            let context = context.clone();
             let gate = self.startup_gate.clone();
             Box::pin(async move {
+                if let Some(observations) = observations {
+                    let supervisor = context.supervisor_identity().await.unwrap();
+                    observations.lock().push((context, supervisor));
+                }
                 if let Some((entered, release)) = gate {
                     entered.notify_one();
                     release.notified().await;
@@ -5732,7 +5737,7 @@ mod tests {
     async fn retirement_waits_for_short_host_admission_transaction() {
         let fixture = behavior(false);
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
-        let lease = actor.admit_transaction().unwrap();
+        let lease = actor.admit_transaction().await.unwrap();
         let retiring = actor.shutdown(ActorTerminal {
             kind: ActorExitKind::Completed,
             summary: "done".into(),
@@ -5741,14 +5746,14 @@ mod tests {
         tokio::pin!(retiring);
         // Polling submits shutdown and closes admission before yielding.
         assert!(futures_util::poll!(&mut retiring).is_pending());
-        assert!(actor.admit_transaction().is_err());
+        assert!(actor.admit_transaction().await.is_err());
         assert!(actor.terminal().get().is_none());
         assert!(!fixture.calls.lock().contains(&"shutdown"));
         drop(lease);
         retiring.await.unwrap();
         task.await.unwrap();
         assert!(fixture.calls.lock().contains(&"shutdown"));
-        assert!(actor.admit_transaction().is_err());
+        assert!(actor.admit_transaction().await.is_err());
     }
 
     #[tokio::test]
@@ -6500,7 +6505,7 @@ mod tests {
     #[tokio::test]
     async fn startup_ownership_precedes_live_link_and_survives_reparenting() {
         let observations = Arc::new(Mutex::new(Vec::new()));
-        let directory = LocalActorDirectory::default();
+        let (directory, _directory_task) = LocalActorDirectory::start().await.unwrap();
         let (parent, parent_task) = spawn_local_actor_in_directory(
             None,
             observed_probe(&observations),
@@ -6533,14 +6538,17 @@ mod tests {
             match lifetime {
                 crate::WorkerLifetime::RunOwned => {
                     assert_eq!(context.spawn_ownership(), SpawnOwnership::Independent);
-                    assert_eq!(context.supervisor_identity(), None);
+                    assert_eq!(context.supervisor_identity().await.unwrap(), None);
                 }
                 _ => {
                     assert_eq!(
                         context.spawn_ownership(),
                         SpawnOwnership::Supervised(parent.identity())
                     );
-                    assert_eq!(context.supervisor_identity(), Some(parent.identity()));
+                    assert_eq!(
+                        context.supervisor_identity().await.unwrap(),
+                        Some(parent.identity())
+                    );
                 }
             }
             children.push((child, context));
@@ -6554,37 +6562,52 @@ mod tests {
         .await
         .unwrap();
         let replacement_context = observations.lock().last().unwrap().0.clone();
-        transfer_supervised_children(&parent_context, &replacement_context);
-        assert!(!parent_context.owns_child(children[0].0.identity()));
-        assert!(replacement_context.owns_child(children[0].0.identity()));
+        transfer_supervised_children(&parent_context, &replacement_context)
+            .await
+            .unwrap();
+        assert!(!parent_context
+            .owns_child(children[0].0.identity())
+            .await
+            .unwrap());
+        assert!(replacement_context
+            .owns_child(children[0].0.identity())
+            .await
+            .unwrap());
         let child_context = &children[0].1;
         assert_eq!(
             child_context.spawn_ownership(),
             SpawnOwnership::Supervised(parent.identity())
         );
         assert_eq!(
-            child_context.supervisor_identity(),
+            child_context.supervisor_identity().await.unwrap(),
             Some(replacement_parent.identity())
         );
-        let (successor, admission) = child_context
+        let successor = child_context
             .spawn_successor(observed_probe(&observations))
             .await
             .unwrap();
-        drop(admission);
         let successor_context = observations.lock().last().unwrap().0.clone();
         assert_eq!(
             successor_context.spawn_ownership(),
             SpawnOwnership::Supervised(replacement_parent.identity())
         );
         assert_eq!(
-            successor_context.supervisor_identity(),
+            successor_context.supervisor_identity().await.unwrap(),
             Some(replacement_parent.identity())
         );
-        assert!(replacement_context.owns_child(successor.identity()));
-        let batch = directory.seal().cancel_all(ActorTerminal::new(
-            ActorExitKind::Cancelled,
-            "test retirement",
-        ));
+        assert!(replacement_context
+            .owns_child(successor.identity())
+            .await
+            .unwrap());
+        let batch = directory
+            .seal()
+            .await
+            .unwrap()
+            .cancel_all(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "test retirement",
+            ))
+            .await;
         let roots = batch.into_roots();
         assert_eq!(roots.len(), 3, "two parents and the unlinked swarm child");
         for root in roots {
@@ -6606,7 +6629,7 @@ mod tests {
     #[tokio::test]
     async fn admitted_pre_start_is_included_in_sealed_retirement_snapshot() {
         let observations = Arc::new(Mutex::new(Vec::new()));
-        let directory = LocalActorDirectory::default();
+        let (directory, _directory_task) = LocalActorDirectory::start().await.unwrap();
         let entered = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let mut probe = observed_probe(&observations);
@@ -6618,10 +6641,15 @@ mod tests {
             })
         };
         entered.notified().await;
-        let batch = directory.seal().cancel_all(ActorTerminal::new(
-            ActorExitKind::Cancelled,
-            "closed while starting",
-        ));
+        let batch = directory
+            .seal()
+            .await
+            .unwrap()
+            .cancel_all(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "closed while starting",
+            ))
+            .await;
         let roots = batch.into_roots();
         assert_eq!(roots.len(), 1);
         assert!(roots[0].terminal().get().is_none());
@@ -6733,7 +6761,8 @@ mod tests {
         let batch = crate::kernel::RetirementBatch::issue(vec![(
             actor.clone(),
             ActorTerminal::new(ActorExitKind::Cancelled, "cancelled before activation"),
-        )]);
+        )])
+        .await;
         let caller = ActorRef::first(crate::ActorId(99));
         let dropped = Arc::new(AtomicUsize::new(0));
         let (reply, receive) = oneshot::channel();
@@ -6747,6 +6776,7 @@ mod tests {
                     reply: reply.into(),
                 }]),
                 draining: false,
+                reply: oneshot::channel().0.into(),
             })
             .unwrap();
         task.await.unwrap();
@@ -6790,6 +6820,7 @@ mod tests {
             .send_message(KernelMessage::ActivateReplacement {
                 backlog: VecDeque::new(),
                 draining: false,
+                reply: oneshot::channel().0.into(),
             })
             .unwrap();
         let terminal = tokio::time::timeout(Duration::from_secs(2), receive)
@@ -6831,6 +6862,7 @@ mod tests {
             .send_message(KernelMessage::ActivateReplacement {
                 backlog: VecDeque::from([before_fence]),
                 draining: true,
+                reply: oneshot::channel().0.into(),
             })
             .unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -6849,6 +6881,7 @@ mod tests {
                 caller,
                 MailboxValue::probe(SessionId(3), Arc::clone(&dropped))
             )
+            .await
             .is_err());
         assert_eq!(dropped.load(Ordering::SeqCst), 3);
     }
@@ -7101,10 +7134,12 @@ mod tests {
         actor.drain().await.unwrap();
         assert!(actor.terminal().get().is_none());
         assert_eq!(
-            actor.cast(
-                caller,
-                MailboxValue::probe(SessionId(1), Arc::clone(&dropped))
-            ),
+            actor
+                .cast(
+                    caller,
+                    MailboxValue::probe(SessionId(1), Arc::clone(&dropped))
+                )
+                .await,
             Err(KernelCallFailure::MailboxClosed(actor.identity()))
         );
         assert!(matches!(
@@ -7228,10 +7263,12 @@ mod tests {
             .unwrap();
         task.await.unwrap();
         assert_eq!(
-            handle.cast(
-                caller,
-                MailboxValue::probe(SessionId(1), Arc::clone(&dropped))
-            ),
+            handle
+                .cast(
+                    caller,
+                    MailboxValue::probe(SessionId(1), Arc::clone(&dropped))
+                )
+                .await,
             Err(KernelCallFailure::MailboxClosed(actor.identity()))
         );
         assert!(matches!(handle.call(
@@ -7548,7 +7585,7 @@ mod tests {
 
     #[tokio::test]
     async fn independent_roots_share_routing_but_not_supervision() {
-        let directory = LocalActorDirectory::default();
+        let (directory, _directory_task) = LocalActorDirectory::start().await.unwrap();
         let first = behavior(false);
         let second = behavior(false);
         let (owner, owner_task) = spawn_local_actor_in_directory(
@@ -7567,8 +7604,12 @@ mod tests {
         )
         .await
         .expect("second root");
-        assert!(directory.resolve(owner.identity()).is_some());
-        assert!(directory.resolve(sibling.identity()).is_some());
+        assert!(directory.resolve(owner.identity()).await.unwrap().is_some());
+        assert!(directory
+            .resolve(sibling.identity())
+            .await
+            .unwrap()
+            .is_some());
         assert_eq!(
             directory.context(owner.identity()).unwrap().identity(),
             owner.identity()
@@ -7578,6 +7619,8 @@ mod tests {
                 incarnation: crate::Incarnation(42),
                 ..owner.identity()
             })
+            .await
+            .unwrap()
             .is_none());
         let (spawn_tx, spawn_rx) = oneshot::channel();
         owner
@@ -7592,11 +7635,13 @@ mod tests {
             .expect("spawn response")
             .expect("spawn result");
         let child = first.spawned_child.lock().clone().expect("child");
-        assert!(directory.resolve(child.identity()).is_some());
+        assert!(directory.resolve(child.identity()).await.unwrap().is_some());
         assert!(directory
             .context(owner.identity())
             .unwrap()
-            .owns_child(child.identity()));
+            .owns_child(child.identity())
+            .await
+            .unwrap());
         owner
             .shutdown(ActorTerminal {
                 kind: ActorExitKind::Cancelled,
@@ -7613,6 +7658,8 @@ mod tests {
         // Exact retired addresses retain their exits for late observers.
         assert!(directory
             .resolve(owner.identity())
+            .await
+            .unwrap()
             .unwrap()
             .terminal()
             .get()
@@ -7639,7 +7686,7 @@ mod tests {
 
     #[tokio::test]
     async fn logical_identity_recovery_requires_terminal_predecessor_and_rejects_old_handle() {
-        let directory = LocalActorDirectory::default();
+        let (directory, _directory_task) = LocalActorDirectory::start().await.unwrap();
         let first_behavior = behavior(false);
         let (first, first_task) = spawn_local_actor_in_directory(
             None,
@@ -7683,11 +7730,17 @@ mod tests {
         assert_eq!(
             directory
                 .resolve(first.identity())
+                .await
+                .unwrap()
                 .map(|actor| actor.identity()),
             Some(first.identity())
         );
         assert_eq!(
-            directory.resolve(successor).map(|actor| actor.identity()),
+            directory
+                .resolve(successor)
+                .await
+                .unwrap()
+                .map(|actor| actor.identity()),
             Some(successor)
         );
         assert!(first
@@ -8024,7 +8077,10 @@ mod tests {
                 SpawnOwnership::Independent,
             )
             .unwrap();
-        assert!(context.forget_terminal_actor(actor.identity()));
+        assert!(context
+            .forget_terminal_actor(actor.identity())
+            .await
+            .unwrap());
         assert!(context.children.lock().is_empty());
         assert!(
             matches!(
@@ -8067,7 +8123,7 @@ mod tests {
             } else {
                 release.notify_one();
                 let child = spawning.await.unwrap().unwrap();
-                assert!(context.owns_child(child.identity()));
+                assert!(context.owns_child(child.identity()).await.unwrap());
             }
             *context.child_admission_closed.write().await = true;
             if cancel {
