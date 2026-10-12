@@ -230,6 +230,17 @@ Keep detailed design references out of always-loaded instructions.
 
 ## Shared-context development
 
+Maintain one integration `main` per repository and integrate reviewed parcels regularly.
+Keep qualification at exact tags and bundle identities; an integration tip is not
+release evidence. Preserve active branches and WIP when transferring work.
+Before integration or delivery, run `python3 scripts/integration-status.py --strict`
+through the admitted project environment. It reads cached tracking refs without
+fetching; fetch deliberately before claiming remote freshness. Use repeated
+`--candidate REF` arguments to inspect containment and patch uniqueness, and
+`--harness-repo PATH --required-harness-ancestor EXACT_OID` to check an explicitly
+required Harness change against Tidepool's selected pin. This status command
+reports evidence; it does not merge, prune, move branches or block pushes.
+
 - Delegate only when an independent result justifies another agent. A spawned
   Exomonad agent is idle until it receives a typed request. Choose its captured
   or fresh context, actual `AgentSpec`, and workspace explicitly; `SameDir`
