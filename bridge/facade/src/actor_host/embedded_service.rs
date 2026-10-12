@@ -189,6 +189,15 @@ impl EmbeddedService {
             return Err("embedded Store recovery requires ownership of this exact run".into());
         }
         settings.validate().map_err(|error| error.to_string())?;
+        let browser_identity =
+            harness::server::BrowserBundleIdentity::from_declared_source(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/harness-browser-source-identity.json"
+            )))
+            .map_err(|error| error.to_string())?;
+        let browser_bundle =
+            harness::server::verify_browser_bundle(&settings.asset_root, &browser_identity)
+                .map_err(|error| error.to_string())?;
         let runtime = Arc::new(
             EmbeddedHarnessRuntime::open(run_root, settings.concurrent_jobs)
                 .map_err(|error| error.to_string())?,
@@ -208,15 +217,6 @@ impl EmbeddedService {
             .store()
             .recover_embedded_inference_after_host_loss(&super::runtime_namespace(run_root))
             .map_err(|error| error.to_string())?;
-        let browser_identity =
-            harness::server::BrowserBundleIdentity::from_declared_source(include_bytes!(concat!(
-                env!("OUT_DIR"),
-                "/harness-browser-source-identity.json"
-            )))
-            .map_err(|error| error.to_string())?;
-        let browser_bundle =
-            harness::server::verify_browser_bundle(&settings.asset_root, &browser_identity)
-                .map_err(|error| error.to_string())?;
         let server_config = ServerConfig::new(settings.asset_root.clone())
             .with_browser_bundle(browser_bundle)
             .with_history_store(runtime.store())
@@ -1126,6 +1126,44 @@ mod shutdown_tests {
     #[tokio::test]
     async fn finished_shutdown_repeats_success() {
         finished_shutdown_history(ServerOutcome::Success).await;
+    }
+
+    #[tokio::test]
+    async fn invalid_browser_assets_refuse_before_opening_or_recovering_the_run_store() {
+        for retained in [false, true] {
+            let files = tempfile::tempdir().unwrap();
+            let mut settings = crate::actor_host::test_campaign::hosted_test_settings(&files, 1);
+            let assets = files.path().join("invalid-assets");
+            std::fs::create_dir(&assets).unwrap();
+            std::fs::write(assets.join("index.html"), "unsealed assets").unwrap();
+            settings.asset_root = assets;
+            let store_path = files.path().join("harness/store.sqlite");
+            let before = if retained {
+                let store = super::super::display_output::open_run_store(files.path()).unwrap();
+                store
+                    .write_request(
+                        &RequestId("retained-before-browser-refusal".into()),
+                        None,
+                        "/root",
+                        &[harness::item::Item(serde_json::json!({
+                            "type":"message", "role":"user", "content":"retained input",
+                        }))],
+                        Default::default(),
+                    )
+                    .unwrap();
+                drop(store);
+                Some(std::fs::read(&store_path).unwrap())
+            } else {
+                None
+            };
+            assert!(EmbeddedService::prepare(files.path(), &settings)
+                .await
+                .is_err());
+            match before {
+                Some(before) => assert_eq!(std::fs::read(&store_path).unwrap(), before),
+                None => assert!(!files.path().join("harness").exists()),
+            }
+        }
     }
 
     #[tokio::test]
