@@ -82,7 +82,6 @@
 
 use std::path::PathBuf;
 
-use exomonad_worktree::testing::binding_row;
 use exomonad_worktree::{
     AgentRef, Binding, BindingState, BranchName, CommitReceipt, EventId, GitOid, GitRef,
     HeadChangeKind, HeadChangeReceipt, ObservationBatch, RepositoryEvent, WorktreeError,
@@ -169,26 +168,44 @@ fn receipt_finalized_worktree_origin() -> WorktreeReceipt {
     }
 }
 
+// Format samples use the durable read model rather than admitting live membership.
+fn binding_sample(
+    worktree: WorktreeId,
+    agent: AgentRef,
+    state: BindingState,
+    access: exomonad_worktree::WorkspaceAccess,
+    bound_at_ms: i64,
+) -> Binding {
+    serde_json::from_value(serde_json::json!({
+        "worktree": worktree,
+        "agent": agent,
+        "state": state,
+        "access": access,
+        "bound_at_ms": bound_at_ms,
+    }))
+    .expect("binding read-model sample deserializes")
+}
+
 // --- Binding sample: all 3 BindingState variants, as one worktree's lease
 // --- history (the actual on-disk shape — one file per worktree id). --------
 
 fn binding_rows() -> Vec<Binding> {
     vec![
-        binding_row(
+        binding_sample(
             WorktreeId::from_raw("wt-provisional-0001"),
             AgentRef::from_raw("agent-alpha"),
             BindingState::Terminal,
             exomonad_worktree::WorkspaceAccess::ReadWrite,
             1_700_000_000_000,
         ),
-        binding_row(
+        binding_sample(
             WorktreeId::from_raw("wt-provisional-0001"),
             AgentRef::from_raw("agent-beta"),
             BindingState::Released,
             exomonad_worktree::WorkspaceAccess::ReadWrite,
             1_700_000_001_000,
         ),
-        binding_row(
+        binding_sample(
             WorktreeId::from_raw("wt-provisional-0001"),
             AgentRef::from_raw("agent-gamma"),
             BindingState::Active,
@@ -529,7 +546,7 @@ fn worktree_receipt_field_shape_is_pinned_inline() {
 
 #[test]
 fn binding_field_shape_is_pinned_inline() {
-    let sample = binding_row(
+    let sample = binding_sample(
         WorktreeId::from_raw("wt-pin"),
         AgentRef::from_raw("agent-pin"),
         BindingState::Active,
