@@ -107,6 +107,7 @@ fn execution_with_id(
         state: Box::new(WorkbenchExecutionState {
             cell_span: cell_execution_span(&context, &request),
             effects: WorkbenchEffectState {
+                lifecycle: None,
                 initial_context: false,
                 display_receipt_owner: None,
                 park_effects: true,

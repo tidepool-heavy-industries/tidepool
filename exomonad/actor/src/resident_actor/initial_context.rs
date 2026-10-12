@@ -11,14 +11,6 @@ fn failure(error: impl std::fmt::Display) -> ResidentActorWorkbenchError {
     ResidentActorWorkbenchError::ActorProtocol(error.to_string())
 }
 
-struct InitialContextAdmissionGuard(Option<lifecycle::ActorLifecycle>);
-
-impl Drop for InitialContextAdmissionGuard {
-    fn drop(&mut self) {
-        if let Some(owner) = self.0.take() { owner.abandon_initial_context(); }
-    }
-}
-
 struct InitialContextWaitGuard(Option<Arc<crate::WorkbenchExecutionControl>>);
 
 impl Drop for InitialContextWaitGuard {
@@ -37,8 +29,9 @@ where
     /// Retention belongs to execution settlement, before its reply is released.
     /// Losing a host waiter cannot discard a completed startup result.
     pub(super) async fn retain_initial_context_execution(
-        environment: &ResidentEnvironment<H, O>,
+        lifecycle: &crate::LifecycleHandle,
         actor: ActorRef,
+        operation: &WorkbenchExecutionId,
         result: &Result<KernelStep<WorkbenchResponse>, crate::KernelInvocationFailure>,
     ) -> Result<(), ResidentActorWorkbenchError> {
         let change = match result {
@@ -99,10 +92,10 @@ where
                 }
             }
         };
-        let lifecycle = environment.actors.lock().get(&actor)
-            .map(|record| record.lifecycle.clone())
-            .ok_or_else(|| failure("initial context execution has no actor owner"))?;
-        lifecycle.change_initial_context(change).await.map_err(failure)?;
+        lifecycle
+            .change_initial_context(change, operation.clone())
+            .await
+            .map_err(failure)?;
         Ok(())
     }
 }
@@ -112,31 +105,37 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    fn initial_context_record(
+    async fn initial_context_record(
         &self,
         actor: ActorRef,
-    ) -> Result<ResidentActorRecord, ResidentActorWorkbenchError> {
-        self.environment
-            .actors
-            .lock()
-            .get(&actor)
-            .cloned()
-            .filter(|record| record.terminal.is_none() && !record.lifecycle.is_closed())
-            .ok_or_else(|| failure("initial context actor is unavailable"))
+    ) -> Result<
+        (
+            crate::LifecycleHandle,
+            crate::kernel::lifecycle::resident::ResidentSnapshot,
+        ),
+        ResidentActorWorkbenchError,
+    > {
+        let lifecycle = self.lifecycle_for(actor).await?;
+        let snapshot = lifecycle
+            .resident_snapshot()
+            .ok_or_else(|| failure("initial context owner is unconfigured"))?;
+        Ok((lifecycle, snapshot))
     }
 
-    pub fn initial_context_observation(
+    pub async fn initial_context_observation(
         &self,
         actor: ActorRef,
     ) -> Result<InitialContextObservation, ResidentActorWorkbenchError> {
-        let record = self.initial_context_record(actor)?;
-        record.lifecycle.initial_context()
+        self.initial_context_record(actor)
+            .await?
+            .1
+            .initial_context
             .ok_or_else(|| failure("initial context has not been admitted"))
     }
 
     /// Project retained facts into the ordinary synchronous context effect.
     /// This observation never executes the initializer or modifies context.
-    pub fn initial_context_wire_observation(
+    pub async fn initial_context_wire_observation(
         &self,
         actor: ActorRef,
     ) -> Result<tidepool_bridge_effects::InitialContextObservation, ResidentActorWorkbenchError>
@@ -145,7 +144,7 @@ where
             ContextReference, InitialContextIdentity as Identity,
             InitialContextObservation as Wire, InitialContextPublicationReceipt as Receipt,
         };
-        let observed = self.initial_context_observation(actor)?;
+        let observed = self.initial_context_observation(actor).await?;
         match observed.state {
             InitialContextState::AbsentHook => return Ok(Wire::InitialContextAbsent),
             InitialContextState::Captured => return Ok(Wire::InitialContextCaptured),
@@ -226,91 +225,63 @@ where
         &self,
         actor: ActorRef,
     ) -> Result<InitialContextObservation, ResidentActorWorkbenchError> {
-        let record = self.initial_context_record(actor)?;
-        let mut admission = InitialContextAdmissionGuard(None);
-        let invocation = {
-            if let Some(current) = record.lifecycle.initial_context() {
-                return Ok(current);
+        let (lifecycle, record) = self.initial_context_record(actor).await?;
+        if let Some(current) = record.initial_context {
+            return Ok(current);
+        }
+        let lease = record.installed_policy;
+        let tools = lease.as_ref().and_then(crate::InstalledToolLease::tools);
+        let captured = record.descriptor.context_parent().is_some();
+        let change = if captured
+            || tools
+                .is_none_or(|tools| !tools.slots.iter().any(|slot| slot == INITIAL_CONTEXT_SLOT))
+        {
+            InitialContextEvent::Skip {
+                captured,
+                caller_seed: record.fresh_context_seed.clone(),
             }
-            if matches!(
-                record.installed_tools.observe(),
-                crate::resident_workbench::InstalledToolsObservation::SourceUnavailable(_)
-            ) {
-                return Err(failure("initial context installed source is unavailable"));
+        } else {
+            let tools = tools.expect("installed startup slot");
+            let (_, operation) =
+                ensure_workbench_execution_id(WorkbenchRequest::for_retained_operation(
+                    INITIAL_CONTEXT_SLOT,
+                    serde_json::Value::Null,
+                ));
+            let source = lease
+                .as_ref()
+                .expect("installed startup source")
+                .source()
+                .semantic_digest();
+            InitialContextEvent::Begin {
+                identity: InitialContextIdentity {
+                    operation,
+                    actor,
+                    spec_install: tools.install,
+                    spec_revision: tools.revision.clone(),
+                    spec_entry: tools
+                        .origin
+                        .resolved()
+                        .and_then(|resolved| resolved.entry.clone()),
+                    spec_source: source.iter().map(|byte| format!("{byte:02x}")).collect(),
+                },
+                caller_seed: record.fresh_context_seed.clone(),
             }
-            let lease = record.installed_tools.current();
-            let tools = lease.as_ref().and_then(crate::InstalledToolLease::tools);
-            let captured = record.descriptor.context_parent().is_some();
-            let change = if captured
-                || tools.is_none_or(|tools| {
-                    !tools.slots.iter().any(|slot| slot == INITIAL_CONTEXT_SLOT)
-                }) {
-                InitialContextEvent::Skip {
-                    captured,
-                    caller_seed: record.fresh_context_seed.clone(),
-                }
-            } else {
-                let tools = tools.expect("installed startup slot");
-                let (_, operation) =
-                    ensure_workbench_execution_id(WorkbenchRequest::for_retained_operation(
-                        INITIAL_CONTEXT_SLOT,
-                        serde_json::Value::Null,
-                    ));
-                let source = lease
-                    .as_ref()
-                    .expect("installed startup source")
-                    .source()
-                    .semantic_digest();
-                InitialContextEvent::Begin {
-                    identity: InitialContextIdentity {
-                        operation,
-                        actor,
-                        spec_install: tools.install,
-                        spec_revision: tools.revision.clone(),
-                        spec_entry: tools
-                            .origin
-                            .resolved()
-                            .and_then(|resolved| resolved.entry.clone()),
-                        spec_source: source.iter().map(|byte| format!("{byte:02x}")).collect(),
-                    },
-                    caller_seed: record.fresh_context_seed.clone(),
-                }
-            };
-            let transition = record.lifecycle.begin_initial_context(change).await.map_err(failure)?;
-            let next = transition.observation;
-            if !transition.admitted { return Ok(next); }
-            admission.0 = Some(record.lifecycle.clone());
-            let Some(identity) = next.identity.clone() else {
-                return Ok(next);
-            };
-            let request = WorkbenchRequest::for_retained_operation(INITIAL_CONTEXT_SLOT,
-                serde_json::json!({"operation": identity.operation.as_str(), "callerSeed": next.caller_seed}))
-                .with_execution_id(identity.operation);
-            let mut invocation = crate::ActorWorkbenchInvocation::issued(request, lease, None);
-            invocation.initial_context = true;
-            invocation
         };
-        let local = self
-            .directory
-            .resolve(actor)
-            .ok_or_else(|| failure("initial context actor disappeared before admission"))?;
-        let (reply, receiver) = tokio::sync::oneshot::channel();
-        let control = crate::WorkbenchExecutionControl::untracked();
-        let mut waiter = InitialContextWaitGuard(Some(control.clone()));
-        local
-            .admit_mailbox(crate::KernelMessage::Workbench {
-                invocation,
-                control: Some(control),
-                reply: reply.into(),
-            })
-            .map_err(failure)?;
-        admission.0.take();
-        receiver
+        let transition = lifecycle
+            .begin_initial_context(change)
             .await
-            .map_err(|_| failure("initial context execution ended without a retained outcome"))?
+            .map_err(failure)?;
+        let Some(execution) = transition.execution else {
+            return Ok(transition.observation);
+        };
+        let mut waiter = InitialContextWaitGuard(Some(execution.control));
+        execution
+            .answer
+            .await
+            .map_err(|_| failure("initial context execution ended without retained outcome"))?
             .map_err(failure)?;
         waiter.0.take();
-        self.initial_context_observation(actor)
+        self.initial_context_observation(actor).await
     }
 
     /// Acknowledge publication into the current exact conversation. References
@@ -321,28 +292,10 @@ where
         operation: &WorkbenchExecutionId,
         publication: InitialContextPublication,
     ) -> Result<InitialContextObservation, ResidentActorWorkbenchError> {
-        let observed = self.initial_context_observation(actor)?;
-        if observed
-            .identity
-            .as_ref()
-            .is_none_or(|identity| &identity.operation != operation)
-        {
-            return Err(failure(
-                "initial context publication has another operation identity",
-            ));
-        }
-        if let Some(journal) = &self.environment.recovery {
-            if !journal
-                .initial_context_publication_matches(actor, operation, &publication.conversation)
-                .map_err(failure)?
-            {
-                return Err(failure(
-                    "initial context publication has another conversation association",
-                ));
-            }
-        }
-        let record = self.initial_context_record(actor)?;
-        record.lifecycle.change_initial_context(InitialContextEvent::Publish { publication })
-            .await.map_err(failure)
+        self.lifecycle_for(actor)
+            .await?
+            .acknowledge_initial_context(operation.clone(), publication)
+            .await
+            .map_err(failure)
     }
 }
