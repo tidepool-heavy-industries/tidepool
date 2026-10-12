@@ -35,8 +35,10 @@ impl ProviderAttachment {
         &self,
     ) -> Result<tidepool_bridge_effects::InitialContextObservation, ResidentActorWorkbenchError>
     {
-        self.validate()?;
-        self.forest.initial_context_wire_observation(self.actor())
+        self.with_admission(|| {
+            self.validate()?;
+            self.forest.initial_context_wire_observation(self.actor())
+        })?
     }
 
     pub(super) fn validate(&self) -> Result<(), ResidentActorWorkbenchError> {
