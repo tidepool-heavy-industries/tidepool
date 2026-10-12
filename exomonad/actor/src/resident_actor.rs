@@ -481,7 +481,6 @@ struct ResidentEnvironment<H, O> {
     actor_admissions: crate::ActorAdmissionRegistry,
     actors: Arc<Mutex<std::collections::HashMap<ActorRef, ResidentActorRecord>>>,
     fork_workspaces: Option<crate::fork_workspace::SharedWorkspaceAdmission>,
-    root_admission_closed: Arc<tokio::sync::RwLock<bool>>,
     /// Installed by a host that keeps a source layer per checkout. Without
     /// one every actor compiles against exactly the deployment-wide roots.
     source_layers: Option<crate::ActorSourceLayerResolver>,
@@ -2115,7 +2114,6 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
             actor_admissions: self.actor_admissions.clone(),
             actors: Arc::clone(&self.actors),
             fork_workspaces: self.fork_workspaces.clone(),
-            root_admission_closed: self.root_admission_closed.clone(),
             source_layers: self.source_layers.clone(),
             jev: Arc::clone(&self.jev),
             cell_model_factory: self.cell_model_factory.clone(),
@@ -13452,7 +13450,6 @@ where
             actor_admissions: crate::ActorAdmissionRegistry::new(),
             actors: Arc::new(Mutex::new(std::collections::HashMap::new())),
             fork_workspaces,
-            root_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
             source_layers: None,
             jev: Arc::new(crate::jev::UnconfiguredJev),
             cell_model_factory: None,
@@ -13633,32 +13630,6 @@ where
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        let admission = self.environment.root_admission_closed.read().await;
-        if *admission {
-            return Err(std::io::Error::other("swarm root admission is closed").into());
-        }
-        let (placement, outcome) = self
-            .environment
-            .runner
-            .prepare_root_program(self.session, compiled)
-            .await?;
-        let current = |actor: ActorRef| ActorRef {
-            id: actor.id,
-            incarnation: self.incarnation,
-        };
-        let mut descriptor = ActorDescriptor::new_optional(durable.label.clone(), placement)
-            .with_capabilities(role)
-            .with_model(durable.model.clone().map(crate::Model::Literal))
-            .with_instructions(durable.instructions.clone())
-            .with_fork_effort(durable.effort)
-            .with_source_layer(durable.source_layer.clone());
-        if let Some(creator) = durable.creator {
-            descriptor = descriptor.with_creator(current(creator));
-        }
-        descriptor = descriptor.with_supervisor_parent(durable.supervisor_parent.map(current));
-        if let Some(parent) = durable.context_parent {
-            descriptor = descriptor.with_context_parent(current(parent));
-        }
         let identity =
             ActorRef {
                 id: durable.actor.id,
@@ -13668,29 +13639,79 @@ where
                     })?,
                 ),
             };
-        match self
-            .admit_prepared_root(
-                descriptor,
-                outcome,
-                PreparedRootAdmission {
-                    identity: Some(identity),
-                    launch_worktrees: durable.launch_worktrees.clone(),
-                    worktree_custody,
-                    ..Default::default()
-                },
-            )
-            .await
-        {
-            Ok(actor) => Ok(actor),
-            Err(error) => {
-                if crate::local_actor::startup_cleanup(&error).is_none() {
-                    self.environment
+        let reservation = self.directory.claim_exact(identity).await?;
+        let durable = durable.clone();
+        let environment = self.environment.clone();
+        let directory = self.directory.clone();
+        let session = self.session;
+        let incarnation = self.incarnation;
+        let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
+            Box::pin(async move {
+                let result = async {
+                    let (placement, outcome) = environment
                         .runner
-                        .retire_root_placement(placement)
+                        .prepare_root_program(session, compiled)
                         .await?;
+                    ticket.placement_prepared(placement);
+                    let current = |actor: ActorRef| ActorRef {
+                        id: actor.id,
+                        incarnation: incarnation,
+                    };
+                    let mut descriptor =
+                        ActorDescriptor::new_optional(durable.label.clone(), placement)
+                            .with_capabilities(role)
+                            .with_model(durable.model.clone().map(crate::Model::Literal))
+                            .with_instructions(durable.instructions.clone())
+                            .with_fork_effort(durable.effort)
+                            .with_source_layer(durable.source_layer.clone());
+                    if let Some(creator) = durable.creator {
+                        descriptor = descriptor.with_creator(current(creator));
+                    }
+                    descriptor =
+                        descriptor.with_supervisor_parent(durable.supervisor_parent.map(current));
+                    if let Some(parent) = durable.context_parent {
+                        descriptor = descriptor.with_context_parent(current(parent));
+                    }
+
+                    let mut behavior =
+                        ResidentKernelBehavior::prepared(descriptor, environment.clone(), outcome);
+                    behavior.launch_worktrees = durable.launch_worktrees;
+                    behavior.worktree_custody = worktree_custody;
+                    match crate::local_actor::spawn_reserved_local_actor(
+                        None,
+                        behavior,
+                        reservation,
+                        directory,
+                    )
+                    .await
+                    {
+                        Ok((actor, task)) => Ok(
+                            crate::local_actor::run_control::RootAdmissionOutcome::Actor(
+                                actor, task,
+                            ),
+                        ),
+                        Err(error) => {
+                            if crate::local_actor::startup_cleanup(&error).is_none() {
+                                environment.runner.retire_root_placement(placement).await?;
+                                ticket.placement_released(placement);
+                            }
+                            Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+                        }
+                    }
                 }
-                Err(Box::new(error))
+                .await;
+                (result, crate::CleanupComponentOutcome::Confirmed)
+            })
+        });
+        match self.directory.prepare_root(operation).await? {
+            Ok(crate::local_actor::run_control::RootAdmissionOutcome::Actor(actor, task)) => {
+                Ok((actor, task))
             }
+            Err(error) => Err(error),
+            _ => Err(std::io::Error::other(
+                "durable program producer returned incompatible result",
+            )
+            .into()),
         }
     }
 
