@@ -183,9 +183,12 @@ async fn pending_durable_actor_refuses_provider_and_cell_admission_after_failed_
     .await
     .expect("pending durable admission refuses without compiler work")
     .expect_err("pending actor cannot begin compiler work");
-    assert!(matches!(error, crate::ResidentToolError::Invocation(
+    assert!(
+        matches!(&error, crate::ResidentToolError::Invocation(
         KernelInvocationFailure::Rejected { detail, .. }
-    ) if detail == "durable actor public surface is not initialized"));
+    ) if detail == "durable actor public surface is not initialized"),
+        "actual pending-owner refusal: {error:?}"
+    );
     forest.shutdown().await;
 }
 
