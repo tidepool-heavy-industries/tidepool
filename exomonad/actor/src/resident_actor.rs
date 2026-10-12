@@ -557,7 +557,6 @@ struct ResidentActorRecord {
     installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
     lifecycle: crate::LifecycleHandle,
     fresh_context_seed: Option<String>,
-    recovery_claimed: bool,
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
     forest_control: bool,
     interactive_policy_installed: bool,
@@ -11150,7 +11149,6 @@ where
                     installed_tools: self.installed_tools.clone(),
                     lifecycle: lifecycle.clone(),
                     fresh_context_seed: self.fresh_context_seed.clone(),
-                    recovery_claimed: false,
                     workbench_executions: self.workbench_executions.clone(),
                     forest_control: self.forest_control,
                     interactive_policy_installed: false,
@@ -13728,7 +13726,7 @@ where
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        let prior = self.directory.resolve(predecessor).ok_or_else(|| {
+        let prior = self.directory.resolve(predecessor).await?.ok_or_else(|| {
             std::io::Error::other("root recovery predecessor is not in this forest")
         })?;
         if prior
@@ -13759,14 +13757,12 @@ where
                 || record.descriptor.creator().is_some()
                 || record.descriptor.supervisor_parent().is_some()
                 || record.descriptor.context_parent().is_some()
-                || record.recovery_claimed
             {
                 return Err(std::io::Error::other(
                     "root recovery predecessor is ineligible or already recovered",
                 )
                 .into());
             }
-            record.recovery_claimed = true;
             record.workbench_executions.clone()
         };
         let identity =
@@ -13778,15 +13774,8 @@ where
                     })?,
                 ),
             };
-        let result = self
-            .new_program_root_with_replay(label, role, compiled, Some(journal), Some(identity))
-            .await;
-        if result.is_err() {
-            if let Some(record) = self.environment.actors.lock().get_mut(&predecessor) {
-                record.recovery_claimed = false;
-            }
-        }
-        result
+        self.new_program_root_with_replay(label, role, compiled, Some(journal), Some(identity))
+            .await
     }
 
     async fn new_program_root_with_replay(
