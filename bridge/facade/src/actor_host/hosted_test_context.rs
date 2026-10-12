@@ -712,6 +712,7 @@ pub(super) struct HostTestHooks {
 #[derive(Clone)]
 pub(super) struct HostedActorContext {
     pub(super) config: ActorHostConfig,
+    pub(super) service_address: std::net::SocketAddr,
     pub(super) actor: LocalActorRef,
     pub(super) forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     pub(super) runtime: Arc<embedded_harness::EmbeddedHarnessRuntime>,
@@ -740,6 +741,64 @@ impl std::fmt::Display for RootExitedBeforeBarrier {
 impl std::error::Error for RootExitedBeforeBarrier {}
 
 impl HostedActorContext {
+    pub(super) async fn http_command(
+        &self,
+        operation_id: harness::embedding::ClientOperationId,
+        command: harness::server::HostCommand,
+    ) -> Result<(), String> {
+        let settings = self
+            .config
+            .embedded
+            .as_ref()
+            .ok_or_else(|| "hosted HTTP input has no embedded settings".to_owned())?;
+        let secret_file = settings
+            .session_secret_file
+            .as_ref()
+            .ok_or_else(|| "hosted HTTP input requires a session secret file".to_owned())?;
+        let secret = std::fs::read_to_string(secret_file).map_err(|error| error.to_string())?;
+        let origin = format!("https://{}", self.service_address);
+        let api = format!("http://{}/api", self.service_address);
+        let client = reqwest::Client::builder()
+            .timeout(super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
+            .build()
+            .map_err(|error| error.to_string())?;
+        let login = client
+            .post(format!("{api}/session"))
+            .header(reqwest::header::ORIGIN, &origin)
+            .json(&json!({"secret": secret.trim()}))
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if login.status() != reqwest::StatusCode::OK {
+            return Err(format!("hosted session login returned {}", login.status()));
+        }
+        let cookie = login
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .ok_or_else(|| "hosted session login did not issue a cookie".to_owned())?
+            .to_str()
+            .map_err(|error| error.to_string())?
+            .split(';')
+            .next()
+            .expect("cookie split has a first field");
+        let wire = harness::server::browser_contract::ClientCommand::Host {
+            operation_id,
+            command: (&command).into(),
+        };
+        let receipt = client
+            .post(format!("{api}/commands"))
+            .header(reqwest::header::ORIGIN, &origin)
+            .header(reqwest::header::COOKIE, cookie)
+            .json(&wire)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if receipt.status() != reqwest::StatusCode::ACCEPTED {
+            return Err(format!("hosted command returned {}", receipt.status()));
+        }
+        Ok(())
+    }
+
     pub(super) fn binding(
         &self,
         actor: ActorRef,
@@ -981,58 +1040,7 @@ impl HostedTestRuntime {
         operation_id: harness::embedding::ClientOperationId,
         command: harness::server::HostCommand,
     ) -> Result<(), String> {
-        let settings = self
-            .context
-            .config
-            .embedded
-            .as_ref()
-            .ok_or_else(|| "hosted HTTP input has no embedded settings".to_owned())?;
-        let secret_file = settings
-            .session_secret_file
-            .as_ref()
-            .ok_or_else(|| "hosted HTTP input requires a session secret file".to_owned())?;
-        let secret = std::fs::read_to_string(secret_file).map_err(|error| error.to_string())?;
-        let origin = format!("https://{}", self.address);
-        let api = format!("http://{}/api", self.address);
-        let client = reqwest::Client::builder()
-            .timeout(super::test_campaign::COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
-            .build()
-            .map_err(|error| error.to_string())?;
-        let login = client
-            .post(format!("{api}/session"))
-            .header(reqwest::header::ORIGIN, &origin)
-            .json(&json!({"secret": secret.trim()}))
-            .send()
-            .await
-            .map_err(|error| error.to_string())?;
-        if login.status() != reqwest::StatusCode::OK {
-            return Err(format!("hosted session login returned {}", login.status()));
-        }
-        let cookie = login
-            .headers()
-            .get(reqwest::header::SET_COOKIE)
-            .ok_or_else(|| "hosted session login did not issue a cookie".to_owned())?
-            .to_str()
-            .map_err(|error| error.to_string())?
-            .split(';')
-            .next()
-            .expect("cookie split has a first field");
-        let wire = harness::server::browser_contract::ClientCommand::Host {
-            operation_id,
-            command: (&command).into(),
-        };
-        let receipt = client
-            .post(format!("{api}/commands"))
-            .header(reqwest::header::ORIGIN, &origin)
-            .header(reqwest::header::COOKIE, cookie)
-            .json(&wire)
-            .send()
-            .await
-            .map_err(|error| error.to_string())?;
-        if receipt.status() != reqwest::StatusCode::ACCEPTED {
-            return Err(format!("hosted command returned {}", receipt.status()));
-        }
-        Ok(())
+        self.context.http_command(operation_id, command).await
     }
 
     pub(super) async fn cell_settlement_diagnostic(&self, call_id: &str) -> String {
@@ -1159,6 +1167,7 @@ impl HostedTestRuntime {
             false,
             None,
             HostedChildMachines::Shared,
+            None,
         )
         .await
     }
@@ -1177,6 +1186,7 @@ impl HostedTestRuntime {
             false,
             Some(diagnostics_root),
             HostedChildMachines::Shared,
+            None,
         )
         .await
     }
@@ -1211,6 +1221,7 @@ impl HostedTestRuntime {
             true,
             None,
             child_machines,
+            None,
         )
         .await
     }
@@ -1233,6 +1244,27 @@ impl HostedTestRuntime {
             false,
             None,
             HostedChildMachines::Shared,
+            None,
+        )
+        .await
+    }
+
+    /// Observe actual production assembly while readiness still waits on startup.
+    pub(super) async fn start_observing_initialization(
+        settings: &crate::exomonad::EmbeddedLaunchConfig,
+        transport: &Arc<dyn harness::engine::ResponsesTransport>,
+        configure: impl FnOnce(&mut ActorHostConfig),
+        assembled: oneshot::Sender<HostedActorContext>,
+    ) -> Result<Self, HostedStartupError> {
+        Self::start_owned(
+            settings,
+            configure,
+            Some(Arc::clone(transport)),
+            None,
+            false,
+            None,
+            HostedChildMachines::Shared,
+            Some(assembled),
         )
         .await
     }
@@ -1245,6 +1277,7 @@ impl HostedTestRuntime {
         prepare: bool,
         diagnostics_root_override: Option<std::path::PathBuf>,
         child_machines: HostedChildMachines,
+        mut initialization_observer: Option<oneshot::Sender<HostedActorContext>>,
     ) -> Result<Self, HostedStartupError> {
         super::test_campaign::ensure_campaign_tracing();
         let startup_policy = StartupPolicy::parse(
@@ -1414,6 +1447,9 @@ impl HostedTestRuntime {
                     return Err(StartupFailure::HostExited { message: detail });
                 },
             };
+            if let Some(observer) = initialization_observer.take() {
+                let _ = observer.send(context.clone());
+            }
             assembly_observed = true;
             observed_root = Some(context.actor.clone());
             let address = context.while_root_live("embedded readiness", async {

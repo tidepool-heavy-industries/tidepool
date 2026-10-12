@@ -25,6 +25,8 @@ pub(crate) use effect_vocabulary::exomonad_effect_declarations;
 mod application_supervisor;
 #[cfg(test)]
 mod context_transaction_acceptance_tests;
+#[cfg(test)]
+mod startup_context_acceptance_tests;
 
 mod delivery;
 mod display_output;
@@ -2577,6 +2579,7 @@ async fn run_owned(
         if let Some(assembled) = hooks.assembled.take() {
             let _ = assembled.send(hosted_test_context::HostedActorContext {
                 config: config.clone(),
+                service_address: embedded_service.address,
                 actor: root_actor.clone(),
                 forest: Arc::clone(&forest),
                 runtime: Arc::clone(&embedded_service.runtime),

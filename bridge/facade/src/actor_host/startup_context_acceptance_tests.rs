@@ -8,7 +8,7 @@ use super::test_campaign::{
 use exomonad_actor::{InitialContextObservation, InitialContextState, JevCallFailure};
 use harness::transport::ResponsesRequest;
 use serde_json::Value;
-use std::{collections::VecDeque, sync::Arc};
+use std::{collections::VecDeque, sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 
 struct HeldJudgment {
@@ -84,18 +84,20 @@ fn observation(host: &HostedTestRuntime) -> InitialContextObservation {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn startup_effects_finish_before_readiness_and_first_request_then_refresh_exact_reference() {
+async fn startup_gates_queued_input_and_refreshes_exact_reference() {
     let files = tempfile::tempdir().unwrap();
     let settings = hosted_test_settings(&files, 1);
     let (provider, mut requests) = hosted_script_provider();
     let (entered, mut judgments) = mpsc::unbounded_channel();
-    let mut starting = Box::pin(HostedTestRuntime::start_configured(
+    let (assembly, mut assembled) = oneshot::channel();
+    let mut starting = Box::pin(HostedTestRuntime::start_observing_initialization(
         &settings,
         &provider,
         move |config| {
             configure_startup(config, "agentSpec", "runtime-memory-first");
             config.jev = Some(Arc::new(StartupJevGate(entered)));
         },
+        assembly,
     ));
     let held = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
         tokio::select! {
@@ -111,6 +113,54 @@ async fn startup_effects_finish_before_readiness_and_first_request_then_refresh_
     assert_eq!(held.packet["memory"], "runtime-memory-first");
     assert_eq!(held.packet["caller_seed_present"], false);
     assert_eq!(held.packet["caller_seed"], Value::Null);
+    let context = assembled
+        .try_recv()
+        .expect("startup effects run after actual production assembly");
+    assert_eq!(
+        context
+            .forest
+            .initial_context_observation(context.actor.identity())
+            .unwrap()
+            .state,
+        InitialContextState::Preparing
+    );
+    let target = context
+        .binding(context.actor.identity())
+        .expect("preparing root retains its exact pending binding")
+        .identity()
+        .clone();
+    let input_operation = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
+    context
+        .while_root_live(
+            "queue input during startup",
+            context.http_command(
+                input_operation,
+                harness::server::HostCommand::Input {
+                    target: target.clone(),
+                    text: "startup-activation".into(),
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let store = context.runtime.store();
+    let pending_input = store
+        .embedded_command(&target.run, input_operation)
+        .unwrap()
+        .expect("HTTP input is retained by the real command owner");
+    assert!(pending_input.receipt.is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), requests.recv())
+            .await
+            .is_err()
+    );
+    assert!(store
+        .embedded_command(&target.run, input_operation)
+        .unwrap()
+        .unwrap()
+        .receipt
+        .is_none());
     assert!(matches!(
         requests.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
@@ -145,7 +195,6 @@ async fn startup_effects_finish_before_readiness_and_first_request_then_refresh_
             let publication = retained.publication.as_ref().unwrap();
             assert!(publication.authored_reference.is_some());
             assert!(publication.caller_reference.is_none());
-            host.input("startup-activation").await.unwrap();
             let root = harness::model::AgentPath("/root".into());
             let mut pending = VecDeque::new();
             let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
