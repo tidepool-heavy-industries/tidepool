@@ -807,6 +807,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_handoff_keeps_original_source_path_and_ordered_settlements() {
+        let fixture = DirectoryFixture::start().await;
+        let registry = Arc::new(RequestRegistry::default());
+        let (first_send, mut first_events) = mpsc::unbounded_channel();
+        let (first, first_address, first_task) = fixture.spawn(first_send, None).await;
+        let (second_send, mut second_events) = mpsc::unbounded_channel();
+        let (second, second_address, second_task) =
+            fixture.spawn(second_send, Some(first.identity())).await;
+        let (third_send, mut third_events) = mpsc::unbounded_channel();
+        let (third, third_address, third_task) =
+            fixture.spawn(third_send, Some(second.identity())).await;
+        let requests = (0..4)
+            .map(|_| {
+                let request = registry.reserve_native(actor(100), actor(101));
+                registry
+                    .mark_queued(actor(100), actor(101), request)
+                    .unwrap();
+                registry.present(actor(101), request).unwrap();
+                request
+            })
+            .collect::<Vec<_>>();
+        let bindings = requests
+            .iter()
+            .enumerate()
+            .map(|(slot, request)| (slot, *request, RequestSourceKind::Settlement))
+            .collect::<Vec<_>>();
+        let mut sources = registry
+            .attach_sources(actor(100), first.clone(), &bindings)
+            .unwrap();
+        let original_destination = sources.recipient.clone();
+        let settle = |request| {
+            let mut claim = Some(registry.begin_reply(actor(101), request).unwrap());
+            crate::request::test_support::complete_optional_reply(&registry, &mut claim, None);
+        };
+        settle(requests[0]);
+        assert_eq!(receive(&mut first_events).await.slot, 0);
+        for (predecessor, successor) in [(&first, &second), (&second, &third)] {
+            let grant = fixture
+                .directory
+                .replacement_ingress_grant(predecessor.identity(), successor.identity())
+                .await
+                .unwrap();
+            predecessor
+                .lifecycle()
+                .begin_replacement(grant.clone())
+                .await
+                .unwrap();
+            sources.handoff(grant).await.unwrap();
+        }
+        assert!(sources.recipient.same_connections(&original_destination));
+        assert_eq!(sources.recipient.0.identity(), first.identity());
+        assert_eq!(sources.recipient.identity(), third.identity());
+        for request in &requests[1..] {
+            settle(*request);
+        }
+        for slot in 1..4 {
+            let delivery = receive(&mut third_events).await;
+            assert_eq!(delivery.slot, slot);
+            assert!(
+                matches!(&delivery.event, SourceEvent::Settled(Ok(root)) if crate::request::test_support::force(root) == 41)
+            );
+        }
+        assert!(first_events.try_recv().is_err());
+        assert!(second_events.try_recv().is_err());
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let request = crate::MailboxValue::probe(tidepool_repr::SessionId(7), Arc::clone(&dropped));
+        assert!(matches!(
+            first.cast(actor(100), request).await,
+            Err(crate::KernelCallFailure::MailboxClosed(identity)) if identity == first.identity()
+        ));
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+        drop(sources);
+        first_address.stop(None);
+        second_address.stop(None);
+        third_address.stop(None);
+        first_task.await.unwrap();
+        second_task.await.unwrap();
+        third_task.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn source_attachment_validates_the_whole_list_before_capturing_anything() {
         let fixture = DirectoryFixture::start().await;
         let registry = Arc::new(RequestRegistry::default());
