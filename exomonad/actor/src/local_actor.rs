@@ -2225,6 +2225,9 @@ where
                     Disposition::Stop(terminal),
                 )
                 .await;
+                if state.context.requested_shutdown().is_none() {
+                    return Ok(state);
+                }
             }
             Err(error) => {
                 let terminal = ActorTerminal::failed(
@@ -2253,7 +2256,21 @@ where
                 .await;
             }
         }
-        state.lifecycle.executor_started().await?;
+        if let Err(error) = state.lifecycle.executor_started().await {
+            finish_actor(
+                &state.context.myself.clone(),
+                &mut state,
+                Disposition::Stop(ActorTerminal::new(
+                    ActorExitKind::Cancelled,
+                    error.to_string(),
+                )),
+            )
+            .await;
+            return Err(Box::new(StartupRefusal {
+                cause: StartupFailureCause::Lifecycle(error),
+                cleanup: state.terminal.cleanup(),
+            }));
+        }
         Ok(state)
     }
 
@@ -3770,9 +3787,17 @@ mod tests {
 
         #[derive(Clone, Debug)]
         enum Operation {
-            Spawn { parent: usize, independent: bool },
-            DropUnpolled { parent: usize },
-            Retire { actor: usize },
+            Spawn {
+                parent: usize,
+                independent: bool,
+                terminal: bool,
+            },
+            DropUnpolled {
+                parent: usize,
+            },
+            Retire {
+                actor: usize,
+            },
         }
 
         struct Birth {
@@ -3798,14 +3823,22 @@ mod tests {
                     Operation::Spawn {
                         parent,
                         independent,
+                        terminal,
                     } => {
                         let parent = parent % births.len();
                         let before = observations.lock().len();
+                        let mut probe = observed_probe(&observations);
+                        if terminal {
+                            probe.startup_terminal = Some(ActorTerminal::new(
+                                ActorExitKind::Completed,
+                                "history startup completion",
+                            ));
+                        }
                         let child = births[parent]
                             .context
                             .spawn_worker(
                                 None,
-                                observed_probe(&observations),
+                                probe,
                                 if independent {
                                     crate::WorkerLifetime::RunOwned
                                 } else {
@@ -3822,7 +3855,7 @@ mod tests {
                                 actor,
                                 context,
                                 parent: (!independent).then_some(parent),
-                                live: true,
+                                live: !terminal,
                             });
                         } else {
                             assert_eq!(
@@ -3918,10 +3951,13 @@ mod tests {
             config.source_file = Some(file!());
             config.test_name = Some(name);
             let operations = prop_oneof![
-                (0usize..8, any::<bool>()).prop_map(|(parent, independent)| Operation::Spawn {
-                    parent,
-                    independent
-                }),
+                (0usize..8, any::<bool>(), any::<bool>()).prop_map(
+                    |(parent, independent, terminal)| Operation::Spawn {
+                        parent,
+                        independent,
+                        terminal,
+                    }
+                ),
                 (0usize..8).prop_map(|parent| Operation::DropUnpolled { parent }),
                 (0usize..8).prop_map(|actor| Operation::Retire { actor }),
             ];
@@ -3931,20 +3967,34 @@ mod tests {
                         Operation::Spawn {
                             parent: 0,
                             independent: false,
+                            terminal: false,
                         },
                         Operation::Spawn {
                             parent: 1,
                             independent: false,
+                            terminal: false,
                         },
                         Operation::Spawn {
                             parent: 1,
                             independent: true,
+                            terminal: false,
+                        },
+                        Operation::Spawn {
+                            parent: 0,
+                            independent: false,
+                            terminal: true,
+                        },
+                        Operation::Spawn {
+                            parent: 0,
+                            independent: true,
+                            terminal: true,
                         },
                         Operation::DropUnpolled { parent: 1 },
                         Operation::Retire { actor: 1 },
                         Operation::Spawn {
                             parent: 1,
                             independent: false,
+                            terminal: false,
                         },
                     ];
                     operations.extend(tail);
@@ -4036,6 +4086,7 @@ mod tests {
         cleanup_peers: Option<Arc<Mutex<Vec<LocalActorRef>>>>,
         replacement_staged: bool,
         startup_gate: Option<(Arc<Notify>, Arc<Notify>)>,
+        startup_terminal: Option<ActorTerminal>,
         calls: Arc<Mutex<Vec<&'static str>>>,
         mailbox_calls: Arc<Mutex<Vec<SessionId>>>,
         release_first: Arc<Notify>,
@@ -4197,6 +4248,7 @@ mod tests {
             let observations = self.start_observations.clone();
             let context = context.clone();
             let gate = self.startup_gate.clone();
+            let terminal = self.startup_terminal.clone();
             Box::pin(async move {
                 if let Some(observations) = observations {
                     let supervisor = context.supervisor_identity().await.unwrap();
@@ -4206,7 +4258,13 @@ mod tests {
                     entered.notify_one();
                     release.notified().await;
                 }
-                Ok(KernelStep::Continue(()))
+                Ok(match terminal {
+                    Some(terminal) => KernelStep::Stop {
+                        output: (),
+                        terminal,
+                    },
+                    None => KernelStep::Continue(()),
+                })
             })
         }
 
@@ -4690,6 +4748,7 @@ mod tests {
                 cleanup_peers: None,
                 replacement_staged: false,
                 startup_gate: None,
+                startup_terminal: None,
                 calls: Arc::clone(&calls),
                 mailbox_calls: Arc::clone(&mailbox_calls),
                 release_first: Arc::clone(&release),
@@ -6693,6 +6752,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_startup_retains_successful_birth_and_closed_admission() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let mut probe = observed_probe(&observations);
+        let expected = ActorTerminal::new(ActorExitKind::Completed, "completed during startup");
+        probe.startup_terminal = Some(expected.clone());
+        let (actor, task) = spawn_local_actor(None, probe)
+            .await
+            .expect("completed startup is a successful birth");
+        task.await.unwrap();
+        assert_eq!(actor.address().get_status(), ractor::ActorStatus::Stopped);
+        assert_eq!(actor.terminal().get().unwrap().kind, expected.kind);
+        assert_eq!(actor.terminal().get().unwrap().summary, expected.summary);
+        assert!(actor.terminal().cleanup().is_some());
+        let context = observations.lock()[0].0.clone();
+        assert!(context
+            .spawn_child(None, behavior(false).behavior)
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_close_during_startup_settles_prepared_behavior() {
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let mut probe = observed_probe(&observations);
+        probe.startup_gate = Some((entered.clone(), release.clone()));
+        let spawning = tokio::spawn(async move { spawn_local_actor(None, probe).await });
+        entered.notified().await;
+        let context = observations.lock()[0].0.clone();
+        context.lifecycle.close().await.unwrap();
+        assert!(context.requested_shutdown().is_none());
+        release.notify_one();
+        let error = match spawning.await.unwrap() {
+            Ok(_) => panic!("closed lifecycle published caller readiness"),
+            Err(error) => error,
+        };
+        let cleanup = startup_cleanup(&error).expect("late startup refusal retains cleanup");
+        assert_eq!(cleanup.actor(), context.identity());
+        assert_eq!(
+            context.terminal.get().unwrap().kind,
+            ActorExitKind::Cancelled
+        );
+        context.myself.get_cell().wait(None).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn admitted_pre_start_is_included_in_sealed_retirement_snapshot() {
         let observations = Arc::new(Mutex::new(Vec::new()));
         let (directory, _directory_task) = LocalActorDirectory::start().await.unwrap();
@@ -6722,11 +6828,23 @@ mod tests {
         assert!(roots[0].terminal().requested_shutdown().is_some());
         release.notify_one();
         match spawning.await.unwrap() {
-            Err(ractor::SpawnErr::StartupFailed(error)) => assert_eq!(
-                error.downcast_ref::<KernelCallFailure>(),
-                Some(&KernelCallFailure::MailboxClosed(roots[0].identity())),
-                "closed startup must refuse publishing caller readiness",
-            ),
+            Err(ractor::SpawnErr::StartupFailed(error)) => {
+                let refusal = error
+                    .downcast_ref::<StartupRefusal>()
+                    .expect("typed startup refusal");
+                assert!(
+                    matches!(
+                        refusal.cause,
+                        StartupFailureCause::Lifecycle(KernelCallFailure::MailboxClosed(actor))
+                            if actor == roots[0].identity()
+                    ),
+                    "closed startup must refuse publishing caller readiness"
+                );
+                assert!(
+                    refusal.cleanup.is_some(),
+                    "closed startup retains cleanup evidence"
+                );
+            }
             Err(error) => panic!("unexpected startup refusal: {error:?}"),
             Ok(_) => panic!("sealed startup published caller readiness"),
         }
