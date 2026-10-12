@@ -38,9 +38,16 @@ pub enum ProviderPhase {
     NeedsAttention,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeSettlement {
+    Confirmed,
+    NeedsAttention(String),
+}
+
 #[derive(Clone)]
 pub struct LifecycleSnapshot {
     pub owner_available: bool,
+    pub native_settlement: NativeSettlement,
     pub phase: LifecyclePhase,
     pub transactions: usize,
     pub ingress: usize,
@@ -80,6 +87,7 @@ pub(super) struct LifecycleState {
     operation_sequence: u64,
     retirement_requested: bool,
     owner_available: bool,
+    native_settlement: NativeSettlement,
     transactions: BTreeSet<u64>,
     ingress: BTreeSet<u64>,
     provider: Option<NativeProvider>,
@@ -156,7 +164,7 @@ pub(super) enum LifecycleCommand {
     },
     NativeBegun {
         sequence: u64,
-        outcome: Result<tidepool_runtime::session::ProviderTransition, String>,
+        outcome: Result<Option<tidepool_runtime::session::ProviderTransition>, String>,
     },
     NativeCompleted {
         sequence: u64,
@@ -298,6 +306,7 @@ impl LifecycleHandle {
     ) -> Result<Self, ractor::SpawnErr> {
         let (observations, observe) = watch::channel(LifecycleSnapshot {
             owner_available: true,
+            native_settlement: NativeSettlement::Confirmed,
             phase: LifecyclePhase::Starting,
             transactions: 0,
             ingress: 0,
@@ -426,7 +435,12 @@ impl LifecycleHandle {
         let mut observe = self.observations.clone();
         loop {
             let snapshot = observe.borrow_and_update().clone();
-            if !snapshot.owner_available {
+            if !snapshot.owner_available
+                || matches!(
+                    snapshot.native_settlement,
+                    NativeSettlement::NeedsAttention(_)
+                )
+            {
                 return Err(KernelCallFailure::TargetUnavailable(self.identity));
             }
             if snapshot.transactions == 0 {
@@ -553,6 +567,7 @@ impl LifecycleState {
     pub(super) fn publish(&self) {
         self.observations.send_replace(LifecycleSnapshot {
             owner_available: self.owner_available,
+            native_settlement: self.native_settlement.clone(),
             phase: self.phase,
             transactions: self.transactions.len()
                 + self
@@ -654,6 +669,7 @@ impl Actor for LifecycleCoordinator {
             operation_sequence: 0,
             retirement_requested: false,
             owner_available: true,
+            native_settlement: NativeSettlement::Confirmed,
             transactions: BTreeSet::new(),
             ingress: BTreeSet::new(),
             provider: None,
@@ -845,18 +861,33 @@ impl Actor for LifecycleCoordinator {
                 }
             }
             LifecycleCommand::NativeBegun { sequence, outcome } => {
-                state.tasks.remove(&sequence);
-                native_begun(state, &myself, sequence, outcome);
+                if matches!(
+                    state.pending.get(&sequence),
+                    Some(PendingOperation::Transaction(_) | PendingOperation::ProviderStart { .. })
+                ) {
+                    state.tasks.remove(&sequence);
+                    native_begun(state, &myself, sequence, outcome);
+                }
             }
             LifecycleCommand::NativeCompleted { sequence, outcome } => {
-                state.tasks.remove(&sequence);
-                native_completed(state, &myself, sequence, outcome);
+                if matches!(
+                    state.pending.get(&sequence),
+                    Some(
+                        PendingOperation::TransactionCompleting { .. }
+                            | PendingOperation::ProviderCompleting { .. }
+                            | PendingOperation::Refusing
+                    )
+                ) {
+                    state.tasks.remove(&sequence);
+                    native_completed(state, &myself, sequence, outcome);
+                }
             }
             LifecycleCommand::ClaimIdle { terminal, reply } => {
                 let eligible = state.phase == LifecyclePhase::Open
                     && state.transactions.is_empty()
                     && state.ingress.is_empty()
                     && state.pending.is_empty()
+                    && matches!(state.native_settlement, NativeSettlement::Confirmed)
                     && !state
                         .resident
                         .as_ref()
@@ -995,6 +1026,7 @@ fn begin_native(state: &mut LifecycleState, myself: &RactorRef<LifecycleCommand>
                     readiness
                         .begin_provider_transition()
                         .await
+                        .map(Some)
                         .map_err(|error| error.to_string())
                 })
                 .catch_unwind()
@@ -1004,13 +1036,7 @@ fn begin_native(state: &mut LifecycleState, myself: &RactorRef<LifecycleCommand>
                     Err(_) => Err("native admission worker panicked".into()),
                 },
                 Err(error) => Err(error),
-                Ok(None) => {
-                    let _ = owner.cast(LifecycleCommand::NativeCompleted {
-                        sequence,
-                        outcome: Ok(()),
-                    });
-                    return;
-                }
+                Ok(None) => Ok(None),
             };
             let _ = owner.cast(LifecycleCommand::NativeBegun { sequence, outcome });
         }),
@@ -1021,7 +1047,7 @@ fn native_begun(
     state: &mut LifecycleState,
     myself: &RactorRef<LifecycleCommand>,
     sequence: u64,
-    outcome: Result<tidepool_runtime::session::ProviderTransition, String>,
+    outcome: Result<Option<tidepool_runtime::session::ProviderTransition>, String>,
 ) {
     let Some(pending) = state.pending.remove(&sequence) else {
         // A stale local completion has no authority over a later turn. An
@@ -1037,9 +1063,15 @@ fn native_begun(
     };
     if let Some(refusal) = state.refusal() {
         refuse_pending(state, pending, refusal.to_string());
-        launch_refuse(state, myself, sequence, transition);
+        if let Some(transition) = transition {
+            launch_refuse(state, myself, sequence, transition);
+        }
         return;
     }
+    // This is the admission cutoff. The native Begin has succeeded and the
+    // coordinator now creates the actual local lease or provider observation.
+    // A later Close fences new work but must let this exact admitted operation
+    // settle native Complete before its success reply or retirement drain.
     let completing = match pending {
         PendingOperation::Transaction(reply) => {
             state.transactions.insert(sequence);
@@ -1068,7 +1100,9 @@ fn native_begun(
                 }
                 Err(error) => {
                     let _ = reply.send(Err(NativeProviderStartError::Invalid(error)));
-                    launch_refuse(state, myself, sequence, transition);
+                    if let Some(transition) = transition {
+                        launch_refuse(state, myself, sequence, transition);
+                    }
                     return;
                 }
             }
@@ -1083,6 +1117,10 @@ fn native_begun(
         }
     };
     state.pending.insert(sequence, completing);
+    let Some(transition) = transition else {
+        native_completed(state, myself, sequence, Ok(()));
+        return;
+    };
     let owner = myself.clone();
     state.tasks.insert(
         sequence,
@@ -1116,18 +1154,6 @@ fn native_completed(
         return;
     };
     match (pending, outcome) {
-        (PendingOperation::Transaction(reply), Ok(())) => {
-            // Ephemeral actors have no native public owner fence.
-            if let Some(refusal) = state.refusal() {
-                let _ = reply.send(Err(refusal));
-            } else {
-                state.transactions.insert(sequence);
-                let _ = reply.send(Ok(ActorAdmissionLease {
-                    owner: myself.clone(),
-                    sequence,
-                }));
-            }
-        }
         (PendingOperation::Refusing, Ok(())) => {}
         (PendingOperation::TransactionCompleting { lease, reply }, Ok(())) => {
             let _ = reply.send(Ok(lease));
@@ -1139,9 +1165,13 @@ fn native_completed(
             }));
         }
         (pending, Err(error)) => {
+            state.native_settlement = NativeSettlement::NeedsAttention(error.clone());
             refuse_pending(state, pending, error);
         }
         (pending, Ok(())) => {
+            state.native_settlement = NativeSettlement::NeedsAttention(
+                "native completion has wrong operation phase".into(),
+            );
             refuse_pending(
                 state,
                 pending,
