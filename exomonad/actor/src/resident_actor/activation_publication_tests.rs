@@ -145,6 +145,9 @@ async fn interrupt_during_preview(
         ResidentBoot::Workbench,
         Vec::new(),
     );
+    // This fixture invokes the resident method directly after configuring the
+    // real owner, so retain the exact handle that production start installs.
+    behavior.lifecycle = Some(fixture.kernel.lifecycle().clone());
     behavior.policy_installed = already_installed;
     fixture.environment.actors.lock().insert(
         context.actor,
@@ -672,6 +675,8 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         ResidentBoot::Workbench,
         Vec::new(),
     );
+    // Match production start's cached handle for the genuinely configured owner.
+    behavior.lifecycle = Some(fixture.kernel.lifecycle().clone());
     behavior.policy_installed = true;
     fixture.environment.actors.lock().insert(
         context.actor,
