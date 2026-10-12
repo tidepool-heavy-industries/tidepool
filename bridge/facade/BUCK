@@ -1062,6 +1062,7 @@ rust_filegroup(
         "src/actor_host/fixtures/startup_persona_refresh.hs": "bridge/facade/src/actor_host/fixtures/startup_persona_refresh.hs",
         "src/actor_host/fixtures/startup_persona_refuse_native.hs": "bridge/facade/src/actor_host/fixtures/startup_persona_refuse_native.hs",
         "src/actor_host/fixtures/startup_persona_spec.hs": "bridge/facade/src/actor_host/fixtures/startup_persona_spec.hs",
+        "src/actor_host/fixtures/startup_persona_web_selection.hs": "bridge/facade/src/actor_host/fixtures/startup_persona_web_selection.hs",
         "src/actor_host/fixtures/supplied_live_observe.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_observe.hs",
         "src/actor_host/fixtures/supplied_live_observe_again.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_observe_again.hs",
         "src/actor_host/fixtures/supplied_live_observe_immediate.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_observe_immediate.hs",
@@ -2794,6 +2795,7 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/startup_persona_refresh.hs": "src/actor_host/fixtures/startup_persona_refresh.hs",
         "bridge/facade/src/actor_host/fixtures/startup_persona_refuse_native.hs": "src/actor_host/fixtures/startup_persona_refuse_native.hs",
         "bridge/facade/src/actor_host/fixtures/startup_persona_spec.hs": "src/actor_host/fixtures/startup_persona_spec.hs",
+        "bridge/facade/src/actor_host/fixtures/startup_persona_web_selection.hs": "src/actor_host/fixtures/startup_persona_web_selection.hs",
         "bridge/facade/src/actor_host/fixtures/supplied_live_observe.hs": "src/actor_host/fixtures/supplied_live_observe.hs",
         "bridge/facade/src/actor_host/fixtures/supplied_live_observe_again.hs": "src/actor_host/fixtures/supplied_live_observe_again.hs",
         "bridge/facade/src/actor_host/fixtures/supplied_live_observe_immediate.hs": "src/actor_host/fixtures/supplied_live_observe_immediate.hs",
@@ -3915,6 +3917,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737461727475705f706572736f6e615f737065632e6873",
     src = "src/actor_host/fixtures/startup_persona_spec.hs",
     out = "startup_persona_spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737461727475705f706572736f6e615f7765625f73656c656374696f6e2e6873",
+    src = "src/actor_host/fixtures/startup_persona_web_selection.hs",
+    out = "startup_persona_web_selection.hs",
     visibility = ["PUBLIC"],
 )
 

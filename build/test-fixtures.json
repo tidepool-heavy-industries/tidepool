@@ -152,6 +152,7 @@
     "bridge/facade/src/actor_host/fixtures/startup_persona_refresh.hs",
     "bridge/facade/src/actor_host/fixtures/startup_persona_refuse_native.hs",
     "bridge/facade/src/actor_host/fixtures/startup_persona_spec.hs",
+    "bridge/facade/src/actor_host/fixtures/startup_persona_web_selection.hs",
     "bridge/facade/src/actor_host/fixtures/supplied_live_observe.hs",
     "bridge/facade/src/actor_host/fixtures/supplied_live_observe_again.hs",
     "bridge/facade/src/actor_host/fixtures/supplied_live_observe_immediate.hs",

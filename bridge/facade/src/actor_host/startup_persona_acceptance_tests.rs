@@ -550,7 +550,52 @@ async fn shipped_persona_initializer_uses_actual_preparation_before_first_reques
                 judgments.try_recv(),
                 Err(mpsc::error::TryRecvError::Empty)
             ));
-            first.finish();
+            let operation = first.operation("persona-web-selection");
+            first.sync_call_named(
+                "persona-web-selection",
+                "haskell",
+                include_str!("fixtures/startup_persona_web_selection.hs"),
+            );
+            let judgment = host
+                .while_operation_succeeds(
+                    &operation,
+                    tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, judgments.recv()),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(judgment.packet["state"]["intent"], "Retain both passages");
+            assert_eq!(judgment.packet["state"]["conversation"], "[explicit intent only]");
+            let questions = judgment.packet["questions"].as_object().unwrap();
+            assert_eq!(questions.len(), 2);
+            let answers = questions
+                .iter()
+                .map(|(key, question)| {
+                    assert_eq!(question["type"], "noul");
+                    (key.clone(), json!({"type":"noul", "noul":1.0}))
+                })
+                .collect::<serde_json::Map<_, _>>();
+            let packet = judgment.packet.clone();
+            judgment.answer.send(json!({
+                "model":"controlled-web", "answers":answers, "usage":{}
+            })).unwrap();
+            let root = harness::model::AgentPath("/root".into());
+            let selected = host.while_operation_succeeds(&operation, async {
+                tokio::select! {
+                    round = next_hosted_script_round(&mut requests, &mut pending, &root) => round,
+                    extra = judgments.recv() => panic!("empty page issued another semantic observation: {:?}", extra.map(|judgment| judgment.packet)),
+                }
+            }).await.unwrap();
+            assert_eq!(committed_display_text(&selected.settled_output("persona-web-selection")), "True");
+            let saved = preparation(&host.context.config.workspace, "web-evaluation");
+            assert_eq!(saved["outcome"], "completed");
+            assert_eq!(saved["observations"].as_array().unwrap().len(), 1);
+            assert_eq!(saved["observations"][0]["request"], packet);
+            assert_eq!(saved["observations"][0]["occurrences"].as_array().unwrap().len(), 2);
+            assert_eq!(preparation(&host.context.config.workspace, "empty-web-evaluation"),
+                json!({"outcome":"completed", "observations":[]}));
+            selected.finish();
         })
     })
     .await;
