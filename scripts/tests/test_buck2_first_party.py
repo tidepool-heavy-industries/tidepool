@@ -442,6 +442,7 @@ sha2-0_11_0 = { package = "sha2", version = "=0.11.0" }
         # cannot depend on the source-backed development checkout fallback.
         producer = self.rule("bridge/facade", "tidepool_build_script_run", "tidepool_buildscript_run")
         self.assertEqual(producer["env"]["TIDEPOOL_EMBED_HASKELL"], "1")
+        self.assertTrue(producer["first_party"])
         binary = self.rule("bridge/facade", "tidepool_unit_tests", "tidepool_rust_binary")
         self.assertEqual(binary["env"]["OUT_DIR"], "$(location :tidepool_build_script_run[out_dir])")
         self.assertEqual(cohort["exact_tests"], [

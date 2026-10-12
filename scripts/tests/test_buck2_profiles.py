@@ -38,6 +38,8 @@ def resolve(profile):
         rust_binary=lambda **kwargs: calls.append(("dependency_binary", kwargs)),
     )
     load_definitions(ROOT / "build/rust/dependency_profiles.bzl", namespace)
+    namespace["buildscript_run"] = lambda **kwargs: calls.append(("buildscript_run", kwargs))
+    load_definitions(ROOT / "build/rust/buildscript.bzl", namespace)
     return namespace, calls
 
 
@@ -138,6 +140,29 @@ class BuckProfileConfiguration(unittest.TestCase):
             with self.subTest(platform=attributes), self.assertRaises(ValueError):
                 namespace["tidepool_cargo_rust_binary"](platform={"linux-x86_64": attributes})
         self.assertEqual(calls, [])
+
+    def test_buildscript_environment_describes_owning_code_and_preserves_no_debuginfo(self):
+        for profile in ("fast-dev", "debug", "production"):
+            for policy, package in (("dependency", "arbitrary"), ("harness", "arbitrary"),
+                                    ("first-party", "tidepool"), ("first-party", "tidepool-codegen")):
+                with self.subTest(profile=profile, policy=policy, package=package):
+                    namespace, calls = resolve(profile)
+                    env = {"CARGO_PKG_NAME": package}
+                    if policy == "harness":
+                        env["TIDEPOOL_NATIVE_RUST_POLICY"] = policy
+                    namespace["tidepool_buildscript_run"](package_name=package, env=env,
+                                                          first_party=policy == "first-party")
+                    emitted = calls[0][1]["env"]
+                    if policy == "first-party":
+                        expected = namespace["rust_optimization_level"](package, True)
+                    else:
+                        expected = namespace["generated_rust_optimization_level"](policy)
+                    self.assertEqual(emitted["OPT_LEVEL"], expected)
+                    self.assertEqual(emitted["PROFILE"], "release" if profile == "production" else "dev")
+                    self.assertEqual(emitted["DEBUG"], "false")
+                    self.assertNotIn("TIDEPOOL_NATIVE_RUST_POLICY", emitted)
+                    self.assertFalse(any("debuginfo" in flag for flag in toolchain_flags()))
+                    self.assertEqual(emitted["CARGO_PKG_NAME"], package)
 
     def test_shared_libtest_binary_remains_unoptimized_in_fast_dev(self):
         namespace, calls = resolve("fast-dev")

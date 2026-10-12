@@ -53,6 +53,7 @@ tidepool_facade_build_inputs(
 
 tidepool_buildscript_run(
     name = "tidepool_build_script_run",
+    first_party = True,
     package_name = "tidepool",
     version = "0.1.0",
     buildscript_rule = ":tidepool_build_script",

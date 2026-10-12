@@ -1,5 +1,7 @@
 """Shared native compiler profiles selected through Buck config."""
 
+GENERATED_RUST_POLICY_ENV = "TIDEPOOL_NATIVE_RUST_POLICY"
+
 _PROFILES = ["fast-dev", "debug", "production"]
 _HOT_RUST_PACKAGES = ["tidepool-codegen", "tidepool-repr", "tidepool-heap", "tidepool-toolchain"]
 
@@ -36,3 +38,9 @@ def generated_rust_optimization_level(policy):
     if policy == "dependency":
         return "0" if profile == "debug" else "2"
     fail("unknown generated Rust policy %r" % policy)
+
+
+def generated_rust_policy_environment(env):
+    env = dict(env)
+    policy = env.pop(GENERATED_RUST_POLICY_ENV, "dependency")
+    return (env, generated_rust_optimization_level(policy))

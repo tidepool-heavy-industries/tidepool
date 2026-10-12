@@ -1,16 +1,12 @@
 """Reindeer compiler policy; Cargo still owns platform and build-script handling."""
-load("//build:native_profile.bzl", "generated_rust_optimization_level", "rust_optimization_flags")
+load("//build:native_profile.bzl", "GENERATED_RUST_POLICY_ENV", "generated_rust_policy_environment", "rust_optimization_flags")
 load("@prelude//rust:cargo_package.bzl", "cargo")
 
-_POLICY_ENV = "TIDEPOOL_NATIVE_RUST_POLICY"
-
 def _arguments(env, rustc_flags, platform):
-    env = dict(env)
     # This Reindeer fixup is build-policy metadata, never compiler/runtime env.
-    policy = env.pop(_POLICY_ENV, "dependency")
-    level = generated_rust_optimization_level(policy)
+    env, level = generated_rust_policy_environment(env)
     for attributes in platform.values():
-        if _POLICY_ENV in attributes.get("env", {}):
+        if GENERATED_RUST_POLICY_ENV in attributes.get("env", {}):
             fail("generated Rust policy belongs to the package fixup, not platform env")
         rust_optimization_flags(level, attributes.get("rustc_flags", []))
     return (env, rust_optimization_flags(level, rustc_flags))

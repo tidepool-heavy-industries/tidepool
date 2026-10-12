@@ -1490,6 +1490,7 @@ load("//build/rust:defs.bzl", "tidepool_rust_test_cases")
 
 tidepool_buildscript_run(
     name = "tidepool_build_script_run",
+    first_party = True,
     package_name = "tidepool",
     version = "''' + package["version"] + '''",
     buildscript_rule = ":tidepool_build_script",
