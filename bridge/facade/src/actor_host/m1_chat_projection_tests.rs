@@ -5,7 +5,7 @@ use harness::{
     model::{AgentPath, Effort, RequestId},
     provider::{CallContext, Provider, ProviderError, ToolScheduling},
     store::{actor_output::ActorOutputOrigin, chat::ChatEntry, Store, Usage},
-    transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError},
+    transport::{Auth, ResponsesTurn, TransportError},
     turn::JobScheduler,
 };
 use proptest::prelude::*;
@@ -47,7 +47,25 @@ impl Provider for Echo {
 struct Script(Mutex<VecDeque<Item>>);
 #[async_trait]
 impl ResponsesTransport for Script {
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
+    async fn create(
+        &self,
+        _: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         Ok(ResponsesTurn {
             response_id: "projection".into(),
             items: vec![self
@@ -120,7 +138,7 @@ proptest! {
             prop_assert_eq!(page.cutover_sequence, 0);
             for entry in page.entries {
                 match entry {
-                    ChatEntry::Message { sequence, request_id, position, hash, item } => {
+                    ChatEntry::Message { sequence, request_id, position, hash, item, .. } => {
                         prop_assert!(sequence > after);
                         after = sequence;
                         projected.push((request_id, position, hash, item));

@@ -477,19 +477,34 @@ fn schema_refusal_input() -> Value {
 
 #[async_trait::async_trait]
 impl harness::engine::ResponsesTransport for SchemaRefusalTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(
         &self,
-        _: harness::transport::ResponsesRequest,
+        _: harness::transport::PreparedProviderRequest,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
         panic!("the Engine must issue the exact durable request identity")
     }
 
-    async fn create_streaming_for_request(
+    async fn create_streaming(
         &self,
-        request: &RequestId,
-        _: harness::transport::ResponsesRequest,
+        prepared: harness::transport::PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+        let request = prepared.request_id();
         match self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
             0 => {
                 let turn = harness::transport::ResponsesTurn {
@@ -500,10 +515,14 @@ impl harness::engine::ResponsesTransport for SchemaRefusalTransport {
                     }))],
                     usage: Default::default(),
                 };
-                for item in &turn.items {
-                    sink.send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
-                        .await
-                        .unwrap();
+                let mut assembly = harness::transport::sse::ResponseAssembly::default();
+                for (index, item) in turn.items.iter().enumerate() {
+                    let event = assembly.accept(
+                        &serde_json::json!({
+                            "type": "response.output_item.done", "output_index": index, "item": item,
+                        }).to_string(),
+                    )?.expect("indexed done item emits its completed event");
+                    sink.send(event).await.unwrap();
                 }
                 Ok(turn)
             }

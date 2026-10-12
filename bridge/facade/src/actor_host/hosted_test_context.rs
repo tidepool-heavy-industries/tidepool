@@ -959,6 +959,28 @@ impl HostedTestRuntime {
 
     /// Exercise browser session login and root input admission through real HTTP.
     pub(super) async fn http_input(&self, text: &str) -> Result<(), String> {
+        let target = self
+            .context
+            .binding(self.context.actor.identity())
+            .and_then(|binding| binding.conversation())
+            .ok_or_else(|| "hosted HTTP input has no root conversation".to_owned())?
+            .identity()
+            .clone();
+        self.http_command(
+            harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
+            harness::server::HostCommand::Input {
+                target,
+                text: text.into(),
+            },
+        )
+        .await
+    }
+
+    pub(super) async fn http_command(
+        &self,
+        operation_id: harness::embedding::ClientOperationId,
+        command: harness::server::HostCommand,
+    ) -> Result<(), String> {
         let settings = self
             .context
             .config
@@ -995,26 +1017,20 @@ impl HostedTestRuntime {
             .split(';')
             .next()
             .expect("cookie split has a first field");
+        let wire = harness::server::browser_contract::ClientCommand::Host {
+            operation_id,
+            command: (&command).into(),
+        };
         let receipt = client
             .post(format!("{api}/commands"))
             .header(reqwest::header::ORIGIN, &origin)
             .header(reqwest::header::COOKIE, cookie)
-            .json(&harness::server::ClientCommand::Host {
-                operation_id: harness::embedding::ClientOperationId(uuid::Uuid::new_v4()),
-                command: harness::server::HostCommand::Input {
-                    target: harness::embedding::HostIdentity {
-                        run: runtime_namespace(&self.context.config.run_directory.path()),
-                        actor: harness::model::AgentPath("/root".into()),
-                        incarnation: self.context.actor.identity().incarnation.0.to_string(),
-                    },
-                    text: text.into(),
-                },
-            })
+            .json(&wire)
             .send()
             .await
             .map_err(|error| error.to_string())?;
         if receipt.status() != reqwest::StatusCode::ACCEPTED {
-            return Err(format!("hosted root input returned {}", receipt.status()));
+            return Err(format!("hosted command returned {}", receipt.status()));
         }
         Ok(())
     }

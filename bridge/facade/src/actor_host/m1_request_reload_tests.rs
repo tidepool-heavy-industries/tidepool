@@ -45,19 +45,49 @@ impl ReloadTransport {
 
 #[async_trait]
 impl ResponsesTransport for ReloadTransport {
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        self.offer(None, request).await
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
     }
 
-    async fn create_streaming_for_request(
+    async fn create(
         &self,
-        id: &RequestId,
-        request: ResponsesRequest,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request_id = request.request_id().clone();
+        let request = request.request().clone();
+        self.offer(Some(request_id), request).await
+    }
+
+    async fn create_streaming(
+        &self,
+        prepared: harness::transport::PreparedProviderRequest,
         sink: mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
+        let id = prepared.request_id();
+        let request = prepared.request().clone();
         let turn = self.offer(Some(id.clone()), request).await?;
-        for item in &turn.items {
-            let _ = sink.send(StreamEvent::ItemDone(item.clone())).await;
+        let mut assembly = harness::transport::sse::ResponseAssembly::default();
+        for (index, item) in turn.items.iter().enumerate() {
+            let event = assembly
+                .accept(
+                    &serde_json::json!({
+                        "type": "response.output_item.done", "output_index": index, "item": item,
+                    })
+                    .to_string(),
+                )?
+                .expect("indexed done item emits its completed event");
+            let _ = sink.send(event).await;
         }
         Ok(turn)
     }

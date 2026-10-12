@@ -1,23 +1,15 @@
 # Embedded browser assets
 
-The Exomonad distribution packages the harness operator UI from the same exact
-`exomonad-harness` revision used by `bridge/facade/Cargo.toml` and
-`Cargo.lock`. `nix flake check` validates the Cargo manifest, Cargo lockfile,
-facade dependency, and flake source pin as one provenance chain before accepting
-the packaged assets.
+The frozen Buck runtime bundle owns the operator UI and the native Harness
+runtime from one exact source revision. Nix supplies the pinned Node toolchain
+and dependency cache; Buck compiles the Rust contract producer, generates the
+TypeScript types and validators, builds the browser, and seals its assets.
 
-The assets are built from that revision's `web/` package and
-`package-lock.json` with Node 24 from the harness web shell's pinned nixpkgs
-revision `bfc1b8a4574108ceef22f02bafcf6611380c100d`.
+Build through `just exomonad-build`, then freeze and qualify the exact bundle
+through [the package guide](../../build/package/README.md). The bundle entrypoint
+sets `EXOMONAD_EMBEDDED_ASSET_ROOT` to its retained `share/exomonad/web` directory.
+The Exomonad toolchain shell does not select browser assets.
 
-Build the immutable asset output with:
-
-```sh
-nix build .#exomonad-embedded-assets
-```
-
-The `exomonad` package includes the same output under
-`share/exomonad/web`. Its wrapper and the `exomonad` development shell set
-`EXOMONAD_EMBEDDED_ASSET_ROOT` to that store path. An explicit `asset_root` in
-the embedded launch configuration continues to override this default and is
-validated before the server starts. Omitting it uses the packaged assets.
+The native host verifies the bundle's declared source identity, its actual
+compiled Harness schema, and every asset hash before opening the listener.
+An explicit absolute `asset_root` must pass the same checks.

@@ -268,9 +268,24 @@ struct FixtureModelTransport;
 #[cfg(test)]
 #[async_trait::async_trait]
 impl ResponsesTransport for FixtureModelTransport {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
     async fn create(
         &self,
-        _request: harness::transport::ResponsesRequest,
+        _request: harness::transport::PreparedProviderRequest,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
         Ok(harness::transport::ResponsesTurn {
             response_id: uuid::Uuid::new_v4().to_string(),

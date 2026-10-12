@@ -267,7 +267,7 @@ async fn engine_yield_claim_waits_and_settles_without_native_dispatch() {
         ToolSurface,
     };
     use harness::provider::{Provider, ProviderError};
-    use harness::transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError};
+    use harness::transport::{Auth, ResponsesTurn, TransportError};
 
     struct Offline;
     impl Auth for Offline {
@@ -318,7 +318,22 @@ async fn engine_yield_claim_waits_and_settles_without_native_dispatch() {
     struct Transport(Arc<dyn harness::engine::ResponsesTransport>);
     #[async_trait::async_trait]
     impl harness::engine::ResponsesTransport for Transport {
-        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                harness::transport::ResponsesRoute,
+                harness::transport::ResponsesProtocol,
+            ),
+            harness::transport::TransportError,
+        > {
+            self.0.response_contract()
+        }
+
+        async fn create(
+            &self,
+            request: harness::transport::PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             self.0.create(request).await
         }
     }

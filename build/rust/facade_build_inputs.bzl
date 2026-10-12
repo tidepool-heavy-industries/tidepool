@@ -4,6 +4,7 @@ def _tidepool_facade_build_inputs_impl(ctx):
         {
             "Cargo.toml": ctx.attrs.cargo_manifest,
             "build/native-workspace-gitlink.json": ctx.attrs.workspace_gitlink,
+            "build/harness-browser-source-identity.json": ctx.attrs.browser_source_identity,
             "bridge/haskell": ctx.attrs.haskell_sources[DefaultInfo].default_outputs[0],
             "exomonad/examples/workspace": ctx.attrs.workspace_sources[DefaultInfo].default_outputs[0],
         },
@@ -16,6 +17,7 @@ tidepool_facade_build_inputs = rule(
     attrs = {
         "cargo_manifest": attrs.source(),
         "workspace_gitlink": attrs.source(),
+        "browser_source_identity": attrs.source(default = "root//web:browser_runtime_source_identity"),
         "haskell_sources": attrs.dep(),
         "workspace_sources": attrs.dep(),
     },

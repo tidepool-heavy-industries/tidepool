@@ -256,8 +256,9 @@ async behavior still needs an authenticated trial.
 Configure `[launch.embedded]` with `listen`, `credential_file`, and the model's
 `context_capacity_tokens`. The listener must
 use loopback or a local Tailscale address. File paths must be absolute;
-`asset_root` must contain the browser's `index.html`, or be supplied by the
-package through `EXOMONAD_EMBEDDED_ASSET_ROOT`. Provider authentication is
+`asset_root` must contain the verified browser bundle, or be supplied by the
+frozen bundle entrypoint through `EXOMONAD_EMBEDDED_ASSET_ROOT`. The host checks
+source, schema, and asset identities before listening. Provider authentication is
 independent of browser access. `provider = "codex"` retains the read-only Codex
 credential bridge; the old `codex_auth_file` spelling remains an alias for
 `credential_file`. Omitting `provider` selects that existing bridge.

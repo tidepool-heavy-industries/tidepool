@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use harness::{
     engine::ResponsesTransport,
     model::{AgentPath, CallId, ConversationIdentity},
-    transport::{ResponsesRequest, ResponsesTurn, TransportError, Usage},
+    transport::{ResponsesTurn, TransportError, Usage},
     turn::JobOutput,
 };
 use serde_json::{json, Value};
@@ -27,7 +27,25 @@ struct ParentTransport {
 
 #[async_trait]
 impl ResponsesTransport for ParentTransport {
-    async fn create(&self, _request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
+    async fn create(
+        &self,
+        _request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         let round = self.round.fetch_add(1, Ordering::SeqCst) + 1;
         let items = match round {
             1 => vec![harness::item::Item(json!({
@@ -85,11 +103,30 @@ struct HostTransport {
 
 #[async_trait]
 impl ResponsesTransport for HostTransport {
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
+    async fn create(
+        &self,
+        prepared: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = prepared.request().clone();
         let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
         let (run, path) = prefix.rsplit_once(':').unwrap();
         if path == "/root" {
-            return self.parent.create(request).await;
+            return self.parent.create(prepared).await;
         }
         let actor = AgentPath(path.into());
         let origin = ConversationIdentity::Embedded {

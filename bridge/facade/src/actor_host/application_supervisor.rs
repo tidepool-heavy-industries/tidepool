@@ -136,7 +136,7 @@ pub(super) async fn run_interactive_applications(
                         id: exomonad_actor::ActorId(input.origin.native_actor),
                         incarnation: exomonad_actor::Incarnation(input.origin.incarnation),
                     };
-                    let response = forest
+                    forest
                         .request_expansion(
                             actor,
                             (
@@ -148,7 +148,7 @@ pub(super) async fn run_interactive_applications(
                         )
                         .await
                         .map_err(|error| error.to_string())?;
-                    serde_json::to_value(response).map_err(|error| error.to_string())
+                    Ok(())
                 })
             }))
             .map_err(str::to_owned)?;
@@ -185,6 +185,7 @@ pub(super) async fn run_interactive_applications(
                                 .map(|request| request.0)
                         })
                 },
+                |identity| service.runtime.store().embedded_inference_state(identity),
                 |actor| !live_actors.contains(&actor),
             )
             .map_err(|error| format!("embedded actor history projection failed: {error}"))?;
@@ -224,7 +225,8 @@ pub(super) async fn run_interactive_applications(
                             &states,
                             |actor| conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
                             |identity| service.runtime.store().embedded_round_frontier(identity).map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0)),
-                            |actor| !live_actors.contains(&actor),
+                            |identity| service.runtime.store().embedded_inference_state(identity),
+                |actor| !live_actors.contains(&actor),
                         ) {
                             break Some(format!("embedded actor history projection failed: {error}"));
                         }
@@ -274,7 +276,8 @@ pub(super) async fn run_interactive_applications(
                         &(*embedded_lifecycle_rx.borrow()).clone(),
                         |actor| conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
                         |identity| service.runtime.store().embedded_round_frontier(identity).map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0)),
-                        |actor| !live_actors.contains(&actor),
+                        |identity| service.runtime.store().embedded_inference_state(identity),
+                |actor| !live_actors.contains(&actor),
                     ) {
                         break Some(format!("embedded actor history projection failed: {error}"));
                     }
@@ -658,6 +661,15 @@ pub(super) async fn run_interactive_applications(
                                     }
                                 };
                                 let spawn_admission = installation.spawn_admission.clone();
+                                let projection_target = match service.projection_target(model.clone()) {
+                                    Ok(target) => target,
+                                    Err(error) => {
+                                        if let Err(error) = refuse_child_attachment(&installation, error, &recovery_store, &output_store).await {
+                                            break Some(error.to_string());
+                                        }
+                                        continue;
+                                    }
+                                };
                                 let runtime = Arc::clone(&service.runtime);
                                 let run_root = launch_context.run_root.clone();
                                 let ready = embedded_ready_tx.clone();
@@ -679,7 +691,7 @@ pub(super) async fn run_interactive_applications(
                                         let attachment = async {
                                             match selected_parent {
                                                 Some(parent) => embedded_service::attach_selected_actor(runtime.as_ref(), provider_attachment.clone(), &run_root, parent, *installation, initial_input).await,
-                                                None => embedded_service::attach_checkpoint_actor(runtime.as_ref(), provider_attachment.clone(), &run_root, *installation, initial_input).await,
+                                                None => embedded_service::attach_checkpoint_actor(runtime.as_ref(), projection_target, provider_attachment.clone(), &run_root, *installation, initial_input).await,
                                             }
                                         };
                                         let mut embedded = tokio::select! {
@@ -824,7 +836,8 @@ pub(super) async fn run_interactive_applications(
                                 &lifecycle_states,
                                 |actor| conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
                                 |identity| service.runtime.store().embedded_round_frontier(identity).map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0)),
-                                |actor| !live_actors.contains(&actor),
+                                |identity| service.runtime.store().embedded_inference_state(identity),
+                |actor| !live_actors.contains(&actor),
                             ) {
                                 break Some(format!("embedded actor history projection failed: {error}"));
                             }

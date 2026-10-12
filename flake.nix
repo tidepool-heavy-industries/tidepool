@@ -28,7 +28,7 @@
     };
     # Browser assets must come from the exact harness source used by Cargo.
     harnessWeb = {
-      url = "github:tidepool-heavy-industries/exomonad-harness/26fb5665d50a38cceabfdc9ec85ac0558a9ab7b8";
+      url = "github:tidepool-heavy-industries/exomonad-harness/f9efb369ccba1e7b8147b1b13cd4a8bb3abf0a33";
       flake = false;
     };
     # Match the harness web verification shell's pinned Node 24 package.
@@ -153,7 +153,7 @@
         harnessPkgs = import harnessNixpkgs { inherit system; };
         embeddedWebNpmCache = harnessPkgs.fetchNpmDeps {
           src = "${harnessWeb}/web";
-          hash = "sha256-gXYGez5cJIcLl6KoAiG3bH1wrEmyf+kax+uoMtj+99g=";
+          hash = "sha256-4K2fllv5MraU1ib4e59qOKqcaHfnLZmsfEall14vgKk=";
         };
         browserTestNpmCache = harnessPkgs.fetchNpmDeps {
           src = ./nix/browser-test;
@@ -162,11 +162,12 @@
         matchedHarnessSource =
           pkgs.runCommand "tidepool-matched-harness-source"
             {
+              src = harnessWeb;
               nativeBuildInputs = [ pkgs.coreutils ];
             }
             ''
               mkdir -p "$out"
-              cp -a "${harnessWeb}/." "$out/"
+              cp -a "$src/." "$out/"
             '';
         playwrightChromium = harnessPkgs.playwright-driver.browsers.override {
           withFirefox = false;
@@ -271,20 +272,6 @@
           pathsToLink = [ "/bin" ];
           paths = testToolPackages;
         };
-        embeddedWebAssets = harnessPkgs.buildNpmPackage {
-          pname = "exomonad-harness-web";
-          version = "26fb5665d50a38cceabfdc9ec85ac0558a9ab7b8";
-          src = "${harnessWeb}/web";
-          nodejs = harnessPkgs.nodejs_24;
-          npmDeps = embeddedWebNpmCache;
-          installPhase = ''
-            runHook preInstall
-            mkdir -p "$out/share/exomonad/web"
-            cp -R dist/. "$out/share/exomonad/web/"
-            runHook postInstall
-          '';
-          passthru.sourceRevision = "26fb5665d50a38cceabfdc9ec85ac0558a9ab7b8";
-        };
         devShell = haskellEnv: pkgs.mkShell {
           nativeBuildInputs = [
             pkgs.pkg-config
@@ -333,7 +320,6 @@
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd ];
           EXOMONAD_NIX_STORE_BIN = "${pkgs.nix}/bin/nix-store";
-          EXOMONAD_EMBEDDED_ASSET_ROOT = "${embeddedWebAssets}/share/exomonad/web";
           # Fetches the project's flake inputs when `[haskell.flake_sources]`
           # pins Haskell source outside the workspace.
           EXOMONAD_NIX_BIN = "${pkgs.nix}/bin/nix";
@@ -343,7 +329,6 @@
           '';
         };
 
-        packages.exomonad-embedded-assets = embeddedWebAssets;
 
         packages.buck-rust = rust;
         packages.buck-buck2 = buck2Release;
@@ -468,7 +453,6 @@
 
           embedded-web-provenance = pkgs.runCommand "embedded-web-provenance" { } ''
             ${pkgs.python3}/bin/python3 ${./scripts/embedded_web_provenance.py} --self-test --check --root ${./.}
-            test -s ${embeddedWebAssets}/share/exomonad/web/index.html
             touch "$out"
           '';
         };

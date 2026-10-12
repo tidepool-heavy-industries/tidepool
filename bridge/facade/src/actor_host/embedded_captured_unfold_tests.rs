@@ -478,19 +478,47 @@ impl CapturedHostTransport {
 
 #[async_trait]
 impl ResponsesTransport for CapturedHostTransport {
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
+    async fn create(
+        &self,
+        _: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         panic!("checkpoint gate requires the Engine's exact durable request identity")
     }
 
-    async fn create_streaming_for_request(
+    async fn create_streaming(
         &self,
-        request_id: &RequestId,
-        request: ResponsesRequest,
+        prepared: harness::transport::PreparedProviderRequest,
         sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
+        let request_id = prepared.request_id();
+        let request = prepared.request().clone();
         let turn = self.create_for_request(request_id, request).await?;
-        for item in &turn.items {
-            sink.send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
+        let mut assembly = harness::transport::sse::ResponseAssembly::default();
+        for (index, item) in turn.items.iter().enumerate() {
+            let event = assembly
+                .accept(
+                    &serde_json::json!({
+                        "type": "response.output_item.done", "output_index": index, "item": item,
+                    })
+                    .to_string(),
+                )?
+                .expect("indexed done item emits its completed event");
+            sink.send(event)
                 .await
                 .map_err(|_| TransportError::Stream("provider stream receiver closed".into()))?;
         }
@@ -1970,16 +1998,35 @@ struct PreflightTransport {
 
 #[async_trait]
 impl ResponsesTransport for PreflightTransport {
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
+    async fn create(
+        &self,
+        _: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         panic!("hosted preflight requires the Engine's exact request identity")
     }
 
-    async fn create_streaming_for_request(
+    async fn create_streaming(
         &self,
-        request_id: &RequestId,
-        request: ResponsesRequest,
+        prepared: harness::transport::PreparedProviderRequest,
         sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
+        let request_id = prepared.request_id();
+        let request = prepared.request().clone();
         self.requests.lock().push(request);
         self.changed.send_modify(|revision| *revision += 1);
         let items = match self
@@ -2014,8 +2061,17 @@ impl ResponsesTransport for PreflightTransport {
                 "content":[{"type":"output_text","text":"preflight and recovery confirmed"}]
             }))],
         };
-        for item in &items {
-            sink.send(harness::transport::sse::StreamEvent::ItemDone(item.clone()))
+        let mut assembly = harness::transport::sse::ResponseAssembly::default();
+        for (index, item) in items.iter().enumerate() {
+            let event = assembly
+                .accept(
+                    &serde_json::json!({
+                        "type": "response.output_item.done", "output_index": index, "item": item,
+                    })
+                    .to_string(),
+                )?
+                .expect("indexed done item emits its completed event");
+            sink.send(event)
                 .await
                 .map_err(|_| TransportError::Stream("preflight provider receiver closed".into()))?;
         }

@@ -1,4 +1,5 @@
-load("@prelude//:rules.bzl", "genrule")
+load("@prelude//:rules.bzl", "genrule", "rust_binary")
+load("@prelude//rust:sources.bzl", "rust_filegroup")
 
 # Project the npm manifests into their own content-addressed artifact. Changes
 # to other harness or web sources rerun this cheap projection without changing
@@ -52,12 +53,108 @@ cp -a node_modules/. "$OUTPUT/"
     visibility = ["PUBLIC"],
 )
 
+
+# Compile the exporter authored by the same immutable Harness source that owns
+# the linked Reindeer library; schemas and samples never have a second producer.
+genrule(
+    name = "harness_browser_contract_entry",
+    srcs = ["//third-party/rust:matched_harness_source"],
+    out = "browser_contract_export.rs",
+    bash = """set -euo pipefail
+SOURCE_ROOT="$PWD/$(location //third-party/rust:matched_harness_source)"
+shopt -s nullglob
+EXPORTERS=("$SOURCE_ROOT"/*/crates/harness/src/bin/browser_contract_export.rs)
+if [[ ${#EXPORTERS[@]} -ne 1 ]]; then
+    echo "expected one matched Harness browser contract exporter" >&2
+    exit 1
+fi
+cp "${EXPORTERS[0]}" "$OUT"
+""",
+)
+
+rust_filegroup(
+    name = "harness_browser_contract_sources",
+    mapped_srcs = {":harness_browser_contract_entry": "browser_contract_export.rs"},
+)
+
+rust_binary(
+    name = "harness_browser_contract_export",
+    crate = "browser_contract_export",
+    crate_root = "browser_contract_export.rs",
+    edition = "2024",
+    srcs_filegroup = ":harness_browser_contract_sources",
+    deps = ["//third-party/rust:harness", "//third-party/rust:serde_json"],
+)
+
+genrule(
+    name = "harness_browser_contract",
+    out = ".",
+    bash = '$(exe :harness_browser_contract_export) "$OUT"',
+    visibility = ["PUBLIC"],
+)
+
+# The matching Harness BUCK source selections feed its canonical identity issuer.
+genrule(
+    name = "harness_browser_inputs",
+    srcs = ["//third-party/rust:matched_harness_source", "prepare-harness-browser-inputs.py"],
+    out = ".",
+    bash = """set -euo pipefail
+SOURCE_ROOT="$PWD/$(location //third-party/rust:matched_harness_source)"
+shopt -s nullglob
+ROOTS=("$SOURCE_ROOT"/*/crates/harness/BUCK)
+if [[ ${#ROOTS[@]} -ne 1 ]]; then
+    echo "expected one matched Harness source tree" >&2
+    exit 1
+fi
+SOURCE="${ROOTS[0]%/crates/harness/BUCK}"
+$(exe toolchains//:python) "$SRCDIR/prepare-harness-browser-inputs.py" "$SOURCE" "$OUT"
+""",
+)
+
+genrule(
+    name = "browser_runtime_source_identity",
+    srcs = [":harness_browser_inputs"],
+    out = "browser-source-identity.json",
+    bash = 'cp "$(location :harness_browser_inputs)/browser-source-identity.json" "$OUT"',
+    visibility = ["PUBLIC"],
+)
+
+genrule(
+    name = "browser_contract",
+    srcs = {
+        "harness-source": "//third-party/rust:matched_harness_source",
+        "npm-dependencies": ":npm_dependencies",
+        "native-contract": ":harness_browser_contract",
+        "runtime-source-identity.json": ":browser_runtime_source_identity",
+    },
+    out = ".",
+    bash = """set -euo pipefail
+SOURCE_ROOT="$PWD/$(location //third-party/rust:matched_harness_source)"
+shopt -s nullglob
+GENERATORS=("$SOURCE_ROOT"/*/web/scripts/generate-browser-contract.mjs)
+if [[ ${#GENERATORS[@]} -ne 1 ]]; then
+    echo "expected one matched Harness browser contract generator" >&2
+    exit 1
+fi
+OUTPUT="$PWD/$OUT"
+CONTRACT="$PWD/$(location :harness_browser_contract)"
+IDENTITY="$PWD/$(location :browser_runtime_source_identity)"
+NPM_DEPS="$PWD/$(location :npm_dependencies)"
+mkdir -p "$TMP/generator/scripts"
+cp "${GENERATORS[0]}" "$TMP/generator/scripts/generate-browser-contract.mjs"
+cp -a "$NPM_DEPS" "$TMP/generator/node_modules"
+$(exe toolchains//:node) "$TMP/generator/scripts/generate-browser-contract.mjs" "$CONTRACT" "$OUTPUT" "$IDENTITY"
+""",
+    visibility = ["PUBLIC"],
+)
+
 genrule(
     name = "dist",
-    srcs = [
-        "//third-party/rust:matched_harness_source",
-        ":npm_dependencies",
-    ],
+    srcs = {
+        "harness-source": "//third-party/rust:matched_harness_source",
+        "npm-dependencies": ":npm_dependencies",
+        "browser-contract": ":browser_contract",
+    },
     out = ".",
     bash = """set -euo pipefail
 NODE='$(exe toolchains//:node)'
@@ -78,8 +175,11 @@ mkdir -p "$TMP/web"
 cp -a "$SOURCE/." "$TMP/web/"
 mkdir -p "$TMP/web/node_modules"
 cp -a "$NPM_DEPS/." "$TMP/web/node_modules/"
+mkdir -p "$TMP/web/src/generated"
+cp -a "$(location :browser_contract)/." "$TMP/web/src/generated/"
 cd "$TMP/web"
 "$NPM" run build
+"$NODE" scripts/seal-browser-bundle.mjs dist src/generated/contract-manifest.json
 mkdir -p "$OUTPUT/web"
 cp -a dist/. "$OUTPUT/web/"
 

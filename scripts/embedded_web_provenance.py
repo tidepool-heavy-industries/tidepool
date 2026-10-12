@@ -157,11 +157,14 @@ def validate(
     )
     _require(declared_input is not None, "flake.nix must declare the pinned harnessWeb source input")
     _require(declared_input.group(1) == requested, "flake.nix browser input differs from Cargo.toml")
-    assets = re.search(r"embeddedWebAssets\s*=\s*harnessPkgs\.buildNpmPackage\s*\{(.*?)\n\s*\};", flake_source, re.DOTALL)
-    _require(assets is not None, "flake.nix has no embedded browser asset derivation")
+    source = re.search(
+        r'matchedHarnessSource\s*=\s*pkgs\.runCommand\s+"tidepool-matched-harness-source"\s*\{(.*?)\}',
+        flake_source, re.DOTALL,
+    )
+    _require(source is not None, "flake.nix has no matched Harness source derivation")
     _require(
-        re.search(r'src\s*=\s*"\$\{harnessWeb\}/web"\s*;', assets.group(1)) is not None,
-        "embedded browser assets are not built from the locked harnessWeb input",
+        re.search(r'\bsrc\s*=\s*harnessWeb\s*;', source.group(1)) is not None,
+        "matched native/browser source is not supplied by the locked harnessWeb input",
     )
     return lock_resolved
 
@@ -190,9 +193,9 @@ def fixture(revision: str = "a" * 40) -> tuple[dict, dict, dict, dict, str]:
             "harnessWeb": {"original": {"rev": revision}, "locked": {"rev": revision}},
         }},
         f'''inputs = {{ harnessWeb = {{ url = "github:tidepool-heavy-industries/exomonad-harness/{revision}"; flake = false; }}; }};
-           embeddedWebAssets = harnessPkgs.buildNpmPackage {{
-             src = "${{harnessWeb}}/web";
-           }};''',
+           matchedHarnessSource = pkgs.runCommand "tidepool-matched-harness-source" {{
+             src = harnessWeb;
+           }} "";''',
     )
 
 
@@ -212,10 +215,10 @@ class ProvenanceTests(unittest.TestCase):
         with self.assertRaisesRegex(ProvenanceError, "not connected"):
             validate(*args)
 
-    def test_dead_harness_input_does_not_prove_asset_source(self) -> None:
+    def test_dead_harness_input_cannot_supply_matched_source(self) -> None:
         args = list(fixture())
-        args[4] = args[4].replace('src = "${harnessWeb}/web"', 'src = "${otherSource}/web"')
-        with self.assertRaisesRegex(ProvenanceError, "not built from"):
+        args[4] = args[4].replace('src = harnessWeb;', 'src = otherSource;')
+        with self.assertRaisesRegex(ProvenanceError, "not supplied by"):
             validate(*args)
 
 

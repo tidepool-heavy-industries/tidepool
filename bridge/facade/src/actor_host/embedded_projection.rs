@@ -4,9 +4,12 @@ use std::collections::{BTreeMap, HashMap};
 
 use exomonad_actor::{ActorExitKind, ActorGraphNode, ActorRef, ActorWorkbenchPosture};
 use harness::{
-    embedding::{EmbeddedRoundId, HostIdentity},
+    embedding::{EmbeddedRoundId, HostIdentity, HostInferenceState},
     model::AgentPath,
-    server::{HostActorKind, HostActorLifecycle, HostActorProjection, ServerControl},
+    server::{
+        browser_contract::{ConversationProjection, ConversationState},
+        HostActorKind, HostActorLifecycle, HostActorProjection, ServerControl,
+    },
 };
 use tokio::sync::watch;
 
@@ -65,13 +68,14 @@ pub(super) struct EmbeddedProjection {
     // so a terminal actor remains linked to its exact history head in the snapshot.
     // Cold restart cannot reconstruct these associations from logical paths alone.
     conversations: HashMap<ActorRef, ConversationObservation>,
-    published_actors: Option<Vec<HostActorProjection>>,
+    published_actors: Option<watch::Sender<Vec<HostActorProjection>>>,
 }
 
 struct ConversationObservation {
     identity: HostIdentity,
     head: Option<String>,
     frozen: bool,
+    inference: Option<HostInferenceState>,
 }
 
 impl EmbeddedProjection {
@@ -82,6 +86,7 @@ impl EmbeddedProjection {
                 identity: identity.clone(),
                 head: None,
                 frozen: false,
+                inference: None,
             });
     }
 
@@ -122,7 +127,7 @@ impl EmbeddedProjection {
         active_round_for: impl Fn(ActorRef) -> Option<EmbeddedRoundId>,
         head_for: impl Fn(&HostIdentity) -> Result<Option<String>, harness::store::StoreError>,
         history_finished_for: impl Fn(ActorRef) -> bool,
-    ) -> Result<(Vec<HostActorProjection>, Vec<serde_json::Value>), harness::store::StoreError>
+    ) -> Result<(Vec<HostActorProjection>, Vec<ConversationProjection>), harness::store::StoreError>
     {
         let mut actors = Vec::new();
         let mut conversations = Vec::new();
@@ -153,36 +158,41 @@ impl EmbeddedProjection {
                 HostActorLifecycle::Retired | HostActorLifecycle::Lost
             );
             let observation = self.conversations.get_mut(&node.actor);
-            let (conversation, model_head_request) = if let Some(observation) = observation {
-                if !observation.frozen {
-                    match head_for(&observation.identity) {
-                        Ok(head) => {
-                            if head.is_some() {
-                                observation.head = head;
+            let (conversation, model_head_request, inference) =
+                if let Some(observation) = observation {
+                    if !observation.frozen {
+                        match head_for(&observation.identity) {
+                            Ok(head) => {
+                                if head.is_some() {
+                                    observation.head = head;
+                                }
                             }
+                            Err(harness::store::StoreError::InvalidEmbeddedBinding) => {
+                                observation.frozen = true;
+                            }
+                            Err(error) => return Err(error),
                         }
-                        Err(harness::store::StoreError::InvalidEmbeddedBinding) => {
-                            observation.frozen = true;
-                        }
-                        Err(error) => return Err(error),
+                        // Kernel retirement can precede the driver committing its last request.
+                        observation.frozen |= terminal && history_finished_for(node.actor);
                     }
-                    // Kernel retirement can precede the driver committing its last request.
-                    observation.frozen |= terminal && history_finished_for(node.actor);
-                }
-                (
-                    Some(observation.identity.actor.0.clone()),
-                    observation.head.clone(),
-                )
-            } else {
-                (None, None)
-            };
+                    (
+                        Some(observation.identity.actor.0.clone()),
+                        observation.head.clone(),
+                        observation.inference.clone(),
+                    )
+                } else {
+                    (None, None, None)
+                };
             actors.push(HostActorProjection {
                 identity,
-                output_origin: Some(harness::store::actor_output::ActorOutputOrigin {
-                    run: run.to_owned(),
-                    native_actor: node.actor.id.0,
-                    incarnation: node.actor.incarnation.0,
-                }),
+                output_origin: Some(
+                    (&harness::store::actor_output::ActorOutputOrigin {
+                        run: run.to_owned(),
+                        native_actor: node.actor.id.0,
+                        incarnation: node.actor.incarnation.0,
+                    })
+                        .into(),
+                ),
                 parent: node
                     .supervisor_parent
                     .or(node.creator)
@@ -193,6 +203,7 @@ impl EmbeddedProjection {
                     HostActorKind::Workflow
                 },
                 lifecycle,
+                inference: inference.as_ref().map(Into::into),
                 active_round: if matches!(
                     lifecycle,
                     HostActorLifecycle::Retired | HostActorLifecycle::Lost
@@ -205,11 +216,14 @@ impl EmbeddedProjection {
                 model_head_request,
             });
             if let Some(path) = conversation {
-                conversations.push(serde_json::json!({
-                    "id": path,
-                    "path": path,
-                    "state": conversation_state(lifecycle),
-                }));
+                conversations.push(ConversationProjection {
+                    id: path.clone(),
+                    path,
+                    parent_id: None,
+                    fork_source_request_id: None,
+                    state: conversation_state(lifecycle),
+                    version: None,
+                });
             }
         }
         Ok((actors, conversations))
@@ -224,8 +238,22 @@ impl EmbeddedProjection {
         states: &LifecycleState,
         active_round_for: impl Fn(ActorRef) -> Option<EmbeddedRoundId>,
         head_for: impl Fn(&HostIdentity) -> Result<Option<String>, harness::store::StoreError>,
+        inference_for: impl Fn(&HostIdentity) -> Result<HostInferenceState, harness::store::StoreError>,
         history_finished_for: impl Fn(ActorRef) -> bool,
     ) -> Result<(), harness::store::StoreError> {
+        for node in nodes {
+            if let Some(observation) = self.conversations.get_mut(&node.actor) {
+                observation.inference = if node.terminal().is_some() || observation.frozen {
+                    None
+                } else {
+                    match inference_for(&observation.identity) {
+                        Ok(inference) => Some(inference),
+                        Err(harness::store::StoreError::InvalidEmbeddedBinding) => None,
+                        Err(error) => return Err(error),
+                    }
+                };
+            }
+        }
         let (actors, conversations) = self.projection(
             run,
             nodes,
@@ -234,25 +262,32 @@ impl EmbeddedProjection {
             head_for,
             history_finished_for,
         )?;
-        if self.published_actors.as_ref() != Some(&actors) {
+        if let Some(published) = &self.published_actors {
+            published.send_if_modified(|previous| {
+                if *previous == actors {
+                    return false;
+                }
+                previous.clone_from(&actors);
+                true
+            });
+        } else {
+            let (published, actors) = watch::channel(actors.clone());
             observation
-                .send(super::ActorHostReadiness::ActorsObserved {
-                    actors: actors.clone(),
-                })
+                .send(super::ActorHostReadiness::ActorsObserved { actors })
                 .ok();
-            self.published_actors = Some(actors.clone());
+            self.published_actors = Some(published);
         }
         control.update_host_projection(run.to_owned(), actors, conversations);
         Ok(())
     }
 }
 
-fn conversation_state(lifecycle: HostActorLifecycle) -> &'static str {
+fn conversation_state(lifecycle: HostActorLifecycle) -> ConversationState {
     match lifecycle {
-        HostActorLifecycle::Running => "requesting",
-        HostActorLifecycle::Waiting => "idle",
-        HostActorLifecycle::Retiring => "paused",
-        HostActorLifecycle::Retired | HostActorLifecycle::Lost => "cancelled",
+        HostActorLifecycle::Running => ConversationState::Requesting,
+        HostActorLifecycle::Waiting => ConversationState::Idle,
+        HostActorLifecycle::Retiring => ConversationState::Paused,
+        HostActorLifecycle::Retired | HostActorLifecycle::Lost => ConversationState::Cancelled,
     }
 }
 
@@ -320,17 +355,55 @@ mod tests {
                     &LifecycleState::default(),
                     |_| None,
                     |_| Ok(Some("retained-head".into())),
+                    |_| Ok(HostInferenceState::Idle),
                     |_| false,
                 )
                 .unwrap();
         }
-        let super::super::ActorHostReadiness::ActorsObserved { actors } =
+        let super::super::ActorHostReadiness::ActorsObserved { mut actors } =
             received.try_recv().unwrap()
         else {
             panic!("the projection must publish its typed actor observation");
         };
-        assert_eq!(actors[0].lifecycle, HostActorLifecycle::Waiting);
+        assert_eq!(actors.borrow()[0].lifecycle, HostActorLifecycle::Waiting);
+        assert_eq!(
+            actors.borrow()[0].inference,
+            Some((&HostInferenceState::Idle).into())
+        );
+        assert!(!actors.has_changed().unwrap());
         assert!(received.try_recv().is_err());
+        let block = harness::embedding::InferenceBlock {
+            request: harness::model::RequestId("retained-head".into()),
+            generation: 1,
+            reason: harness::embedding::InferenceBlockReason::ContinuityUnproven,
+        };
+        projection
+            .publish(
+                &control,
+                &observations,
+                "run",
+                &[root.clone()],
+                &LifecycleState::default(),
+                |_| None,
+                |_| Ok(Some("retained-head".into())),
+                |_| {
+                    Ok(HostInferenceState::Blocked {
+                        block: block.clone(),
+                    })
+                },
+                |_| false,
+            )
+            .unwrap();
+        assert!(received.try_recv().is_err());
+        assert!(actors.has_changed().unwrap());
+        assert_eq!(
+            actors.borrow_and_update()[0].lifecycle,
+            HostActorLifecycle::Waiting
+        );
+        assert_eq!(
+            actors.borrow()[0].inference,
+            Some((&HostInferenceState::Blocked { block }).into())
+        );
         root.lifecycle = Some(exomonad_actor::ActorLifecycle::Exited(ActorTerminal {
             kind: ActorExitKind::Failed,
             summary: "runtime failed".into(),
@@ -345,15 +418,15 @@ mod tests {
                 &LifecycleState::default(),
                 |_| None,
                 |_| Ok(Some("retained-head".into())),
+                |_| Ok(HostInferenceState::Idle),
                 |_| true,
             )
             .unwrap();
-        let super::super::ActorHostReadiness::ActorsObserved { actors } =
-            received.try_recv().unwrap()
-        else {
-            panic!("actor failure must remain observable while the browser stays ready");
-        };
+        assert!(received.try_recv().is_err());
+        assert!(actors.has_changed().unwrap());
+        let actors = actors.borrow_and_update();
         assert_eq!(actors[0].lifecycle, HostActorLifecycle::Lost);
+        assert_eq!(actors[0].inference, None);
         assert_eq!(
             actors[0].model_head_request.as_deref(),
             Some("retained-head")
@@ -473,10 +546,10 @@ mod tests {
         assert_eq!(projected_child.lifecycle, HostActorLifecycle::Waiting);
         assert_eq!(conversations.len(), 2);
         assert!(conversations.iter().any(|conversation| {
-            conversation["id"] == "/root" && conversation["state"] == "cancelled"
+            conversation.id == "/root" && conversation.state == ConversationState::Cancelled
         }));
         assert!(conversations.iter().any(|conversation| {
-            conversation["id"] == "/root/1" && conversation["state"] == "idle"
+            conversation.id == "/root/1" && conversation.state == ConversationState::Idle
         }));
     }
 

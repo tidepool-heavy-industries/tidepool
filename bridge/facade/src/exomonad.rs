@@ -757,8 +757,9 @@ pub struct RunStatus {
     pub unavailable_actors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recovered_actors: Vec<RecoveredActorObservation>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub actors: Vec<harness::server::HostActorProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Latest host-owned observation, retained after host exit.
+    pub actors: Option<Vec<harness::server::HostActorProjection>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lost_state: Vec<String>,
     #[serde(default)]
@@ -1474,6 +1475,42 @@ fn write_startup_failure(
     )
 }
 
+fn write_coordination_failure(
+    status_path: &Path,
+    run_id: &str,
+    host_generation: u64,
+    actors: Option<Vec<harness::server::HostActorProjection>>,
+    error: &dyn std::fmt::Display,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut status = decode_run_status(&std::fs::read(status_path)?)?;
+    if status.run_id != run_id || status.host_generation != host_generation {
+        return Err(runtime_error(
+            "coordination failure belongs to another run or host generation",
+        ));
+    }
+    status.phase = RunPhase::Failed {
+        error: error.to_string(),
+    };
+    if let Some(actors) = actors {
+        status.replace_actor_observations(host_generation, actors);
+    }
+    persist_status(status_path, &status)
+}
+
+fn write_actor_observations(
+    status_path: &Path,
+    run_id: &str,
+    host_generation: u64,
+    actors: Vec<harness::server::HostActorProjection>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut status = decode_run_status(&std::fs::read(status_path)?)?;
+    if status.run_id != run_id || !status.replace_actor_observations(host_generation, actors) {
+        return Ok(false);
+    }
+    persist_status(status_path, &status)?;
+    Ok(true)
+}
+
 async fn wait_until_compiler_daemon(
     tmux: &TmuxSession,
     socket: &Path,
@@ -1597,7 +1634,10 @@ async fn run_host(
         .ensure_active(&workspace_inputs)?
         .identity;
     let mut unavailable_actors = Vec::new();
-    let mut actor_observations = Vec::new();
+    let mut actor_observations = None;
+    let mut actor_observer: Option<
+        tokio::sync::watch::Receiver<Vec<harness::server::HostActorProjection>>,
+    > = None;
     let lost_state = recovery_lost_state(host_generation);
     if host_generation > 1 {
         let mut status = RunStatus::new(
@@ -1740,38 +1780,51 @@ async fn run_host(
     tokio::pin!(run);
     loop {
         tokio::select! {
+            changed = async {
+                match actor_observer.as_mut() {
+                    Some(observer) => observer.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_err() {
+                    actor_observer = None;
+                    continue;
+                }
+                let actors = actor_observer.as_mut().unwrap().borrow_and_update().clone();
+                actor_observations = Some(actors.clone());
+                if let Err(error) = write_actor_observations(
+                    &options.status_path, &options.run_id, host_generation,
+                    actors,
+                ) {
+                    tracing::error!(%error, "could not publish actor availability");
+                }
+            }
             readiness = readiness_rx.recv() => match readiness {
-                Some(crate::actor_host::ActorHostReadiness::ActorsObserved { actors }) => {
-                    actor_observations = actors;
-                    match std::fs::read(&options.status_path)
-                        .map_err(Box::<dyn std::error::Error>::from)
-                        .and_then(|bytes| decode_run_status(&bytes))
-                    {
-                        Ok(mut status) if status.host_generation == host_generation => {
-                            if status.replace_actor_observations(host_generation, actor_observations.clone()) {
-                                if let Err(error) = write_status(&options.status_path, &status) {
-                                    tracing::error!(%error, "could not publish actor availability");
-                                }
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(error) => tracing::debug!(%error, "actor observation preceded run status"),
-                    }
+                Some(crate::actor_host::ActorHostReadiness::ActorsObserved { mut actors }) => {
+                    actor_observations = Some(actors.borrow_and_update().clone());
+                    actor_observer = Some(actors);
                 }
                 Some(crate::actor_host::ActorHostReadiness::CoordinationFailed { root, error }) => {
                     tracing::error!(actor = ?root, %error, "root coordination failed; preserving native application");
-                    if let Err(error) = write_startup_failure(
+                    let latest_actors = actor_observer.as_mut()
+                        .map(|observer| observer.borrow_and_update().clone());
+                    if let Some(actors) = &latest_actors {
+                        actor_observations = Some(actors.clone());
+                    }
+                    if let Err(error) = write_coordination_failure(
                         &options.status_path,
                         &options.run_id,
-                        &options.workspace,
-                        &options.session,
-                        &options.agent,
+                        host_generation,
+                        latest_actors,
                         &error,
                     ) {
                         tracing::error!(%error, "could not publish root failure; host remains active");
                     }
                 }
                 Some(crate::actor_host::ActorHostReadiness::EmbeddedReady { root, address }) => {
+                    if let Some(observer) = actor_observer.as_mut() {
+                        actor_observations = Some(observer.borrow_and_update().clone());
+                    }
                     let mut status = observe_run_runtime(RunStatus::new(
                         &options.run_id,
                         &options.workspace,
@@ -1786,7 +1839,9 @@ async fn run_host(
                         &recovered_actors,
                         &lost_state,
                     ).await;
-                    status.replace_actor_observations(host_generation, actor_observations.clone());
+                    if let Some(actors) = &actor_observations {
+                        status.replace_actor_observations(host_generation, actors.clone());
+                    }
                     if let Err(error) = write_status(&options.status_path, &status) {
                         tracing::error!(%error, "could not publish embedded readiness; host remains active");
                     }
@@ -2122,7 +2177,7 @@ impl RunStatus {
             host_generation: 0,
             unavailable_actors: Vec::new(),
             recovered_actors: Vec::new(),
-            actors: Vec::new(),
+            actors: None,
             lost_state: Vec::new(),
             resource_service: ResourceServiceObservation::default(),
             run_storage: BoundedStorageObservation::default(),
@@ -2149,10 +2204,10 @@ impl RunStatus {
         host_generation: u64,
         actors: Vec<harness::server::HostActorProjection>,
     ) -> bool {
-        if self.host_generation != host_generation || self.actors == actors {
+        if self.host_generation != host_generation || self.actors.as_ref() == Some(&actors) {
             return false;
         }
-        self.actors = actors;
+        self.actors = Some(actors);
         true
     }
 }
@@ -2196,7 +2251,11 @@ fn write_status(path: &Path, status: &RunStatus) -> Result<(), Box<dyn std::erro
     if let Some(run_root) = path.parent() {
         status.run_storage = observe_storage(run_root, 8_192);
     }
-    let bytes = serde_json::to_vec_pretty(&status)?;
+    persist_status(path, &status)
+}
+
+fn persist_status(path: &Path, status: &RunStatus) -> Result<(), Box<dyn std::error::Error>> {
+    let bytes = serde_json::to_vec_pretty(status)?;
     tidepool_atomic_write::write_best_effort(path, &bytes)?;
     Ok(())
 }
@@ -3807,13 +3866,74 @@ mod tests {
                 "modelHeadRequest":"retained-failed-head",
             }))
             .unwrap();
+        assert!(status.actors.is_none());
+        assert!(serde_json::to_value(&status)
+            .unwrap()
+            .get("actors")
+            .is_none());
+        assert!(status.replace_actor_observations(2, Vec::new()));
+        assert_eq!(
+            serde_json::to_value(&status).unwrap()["actors"],
+            serde_json::json!([])
+        );
         assert!(status.replace_actor_observations(2, vec![lost.clone()]));
         assert!(matches!(status.phase, RunPhase::EmbeddedReady { .. }));
         assert!(!status.replace_actor_observations(1, Vec::new()));
         assert!(!status.replace_actor_observations(2, vec![lost.clone()]));
         let restored = decode_run_status(&serde_json::to_vec(&status).unwrap()).unwrap();
-        assert_eq!(restored.actors, vec![lost]);
+        assert_eq!(restored.actors, Some(vec![lost]));
         assert!(matches!(restored.phase, RunPhase::EmbeddedReady { .. }));
+    }
+
+    #[test]
+    fn published_coordination_failure_preserves_generation_and_later_actor_updates() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("status.json");
+        let root = ActorRef::first(exomonad_actor::ActorId(7));
+        let mut status = RunStatus::new(
+            "run-1",
+            directory.path(),
+            "exomonad-work",
+            test_agent_defaults(),
+            RunPhase::EmbeddedReady {
+                root_actor: root,
+                browser_address: "127.0.0.1:1234".parse().unwrap(),
+            },
+        )
+        .at_generation(2);
+        let actor =
+            serde_json::from_value::<harness::server::HostActorProjection>(serde_json::json!({
+                "identity":{"run":"run-1","actor":"/root","incarnation":"1"},
+                "parent":null,"kind":"model","lifecycle":"waiting",
+                "modelConversation":"/root","modelHeadRequest":"retained-head",
+            }))
+            .unwrap();
+        status.actors = Some(vec![actor.clone()]);
+        status.unavailable_actors = vec!["9-1".into()];
+        status.lost_state = recovery_lost_state(2);
+        status.resource_service.healthy = Some(false);
+        write_status(&path, &status).unwrap();
+        let previous = decode_run_status(&std::fs::read(&path).unwrap()).unwrap();
+        write_coordination_failure(&path, "run-1", 2, None, &"coordination stopped").unwrap();
+        let failed = decode_run_status(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(failed.host_generation, 2);
+        assert_eq!(failed.actors, previous.actors);
+        assert_eq!(failed.unavailable_actors, previous.unavailable_actors);
+        assert_eq!(failed.lost_state, previous.lost_state);
+        assert_eq!(failed.resource_service, previous.resource_service);
+        assert_eq!(failed.run_storage, previous.run_storage);
+        assert!(matches!(failed.phase, RunPhase::Failed { .. }));
+        let mut lost = actor;
+        lost.lifecycle = harness::server::HostActorLifecycle::Lost;
+        assert!(write_actor_observations(&path, "run-1", 2, vec![lost.clone()]).unwrap());
+        let latest = decode_run_status(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(latest.actors, Some(vec![lost]));
+        assert_eq!(latest.host_generation, 2);
+        assert!(matches!(latest.phase, RunPhase::Failed { .. }));
+        let retained = std::fs::read(&path).unwrap();
+        assert!(!write_actor_observations(&path, "run-1", 1, Vec::new()).unwrap());
+        assert!(write_coordination_failure(&path, "run-1", 1, None, &"stale host").is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), retained);
     }
 
     #[test]

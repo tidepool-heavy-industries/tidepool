@@ -1,5 +1,5 @@
 use super::*;
-use harness::transport::{ResponsesRequest, ResponsesTurn, TransportError, Usage};
+use harness::transport::{ResponsesTurn, TransportError, Usage};
 use serde_json::json;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -14,7 +14,26 @@ struct RecoveryTransport {
 }
 #[async_trait::async_trait]
 impl harness::engine::ResponsesTransport for RecoveryTransport {
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    fn response_contract(
+        &self,
+    ) -> Result<
+        (
+            harness::transport::ResponsesRoute,
+            harness::transport::ResponsesProtocol,
+        ),
+        harness::transport::TransportError,
+    > {
+        Ok((
+            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesProtocol::Standard,
+        ))
+    }
+
+    async fn create(
+        &self,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         let count = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         std::fs::write(
             self.root.join(format!("{}.calls", self.phase)),

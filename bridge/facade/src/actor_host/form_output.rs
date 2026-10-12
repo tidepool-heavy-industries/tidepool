@@ -36,7 +36,13 @@ impl StoreFormHost {
     fn publish_form(&self, actor: ActorRef, mount: &str) {
         if let Some(control) = self.control.get() {
             match self.store.actor_form(&self.origin(actor), mount) {
-                Ok(row) => control.publish_actor_form(&row),
+                Ok(row) => {
+                    control.publish(
+                        harness::server::browser_contract::StateEvent::ActorFormChanged(
+                            (&row).into(),
+                        ),
+                    );
+                }
                 Err(error) => {
                     tracing::warn!(?actor, mount, %error, "committed form projection awaits reconciliation")
                 }
@@ -107,7 +113,11 @@ impl FormHost for StoreFormHost {
             .open_actor_form(&OpenAuthority(&opening), &opening)
             .map(|row| {
                 if let Some(control) = self.control.get() {
-                    control.publish_actor_form(&row);
+                    control.publish(
+                        harness::server::browser_contract::StateEvent::ActorFormChanged(
+                            (&row).into(),
+                        ),
+                    );
                 }
             })
             .map_err(cause)

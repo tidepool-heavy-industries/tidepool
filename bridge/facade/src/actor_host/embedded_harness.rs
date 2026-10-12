@@ -252,6 +252,7 @@ impl EmbeddedHarnessRuntime {
         installation: &LocalResidentInstallation,
         policy: Arc<EmbeddedPolicyInstallation>,
         captured: Arc<EmbeddedHostedCheckpoint>,
+        projection_target: &harness::context::ContextProjectionTarget,
     ) -> Result<EmbeddedConversation, EmbeddedError> {
         self.store.ensure_ready()?;
         if identity.run != self.run
@@ -316,6 +317,7 @@ impl EmbeddedHarnessRuntime {
             checkpoint,
             &json!({}),
             &json!({}),
+            projection_target,
         )?);
         self.bind_application(actor_identity, &conversation)?;
         let provider_admission = attach_native_provider(
@@ -398,6 +400,7 @@ pub(super) struct EmbeddedConversation {
 #[derive(Default)]
 pub(super) struct EmbeddedRoundControl {
     active: ParkingMutex<Option<RoundCancellationHandle>>,
+    recovery_changed: tokio::sync::Notify,
 }
 
 #[derive(Clone)]
@@ -413,6 +416,10 @@ pub(super) struct EmbeddedRoundLease {
 }
 
 impl EmbeddedRoundControl {
+    pub(super) fn recovery_changed(&self) -> tokio::sync::futures::Notified<'_> {
+        self.recovery_changed.notified()
+    }
+
     pub(super) fn begin(self: &Arc<Self>) -> Result<EmbeddedRoundLease, String> {
         let mut active = self.active.lock();
         if active.is_some() {
@@ -726,6 +733,11 @@ impl HostActor for EmbeddedHostActor {
         self.wakes
             .send(DurableMailboxWake { envelope_id })
             .map_err(|_| "embedded Engine wake receiver closed".into())
+    }
+
+    async fn wake_recovery(&self) -> Result<(), String> {
+        self.round_control.recovery_changed.notify_one();
+        Ok(())
     }
 
     async fn control(&self, control: HostControl) -> Result<Value, HostControlError> {
@@ -2172,7 +2184,26 @@ mod tests {
 
     #[async_trait]
     impl ResponsesTransport for ParkUntilInput {
-        async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        fn response_contract(
+            &self,
+        ) -> Result<
+            (
+                harness::transport::ResponsesRoute,
+                harness::transport::ResponsesProtocol,
+            ),
+            harness::transport::TransportError,
+        > {
+            Ok((
+                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesProtocol::Standard,
+            ))
+        }
+
+        async fn create(
+            &self,
+            request: harness::transport::PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
+            let request = request.request();
             if request.tools_allowed.as_ref().is_some_and(Vec::is_empty) {
                 assert!(request.tools.is_empty());
                 assert!(
@@ -2194,7 +2225,7 @@ mod tests {
             }
             let round = {
                 let mut requests = self.requests.lock().unwrap();
-                requests.push(request);
+                requests.push(request.clone());
                 requests.len()
             };
             let items = if round == 1 {
