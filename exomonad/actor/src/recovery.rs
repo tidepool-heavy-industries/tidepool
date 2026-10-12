@@ -738,7 +738,7 @@ impl ActorRecoveryJournal {
         successor: RootRecoveryPlacement,
         expected_source: Option<&str>,
         canonical_binding_path: &Path,
-        claim: &crate::RootSuccessorOperationClaim,
+        claim: &crate::RootBindingOperationClaim,
     ) -> std::io::Result<Arc<DurableRootSuccessorAdmission>> {
         if !claim.journal_matches(self)
             || successor.actor() != claim.successor_actor()
@@ -749,8 +749,12 @@ impl ActorRecoveryJournal {
                 "journal successor differs from its exact lifecycle execution claim",
             ));
         }
+        let claimed_predecessor = claim
+            .predecessor_owner()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+            .clone();
         self.request(|reply| Command::Certify {
-            claimed_predecessor: claim.predecessor_owner().clone(),
+            claimed_predecessor,
             operation: claim.operation(),
             predecessor,
             successor,
