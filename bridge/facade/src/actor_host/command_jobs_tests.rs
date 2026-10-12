@@ -1338,14 +1338,22 @@ async fn bound_command_result_is_summarized_and_remains_readable() {
                     .supply(Ok(unbound_backend.clone()));
                 let unbound = unbound_run.await.unwrap();
                 let unbound_bindings = &unbound["items"][0]["installedBindings"];
-                assert!(
-                    unbound_bindings.is_null()
-                        || unbound_bindings
-                            .as_array()
-                            .is_some_and(|bindings| bindings.is_empty()),
-                    "an unbound result must not retain a job: {unbound}"
-                );
+                let observations = unbound_bindings
+                    .as_array()
+                    .expect("the expression result must publish its retained observation");
+                assert_eq!(observations.len(), 1, "{unbound}");
+                let observation = observations[0].as_str().unwrap();
                 assert_eq!(unbound["status"], "committed", "{unbound}");
+                let recovered_observation = committed(
+                    campaign,
+                    &format!(
+                        "if Cmd.stdout {observation} == Right \"U\" then pure () else error \"retained expression result was not readable\""
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    recovered_observation["status"], "committed", "{recovered_observation}"
+                );
                 assert_eq!(backend.specs.lock().len(), 1, "reading reran the command");
                 assert_eq!(unbound_backend.specs.lock().len(), 1);
             })
