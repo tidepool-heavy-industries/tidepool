@@ -34,9 +34,8 @@ impl ProviderAttachment {
         &self,
     ) -> Result<tidepool_bridge_effects::InitialContextObservation, ResidentActorWorkbenchError>
     {
-        self.validate().await?;
         self.forest
-            .initial_context_wire_observation(self.actor())
+            .initial_context_wire_observation_for_provider(&self.admission)
             .await
     }
 
@@ -58,9 +57,12 @@ impl ProviderAttachment {
         operation: &tidepool_runtime::session::WorkbenchExecutionId,
         publication: exomonad_actor::InitialContextPublication,
     ) -> Result<exomonad_actor::InitialContextObservation, ResidentActorWorkbenchError> {
-        self.validate().await?;
         self.forest
-            .acknowledge_initial_context_publication(self.actor(), operation, publication)
+            .acknowledge_initial_context_publication_for_provider(
+                &self.admission,
+                operation,
+                publication,
+            )
             .await
     }
 }
