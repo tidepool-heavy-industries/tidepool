@@ -31,6 +31,19 @@ the retained terminal observation of the host's single readiness receiver;
 never hold that receiver's mutex across a caller's progress future. Test
 barrier composition and cancelled or late observers through this shared owner.
 
+Shutdown tests must distinguish executor termination from physical ownership
+release. A retained `Conversation` carries host authority; an `InputObserver`
+retains read-only Store evidence. Check late-operation refusal after executor
+shutdown, then release execution-owning handles before awaiting the physical
+release receipt. Keep read-only observers alive when testing evidence survival;
+do not weaken the receipt or discard the evidence to make teardown pass.
+
+Notification tests assert exact message multiplicity, FIFO order and durable
+delivery phases. Provider batching may include several admitted notifications
+in one request. An idempotent reconciliation may schedule no work when delivery
+is already complete; assert the resulting receipts rather than a fixed task or
+provider-round count unless that count is the API contract under test.
+
 Rich views and human forms share `FormHost`, installed before actor admission.
 A form-unavailable campaign that still publishes views needs the production
 display delegate and an explicit typed refusal at form opening.
