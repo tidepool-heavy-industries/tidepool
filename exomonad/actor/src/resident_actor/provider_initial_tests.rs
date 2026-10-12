@@ -127,7 +127,7 @@ async fn provider_observation_close_and_dropped_reply_settle_actual_native_grant
     .unwrap();
     assert_eq!(
         fixture.admission.lifecycle.observation().phase,
-        crate::LifecyclePhase::Closing
+        crate::kernel::lifecycle::LifecyclePhase::Closing
     );
     native.check_ready_async().await.unwrap();
     assert!(fixture.admission.lifecycle.transaction().await.is_err());
