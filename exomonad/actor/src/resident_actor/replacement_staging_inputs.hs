@@ -11,3 +11,15 @@ let replacementEntry :: Int -> Eff '[] Int
       where
         handler :: forall result. Maybe result -> Eff '[ActorKernel, ActorLocal Maybe] ()
         handler _ = send (ActorContinueWith 0 (Nothing :: Maybe Int))
+    predecessorEntry :: Eff '[ActorKernel, ActorLocal Maybe] Int
+    predecessorEntry = do
+      send @(ActorLocal Maybe) (ActorCheckpointWith 7 (41 :: Int))
+      next <- send @(ActorLocal Maybe) (ActorReceiveStatefulWith 7 handler)
+      pure (maybe 41 id next)
+      where
+        handler :: forall result. Maybe result -> Eff '[ActorKernel, ActorLocal Maybe] ()
+        handler _ = error "intentional predecessor handler failure"
+    predecessorInput :: Maybe Int
+    predecessorInput = Just 73
+    predecessorInputValue :: Maybe Int -> Eff '[] Int
+    predecessorInputValue input = pure (maybe (-1) id input)
