@@ -814,6 +814,8 @@ pub(crate) enum StartupFailureCause {
     Reservation(String),
     #[error("worker admission refused: {0}")]
     WorkerAdmission(String),
+    #[error("executor lifecycle attachment refused: {0}")]
+    Lifecycle(crate::KernelCallFailure),
     #[error(transparent)]
     Behavior(KernelBehaviorError),
 }
@@ -2090,7 +2092,7 @@ where
             directory: arguments.directory,
         });
         let startup_admission = arguments.startup_admission;
-        let startup_refusal = arguments.startup_refusal;
+        let mut startup_refusal = arguments.startup_refusal;
         let cleanup_only_executor = arguments.reservation.cleanup_only();
         let mut state = Box::new(LocalActorState {
             replacement: None,
@@ -2106,13 +2108,16 @@ where
             deferred_mailbox: VecDeque::new(),
             mailbox_drain_scheduled: false,
         });
-        if cleanup_only_executor {
-            // Cleanup-only startup still owns a real executor. Retain its exact
-            // cell before refusal so finalization can await physical termination.
-            state
+        if cleanup_only_executor || startup_refusal.is_none() {
+            // Retain the actual executor cell before cleanup. Attachment refusal
+            // must also settle the already-owned behavior's native resources.
+            if let Err(error) = state
                 .lifecycle
                 .attach_executor(state.context.myself.clone())
-                .await?;
+                .await
+            {
+                startup_refusal = Some(StartupFailureCause::Lifecycle(error));
+            }
         }
         if let Some(cause) = startup_refusal {
             finish_actor(
@@ -2136,12 +2141,6 @@ where
             state.context.identity,
             state.lifecycle.clone(),
         );
-        if !cleanup_only_executor {
-            state
-                .lifecycle
-                .attach_executor(state.context.myself.clone())
-                .await?;
-        }
         if let Err(detail) = state
             .context
             .directory
