@@ -1340,37 +1340,22 @@ async fn published_lookup_and_reflect_examples_preserve_boundary_results() {
 
 
 fn configure_persona_skill_workspace(config: &mut ActorHostConfig, helper: bool) {
-    let authored = config.workspace.join(".exomonad");
-    std::fs::create_dir_all(authored.join("Persona")).unwrap();
-    std::fs::write(
-        authored.join("Persona/Spec.hs"),
-        tidepool_testing::fixture_source("exomonad/examples/persona/.exomonad/Persona/Spec.hs"),
-    )
-    .unwrap();
-    let spec = tidepool_testing::fixture_source("exomonad/examples/persona/.exomonad/AgentSpec.hs");
-    std::fs::write(authored.join("AgentSpec.hs"), spec).unwrap();
+    super::startup_persona_acceptance_tests::configure_persona(
+        config,
+        if helper {
+            "Persona.Spec.helperSpec"
+        } else {
+            "Persona.Spec.agentSpec"
+        },
+    );
     let outside = config.workspace.join(".agents/skills/exomonad-jev");
     std::fs::create_dir_all(&outside).unwrap();
     std::fs::write(outside.join("SKILL.md"), "outside the state root").unwrap();
-    crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
-        project.haskell.source_roots = vec![".".into()];
-        project.haskell.modules = vec!["Persona.Spec".into()];
-        project.haskell.spec = Some(if helper {
-            "Persona.Spec.helperSpec".into()
-        } else {
-            "AgentSpec.agentSpec".into()
-        });
-    });
-    super::test_campaign::commit_workspace(&config.workspace);
-    std::fs::create_dir_all(authored.join("state")).unwrap();
-    std::fs::write(authored.join("state/probe.md"), "state marker").unwrap();
-    config.workspace_inputs = Some(
-        crate::exomonad::workspace::FrozenWorkspace::load(
-            &config.workspace,
-            config.run_directory.path(),
-        )
-        .unwrap(),
-    );
+    std::fs::write(
+        config.workspace.join(".exomonad/state/probe.md"),
+        "state marker",
+    )
+    .unwrap();
 }
 
 #[tokio::test]
@@ -1429,6 +1414,10 @@ async fn persona_and_helper_lookup_deliver_pinned_skills_with_state_files_confin
                     assert!(docs[expected.len()..]
                         .iter()
                         .all(serde_json::Value::is_null));
+                    assert_eq!(
+                        received["docs_refused"], true,
+                        "helper={helper}: {received}"
+                    );
                     assert_eq!(
                         received["files_confined"], true,
                         "helper={helper}: {received}"

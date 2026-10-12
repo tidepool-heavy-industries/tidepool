@@ -82,7 +82,7 @@ fn retained_location(config: &mut super::ActorHostConfig, workspace: &Path, run:
     config.root_binding_path = run.join("root-binding.json");
 }
 
-fn configure_persona(config: &mut super::ActorHostConfig, entry: &str) {
+pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str) {
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Persona")).unwrap();
     std::fs::create_dir_all(authored.join("Jev")).unwrap();

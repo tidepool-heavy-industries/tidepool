@@ -348,7 +348,6 @@
     "exomonad/actor/tests/resident_local_actor/policy.hs",
     "exomonad/actor/tests/resident_local_actor/policy_failed_hook.hs",
     "exomonad/actor/tests/resident_local_actor/shadow_cell.hs",
-    "exomonad/examples/persona/.exomonad/AgentSpec.hs",
     "exomonad/examples/persona/.exomonad/Persona/Attention.hs",
     "exomonad/examples/persona/.exomonad/Persona/Collection.hs",
     "exomonad/examples/persona/.exomonad/Persona/Context.hs",

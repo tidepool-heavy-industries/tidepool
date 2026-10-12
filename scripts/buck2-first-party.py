@@ -497,8 +497,6 @@ EXTERNAL_SOURCE_LABELS = {
     ".exomonad/workspace/skills/exomonad-command/SKILL.md": "//:actor_skill_exomonad_command",
     ".exomonad/workspace/skills/exomonad-define-actors/SKILL.md": "//:actor_skill_exomonad_define_actors",
     ".exomonad/workspace/skills/exomonad-agent-spec/SKILL.md": "//:actor_skill_exomonad_agent_spec",
-    "exomonad/examples/persona/.exomonad/Persona/Spec.hs": "//exomonad/examples/persona:authored_haskell_Persona_Spec_hs",
-    "exomonad/examples/persona/.exomonad/AgentSpec.hs": "//exomonad/examples/persona:authored_haskell_AgentSpec_hs",
     ".exomonad/workspace/skills/exomonad-jev/SKILL.md": "//:facade_doc__exomonad_workspace_skills_exomonad_jev_SKILL_md",
     ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md": "//:facade_doc__exomonad_workspace_skills_exomonad_jev_references_recent_changes_md",
     ".exomonad/workspace/skills/exomonad-workbench/SKILL.md": "//:facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md",

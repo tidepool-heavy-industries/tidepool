@@ -476,7 +476,6 @@ filegroup(
         "exomonad/actor/tests/resident_local_actor/policy.hs": "//exomonad/actor:haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f706f6c6963792e6873",
         "exomonad/actor/tests/resident_local_actor/policy_failed_hook.hs": "//exomonad/actor:haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f706f6c6963795f6661696c65645f686f6f6b2e6873",
         "exomonad/actor/tests/resident_local_actor/shadow_cell.hs": "//exomonad/actor:haskell_test_fixture_74657374732f7265736964656e745f6c6f63616c5f6163746f722f736861646f775f63656c6c2e6873",
-        "exomonad/examples/persona/.exomonad/AgentSpec.hs": "//exomonad/examples/persona:authored_haskell_AgentSpec_hs",
         "exomonad/examples/persona/.exomonad/Persona/Attention.hs": "//exomonad/examples/persona:authored_haskell_Persona_Attention_hs",
         "exomonad/examples/persona/.exomonad/Persona/Collection.hs": "//exomonad/examples/persona:authored_haskell_Persona_Collection_hs",
         "exomonad/examples/persona/.exomonad/Persona/Context.hs": "//exomonad/examples/persona:authored_haskell_Persona_Context_hs",
