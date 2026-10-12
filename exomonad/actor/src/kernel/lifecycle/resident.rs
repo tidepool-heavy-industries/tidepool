@@ -537,65 +537,64 @@ pub(super) fn handle(
             complete(state, address, sequence, outcome)
         }
         ResidentCommand::BeginBinding { origin, reply } => {
-            let result = if state.is_closed() {
-                Err("successor lifecycle is closing".into())
-            } else if state
-                .resident
-                .as_ref()
-                .is_none_or(|resident| resident.successor.is_some())
-            {
-                Err("successor operation is unavailable or already owned".into())
-            } else {
-                let sequence = state.next_operation();
-                let resident = state.resident.as_mut().unwrap();
-                let owner = match &resident.current.public_owner {
-                    ActorPublicOwnerPlane::DurablePending(owner) => Some(owner.clone()),
-                    ActorPublicOwnerPlane::DurableCommitted(owner) => owner.durable().cloned(),
-                    _ => None,
-                };
-                let original = resident
-                    .startup_intent
-                    .as_ref()
-                    .and_then(|intent| intent.manifest.as_ref())
-                    .map(|manifest| &manifest.public_owner.owner);
-                let origin_matches = match &origin {
-                    BindingOrigin::Fresh => original.is_none(),
-                    BindingOrigin::Successor(owner) => {
-                        original.is_none_or(|original| original == owner)
-                    }
-                };
-                if !origin_matches {
-                    let _ = reply.send(Err(
-                        "binding origin differs from original startup manifest".into(),
-                    ));
-                    return;
-                }
-                let journal = resident.journal.clone();
-                owner
-                    .zip(journal)
-                    .ok_or_else(|| {
-                        "successor operation requires its exact durable owner and journal"
-                            .to_owned()
-                    })
-                    .map(|(owner, journal)| {
-                        resident.successor = Some(SuccessorOperation {
-                            sequence,
-                            origin: origin.clone(),
-                            owner: owner.clone(),
-                            stage: SuccessorStage::Reserved,
-                        });
-                        RootBindingOperationClaim {
-                            sequence,
-                            actor: state.identity,
-                            placement: resident.current.context.placement,
-                            owner,
-                            origin,
-                            lifecycle: address.clone(),
-                            journal,
-                            armed: true,
+            let result =
+                if state.is_closed() {
+                    Err("successor lifecycle is closing".into())
+                } else if state.resident.as_ref().is_none_or(|resident| {
+                    resident.successor.is_some() || resident.pending.is_some()
+                }) {
+                    Err("successor operation is unavailable or already owned".into())
+                } else {
+                    let sequence = state.next_operation();
+                    let resident = state.resident.as_mut().unwrap();
+                    let owner = match &resident.current.public_owner {
+                        ActorPublicOwnerPlane::DurablePending(owner) => Some(owner.clone()),
+                        ActorPublicOwnerPlane::DurableCommitted(owner) => owner.durable().cloned(),
+                        _ => None,
+                    };
+                    let original = resident
+                        .startup_intent
+                        .as_ref()
+                        .and_then(|intent| intent.manifest.as_ref())
+                        .map(|manifest| &manifest.public_owner.owner);
+                    let origin_matches = match &origin {
+                        BindingOrigin::Fresh => original.is_none(),
+                        BindingOrigin::Successor(owner) => {
+                            original.is_none_or(|original| original == owner)
                         }
-                    })
-            };
+                    };
+                    if !origin_matches {
+                        let _ = reply.send(Err(
+                            "binding origin differs from original startup manifest".into(),
+                        ));
+                        return;
+                    }
+                    let journal = resident.journal.clone();
+                    owner
+                        .zip(journal)
+                        .ok_or_else(|| {
+                            "successor operation requires its exact durable owner and journal"
+                                .to_owned()
+                        })
+                        .map(|(owner, journal)| {
+                            resident.successor = Some(SuccessorOperation {
+                                sequence,
+                                origin: origin.clone(),
+                                owner: owner.clone(),
+                                stage: SuccessorStage::Reserved,
+                            });
+                            RootBindingOperationClaim {
+                                sequence,
+                                actor: state.identity,
+                                placement: resident.current.context.placement,
+                                owner,
+                                origin,
+                                lifecycle: address.clone(),
+                                journal,
+                                armed: true,
+                            }
+                        })
+                };
             if result.is_ok() && state.phase == super::LifecyclePhase::Open {
                 state.phase = super::LifecyclePhase::Installing;
             }
