@@ -3204,4 +3204,46 @@ mod tests {
             first.confirmed_sequence() as usize
         );
     }
+    #[tokio::test]
+    async fn unissued_startup_parameters_do_not_admit_or_append() {
+        let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
+        let actor = ActorRef::first(ActorId(56));
+        let root =
+            descriptor("root").with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap());
+        let startup = startup_intent(
+            actor,
+            &directory.path().join("binding.json"),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(journal
+            .admit_with_startup(actor, &root, &[], Some(startup), None)
+            .await
+            .is_err());
+        assert!(journal.records().await.unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("actors.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn observed_read_preserves_filesystem_kind_and_malformed_data_distinction() {
+        let directory = tempfile::tempdir().unwrap();
+        let error = ActorRecoveryJournal::read_observed(directory.path()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::IsADirectory);
+        let path = directory.path().join("malformed.jsonl");
+        std::fs::write(&path, b"{}\n").unwrap();
+        let error = ActorRecoveryJournal::read_observed(&path).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
 }
