@@ -3,6 +3,25 @@
 Implementation work is isolated from main and from the ongoing conversation and
 recovery work. No running service has been redeployed.
 
+## Prompting follow-up
+
+Branch `companion/persona-metaprompt` adds prompt/configuration/documentation
+changes on the preserved seed commit
+`afb3526e27de72a76bddafb1398ac839a6ccb4f5`. Its persona-specific base uses the
+existing workspace override; the host still appends the shared API guide.
+The agent prompt seeds embodied curiosity, ambitious Haskell composition,
+interaction through Jev and GUI, and engineering in the spirit of customizing
+one's own Emacs. Ancestor notes are explicitly optional. Activity begins through
+human interaction; no autonomous scheduler is introduced.
+
+The native and browser results below belong to the original implementation.
+This follow-up adds no Haskell snippets or executable changes. Its checks cover
+TOML parsing, referenced prompt/module files, local documentation links, patch
+scope and whitespace. Prompt composition was inspected against the existing
+production selection path. No live behavioral trial or release qualification
+has run for the revised seed. Research and deferred runtime work are retained in
+[PROVENANCE.md](PROVENANCE.md) and [NEXT-IDEAS.md](NEXT-IDEAS.md).
+
 ## Source and integration
 
 - Tidepool base: `2dd63765c0ea3a8c4c9f556cac292eb994848189`.

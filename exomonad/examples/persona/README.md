@@ -9,14 +9,22 @@ Helpers preferentially use the configured Luna/Sol aliases; Astra context forks
 remain available. The prompt states the root-model boundary; the existing context effect also contains
 model-selection operations, so this is an instruction, not a new per-operation
 runtime restriction. Haskell is an expressive medium it can use to develop
-its own tools, context, interfaces and methods.
+its own tools, context, interfaces and methods. The seed invites an embodied
+understanding of the whole system: tools supply perception and action; memory,
+context, profile and harness shape what it can notice and do. Technical work has
+the character of growing one's own Emacs configuration. Direction can emerge
+from conversation, use and curiosity.
 
 Start with a normal `exomonad new` workspace using this Tidepool build's pinned
 shared-source workspace. Copy this seed's `.exomonad/Persona`, `AgentSpec.hs`,
 and `prompts` into that workspace. Merge the seed `config.toml`'s Haskell and
-prompt settings with the operator's existing launch/provider settings. Retain the
-shared Exomonad base prompt; this seed supplies the companion-specific agent
-prompt, not a replacement for the system's composition and lifecycle guidance. Keep the shared workspace at `.exomonad/workspace`; it supplies the pinned Jev facade.
+prompt settings with the operator's existing launch/provider settings. Keep the
+live workspace's configuration separate while preparing this alternative.
+The seed supplies both `prompts/base.md` and `prompts/agent.md`. The workspace
+base override carries composition and lifecycle guidance for an open-ended
+companion; the host appends the shared Exomonad API guide using its existing
+prompt-selection mechanism. The shared harness prompts remain unchanged.
+Keep the shared workspace at `.exomonad/workspace`; it supplies the pinned Jev facade.
 Do not copy run history or another companion's `.exomonad/state` accidentally.
 Run the normal workspace check and frozen-bundle qualification before launching.
 The renderer must include this feature's matching Harness commit; an older
@@ -34,8 +42,10 @@ Its synchronous notebook includes context editing, record actors, hosted agents,
 typed requests, watches, inspection and scoped cleanup. It omits commands and
 raw HTTP. `Persona.Spec.helperSpec` provides a starting helper profile that
 returns findings rather than writing shared memory or mounting human forms.
-The Fs handlers resolve all file operations beneath `.exomonad/state`, outside
-the source roots. The host currently grants the general effect vocabulary;
+The Fs handlers resolve all file operations beneath `.exomonad/state`.
+Coordinate the existing state/source exclusion fix with the integration owner
+before running; state must not become part of captured authored source.
+The host currently grants the general effect vocabulary;
 the installed notebook narrows it. This is a tool capability boundary, not a
 separate OS user or process sandbox.
 
@@ -44,9 +54,12 @@ compare-and-swap. It never overwrites an existing identity, and storage errors
 remain distinct from absence. The startup prompt asks the companion to read those blocks explicitly;
 there is no hidden before-model memory injection. Small notes and change requests
 are individual Markdown files. The operator can review `state/changes/*.md` in a
-stock coding session, implement a proposal, and redeploy. A request does not edit
-or deploy running code. `readSourceModule` returns active captured bytes and their
-source revision; `sourceStatus` distinguishes pending edits.
+stock coding session, implement a proposal, and redeploy. Direct, reversible
+persistent self-editing is the intended direction; the proposal path describes
+the current capability gap, not a permanent approval policy. A request does not
+edit or deploy running code. `readSourceModule` returns active captured bytes and
+their source revision; `sourceStatus` distinguishes pending edits. Startup prompts
+are frozen for the run; context editing does not replace system/developer text.
 
 `Persona.Web.search` returns source hits, `open` retains a complete extracted
 Page, `follow` resolves relative links natively, `readLines` returns addressed
@@ -64,13 +77,22 @@ A failed Jev call marks all passages uncertain. It never reports a false empty
 selection as if it were a successful judgment. Notebook values last for the
 machine session; save useful excerpts in notes for continuity across runs.
 
-The seed prescribes no activities, actor topology, context assembler or recurring
-self-improvement routine. The shared Exomonad instructions teach composition;
-the companion prompt invites it to develop its own praxis with the person.
-Memory starts nearly empty. Templates, conditional context and interfaces can
-be ordinary authored Haskell using the existing effects. No pre-inference hook
-or automatic semantic filtering is installed. Existing shared examples remain
-available as source material rather than required behavior.
+The metaprompting hypothesis is that an ambitious invitation, an accurate account
+of the editable system, and consequences carried forward from interaction can
+encourage interesting evolution. It leaves eventual behavior and personality
+open. Forms and Jev belong in that feedback loop: an invented interaction changes
+what can be expressed, and the response can suggest a new interpretation or
+composition. The prompt gives positive discoveries, tastes and unresolved
+questions a place in memory alongside corrections.
+
+Exploration runs during human interactions and their ongoing work. No autonomous
+background schedule, actor topology, context assembler or recurring improvement
+routine is installed. Memory starts nearly empty. Templates and conditional
+context can be authored Haskell using existing effects. Optional examples are
+marked as notes from an ancestor LLM; they suggest possibilities the companion
+may adapt, ignore or outgrow. The shared API guide retains compiled examples.
+See [design sources](PROVENANCE.md) for the research and [next ideas](NEXT-IDEAS.md)
+for hypotheses and deferred harness-adaptation work.
 
 ## Acceptance
 
@@ -80,6 +102,9 @@ tests cover retrieval configuration and content identity. Harness tests cover
 local interaction, selected drafts, and wire refusal. A live companion session requires a qualified matched bundle and provider credentials; unit tests
 do not establish persona quality or semantic relevance.
 
-Observe what the companion and person develop together. Retain concrete
-limitations and unexpected behaviors for the owning Exomonad abstraction; the
-seed does not prescribe an activity sequence or a persona-quality benchmark.
+Observe what develops across conversations and how earlier experience changes
+later attention, authored code, context or interaction. Compare prompting
+strategies through their consequences without prescribing a personality or
+rewarding repeated declarations of curiosity. Retain concrete limitations and
+unexpected behaviors for the owning Exomonad abstraction. The seed remains a
+hypothesis until tried with the selected model and an actual human.
