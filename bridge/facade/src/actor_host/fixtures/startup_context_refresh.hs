@@ -1,10 +1,11 @@
+import qualified Data.Text as T
 import Control.Lens (over, view)
 import qualified Tidepool.Agent.Context as C
 
 startupPublication <- C.getInitialContext
 (startupIdentity, startupAssociation, startupOriginalText, startupReference) <- case startupPublication of
   C.InitialContextPublished identity association text reference -> pure (identity, association, text, reference)
-  other -> error (show other)
+  other -> error (T.pack (show other))
 
 startupCurrent <- C.getContext
 let startupMatches = [body | C.Text (Just reference) _ body _ <- view C.contextBlocks startupCurrent, reference == startupReference]

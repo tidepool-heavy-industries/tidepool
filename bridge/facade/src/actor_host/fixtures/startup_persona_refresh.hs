@@ -1,3 +1,4 @@
+import qualified Data.Text as T
 import qualified Persona.Attention as Attention
 import qualified Persona.Context as PersonaContext
 import qualified Persona.Memory as Memory
@@ -6,7 +7,7 @@ import qualified Tidepool.Agent.Context as C
 personaPublication <- C.getInitialContext
 personaReference <- case personaPublication of
   C.InitialContextPublished _ _ _ reference -> pure reference
-  other -> error (show other)
+  other -> error (T.pack (show other))
 Right () <- Memory.remember Memory.Persona "persona-memory-updated"
 Right (_, personaPrepared) <- PersonaContext.prepare (Attention.Limits 1 16384) "refresh" Attention.continuity
 Right () <- PersonaContext.save "refresh-preparation" personaPrepared

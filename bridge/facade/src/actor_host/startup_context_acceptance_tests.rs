@@ -88,7 +88,6 @@ pub(super) fn assert_request_user_texts(
         .embedded_conversation_history(binding.identity())
         .unwrap();
     let head = projected.head.as_ref().unwrap();
-    let canonical = store.context_history(head).unwrap();
     let user_bodies = |items: &[(
         harness::model::RequestId,
         harness::item::ItemHash,
@@ -100,12 +99,24 @@ pub(super) fn assert_request_user_texts(
             .map(|(_, _, item)| item.0["content"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>()
     };
-    assert_eq!(user_bodies(&canonical), expected_bodies);
+    assert_eq!(&user_texts(request)[1..], &expected_bodies[1..]);
     assert_eq!(user_texts(request), user_bodies(&projected.history));
+    let retained = host
+        .context
+        .forest
+        .initial_context_observation(actor)
+        .unwrap();
+    let reference = retained
+        .publication
+        .as_ref()
+        .unwrap()
+        .authored_reference
+        .as_deref()
+        .unwrap();
     let document = store.read_context(head).unwrap();
     assert!(document.blocks.iter().any(|block| matches!(block,
-        harness::context::ContextBlock::Text { role: harness::context::ContextRole::User, text, .. }
-            if text == expected_bodies[0])));
+        harness::context::ContextBlock::Text { reference: Some(actual), role: harness::context::ContextRole::User, text, .. }
+            if actual.as_str() == reference && text == expected_bodies[0])));
 }
 
 
@@ -577,7 +588,19 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
             let activated = next_hosted_script_round(&mut requests, &mut pending, &path).await;
             let texts = user_texts(&activated.request);
             assert_eq!(texts[0], "fresh-caller-seed");
-            assert_eq!(texts[1], fresh.result.as_ref().unwrap().rendered);
+            let binding = host.context.binding(child("startup-fresh").actor).unwrap();
+            let store = host.context.runtime.store();
+            let projected = store.embedded_conversation_history(binding.identity()).unwrap();
+            let projected_texts: Vec<_> = projected.history.iter()
+                .filter(|(_, _, item)| item.0["type"] == "message" && item.0["role"] == "user")
+                .map(|(_, _, item)| item.0["content"].as_str().unwrap())
+                .collect();
+            assert_eq!(texts, projected_texts);
+            let document = store.read_context(projected.head.as_ref().unwrap()).unwrap();
+            let reference = fresh.publication.as_ref().unwrap().authored_reference.as_deref().unwrap();
+            assert!(document.blocks.iter().any(|block| matches!(block,
+                harness::context::ContextBlock::Text { reference: Some(actual), role: harness::context::ContextRole::User, text, .. }
+                    if actual.as_str() == reference && text == &fresh.result.as_ref().unwrap().rendered)));
             assert!(matches!(
                 judgments.try_recv(),
                 Err(mpsc::error::TryRecvError::Empty)
