@@ -1680,6 +1680,7 @@ impl ActorPublicOwnerPlane {
 /// Actual actor-owner readiness for the provider composition boundary. The
 /// frontend retains this capsule across waits and revalidates it before bind.
 pub struct ActorProviderAdmission {
+    issuer: crate::local_actor::LocalActorDirectory,
     lifecycle: crate::LifecycleHandle,
     owner: Arc<WorkbenchPublicOwner>,
 }
@@ -13468,13 +13469,22 @@ where
             .public_owner(None, true)
             .await
             .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-        Ok(Arc::new(ActorProviderAdmission { lifecycle, owner }))
+        Ok(Arc::new(ActorProviderAdmission {
+            issuer: self.directory.clone(),
+            lifecycle,
+            owner,
+        }))
     }
 
     pub async fn validate_provider_attachment(
         &self,
         admission: &ActorProviderAdmission,
     ) -> Result<(), ResidentActorWorkbenchError> {
+        if !self.directory.same_owner(&admission.issuer) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "provider attachment belongs to another forest owner".into(),
+            ));
+        }
         admission.validate().await
     }
 
