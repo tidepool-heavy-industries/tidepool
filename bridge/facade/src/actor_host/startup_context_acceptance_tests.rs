@@ -297,7 +297,7 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
             let mut pending = VecDeque::new();
             let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             let operation = first.operation("startup-children-spawn");
-            first.sync_call(
+            first.call(
                 "startup-children-spawn",
                 include_str!("fixtures/startup_children_spawn.hs"),
             );
