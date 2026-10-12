@@ -485,16 +485,66 @@ impl KernelContext {
         }
     }
 
+    pub(crate) async fn reserve_worker_creation(
+        &self,
+        lifetime: crate::WorkerLifetime,
+    ) -> Result<run_control::ActorReservation, ractor::SpawnErr> {
+        let admission = self
+            .lifecycle
+            .resource_admission()
+            .await
+            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        let mut reservation = if lifetime == crate::WorkerLifetime::RunOwned {
+            self.directory.reserve(self.identity.incarnation).await
+        } else {
+            self.directory
+                .reserve_worker(self.identity, self.identity.incarnation)
+                .await
+        }
+        .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        reservation.retain_parent_admission(admission);
+        Ok(reservation)
+    }
+
+    pub(crate) async fn reserve_successor_creation(
+        &self,
+    ) -> Result<run_control::ActorReservation, ractor::SpawnErr> {
+        let admission = self
+            .lifecycle
+            .resource_admission()
+            .await
+            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        let mut reservation = self
+            .directory
+            .reserve_successor(self.identity, self.identity.incarnation)
+            .await
+            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?;
+        reservation.retain_parent_admission(admission);
+        Ok(reservation)
+    }
+
     pub(crate) async fn spawn_successor<B: KernelBehavior>(
         &self,
         behavior: B,
     ) -> Result<LocalActorRef, ractor::SpawnErr> {
+        let reservation = self.reserve_successor_creation().await?;
+        self.spawn_reserved_successor(None, behavior, reservation)
+            .await
+    }
+
+    pub(crate) async fn spawn_reserved_successor<B: KernelBehavior>(
+        &self,
+        name: Option<String>,
+        behavior: B,
+        reservation: run_control::ActorReservation,
+    ) -> Result<LocalActorRef, ractor::SpawnErr> {
         self.prepare_worker(
-            None,
+            name,
             Box::new(behavior),
             crate::WorkerLifetime::ActorOwned,
             None,
             true,
+            reservation,
         )
         .await
     }
@@ -633,7 +683,8 @@ impl KernelContext {
         behavior: C,
         lifetime: crate::WorkerLifetime,
     ) -> Result<LocalActorRef, ractor::SpawnErr> {
-        self.prepare_worker(name, Box::new(behavior), lifetime, None, false)
+        let reservation = self.reserve_worker_creation(lifetime).await?;
+        self.spawn_reserved_worker(name, behavior, lifetime, reservation)
             .await
     }
 
@@ -644,8 +695,39 @@ impl KernelContext {
         lifetime: crate::WorkerLifetime,
         admission: Arc<dyn WorkerStartupAdmission>,
     ) -> Result<LocalActorRef, ractor::SpawnErr> {
-        self.prepare_worker(name, Box::new(behavior), lifetime, Some(admission), false)
+        let reservation = self.reserve_worker_creation(lifetime).await?;
+        self.spawn_reserved_worker_scoped(name, behavior, lifetime, admission, reservation)
             .await
+    }
+
+    pub(crate) async fn spawn_reserved_worker<C: KernelBehavior>(
+        &self,
+        name: Option<String>,
+        behavior: C,
+        lifetime: crate::WorkerLifetime,
+        reservation: run_control::ActorReservation,
+    ) -> Result<LocalActorRef, ractor::SpawnErr> {
+        self.prepare_worker(name, Box::new(behavior), lifetime, None, false, reservation)
+            .await
+    }
+
+    pub(crate) async fn spawn_reserved_worker_scoped<C: KernelBehavior>(
+        &self,
+        name: Option<String>,
+        behavior: C,
+        lifetime: crate::WorkerLifetime,
+        admission: Arc<dyn WorkerStartupAdmission>,
+        reservation: run_control::ActorReservation,
+    ) -> Result<LocalActorRef, ractor::SpawnErr> {
+        self.prepare_worker(
+            name,
+            Box::new(behavior),
+            lifetime,
+            Some(admission),
+            false,
+            reservation,
+        )
+        .await
     }
 
     async fn prepare_worker<C: KernelBehavior>(
@@ -655,23 +737,25 @@ impl KernelContext {
         lifetime: crate::WorkerLifetime,
         startup_admission: Option<Arc<dyn WorkerStartupAdmission>>,
         successor: bool,
+        mut reservation: run_control::ActorReservation,
     ) -> Result<LocalActorRef, ractor::SpawnErr> {
+        let admission = reservation.take_parent_admission().ok_or_else(|| {
+            ractor::SpawnErr::StartupFailed(
+                std::io::Error::other(
+                    "worker creation reservation has no retained parent admission",
+                )
+                .into(),
+            )
+        })?;
         let context = self.clone();
         let result = self.directory.prepare_root(Box::new(move |_ticket| Box::pin(async move {
             let produced: run_control::RootOperationResult = async {
-                let admission = context.lifecycle.resource_admission().await;
                 let mut custody = StartupCustody { directory: context.directory.clone(), parent: context.identity, accounted: false };
-                let reservation = if successor {
-                    context.directory.reserve_successor(context.identity, context.identity.incarnation).await?
-                } else { context.directory.reserve_worker(context.identity, context.identity.incarnation).await? };
                 let identity = reservation.identity();
                 let terminal = reservation.terminal().clone();
                 let lifecycle = reservation.lifecycle().clone();
-                let startup_refusal = match &admission {
-                    Err(_) => Some(StartupFailureCause::ChildAdmissionClosed),
-                    Ok(_) => startup_admission.as_ref().and_then(|admission| admission.reserve(identity).err())
-                        .map(StartupFailureCause::Reservation),
-                };
+                let startup_refusal = startup_admission.as_ref().and_then(|admission| admission.reserve(identity).err())
+                    .map(StartupFailureCause::Reservation);
                 let supervisor = if successor {
                     match context.supervisor_identity().await? {
                         Some(parent) => Some(context.directory.context(parent).await?.ok_or(run_control::DirectoryError::Unauthorized { actor: parent })?),
