@@ -100,6 +100,14 @@ pub(crate) struct RootPlacementPublisher {
     >,
 }
 impl RootPlacementPublisher {
+    #[cfg(test)]
+    pub(crate) async fn kill_producer_for_test(&self) -> Result<(), DirectoryError> {
+        let (reply, receiver) = oneshot::channel();
+        self.supervisor
+            .send_message(PreparationMessage::KillRoot { id: self.id, reply })
+            .map_err(|_| DirectoryError::Unavailable)?;
+        receiver.await.map_err(|_| DirectoryError::Unavailable)
+    }
     pub(crate) fn publish(&self, placement: crate::ActorPlacement) -> Result<(), DirectoryError> {
         self.supervisor
             .send_message(PreparationMessage::NativePlacement {
@@ -191,6 +199,11 @@ impl RootDelivery {
 }
 
 pub(super) enum PreparationMessage {
+    #[cfg(test)]
+    KillRoot {
+        id: u64,
+        reply: oneshot::Sender<()>,
+    },
     NativePlacement {
         id: u64,
         custody: ProducedCustody,
@@ -293,6 +306,11 @@ impl Actor for PreparationSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            #[cfg(test)]
+            PreparationMessage::KillRoot { id, reply } => {
+                for worker in state.workers.values() { if matches!(&worker.kind, WorkerKind::Root { id: issued, .. } if *issued == id) { worker.cell.kill(); } }
+                let _ = reply.send(());
+            }
             PreparationMessage::NativePlacement { id, custody } => {
                 for worker in state.workers.values_mut() { if let WorkerKind::Root { id: issued, native, .. } = &mut worker.kind { if *issued == id { *native = Some(custody.clone()); } } }
             }

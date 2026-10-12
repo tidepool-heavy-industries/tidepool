@@ -38,6 +38,8 @@ pub(crate) mod invocation_work;
 mod jev_form_runtime_tests;
 mod owned_workbench;
 #[cfg(test)]
+mod root_preparation_tests;
+#[cfg(test)]
 pub(crate) async fn before_publication_attempt() {
     owned_workbench::counting_publication_tests::before_publication_attempt().await;
 }
