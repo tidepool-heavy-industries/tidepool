@@ -26,9 +26,9 @@ pub(super) enum ActorTaskExecution<B, T> {
     Serial(
         Box<
             dyn FnOnce(
-                    B,
+                    Box<B>,
                     std::sync::Arc<KernelContext>,
-                ) -> BoxFuture<'static, (B, OwnedActorCompletion<B, T>)>
+                ) -> BoxFuture<'static, (Box<B>, OwnedActorCompletion<B, T>)>
                 + Send,
         >,
     ),
@@ -44,9 +44,9 @@ impl<B: 'static, T: 'static> OwnedActorTask<B, T> {
 
     pub(crate) fn serial(
         run: impl FnOnce(
-                B,
+                Box<B>,
                 std::sync::Arc<KernelContext>,
-            ) -> BoxFuture<'static, (B, OwnedActorCompletion<B, T>)>
+            ) -> BoxFuture<'static, (Box<B>, OwnedActorCompletion<B, T>)>
             + Send
             + 'static,
     ) -> Self {

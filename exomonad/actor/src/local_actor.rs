@@ -1031,7 +1031,7 @@ pub trait KernelBehavior: Send + 'static {
     where
         Self: Sized,
     {
-        OwnedActorTask::serial(move |mut behavior: Self, context| {
+        OwnedActorTask::serial(move |mut behavior: Box<Self>, context| {
             Box::pin(async move {
                 let tool = behavior.tool(&context, invocation, hosted_checkpoint_capture);
                 let result = crate::resident_workbench::with_execution_control(control, tool).await;
@@ -1111,7 +1111,7 @@ pub trait KernelBehavior: Send + 'static {
             });
         }
         Ok(OwnedActorTask::serial(
-            move |mut behavior: Self, context| {
+            move |mut behavior: Box<Self>, context| {
                 Box::pin(async move {
                     let result = behavior.resume(&context).await.map_err(|error| {
                         KernelInvocationFailure::Failed {
@@ -1331,14 +1331,14 @@ impl<B> Drop for LocalActorState<B> {
 }
 
 /// The behavior has exactly one owner: the actor or its active serial task.
-struct BehaviorSlot<B>(Option<B>);
+struct BehaviorSlot<B>(Option<Box<B>>);
 
 impl<B> std::ops::Deref for BehaviorSlot<B> {
     type Target = B;
 
     fn deref(&self) -> &B {
         self.0
-            .as_ref()
+            .as_deref()
             .expect("behavior is owned by a pending actor task")
     }
 }
@@ -1346,7 +1346,7 @@ impl<B> std::ops::Deref for BehaviorSlot<B> {
 impl<B> std::ops::DerefMut for BehaviorSlot<B> {
     fn deref_mut(&mut self) -> &mut B {
         self.0
-            .as_mut()
+            .as_deref_mut()
             .expect("behavior is owned by a pending actor task")
     }
 }
@@ -1449,7 +1449,7 @@ type WorkbenchTaskOutcome<B> = ActorTaskOutcome<B, WorkbenchResponse>;
 
 enum ActorTaskOutcome<B, T> {
     Rejoined {
-        behavior: B,
+        behavior: Box<B>,
         completion: OwnedActorCompletion<B, T>,
     },
     Owned(OwnedActorCompletion<B, T>),
@@ -2099,7 +2099,7 @@ where
             lifecycle: arguments.lifecycle,
             active_ingress: None,
             context,
-            behavior: BehaviorSlot(Some(*arguments.behavior)),
+            behavior: BehaviorSlot(Some(arguments.behavior)),
             pending_tasks: HashMap::new(),
             next_task_generation: 0,
             pending_child_exits: Vec::new(),
@@ -2470,7 +2470,7 @@ fn start_workbench<B: KernelBehavior>(
         WorkbenchDispatch::Sequential {
             invocation,
             control,
-        } => OwnedActorTask::serial(move |mut behavior: B, context| {
+        } => OwnedActorTask::serial(move |mut behavior: Box<B>, context| {
             Box::pin(async move {
                 let result = behavior.workbench(&context, invocation, control).await;
                 (behavior, OwnedActorCompletion::new(move |_| result))
@@ -4081,7 +4081,36 @@ mod tests {
         }
     }
 
+    struct BehaviorCustodyProbe {
+        addresses: Mutex<Vec<(&'static str, usize)>>,
+        drops: AtomicUsize,
+        entered: Notify,
+        release: Notify,
+        rejoined: Notify,
+    }
+
+    impl BehaviorCustodyProbe {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                addresses: Mutex::new(Vec::new()),
+                drops: AtomicUsize::new(0),
+                entered: Notify::new(),
+                release: Notify::new(),
+                rejoined: Notify::new(),
+            })
+        }
+    }
+
+    struct BehaviorCustody(Arc<BehaviorCustodyProbe>);
+
+    impl Drop for BehaviorCustody {
+        fn drop(&mut self) {
+            self.0.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     struct ProbeBehavior {
+        boxed_custody: Option<BehaviorCustody>,
         start_observations: Option<Arc<Mutex<Vec<(KernelContext, Option<ActorRef>)>>>>,
         cleanup_peers: Option<Arc<Mutex<Vec<LocalActorRef>>>>,
         replacement_staged: bool,
@@ -4134,6 +4163,18 @@ mod tests {
         ),
         HangRealmUntilDeadline,
         HangRealmForever(Arc<Notify>),
+    }
+
+    impl ProbeBehavior {
+        fn record_custody_address(&self, phase: &'static str) {
+            if let Some(custody) = &self.boxed_custody {
+                custody
+                    .0
+                    .addresses
+                    .lock()
+                    .push((phase, self as *const Self as usize));
+            }
+        }
     }
 
     impl KernelBehavior for ProbeBehavior {
@@ -4245,6 +4286,7 @@ mod tests {
             &mut self,
             context: &KernelContext,
         ) -> BoxFuture<'_, Result<KernelStep<()>, KernelBehaviorError>> {
+            self.record_custody_address("start");
             let observations = self.start_observations.clone();
             let context = context.clone();
             let gate = self.startup_gate.clone();
@@ -4274,9 +4316,31 @@ mod tests {
             kind: crate::kernel::KernelResume,
         ) -> Result<OwnedActorTask<Self, ()>, KernelBehaviorError> {
             assert_eq!(kind, crate::kernel::KernelResume::ContinueProgram);
+            self.record_custody_address("dispatch");
+            if let Some(custody) = &self.boxed_custody {
+                let observation = Arc::clone(&custody.0);
+                return Ok(OwnedActorTask::serial(
+                    move |behavior: Box<Self>, _context| {
+                        Box::pin(async move {
+                            behavior.record_custody_address("serial_started");
+                            observation.entered.notify_one();
+                            observation.release.notified().await;
+                            behavior.record_custody_address("serial_resumed");
+                            (
+                                behavior,
+                                OwnedActorCompletion::new(move |behavior: &mut Self| {
+                                    behavior.record_custody_address("rejoined");
+                                    observation.rejoined.notify_one();
+                                    Ok(KernelStep::Continue(()))
+                                }),
+                            )
+                        })
+                    },
+                ));
+            }
             let Some(probe) = self.kernel_probe.clone() else {
                 return Ok(OwnedActorTask::serial(
-                    move |mut behavior: Self, context| {
+                    move |mut behavior: Box<Self>, context| {
                         Box::pin(async move {
                             let result = behavior.resume(&context).await.map_err(|error| {
                                 KernelInvocationFailure::Failed {
@@ -4601,6 +4665,7 @@ mod tests {
             _context: &KernelContext,
             terminal: &ActorTerminal,
         ) -> BoxFuture<'_, Result<(), KernelBehaviorError>> {
+            self.record_custody_address("shutdown");
             let terminal = terminal.clone();
             Box::pin(async move {
                 if let Some(peers) = &self.cleanup_peers {
@@ -4744,6 +4809,7 @@ mod tests {
         let terminal_callbacks = Arc::new(Mutex::new(Vec::new()));
         ProbeFixture {
             behavior: ProbeBehavior {
+                boxed_custody: None,
                 start_observations: None,
                 cleanup_peers: None,
                 replacement_staged: false,
@@ -4928,6 +4994,127 @@ mod tests {
             .await
             .unwrap();
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn serial_behavior_keeps_admission_allocation_and_discards_unmatched_rejoin_once() {
+        let custody = BehaviorCustodyProbe::new();
+        let mut probe = behavior(false).behavior;
+        probe.boxed_custody = Some(BehaviorCustody(Arc::clone(&custody)));
+        let boxed = Box::new(probe);
+        let original_address = (&*boxed) as *const ProbeBehavior as usize;
+        custody
+            .addresses
+            .lock()
+            .push(("admission", original_address));
+        let (directory, _directory_task) = LocalActorDirectory::start().await.unwrap();
+        let reservation = directory.reserve(crate::Incarnation::FIRST).await.unwrap();
+        let identity = reservation.identity();
+        let lifecycle = reservation.lifecycle().clone();
+        let terminal = reservation.terminal().clone();
+        let (address, task) = Actor::spawn(
+            None,
+            LocalActor::<ProbeBehavior>(PhantomData),
+            LocalActorArguments {
+                behavior: boxed,
+                spawn_ownership: SpawnOwnership::Independent,
+                startup_refusal: None,
+                startup_admission: None,
+                terminal: terminal.clone(),
+                directory,
+                identity,
+                lifecycle: lifecycle.clone(),
+                reservation,
+            },
+        )
+        .await
+        .unwrap();
+        let actor = LocalActorRef::with_identity_admission(address, terminal, identity, lifecycle);
+        send_kernel_resume(&actor);
+        tokio::time::timeout(Duration::from_secs(2), custody.entered.notified())
+            .await
+            .expect("serial task started");
+        assert_eq!(custody.drops.load(Ordering::SeqCst), 0);
+
+        let unmatched_custody = BehaviorCustodyProbe::new();
+        let mut unmatched_behavior = behavior(false).behavior;
+        unmatched_behavior.boxed_custody = Some(BehaviorCustody(Arc::clone(&unmatched_custody)));
+        let unmatched_dropped = Arc::new(Notify::new());
+        let notify = Arc::clone(&unmatched_dropped);
+        let completion = OwnedActorCompletion::new(|_: &mut ProbeBehavior| {
+            panic!("unmatched rejoin must not restore behavior or run its finalizer")
+        })
+        .with_abandon_guard(ActorAbandonGuard::new(move || notify.notify_one()));
+        actor
+            .address()
+            .send_message(KernelMessage::ActorStepCompleted {
+                step: crate::WorkbenchStepKey::new(identity, 2, None),
+                outcome: Box::new(ActorTaskOutcome::<ProbeBehavior, ()>::Rejoined {
+                    behavior: Box::new(unmatched_behavior),
+                    completion,
+                }),
+            })
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), unmatched_dropped.notified())
+            .await
+            .unwrap();
+        assert_eq!(unmatched_custody.drops.load(Ordering::SeqCst), 1);
+        assert!(unmatched_custody.addresses.lock().is_empty());
+        assert_eq!(custody.drops.load(Ordering::SeqCst), 0);
+        custody.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), custody.rejoined.notified())
+            .await
+            .unwrap();
+        actor
+            .shutdown(ActorTerminal::new(
+                ActorExitKind::Completed,
+                "boxed custody finished",
+            ))
+            .await
+            .unwrap();
+        task.await.unwrap();
+        let addresses = custody.addresses.lock();
+        assert_eq!(
+            addresses
+                .iter()
+                .map(|(phase, _)| *phase)
+                .collect::<Vec<_>>(),
+            [
+                "admission",
+                "start",
+                "dispatch",
+                "serial_started",
+                "serial_resumed",
+                "rejoined",
+                "shutdown"
+            ]
+        );
+        assert!(
+            addresses
+                .iter()
+                .all(|(_, address)| *address == original_address),
+            "behavior allocation moved across actor/task custody: {addresses:?}"
+        );
+        assert_eq!(custody.drops.load(Ordering::SeqCst), 1);
+        assert_eq!(unmatched_custody.drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn actor_task_outcome_layout_is_independent_of_behavior_size() {
+        type Resident = crate::resident_actor::ResidentKernelBehavior<
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput,
+        >;
+        if std::env::var_os("TIDEPOOL_TIMING").is_some_and(|value| value == "1") {
+            println!("ResidentKernelBehavior<HNil,CapturedOutput>={} ActorTaskOutcome<B,WorkbenchResponse>={} BehaviorSlot<B>={}",
+                std::mem::size_of::<Resident>(),
+                std::mem::size_of::<ActorTaskOutcome<Resident, WorkbenchResponse>>(),
+                std::mem::size_of::<BehaviorSlot<Resident>>());
+        }
+        assert_eq!(
+            std::mem::size_of::<ActorTaskOutcome<u8, WorkbenchResponse>>(),
+            std::mem::size_of::<ActorTaskOutcome<[u8; 65536], WorkbenchResponse>>()
+        );
     }
 
     #[tokio::test]
@@ -9032,7 +9219,7 @@ mod tests {
             drain: DrainState::Open,
             lifecycle,
             context,
-            behavior: BehaviorSlot(Some(behavior(false).behavior)),
+            behavior: BehaviorSlot(Some(Box::new(behavior(false).behavior))),
             pending_tasks: HashMap::new(),
             next_task_generation: 0,
             pending_child_exits: Vec::new(),

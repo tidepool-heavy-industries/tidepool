@@ -11657,7 +11657,7 @@ where
             execution.as_ref(),
             key.as_ref(),
         );
-        crate::OwnedActorTask::serial(move |mut behavior: Self, kernel| {
+        crate::OwnedActorTask::serial(move |mut behavior: Box<Self>, kernel| {
             Box::pin(async move {
                 let context = behavior.context(actor);
                 let runner = behavior.environment.runner.clone();
@@ -12471,7 +12471,7 @@ where
                 .ok_or_else(|| Self::failure("root lifecycle is absent"))?;
             let context = self.context(kernel.identity());
             return Ok(crate::OwnedActorTask::serial(
-                move |mut behavior: Self, kernel| {
+                move |mut behavior: Box<Self>, kernel| {
                     Box::pin(async move {
                         let result = async {
                             if !lifecycle.activate_startup().await.map_err(|error| {
@@ -12505,7 +12505,7 @@ where
         }
         // Remaining program stabilization is still the original serial driver.
         Ok(crate::OwnedActorTask::serial(
-            move |mut behavior: Self, kernel| {
+            move |mut behavior: Box<Self>, kernel| {
                 Box::pin(async move {
                     let result = behavior
                         .resume(&kernel)

@@ -7,6 +7,16 @@ observability interfaces stay in their owning crates. Ractor is the scheduler;
 `LocalActor` adds Tidepool identity, retained exits, live-value custody, and
 call ancestry. Do not add a second scheduler or result/root registry.
 
+The actor's original behavior allocation travels intact through admission,
+serial task transfer, and fenced rejoin. Serial tasks move its `Box<B>`;
+mailbox handlers and completion finalizers borrow `B` through that box. Holding
+an actor-state borrow across an await retains that actor's serialization.
+
+Named native operations heap-own their future before composing polling adapters.
+Future layout and native poll-stack use are separate costs: a future handle
+bounds the enclosing state, while a native poll can still use its own stack.
+Inspect each at its owning boundary.
+
 Ractor serializes actor turns. Independent notebook executions retain their own
 fenced task, cursor, reply and cancellation control while parked. Stateful actor
 protocols remain exclusive until their RPC resolves. Delivery validates the exact
