@@ -1042,6 +1042,7 @@ pub(crate) async fn expand_display_response(
             control: Some(crate::WorkbenchExecutionControl::untracked()),
             reply: reply.into(),
         })
+        .await
         .map_err(|failure| hosted_admission_failure(actor.identity(), failure))
         .map_err(ResidentToolError::Invocation)?;
     let reply = receive
@@ -1183,6 +1184,7 @@ impl ResidentToolClient {
                 invocation,
                 reply: response.into(),
             })
+            .await
             .map_err(|failure| {
                 ResidentToolError::Invocation(hosted_admission_failure(
                     self.actor.identity(),
@@ -1211,6 +1213,7 @@ impl ResidentToolClient {
                 capture,
                 reply: response.into(),
             })
+            .await
             .map_err(|failure| {
                 ResidentToolError::Invocation(hosted_admission_failure(
                     self.actor.identity(),
@@ -1536,6 +1539,7 @@ impl ResidentToolClient {
                 control: Some(Arc::clone(&control)),
                 reply: response.into(),
             })
+            .await
             .map_err(|failure| hosted_admission_failure(self.actor.identity(), failure))
         {
             control.settle_not_admitted(Err(error.clone()));

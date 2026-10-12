@@ -30,7 +30,7 @@ where
     /// Losing a host waiter cannot discard a completed startup result.
     pub(super) async fn retain_initial_context_execution(
         lifecycle: &crate::LifecycleHandle,
-        actor: ActorRef,
+        _actor: ActorRef,
         operation: &WorkbenchExecutionId,
         result: &Result<KernelStep<WorkbenchResponse>, crate::KernelInvocationFailure>,
     ) -> Result<(), ResidentActorWorkbenchError> {

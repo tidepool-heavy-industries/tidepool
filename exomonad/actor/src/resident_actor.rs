@@ -5179,6 +5179,7 @@ where
             .await?;
         target_ref
             .cast(context.actor, request)
+            .await
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))
     }
 
@@ -7221,7 +7222,8 @@ where
                             context_parent: self.descriptor.context_parent(),
                             runtime_observation: self.runtime_observation.clone(),
                         };
-                        self.commit_interactive_installation(kernel, context, installation)?;
+                        self.commit_interactive_installation(kernel, context, installation)
+                            .await?;
                     }
                     self.set_standing(context.actor, ResidentStanding::Tools(awaiting));
                     return Ok(KernelStep::Continue(()));
@@ -7918,7 +7920,8 @@ where
                 ));
             };
             self.set_standing(context.actor, ResidentStanding::Receiving(receiver));
-            self.commit_interactive_installation(kernel, context, installation)?;
+            self.commit_interactive_installation(kernel, context, installation)
+                .await?;
             return Ok(KernelStep::Continue(()));
         }
         if matches!(boot, ResidentBoot::Workbench) {
@@ -13730,10 +13733,14 @@ where
     /// Fence every admitted member before draining run and root-owned cleanup.
     /// A forced actor stop remains unconfirmed even after its scheduler task exits.
     pub async fn shutdown(&self) -> Vec<crate::ForestRootShutdown> {
-        let retirement = self.directory.seal().cancel_all(ActorTerminal::new(
-            ActorExitKind::Cancelled,
-            "forest host shutdown",
-        ));
+        let retirement = self
+            .directory
+            .seal()
+            .cancel_all(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "forest host shutdown",
+            ))
+            .await;
         *self.environment.root_admission_closed.write().await = true;
         self.directory.close_run_admission().await;
         let roots = retirement.into_roots();

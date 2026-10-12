@@ -235,7 +235,7 @@ pub(crate) struct ForestRetirementBatch {
 }
 
 impl SealedActorMembership {
-    pub(crate) fn cancel_all(self, terminal: ActorTerminal) -> ForestRetirementBatch {
+    pub(crate) async fn cancel_all(self, terminal: ActorTerminal) -> ForestRetirementBatch {
         let roots = self
             .actors
             .iter()
@@ -247,7 +247,8 @@ impl SealedActorMembership {
                 .into_iter()
                 .map(|(actor, _)| (actor, terminal.clone()))
                 .collect(),
-        );
+        )
+        .await;
         ForestRetirementBatch {
             _fence: fence,
             roots,
@@ -455,6 +456,10 @@ pub(crate) enum LifetimeTransferError {
 }
 
 impl KernelContext {
+    pub(crate) fn lifecycle(&self) -> &crate::LifecycleHandle {
+        &self.lifecycle
+    }
+
     pub(crate) fn with_worker_lifetime_transfer<T, E>(
         &self,
         child: &LocalActorRef,
@@ -2622,7 +2627,7 @@ async fn apply_hosted_settlement<B: KernelBehavior>(
     state: &mut LocalActorState<B>,
     message: KernelMessage,
 ) {
-    match message.payload() {
+    match message {
         KernelMessage::ReplaceSpec { definition, reply } => {
             let result = state
                 .behavior

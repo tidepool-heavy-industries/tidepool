@@ -530,7 +530,9 @@ impl std::fmt::Debug for KernelMessage {
             Self::DrainFence => formatter.write_str("DrainFence"),
             Self::ReplacementFence => formatter.write_str("ReplacementFence"),
             Self::AbortReplacement { .. } => formatter.write_str("AbortReplacement"),
-            Self::ActivateReplacement { backlog, draining } => formatter
+            Self::ActivateReplacement {
+                backlog, draining, ..
+            } => formatter
                 .debug_struct("ActivateReplacement")
                 .field("backlog", &backlog.len())
                 .field("draining", draining)
