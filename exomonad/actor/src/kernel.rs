@@ -5,6 +5,12 @@
 //! through these messages under Rust ownership.
 
 use ractor::{ActorRef as RactorRef, RpcReplyPort};
+
+pub mod lifecycle;
+pub use lifecycle::{
+    ActorAdmissionLease, AdmittedKernelEnvelope, LifecycleHandle, NativeProviderAdmission,
+    NativeProviderStartError, NativeProviderTurnLease, ProviderIdleProbe,
+};
 use tidepool_runtime::session::{WorkbenchRequest, WorkbenchResponse};
 
 /// Exact identity of one actor-owned execution step. The generation
@@ -375,6 +381,8 @@ pub enum KernelResume {
 /// remains a Ractor control signal; `Shutdown` is the cooperative typed-hook
 /// path.
 pub enum KernelMessage {
+    /// Only the lifecycle coordinator can construct an admitted envelope.
+    Admitted(AdmittedKernelEnvelope),
     ReplaceSpec {
         definition: Box<crate::SpecReplacementDefinition>,
         reply: RpcReplyPort<Result<(), crate::SpecReplacementError>>,
@@ -471,6 +479,7 @@ impl KernelMessage {
     /// dispatch and none of its content.
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Admitted(_) => "Admitted",
             Self::Replace { .. } => "Replace",
             Self::ReplaceSpec { .. } => "ReplaceSpec",
             Self::Drain { .. } => "Drain",
@@ -502,6 +511,7 @@ impl KernelMessage {
 impl std::fmt::Debug for KernelMessage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Admitted(_) => formatter.write_str("Admitted"),
             Self::Replace { .. } => formatter.write_str("Replace"),
             Self::ReplaceSpec { .. } => formatter.write_str("ReplaceSpec"),
             Self::Drain { .. } => formatter.write_str("Drain"),
@@ -588,14 +598,8 @@ pub struct LocalActorRef {
     identity: ActorRef,
     address: RactorRef<KernelMessage>,
     terminal: RetainedActorExit,
-    admission: MailboxAdmission,
+    lifecycle: LifecycleHandle,
 }
-
-/// Admission shares its fence with the incarnation's hosted-cell slot: both
-/// are per-incarnation state every handle to the actor (the directory's and
-/// the spawner's alike) must observe identically.
-#[derive(Clone, Default)]
-pub(crate) struct MailboxAdmission(std::sync::Arc<AdmissionOwner>, HostedCellSlot);
 
 /// One incarnation's published hosted calls, from transport queuing through
 /// native completion and provider acknowledgement. Multiple callers may queue
@@ -824,326 +828,6 @@ impl HostedCellPublications {
     }
 }
 
-#[derive(Default)]
-struct AdmissionOwner {
-    state: parking_lot::Mutex<AdmissionState>,
-    released: tokio::sync::Notify,
-}
-
-#[derive(Default)]
-struct AdmissionState {
-    phase: AdmissionPhase,
-    transactions: usize,
-    provider: Option<NativeProvider>,
-}
-
-#[derive(Default, PartialEq, Eq)]
-enum AdmissionPhase {
-    #[default]
-    Open,
-    IdleRetirementClaim,
-    Closed,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum AdmissionRefusal {
-    RetirementPending,
-    Closed,
-}
-
-impl AdmissionRefusal {
-    fn for_actor(self, actor: ActorRef) -> KernelCallFailure {
-        match self {
-            Self::RetirementPending => KernelCallFailure::RetirementPending(actor),
-            Self::Closed => KernelCallFailure::MailboxClosed(actor),
-        }
-    }
-}
-
-impl AdmissionPhase {
-    fn refusal(&self) -> Option<AdmissionRefusal> {
-        match self {
-            Self::Open => None,
-            Self::IdleRetirementClaim => Some(AdmissionRefusal::RetirementPending),
-            Self::Closed => Some(AdmissionRefusal::Closed),
-        }
-    }
-}
-
-#[derive(PartialEq, Eq)]
-enum NativeProviderState {
-    NotStarted,
-    Active,
-    Idle,
-    NeedsAttention,
-}
-
-struct NativeProvider {
-    state: NativeProviderState,
-    probe: std::sync::Arc<dyn Fn() -> Result<bool, String> + Send + Sync>,
-}
-
-/// Native round admission and idle retirement share the actor's mailbox fence.
-/// The provider lease never holds a short Store transaction across inference.
-#[derive(Clone)]
-pub struct NativeProviderAdmission {
-    owner: std::sync::Arc<AdmissionOwner>,
-    observation: crate::ActorRuntimeObservationHandle,
-}
-
-#[derive(Debug, PartialEq, Eq, thiserror::Error)]
-pub enum NativeProviderStartError {
-    #[error("idle retirement is being checked")]
-    RetirementPending,
-    #[error("actor admission is closed")]
-    Closed,
-    #[error("native provider round cannot start: {0}")]
-    Invalid(&'static str),
-}
-
-pub struct NativeProviderTurnLease {
-    admission: NativeProviderAdmission,
-    observation: Option<crate::ProviderTurnLease>,
-}
-
-impl NativeProviderAdmission {
-    /// Wait for the current retirement decision, then re-read durable work.
-    /// The notification is registered before checking the fence.
-    pub async fn wait_for_retirement_decision(&self) {
-        loop {
-            let changed = self.owner.released.notified();
-            tokio::pin!(changed);
-            changed.as_mut().enable();
-            if self.owner.state.lock().phase != AdmissionPhase::IdleRetirementClaim {
-                return;
-            }
-            changed.await;
-        }
-    }
-
-    pub fn begin_provider_turn(
-        &self,
-        thread: String,
-        turn: String,
-    ) -> Result<NativeProviderTurnLease, NativeProviderStartError> {
-        let mut state = self.owner.state.lock();
-        match state.phase {
-            AdmissionPhase::IdleRetirementClaim => {
-                return Err(NativeProviderStartError::RetirementPending);
-            }
-            AdmissionPhase::Closed => return Err(NativeProviderStartError::Closed),
-            AdmissionPhase::Open => {}
-        }
-        let provider = state
-            .provider
-            .as_mut()
-            .ok_or(NativeProviderStartError::Invalid(
-                "native provider is not attached",
-            ))?;
-        if provider.state == NativeProviderState::Active {
-            return Err(NativeProviderStartError::Invalid(
-                "a native provider round is already active",
-            ));
-        }
-        let observation = self
-            .observation
-            .begin_provider_turn(thread, turn)
-            .map_err(NativeProviderStartError::Invalid)?;
-        provider.state = NativeProviderState::Active;
-        Ok(NativeProviderTurnLease {
-            admission: self.clone(),
-            observation: Some(observation),
-        })
-    }
-}
-
-impl NativeProviderTurnLease {
-    pub fn succeed(mut self) {
-        self.finish(NativeProviderState::Idle, |observation| {
-            observation.succeed()
-        });
-    }
-
-    pub fn fail(mut self, failure: exomonad_model::ProviderFailure) {
-        self.finish(NativeProviderState::NeedsAttention, |observation| {
-            observation.fail(failure)
-        });
-    }
-
-    pub fn interrupt(mut self) {
-        self.finish(NativeProviderState::NeedsAttention, |observation| {
-            observation.interrupt()
-        });
-    }
-
-    fn finish(
-        &mut self,
-        outcome: NativeProviderState,
-        publish: impl FnOnce(crate::ProviderTurnLease),
-    ) {
-        let Some(observation) = self.observation.take() else {
-            return;
-        };
-        let mut state = self.admission.owner.state.lock();
-        publish(observation);
-        if let Some(provider) = state.provider.as_mut() {
-            provider.state = outcome;
-        }
-    }
-}
-
-impl Drop for NativeProviderTurnLease {
-    fn drop(&mut self) {
-        self.finish(NativeProviderState::NeedsAttention, |observation| {
-            observation.interrupt()
-        });
-    }
-}
-
-/// Temporarily closes all ingress while the durable owner checks pending input.
-/// A forced close dominates an abandoned claim and is never reopened by Drop.
-struct IdleRetirementClaim(std::sync::Arc<AdmissionOwner>);
-
-impl IdleRetirementClaim {
-    fn commit(self) -> Result<(), &'static str> {
-        let mut state = self.0.state.lock();
-        if state.phase != AdmissionPhase::IdleRetirementClaim {
-            return Err("actor closed while idle retirement was being checked");
-        }
-        state.phase = AdmissionPhase::Closed;
-        self.0.released.notify_waiters();
-        Ok(())
-    }
-}
-
-impl Drop for IdleRetirementClaim {
-    fn drop(&mut self) {
-        let mut state = self.0.state.lock();
-        if state.phase == AdmissionPhase::IdleRetirementClaim {
-            state.phase = AdmissionPhase::Open;
-            self.0.released.notify_waiters();
-        }
-    }
-}
-
-/// Protects a synchronous host transaction from cooperative actor retirement.
-/// Drop before waking the actor or awaiting dispatched work: accepted actor work
-/// has its own completion owner and must never retain this admission lease.
-/// Forced process/actor loss is not a confirmed cooperative retirement.
-#[must_use]
-pub struct ActorAdmissionLease(std::sync::Arc<AdmissionOwner>);
-
-impl Drop for ActorAdmissionLease {
-    fn drop(&mut self) {
-        let mut state = self.0.state.lock();
-        state.transactions -= 1;
-        if state.transactions == 0 {
-            self.0.released.notify_waiters();
-        }
-    }
-}
-
-impl MailboxAdmission {
-    pub(crate) fn hosted_cell(&self) -> &HostedCellSlot {
-        &self.1
-    }
-    fn attach_provider(
-        &self,
-        observation: crate::ActorRuntimeObservationHandle,
-        probe: std::sync::Arc<dyn Fn() -> Result<bool, String> + Send + Sync>,
-    ) -> Result<NativeProviderAdmission, &'static str> {
-        let mut state = self.0.state.lock();
-        if state.phase != AdmissionPhase::Open || state.provider.is_some() {
-            return Err("native provider cannot attach to a closed or already attached actor");
-        }
-        state.provider = Some(NativeProvider {
-            state: NativeProviderState::NotStarted,
-            probe,
-        });
-        Ok(NativeProviderAdmission {
-            owner: self.0.clone(),
-            observation,
-        })
-    }
-
-    fn claim_idle(&self) -> Result<IdleRetirementClaim, String> {
-        let probe = {
-            let mut state = self.0.state.lock();
-            if state.phase != AdmissionPhase::Open || state.transactions != 0 {
-                return Err("actor is closing or has an admitted transaction".into());
-            }
-            let provider = state
-                .provider
-                .as_ref()
-                .ok_or("native provider has not attached")?;
-            if provider.state != NativeProviderState::Idle {
-                return Err("native provider is not confirmed idle".into());
-            }
-            let probe = provider.probe.clone();
-            state.phase = AdmissionPhase::IdleRetirementClaim;
-            probe
-        };
-        let claim = IdleRetirementClaim(self.0.clone());
-        // Never acquire the Store mutex under the admission mutex. Existing
-        // short transactions are refused above; ingress stays fenced here.
-        if !probe()? {
-            return Err("native provider has pending durable work or lost its binding".into());
-        }
-        Ok(claim)
-    }
-
-    pub(crate) fn close(&self) {
-        self.0.state.lock().phase = AdmissionPhase::Closed;
-        self.0.released.notify_waiters();
-    }
-
-    fn transaction(&self) -> Result<ActorAdmissionLease, AdmissionRefusal> {
-        let mut state = self.0.state.lock();
-        if let Some(refusal) = state.phase.refusal() {
-            return Err(refusal);
-        }
-        state.transactions += 1;
-        Ok(ActorAdmissionLease(std::sync::Arc::clone(&self.0)))
-    }
-
-    /// Admission must already be closed. Register the waiter before inspecting
-    /// the count so the final lease's drop cannot be lost between them.
-    pub(crate) async fn wait_transactions(&self) {
-        loop {
-            let released = self.0.released.notified();
-            tokio::pin!(released);
-            released.as_mut().enable();
-            {
-                let state = self.0.state.lock();
-                debug_assert!(state.phase != AdmissionPhase::Open);
-                if state.transactions == 0 {
-                    return;
-                }
-            }
-            released.await;
-        }
-    }
-
-    pub(crate) fn close_with_fence(
-        &self,
-        address: &RactorRef<KernelMessage>,
-    ) -> Result<(), Box<ractor::MessagingErr<KernelMessage>>> {
-        self.fence(address, KernelMessage::DrainFence)
-    }
-
-    fn fence(
-        &self,
-        address: &RactorRef<KernelMessage>,
-        fence: KernelMessage,
-    ) -> Result<(), Box<ractor::MessagingErr<KernelMessage>>> {
-        let mut admission = self.0.state.lock();
-        address.send_message(fence).map_err(Box::new)?;
-        admission.phase = AdmissionPhase::Closed;
-        self.0.released.notify_waiters();
-        Ok(())
-    }
-}
-
 impl std::fmt::Debug for LocalActorRef {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -1162,16 +846,15 @@ pub(crate) struct RetirementBatch {
 }
 
 impl RetirementBatch {
-    pub(crate) fn issue(actors: Vec<(LocalActorRef, ActorTerminal)>) -> Self {
+    pub(crate) async fn issue(actors: Vec<(LocalActorRef, ActorTerminal)>) -> Self {
         let requests = actors
             .iter()
             .map(|(actor, terminal)| (actor.terminal.clone(), terminal.clone()))
             .collect::<Vec<_>>();
-        RetainedActorExit::request_shutdown_batch(&requests, || {
-            for (actor, _) in &actors {
-                actor.admission.close();
-            }
-        });
+        RetainedActorExit::request_shutdown_batch(&requests, || {});
+        for (actor, terminal) in &actors {
+            let _ = actor.lifecycle.request_shutdown(terminal.clone()).await;
+        }
         Self { actors }
     }
 
@@ -1182,7 +865,7 @@ impl RetirementBatch {
 
 impl LocalActorRef {
     pub(crate) fn hosted_cell(&self) -> &HostedCellSlot {
-        &self.admission.1
+        self.lifecycle.hosted_cell()
     }
 
     /// Whether this incarnation is inside a model-visible `haskell` call that
@@ -1192,7 +875,7 @@ impl LocalActorRef {
     /// native submission while this holds.
     #[must_use]
     pub fn hosted_cell_computing(&self) -> bool {
-        self.admission.1.computing()
+        self.lifecycle.hosted_cell().computing()
     }
 
     /// Observe whether this exact original hosted call currently has an armed
@@ -1220,10 +903,10 @@ impl LocalActorRef {
 
     pub(crate) async fn abort_prepared_replacement(&self) -> Result<(), KernelBehaviorError> {
         let (reply, receive) = tokio::sync::oneshot::channel();
-        self.address
-            .send_message(KernelMessage::AbortReplacement {
+        self.lifecycle
+            .control(KernelMessage::AbortReplacement {
                 reply: reply.into(),
-            })
+            }).await
             .map_err(|error| KernelBehaviorError {
                 detail: format!("prepared actor {:?}: {error}", self.identity),
                 diagnostic: None,
@@ -1236,9 +919,9 @@ impl LocalActorRef {
             diagnostic: None,
         })?
     }
-    pub(crate) fn fence_replacement(&self) -> Result<(), KernelBehaviorError> {
-        self.admission
-            .fence(&self.address, KernelMessage::ReplacementFence)
+    pub(crate) async fn fence_replacement(&self) -> Result<(), KernelBehaviorError> {
+        self.lifecycle
+            .close_with_fence(KernelMessage::ReplacementFence).await
             .map_err(|error| KernelBehaviorError {
                 detail: error.to_string(),
                 diagnostic: None,
@@ -1265,11 +948,11 @@ impl LocalActorRef {
             return Err(crate::SpecReplacementError::Unavailable);
         }
         let (reply, receive) = tokio::sync::oneshot::channel();
-        self.address
-            .send_message(KernelMessage::ReplaceSpec {
+        self.lifecycle
+            .control(KernelMessage::ReplaceSpec {
                 definition: Box::new(definition),
                 reply: reply.into(),
-            })
+            }).await
             .map_err(|_| crate::SpecReplacementError::Unavailable)?;
         receive.await.map_err(|_| {
             crate::SpecReplacementError::Failed(
@@ -1283,11 +966,11 @@ impl LocalActorRef {
         definition: crate::ActorReplacementDefinition,
     ) -> Result<Self, KernelInvocationFailure> {
         let (reply, receive) = tokio::sync::oneshot::channel();
-        self.address
-            .send_message(KernelMessage::Replace {
+        self.lifecycle
+            .control(KernelMessage::Replace {
                 definition: Box::new(definition),
                 reply: reply.into(),
-            })
+            }).await
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
         receive.await.map_err(|_| KernelInvocationFailure::Failed { receipts: Vec::new(),
             actor: self.identity,
@@ -1298,10 +981,10 @@ impl LocalActorRef {
 
     async fn request_drain(&self) -> Result<(), KernelInvocationFailure> {
         let (reply, receive) = tokio::sync::oneshot::channel();
-        self.address
-            .send_message(KernelMessage::Drain {
+        self.lifecycle
+            .control(KernelMessage::Drain {
                 reply: reply.into(),
-            })
+            }).await
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
         receive
             .await
@@ -1313,79 +996,35 @@ impl LocalActorRef {
                 diagnostic: error.diagnostic,
             })
     }
-    #[must_use]
-    pub fn new(address: RactorRef<KernelMessage>, terminal: RetainedActorExit) -> Self {
-        Self::new_in_incarnation(address, terminal, crate::Incarnation::FIRST)
-    }
-
-    #[must_use]
-    pub fn new_in_incarnation(
-        address: RactorRef<KernelMessage>,
-        terminal: RetainedActorExit,
-        incarnation: crate::Incarnation,
-    ) -> Self {
-        Self::with_admission(address, terminal, incarnation, MailboxAdmission::default())
-    }
-
-    pub(crate) fn with_admission(
-        address: RactorRef<KernelMessage>,
-        terminal: RetainedActorExit,
-        incarnation: crate::Incarnation,
-        admission: MailboxAdmission,
-    ) -> Self {
-        Self {
-            identity: ActorRef {
-                id: crate::ActorId(address.get_id().pid()),
-                incarnation,
-            },
-            address,
-            terminal,
-            admission,
-        }
-    }
-
     pub(crate) fn with_identity_admission(
         address: RactorRef<KernelMessage>,
         terminal: RetainedActorExit,
         identity: ActorRef,
-        admission: MailboxAdmission,
+        lifecycle: LifecycleHandle,
     ) -> Self {
-        Self {
-            identity,
-            address,
-            terminal,
-            admission,
-        }
+        Self { identity, address, terminal, lifecycle }
     }
+
+    pub fn lifecycle(&self) -> &LifecycleHandle { &self.lifecycle }
 
     /// Admission and queue insertion share the close fence. Accepted payloads
     /// belong to the existing Ractor mailbox even while execution is paused.
-    pub(crate) fn admit_mailbox(&self, message: KernelMessage) -> Result<(), KernelCallFailure> {
-        let admission = self.admission.0.state.lock();
-        if let Some(refusal) = admission.phase.refusal() {
-            return Err(refusal.for_actor(self.identity));
-        }
-        self.address
-            .send_message(message)
-            .map_err(|_| KernelCallFailure::TargetExited(self.identity))
+    pub(crate) async fn admit_mailbox(&self, message: KernelMessage) -> Result<(), KernelCallFailure> {
+        self.lifecycle.enqueue(message).await
     }
 
-    /// Admit a short synchronous Store/binding transaction. This is not an
-    /// execution lease; dispatch must enqueue under the actor's mailbox fence.
-    pub fn admit_transaction(&self) -> Result<ActorAdmissionLease, KernelCallFailure> {
-        self.admission
-            .transaction()
-            .map_err(|refusal| refusal.for_actor(self.identity))
+    /// Create a short transaction lease through the original native owner.
+    pub async fn admit_transaction(&self) -> Result<ActorAdmissionLease, KernelCallFailure> {
+        self.lifecycle.transaction().await
     }
 
-    /// Attach the durable native work probe once for this exact incarnation.
-    pub fn attach_native_provider(
+    pub async fn attach_native_provider(
         &self,
         observation: crate::ActorRuntimeObservationHandle,
-        probe: impl Fn() -> Result<bool, String> + Send + Sync + 'static,
+        readiness: std::sync::Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
+        probe: std::sync::Arc<dyn ProviderIdleProbe>,
     ) -> Result<NativeProviderAdmission, &'static str> {
-        self.admission
-            .attach_provider(observation, std::sync::Arc::new(probe))
+        self.lifecycle.attach_provider(observation, readiness, probe).await
     }
 
     /// Atomically fence new provider rounds and input before checking the Store.
@@ -1403,20 +1042,16 @@ impl LocalActorRef {
             receipts: Vec::new(),
             diagnostic: None,
         };
-        self.admission
-            .claim_idle()
-            .map_err(rejected)?
-            .commit()
-            .map_err(|detail| rejected(detail.into()))?;
+        self.lifecycle.claim_idle(terminal.clone()).await.map_err(rejected)?;
         self.retire_by(supervisor, terminal).await
     }
 
-    pub fn cast(&self, sender: ActorRef, request: MailboxValue) -> Result<(), KernelCallFailure> {
-        self.admit_mailbox(KernelMessage::Cast { sender, request })
+    pub async fn cast(&self, sender: ActorRef, request: MailboxValue) -> Result<(), KernelCallFailure> {
+        self.admit_mailbox(KernelMessage::Cast { sender, request }).await
     }
 
-    pub(crate) fn source(&self, delivery: crate::SourceDelivery) -> Result<(), KernelCallFailure> {
-        self.admit_mailbox(KernelMessage::Source(delivery))
+    pub(crate) async fn source(&self, delivery: crate::SourceDelivery) -> Result<(), KernelCallFailure> {
+        self.admit_mailbox(KernelMessage::Source(delivery)).await
     }
 
     pub async fn call(
@@ -1431,7 +1066,7 @@ impl LocalActorRef {
             ancestry,
             request,
             reply: reply.into(),
-        })?;
+        }).await?;
         receive
             .await
             .map_err(|_| KernelCallFailure::TargetExited(self.identity))?
@@ -1443,7 +1078,7 @@ impl LocalActorRef {
     }
 
     #[must_use]
-    pub fn address(&self) -> &RactorRef<KernelMessage> {
+    pub(crate) fn address(&self) -> &RactorRef<KernelMessage> {
         &self.address
     }
 
@@ -1460,11 +1095,11 @@ impl LocalActorRef {
             return Ok(ExternalFailureDisposition::AlreadyTerminal);
         }
         let (reply, receive) = tokio::sync::oneshot::channel();
-        self.address
-            .send_message(KernelMessage::ExternalApplicationFailed {
+        self.lifecycle
+            .control(KernelMessage::ExternalApplicationFailed {
                 failure,
                 reply: reply.into(),
-            })
+            }).await
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
         receive
             .await
@@ -1473,10 +1108,10 @@ impl LocalActorRef {
 
     pub async fn seal_hosted_work(&self) -> Result<crate::HostedWorkSeal, KernelInvocationFailure> {
         let (reply, receive) = tokio::sync::oneshot::channel();
-        self.address
-            .send_message(KernelMessage::SealHostedWork {
+        self.lifecycle
+            .control(KernelMessage::SealHostedWork {
                 reply: reply.into(),
-            })
+            }).await
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
         receive
             .await
@@ -1516,15 +1151,15 @@ impl LocalActorRef {
         &self,
         terminal: ActorTerminal,
     ) -> Result<ActorTerminal, KernelInvocationFailure> {
-        let _batch = RetirementBatch::issue(vec![(self.clone(), terminal.clone())]);
+        let _batch = RetirementBatch::issue(vec![(self.clone(), terminal.clone())]).await;
         let terminal = self.terminal.requested_shutdown().unwrap_or(terminal);
         let (reply, receive) = tokio::sync::oneshot::channel();
         if self
-            .address
-            .send_message(KernelMessage::Shutdown {
+            .lifecycle
+            .control(KernelMessage::Shutdown {
                 terminal,
                 reply: reply.into(),
-            })
+            }).await
             .is_err()
         {
             // A concurrent bootstrap can finish between recording intent and
@@ -1565,146 +1200,6 @@ impl LocalActorRef {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn native_admission(
-        probe: impl Fn() -> Result<bool, String> + Send + Sync + 'static,
-    ) -> (MailboxAdmission, NativeProviderAdmission) {
-        let admission = MailboxAdmission::default();
-        let provider = admission
-            .attach_provider(
-                crate::ActorRuntimeObservationHandle::default(),
-                std::sync::Arc::new(probe),
-            )
-            .unwrap();
-        (admission, provider)
-    }
-
-    fn succeed_native(provider: &NativeProviderAdmission, turn: &str) {
-        provider
-            .begin_provider_turn("thread".into(), turn.into())
-            .unwrap()
-            .succeed();
-    }
-
-    #[tokio::test]
-    async fn idle_retirement_fences_input_and_rounds_until_claim_is_released() {
-        let (admission, provider) = native_admission(|| Ok(true));
-        succeed_native(&provider, "first");
-        let claim = admission.claim_idle().unwrap();
-        assert!(matches!(
-            admission.transaction(),
-            Err(AdmissionRefusal::RetirementPending)
-        ));
-        assert!(matches!(
-            provider.begin_provider_turn("thread".into(), "next".into()),
-            Err(NativeProviderStartError::RetirementPending)
-        ));
-        let waiting = provider.wait_for_retirement_decision();
-        tokio::pin!(waiting);
-        assert!(futures_util::poll!(&mut waiting).is_pending());
-        drop(claim);
-        assert!(futures_util::poll!(&mut waiting).is_ready());
-        assert!(admission.transaction().is_ok());
-        succeed_native(&provider, "next");
-    }
-
-    #[test]
-    fn idle_retirement_refuses_admitted_input_and_durable_work_before_wake() {
-        let pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let read = pending.clone();
-        let (admission, provider) =
-            native_admission(move || Ok(!read.load(std::sync::atomic::Ordering::SeqCst)));
-        succeed_native(&provider, "first");
-        let input = admission.transaction().unwrap();
-        assert!(admission.claim_idle().is_err());
-        pending.store(true, std::sync::atomic::Ordering::SeqCst);
-        drop(input);
-        // Durable commit exists, but no wake has reached the provider.
-        assert!(admission.claim_idle().is_err());
-        assert!(admission.transaction().is_ok());
-        let round = provider
-            .begin_provider_turn("thread".into(), "second".into())
-            .unwrap();
-        assert!(admission.claim_idle().is_err());
-        pending.store(false, std::sync::atomic::Ordering::SeqCst);
-        round.succeed();
-        admission.claim_idle().unwrap().commit().unwrap();
-        assert!(matches!(
-            admission.transaction(),
-            Err(AdmissionRefusal::Closed)
-        ));
-        assert!(matches!(
-            provider.begin_provider_turn("thread".into(), "third".into()),
-            Err(NativeProviderStartError::Closed)
-        ));
-    }
-
-    #[test]
-    fn idle_retirement_does_not_treat_abandoned_or_failed_rounds_as_idle() {
-        let (admission, provider) = native_admission(|| Ok(true));
-        assert!(admission.claim_idle().is_err());
-        drop(
-            provider
-                .begin_provider_turn("thread".into(), "first".into())
-                .unwrap(),
-        );
-        assert!(admission.claim_idle().is_err());
-        provider
-            .begin_provider_turn("thread".into(), "second".into())
-            .unwrap()
-            .fail(exomonad_model::ProviderFailure::RequestRejected);
-        assert!(admission.claim_idle().is_err());
-        succeed_native(&provider, "third");
-        assert!(admission.claim_idle().is_ok());
-    }
-
-    #[tokio::test]
-    async fn idle_retirement_forced_close_dominates_claim_rollback() {
-        let (admission, provider) = native_admission(|| Ok(true));
-        succeed_native(&provider, "first");
-        let claim = admission.claim_idle().unwrap();
-        let waiting = provider.wait_for_retirement_decision();
-        tokio::pin!(waiting);
-        assert!(futures_util::poll!(&mut waiting).is_pending());
-        admission.close();
-        assert!(futures_util::poll!(&mut waiting).is_ready());
-        assert!(claim.commit().is_err());
-        assert!(matches!(
-            admission.transaction(),
-            Err(AdmissionRefusal::Closed)
-        ));
-        assert!(matches!(
-            provider.begin_provider_turn("thread".into(), "second".into()),
-            Err(NativeProviderStartError::Closed)
-        ));
-    }
-
-    #[test]
-    fn idle_retirement_probe_failure_reopens_admission() {
-        let (admission, provider) = native_admission(|| Err("Store unavailable".into()));
-        succeed_native(&provider, "first");
-        assert!(admission.claim_idle().is_err());
-        assert!(admission.transaction().is_ok());
-        succeed_native(&provider, "second");
-    }
-
-    #[tokio::test]
-    async fn admission_close_waits_for_all_transactions_and_rejects_new_ones() {
-        let admission = MailboxAdmission::default();
-        let first = admission.transaction().unwrap();
-        let second = admission.transaction().unwrap();
-        admission.close();
-        assert!(admission.transaction().is_err());
-        let waiting = admission.wait_transactions();
-        tokio::pin!(waiting);
-        assert!(futures_util::poll!(&mut waiting).is_pending());
-        drop(first);
-        assert!(futures_util::poll!(&mut waiting).is_pending());
-        drop(second);
-        assert!(futures_util::poll!(&mut waiting).is_ready());
-        // A last drop before waiter registration also completes immediately.
-        admission.wait_transactions().await;
-    }
 
     #[test]
     fn call_ancestry_rejects_direct_and_indirect_reentry() {
