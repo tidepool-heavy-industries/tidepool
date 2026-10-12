@@ -20,7 +20,7 @@ use crate::{
 };
 use tidepool_runtime::session::WorkbenchResponse;
 
-mod run_control;
+pub(crate) mod run_control;
 mod workbench_step;
 pub use workbench_step::{
     ActorAbandonGuard, ActorAdvance, OwnedActorCompletion, OwnedActorTask,

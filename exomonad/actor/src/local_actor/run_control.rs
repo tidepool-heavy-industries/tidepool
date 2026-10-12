@@ -1,6 +1,11 @@
 //! One run owns actor membership, identity claims and preparation admission.
 use super::*;
 use tokio::sync::oneshot;
+mod preparation;
+use preparation::{PreparationMessage, PreparationSupervisor, RootDelivery};
+pub(crate) use preparation::{
+    RootAdmissionOutcome, RootOperation, RootOperationResult, RootPreparationTicket,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DirectoryError {
@@ -12,6 +17,8 @@ pub enum DirectoryError {
     IdentityConflict { actor: crate::ActorId },
     #[error("directory operation does not own actor {actor:?}")]
     Unauthorized { actor: ActorRef },
+    #[error("actor {actor:?} is already registered by another executor")]
+    AlreadyRegistered { actor: ActorRef },
 }
 
 /// Registration and preparation share this phase, rather than separate gates.
@@ -29,6 +36,10 @@ pub(super) struct RunState {
     sessions: HashMap<ActorRef, crate::ActorSessionContext>,
     identities: DirectoryIdentities,
     resources: HashMap<ractor::ActorId, ResourceChild>,
+    preparation_supervisor: Option<RactorRef<PreparationMessage>>,
+    preparations: HashMap<u64, RootPreparationRecord>,
+    next_preparation: u64,
+    preparation_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
 }
 impl Default for RunState {
     fn default() -> Self {
@@ -38,11 +49,86 @@ impl Default for RunState {
             sessions: HashMap::new(),
             identities: DirectoryIdentities::default(),
             resources: HashMap::new(),
+            preparation_supervisor: None,
+            preparations: HashMap::new(),
+            next_preparation: 0,
+            preparation_waiters: Vec::new(),
+        }
+    }
+}
+
+enum PreparationPhase {
+    Running,
+    Accepted,
+    Settled(crate::CleanupComponentOutcome),
+}
+struct RootPreparationRecord {
+    phase: PreparationPhase,
+    compiler: RetainedActorExit,
+    placement: Option<crate::ActorPlacement>,
+}
+impl RunState {
+    fn settle_preparation_waiters(&mut self) {
+        if self
+            .preparations
+            .values()
+            .any(|record| !matches!(record.phase, PreparationPhase::Settled(_)))
+        {
+            return;
+        }
+        let failures = self
+            .preparations
+            .values()
+            .filter_map(|record| match &record.phase {
+                PreparationPhase::Settled(outcome)
+                    if outcome != &crate::CleanupComponentOutcome::Confirmed =>
+                {
+                    Some(outcome.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let outcome = if failures.is_empty() {
+            crate::CleanupComponentOutcome::Confirmed
+        } else {
+            crate::CleanupComponentOutcome::Unconfirmed(format!(
+                "root preparation cleanup: {failures:?}"
+            ))
+        };
+        for waiter in self.preparation_waiters.drain(..) {
+            let _ = waiter.send(outcome.clone());
         }
     }
 }
 
 pub(super) enum RunControlMessage {
+    AttachPreparationSupervisor {
+        supervisor: RactorRef<PreparationMessage>,
+        reply: oneshot::Sender<()>,
+    },
+    BeginPreparation {
+        operation: RootOperation,
+        reply: oneshot::Sender<Result<oneshot::Receiver<RootDelivery>, DirectoryError>>,
+    },
+    AcceptPreparation {
+        id: u64,
+        reply: oneshot::Sender<Result<(), DirectoryError>>,
+    },
+    PlacementPrepared {
+        id: u64,
+        placement: crate::ActorPlacement,
+    },
+    PlacementReleased {
+        id: u64,
+        placement: crate::ActorPlacement,
+    },
+    PreparationSettled {
+        id: u64,
+        outcome: crate::CleanupComponentOutcome,
+    },
+    ObservePreparations {
+        reply: oneshot::Sender<crate::CleanupComponentOutcome>,
+    },
     Reserve {
         incarnation: crate::Incarnation,
         reply: oneshot::Sender<Result<ActorRef, DirectoryError>>,
@@ -109,6 +195,94 @@ impl Actor for RunControl {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            RunControlMessage::AttachPreparationSupervisor { supervisor, reply } => {
+                state.preparation_supervisor = Some(supervisor);
+                let _ = reply.send(());
+            }
+            RunControlMessage::BeginPreparation { operation, reply } => {
+                let Some(supervisor) = state.preparation_supervisor.as_ref() else {
+                    let _ = reply.send(Err(DirectoryError::Unavailable));
+                    return Ok(());
+                };
+                if state.phase != RunPhase::Running {
+                    let _ = reply.send(Err(DirectoryError::Closed));
+                    return Ok(());
+                }
+                let id = state.next_preparation;
+                state.next_preparation = state
+                    .next_preparation
+                    .checked_add(1)
+                    .ok_or("root preparation identity exhausted")?;
+                let compiler = RetainedActorExit::new();
+                state.preparations.insert(
+                    id,
+                    RootPreparationRecord {
+                        phase: PreparationPhase::Running,
+                        compiler: compiler.clone(),
+                        placement: None,
+                    },
+                );
+                let (delivery, receiver) = oneshot::channel();
+                if supervisor
+                    .send_message(PreparationMessage::Start {
+                        id,
+                        operation,
+                        compiler,
+                        reply: delivery,
+                    })
+                    .is_err()
+                {
+                    state
+                        .preparations
+                        .get_mut(&id)
+                        .expect("admitted preparation")
+                        .phase =
+                        PreparationPhase::Settled(crate::CleanupComponentOutcome::Unconfirmed(
+                            "preparation supervisor unavailable".into(),
+                        ));
+                    let _ = reply.send(Err(DirectoryError::Unavailable));
+                } else {
+                    let _ = reply.send(Ok(receiver));
+                }
+            }
+            RunControlMessage::AcceptPreparation { id, reply } => {
+                let result = if state.phase != RunPhase::Running {
+                    Err(DirectoryError::Closed)
+                } else if let Some(record) = state.preparations.get_mut(&id) {
+                    match record.phase {
+                        PreparationPhase::Running => {
+                            record.phase = PreparationPhase::Accepted;
+                            Ok(())
+                        }
+                        _ => Err(DirectoryError::Unavailable),
+                    }
+                } else {
+                    Err(DirectoryError::Unavailable)
+                };
+                let _ = reply.send(result);
+            }
+            RunControlMessage::PlacementPrepared { id, placement } => {
+                if let Some(record) = state.preparations.get_mut(&id) {
+                    record.placement = Some(placement);
+                }
+            }
+            RunControlMessage::PlacementReleased { id, placement } => {
+                if let Some(record) = state.preparations.get_mut(&id) {
+                    if record.placement == Some(placement) {
+                        record.placement = None;
+                    }
+                }
+            }
+            RunControlMessage::PreparationSettled { id, outcome } => {
+                if let Some(record) = state.preparations.get_mut(&id) {
+                    record.phase = PreparationPhase::Settled(outcome);
+                }
+                state.settle_preparation_waiters();
+            }
+            RunControlMessage::ObservePreparations { reply } => {
+                state.preparation_waiters.push(reply);
+                state.settle_preparation_waiters();
+            }
             RunControlMessage::Reserve { incarnation, reply } => {
                 let result = if state.phase != RunPhase::Running {
                     Err(DirectoryError::Closed)
@@ -178,6 +352,12 @@ impl Actor for RunControl {
                     Err(DirectoryError::Closed)
                 } else if state.identities.claimed.get(&identity.id) != Some(&identity) {
                     Err(DirectoryError::Unauthorized { actor: identity })
+                } else if let Some(existing) = state.entries.get(&identity) {
+                    if existing.actor.address().get_id() == actor.address().get_id() {
+                        Ok(())
+                    } else {
+                        Err(DirectoryError::AlreadyRegistered { actor: identity })
+                    }
                 } else {
                     state
                         .identities
@@ -213,7 +393,9 @@ impl Actor for RunControl {
                 let _ = reply.send(state.sessions.get(&actor).cloned());
             }
             RunControlMessage::InstallSession { context, reply } => {
-                let result = if state.entries.contains_key(&context.actor) {
+                let result = if state.phase != RunPhase::Running {
+                    Err(DirectoryError::Closed)
+                } else if state.entries.contains_key(&context.actor) {
                     state.sessions.insert(context.actor, context);
                     Ok(())
                 } else {
@@ -242,6 +424,18 @@ impl Actor for RunControl {
             RunControlMessage::Seal { reply } => {
                 if state.phase == RunPhase::Running {
                     state.phase = RunPhase::RetiringPreparations;
+                    for (id, record) in &state.preparations {
+                        if !matches!(record.phase, PreparationPhase::Settled(_)) {
+                            record.compiler.request_shutdown(ActorTerminal::new(
+                                ActorExitKind::Cancelled,
+                                "forest preparation shutdown",
+                            ));
+                            if let Some(supervisor) = &state.preparation_supervisor {
+                                let _ =
+                                    supervisor.send_message(PreparationMessage::Cancel { id: *id });
+                            }
+                        }
+                    }
                 }
                 let _ = reply.send(SealedActorMembership {
                     actors: state
@@ -251,6 +445,28 @@ impl Actor for RunControl {
                         .collect(),
                 });
             }
+        }
+        Ok(())
+    }
+    async fn handle_supervisor_evt(
+        &self,
+        _myself: RactorRef<Self::Msg>,
+        event: SupervisionEvent,
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        if matches!(
+            event,
+            SupervisionEvent::ActorFailed(_, _) | SupervisionEvent::ActorTerminated(_, _, _)
+        ) {
+            for record in state.preparations.values_mut() {
+                if !matches!(record.phase, PreparationPhase::Settled(_)) {
+                    record.phase =
+                        PreparationPhase::Settled(crate::CleanupComponentOutcome::Unconfirmed(
+                            "preparation supervisor exited before root settlement".into(),
+                        ));
+                }
+            }
+            state.settle_preparation_waiters();
         }
         Ok(())
     }
@@ -264,7 +480,16 @@ pub struct RunControlClient {
 impl RunControlClient {
     pub async fn start() -> Result<(Self, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
         let (owner, task) = Actor::spawn(None, RunControl, ()).await?;
-        Ok((Self { owner }, task))
+        let (supervisor, supervisor_task) =
+            Actor::spawn_linked(None, PreparationSupervisor, owner.clone(), owner.get_cell())
+                .await?;
+        drop(supervisor_task);
+        let client = Self { owner };
+        client
+            .ask(|reply| RunControlMessage::AttachPreparationSupervisor { supervisor, reply })
+            .await
+            .map_err(|error| ractor::SpawnErr::StartupFailed(error.into()))?;
+        Ok((client, task))
     }
     async fn ask<T: Send + 'static>(
         &self,
@@ -275,6 +500,38 @@ impl RunControlClient {
             .send_message(message(reply))
             .map_err(|_| DirectoryError::Unavailable)?;
         receiver.await.map_err(|_| DirectoryError::Unavailable)
+    }
+    pub(crate) async fn prepare_root(
+        &self,
+        operation: RootOperation,
+    ) -> Result<RootOperationResult, DirectoryError> {
+        let receiver = self
+            .ask(|reply| RunControlMessage::BeginPreparation { operation, reply })
+            .await??;
+        let delivery = receiver.await.map_err(|_| DirectoryError::Unavailable)?;
+        self.ask(|reply| RunControlMessage::AcceptPreparation {
+            id: delivery.id,
+            reply,
+        })
+        .await??;
+        Ok(delivery.accept())
+    }
+    pub(crate) async fn settle_preparations(
+        &self,
+        timeout: Duration,
+    ) -> crate::CleanupComponentOutcome {
+        match tokio::time::timeout(
+            timeout,
+            self.ask(|reply| RunControlMessage::ObservePreparations { reply }),
+        )
+        .await
+        {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(error)) => crate::CleanupComponentOutcome::Unconfirmed(error.to_string()),
+            Err(_) => crate::CleanupComponentOutcome::Unconfirmed(
+                "root preparation cleanup remains in flight".into(),
+            ),
+        }
     }
     pub(super) async fn reserve(
         &self,
