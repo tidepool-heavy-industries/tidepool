@@ -1386,6 +1386,11 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
     }
 }
 
+#[cfg(test)]
+fn panicking_worker_completion_for_test() -> Completion {
+    panic!("test owned resident worker panic")
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WorkerKind {
     ProviderInitial(provider_initial::StageKind),
@@ -1416,7 +1421,7 @@ fn spawn(
         let resident = state.resident.as_mut().unwrap();
         if resident.worker_fault.as_ref() == Some(&kind) {
             resident.worker_fault.take();
-            Box::pin(async { panic!("test owned resident worker panic") })
+            Box::pin(async { panicking_worker_completion_for_test() })
                 as BoxFuture<'static, Completion>
         } else {
             work
