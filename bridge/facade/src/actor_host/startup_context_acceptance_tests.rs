@@ -415,6 +415,69 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 Err(mpsc::error::TryRecvError::Empty)
             ));
             failed.finish();
+            host.while_host_running(tokio::time::timeout(
+                COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                async {
+                    loop {
+                        let binding = host.context.binding(host.context.actor.identity()).unwrap();
+                        let conversation = binding.conversation().unwrap();
+                        let frontier = host
+                            .runtime
+                            .store()
+                            .embedded_round_frontier(conversation.identity())
+                            .unwrap();
+                        if frontier.pending_head.is_none() && conversation.active_round().is_none()
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                },
+            ))
+            .await
+            .unwrap()
+            .expect("last provider round settles before close control");
+            let lifecycle = host.context.actor.lifecycle();
+            lifecycle.wait_transactions().await.unwrap();
+            let open_phase = lifecycle.observation().phase;
+            let native = scenario_attachment.native_readiness().unwrap();
+            let held = native.begin_provider_transition().await.unwrap();
+            let mut observer =
+                Box::pin(scenario_attachment.acknowledge_initial_context_publication(
+                    &identity.operation,
+                    publication.clone(),
+                ));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut observer)
+                    .await
+                    .is_err()
+            );
+            tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                while lifecycle.observation().transactions == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("provider ack reserves its actual owner before native grant");
+            drop(observer);
+            lifecycle.close().await.unwrap();
+            let closed_phase = lifecycle.observation().phase;
+            assert_ne!(closed_phase, open_phase);
+            assert!(scenario_attachment
+                .initial_context_wire_observation()
+                .await
+                .is_err());
+            held.complete().await.unwrap();
+            tokio::time::timeout(
+                COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+                lifecycle.wait_transactions(),
+            )
+            .await
+            .expect("dropped observer cannot abandon admitted publication settlement")
+            .unwrap();
+            native.check_ready_async().await.unwrap();
+            assert_eq!(lifecycle.observation().phase, closed_phase);
+            assert_eq!(observation(host).await, retained);
         })
     })
     .await;
