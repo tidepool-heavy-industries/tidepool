@@ -185,7 +185,6 @@ pub(crate) enum PreparedPublicOwnerChange {
 
 struct StoreConnection {
     connection: Connection,
-    fence: Option<StoreError>,
     #[cfg(test)]
     fault: Option<StoreFault>,
 }
@@ -315,7 +314,6 @@ impl NativeStorage {
             physical_identity,
             connection: RefCell::new(StoreConnection {
                 connection,
-                fence: None,
                 #[cfg(test)]
                 fault: None,
             }),
@@ -331,9 +329,6 @@ impl NativeStorage {
         self.database_id
     }
     fn ensure_ready(&self) -> Result<(), StoreError> {
-        if let Some(error) = &self.connection.borrow().fence {
-            return Err(error.clone());
-        }
         self.validate_physical_identity()
     }
     fn validate_physical_identity(&self) -> Result<(), StoreError> {
@@ -363,9 +358,6 @@ impl NativeStorage {
         domain: RecoveryDomainId,
     ) -> Result<Option<RecoveryDomainState>, StoreError> {
         let owner = self.connection.borrow();
-        if let Some(error) = &owner.fence {
-            return Err(error.clone());
-        }
         self.validate_physical_identity()?;
         read_domain(&owner.connection, domain).map_err(|error| sql_store_error(self.path(), error))
     }
@@ -375,9 +367,6 @@ impl NativeStorage {
         owner: &RecoveryPublicOwner,
     ) -> Result<Option<RecoveryPublicOwnerState>, StoreError> {
         let connection = self.connection.borrow();
-        if let Some(error) = &connection.fence {
-            return Err(error.clone());
-        }
         self.validate_physical_identity()?;
         read_public_owner(&connection.connection, domain, owner)
             .map_err(|error| sql_store_error(self.path(), error))
@@ -387,9 +376,6 @@ impl NativeStorage {
         domain: RecoveryDomainId,
     ) -> Result<Vec<RecoveryPublicOwnerState>, StoreError> {
         let connection = self.connection.borrow();
-        if let Some(error) = &connection.fence {
-            return Err(error.clone());
-        }
         self.validate_physical_identity()?;
         let mut statement = connection
             .connection
@@ -419,9 +405,6 @@ impl NativeStorage {
     }
     pub fn has_public_owners(&self, domain: RecoveryDomainId) -> Result<bool, StoreError> {
         let connection = self.connection.borrow();
-        if let Some(error) = &connection.fence {
-            return Err(error.clone());
-        }
         self.validate_physical_identity()?;
         connection
             .connection
@@ -438,9 +421,6 @@ impl NativeStorage {
         owner: Option<&RecoveryPublicOwner>,
     ) -> Result<Option<RecoverySnapshotIdentity>, StoreError> {
         let connection = self.connection.borrow();
-        if let Some(error) = &connection.fence {
-            return Err(error.clone());
-        }
         self.validate_physical_identity()?;
         read_snapshot(&connection.connection, self.database_id, domain, owner)
             .map_err(|error| sql_store_error(self.path(), error))
@@ -615,9 +595,6 @@ impl NativeStorage {
             }
         }
         let mut owner = self.connection.borrow_mut();
-        if let Some(error) = &owner.fence {
-            return StoreDisposition::RecoveryRequired(error.clone());
-        }
         if let Err(error) = self.validate_physical_identity() {
             return StoreDisposition::Refused(StoreRefusal::Storage(error));
         }
@@ -647,7 +624,6 @@ impl NativeStorage {
             }
             TransactionResult::RecoveryRequired(detail) => {
                 let error = store_error(self.path(), StoreErrorKind::RecoveryRequired, detail);
-                owner.fence = Some(error.clone());
                 StoreDisposition::RecoveryRequired(error)
             }
         }
@@ -657,9 +633,6 @@ impl NativeStorage {
 impl Blockstore for NativeStorage {
     fn get(&self, cid: &Cid) -> anyhow::Result<Option<Vec<u8>>> {
         let owner = self.connection.borrow();
-        if let Some(error) = &owner.fence {
-            return Err(error.clone().into());
-        }
         self.validate_physical_identity()?;
         let bytes = owner
             .connection

@@ -95,11 +95,23 @@ enum Value {
 impl Value {
     fn fence(&self) -> Option<StoreError> {
         match self {
-            Self::Create(StoreDisposition::RecoveryRequired(error))
-            | Self::Publish(StoreDisposition::RecoveryRequired(error))
-            | Self::Transfer(StoreDisposition::RecoveryRequired(error))
-            | Self::Ceiling(StoreDisposition::RecoveryRequired(error)) => Some(error.clone()),
-            _ => None,
+            Self::Create(value) | Self::Publish(value) | Self::Transfer(value) => match value {
+                StoreDisposition::RecoveryRequired(error) => Some(error.clone()),
+                StoreDisposition::Committed(_) | StoreDisposition::Refused(_) => None,
+            },
+            Self::Ceiling(value) => match value {
+                StoreDisposition::RecoveryRequired(error) => Some(error.clone()),
+                StoreDisposition::Committed(_) | StoreDisposition::Refused(_) => None,
+            },
+            Self::ReadDomain(_)
+            | Self::ReadOwner(_)
+            | Self::Owners(_)
+            | Self::HasOwners(_)
+            | Self::Snapshot(_)
+            | Self::Get(_)
+            | Self::Check(_) => None,
+            #[cfg(test)]
+            Self::Fault => None,
         }
     }
     fn committed_installation(&self) -> Option<RecoveryDomainState> {
