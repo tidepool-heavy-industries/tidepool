@@ -52,6 +52,31 @@ fn command_pages_explain_gaps_without_merging_stream_order() {
     ]);
     assert!(rendered.contains("89 retained bytes between displayed pages"));
     assert_eq!(rendered.matches("between displayed pages").count(), 1);
-    assert!(rendered.contains("stdout · bytes 95–100 of 100"));
-    assert!(rendered.contains("stderr · bytes 0–6 of 100"));
+    assert!(rendered.contains("stdout · captured bytes 95–100 · available through 100 · EOF"));
+    assert!(
+        rendered.contains("stderr · captured bytes 0–6 · available through 100 · more available")
+    );
+}
+
+#[test]
+fn command_pages_distinguish_running_current_end_from_eof() {
+    use tidepool_bridge_effects::{CommandPage, CommandStream};
+    let running = CommandPage {
+        text: "partial".into(),
+        start: 4,
+        end: 11,
+        available_end: 11,
+        retained_start: 4,
+        lost_bytes: 4,
+        finished: false,
+        lossy: true,
+        leading_fragment: true,
+        trailing_fragment: true,
+    };
+    let rendered = super::command_pages(&[(CommandStream::Stdout, running)]);
+    assert!(rendered.contains("captured bytes 4–11 · available through 11 · current end · running"));
+    assert!(rendered.contains("4 bytes no longer retained"));
+    assert!(rendered.contains("lossy UTF-8"));
+    assert!(rendered.contains("leading fragment"));
+    assert!(rendered.contains("trailing fragment"));
 }

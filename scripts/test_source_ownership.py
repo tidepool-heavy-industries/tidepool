@@ -218,6 +218,7 @@ TEST_ONLY_FIXTURES = {
         'tidepool/runtime/src/session/fixtures/unrelated-home-value.hs',
     }),
     'tidepool-toolchain': frozenset({
+        'tidepool/toolchain/src/fixtures/pure_command_projection_diagnostics.json',
         'tidepool/toolchain/tests/fixtures/deployment-module-package/Consumer.hs',
         'tidepool/toolchain/tests/fixtures/home-self-issuer/HomeSelf.hs',
         'tidepool/toolchain/tests/fixtures/home-self-issuer/HomeSelfCapture.hs',

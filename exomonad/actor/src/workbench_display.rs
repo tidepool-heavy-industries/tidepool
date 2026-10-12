@@ -31,7 +31,7 @@ pub fn bounded_output(text: &str, budget: usize) -> String {
     }
     let omitted = tail - head;
     format!(
-        "{}\n[… {omitted} output bytes not displayed]\n{}",
+        "{}\n[… {omitted} response bytes not displayed]\n{}",
         &text[..head],
         &text[tail..]
     )
@@ -65,8 +65,17 @@ pub(crate) fn command_pages(
             tidepool_bridge_effects::CommandStream::Stdout => "stdout",
             tidepool_bridge_effects::CommandStream::Stderr => "stderr",
         };
+        let progress = if page.finished && page.end == page.available_end {
+            " · EOF"
+        } else if page.end < page.available_end {
+            " · more available"
+        } else if page.finished {
+            " · finished before available end"
+        } else {
+            " · current end · running"
+        };
         output.push_str(&format!(
-            "\n{label} · bytes {}–{} of {}",
+            "\n{label} · captured bytes {}–{} · available through {}{progress}",
             page.start, page.end, page.available_end
         ));
         if page.lost_bytes > 0 {

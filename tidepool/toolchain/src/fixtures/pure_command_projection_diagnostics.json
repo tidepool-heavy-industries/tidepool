@@ -1,0 +1,22 @@
+{
+  "origin": {
+    "run": "6c571976-8186-4523-9aa9-3dcc8c589d90",
+    "request": "8254d5be-47c5-48cb-b371-6be2c9880220",
+    "call_position": 4,
+    "output_position": 6
+  },
+  "cell": "import qualified Tidepool.Form as F\nimport qualified Tidepool.View as V\nF.note \"Effect experiment: testing presentation and a deliberately unsuccessful command. No project files will be changed.\"\nsupervisor <- parentAgent\ndisplay supervisor\nfailedProbe <- Cmd.run (Cmd.bashCommand \"printf 'retained stdout\\\\n'; printf 'intentional diagnostic\\\\n' >&2; exit 7\")\ndisplay failedProbe\nstdoutAssessment <- Cmd.stdout failedProbe\ndisplay stdoutAssessment\ndisplay (V.column [V.markdown \"### Notebook effect probe\\nThis is a composed view, rather than a plain result dump.\", V.inspect ([(\"persistent values\", roundTripPassed observation), (\"mutation detected\", length sensitivityFailures == length inputs)] :: [(Text, Bool)])])\n",
+  "diagnostics": [
+    {
+      "span": {
+        "endCol": 43,
+        "endLine": 8,
+        "startCol": 21,
+        "startLine": 8,
+        "file": "<cell>"
+      },
+      "severity": "error",
+      "message": "Couldn't match expected type: Eff\n                                [Replies, Watches, ResourceScopes, ActorContext, AgentLaunch,\n                                 AgentInspection, AgentControl, BoundWorktree, WorktreeRegistry,\n                                 WorktreeAllocation, WorktreeIntegration, Sleep, Notifications, Jev,\n                                 ModelCall, Commands, Console, AskUser, Green, Actor, Reflect,\n                                 Lookup, Source, Journal, RepoEvent]\n                                value0\n            with actual type: Either Cmd.OutputIssue Text"
+    }
+  ]
+}

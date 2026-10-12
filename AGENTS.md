@@ -302,6 +302,8 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   private-field writes or forged records, then repair positions or metadata to
   make the scenario pass. Reuse small helpers that compose the real APIs, and
   remove obsolete fixture paths instead of adding compatibility machinery.
+  Trace callers when retiring a fixture and remove otherwise-unused production
+  escape hatches that existed only to manufacture its unsupported state.
   Direct storage manipulation belongs in storage, migration or deliberate
   corruption tests whose purpose requires it; identify that boundary and keep
   a valid control constructed through the appropriate owner.
