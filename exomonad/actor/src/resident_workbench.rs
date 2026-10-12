@@ -19680,27 +19680,49 @@ pub(crate) mod request_tests {
         use ractor::{Actor, ActorProcessingErr};
         use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
+        struct SourceCollectorState {
+            identity: crate::ActorRef,
+            lifecycle: crate::LifecycleHandle,
+            sender: tokio::sync::mpsc::UnboundedSender<SourceDelivery>,
+        }
         struct SourceCollector;
         impl Actor for SourceCollector {
             type Msg = crate::KernelMessage;
-            type State = tokio::sync::mpsc::UnboundedSender<SourceDelivery>;
+            type State = SourceCollectorState;
             type Arguments = Self::State;
             async fn pre_start(
                 &self,
                 _: ractor::ActorRef<Self::Msg>,
-                sender: Self::Arguments,
+                state: Self::Arguments,
             ) -> Result<Self::State, ActorProcessingErr> {
-                Ok(sender)
+                Ok(state)
             }
             async fn handle(
                 &self,
                 _: ractor::ActorRef<Self::Msg>,
                 message: Self::Msg,
-                sender: &mut Self::State,
+                state: &mut Self::State,
             ) -> Result<(), ActorProcessingErr> {
+                let (message, lease) = match message {
+                    crate::KernelMessage::Admitted(envelope) => {
+                        let (message, lease) = envelope.into_parts(state.identity)?;
+                        (message, Some(lease))
+                    }
+                    message => (message, None),
+                };
                 if let crate::KernelMessage::Source(delivery) = message {
-                    sender.send(delivery)?;
+                    state.sender.send(delivery)?;
                 }
+                drop(lease);
+                Ok(())
+            }
+            async fn post_stop(
+                &self,
+                _: ractor::ActorRef<Self::Msg>,
+                state: &mut Self::State,
+            ) -> Result<(), ActorProcessingErr> {
+                state.lifecycle.close().await?;
+                state.lifecycle.executor_retired();
                 Ok(())
             }
         }
@@ -19832,14 +19854,46 @@ pub(crate) mod request_tests {
             .unwrap();
         assert!(initial.is_empty());
         let (source_send, mut source_events) = tokio::sync::mpsc::unbounded_channel();
-        let (source_address, source_task) =
-            SourceCollector::spawn(None, SourceCollector, source_send)
-                .await
-                .unwrap();
+        let (directory, directory_task) = crate::LocalActorDirectory::start().await.unwrap();
+        let reservation = directory.reserve(crate::Incarnation::FIRST).await.unwrap();
+        let source_identity = reservation.identity();
+        let source_lifecycle = reservation.lifecycle().clone();
+        let source_terminal = reservation.terminal().clone();
+        let (source_address, source_task) = SourceCollector::spawn(
+            None,
+            SourceCollector,
+            SourceCollectorState {
+                identity: source_identity,
+                lifecycle: source_lifecycle.clone(),
+                sender: source_send,
+            },
+        )
+        .await
+        .unwrap();
+        let source_actor = crate::LocalActorRef::with_identity_admission(
+            source_address.clone(),
+            source_terminal,
+            source_identity,
+            source_lifecycle.clone(),
+        );
+        source_lifecycle
+            .attach_executor(source_address.clone())
+            .await
+            .unwrap();
+        directory
+            .register_executor(
+                reservation,
+                source_actor.clone(),
+                std::sync::Weak::new(),
+                crate::local_actor::SpawnOwnership::Independent,
+            )
+            .await
+            .unwrap();
+        source_lifecycle.executor_started().await.unwrap();
         let sources = registry
             .attach_sources(
                 owner,
-                crate::LocalActorRef::new(source_address.clone(), crate::RetainedActorExit::new()),
+                source_actor,
                 &[(0, request, RequestSourceKind::Progress)],
             )
             .unwrap();
@@ -20303,6 +20357,7 @@ pub(crate) mod request_tests {
         ));
         source_address.stop(None);
         source_task.await.unwrap();
+        directory_task.abort();
         assert!(source_events.try_recv().is_err());
         drop(observer_root);
     }
