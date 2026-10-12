@@ -2781,7 +2781,12 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
+        drop(permit);
+        let mut stopped = journal.owner_status();
         drop(journal);
+        while !matches!(*stopped.borrow(), JournalOwnerStatus::Stopped { .. }) {
+            stopped.changed().await.unwrap();
+        }
         let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", run.clone())
             .await
             .unwrap();
