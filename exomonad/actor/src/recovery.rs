@@ -736,7 +736,8 @@ impl ActorRecoveryJournal {
         canonical_binding_path: &Path,
         claim: &crate::RootSuccessorOperationClaim,
     ) -> std::io::Result<Arc<DurableRootSuccessorAdmission>> {
-        if successor.actor() != claim.successor_actor()
+        if !claim.journal_matches(self)
+            || successor.actor() != claim.successor_actor()
             || successor.placement() != claim.successor_placement()
             || successor.owner() != claim.successor_owner()
         {
