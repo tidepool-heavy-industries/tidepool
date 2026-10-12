@@ -10,14 +10,21 @@ impl Actor for Executor {
         Ok(())
     }
 
-    async fn handle(&self, _: RactorRef<Self::Msg>, _: Self::Msg, _: &mut ()) -> Result<(), ActorProcessingErr> {
+    async fn handle(
+        &self,
+        _: RactorRef<Self::Msg>,
+        _: Self::Msg,
+        _: &mut (),
+    ) -> Result<(), ActorProcessingErr> {
         Ok(())
     }
 }
 
 async fn opened() -> (LifecycleHandle, RactorRef<KernelMessage>) {
     let identity = ActorRef::first(crate::ActorId(9101));
-    let owner = LifecycleHandle::start(identity, RetainedActorExit::new()).await.unwrap();
+    let owner = LifecycleHandle::start(identity, RetainedActorExit::new())
+        .await
+        .unwrap();
     let (executor, _) = Actor::spawn(None, Executor, ()).await.unwrap();
     owner.attach_executor(executor.clone()).await.unwrap();
     owner.executor_started().await.unwrap();
@@ -31,11 +38,17 @@ async fn close_preserves_accepted_lease_and_refuses_new_admission() {
     owner.close().await.unwrap();
     assert_eq!(owner.observation().phase, LifecyclePhase::Closing);
     assert_eq!(owner.observation().transactions, 1);
-    assert!(matches!(owner.transaction().await, Err(KernelCallFailure::MailboxClosed(_))));
+    assert!(matches!(
+        owner.transaction().await,
+        Err(KernelCallFailure::MailboxClosed(_))
+    ));
     let mut drained = Box::pin(owner.wait_transactions());
     assert!(futures_util::poll!(drained.as_mut()).is_pending());
     drop(admitted);
-    tokio::time::timeout(std::time::Duration::from_secs(5), drained).await.unwrap().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), drained)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(owner.observation().phase, LifecyclePhase::Closing);
     executor.stop(None);
     owner.address.stop(None);
@@ -45,13 +58,22 @@ async fn close_preserves_accepted_lease_and_refuses_new_admission() {
 async fn lost_admission_observer_releases_its_exact_lease_without_reopening() {
     let (owner, executor) = opened().await;
     let (reply, observer) = tokio::sync::oneshot::channel();
-    owner.address.cast(LifecycleCommand::Transaction(reply.into())).unwrap();
+    owner
+        .address
+        .cast(LifecycleCommand::Transaction(reply.into()))
+        .unwrap();
     drop(observer);
     owner.close().await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), owner.wait_transactions()).await.unwrap().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), owner.wait_transactions())
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(owner.observation().transactions, 0);
     assert_eq!(owner.observation().phase, LifecyclePhase::Closing);
-    assert!(matches!(owner.transaction().await, Err(KernelCallFailure::MailboxClosed(_))));
+    assert!(matches!(
+        owner.transaction().await,
+        Err(KernelCallFailure::MailboxClosed(_))
+    ));
     executor.stop(None);
     owner.address.stop(None);
 }

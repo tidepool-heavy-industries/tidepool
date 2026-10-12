@@ -7,7 +7,10 @@ async fn reservation_issued_before_seal_cannot_authorize_later_reservation() {
     let issued = reservation.identity();
     let membership = control.seal().await.unwrap();
     assert!(membership.actors.is_empty());
-    assert!(matches!(control.reserve(crate::Incarnation(1)).await, Err(DirectoryError::Closed)));
+    assert!(matches!(
+        control.reserve(crate::Incarnation(1)).await,
+        Err(DirectoryError::Closed)
+    ));
     assert!(control.resolve(issued).await.unwrap().is_none());
     drop(reservation);
     assert!(control.seal().await.unwrap().actors.is_empty());
