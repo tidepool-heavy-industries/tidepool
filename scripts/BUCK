@@ -35,6 +35,21 @@ native_source_snapshot(
     ],
 )
 
+export_file(name = "integration_status", src = "integration-status.py", visibility = ["PUBLIC"])
+
+sh_test(
+    name = "integration_status_tests",
+    test = "run-unittests.sh",
+    args = ["scripts.tests.test_integration_status"],
+    env = {
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
+        "PATH": "$(location toolchains//:test_tools)/bin:" + read_root_config("nix", "action_path"),
+    },
+    resources = [":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure", "toolchains//:test_tools"],
+    visibility = ["PUBLIC"],
+)
+
 sh_test(
     name = "native_source_snapshot_tests",
     test = "run-unittests.sh",
