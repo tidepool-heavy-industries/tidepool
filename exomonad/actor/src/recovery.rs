@@ -59,6 +59,7 @@ impl RootRecoveryPlacement {
 /// Opaque proof of the actual journal's complete predecessor and durably
 /// prepared successor. A copied admission DTO cannot create this receipt.
 pub struct DurableRootSuccessorAdmission {
+    operation: u64,
     path: PathBuf,
     predecessor_owner: tidepool_runtime::session::RecoveryPublicOwner,
     store_predecessor: Option<ApplicationConversation>,
@@ -69,6 +70,9 @@ pub struct DurableRootSuccessorAdmission {
 }
 
 impl DurableRootSuccessorAdmission {
+    pub fn operation(&self) -> u64 {
+        self.operation
+    }
     pub fn predecessor(&self) -> ActorRef {
         self.predecessor
     }
@@ -551,6 +555,8 @@ impl ActorRecoveryJournal {
                                 );
                             }
                             Command::Certify {
+                                claimed_predecessor,
+                                operation,
                                 predecessor,
                                 successor,
                                 expected_source,
@@ -560,6 +566,8 @@ impl ActorRecoveryJournal {
                                 complete!(
                                     reply,
                                     owner.certify(
+                                        claimed_predecessor,
+                                        operation,
                                         predecessor,
                                         successor,
                                         expected_source,
@@ -726,8 +734,19 @@ impl ActorRecoveryJournal {
         successor: RootRecoveryPlacement,
         expected_source: Option<&str>,
         canonical_binding_path: &Path,
+        claim: &crate::RootSuccessorOperationClaim,
     ) -> std::io::Result<Arc<DurableRootSuccessorAdmission>> {
+        if successor.actor() != claim.successor_actor()
+            || successor.placement() != claim.successor_placement()
+            || successor.owner() != claim.successor_owner()
+        {
+            return Err(std::io::Error::other(
+                "journal successor differs from its exact lifecycle execution claim",
+            ));
+        }
         self.request(|reply| Command::Certify {
+            claimed_predecessor: claim.predecessor_owner().clone(),
+            operation: claim.operation(),
             predecessor,
             successor,
             expected_source: expected_source.map(str::to_owned),
@@ -838,6 +857,8 @@ enum Command {
         reply: tokio::sync::oneshot::Sender<std::io::Result<JournalApplicationBindingAck>>,
     },
     Certify {
+        claimed_predecessor: tidepool_runtime::session::RecoveryPublicOwner,
+        operation: u64,
         predecessor: ActorRef,
         successor: RootRecoveryPlacement,
         expected_source: Option<String>,
@@ -906,6 +927,8 @@ impl JournalOwner {
 
     fn certify(
         &mut self,
+        claimed_predecessor: tidepool_runtime::session::RecoveryPublicOwner,
+        operation: u64,
         predecessor: ActorRef,
         successor: RootRecoveryPlacement,
         source: Option<String>,
@@ -917,6 +940,11 @@ impl JournalOwner {
             .records
             .get(&predecessor)
             .expect("validated predecessor");
+        if owner_for_admission(&old.admission).as_ref() != Some(&claimed_predecessor) {
+            return Err(std::io::Error::other(
+                "journal predecessor differs from its exact lifecycle execution claim",
+            ));
+        }
         let new = self
             .state
             .records
@@ -925,6 +953,7 @@ impl JournalOwner {
         let startup = new.startup.as_ref().expect("validated startup");
         let application = new.application.as_ref().expect("validated application");
         Ok(Arc::new(DurableRootSuccessorAdmission {
+            operation,
             path: self.path.clone(),
             predecessor,
             successor,
