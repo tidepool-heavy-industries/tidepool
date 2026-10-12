@@ -1942,6 +1942,12 @@ impl Actor for RunControl {
                 if state.phase == RunPhase::Running {
                     state.phase = RunPhase::RetiringPreparations;
                     for record in state.reservations.values_mut() {
+                        // Prepared input already owns effects. Its producer must
+                        // receive the reservation and run the real refusal cleanup.
+                        // Register still checks the sealed run phase.
+                        if matches!(record.purpose, ReservationPurpose::ExistingInput) {
+                            continue;
+                        }
                         if !matches!(record.phase, ReservationPhase::Registered) {
                             record.terminal.request_shutdown(ActorTerminal::new(
                                 ActorExitKind::Cancelled,
