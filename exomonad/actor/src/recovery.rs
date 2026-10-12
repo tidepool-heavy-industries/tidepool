@@ -1977,6 +1977,24 @@ pub(crate) mod recovery_test_fixture {
         }
     }
 
+    impl RecoveryBootRegistration for LockedRun {
+        fn into_run(self: Box<Self>) -> Arc<dyn RecoveryRunAuthority> {
+            Arc::from(self)
+        }
+    }
+    pub(super) fn boot_registration(root: &Path) -> Box<dyn RecoveryBootRegistration> {
+        let root = root.canonicalize().unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(root.join("recovery-owner.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        Box::new(LockedRun { root, _lock: lock })
+    }
+
     #[derive(Clone)]
     pub(crate) struct RecoveryFixture {
         pub(crate) store: Arc<RunRecoveryStore>,
@@ -2788,6 +2806,43 @@ mod tests {
                 .as_ref(),
             Some(&intent.conversation)
         );
+    }
+
+    #[tokio::test]
+    async fn boot_registration_freezes_initial_prefix_and_exact_writer() {
+        let run = Arc::new(tempfile::tempdir().unwrap());
+        let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
+        let previous = ActorRecoveryJournal::open(&anchor, "actors.jsonl", run.clone())
+            .await
+            .unwrap();
+        let old = ActorRef::first(ActorId(1));
+        let current = ActorRef::first(ActorId(2));
+        previous.admit(old, &descriptor("old"), &[]).await.unwrap();
+        let mut status = previous.owner_status();
+        drop(previous);
+        while !matches!(*status.borrow(), JournalOwnerStatus::Stopped { .. }) {
+            status.changed().await.unwrap();
+        }
+        let (journal, boot) = ActorRecoveryJournal::open_for_boot(
+            &anchor,
+            "actors.jsonl",
+            true,
+            recovery_test_fixture::boot_registration(run.path()),
+        )
+        .await
+        .unwrap();
+        assert!(boot.qualifies(old, &journal));
+        assert!(!boot.qualifies(current, &journal));
+        journal
+            .admit(current, &descriptor("current"), &[])
+            .await
+            .unwrap();
+        assert!(!boot.qualifies(current, &journal));
+        let other = ActorRecoveryJournal::open(&anchor, "other.jsonl", run.clone())
+            .await
+            .unwrap();
+        assert!(!boot.qualifies(old, &other));
+        assert!(boot.run.owns_run(run.path()).unwrap());
     }
 
     #[tokio::test]
