@@ -696,7 +696,7 @@ async fn schema_refusal_then_native_close(close_timing: NativeCloseTiming) {
     let schema = harness::finalize::FunctionToolSchema::new(schema_refusal_parameters()).unwrap();
     assert!(matches!(
         schema.decode_arguments(schema_refusal_input()),
-        Err(harness::finalize::FinalizeError::AmbiguousArguments(_))
+        Err(harness::finalize::SchemaError::AmbiguousArguments(_))
     ));
     let (actor, task) = exomonad_actor::spawn_local_actor(None, AdmissionSentinel)
         .await
