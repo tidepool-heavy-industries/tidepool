@@ -125,11 +125,14 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
     for (relative, source) in sources {
         std::fs::write(authored.join(relative), source).unwrap();
     }
-    std::fs::write(
-        authored.join("AgentSpec.hs"),
-        include_str!("fixtures/startup_persona_spec.hs"),
-    )
-    .unwrap();
+    let conventional_spec = entry == "AgentSpec.agentSpec";
+    if conventional_spec {
+        std::fs::write(
+            authored.join("AgentSpec.hs"),
+            include_str!("fixtures/startup_persona_spec.hs"),
+        )
+        .unwrap();
+    }
     std::fs::write(
         config.workspace.join("flake.nix"),
         include_str!("../../../../exomonad/examples/workspace/flake.nix"),
@@ -144,7 +147,6 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
         project.haskell.source_roots = vec![".".into()];
         project.haskell.modules = vec![
-            "AgentSpec".into(),
             "Persona.Memory".into(),
             "Persona.Spec".into(),
             "Persona.Attention".into(),
@@ -152,6 +154,9 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
             "Persona.Context".into(),
             "Jev.Operators".into(),
         ];
+        if conventional_spec {
+            project.haskell.modules.insert(0, "AgentSpec".into());
+        }
         project.haskell.spec = Some(entry.into());
         project
             .haskell
