@@ -2475,14 +2475,14 @@ mod tests {
         fn shutdown<'a>(
             &'a mut self,
             _context: &'a crate::KernelContext,
-            _terminal: &'a ActorTerminal,
+            _terminal: &'a crate::ActorTerminal,
         ) -> futures_util::future::BoxFuture<'a, Result<(), crate::KernelBehaviorError>> {
             Box::pin(async { Ok(()) })
         }
         fn stopped<'a>(
             &'a mut self,
             _context: &'a crate::KernelContext,
-            _terminal: &'a ActorTerminal,
+            _terminal: &'a crate::ActorTerminal,
         ) -> futures_util::future::BoxFuture<'a, ()> {
             Box::pin(async {})
         }
