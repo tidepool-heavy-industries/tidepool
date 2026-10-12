@@ -6,7 +6,7 @@ use harness::{
     store::TerminalOutcome,
     turn::JobOutput,
 };
-use std::time::Duration;
+use std::{sync::atomic::AtomicBool, time::Duration};
 
 struct HeldDispatch {
     dispatcher: Arc<EmbeddedDispatcher>,

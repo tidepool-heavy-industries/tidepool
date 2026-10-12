@@ -1042,6 +1042,9 @@ rust_filegroup(
         "src/actor_host/fixtures/selected_parent_spawn.hs": "bridge/facade/src/actor_host/fixtures/selected_parent_spawn.hs",
         "src/actor_host/fixtures/spec_reload_flake.lock": "bridge/facade/src/actor_host/fixtures/spec_reload_flake.lock",
         "src/actor_host/fixtures/spec_reload_flake.nix": "bridge/facade/src/actor_host/fixtures/spec_reload_flake.nix",
+        "src/actor_host/fixtures/startup_child_activate.hs": "bridge/facade/src/actor_host/fixtures/startup_child_activate.hs",
+        "src/actor_host/fixtures/startup_child_reply.hs": "bridge/facade/src/actor_host/fixtures/startup_child_reply.hs",
+        "src/actor_host/fixtures/startup_children_spawn.hs": "bridge/facade/src/actor_host/fixtures/startup_children_spawn.hs",
         "src/actor_host/fixtures/startup_context_refresh.hs": "bridge/facade/src/actor_host/fixtures/startup_context_refresh.hs",
         "src/actor_host/fixtures/startup_context_refresh_again.hs": "bridge/facade/src/actor_host/fixtures/startup_context_refresh_again.hs",
         "src/actor_host/fixtures/startup_context_refresh_failure.hs": "bridge/facade/src/actor_host/fixtures/startup_context_refresh_failure.hs",
@@ -1245,6 +1248,9 @@ tidepool_rust_binary(
         "bridge/facade/src/actor_host/fixtures/request_reload_agent_spec.hs",
         "bridge/facade/src/actor_host/fixtures/retained_handler_agent_spec.hs",
         "bridge/facade/src/actor_host/fixtures/retained_handler_tools.hs",
+        "bridge/facade/src/actor_host/fixtures/startup_child_activate.hs",
+        "bridge/facade/src/actor_host/fixtures/startup_child_reply.hs",
+        "bridge/facade/src/actor_host/fixtures/startup_children_spawn.hs",
         "bridge/facade/src/actor_host/fixtures/startup_context_refresh.hs",
         "bridge/facade/src/actor_host/fixtures/startup_context_refresh_again.hs",
         "bridge/facade/src/actor_host/fixtures/startup_context_refresh_failure.hs",
@@ -2768,6 +2774,9 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/selected_parent_spawn.hs": "src/actor_host/fixtures/selected_parent_spawn.hs",
         "bridge/facade/src/actor_host/fixtures/spec_reload_flake.lock": "src/actor_host/fixtures/spec_reload_flake.lock",
         "bridge/facade/src/actor_host/fixtures/spec_reload_flake.nix": "src/actor_host/fixtures/spec_reload_flake.nix",
+        "bridge/facade/src/actor_host/fixtures/startup_child_activate.hs": "src/actor_host/fixtures/startup_child_activate.hs",
+        "bridge/facade/src/actor_host/fixtures/startup_child_reply.hs": "src/actor_host/fixtures/startup_child_reply.hs",
+        "bridge/facade/src/actor_host/fixtures/startup_children_spawn.hs": "src/actor_host/fixtures/startup_children_spawn.hs",
         "bridge/facade/src/actor_host/fixtures/startup_context_refresh.hs": "src/actor_host/fixtures/startup_context_refresh.hs",
         "bridge/facade/src/actor_host/fixtures/startup_context_refresh_again.hs": "src/actor_host/fixtures/startup_context_refresh_again.hs",
         "bridge/facade/src/actor_host/fixtures/startup_context_refresh_failure.hs": "src/actor_host/fixtures/startup_context_refresh_failure.hs",
@@ -3826,6 +3835,27 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737461727475705f617574686f7265645f6661696c7572652e6873",
     src = "src/actor_host/fixtures/startup_authored_failure.hs",
     out = "startup_authored_failure.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737461727475705f6368696c645f61637469766174652e6873",
+    src = "src/actor_host/fixtures/startup_child_activate.hs",
+    out = "startup_child_activate.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737461727475705f6368696c645f7265706c792e6873",
+    src = "src/actor_host/fixtures/startup_child_reply.hs",
+    out = "startup_child_reply.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737461727475705f6368696c6472656e5f737061776e2e6873",
+    src = "src/actor_host/fixtures/startup_children_spawn.hs",
+    out = "startup_children_spawn.hs",
     visibility = ["PUBLIC"],
 )
 
