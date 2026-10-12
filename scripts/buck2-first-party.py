@@ -397,6 +397,9 @@ def register_test_fixture(included, external_labels):
     elif relative.startswith("exomonad/examples/workspace/.exomonad/"):
         source = relative.removeprefix("exomonad/examples/workspace/.exomonad/")
         label = "//exomonad/examples/workspace:authored_haskell_" + source.replace("/", "_").replace(".", "_").replace("-", "_")
+    elif relative.startswith("exomonad/examples/persona/.exomonad/"):
+        source = relative.removeprefix("exomonad/examples/persona/.exomonad/")
+        label = "//exomonad/examples/persona:authored_haskell_" + source.replace("/", "_").replace(".", "_").replace("-", "_")
     elif relative in external_labels:
         label = external_labels[relative]
     elif relative.startswith("bridge/haskell/"):

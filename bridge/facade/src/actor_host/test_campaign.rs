@@ -1495,6 +1495,15 @@ impl HostedScriptRound {
         self.cell(call_id, source, harness::item::ToolExecution::Synchronous);
     }
 
+    pub fn sync_call_named(self, call_id: &str, name: &str, source: &str) {
+        self.custom_cell(
+            call_id,
+            name,
+            source,
+            harness::item::ToolExecution::Synchronous,
+        );
+    }
+
     pub fn async_call(self, call_id: &str, source: &str) {
         self.cell(call_id, source, harness::item::ToolExecution::Asynchronous);
     }
@@ -1505,6 +1514,17 @@ impl HostedScriptRound {
             ToolExecution::Synchronous => "haskell_sync",
             ToolExecution::Asynchronous => "haskell",
         };
+        self.custom_cell(call_id, name, source, execution);
+    }
+
+    fn custom_cell(
+        self,
+        call_id: &str,
+        name: &str,
+        source: &str,
+        execution: harness::item::ToolExecution,
+    ) {
+        use harness::item::ToolExecution;
         self.assert_advertised(call_id, name, "custom");
         let call = harness::item::Item(serde_json::json!({
             "type":"custom_tool_call", "call_id":call_id, "name":name, "input":source,

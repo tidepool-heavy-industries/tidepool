@@ -27,6 +27,8 @@ mod application_supervisor;
 mod context_transaction_acceptance_tests;
 #[cfg(test)]
 mod startup_context_acceptance_tests;
+#[cfg(test)]
+mod startup_persona_acceptance_tests;
 
 mod delivery;
 mod display_output;
