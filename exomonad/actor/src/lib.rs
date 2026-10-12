@@ -126,10 +126,10 @@ pub use lineage::{
 };
 pub use local_actor::{
     spawn_local_actor, spawn_local_actor_in_incarnation, ActorAbandonGuard, ActorAdvance,
-    ChildExitNotice, KernelBehavior, KernelBehaviorError, KernelContext, KernelStep, LocalActor,
-    LocalActorArguments, LocalActorDirectory, LocalActorState, OwnedActorCompletion,
-    OwnedActorTask, OwnedWorkbenchCompletion, OwnedWorkbenchTask, WorkbenchAbandonGuard,
-    WorkbenchAdvance, WorkbenchDispatch,
+    ChildExitNotice, DirectoryError, KernelBehavior, KernelBehaviorError, KernelContext,
+    KernelStep, LocalActor, LocalActorArguments, LocalActorDirectory, LocalActorState,
+    OwnedActorCompletion, OwnedActorTask, OwnedWorkbenchCompletion, OwnedWorkbenchTask,
+    WorkbenchAbandonGuard, WorkbenchAdvance, WorkbenchDispatch,
 };
 pub use mailbox::MailboxValue;
 pub use mount::{

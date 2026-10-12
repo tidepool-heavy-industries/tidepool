@@ -21,6 +21,7 @@ use crate::{
 use tidepool_runtime::session::WorkbenchResponse;
 
 pub(crate) mod run_control;
+pub use run_control::{DirectoryError, RunControlClient as LocalActorDirectory};
 mod workbench_step;
 pub use workbench_step::{
     ActorAbandonGuard, ActorAdvance, OwnedActorCompletion, OwnedActorTask,
@@ -175,7 +176,7 @@ pub struct KernelContext {
 }
 
 #[derive(Clone)]
-struct ResourceChild {
+pub(crate) struct ResourceChild {
     cell: ractor::ActorCell,
     cleanup: Arc<
         dyn Fn(ResourceCleanup) -> BoxFuture<'static, crate::CleanupComponentOutcome> + Send + Sync,
@@ -219,12 +220,6 @@ impl SpawnOwnership {
     }
 }
 
-#[derive(Default)]
-struct DirectoryMembership {
-    closed: bool,
-    entries: HashMap<ActorRef, DirectoryEntry>,
-}
-
 /// A sealed membership snapshot must issue cancellation before root cleanup.
 pub(crate) struct SealedActorMembership {
     actors: Vec<(LocalActorRef, SpawnOwnership)>,
@@ -263,30 +258,6 @@ impl ForestRetirementBatch {
     }
 }
 
-/// Routing and terminal-observation index for one resident actor forest.
-///
-/// This is deliberately not a scheduler or lifecycle state machine. Ractor
-/// owns runnable actors and mailboxes; each actor owns its terminal cell. The
-/// directory resolves the identity carried by a live Haskell `ActorRef`
-/// to that pair of owners and retains native resources whose cleanup belongs
-/// to the run. Entries intentionally live for the routing
-/// domain's lifetime: an exited exact reference must remain resolvable so any
-/// number of late `wait` operations can observe its retained result. Logical
-/// actor IDs are process-unique (see [`NEXT_ACTOR_ID`]); this directory's own
-/// `identities` bookkeeping tracks only which of those process-wide IDs are
-/// fenced, claimed, or live in this particular forest.
-#[derive(Clone, Default)]
-pub struct LocalActorDirectory {
-    actors: std::sync::Arc<parking_lot::RwLock<DirectoryMembership>>,
-    sessions: std::sync::Arc<parking_lot::RwLock<HashMap<ActorRef, crate::ActorSessionContext>>>,
-    identities: std::sync::Arc<parking_lot::Mutex<DirectoryIdentities>>,
-    // Native resources transfer their existing Ractor identity and finalizer
-    // here when their lifetime belongs to this run rather than an actor.
-    run_resources: Arc<Mutex<HashMap<ractor::ActorId, ResourceChild>>>,
-    run_admission_closed: Arc<tokio::sync::RwLock<bool>>,
-    run_cleanup_lock: Arc<tokio::sync::Mutex<()>>,
-}
-
 #[derive(Default)]
 struct DirectoryIdentities {
     runtime: HashMap<ractor::ActorId, ActorRef>,
@@ -300,153 +271,6 @@ struct DirectoryEntry {
     // Retaining an exit must not keep its execution context (and thus this
     // directory) alive. Ractor's actor state owns the strong context reference.
     context: std::sync::Weak<KernelContext>,
-}
-
-impl LocalActorDirectory {
-    pub(crate) fn with_run_admission<T>(&self, operation: impl FnOnce() -> T) -> Result<T, String> {
-        let admission = self
-            .run_admission_closed
-            .try_read()
-            .map_err(|_| "run resource admission is closing".to_string())?;
-        if *admission {
-            return Err("run resource admission is closed".into());
-        }
-        Ok(operation())
-    }
-
-    pub(crate) async fn close_run_admission(&self) {
-        *self.run_admission_closed.write().await = true;
-    }
-
-    pub(crate) async fn shutdown_run_resources(&self) -> crate::CleanupComponentOutcome {
-        self.close_run_admission().await;
-        let _cleanup = self.run_cleanup_lock.lock().await;
-        shutdown_resources(&self.run_resources, SHUTDOWN_BUDGET).await
-    }
-
-    fn reserve(&self, incarnation: crate::Incarnation) -> Result<ActorRef, String> {
-        loop {
-            let next = NEXT_ACTOR_ID.fetch_add(1, Ordering::Relaxed);
-            let id = crate::ActorId(next);
-            let mut identities = self.identities.lock();
-            if !identities.fenced.contains(&id) && !identities.claimed.contains_key(&id) {
-                let actor = ActorRef { id, incarnation };
-                identities.claimed.insert(id, actor);
-                return Ok(actor);
-            }
-        }
-    }
-
-    pub(crate) fn fence_logical_ids(
-        &self,
-        actors: impl IntoIterator<Item = crate::ActorId>,
-    ) -> Result<(), String> {
-        let mut identities = self.identities.lock();
-        for actor in actors {
-            if identities.claimed.contains_key(&actor) {
-                return Err(format!("logical actor {} is already active", actor.0));
-            }
-            identities.fenced.insert(actor);
-            advance_actor_ids_past(actor);
-        }
-        Ok(())
-    }
-
-    fn claim_exact(&self, actor: ActorRef) -> Result<(), String> {
-        advance_actor_ids_past(actor.id);
-        let mut identities = self.identities.lock();
-        if let Some(previous) = identities.claimed.get(&actor.id).copied() {
-            let predecessor_is_terminal = self
-                .actors
-                .read()
-                .entries
-                .get(&previous)
-                .is_some_and(|entry| entry.actor.terminal().get().is_some());
-            if !predecessor_is_terminal || actor.incarnation <= previous.incarnation {
-                return Err(format!(
-                    "logical actor {} is already active as {previous}",
-                    actor.id.0
-                ));
-            }
-        }
-        identities.fenced.remove(&actor.id);
-        identities.claimed.insert(actor.id, actor);
-        Ok(())
-    }
-
-    fn runtime_identity(&self, actor: ractor::ActorId) -> Option<ActorRef> {
-        self.identities.lock().runtime.get(&actor).copied()
-    }
-
-    #[must_use]
-    pub fn resolve(&self, actor: ActorRef) -> Option<LocalActorRef> {
-        self.actors
-            .read()
-            .entries
-            .get(&actor)
-            .map(|entry| entry.actor.clone())
-    }
-
-    #[must_use]
-    pub fn session_context(&self, actor: ActorRef) -> Option<crate::ActorSessionContext> {
-        self.sessions.read().get(&actor).cloned()
-    }
-
-    fn insert(
-        &self,
-        actor: LocalActorRef,
-        context: std::sync::Weak<KernelContext>,
-        spawn_ownership: SpawnOwnership,
-    ) -> Result<(), &'static str> {
-        // Match claim_exact's identities -> membership lock order. No staged
-        // actor becomes routable after the owning shutdown snapshot is sealed.
-        let mut identities = self.identities.lock();
-        let mut membership = self.actors.write();
-        if membership.closed {
-            return Err("actor forest admission is closed");
-        }
-        identities
-            .runtime
-            .insert(actor.address().get_id(), actor.identity());
-        membership.entries.insert(
-            actor.identity(),
-            DirectoryEntry {
-                actor,
-                context,
-                spawn_ownership,
-            },
-        );
-        Ok(())
-    }
-
-    pub(crate) fn seal(&self) -> SealedActorMembership {
-        let mut membership = self.actors.write();
-        membership.closed = true;
-        SealedActorMembership {
-            actors: membership
-                .entries
-                .values()
-                .map(|entry| (entry.actor.clone(), entry.spawn_ownership))
-                .collect(),
-        }
-    }
-
-    fn context(&self, actor: ActorRef) -> Option<std::sync::Arc<KernelContext>> {
-        self.actors.read().entries.get(&actor)?.context.upgrade()
-    }
-
-    fn forget_terminal(&self, actor: ActorRef) -> bool {
-        let mut actors = self.actors.write();
-        let terminal = actors
-            .entries
-            .get(&actor)
-            .is_some_and(|entry| entry.actor.terminal().get().is_some());
-        if terminal {
-            actors.entries.remove(&actor);
-            self.sessions.write().remove(&actor);
-        }
-        terminal
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3331,8 +3155,8 @@ pub async fn spawn_local_actor_in_incarnation<B>(
 where
     B: KernelBehavior,
 {
-    spawn_local_actor_in_directory(name, behavior, incarnation, LocalActorDirectory::default())
-        .await
+    let (directory, _control_task) = LocalActorDirectory::start().await?;
+    spawn_local_actor_in_directory(name, behavior, incarnation, directory).await
 }
 
 /// Admit an independent root to an existing routing domain. Ractor still owns
@@ -3360,10 +3184,12 @@ where
     B: KernelBehavior,
     F: FnOnce(ActorRef) -> B,
 {
-    let identity = directory
+    let reservation = directory
         .reserve(incarnation)
-        .map_err(|error| ractor::SpawnErr::StartupFailed(std::io::Error::other(error).into()))?;
-    spawn_reserved_local_actor(name, build(identity), identity, directory).await
+        .await
+        .map_err(|error| ractor::SpawnErr::StartupFailed(error.into()))?;
+    let identity = reservation.identity();
+    spawn_reserved_local_actor(name, build(identity), reservation, directory).await
 }
 
 pub(crate) async fn spawn_local_actor_in_directory_with_identity<B>(
@@ -3375,23 +3201,25 @@ pub(crate) async fn spawn_local_actor_in_directory_with_identity<B>(
 where
     B: KernelBehavior,
 {
-    directory
+    let reservation = directory
         .claim_exact(identity)
-        .map_err(|error| ractor::SpawnErr::StartupFailed(std::io::Error::other(error).into()))?;
-    spawn_reserved_local_actor(name, behavior, identity, directory).await
+        .await
+        .map_err(|error| ractor::SpawnErr::StartupFailed(error.into()))?;
+    spawn_reserved_local_actor(name, behavior, reservation, directory).await
 }
 
-async fn spawn_reserved_local_actor<B>(
+pub(crate) async fn spawn_reserved_local_actor<B>(
     name: Option<String>,
     behavior: B,
-    identity: ActorRef,
+    reservation: run_control::ActorReservation,
     directory: LocalActorDirectory,
 ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr>
 where
     B: KernelBehavior,
 {
-    let terminal = RetainedActorExit::new();
-    let lifecycle = crate::kernel::LifecycleHandle::default();
+    let identity = reservation.identity();
+    let terminal = reservation.terminal().clone();
+    let lifecycle = reservation.lifecycle().clone();
     let (address, task) = Actor::spawn(
         name,
         LocalActor::<B>(PhantomData),
@@ -3404,6 +3232,7 @@ where
             directory,
             identity,
             lifecycle: lifecycle.clone(),
+            reservation,
         },
     )
     .await?;
