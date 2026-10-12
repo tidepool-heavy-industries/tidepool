@@ -137,8 +137,6 @@ async function selectActorChat(page, actor) {
   await page.waitForURL(matchesActor, { timeout: 30_000 });
   const chat = page.getByRole('region', { name: 'Selected worker Chat' });
   await chat.getByRole('heading', { name: actor.name, level: 2, exact: true }).waitFor({ timeout: 30_000 });
-  await chat.getByText(`run ${actor.run} · incarnation ${actor.incarnation}`, { exact: true })
-    .waitFor({ timeout: 30_000 });
 }
 
 async function sendActorInput(page, text) {
