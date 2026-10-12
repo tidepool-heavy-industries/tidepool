@@ -1388,9 +1388,12 @@ async fn persona_and_helper_lookup_deliver_pinned_skills_with_state_files_confin
         ),
     ];
     for helper in [false, true] {
-        let campaign = TestCampaign::start_with_config(
+        let campaign = TestCampaign::start_with_conversation(
             |admission| admission,
             |config| configure_persona_skill_workspace(config, helper),
+            Some(Arc::new(|_, _| {
+                Box::pin(async { Err(exomonad_actor::ConversationUnavailable::Unbound) })
+            })),
         )
         .await;
         campaign
