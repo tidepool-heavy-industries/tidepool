@@ -2235,8 +2235,7 @@ async fn run_owned(
                 .map(|record| record.admission.actor.id)
                 .chain(recovered_root.map(|(_, actor)| actor.id)),
         )
-        .await
-        .map_err(runtime_error)?;
+        .await?;
     let mut startup_intent = embedded_startup
         .intent(
             &run_root,

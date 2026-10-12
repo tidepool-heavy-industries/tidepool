@@ -17,19 +17,9 @@ fn registered_shutdown_owners(
 }
 
 fn native_recovery_driver_error() -> embedded_service::EmbeddedDriverError {
-    embedded_service::EmbeddedDriverError::NativeAdmission(Box::new(
-        exomonad_actor::ResidentActorWorkbenchError::Resident(
-            tidepool_runtime::session::resident::ResidentError::Session(
-                tidepool_runtime::session::SessionError::RecoveryStore(Box::new(
-                    tidepool_runtime::session::StoreError {
-                        path: PathBuf::from("run-recovery.sqlite"),
-                        kind: tidepool_runtime::session::StoreErrorKind::RecoveryRequired,
-                        detail: "commit outcome is uncertain".into(),
-                    },
-                )),
-            ),
-        ),
-    ))
+    embedded_service::EmbeddedDriverError::NativeAdmission(
+        exomonad_actor::NativeProviderStartError::Native("commit outcome is uncertain".into()),
+    )
 }
 
 #[tokio::test]

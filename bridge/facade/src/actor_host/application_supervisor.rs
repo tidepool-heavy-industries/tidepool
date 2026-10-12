@@ -426,7 +426,7 @@ pub(super) async fn run_interactive_applications(
                 }
             }
             Some(((actor, provider_attachment), local_actor, initial_context_ready, ready_ack)) = embedded_ready_rx.recv() => {
-                if let Err(error) = provider_attachment.validate() {
+                if let Err(error) = provider_attachment.validate().await {
                     tracing::warn!(?actor, %error, "embedded provider attachment became unavailable");
                     if let Some(cancel) = with_embedded_state(&application_owners, actor, |state| state.cancellation.clone()).flatten() {
                         cancel.send_replace(true);
@@ -487,7 +487,7 @@ pub(super) async fn run_interactive_applications(
                     tracing::warn!(?actor, %error, "embedded child attachment refused an activation");
                     continue;
                 }
-                if let Err(error) = provider_attachment.validate() {
+                if let Err(error) = provider_attachment.validate().await {
                     tracing::warn!(?actor, %error, "embedded provider readiness became unavailable");
                     if let Some(cancel) = with_embedded_state(&application_owners, actor, |state| state.cancellation.clone()).flatten() {
                         cancel.send_replace(true);
@@ -711,7 +711,7 @@ pub(super) async fn run_interactive_applications(
                                         if *cancellation_rx.borrow() || local_actor.terminal().get().is_some() {
                                             return Ok(());
                                         }
-                                        provider_attachment.validate().map_err(|error| error.to_string())?;
+                                        provider_attachment.validate().await.map_err(|error| error.to_string())?;
                                         let attachment = async {
                                             if is_root {
                                                 embedded_service::attach_root_actor(runtime.as_ref(), provider_attachment.clone(), &run_root, path, None, *installation, initial_input, Some(&binding)).await
@@ -729,7 +729,7 @@ pub(super) async fn run_interactive_applications(
                                         if *cancellation_rx.borrow() || local_actor.terminal().get().is_some() {
                                             return Ok(());
                                         }
-                                        if let Err(error) = provider_attachment.validate() {
+                                        if let Err(error) = provider_attachment.validate().await {
                                             embedded.cancellation.send_replace(true);
                                             return Err(error.to_string().into());
                                         }

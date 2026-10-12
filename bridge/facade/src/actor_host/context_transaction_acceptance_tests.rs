@@ -220,14 +220,13 @@ async fn next_round_with_state(
             }
         }
     };
-    tokio::time::timeout(CELL_TIMEOUT, waiting)
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "native actor did not reach the next model request; graph={:?}",
-                forest.inspect_host_graph().await.unwrap()
-            )
-        })
+    match tokio::time::timeout(CELL_TIMEOUT, waiting).await {
+        Ok(request) => request,
+        Err(_) => panic!(
+            "native actor did not reach the next model request; graph={:?}",
+            forest.inspect_host_graph().await,
+        ),
+    }
 }
 
 fn retained_output(request: &ResponsesRequest, call_id: &str) -> Value {
@@ -1450,19 +1449,20 @@ async fn resident_sync_context_cancel_discards_staging_and_keeps_activated_child
             }
         }
     };
-    let operation = tokio::time::timeout(
+    let operation = match tokio::time::timeout(
         CELL_TIMEOUT,
         fixture
             .context
             .while_root_live("the staged context-cancel Sleep wait", waiting),
     )
     .await
-    .unwrap_or_else(|_| {
-        panic!(
+    {
+        Ok(operation) => operation,
+        Err(_) => panic!(
             "staged cell never reached its real Sleep wait; graph={:?}",
-            fixture.context.forest.inspect_host_graph().await.unwrap()
-        )
-    })
+            fixture.context.forest.inspect_host_graph().await,
+        ),
+    }
     .expect("exact root exited before the staged cell reached its real Sleep wait");
     let conversation_identity = harness::model::ConversationIdentity::Embedded {
         run: identity.run,

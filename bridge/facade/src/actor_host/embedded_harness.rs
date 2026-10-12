@@ -1593,8 +1593,13 @@ impl Provider for EmbeddedDispatcher {
                         Ok(observation) => observation,
                         Err(error) => {
                             return unavailable_context_completion(JobOutput::Completed(Err(
-                                provider_tool_error(error, context.operation.as_ref())
-                                    .into_tool_failure(),
+                                provider_tool_error(
+                                    ResidentToolError::Unavailable(format!(
+                                        "initial context observation failed: {error}"
+                                    )),
+                                    context.operation.as_ref(),
+                                )
+                                .into_tool_failure(),
                             )))
                         }
                     };

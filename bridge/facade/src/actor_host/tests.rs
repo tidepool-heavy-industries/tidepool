@@ -2859,16 +2859,16 @@ async fn forest_operator_survives_model_root_recovery() {
                 ) -> tidepool_runtime::session::WorkbenchResponse {
                     let (reply, receive) = tokio::sync::oneshot::channel();
                     actor
-                        .address()
-                        .send_message(exomonad_actor::KernelMessage::Workbench {
-                            invocation: exomonad_actor::ActorWorkbenchInvocation::unbound(
+                        .submit_workbench(
+                            exomonad_actor::ActorWorkbenchInvocation::unbound(
                                 tidepool_runtime::session::WorkbenchRequest::from_cell_input(
                                     source,
                                 ),
                             ),
-                            control: None,
-                            reply: reply.into(),
-                        })
+                            None,
+                            reply.into(),
+                        )
+                        .await
                         .unwrap();
                     receive.await.unwrap().unwrap()
                 }

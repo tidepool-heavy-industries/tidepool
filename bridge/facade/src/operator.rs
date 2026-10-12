@@ -10,9 +10,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use exomonad_actor::{
-    ActorExitKind, ActorTerminal, KernelInvocationFailure, KernelMessage, LocalActorRef,
-};
+use exomonad_actor::{ActorExitKind, ActorTerminal, KernelInvocationFailure, LocalActorRef};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -626,22 +624,23 @@ async fn submit_invocation(
         );
     };
     let (reply, receive) = tokio::sync::oneshot::channel();
-    if actor
-        .address()
-        .send_message(KernelMessage::Workbench {
-            invocation,
-            control: None,
-            reply: reply.into(),
-        })
-        .is_err()
-    {
-        return error(
-            StatusCode::NOT_FOUND,
-            "session_not_found",
-            "Session no longer exists",
-        );
-    }
+    let actor = actor.clone();
     drop(sessions);
+    if let Err(failure) = actor.submit_workbench(invocation, None, reply.into()).await {
+        return match failure {
+            exomonad_actor::KernelCallFailure::MailboxClosed(_)
+            | exomonad_actor::KernelCallFailure::TargetExited(_) => error(
+                StatusCode::NOT_FOUND,
+                "session_not_found",
+                "Session no longer exists",
+            ),
+            failure => error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "workbench_unavailable",
+                failure.to_string(),
+            ),
+        };
+    }
     // Ractor now owns the request, including when this response future is dropped.
     match receive.await {
         Ok(Ok(result)) => bounded_response(map_result(result)),
