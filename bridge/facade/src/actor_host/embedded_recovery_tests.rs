@@ -4,6 +4,34 @@ use serde_json::json;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+struct RecoveryPersonaJev {
+    root: PathBuf,
+    phase: String,
+    calls: AtomicUsize,
+}
+
+impl exomonad_actor::JevBackend for RecoveryPersonaJev {
+    fn ask(
+        &self,
+        packet: String,
+    ) -> futures_util::future::BoxFuture<'_, Result<String, exomonad_actor::JevCallFailure>> {
+        Box::pin(async move {
+            let count = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            std::fs::write(
+                self.root.join(format!("{}.jev-calls", self.phase)),
+                count.to_string(),
+            )
+            .unwrap();
+            assert_eq!(
+                self.phase, "persona-original",
+                "cold successor replayed persona preparation"
+            );
+            let packet = serde_json::from_str(&packet).unwrap();
+            Ok(super::startup_persona_acceptance_tests::original_choices(&packet).to_string())
+        })
+    }
+}
+
 const PROCESS_TEST: &str = "actor_host::embedded_recovery_tests::production_recovery_process";
 const SECRET: &str = "offline-production-recovery-secret-is-long-enough";
 
@@ -40,6 +68,91 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
             count.to_string(),
         )
         .unwrap();
+        if matches!(
+            self.phase.as_str(),
+            "persona-original" | "persona-recovered"
+        ) {
+            std::fs::write(
+                self.root.join(format!("{}.request.json", self.phase)),
+                serde_json::to_vec(&request).unwrap(),
+            )
+            .unwrap();
+        }
+        if self.phase == "persona-original" {
+            let source = match count {
+                1 => Some((
+                    "persona-refresh",
+                    include_str!("fixtures/startup_persona_refresh.hs"),
+                )),
+                2 | 3 => {
+                    let call = if count == 2 {
+                        "persona-refresh"
+                    } else {
+                        "persona-native-refusal"
+                    };
+                    let item = request
+                        .input
+                        .iter()
+                        .find(|item| {
+                            item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == call
+                        })
+                        .expect("real synchronous persona call settled before next inference");
+                    let output: serde_json::Value =
+                        serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap();
+                    assert!(
+                        matches!(output["status"].as_str(), Some("committed" | "completed")),
+                        "{output}"
+                    );
+                    assert!(
+                        output["items"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .all(|item| item["status"] == "committed"),
+                        "{output}"
+                    );
+                    assert_eq!(
+                        super::test_campaign::committed_display_text(&output),
+                        "True"
+                    );
+                    std::fs::write(
+                        self.root.join(format!("{}.{call}.json", self.phase)),
+                        serde_json::to_vec(&output).unwrap(),
+                    )
+                    .unwrap();
+                    if count == 2 {
+                        Some((
+                            "persona-native-refusal",
+                            include_str!("fixtures/startup_persona_refuse_native.hs"),
+                        ))
+                    } else {
+                        std::fs::write(
+                            self.root.join(format!("{}.settled", self.phase)),
+                            serde_json::to_vec(&output).unwrap(),
+                        )
+                        .unwrap();
+                        None
+                    }
+                }
+                _ => panic!("persona fixture exceeded its three-request history"),
+            };
+            let items = match source {
+                Some((call, source)) => vec![super::test_campaign::scripted_tool_call(
+                    call,
+                    "haskell",
+                    harness::item::ToolInput::Custom(source.into()),
+                    harness::item::ToolExecution::Synchronous,
+                )],
+                None => vec![harness::item::Item(
+                    json!({"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"retained persona history"}]}),
+                )],
+            };
+            return Ok(ResponsesTurn {
+                response_id: format!("{}-{count}", self.phase),
+                items,
+                usage: Usage::default(),
+            });
+        }
         if matches!(self.phase.as_str(), "publish-original" | "execute-original") {
             assert!(
                 count <= 16,
@@ -145,7 +258,7 @@ fn configuration(root: &Path) -> ActorHostConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
             public_origin_scheme: crate::exomonad::EmbeddedPublicOriginScheme::Http,
             public_origin: None,
-            asset_root: root.join("assets"),
+            asset_root: super::test_campaign::hosted_browser_assets(),
             browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
             session_secret_file: Some(root.join("secret")),
             provider: crate::exomonad::EmbeddedModelProvider::Codex,
@@ -176,7 +289,15 @@ fn production_recovery_process() {
         .build()
         .unwrap();
     runtime.block_on(async {
-        let config = configuration(&root);
+        let mut config = configuration(&root);
+        if matches!(phase.as_str(), "persona-original" | "persona-recovered") {
+            if phase == "persona-original" {
+                super::startup_persona_acceptance_tests::configure_persona(&mut config, "Persona.Spec.agentSpec");
+            } else {
+                config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, config.run_directory.path()).unwrap());
+            }
+            config.jev = Some(Arc::new(RecoveryPersonaJev { root: root.clone(), phase: phase.clone(), calls: AtomicUsize::new(0) }));
+        }
         let lease = HostIncarnationLease::claim(&config.run_directory).unwrap();
         let (ready, mut incoming) = mpsc::unbounded_channel();
         let transport: Arc<dyn harness::engine::ResponsesTransport> = Arc::new(RecoveryTransport {
@@ -351,6 +472,28 @@ async fn wait_calls(root: &Path, phase: &str) {
     .unwrap();
 }
 
+async fn settled_frontier(root: &Path, identity: &harness::embedding::HostIdentity) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let store = harness::store::Store::open(root.join("run/harness/store.sqlite")).unwrap();
+            let frontier = store.embedded_round_frontier(identity).unwrap();
+            if frontier.pending_head.is_none()
+                && frontier.settled_head.is_some()
+                && matches!(
+                    store.embedded_inference_state(identity).unwrap(),
+                    harness::embedding::HostInferenceState::Idle
+                )
+            {
+                assert!(frontier.pending_interruption.is_none());
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("provider continuation settles before the crash");
+}
+
 async fn refused(root: &Path, phase: &str, process: &mut Process, expected: &str) {
     tokio::time::timeout(Duration::from_secs(360), async {
         loop {
@@ -373,8 +516,11 @@ async fn refused(root: &Path, phase: &str, process: &mut Process, expected: &str
 }
 
 fn fixture() -> PathBuf {
-    let artifacts =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/recovery-fixtures");
+    let artifacts = std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/recovery-fixtures")
+        });
     std::fs::create_dir_all(&artifacts).unwrap();
     let files = tempfile::Builder::new()
         .prefix("production-recovery-")
@@ -399,15 +545,15 @@ fn fixture() -> PathBuf {
             ],
         )
         .unwrap();
-    std::fs::create_dir(root.join("assets")).unwrap();
-    std::fs::write(root.join("assets/index.html"), "<!doctype html>").unwrap();
     std::fs::write(root.join("secret"), SECRET).unwrap();
     std::fs::write(root.join("auth.json"), "{}").unwrap();
     retained_root
 }
 
 fn finish_fixture(root: PathBuf) {
-    if std::env::var("TIDEPOOL_KEEP_TEST_LOGS").ok().as_deref() == Some("1") {
+    if std::env::var_os("TIDEPOOL_TEST_ARTIFACT_ROOT").is_some()
+        || std::env::var("TIDEPOOL_KEEP_TEST_LOGS").ok().as_deref() == Some("1")
+    {
         eprintln!("retained production recovery evidence: {}", root.display());
     } else {
         std::fs::remove_dir_all(root).unwrap();
@@ -510,6 +656,261 @@ async fn production_startup_and_cold_successor_preserve_bound_conversation_witho
         Some(embedded_recovery::conversation(&new))
     );
     drop(store);
+    finish_fixture(retained_root);
+}
+
+#[tokio::test]
+async fn production_persona_crash_preserves_edited_context_without_reinitialization() {
+    use std::os::unix::process::ExitStatusExt;
+    tidepool_testing::eval_harness::require_extract();
+    let retained_root = fixture();
+    let root = retained_root.as_path();
+    let run = root.join("run");
+    let mut original = start(root, "persona-original");
+    let original_pid = original.0.id();
+    let initial = ready(root, "persona-original", &mut original).await;
+    assert_eq!(initial["pid"].as_u64(), Some(u64::from(original_pid)));
+    let original_actor: ActorRef = serde_json::from_value(initial["actor"].clone()).unwrap();
+    let original_identity = embedded_recovery::host_identity(&run, "/root", original_actor);
+    assert!(!root.join("persona-original.calls").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("persona-original.jev-calls")).unwrap(),
+        "1"
+    );
+    input(
+        initial["address"].as_str().unwrap(),
+        &original_identity,
+        None,
+    )
+    .await;
+    cell_settled(root, "persona-original", &mut original).await;
+    wait_calls(root, "persona-original").await;
+    settled_frontier(root, &original_identity).await;
+    assert_eq!(
+        std::fs::read_to_string(root.join("persona-original.calls")).unwrap(),
+        "3"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("persona-original.jev-calls")).unwrap(),
+        "2"
+    );
+    let before =
+        exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
+            .unwrap();
+    let bound = latest_durable_root_application(&before).unwrap().unwrap();
+    assert_eq!(bound.admission.actor, original_actor);
+    assert!(bound.terminal.is_none());
+    let startup = bound.initial_context.clone().unwrap();
+    assert_eq!(
+        startup.state,
+        exomonad_actor::InitialContextState::Published
+    );
+    let source = active_source_identity(&run, true).unwrap().unwrap();
+    assert_eq!(
+        bound
+            .application
+            .as_ref()
+            .unwrap()
+            .accepted_source
+            .as_deref(),
+        Some(source.as_str())
+    );
+    let initial_note =
+        std::fs::read(root.join("project/.exomonad/state/notes/initial-attention.md")).unwrap();
+    let inspection: serde_json::Value = serde_json::from_slice(&initial_note).unwrap();
+    assert_eq!(
+        inspection["operation"],
+        startup.identity.as_ref().unwrap().operation.as_str()
+    );
+    let refresh_note =
+        std::fs::read(root.join("project/.exomonad/state/notes/refresh-preparation.md")).unwrap();
+    let refresh: serde_json::Value = serde_json::from_slice(&refresh_note).unwrap();
+    let edited = refresh["contextText"].as_str().unwrap();
+    assert_ne!(edited, startup.result.as_ref().unwrap().sections[0].body);
+    assert!(edited.contains("persona-memory-updated"));
+    let store = harness::store::Store::open(run.join("harness/store.sqlite")).unwrap();
+    let head = store
+        .agent(&harness::model::AgentPath("/root".into()))
+        .unwrap()
+        .unwrap()
+        .head_request
+        .unwrap();
+    let reference = startup
+        .publication
+        .as_ref()
+        .unwrap()
+        .authored_reference
+        .as_deref()
+        .unwrap();
+    assert!(store.read_context(&head).unwrap().blocks.iter().any(|block| matches!(block,
+        harness::context::ContextBlock::Text { reference: Some(current), role: harness::context::ContextRole::User, text, .. }
+            if current.as_str() == reference && text == edited)));
+    drop(store);
+    original.0.kill().unwrap();
+    assert_eq!(original.0.wait().unwrap().signal(), Some(9));
+    drop(
+        host_incarnation::HostRunLock::existing(&run)
+            .expect("crashed process releases its actual run lock"),
+    );
+    let after_crash =
+        exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
+            .unwrap();
+    assert!(latest_durable_root_application(&after_crash)
+        .unwrap()
+        .unwrap()
+        .terminal
+        .is_none());
+    std::fs::write(
+        root.join("project/.exomonad/state/memory/persona.md"),
+        "changed-after-crash",
+    )
+    .unwrap();
+    assert_eq!(
+        active_source_identity(&run, true).unwrap().as_deref(),
+        Some(source.as_str())
+    );
+
+    let mut recovered = start(root, "persona-recovered");
+    assert_ne!(recovered.0.id(), original_pid);
+    let resumed = ready(root, "persona-recovered", &mut recovered).await;
+    assert_eq!(resumed["pid"].as_u64(), Some(u64::from(recovered.0.id())));
+    let current_actor: ActorRef = serde_json::from_value(resumed["actor"].clone()).unwrap();
+    assert_eq!(current_actor.id, original_actor.id);
+    assert_eq!(
+        current_actor.incarnation.0,
+        original_actor.incarnation.0 + 1
+    );
+    let current_identity = embedded_recovery::host_identity(&run, "/root", current_actor);
+    let current_records =
+        exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
+            .unwrap();
+    let current = latest_durable_root_application(&current_records)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        current
+            .application
+            .as_ref()
+            .unwrap()
+            .accepted_source
+            .as_deref(),
+        Some(source.as_str())
+    );
+    assert_eq!(
+        current.startup.as_ref().unwrap().predecessor,
+        Some(original_actor)
+    );
+    let store = harness::store::Store::open(run.join("harness/store.sqlite")).unwrap();
+    assert!(store.embedded_binding_matches(&current_identity).unwrap());
+    assert!(!store.embedded_binding_matches(&original_identity).unwrap());
+    assert_eq!(
+        store
+            .agent(&harness::model::AgentPath("/root".into()))
+            .unwrap()
+            .unwrap()
+            .head_request
+            .as_ref(),
+        Some(&head)
+    );
+    assert_eq!(
+        std::fs::read(root.join("project/.exomonad/state/notes/initial-attention.md")).unwrap(),
+        initial_note
+    );
+    assert_eq!(
+        std::fs::read(root.join("project/.exomonad/state/notes/refresh-preparation.md")).unwrap(),
+        refresh_note
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("project/.exomonad/state/memory/persona.md")).unwrap(),
+        "changed-after-crash"
+    );
+    assert!(!root.join("persona-recovered.jev-calls").exists());
+    assert!(!root.join("persona-recovered.calls").exists());
+    input(
+        resumed["address"].as_str().unwrap(),
+        &current_identity,
+        None,
+    )
+    .await;
+    wait_calls(root, "persona-recovered").await;
+    settled_frontier(root, &current_identity).await;
+    assert_eq!(
+        std::fs::read_to_string(root.join("persona-recovered.calls")).unwrap(),
+        "1"
+    );
+    let request: harness::transport::ResponsesRequest = serde_json::from_slice(
+        &std::fs::read(root.join("persona-recovered.request.json")).unwrap(),
+    )
+    .unwrap();
+    let user_texts = |items: &[harness::item::Item]| {
+        items
+            .iter()
+            .filter(|item| item.0["type"] == "message" && item.0["role"] == "user")
+            .map(|item| item.0["content"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let projected = store
+        .embedded_conversation_history(&current_identity)
+        .unwrap();
+    assert_eq!(
+        user_texts(&request.input),
+        user_texts(
+            &projected
+                .history
+                .iter()
+                .map(|(_, _, item)| item.clone())
+                .collect::<Vec<_>>()
+        )
+    );
+    let actual_users = user_texts(&request.input);
+    assert_eq!(actual_users.len(), 3);
+    assert!(actual_users[0].ends_with(edited));
+    assert!(actual_users[0].contains("persona-memory-updated"));
+    assert!(!actual_users[0].contains("changed-after-crash"));
+    assert_eq!(
+        &actual_users[1..],
+        &[
+            "continue retained conversation",
+            "continue retained conversation"
+        ]
+    );
+    assert!(store.read_context(projected.head.as_ref().unwrap()).unwrap().blocks.iter().any(|block| matches!(block,
+        harness::context::ContextBlock::Text { reference: Some(current), text, .. } if current.as_str() == reference && text == edited)));
+    assert!(!root.join("persona-recovered.jev-calls").exists());
+    drop(store);
+    recovered.0.kill().unwrap();
+    assert_eq!(recovered.0.wait().unwrap().signal(), Some(9));
+    let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(&run).unwrap();
+    let journal = exomonad_actor::ActorRecoveryJournal::open_existing(
+        &anchor,
+        "actor-lifecycle.v2.jsonl",
+        Arc::new(anchor.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        journal.initial_context(current_actor).await.unwrap(),
+        Some(startup)
+    );
+    let mut stopped = journal.owner_status();
+    drop(journal);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !matches!(
+            *stopped.borrow(),
+            exomonad_actor::JournalOwnerStatus::Stopped { .. }
+        ) {
+            stopped.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("offline journal owner stops before fixture deletion");
+    assert_eq!(
+        *stopped.borrow(),
+        exomonad_actor::JournalOwnerStatus::Stopped {
+            clean: true,
+            fenced: false
+        }
+    );
     finish_fixture(retained_root);
 }
 

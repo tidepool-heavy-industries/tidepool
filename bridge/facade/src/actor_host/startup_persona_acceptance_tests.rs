@@ -40,7 +40,7 @@ impl exomonad_actor::JevBackend for PersonaJevGate {
     }
 }
 
-fn original_choices(packet: &Value) -> Value {
+pub(super) fn original_choices(packet: &Value) -> Value {
     let questions = packet["questions"].as_object().expect("native Jev packet");
     assert_eq!(
         questions.len(),
@@ -244,7 +244,7 @@ async fn settled_head(host: &HostedTestRuntime) -> harness::model::RequestId {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_context() {
+async fn actual_persona_prepares_saves_activates_and_retires_without_resurrection() {
     let mut files = tempfile::tempdir().unwrap();
     let mut repository = exomonad_worktree::testing::TestRepo::init().unwrap();
     repository
@@ -402,71 +402,41 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
         }
     }
     let forest = Arc::downgrade(&host.context.forest);
-    host.stop().await.unwrap();
+    let stopped = host.stop().await;
+    if stopped.is_err() {
+        files.disable_cleanup(true);
+        repository.disable_cleanup(true);
+    }
+    stopped.unwrap();
     assert_eq!(
         forest.strong_count(),
         0,
         "retained completed cancellation records do not keep the forest alive"
     );
 
-    let startup_before =
-        std::fs::read(workspace.join(".exomonad/state/notes/startup-preparation.md")).unwrap();
-    let updated = preparation(&workspace, "refresh-preparation");
-    std::fs::write(
-        workspace.join(".exomonad/state/memory/persona.md"),
-        "changed-after-stop",
-    )
-    .unwrap();
-    let (provider, mut requests) = hosted_script_provider();
-    let restarted = HostedTestRuntime::start_configured(&settings, &provider, |config| {
-        retained_location(config, &workspace, &run);
-        config.jev = Some(backend);
-        config.workspace_inputs = Some(
-            crate::exomonad::workspace::FrozenWorkspace::load(
-                &workspace,
-                &config.run_directory.path(),
-            )
-            .unwrap(),
-        );
-    })
-    .await;
-    if restarted.is_err() {
-        files.disable_cleanup(true);
-        repository.disable_cleanup(true);
-    }
-    let host = restarted.unwrap();
-    {
-        assert!(matches!(
-            judgments.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
-        assert_eq!(
-            std::fs::read(workspace.join(".exomonad/state/notes/startup-preparation.md")).unwrap(),
-            startup_before
-        );
-        host.input("persona-resume-activation").await.unwrap();
-        let root = harness::model::AgentPath("/root".into());
-        let mut pending = VecDeque::new();
-        let resumed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-        super::startup_context_acceptance_tests::assert_request_user_texts(
-            &host,
-            host.context.actor.identity(),
-            &resumed.request,
-            &[
-                updated["contextText"].as_str().unwrap(),
-                "persona-activation",
-                "persona-resume-activation",
-            ],
-        )
-        .await;
-        assert!(matches!(
-            judgments.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
-        resumed.finish();
-        settled_head(&host).await;
-    }
-    host.stop().await.unwrap();
+    let records =
+        exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
+            .unwrap();
+    let retired = super::latest_durable_root_application(&records)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        retired.terminal.as_ref().unwrap().kind,
+        exomonad_actor::ActorExitKind::Cancelled
+    );
+    let source = retired
+        .application
+        .as_ref()
+        .unwrap()
+        .accepted_source
+        .as_deref();
+    assert!(super::durable_root_identity(&records, source)
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        judgments.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
