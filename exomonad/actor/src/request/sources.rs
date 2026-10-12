@@ -823,6 +823,8 @@ mod tests {
         let (third, third_address, third_task) =
             fixture.spawn(third_send, Some(second.identity())).await;
         eprintln!("source-order stage: C registered {:?}", third.identity());
+        let fixture_started = std::time::Instant::now();
+        eprintln!("source-order stage: compile real request wrappers");
         let requests = (0..4)
             .map(|_| {
                 let request = registry.reserve_native(actor(100), actor(101));
@@ -833,6 +835,11 @@ mod tests {
                 request
             })
             .collect::<Vec<_>>();
+        eprintln!(
+            "source-order stage: request wrappers prepared; setup_elapsed={:?}",
+            fixture_started.elapsed()
+        );
+        let protocol_started = std::time::Instant::now();
         let bindings = requests
             .iter()
             .enumerate()
@@ -902,7 +909,10 @@ mod tests {
         first_task.await.unwrap();
         second_task.await.unwrap();
         third_task.await.unwrap();
-        eprintln!("source-order stage: collectors joined");
+        eprintln!(
+            "source-order stage: collectors joined; protocol_elapsed={:?}",
+            protocol_started.elapsed()
+        );
     }
 
     #[tokio::test]
