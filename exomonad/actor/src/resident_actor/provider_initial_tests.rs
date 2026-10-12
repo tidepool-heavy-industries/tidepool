@@ -595,3 +595,96 @@ async fn owned_publication_worker_panic_fences_actual_native_ticket_without_publ
         "unknown worker effect cannot certify run retirement"
     );
 }
+
+struct UnusedProviderIdleProbe;
+
+impl crate::ProviderIdleProbe for UnusedProviderIdleProbe {
+    fn check_idle(&self) -> futures_util::future::BoxFuture<'static, Result<bool, String>> {
+        Box::pin(async { panic!("held provider controls do not request idle retirement") })
+    }
+}
+
+async fn admitted_provider_turn(fixture: &NativeFixture) -> crate::NativeProviderTurnLease {
+    let provider = fixture
+        .actor
+        .attach_native_provider(
+            crate::ActorRuntimeObservationHandle::default(),
+            fixture.admission.native_readiness().unwrap(),
+            Arc::new(UnusedProviderIdleProbe),
+        )
+        .await
+        .unwrap();
+    provider
+        .begin_provider_turn(
+            "actual-provider-thread".into(),
+            "actual-provider-turn".into(),
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn issued_provider_lease_keeps_retired_executor_owner_alive_until_exact_settlement() {
+    use crate::kernel::lifecycle::{LifecyclePhase, ProviderPhase};
+    let fixture = NativeFixture::start().await;
+    let held = admitted_provider_turn(&fixture).await;
+    fixture.actor.lifecycle().close().await.unwrap();
+    let forest = fixture.forest.clone();
+    let mut shutdown = tokio::spawn(async move { forest.shutdown().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while fixture.actor.address().get_status() != ractor::ActorStatus::Stopped {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("actual executor retirement settles independently of external provider lease");
+    assert!(fixture.actor.terminal().get().is_some());
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut shutdown)
+            .await
+            .is_err()
+    );
+    let pending = fixture.actor.lifecycle().observation();
+    assert!(pending.owner_available);
+    assert_eq!(pending.phase, LifecyclePhase::Closing);
+    assert_eq!(pending.provider, ProviderPhase::Active);
+    held.succeed().await.unwrap();
+    let outcomes = tokio::time::timeout(std::time::Duration::from_secs(5), shutdown)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        outcomes.iter().all(|outcome| outcome.is_confirmed()),
+        "{outcomes:?}"
+    );
+    assert!(fixture.actor.lifecycle().run_finalized());
+}
+
+#[tokio::test]
+async fn active_provider_turn_does_not_join_the_staged_replacement_transaction_drain() {
+    let fixture = NativeFixture::start().await;
+    let held = admitted_provider_turn(&fixture).await;
+    // ReplacementFence uses this exact transaction drain before adopting staged custody.
+    // A provider round can await that adoption; its external lease cannot join this drain.
+    let transaction = fixture.actor.admit_transaction().await.unwrap();
+    fixture.actor.lifecycle().close().await.unwrap();
+    drop(transaction);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fixture.actor.lifecycle().wait_transactions(),
+    )
+    .await
+    .expect("same-round replacement fence must not await its provider lease")
+    .unwrap();
+    assert_eq!(
+        fixture.actor.lifecycle().observation().provider,
+        crate::kernel::lifecycle::ProviderPhase::Active
+    );
+    held.succeed().await.unwrap();
+    assert!(fixture
+        .forest
+        .shutdown()
+        .await
+        .iter()
+        .all(|outcome| outcome.is_confirmed()));
+}

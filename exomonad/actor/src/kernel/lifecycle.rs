@@ -61,6 +61,7 @@ pub struct LifecycleSnapshot {
     pub transactions: usize,
     pub ingress: usize,
     pub provider: ProviderPhase,
+    provider_sequence: Option<u64>,
     pub(super) resident: Option<resident::ResidentSnapshot>,
 }
 
@@ -453,6 +454,7 @@ impl LifecycleHandle {
             transactions: 0,
             ingress: 0,
             provider: ProviderPhase::Detached,
+            provider_sequence: None,
             resident: None,
         });
         let arguments = LifecycleArguments {
@@ -669,6 +671,7 @@ impl LifecycleHandle {
                 .await
                 .map_err(|_| KernelCallFailure::TargetUnavailable(self.identity))?;
         }
+        self.wait_provider_settlement().await?;
         self.send(LifecycleCommand::FinishRun {
             grant,
             reply: send.into(),
@@ -679,6 +682,23 @@ impl LifecycleHandle {
             .wait(None)
             .await
             .map_err(|_| KernelCallFailure::TargetUnavailable(self.identity))
+    }
+
+    async fn wait_provider_settlement(&self) -> Result<(), KernelCallFailure> {
+        let mut observations = self.observations.clone();
+        loop {
+            let snapshot = observations.borrow_and_update().clone();
+            if !snapshot.owner_available {
+                return Err(self.unavailable_failure());
+            }
+            if snapshot.provider_sequence.is_none() {
+                return Ok(());
+            }
+            observations
+                .changed()
+                .await
+                .map_err(|_| self.unavailable_failure())?;
+        }
     }
 
     #[cfg(test)]
@@ -888,6 +908,14 @@ impl LifecycleState {
                 .is_some_and(resident::ResidentState::has_pending)
     }
 
+    fn retirement_pending(&self) -> bool {
+        self.has_pending()
+            || self
+                .provider
+                .as_ref()
+                .is_some_and(|provider| provider.sequence.is_some())
+    }
+
     pub(super) fn is_closed(&self) -> bool {
         matches!(
             self.phase,
@@ -932,6 +960,10 @@ impl LifecycleState {
                 .provider
                 .as_ref()
                 .map_or(ProviderPhase::Detached, |provider| provider.phase),
+            provider_sequence: self
+                .provider
+                .as_ref()
+                .and_then(|provider| provider.sequence),
             resident: self.resident.as_ref().map(resident::snapshot),
         });
     }
@@ -1118,7 +1150,7 @@ impl Actor for LifecycleCoordinator {
             LifecycleCommand::FinishRun { grant, reply } => {
                 let exact = grant.actor() == state.identity
                     && grant.lifecycle().address.get_id() == myself.get_id();
-                let settled = !state.has_pending()
+                let settled = !state.retirement_pending()
                     && state.tasks.is_empty()
                     && matches!(state.native_settlement, NativeSettlement::Confirmed)
                     && state.transfer.unconfirmed.is_none();
@@ -1173,10 +1205,8 @@ impl Actor for LifecycleCoordinator {
                 state.phase = LifecyclePhase::Closing;
                 // Retain the exact cell for finalization, including forgotten membership.
                 // Closing/Retired phases already prohibit new executor ingress.
-                if let Some(provider) = state.provider.as_mut() {
-                    provider.turn.take();
-                    provider.phase = ProviderPhase::NeedsAttention;
-                }
+                // The external driver still owns an admitted provider lease.
+                // Keep its turn until the exact FinishProvider outcome arrives.
             }
             LifecycleCommand::SuccessorDrainReceipt(reply) => {
                 let resident_confirmed = state
@@ -1573,7 +1603,7 @@ impl Actor for LifecycleCoordinator {
             LifecycleCommand::Transfer(command) => transfer::handle(state, &myself, *command),
         }
         if state.retirement_requested
-            && !state.has_pending()
+            && !state.retirement_pending()
             && state.phase != LifecyclePhase::Finalized
         {
             state.phase = LifecyclePhase::Retired;
