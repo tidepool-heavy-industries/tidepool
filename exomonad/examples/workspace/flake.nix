@@ -2,7 +2,7 @@
   description = "Haskell this workspace compiles but does not carry: jev-dsl, pinned.";
 
   inputs.jev-dsl = {
-    url = "github:inanna-malick/jev-dsl/74ecea515617906d1a126289709ae9fc4c32cbc4";
+    url = "github:inanna-malick/jev-dsl/38e8fe361b3437363e8cef7b684d4a9af7a526ef";
     flake = false;
   };
 
