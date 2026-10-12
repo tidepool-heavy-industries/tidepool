@@ -18123,8 +18123,8 @@ pub(crate) mod request_tests {
             let workbench = ResidentActorWorkbench::new(machines, source, None);
             let before = tidepool_extract_cmd::extract_spawn_count();
             let first = Arc::new(workbench.prepare_explicit_tools(context.clone(), 1, vec![], installer.clone()).await.unwrap());
-            assert!(!installer.published_source_original_selections().is_empty(),
-                "the fixture must carry actual public source provenance");
+            assert!(installer.published_source_original_selections().is_empty(),
+                "ordinary captured binding retains private provenance without public source selection");
             let public_before = workbench.access.with_machine(context.clone(), |session, context, _| {
                 Ok(session.public_visibility_snapshot_in(context.placement.lexical_scope))
             }).await.unwrap();
