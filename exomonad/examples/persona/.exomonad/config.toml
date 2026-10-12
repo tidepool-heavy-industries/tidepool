@@ -16,4 +16,5 @@ spec = "AgentSpec.agentSpec"
 jev-dsl = ["core"]
 
 [prompts]
+base = "prompts/base.md"
 agent = "prompts/agent.md"
