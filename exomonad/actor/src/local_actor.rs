@@ -3297,7 +3297,7 @@ where
         .map_err(|error| ractor::SpawnErr::StartupFailed(error.into()))?
     {
         Ok(run_control::RootAdmissionOutcome::Actor(actor, task)) => Ok((actor, task)),
-        Err(error) => Err(preparation_spawn_failure(error)),
+        Err(error) => Err(KernelContext::preparation_spawn_failure(error)),
         _ => unreachable!("existing actor producer returns only actor outcomes"),
     }
 }
