@@ -15,7 +15,7 @@ use tokio::sync::watch;
 use super::{HostedCellPublications, HostedCellSlot, KernelCallFailure, KernelMessage};
 use crate::{ActorRef, ActorRuntimeObservationHandle, ActorTerminal, RetainedActorExit};
 
-pub(super) mod resident;
+pub(crate) mod resident;
 
 #[cfg(test)]
 mod control_cluster_tests;
@@ -281,7 +281,7 @@ impl LifecycleHandle {
     pub fn identity(&self) -> ActorRef { self.identity }
     pub fn observation(&self) -> LifecycleSnapshot { self.observations.borrow().clone() }
     pub(crate) fn hosted_cell(&self) -> &HostedCellSlot { &self.hosted_cell }
-    pub(super) fn resident_snapshot(&self) -> Option<resident::ResidentSnapshot> {
+    pub(crate) fn resident_snapshot(&self) -> Option<resident::ResidentSnapshot> {
         self.observations.borrow().resident.clone()
     }
     pub(super) fn address(&self) -> &RactorRef<LifecycleCommand> { &self.address }

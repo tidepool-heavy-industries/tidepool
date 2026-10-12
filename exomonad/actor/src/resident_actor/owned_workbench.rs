@@ -277,6 +277,10 @@ impl WorkbenchPublicOwner {
         }))
     }
 
+    pub(crate) fn native_readiness(&self) -> Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>> {
+        self.readiness.clone()
+    }
+
     pub(crate) fn durable(&self) -> Option<&tidepool_runtime::session::RecoveryPublicOwner> {
         self.readiness.as_ref().map(|native| native.durable_owner())
     }

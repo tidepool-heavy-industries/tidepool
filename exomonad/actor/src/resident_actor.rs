@@ -1726,17 +1726,16 @@ enum RootPublicOwnerPosture {
 }
 
 #[derive(Clone)]
-enum ActorPublicOwnerPlane {
+pub(crate) enum ActorPublicOwnerPlane {
     Ephemeral(Arc<WorkbenchPublicOwner>),
     DurablePending(tidepool_runtime::session::RecoveryPublicOwner),
     DurableReady(Arc<WorkbenchPublicOwner>),
 }
 
 impl ActorPublicOwnerPlane {
-    fn ready(&self) -> Option<&Arc<WorkbenchPublicOwner>> {
+    pub(crate) fn ready(&self) -> Option<&Arc<WorkbenchPublicOwner>> {
         match self {
-            Self::Ephemeral(owner) | Self::DurableReady(owner) if owner.is_ready() => Some(owner),
-            Self::Ephemeral(_) | Self::DurableReady(_) => None,
+            Self::Ephemeral(owner) | Self::DurableReady(owner) => Some(owner),
             Self::DurablePending(_) => None,
         }
     }
@@ -2187,7 +2186,7 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RootStartupState {
+pub(crate) enum RootStartupState {
     Pending,
     Released,
     Activated,
