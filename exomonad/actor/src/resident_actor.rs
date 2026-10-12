@@ -13780,38 +13780,59 @@ where
         (LocalActorRef, ractor::concurrency::JoinHandle<()>),
         Box<dyn std::error::Error + Send + Sync>,
     > {
-        let admission = self.environment.root_admission_closed.read().await;
-        if *admission {
-            return Err(std::io::Error::other("swarm root admission is closed").into());
-        }
-        let (placement, outcome) = self
-            .environment
-            .runner
-            .prepare_root_program(self.session, compiled)
-            .await?;
-        match self
-            .admit_prepared_root(
-                ActorDescriptor::new(label, placement).with_capabilities(role),
-                outcome,
-                &admission,
-                PreparedRootAdmission {
-                    replay,
-                    identity,
-                    ..Default::default()
-                },
-            )
-            .await
-        {
-            Ok(root) => Ok(root),
-            Err(error) => {
-                if crate::local_actor::startup_cleanup(&error).is_none() {
-                    self.environment
+        let reservation = match identity {
+            Some(identity) => self.directory.claim_exact(identity).await?,
+            None => self.directory.reserve(self.incarnation).await?,
+        };
+        let environment = self.environment.clone();
+        let directory = self.directory.clone();
+        let session = self.session;
+        let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
+            Box::pin(async move {
+                let result = async {
+                    let (placement, outcome) = environment
                         .runner
-                        .retire_root_placement(placement)
+                        .prepare_root_program(session, compiled)
                         .await?;
+                    ticket.placement_prepared(placement);
+                    let descriptor = ActorDescriptor::new(label, placement).with_capabilities(role);
+                    let mut behavior =
+                        ResidentKernelBehavior::prepared(descriptor, environment.clone(), outcome);
+                    if let Some(replay) = replay {
+                        behavior.workbench_executions = replay;
+                    }
+                    match crate::local_actor::spawn_reserved_local_actor(
+                        None,
+                        behavior,
+                        reservation,
+                        directory,
+                    )
+                    .await
+                    {
+                        Ok((actor, task)) => Ok(
+                            crate::local_actor::run_control::RootAdmissionOutcome::Actor(
+                                actor, task,
+                            ),
+                        ),
+                        Err(error) => {
+                            if crate::local_actor::startup_cleanup(&error).is_none() {
+                                environment.runner.retire_root_placement(placement).await?;
+                                ticket.placement_released(placement);
+                            }
+                            Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+                        }
+                    }
                 }
-                Err(Box::new(error))
+                .await;
+                (result, crate::CleanupComponentOutcome::Confirmed)
+            })
+        });
+        match self.directory.prepare_root(operation).await? {
+            Ok(crate::local_actor::run_control::RootAdmissionOutcome::Actor(actor, task)) => {
+                Ok((actor, task))
             }
+            Err(error) => Err(error),
+            _ => Err(std::io::Error::other("program producer returned incompatible result").into()),
         }
     }
 
