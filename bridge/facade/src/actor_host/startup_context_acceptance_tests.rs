@@ -268,12 +268,12 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
     )
     .unwrap();
     let retained_after_startup = observation(&host);
-    let scenario_attachment = &attachment;
+    let scenario_attachment = attachment.clone();
     host.run_scenario(|host| {
         Box::pin(async move {
             let retained = observation(host).await;
             assert_eq!(retained.state, InitialContextState::Published);
-            exercise_durable_attachment(scenario_attachment, &retained);
+            exercise_durable_attachment(&scenario_attachment, &retained);
             let identity = retained.identity.as_ref().unwrap();
             assert_eq!(identity.actor, host.context.actor.identity());
             assert_eq!(held.packet["operation"], identity.operation.as_str());
