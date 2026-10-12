@@ -245,8 +245,8 @@ async fn settled_head(host: &HostedTestRuntime) -> harness::model::RequestId {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_context() {
-    let files = tempfile::tempdir().unwrap();
-    let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
+    let mut files = tempfile::tempdir().unwrap();
+    let mut repository = exomonad_worktree::testing::TestRepo::init().unwrap();
     repository
         .writer()
         .commit_file("README.md", "source\n", "seed")
@@ -418,7 +418,7 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
     )
     .unwrap();
     let (provider, mut requests) = hosted_script_provider();
-    let host = HostedTestRuntime::start_configured(&settings, &provider, |config| {
+    let restarted = HostedTestRuntime::start_configured(&settings, &provider, |config| {
         retained_location(config, &workspace, &run);
         config.jev = Some(backend);
         config.workspace_inputs = Some(
@@ -429,8 +429,12 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
             .unwrap(),
         );
     })
-    .await
-    .unwrap();
+    .await;
+    if restarted.is_err() {
+        files.disable_cleanup(true);
+        repository.disable_cleanup(true);
+    }
+    let host = restarted.unwrap();
     {
         assert!(matches!(
             judgments.try_recv(),

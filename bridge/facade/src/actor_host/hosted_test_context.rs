@@ -498,6 +498,35 @@ impl HostedTestDiagnostics {
         Ok(Some(directory.keep()))
     }
 
+    fn recovery_observation(&self) -> serde_json::Value {
+        let records = exomonad_actor::ActorRecoveryJournal::read_observed(
+            &self.run_root.join("actor-lifecycle.v2.jsonl"),
+        )
+        .map(|records| {
+            let roots = records.into_iter()
+                .filter(|record| record.admission.actor_path.as_deref() == Some("root"))
+                .collect::<Vec<_>>();
+            let observed_count = roots.len();
+            // This limits private diagnostic rows, never recovery admission.
+            let included = roots.into_iter().rev().take(16)
+                .map(|record| json!({
+                    "actor": record.admission.actor,
+                    "startup_predecessor": record.startup.as_ref().and_then(|intent| intent.predecessor),
+                    "accepted_source": record.application.as_ref().and_then(|application| application.accepted_source.as_deref()),
+                    "conversation_bound": record.application.as_ref().is_some_and(|application| application.conversation.is_some()),
+                    "terminal_kind": record.terminal.as_ref().map(|terminal| &terminal.kind),
+                }))
+                .collect::<Vec<_>>();
+            json!({ "observed_count": observed_count, "included": included })
+        })
+        .map_err(|error| error.to_string());
+        let source = crate::exomonad::source::SourceLayer::new(&self.run_root)
+            .read_active()
+            .map(|source| source.map(|source| source.identity))
+            .map_err(|error| error.to_string());
+        json!({ "root_records": records, "active_source": source })
+    }
+
     fn report(&self, scenario: &ScenarioOutcome, cleanup: &CleanupOutcome) -> Result<(), String> {
         Self::write_report(
             &self.root,
@@ -508,6 +537,7 @@ impl HostedTestDiagnostics {
                 "cleanup": cleanup,
                 "workspace": self.workspace,
                 "run_root": self.run_root,
+                "recovery_observation": self.recovery_observation(),
             }),
         )
     }
@@ -1526,6 +1556,8 @@ impl HostedTestRuntime {
                 started
             }
             failure => {
+                repository.disable_cleanup(true);
+                runtime_directory.disable_cleanup(true);
                 let failure = match failure {
                     Ok(Err(error)) => error,
                     Err(_) => StartupFailure::Deadline,
