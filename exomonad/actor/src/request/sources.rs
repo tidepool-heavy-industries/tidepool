@@ -47,11 +47,11 @@ pub struct SourceDelivery {
 /// One destination shared by an actor's source connections. The guard owns
 /// the set independently of the actor identity currently receiving its events.
 #[derive(Clone)]
-struct SourceDestination(Arc<parking_lot::Mutex<LocalActorRef>>);
+struct SourceDestination(Arc<crate::kernel::LifecycleHandle>);
 
 impl SourceDestination {
     fn identity(&self) -> ActorRef {
-        self.0.lock().identity()
+        self.0.source_recipient()
     }
 
     fn same_connections(&self, other: &Self) -> bool {
@@ -59,7 +59,7 @@ impl SourceDestination {
     }
 
     fn send(&self, delivery: SourceDelivery) -> Result<(), crate::KernelCallFailure> {
-        self.0.lock().source(delivery)
+        self.0.dispatch_source(delivery)
     }
 }
 
@@ -178,20 +178,16 @@ impl ActorSourceConnections {
             }));
     }
 
-    /// Fence the old mailbox before later publications can reach the successor.
-    /// The fence must not acquire the request registry: publishers lock that
-    /// registry before this destination. Failure leaves the destination intact.
-    pub(crate) fn handoff<E>(
+    /// The predecessor closes and selects forwarding before this routing path
+    /// is shortened. Publications racing the handoff follow the same chain.
+    pub(crate) async fn handoff(
         &mut self,
-        successor: LocalActorRef,
-        fence: impl FnOnce(&LocalActorRef) -> Result<(), E>,
-    ) -> Result<(), E> {
-        let mut recipient = self.recipient.0.lock();
-        fence(&recipient)?;
+        grant: crate::local_actor::run_control::ReplacementIngressGrant,
+    ) -> Result<(), crate::KernelCallFailure> {
+        self.recipient.0.retarget_sources(grant.clone()).await?;
         for command in &mut self.commands {
-            command.handoff(successor.identity());
+            command.handoff(grant.successor());
         }
-        *recipient = successor;
         Ok(())
     }
 }
@@ -253,7 +249,7 @@ impl RequestRegistry {
                 return Err(ReplyError::CancellationRequested);
             }
         }
-        let recipient = SourceDestination(Arc::new(parking_lot::Mutex::new(recipient)));
+        let recipient = SourceDestination(Arc::new(recipient.lifecycle().clone()));
         for (slot, request, kind) in sources {
             let Some(record) = state.requests.get_mut(request) else {
                 unreachable!("validated source remains under the publication lock");

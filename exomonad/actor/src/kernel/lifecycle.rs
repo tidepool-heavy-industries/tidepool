@@ -50,6 +50,7 @@ pub enum NativeSettlement {
 #[derive(Clone)]
 pub struct LifecycleSnapshot {
     pub owner_available: bool,
+    pub(crate) source_recipient: ActorRef,
     pub native_settlement: NativeSettlement,
     pub transfer_unconfirmed: Option<String>,
     pub phase: LifecyclePhase,
@@ -90,6 +91,7 @@ pub(super) struct LifecycleState {
     pub(super) phase: LifecyclePhase,
     executor: Option<RactorRef<KernelMessage>>,
     hosted_sealed: bool,
+    source_forward: Option<LifecycleHandle>,
     operation_sequence: u64,
     retirement_requested: bool,
     owner_available: bool,
@@ -153,6 +155,18 @@ pub(super) enum LifecycleCommand {
     },
     Transaction(RpcReplyPort<Result<ActorAdmissionLease, KernelCallFailure>>),
     ResourceAdmission(RpcReplyPort<Result<ActorAdmissionLease, KernelCallFailure>>),
+    Source {
+        delivery: crate::SourceDelivery,
+        reply: Option<RpcReplyPort<Result<(), KernelCallFailure>>>,
+    },
+    BeginReplacement {
+        grant: crate::local_actor::run_control::ReplacementIngressGrant,
+        reply: RpcReplyPort<Result<(), KernelCallFailure>>,
+    },
+    RetargetSources {
+        grant: crate::local_actor::run_control::ReplacementIngressGrant,
+        reply: RpcReplyPort<Result<(), KernelCallFailure>>,
+    },
     TransactionReleased(u64),
     IngressReleased(u64),
     AttachProvider {
@@ -389,6 +403,7 @@ impl LifecycleHandle {
     ) -> Result<Self, ractor::SpawnErr> {
         let (observations, observe) = watch::channel(LifecycleSnapshot {
             owner_available: true,
+            source_recipient: identity,
             native_settlement: NativeSettlement::Confirmed,
             transfer_unconfirmed: None,
             phase: LifecyclePhase::Starting,
@@ -523,6 +538,44 @@ impl LifecycleHandle {
         self.send(LifecycleCommand::Enqueue {
             message: Box::new(message),
             control,
+            reply: send.into(),
+        })?;
+        self.receive(receive).await?
+    }
+
+    pub(crate) fn dispatch_source(
+        &self,
+        delivery: crate::SourceDelivery,
+    ) -> Result<(), KernelCallFailure> {
+        self.send(LifecycleCommand::Source {
+            delivery,
+            reply: None,
+        })
+    }
+
+    pub(crate) fn source_recipient(&self) -> ActorRef {
+        self.observations.borrow().source_recipient
+    }
+
+    pub(crate) async fn begin_replacement(
+        &self,
+        grant: crate::local_actor::run_control::ReplacementIngressGrant,
+    ) -> Result<(), KernelCallFailure> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.send(LifecycleCommand::BeginReplacement {
+            grant,
+            reply: send.into(),
+        })?;
+        self.receive(receive).await?
+    }
+
+    pub(crate) async fn retarget_sources(
+        &self,
+        grant: crate::local_actor::run_control::ReplacementIngressGrant,
+    ) -> Result<(), KernelCallFailure> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.send(LifecycleCommand::RetargetSources {
+            grant,
             reply: send.into(),
         })?;
         self.receive(receive).await?
@@ -728,6 +781,10 @@ impl LifecycleState {
     pub(super) fn publish(&self) {
         self.observations.send_replace(LifecycleSnapshot {
             owner_available: self.owner_available,
+            source_recipient: self
+                .source_forward
+                .as_ref()
+                .map_or(self.identity, |handle| handle.identity),
             native_settlement: self.native_settlement.clone(),
             transfer_unconfirmed: self.transfer.unconfirmed.clone(),
             phase: self.phase,
@@ -862,6 +919,7 @@ impl Actor for LifecycleCoordinator {
             phase: LifecyclePhase::Starting,
             executor: None,
             hosted_sealed: false,
+            source_forward: None,
             operation_sequence: 0,
             retirement_requested: false,
             owner_available: true,
@@ -935,6 +993,47 @@ impl Actor for LifecycleCoordinator {
                     }
                     _ => Err(KernelCallFailure::TargetUnavailable(state.identity)),
                 };
+                let _ = reply.send(result);
+            }
+            LifecycleCommand::Source { delivery, reply } => {
+                // Cast directly along the selected chain: spawning per-event tasks
+                // would reorder publications relative to the replacement fence.
+                if let Some(next) = &state.source_forward {
+                    let _ = next
+                        .address
+                        .cast(LifecycleCommand::Source { delivery, reply });
+                } else {
+                    let result = state.enqueue(&myself, KernelMessage::Source(delivery), false);
+                    if let Some(reply) = reply {
+                        let _ = reply.send(result);
+                    }
+                }
+            }
+            LifecycleCommand::BeginReplacement { grant, reply } => {
+                let result = if grant.predecessor() != state.identity
+                    || state.phase != LifecyclePhase::Open
+                {
+                    Err(KernelCallFailure::MailboxClosed(state.identity))
+                } else {
+                    state.source_forward = Some(grant.successor_handle().clone());
+                    state.phase = LifecyclePhase::Closing;
+                    state.enqueue(&myself, KernelMessage::ReplacementFence, true)
+                };
+                state.publish();
+                let _ = reply.send(result);
+            }
+            LifecycleCommand::RetargetSources { grant, reply } => {
+                let current = state
+                    .source_forward
+                    .as_ref()
+                    .map_or(state.identity, |handle| handle.identity);
+                let result = if current == grant.predecessor() || current == grant.successor() {
+                    state.source_forward = Some(grant.successor_handle().clone());
+                    Ok(())
+                } else {
+                    Err(KernelCallFailure::TargetUnavailable(state.identity))
+                };
+                state.publish();
                 let _ = reply.send(result);
             }
             LifecycleCommand::Enqueue {

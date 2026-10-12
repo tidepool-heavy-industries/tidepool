@@ -107,10 +107,12 @@ where
             ));
         }
         let session_startup_custody = staged.session_startup.clone();
-        let descriptor = staged
-            .descriptor
-            .clone()
-            .with_supervisor_parent(kernel.supervisor_identity());
+        let descriptor = staged.descriptor.clone().with_supervisor_parent(
+            kernel
+                .supervisor_identity()
+                .await
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?,
+        );
         let (transfer, custody) = tokio::sync::oneshot::channel();
         let session_startup = staged.session_startup.take();
         let exit_destination = staged.exit_destination.take();
@@ -123,7 +125,7 @@ where
         behavior.child_session_startup = session_startup;
         behavior.child_placement_custody = Some(placement_custody.clone());
         behavior.exit_destination = exit_destination;
-        let (successor, parent_admission) = match kernel.spawn_successor(behavior).await {
+        let successor = match kernel.spawn_successor(behavior).await {
             Ok(successor) => successor,
             Err(error) => {
                 if let Some(cleanup) = crate::local_actor::startup_cleanup(&error) {
@@ -148,7 +150,6 @@ where
         };
         // Directory insertion committed this successor's membership. Admission
         // guards protect preparation, not the later custody transfer.
-        drop(parent_admission);
         drop(root_admission);
         drop(session_startup_custody);
         if let Err(error) = self.transfer_worktree(successor.identity()).await {
@@ -162,32 +163,23 @@ where
                 })?;
             return Err(error);
         }
-        let fence = if let Some(sources) = &mut self.source_connections {
-            sources.handoff(successor.clone(), LocalActorRef::fence_replacement)
-        } else {
-            kernel
-                .resolve(kernel.identity())
-                .ok_or_else(|| KernelBehaviorError {
-                    detail: "replacement predecessor is absent from its directory".into(),
-                    diagnostic: None,
-                })
-                .and_then(|actor| actor.fence_replacement())
-        };
+        let grant = kernel
+            .directory
+            .replacement_ingress_grant(kernel.identity(), successor.identity())
+            .await
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let fence = kernel.lifecycle().begin_replacement(grant.clone()).await;
         if let Err(error) = fence {
-            // No source moved and admission stayed open. Restore the original
-            // owner with a new binding generation before discarding the successor.
-            let restored = self.transfer_worktree(kernel.identity()).await;
-            let cleanup = successor.abort_prepared_replacement().await;
-            let mut detail = error.to_string();
-            if let Err(restore) = restored {
-                detail.push_str(&format!(
-                    "; original workspace authority could not be restored: {restore}; custody retained"
-                ));
-            }
-            if let Err(cleanup) = cleanup {
-                detail.push_str(&format!("; candidate cleanup failed: {cleanup}"));
-            }
-            return Err(ResidentActorWorkbenchError::ActorProtocol(detail));
+            // A lost reply may follow the committed close. Preserve staged
+            // custody rather than undoing a possibly installed relationship.
+            self.replacement_transfer = Some(ReplacementTransfer { send: transfer });
+            return Err(ResidentActorWorkbenchError::ActorProtocol(error.to_string()));
+        }
+        if let Some(sources) = &mut self.source_connections {
+            sources
+                .handoff(grant)
+                .await
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         }
         self.replacement_transfer = Some(ReplacementTransfer { send: transfer });
         Ok(successor)
