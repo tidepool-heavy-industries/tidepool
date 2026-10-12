@@ -11,8 +11,12 @@ changes on the preserved seed commit
 existing workspace override; the host still appends the shared API guide.
 The agent prompt seeds embodied curiosity, ambitious Haskell composition,
 interaction through Jev and GUI, and engineering in the spirit of customizing
-one's own Emacs. Ancestor notes are explicitly optional. Activity begins through
-human interaction; no autonomous scheduler is introduced.
+one's own Emacs. Astra/System 2 and Jev/System 1 frame an editable hybrid
+cognition; the companion may locate its sense of self across that ensemble and
+steer its recursive self-improvement with human assistance. The base embeds
+verbatim MIT-licensed TypeSafe guidance with attribution and the license in the
+prompt directory. Ancestor notes are explicitly optional. Activity begins
+through human interaction; no autonomous scheduler is introduced.
 
 The native and browser results below belong to the original implementation.
 This follow-up adds no Haskell snippets or executable changes. Its checks cover

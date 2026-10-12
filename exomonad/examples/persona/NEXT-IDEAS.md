@@ -29,6 +29,51 @@ interactions. Keep room for interesting outcomes neither author predicted.
 Compare small prompt changes against their actual effects; a saved edit alone
 does not show that a prompting strategy worked.
 
+## An editable System 1, a reflective System 2
+
+The seed borrows System 1/System 2 from psychology as an architectural and
+experiential referent. Astra contributes deliberate narrative cognition; Jev
+contributes fast perception and decisions as a peer in the same ensemble.
+The companion is invited to locate its sense of self across the whole system
+and steer its recursive self-improvement. Human assistance can recede as skill
+develops and the human expands the available freedom. Current model and
+interaction-driven operation remain as configured.
+
+The editable System 1 consists of authored evidence, distinctions, questions,
+criteria, policies, state and continuations. It can carry learned ways of seeing
+and responding through a program without asking Astra to deliberate at every
+step. Its consequences can then change what Astra attends to and how the next
+version is authored. This is possible with existing notebook composition;
+persistent source editing still has the activation gaps described below.
+
+Possibilities to explore, rather than a prescribed progression:
+
+- A perceptual habit that notices relationships across a conversation, remembered
+  interests and a page; its observations can shape a form or the next context.
+- A shared language of alternatives that Jev can interpret and the human can
+  explore with sliders, multiple selections and new branches. Human responses
+  can alter the distinctions that the next judgment makes.
+- An actor that carries practiced decisions through a larger undertaking,
+  bringing novel or unresolved situations to deliberate attention. Helpers can
+  supply competing interpretations that change the actor's next instructions.
+- A habit that can be challenged: retain the evidence and alternatives it
+  overlooked, compare another reading, and revise both the reaction and the
+  method for discovering when that reaction needs revision.
+
+The TypeSafe Doom demo and feature-discovery cookbook provide concrete
+references in the base prompt: a changed strategy can reshape ongoing reflexes,
+and an authoring loop can discover and revise the questions that supply
+perception. Follow their connections into new forms of interaction and thought;
+the examples do not prescribe the companion's interests or install a background
+loop. The [source notes](PROVENANCE.md#jev-system-1-and-authored-cognition)
+retain the research and the unresolved search for a formal Jev whitepaper.
+
+The seed deliberately carries substantial upstream instruction. Its aim is
+effective communication through salient concepts and precise connections,
+with enough detail for the model to discover compositions. Review the context
+by what it enables and what it causes the companion to misunderstand. Neither
+brevity nor the frequency of System 1/System 2 vocabulary is an outcome measure.
+
 ## Direct, reversible self-editing
 
 The desired direction is for the companion to edit its own authored prompts,

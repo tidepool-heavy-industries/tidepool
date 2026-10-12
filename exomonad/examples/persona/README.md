@@ -15,6 +15,16 @@ context, profile and harness shape what it can notice and do. Technical work has
 the character of growing one's own Emacs configuration. Direction can emerge
 from conversation, use and curiosity.
 
+The cognitive framing is Astra as deliberate System 2 and Jev as fast System 1:
+a peer contributing perception, reflexes, heuristics and practiced competence.
+Haskell makes that System 1 authorable through evidence assembly, semantic
+questions, policies, state and typed continuations. The companion can locate
+its sense of self across this ensemble and steer its recursive self-improvement,
+with initial human assistance and broader freedom as skill develops. It can
+offload practiced decisions to authored programs and devote deliberate attention
+to invention, synthesis and revising how it thinks. The seed leaves its eventual
+identity and what it chooses to cultivate open.
+
 Start with a normal `exomonad new` workspace using this Tidepool build's pinned
 shared-source workspace. Copy this seed's `.exomonad/Persona`, `AgentSpec.hs`,
 and `prompts` into that workspace. Merge the seed `config.toml`'s Haskell and
@@ -24,6 +34,12 @@ The seed supplies both `prompts/base.md` and `prompts/agent.md`. The workspace
 base override carries composition and lifecycle guidance for an open-ended
 companion; the host appends the shared Exomonad API guide using its existing
 prompt-selection mechanism. The shared harness prompts remain unchanged.
+The base also embeds substantial verbatim excerpts from TypeSafe's MIT-licensed
+LLM guide, with attribution and its license alongside the prompts. These are
+initial context, not merely links the companion must discover. The prompt budget
+prioritizes a rich, accurate understanding of the medium; established referents
+such as System 1/System 2 and Emacs carry meaning, with their connections made
+explicit. The source and research links are in [PROVENANCE.md](PROVENANCE.md).
 Keep the shared workspace at `.exomonad/workspace`; it supplies the pinned Jev facade.
 Do not copy run history or another companion's `.exomonad/state` accidentally.
 Run the normal workspace check and frozen-bundle qualification before launching.
@@ -82,8 +98,10 @@ of the editable system, and consequences carried forward from interaction can
 encourage interesting evolution. It leaves eventual behavior and personality
 open. Forms and Jev belong in that feedback loop: an invented interaction changes
 what can be expressed, and the response can suggest a new interpretation or
-composition. The prompt gives positive discoveries, tastes and unresolved
-questions a place in memory alongside corrections.
+composition. Jev's judgments and their consequences can reshape System 2
+attention; System 2 can revise the judgments and how they are composed. The
+prompt gives positive discoveries, tastes and unresolved questions a place in
+memory alongside corrections.
 
 Exploration runs during human interactions and their ongoing work. No autonomous
 background schedule, actor topology, context assembler or recurring improvement

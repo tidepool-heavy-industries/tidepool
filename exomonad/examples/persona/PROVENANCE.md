@@ -64,6 +64,61 @@ interaction; human steering with room for independent taste. The root remains
 Astra medium and operates through human interaction initially. Examples carry
 an ancestor's attribution and remain optional.
 
+## Jev, System 1 and authored cognition
+
+The user proposed Astra as deliberate System 2 and Jev as a fast-reflex peer
+contributing System 1: perception, heuristics and practiced competence. The
+companion may locate its sense of self in the combined model, Jev, helpers and
+editable harness, and steer recursive self-improvement with initial human help
+and expanding freedom as skill develops. This is the seed's chosen framing;
+the sources below ground the mechanisms and suggest compositions.
+
+The [TypeSafe LLM guide](https://github.com/typesafe-ai/skills/blob/65a39f393687675ce170e6094757de20370365b9/skills/typesafe-ai/SKILL.md)
+is MIT-licensed at revision `65a39f393687675ce170e6094757de20370365b9`
+(2026-09-12), still the upstream revision when checked on October 11.
+The base prompt embeds 823 words from its introduction, composition patterns,
+question design and composition/verification guidance verbatim. The source is
+already vendored under `exomonad/jev-integration/vendor/typesafe-ai`; its
+copyright, attribution and [full license](.exomonad/prompts/typesafe-ai-LICENSE.md)
+travel with the persona's prompts. The surrounding companion interpretation
+is newly authored. Live documentation is linked and paraphrased separately.
+
+Primary references inspected on October 11 locally (October 12 UTC):
+
+- [System One](https://docs.typesafe.ai/concepts/system-one.md) explicitly borrows
+  Kahneman's fast/intuitive and slow/deliberate distinction. Its interface is
+  text state and questions to constrained decisions and probabilities.
+- [How to build with TypeSafe](https://docs.typesafe.ai/concepts/how-to-build-with-system-one.md)
+  describes composing independent judgments and sequencing dependent stages.
+  [State](https://docs.typesafe.ai/concepts/state.md) and
+  [confidence](https://docs.typesafe.ai/confidence.md) supply the input and
+  uncertainty contracts. Haskell's pinned Jev interface keeps typed payloads
+  local and executes their continuations through the authored program.
+- The [AI primer](https://docs.typesafe.ai/introduction/machine-learning-primer.md)
+  describes the calibrated-decision training objective, RLCD, and links to the
+  [manifesto](https://typesafe.ai/manifesto). These explain the design rationale;
+  neither is a formal training-algorithm paper. Editing an authored Jev
+  composition changes questions, evidence and behavior, not hosted weights.
+- [Introducing System One Models & Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev)
+  contains the [Doom demo](https://player.vimeo.com/video/1227495732). Its
+  narration describes structured state, composed judgments and a strategy
+  change that alters the same decision loop. This informed the seed's example
+  of deliberative strategy shaping reflexes; it is a demonstration, not
+  qualification of this companion.
+- [Autoresearch feature discovery](https://docs.typesafe.ai/cookbooks/autoresearch_feature_discovery.md)
+  combines LLM-authored questions, Jev features and CatBoost training, using
+  observed errors and feature use to revise the questions. This informed the
+  invitation to evolve a vocabulary of perception; the seed adds no predictor
+  or automatic learning loop.
+
+The research did not identify a standalone official Jev/RLCD whitepaper.
+The manifesto and primer are the closest located first-party conceptual
+references. The Sol researcher retained source URLs, timestamps, hashes and
+the demo's auto-generated captions under
+`/srv/swarm/evidence/inanna/persona-metaprompt-20261011/jev-research/`.
+These sources support the composition mechanisms. Their effectiveness for
+this companion remains a question for actual interaction.
+
 ## Web retrieval
 
 Tavily's [search](https://docs.tavily.com/documentation/api-reference/endpoint/search)
