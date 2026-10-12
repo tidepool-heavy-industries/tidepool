@@ -906,7 +906,8 @@ impl LocalActorRef {
         self.lifecycle
             .control(KernelMessage::AbortReplacement {
                 reply: reply.into(),
-            }).await
+            })
+            .await
             .map_err(|error| KernelBehaviorError {
                 detail: format!("prepared actor {:?}: {error}", self.identity),
                 diagnostic: None,
@@ -921,7 +922,8 @@ impl LocalActorRef {
     }
     pub(crate) async fn fence_replacement(&self) -> Result<(), KernelBehaviorError> {
         self.lifecycle
-            .close_with_fence(KernelMessage::ReplacementFence).await
+            .close_with_fence(KernelMessage::ReplacementFence)
+            .await
             .map_err(|error| KernelBehaviorError {
                 detail: error.to_string(),
                 diagnostic: None,
@@ -952,7 +954,8 @@ impl LocalActorRef {
             .control(KernelMessage::ReplaceSpec {
                 definition: Box::new(definition),
                 reply: reply.into(),
-            }).await
+            })
+            .await
             .map_err(|_| crate::SpecReplacementError::Unavailable)?;
         receive.await.map_err(|_| {
             crate::SpecReplacementError::Failed(
@@ -970,7 +973,8 @@ impl LocalActorRef {
             .control(KernelMessage::Replace {
                 definition: Box::new(definition),
                 reply: reply.into(),
-            }).await
+            })
+            .await
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
         receive.await.map_err(|_| KernelInvocationFailure::Failed { receipts: Vec::new(),
             actor: self.identity,
@@ -984,7 +988,8 @@ impl LocalActorRef {
         self.lifecycle
             .control(KernelMessage::Drain {
                 reply: reply.into(),
-            }).await
+            })
+            .await
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
         receive
             .await
@@ -1002,14 +1007,24 @@ impl LocalActorRef {
         identity: ActorRef,
         lifecycle: LifecycleHandle,
     ) -> Self {
-        Self { identity, address, terminal, lifecycle }
+        Self {
+            identity,
+            address,
+            terminal,
+            lifecycle,
+        }
     }
 
-    pub fn lifecycle(&self) -> &LifecycleHandle { &self.lifecycle }
+    pub fn lifecycle(&self) -> &LifecycleHandle {
+        &self.lifecycle
+    }
 
     /// Admission and queue insertion share the close fence. Accepted payloads
     /// belong to the existing Ractor mailbox even while execution is paused.
-    pub(crate) async fn admit_mailbox(&self, message: KernelMessage) -> Result<(), KernelCallFailure> {
+    pub(crate) async fn admit_mailbox(
+        &self,
+        message: KernelMessage,
+    ) -> Result<(), KernelCallFailure> {
         self.lifecycle.enqueue(message).await
     }
 
@@ -1024,7 +1039,9 @@ impl LocalActorRef {
         readiness: std::sync::Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
         probe: std::sync::Arc<dyn ProviderIdleProbe>,
     ) -> Result<NativeProviderAdmission, &'static str> {
-        self.lifecycle.attach_provider(observation, readiness, probe).await
+        self.lifecycle
+            .attach_provider(observation, readiness, probe)
+            .await
     }
 
     /// Atomically fence new provider rounds and input before checking the Store.
@@ -1042,15 +1059,26 @@ impl LocalActorRef {
             receipts: Vec::new(),
             diagnostic: None,
         };
-        self.lifecycle.claim_idle(terminal.clone()).await.map_err(rejected)?;
+        self.lifecycle
+            .claim_idle(terminal.clone())
+            .await
+            .map_err(rejected)?;
         self.retire_by(supervisor, terminal).await
     }
 
-    pub async fn cast(&self, sender: ActorRef, request: MailboxValue) -> Result<(), KernelCallFailure> {
-        self.admit_mailbox(KernelMessage::Cast { sender, request }).await
+    pub async fn cast(
+        &self,
+        sender: ActorRef,
+        request: MailboxValue,
+    ) -> Result<(), KernelCallFailure> {
+        self.admit_mailbox(KernelMessage::Cast { sender, request })
+            .await
     }
 
-    pub(crate) async fn source(&self, delivery: crate::SourceDelivery) -> Result<(), KernelCallFailure> {
+    pub(crate) async fn source(
+        &self,
+        delivery: crate::SourceDelivery,
+    ) -> Result<(), KernelCallFailure> {
         self.admit_mailbox(KernelMessage::Source(delivery)).await
     }
 
@@ -1066,7 +1094,8 @@ impl LocalActorRef {
             ancestry,
             request,
             reply: reply.into(),
-        }).await?;
+        })
+        .await?;
         receive
             .await
             .map_err(|_| KernelCallFailure::TargetExited(self.identity))?
@@ -1099,7 +1128,8 @@ impl LocalActorRef {
             .control(KernelMessage::ExternalApplicationFailed {
                 failure,
                 reply: reply.into(),
-            }).await
+            })
+            .await
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
         receive
             .await
@@ -1111,7 +1141,8 @@ impl LocalActorRef {
         self.lifecycle
             .control(KernelMessage::SealHostedWork {
                 reply: reply.into(),
-            }).await
+            })
+            .await
             .map_err(|_| KernelInvocationFailure::ActorExited(self.identity))?;
         receive
             .await
@@ -1159,7 +1190,8 @@ impl LocalActorRef {
             .control(KernelMessage::Shutdown {
                 terminal,
                 reply: reply.into(),
-            }).await
+            })
+            .await
             .is_err()
         {
             // A concurrent bootstrap can finish between recording intent and
