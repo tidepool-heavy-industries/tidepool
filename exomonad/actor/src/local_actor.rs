@@ -1993,9 +1993,6 @@ where
             myself: myself.clone(),
             lifecycle: arguments.lifecycle.clone(),
             directory: arguments.directory,
-
-                crate::CleanupComponentOutcome::Confirmed,
-            )),
         });
         let startup_admission = arguments.startup_admission;
         let startup_refusal = arguments.startup_refusal;
@@ -7955,7 +7952,7 @@ mod tests {
                 children: Arc::new(Mutex::new(HashMap::new())),
                 directory: LocalActorDirectory::default(),
                 child_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
-                    forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
+                forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
             };
             let entered = Arc::new(Notify::new());
             let release = Arc::new(Notify::new());
