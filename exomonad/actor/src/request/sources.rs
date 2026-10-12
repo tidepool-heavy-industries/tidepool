@@ -178,8 +178,8 @@ impl ActorSourceConnections {
             }));
     }
 
-    /// The predecessor closes and selects forwarding before this routing path
-    /// is shortened. Publications racing the handoff follow the same chain.
+    /// The predecessor selects forwarding before subscriptions change owner.
+    /// Publications follow the same ordered path across every handoff.
     pub(crate) async fn handoff(
         &mut self,
         grant: crate::local_actor::run_control::ReplacementIngressGrant,

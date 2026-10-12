@@ -50,7 +50,7 @@ pub enum NativeSettlement {
 #[derive(Clone)]
 pub struct LifecycleSnapshot {
     pub owner_available: bool,
-    pub(crate) source_recipient: ActorRef,
+    source_forward: Option<LifecycleHandle>,
     pub native_settlement: NativeSettlement,
     pub transfer_unconfirmed: Option<String>,
     pub phase: LifecyclePhase,
@@ -403,7 +403,7 @@ impl LifecycleHandle {
     ) -> Result<Self, ractor::SpawnErr> {
         let (observations, observe) = watch::channel(LifecycleSnapshot {
             owner_available: true,
-            source_recipient: identity,
+            source_forward: None,
             native_settlement: NativeSettlement::Confirmed,
             transfer_unconfirmed: None,
             phase: LifecyclePhase::Starting,
@@ -558,7 +558,14 @@ impl LifecycleHandle {
     }
 
     pub(crate) fn source_recipient(&self) -> ActorRef {
-        self.observations.borrow().source_recipient
+        let mut recipient = self.clone();
+        loop {
+            let next = recipient.observations.borrow().source_forward.clone();
+            match next {
+                Some(next) => recipient = next,
+                None => return recipient.identity,
+            }
+        }
     }
 
     pub(crate) async fn begin_replacement(
@@ -785,10 +792,7 @@ impl LifecycleState {
     pub(super) fn publish(&self) {
         self.observations.send_replace(LifecycleSnapshot {
             owner_available: self.owner_available,
-            source_recipient: self
-                .source_forward
-                .as_ref()
-                .map_or(self.identity, |handle| handle.identity),
+            source_forward: self.source_forward.clone(),
             native_settlement: self.native_settlement.clone(),
             transfer_unconfirmed: self.transfer.unconfirmed.clone(),
             phase: self.phase,
@@ -1027,17 +1031,17 @@ impl Actor for LifecycleCoordinator {
                 let _ = reply.send(result);
             }
             LifecycleCommand::RetargetSources { grant, reply } => {
+                // Keep the forwarding path intact. Shortening A→B→C to A→C
+                // can overtake an earlier event still in B's mailbox.
                 let current = state
                     .source_forward
                     .as_ref()
-                    .map_or(state.identity, |handle| handle.identity);
-                let result = if current == grant.predecessor() || current == grant.successor() {
-                    state.source_forward = Some(grant.successor_handle().clone());
+                    .map_or(state.identity, LifecycleHandle::source_recipient);
+                let result = if current == grant.successor() {
                     Ok(())
                 } else {
                     Err(KernelCallFailure::TargetUnavailable(state.identity))
                 };
-                state.publish();
                 let _ = reply.send(result);
             }
             LifecycleCommand::Enqueue {
