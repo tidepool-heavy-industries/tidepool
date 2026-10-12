@@ -865,19 +865,32 @@ impl InvocationWork {
         })
     }
 
-    pub(super) fn retain_aborted_children(&self, kernel: &KernelContext, children: &[ActorRef]) {
-        let mut state = self.state.lock();
+    pub(super) async fn retain_aborted_children(
+        &self,
+        kernel: &KernelContext,
+        children: &[ActorRef],
+    ) {
         for &actor in children {
-            if let Some(child) = kernel.resolve(actor) {
-                if !state
-                    .workers
-                    .iter()
-                    .any(|worker| worker.identity() == actor)
-                {
-                    state.workers.push(child);
+            let resolved = kernel.resolve(actor).await;
+            let mut state = self.state.lock();
+            match resolved {
+                Ok(Some(child)) => {
+                    if !state
+                        .workers
+                        .iter()
+                        .any(|worker| worker.identity() == actor)
+                    {
+                        state.workers.push(child);
+                    }
+                    state
+                        .unresolved_workers
+                        .retain(|unresolved| *unresolved != actor);
                 }
-            } else if !state.unresolved_workers.contains(&actor) {
-                state.unresolved_workers.push(actor);
+                Ok(None) | Err(_) => {
+                    if !state.unresolved_workers.contains(&actor) {
+                        state.unresolved_workers.push(actor);
+                    }
+                }
             }
         }
     }
@@ -917,29 +930,40 @@ impl InvocationWork {
         self.state.lock().cleanup.clone()
     }
 
-    fn retirement_members(&self, kernel: &KernelContext) -> Vec<LocalActorRef> {
-        let (mut members, pending, scopes) = {
-            let state = self.state.lock();
-            (
-                state.workers.clone(),
-                state
-                    .pending_workers
-                    .iter()
-                    .chain(&state.unresolved_workers)
-                    .copied()
-                    .collect::<Vec<_>>(),
-                state.scopes.clone(),
-            )
-        };
-        members.extend(
-            pending
-                .into_iter()
-                .filter_map(|actor| kernel.resolve(actor)),
-        );
-        for scope in scopes {
-            members.extend(scope.retirement_members(kernel));
-        }
-        members
+    fn retirement_members<'a>(
+        &'a self,
+        kernel: &'a KernelContext,
+    ) -> futures_util::future::BoxFuture<'a, Vec<LocalActorRef>> {
+        Box::pin(async move {
+            let (mut members, pending, scopes) = {
+                let state = self.state.lock();
+                (
+                    state.workers.clone(),
+                    state
+                        .pending_workers
+                        .iter()
+                        .chain(&state.unresolved_workers)
+                        .copied()
+                        .collect::<Vec<_>>(),
+                    state.scopes.clone(),
+                )
+            };
+            for actor in pending {
+                match kernel.resolve(actor).await {
+                    Ok(Some(child)) => members.push(child),
+                    Ok(None) | Err(_) => {
+                        let mut state = self.state.lock();
+                        if !state.unresolved_workers.contains(&actor) {
+                            state.unresolved_workers.push(actor);
+                        }
+                    }
+                }
+            }
+            for scope in scopes {
+                members.extend(scope.retirement_members(kernel).await);
+            }
+            members
+        })
     }
 
     pub(super) async fn cleanup<H, O>(
@@ -972,6 +996,7 @@ impl InvocationWork {
         // retained subtree first, using its existing worker custody.
         let _retirement = crate::kernel::RetirementBatch::issue(
             self.retirement_members(kernel)
+                .await
                 .into_iter()
                 .map(|child| {
                     (
@@ -980,7 +1005,8 @@ impl InvocationWork {
                     )
                 })
                 .collect(),
-        );
+        )
+        .await;
         let mut cleanup = InvocationCleanup {
             compilers: self.state.lock().compilers.clone(),
             ..InvocationCleanup::default()
@@ -1126,8 +1152,8 @@ impl InvocationWork {
             cleanup.settlement_notifications_pending =
                 environment.requests.has_settlement_notifications();
         }
-        {
-            let mut state = self.state.lock();
+        let unresolved = {
+            let state = self.state.lock();
             for child in &state.workers {
                 if !workers
                     .iter()
@@ -1136,9 +1162,15 @@ impl InvocationWork {
                     workers.push(child.clone());
                 }
             }
-            let unresolved = std::mem::take(&mut state.unresolved_workers);
-            for actor in unresolved {
-                if let Some(child) = kernel.resolve(actor) {
+            // Keep unresolved ownership retained while its asynchronous lookup
+            // is in flight, including when the cleanup waiter is cancelled.
+            state.unresolved_workers.clone()
+        };
+        for actor in unresolved {
+            let resolved = kernel.resolve(actor).await;
+            let mut state = self.state.lock();
+            match resolved {
+                Ok(Some(child)) => {
                     if !state
                         .workers
                         .iter()
@@ -1149,9 +1181,15 @@ impl InvocationWork {
                     if !workers.iter().any(|worker| worker.identity() == actor) {
                         workers.push(child);
                     }
-                } else {
-                    state.unresolved_workers.push(actor);
+                    state
+                        .unresolved_workers
+                        .retain(|unresolved| *unresolved != actor);
+                }
+                Ok(None) => {
                     cleanup.failures.push(format!("worker {actor:?} has no retained lifecycle owner; cleanup remains unconfirmed"));
+                }
+                Err(error) => {
+                    cleanup.failures.push(format!("worker {actor:?} lifecycle lookup failed: {error}; cleanup remains unconfirmed"));
                 }
             }
         }
