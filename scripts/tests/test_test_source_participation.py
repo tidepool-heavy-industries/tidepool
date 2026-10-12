@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from scripts.tests.test_buck2_profiles import resolve as profile_rules
 from unittest.mock import patch
 
 
@@ -43,14 +44,12 @@ class DepInfoTests(unittest.TestCase):
     def test_native_macro_declares_module_and_fixture_manifest_as_compile_input(self):
         manifests = []
         binaries = []
-        namespace = {
+        namespace, _ = profile_rules("fast-dev")
+        namespace.update({
             "rust_optimization_level": lambda *_: "0",
             "test_source_requirements": lambda **kwargs: manifests.append(kwargs),
             "rust_binary": lambda **kwargs: binaries.append(kwargs),
-        }
-        definitions = (ROOT / "build/rust/defs.bzl").read_text()
-        exec("\n".join(line for line in definitions.splitlines()
-                       if not line.startswith("load(")), namespace)
+        })
         namespace["tidepool_rust_binary"](
             name="unit_tests", package_name="component", package_dir="owned/component",
             version="0.1.0", rustc_flags=["--test"],

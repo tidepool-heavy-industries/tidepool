@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from scripts.tests.test_buck2_profiles import resolve as profile_rules
 from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[2] / 'build/rust/isolated-libtest.py'
@@ -1357,16 +1358,14 @@ class IsolatedLibtestTests(unittest.TestCase):
 
     def test_native_compile_regression_path_uses_declared_package_and_target(self):
         calls = []
-        definitions = SCRIPT.with_name('defs.bzl').read_text()
-        namespace = {
+        namespace, _ = profile_rules("fast-dev")
+        namespace.update({
             'rust_optimization_level': lambda *_: '1',
             'rust_test': lambda **kwargs: calls.append(('test', kwargs)),
             'rust_binary': lambda **kwargs: calls.append(('binary', kwargs)),
             'sh_test': lambda **kwargs: calls.append(('runner', kwargs)),
             'test_source_requirements': lambda **kwargs: None,
-        }
-        exec('\n'.join(line for line in definitions.splitlines()
-                       if not line.startswith('load(')), namespace)
+        })
         declared_source = 'owned/component/src/lib.rs'
         arguments = {
             'name': 'property_case', 'package_name': 'component',
@@ -1384,14 +1383,12 @@ class IsolatedLibtestTests(unittest.TestCase):
 
     def test_shared_binary_regression_path_only_applies_to_libtest(self):
         calls = []
-        definitions = SCRIPT.with_name('defs.bzl').read_text()
-        namespace = {
+        namespace, _ = profile_rules("fast-dev")
+        namespace.update({
             'rust_optimization_level': lambda *_: '1',
             'rust_binary': lambda **kwargs: calls.append(kwargs),
             'test_source_requirements': lambda **kwargs: None,
-        }
-        exec('\n'.join(line for line in definitions.splitlines()
-                       if not line.startswith('load(')), namespace)
+        })
         common = {
             'package_name': 'component', 'package_dir': 'owned/component',
             'version': '0.1.0', 'crate_root': 'owned/component/src/lib.rs',

@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from scripts.tests.test_buck2_profiles import resolve as profile_rules
 
 
 GENERATOR = Path(__file__).resolve().parents[1] / "buck2-first-party.py"
@@ -1411,16 +1412,14 @@ source = "git+https://example.invalid/tokio-tungstenite?rev=aaaaaaaaaaaaaaaaaaaa
         generated = self.rule("tidepool/toolchain", "tidepool_toolchain_unit_tests",
                               "tidepool_rust_isolated_test")
         wrappers = []
-        definitions = GENERATOR.parents[1] / "build/rust/defs.bzl"
-        namespace = {
+        namespace, _ = profile_rules("fast-dev")
+        namespace.update({
             "rust_optimization_level": lambda *_: "1",
             "rust_binary": lambda **_: None,
             "sh_test": lambda **arguments: wrappers.append(arguments),
             "read_root_config": lambda *_: "/declared/compiler",
             "test_source_requirements": lambda **_kwargs: None,
-        }
-        exec("\n".join(line for line in definitions.read_text().splitlines()
-                       if not line.startswith("load(")), namespace)
+        })
         namespace["tidepool_rust_isolated_test"](**generated)
         wrapper = wrappers.pop()
         args = wrapper["args"]
