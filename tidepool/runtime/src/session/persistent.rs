@@ -2721,17 +2721,25 @@ impl PersistentSession {
                 detail: e.to_string(),
             }
         })?;
-        Ok(super::durable_owner_disposition(
-            staged.publish_and_install(|graph, state| {
+        let outcome = match staged.commit() {
+            super::StoreDisposition::Committed((graph, receipt)) => {
                 let lib = self.lib_mut();
-                lib.install_committed_recovery_graph(graph, state);
+                lib.install_committed_recovery_graph(graph, receipt.state.clone());
                 lib.durable_public_scopes = public_scopes;
                 lib.tips = tips;
                 self.public_visibility_epochs.insert(target, next_epoch);
                 self.recovery_initialization = None;
-                readiness
-            }),
-        ))
+                match receipt.installed_blocking() {
+                    Ok(()) => super::StoreDisposition::Committed(readiness),
+                    Err(error) => super::StoreDisposition::RecoveryRequired(error),
+                }
+            }
+            super::StoreDisposition::Refused(error) => super::StoreDisposition::Refused(error),
+            super::StoreDisposition::RecoveryRequired(error) => {
+                super::StoreDisposition::RecoveryRequired(error)
+            }
+        };
+        Ok(super::durable_owner_disposition(outcome))
     }
 
     /// Transfer only owner/epoch; immutable content and allocation identity stay fixed.
@@ -2846,27 +2854,29 @@ impl PersistentSession {
         })?;
         let admission_epoch = self.prepare_execution_admission_epoch_advance()?;
         let readiness = self.prepare_durable_public_readiness(&successor, target, admission_epoch);
-        Ok(super::durable_owner_disposition(
-            store.transfer_owner_and_install(
-                domain,
-                revision,
-                &previous,
-                successor,
-                epoch,
-                |state| {
+        let outcome =
+            match store.commit_owner_transfer(domain, revision, &previous, successor, epoch) {
+                super::StoreDisposition::Committed(receipt) => {
                     let mut graph = graph;
-                    graph.install_store_state(&state);
+                    graph.install_store_state(&receipt.state);
                     let lib = self.lib_mut();
-                    lib.install_committed_recovery_graph(graph, state);
+                    lib.install_committed_recovery_graph(graph, receipt.state.clone());
                     lib.tips = tips;
                     lib.durable_public_scopes = public_scopes;
                     self.public_visibility_epochs.insert(target, epoch);
                     self.invalidate_execution_admissions_after_owner_transfer(admission_epoch);
                     self.recovery_initialization = None;
-                    readiness
-                },
-            ),
-        ))
+                    match receipt.installed_blocking() {
+                        Ok(()) => super::StoreDisposition::Committed(readiness),
+                        Err(error) => super::StoreDisposition::RecoveryRequired(error),
+                    }
+                }
+                super::StoreDisposition::Refused(error) => super::StoreDisposition::Refused(error),
+                super::StoreDisposition::RecoveryRequired(error) => {
+                    super::StoreDisposition::RecoveryRequired(error)
+                }
+            };
+        Ok(super::durable_owner_disposition(outcome))
     }
 
     /// Admit bootstrap only against the exact already published actor surface.
@@ -2982,12 +2992,18 @@ impl PersistentSession {
                 detail: e.to_string(),
             }
         })?;
-        match super::publication_disposition(staged.publish_and_install(|graph, state| {
-            self.lib_mut()
-                .install_committed_recovery_graph(graph, state);
-            self.public_visibility_epochs.insert(scope, next_epoch);
-        })) {
-            Ok(()) => Ok(PublicManifestCommit::Durable),
+        match super::publication_disposition(staged.commit()) {
+            Ok((graph, receipt)) => {
+                self.lib_mut()
+                    .install_committed_recovery_graph(graph, receipt.state.clone());
+                self.public_visibility_epochs.insert(scope, next_epoch);
+                match receipt.installed_blocking() {
+                    Ok(()) => Ok(PublicManifestCommit::Durable),
+                    Err(error) => Ok(PublicManifestCommit::RecoveryRequired {
+                        error: Box::new(SessionError::RecoveryStore(Box::new(error))),
+                    }),
+                }
+            }
             Err(outcome) => Ok(outcome),
         }
     }

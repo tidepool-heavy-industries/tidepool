@@ -108,7 +108,7 @@ fn session_consumes_only_requested_slots_without_durable_writes_within_lease() {
         vec![Generation(1), Generation(2)]
     );
     let committed = store_state(&lib);
-    let work = run.store.work();
+    let work = run.store.work().unwrap();
     assert_eq!(committed.allocation_ceiling, Generation(64));
     assert_eq!(lib.generation(), Generation(2));
     assert_eq!(lib.next_module().unwrap().gen(), Generation(3));
@@ -121,14 +121,17 @@ fn session_consumes_only_requested_slots_without_durable_writes_within_lease() {
         62
     );
     assert_eq!(store_state(&lib), committed);
-    assert_eq!(run.store.work(), work);
+    assert_eq!(run.store.work().unwrap(), work);
     assert_eq!(lib.generation(), Generation(64));
     assert_eq!(
         lib.reserve_declaration_generation_durable().unwrap(),
         Generation(65)
     );
     assert_eq!(store_state(&lib).allocation_ceiling, Generation(128));
-    assert_eq!(run.store.work().transactions, work.transactions + 1);
+    assert_eq!(
+        run.store.work().unwrap().transactions,
+        work.transactions + 1
+    );
     assert_eq!(lib.scope_tip(ScopeId::ROOT), Generation(0));
     assert!(!lib.log.is_reserved(Generation(66)));
 }
@@ -191,7 +194,7 @@ fn session_full_u64_tail_large_request_and_import_after_exposure_refusal() {
         Generation(u64::MAX - 9)
     );
     let tail = store_state(&lib);
-    let work = run.store.work();
+    let work = run.store.work().unwrap();
     assert_eq!(tail.allocation_ceiling, Generation(u64::MAX));
     assert_eq!(
         lib.reserve_declaration_generations_durable(9)
@@ -200,7 +203,7 @@ fn session_full_u64_tail_large_request_and_import_after_exposure_refusal() {
         Some(&Generation(u64::MAX))
     );
     assert_eq!(store_state(&lib), tail);
-    assert_eq!(run.store.work(), work);
+    assert_eq!(run.store.work().unwrap(), work);
     assert!(matches!(
         lib.reserve_declaration_generation_durable(),
         Err(crate::session::SessionError::GenerationExhausted(_))
@@ -210,7 +213,7 @@ fn session_full_u64_tail_large_request_and_import_after_exposure_refusal() {
         Err(crate::session::SessionError::GenerationExhausted(_))
     ));
     assert_eq!(store_state(&lib), tail);
-    assert_eq!(run.store.work(), work);
+    assert_eq!(run.store.work().unwrap(), work);
 }
 
 #[test]
@@ -714,12 +717,12 @@ fn domains_refuse_collisions_and_preserve_independent_ceilings() {
         .initialize_captured_declaration_high_water(Generation(1 << 40))
         .unwrap();
     let first_state = store_state(&first);
-    let work = run.store.work();
+    let work = run.store.work().unwrap();
     first
         .initialize_captured_declaration_high_water(Generation(4))
         .unwrap();
     assert_eq!(store_state(&first), first_state);
-    assert_eq!(run.store.work(), work);
+    assert_eq!(run.store.work().unwrap(), work);
     assert_eq!(
         root.reserve_declaration_generation_durable().unwrap(),
         Generation(1)
@@ -808,13 +811,13 @@ proptest::proptest! {
                 HistoryOperation::Reserve(amount) | HistoryOperation::Cancel(amount) => {
                     let count = usize::from(amount);
                     let before = store_state(&lib);
-                    let work = run.store.work();
+                    let work = run.store.work().unwrap();
                     let end = consumed + count as u128;
                     let result = lib.reserve_declaration_generations_durable(count);
                     if end > u128::from(u64::MAX) {
                         proptest::prop_assert!(matches!(result, Err(crate::session::SessionError::GenerationExhausted(_))));
                         proptest::prop_assert_eq!(store_state(&lib), before);
-                        proptest::prop_assert_eq!(run.store.work(), work);
+                        proptest::prop_assert_eq!(run.store.work().unwrap(), work);
                     } else {
                         let ids = result.unwrap();
                         proptest::prop_assert_eq!(ids.len(), count);
@@ -829,12 +832,12 @@ proptest::proptest! {
                             ceiling = (ceiling + 64).max(end).min(u128::from(u64::MAX));
                             lease = true;
                             proptest::prop_assert_ne!(store_state(&lib).revision, before.revision);
-                            proptest::prop_assert_eq!(run.store.work().transactions, work.transactions + 1);
-                            proptest::prop_assert_eq!(run.store.work().block_writes, work.block_writes);
-                            proptest::prop_assert_eq!(run.store.work().block_bytes, work.block_bytes);
+                            proptest::prop_assert_eq!(run.store.work().unwrap().transactions, work.transactions + 1);
+                            proptest::prop_assert_eq!(run.store.work().unwrap().block_writes, work.block_writes);
+                            proptest::prop_assert_eq!(run.store.work().unwrap().block_bytes, work.block_bytes);
                         } else {
                             proptest::prop_assert_eq!(store_state(&lib), before);
-                            proptest::prop_assert_eq!(run.store.work(), work);
+                            proptest::prop_assert_eq!(run.store.work().unwrap(), work);
                         }
                         consumed = end;
                         exposed |= count != 0;

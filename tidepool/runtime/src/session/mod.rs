@@ -45,12 +45,16 @@ pub use recovery_hydration::{
     RecoveredDomainPresence, RecoveryRunAuthority, RecoverySuccessorAuthority,
 };
 pub use recovery_store::{
-    DomainSnapshotRoot, NativeStoreStatus, ProviderTransition, PublicSurfaceRoot, RecoveryDomainId, RecoveryDomainState,
-    RecoveryPublicOwnerState, RecoverySnapshotIdentity, RunRecoveryStore, StoreDisposition,
-    StoreError, StoreErrorKind, StoreRefusal, StoreRevision,
+    DomainSnapshotRoot, NativeStoreStatus, ProviderTransition, PublicSurfaceRoot, RecoveryDomainId,
+    RecoveryDomainState, RecoveryPublicOwnerState, RecoverySnapshotIdentity, RunRecoveryStore,
+    StoreDisposition, StoreError, StoreErrorKind, StoreRefusal, StoreRevision,
 };
-fn complete_native_transition(ticket: Option<recovery_store::OwnedTransition>) -> Result<(), SessionError> {
-    ticket.map(recovery_store::OwnedTransition::complete_blocking).transpose()
+fn complete_native_transition(
+    ticket: Option<recovery_store::OwnedTransition>,
+) -> Result<(), SessionError> {
+    ticket
+        .map(recovery_store::OwnedTransition::complete_blocking)
+        .transpose()
         .map(|_| ())
         .map_err(|error| SessionError::RecoveryStore(Box::new(error)))
 }
@@ -1461,11 +1465,17 @@ impl SessionLib {
             install(self);
             return PublicManifestCommit::Ephemeral;
         };
-        match publication_disposition(staged.publish_and_install(|graph, state| {
-            self.install_committed_recovery_graph(graph, state);
-            install(self)
-        })) {
-            Ok(()) => PublicManifestCommit::Durable,
+        match publication_disposition(staged.commit()) {
+            Ok((graph, receipt)) => {
+                self.install_committed_recovery_graph(graph, receipt.state.clone());
+                install(self);
+                match receipt.installed_blocking() {
+                    Ok(()) => PublicManifestCommit::Durable,
+                    Err(error) => PublicManifestCommit::RecoveryRequired {
+                        error: Box::new(SessionError::RecoveryStore(Box::new(error))),
+                    },
+                }
+            }
             Err(outcome) => outcome,
         }
     }
@@ -2520,13 +2530,17 @@ impl SessionLib {
             tip.tip = generation;
             tip.exact_context = next_context;
             let scope = staged.scope;
-            return match staged_graph.publish_and_install(|graph, state| {
-                self.install_committed_recovery_graph(graph, state);
-                self.log.activate_prepared_commit(prepared);
-                *self.tips.get_mut(&scope).expect("prepared authored tip") = tip;
-                activate(generation)
-            }) {
-                recovery_store::StoreDisposition::Committed(commit) => Ok(commit),
+            return match staged_graph.commit() {
+                recovery_store::StoreDisposition::Committed((graph, receipt)) => {
+                    self.install_committed_recovery_graph(graph, receipt.state.clone());
+                    self.log.activate_prepared_commit(prepared);
+                    *self.tips.get_mut(&scope).expect("prepared authored tip") = tip;
+                    let value = activate(generation);
+                    receipt
+                        .installed_blocking()
+                        .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+                    Ok(value)
+                }
                 recovery_store::StoreDisposition::Refused(reason) => {
                     Err(SessionError::RecoveryStoreRefused(reason))
                 }

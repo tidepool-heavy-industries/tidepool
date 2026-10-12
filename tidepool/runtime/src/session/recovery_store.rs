@@ -216,6 +216,7 @@ pub(crate) enum StoreFault {
     BeforeCommit,
     CommitError,
     RollbackError,
+    WorkerPanic,
 }
 
 impl NativeStorage {
@@ -622,7 +623,12 @@ impl NativeStorage {
         }
         #[cfg(test)]
         let fault = owner.fault.take();
-        self.transactions.set(self.transactions.get() + 1);
+        #[cfg(test)]
+        if fault == Some(StoreFault::WorkerPanic) {
+            panic!("injected native storage worker panic");
+        }
+        self.transactions
+            .set(self.transactions.get().wrapping_add(1));
         let result = transact(
             &mut owner.connection,
             action,
@@ -780,8 +786,8 @@ fn insert_blocks(
                 return Err(rusqlite::Error::InvalidQuery);
             }
         } else {
-            writes.set(writes.get() + 1);
-            written_bytes.set(written_bytes.get() + bytes.len() as u64);
+            writes.set(writes.get().wrapping_add(1));
+            written_bytes.set(written_bytes.get().wrapping_add(bytes.len() as u64));
         }
     }
     Ok(())
@@ -1427,7 +1433,7 @@ mod tests {
             StoreErrorKind::Integrity
         );
         assert!(store.get(state.snapshot_root.cid()).is_err());
-        let before = store.work();
+        let before = store.work().unwrap();
         assert!(matches!(
             store.reserve_ceiling(RecoveryDomainId::Root, state.revision, Generation(128)),
             StoreDisposition::Refused(StoreRefusal::Storage(StoreError {
@@ -1435,7 +1441,7 @@ mod tests {
                 ..
             }))
         ));
-        assert_eq!(before, store.work());
+        assert_eq!(before, store.work().unwrap());
     }
 
     #[test]

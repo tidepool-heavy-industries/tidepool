@@ -790,20 +790,43 @@ pub(crate) struct StagedRecoveryManifest {
     pub(crate) work: crate::session::RecoveryPublicationWork,
 }
 impl StagedRecoveryManifest {
-    pub(crate) fn publish_and_install<T>(
+    pub(crate) fn commit(
         self,
-        install: impl FnOnce(RecoveryGraph, RecoveryDomainState) -> T,
-    ) -> StoreDisposition<T> {
+    ) -> StoreDisposition<(
+        RecoveryGraph,
+        crate::session::recovery_store::NativeInstallationReceipt,
+    )> {
         let Self {
             mut graph,
             prepared,
             ..
         } = self;
-        let store = graph.store.clone();
-        store.publish_and_install(prepared, move |state| {
-            graph.install_store_state(&state);
-            install(graph, state)
-        })
+        match graph.store.commit_publication(prepared) {
+            StoreDisposition::Committed(receipt) => {
+                graph.install_store_state(&receipt.state);
+                StoreDisposition::Committed((graph, receipt))
+            }
+            StoreDisposition::Refused(error) => StoreDisposition::Refused(error),
+            StoreDisposition::RecoveryRequired(error) => StoreDisposition::RecoveryRequired(error),
+        }
+    }
+
+    #[cfg(test)]
+    fn publish_and_install<T>(
+        self,
+        install: impl FnOnce(RecoveryGraph, RecoveryDomainState) -> T,
+    ) -> StoreDisposition<T> {
+        match self.commit() {
+            StoreDisposition::Committed((graph, receipt)) => {
+                let value = install(graph, receipt.state.clone());
+                match receipt.installed_blocking() {
+                    Ok(()) => StoreDisposition::Committed(value),
+                    Err(error) => StoreDisposition::RecoveryRequired(error),
+                }
+            }
+            StoreDisposition::Refused(error) => StoreDisposition::Refused(error),
+            StoreDisposition::RecoveryRequired(error) => StoreDisposition::RecoveryRequired(error),
+        }
     }
 }
 

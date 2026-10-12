@@ -96,12 +96,12 @@ impl Value {
             _ => None,
         }
     }
-    fn committed_installation(&self) -> bool {
-        matches!(
-            self,
-            Self::Publish(StoreDisposition::Committed(_))
-                | Self::Transfer(StoreDisposition::Committed(_))
-        )
+    fn committed_installation(&self) -> Option<RecoveryDomainState> {
+        match self {
+            Self::Publish(StoreDisposition::Committed(state))
+            | Self::Transfer(StoreDisposition::Committed(state)) => Some(state.clone()),
+            _ => None,
+        }
     }
 }
 impl Operation {
@@ -160,6 +160,12 @@ struct Response {
     value: Value,
     installation: Option<OwnedTransition>,
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SettlementOutcome {
+    Completed,
+    Refused,
+    Installed(RecoveryDomainState),
+}
 enum Command {
     Request {
         store: RunRecoveryStore,
@@ -172,6 +178,7 @@ enum Command {
     },
     Settle {
         id: u64,
+        outcome: SettlementOutcome,
         reply: Reply<Result<(), StoreError>>,
     },
     Abandon {
@@ -181,7 +188,7 @@ enum Command {
         reply: Reply<NativeStoreStatus>,
     },
     Work {
-        reply: Reply<RecoveryStoreWork>,
+        reply: Reply<Result<RecoveryStoreWork, StoreError>>,
     },
     WaitFence {
         reply: Reply<StoreError>,
@@ -207,7 +214,10 @@ enum Phase {
         store: RunRecoveryStore,
         reply: Reply<Result<OwnedTransition, StoreError>>,
     },
-    Installing(u64),
+    Installing {
+        id: u64,
+        state: RecoveryDomainState,
+    },
     Transition(u64),
     Fenced(StoreError),
 }
@@ -226,30 +236,77 @@ impl Drop for OwnerHandle {
         let _ = self.sender.send(Command::Shutdown);
     }
 }
+enum OpenMode {
+    Create,
+    Open,
+    ReadOnly,
+}
 impl RunRecoveryStore {
     pub fn create(path: &Path) -> Result<Self, StoreError> {
-        Self::start(NativeStorage::create(path)?)
+        Self::start(path, OpenMode::Create)
     }
     pub fn open(path: &Path) -> Result<Self, StoreError> {
-        Self::start(NativeStorage::open(path)?)
+        Self::start(path, OpenMode::Open)
     }
     pub(crate) fn open_read_only(path: &Path) -> Result<Self, StoreError> {
-        Self::start(NativeStorage::open_read_only(path)?)
+        Self::start(path, OpenMode::ReadOnly)
     }
-    fn start(storage: NativeStorage) -> Result<Self, StoreError> {
-        let path = storage.path.clone();
-        let database_id = storage.database_id;
+    pub async fn create_async(path: PathBuf) -> Result<Self, StoreError> {
+        let error_path = path.clone();
+        tokio::task::spawn_blocking(move || Self::create(&path))
+            .await
+            .map_err(|error| store_error(&error_path, StoreErrorKind::RecoveryRequired, error))?
+    }
+    pub async fn open_async(path: PathBuf) -> Result<Self, StoreError> {
+        let error_path = path.clone();
+        tokio::task::spawn_blocking(move || Self::open(&path))
+            .await
+            .map_err(|error| store_error(&error_path, StoreErrorKind::RecoveryRequired, error))?
+    }
+    fn start(path: &Path, mode: OpenMode) -> Result<Self, StoreError> {
+        let path = Arc::new(path.to_owned());
         let (sender, receiver) = mpsc::channel();
         let (worker, work_queue) = mpsc::channel::<WorkerRequest>();
         let completed = sender.clone();
+        let (initialized, initialization) = mpsc::sync_channel(1);
+        let storage_path = path.clone();
         std::thread::Builder::new()
             .name("run-native-storage".into())
             .spawn(move || {
+                let opened =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match mode {
+                        OpenMode::Create => NativeStorage::create(&storage_path),
+                        OpenMode::Open => NativeStorage::open(&storage_path),
+                        OpenMode::ReadOnly => NativeStorage::open_read_only(&storage_path),
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(store_error(
+                            &storage_path,
+                            StoreErrorKind::RecoveryRequired,
+                            "native storage worker panicked while opening",
+                        ))
+                    });
+                let storage = match opened {
+                    Ok(storage) => storage,
+                    Err(error) => {
+                        let _ = initialized.send(Err(error));
+                        return;
+                    }
+                };
+                if initialized.send(Ok(storage.database_id)).is_err() {
+                    return;
+                }
                 for WorkerRequest(operation) in work_queue {
-                    let value = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation.execute(&storage))) {
+                    let value = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        operation.execute(&storage)
+                    })) {
                         Ok(value) => value,
                         Err(_) => {
-                            let _ = completed.send(Command::WorkerFailed(store_error(storage.path(), StoreErrorKind::RecoveryRequired, "native storage worker panicked during an operation")));
+                            let _ = completed.send(Command::WorkerFailed(store_error(
+                                storage.path(),
+                                StoreErrorKind::RecoveryRequired,
+                                "native storage worker panicked during an operation",
+                            )));
                             break;
                         }
                     };
@@ -265,6 +322,13 @@ impl RunRecoveryStore {
                 }
             })
             .map_err(|error| store_error(&path, StoreErrorKind::Storage, error))?;
+        let database_id = initialization.recv().map_err(|_| {
+            store_error(
+                &path,
+                StoreErrorKind::RecoveryRequired,
+                "native storage initialization acknowledgement lost",
+            )
+        })??;
         let owner_path = path.clone();
         std::thread::Builder::new().name("run-native-owner".into()).spawn(move || {
             let mut phase = Phase::Ready;
@@ -272,7 +336,7 @@ impl RunRecoveryStore {
             let mut next = 0u64;
             let mut work = RecoveryStoreWork::default();
             let mut watchers: Vec<Reply<StoreError>> = Vec::new();
-            let mut settled = std::collections::BTreeMap::<u64, Result<(), StoreError>>::new();
+            let mut settled = std::collections::BTreeMap::<u64, SettlementOutcome>::new();
             loop {
                 let command = if matches!(phase, Phase::Ready | Phase::Fenced(_)) && !pending.is_empty() {
                     pending.pop_front().expect("nonempty deferred queue")
@@ -294,12 +358,12 @@ impl RunRecoveryStore {
                         let status = match &phase {
                             Phase::Ready => NativeStoreStatus::Ready,
                             Phase::Working { .. } | Phase::Checking { .. } | Phase::Transition(_) => NativeStoreStatus::Pending,
-                            Phase::Installing(_) => NativeStoreStatus::Installing,
+                            Phase::Installing { .. } => NativeStoreStatus::Installing,
                             Phase::Fenced(error) => NativeStoreStatus::Fenced(error.clone()),
                         };
                         reply.send(status);
                     }
-                    Command::Work { reply } => { reply.send(work); }
+                    Command::Work { reply } => { reply.send(Ok(work)); }
                     Command::WaitFence { reply } => {
                         if let Phase::Fenced(error) = &phase { reply.send(error.clone()); }
                         else { watchers.push(reply); }
@@ -319,23 +383,27 @@ impl RunRecoveryStore {
                         Phase::Fenced(error) => { reply.send(Err(error.clone())); }
                         _ => pending.push_back(Command::Begin { store, reply }),
                     },
-                    Command::Settle { id, reply } => {
-                        if let Some(outcome) = settled.get(&id) {
-                            reply.send(outcome.clone());
+                    Command::Settle { id, outcome, reply } => {
+                        if let Some(completed) = settled.get(&id) {
+                            let result = if completed == &outcome { Ok(()) } else { Err(store_error(&owner_path, StoreErrorKind::Integrity, "native settlement conflicts with retained completion")) };
+                            reply.send(result);
                             continue;
                         }
-                        match &phase {
-                            Phase::Transition(current) | Phase::Installing(current) if *current == id => {
-                                phase = Phase::Ready;
-                                settled.insert(id, Ok(()));
-                                reply.send(Ok(()));
-                            }
-                            Phase::Fenced(error) => { reply.send(Err(error.clone())); }
-                            _ => { reply.send(Err(store_error(&owner_path, StoreErrorKind::Integrity, "native settlement does not own the outstanding operation"))); }
-                        }
+                        let admitted = match (&phase, &outcome) {
+                            (Phase::Transition(current), SettlementOutcome::Completed | SettlementOutcome::Refused) => *current == id,
+                            (Phase::Installing { id: current, state }, SettlementOutcome::Installed(installed)) => *current == id && state == installed,
+                            _ => false,
+                        };
+                        if admitted {
+                            phase = Phase::Ready;
+                            settled.insert(id, outcome);
+                            // Local completion is authoritative; losing its response observer does not undo it.
+                            reply.send(Ok(()));
+                        } else if let Phase::Fenced(error) = &phase { reply.send(Err(error.clone())); }
+                        else { reply.send(Err(store_error(&owner_path, StoreErrorKind::Integrity, "native settlement does not own the outstanding operation"))); }
                     }
                     Command::Abandon { id } => {
-                        if matches!(&phase, Phase::Transition(current) | Phase::Installing(current) if *current == id) {
+                        if matches!(&phase, Phase::Transition(current) if *current == id) || matches!(&phase, Phase::Installing { id: current, .. } if *current == id) {
                             phase = Phase::Fenced(store_error(&owner_path, StoreErrorKind::RecoveryRequired, "native transition abandoned before explicit settlement"));
                         }
                     }
@@ -360,10 +428,10 @@ impl RunRecoveryStore {
                         if let Phase::Working { id, store, reply } = old {
                             if let Some(error) = value.fence() {
                                 phase = Phase::Fenced(error);
-                            } else if value.committed_installation() {
-                                phase = Phase::Installing(id);
+                            } else if let Some(state) = value.committed_installation() {
+                                phase = Phase::Installing { id, state };
                             }
-                            let installation = matches!(phase, Phase::Installing(_)).then(|| OwnedTransition { store, id, settled: false });
+                            let installation = matches!(phase, Phase::Installing { .. }).then(|| OwnedTransition { store, id, settled: false });
                             let committed = installation.is_some();
                             if !reply.send(Ok(Response { value, installation })) && committed {
                                 phase = Phase::Fenced(store_error(&owner_path, StoreErrorKind::RecoveryRequired, "committed native installation acknowledgement lost"));
@@ -487,19 +555,17 @@ impl RunRecoveryStore {
         }
         result.await.unwrap_or_else(|_| self.stopped())
     }
-    pub fn work(&self) -> RecoveryStoreWork {
+    /// Work reported by the last completed storage operation. A failed owner
+    /// observation is an error, never fabricated zero work.
+    pub fn work(&self) -> Result<RecoveryStoreWork, StoreError> {
         let (reply, result) = mpsc::sync_channel(1);
-        if self
-            .handle
+        self.handle
             .sender
             .send(Command::Work {
                 reply: Reply::Blocking(reply),
             })
-            .is_err()
-        {
-            return RecoveryStoreWork::default();
-        }
-        result.recv().unwrap_or_default()
+            .map_err(|_| self.stopped())?;
+        result.recv().map_err(|_| self.stopped())?
     }
     pub fn read_snapshot_at(
         path: &Path,
@@ -691,7 +757,11 @@ impl RunRecoveryStore {
                 installation,
             }) => {
                 if let Some(ticket) = installation {
-                    if let Err(error) = ticket.complete_blocking()
+                    let StoreDisposition::Committed(state) = &value else {
+                        unreachable!("installation ticket without committed state");
+                    };
+                    if let Err(error) =
+                        ticket.finish_blocking(SettlementOutcome::Installed(state.clone()))
                     {
                         return StoreDisposition::RecoveryRequired(error);
                     }
@@ -722,7 +792,11 @@ impl RunRecoveryStore {
                 installation,
             }) => {
                 if let Some(ticket) = installation {
-                    if let Err(error) = ticket.complete_blocking()
+                    let StoreDisposition::Committed(state) = &value else {
+                        unreachable!("installation ticket without committed state");
+                    };
+                    if let Err(error) =
+                        ticket.finish_blocking(SettlementOutcome::Installed(state.clone()))
                     {
                         return StoreDisposition::RecoveryRequired(error);
                     }
@@ -775,7 +849,8 @@ impl RunRecoveryStore {
             Ok(_) => unreachable!("typed native installation response differs from request"),
         }
     }
-    pub(crate) fn publish_and_install<T>(
+    #[cfg(test)]
+    pub(super) fn publish_and_install<T>(
         &self,
         prepared: PreparedRecoveryWrite,
         install: impl FnOnce(RecoveryDomainState) -> T,
@@ -792,32 +867,21 @@ impl RunRecoveryStore {
             StoreDisposition::RecoveryRequired(error) => StoreDisposition::RecoveryRequired(error),
         }
     }
-    pub(crate) fn transfer_owner_and_install<T>(
+    pub(crate) fn commit_owner_transfer(
         &self,
         domain: RecoveryDomainId,
         expected: StoreRevision,
         previous: &RecoveryPublicOwnerState,
         successor: RecoveryPublicOwner,
         successor_epoch: u64,
-        install: impl FnOnce(RecoveryDomainState) -> T,
-    ) -> StoreDisposition<T> {
-        match self.commit_installation(Operation::Transfer {
+    ) -> StoreDisposition<NativeInstallationReceipt> {
+        self.commit_installation(Operation::Transfer {
             domain,
             expected,
             previous: previous.clone(),
             successor,
             successor_epoch,
-        }) {
-            StoreDisposition::Committed(receipt) => {
-                let value = install(receipt.state.clone());
-                match receipt.installed_blocking() {
-                    Ok(()) => StoreDisposition::Committed(value),
-                    Err(error) => StoreDisposition::RecoveryRequired(error),
-                }
-            }
-            StoreDisposition::Refused(error) => StoreDisposition::Refused(error),
-            StoreDisposition::RecoveryRequired(error) => StoreDisposition::RecoveryRequired(error),
-        }
+        })
     }
     #[cfg(test)]
     pub(crate) fn inject_fault(&self, fault: StoreFault) {
@@ -831,13 +895,17 @@ pub(crate) struct OwnedTransition {
     settled: bool,
 }
 impl OwnedTransition {
-    pub(crate) fn complete_blocking(mut self) -> Result<(), StoreError> {
+    pub(crate) fn complete_blocking(self) -> Result<(), StoreError> {
+        self.finish_blocking(SettlementOutcome::Completed)
+    }
+    fn finish_blocking(mut self, outcome: SettlementOutcome) -> Result<(), StoreError> {
         let (reply, result) = mpsc::sync_channel(1);
         self.store
             .handle
             .sender
             .send(Command::Settle {
                 id: self.id,
+                outcome,
                 reply: Reply::Blocking(reply),
             })
             .map_err(|_| self.store.stopped())?;
@@ -847,13 +915,20 @@ impl OwnedTransition {
         }
         outcome
     }
-    async fn complete(mut self) -> Result<(), StoreError> {
+    async fn complete(self) -> Result<(), StoreError> {
+        self.finish(SettlementOutcome::Completed).await
+    }
+    async fn refuse(self) -> Result<(), StoreError> {
+        self.finish(SettlementOutcome::Refused).await
+    }
+    async fn finish(mut self, outcome: SettlementOutcome) -> Result<(), StoreError> {
         let (reply, result) = tokio::sync::oneshot::channel();
         self.store
             .handle
             .sender
             .send(Command::Settle {
                 id: self.id,
+                outcome,
                 reply: Reply::Async(reply),
             })
             .map_err(|_| self.store.stopped())?;
@@ -895,11 +970,7 @@ impl ProviderTransition {
             .await
     }
     pub async fn refuse(mut self) -> Result<(), StoreError> {
-        self.ticket
-            .take()
-            .expect("owned transition")
-            .complete()
-            .await
+        self.ticket.take().expect("owned transition").refuse().await
     }
 }
 pub(crate) struct NativeInstallationReceipt {
@@ -911,7 +982,7 @@ impl NativeInstallationReceipt {
         self.ticket
             .take()
             .expect("owned installation")
-            .complete_blocking()
+            .finish_blocking(SettlementOutcome::Installed(self.state.clone()))
     }
 }
 
@@ -923,3 +994,6 @@ impl Blockstore for RunRecoveryStore {
         anyhow::bail!("run blocks require an owner-prepared root transaction")
     }
 }
+
+#[cfg(test)]
+mod control_cluster_tests;
