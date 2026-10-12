@@ -1766,7 +1766,8 @@ async fn interrupted_failed_admission_cleanup_retains_worker_for_retry() {
     let _worker_context = receive.await.unwrap();
     let child = worker.identity();
     let work = InvocationWork::new(fixture.actor.identity(), reservation());
-    work.retain_aborted_children(&fixture.kernel, &[child]).await;
+    work.retain_aborted_children(&fixture.kernel, &[child])
+        .await;
     assert!(work.owns_worker(child));
 
     let mut first_cleanup = Box::pin(work.cleanup(&fixture.environment, &fixture.kernel));
@@ -1814,7 +1815,8 @@ async fn unresolved_failed_admission_worker_remains_uncertain_across_cleanup_ret
     };
     assert!(fixture.kernel.resolve(missing).await.unwrap().is_none());
     let work = InvocationWork::new(fixture.actor.identity(), reservation());
-    work.retain_aborted_children(&fixture.kernel, &[missing]).await;
+    work.retain_aborted_children(&fixture.kernel, &[missing])
+        .await;
     for _ in 0..2 {
         let cleanup = tokio::time::timeout(
             Duration::from_secs(1),
@@ -2672,4 +2674,36 @@ async fn command_transfer_send_refusal_preserves_source_cleanup_before_observer_
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn worker_transfer_refuses_another_parent_in_the_same_run() {
+    let fixture = Fixture::start().await;
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let parent = fixture
+        .kernel
+        .spawn_child(None, Owner::new(send))
+        .await
+        .unwrap();
+    let parent_context = receive.await.unwrap();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let worker = parent_context
+        .spawn_child(None, Owner::new(send))
+        .await
+        .unwrap();
+    let worker_context = receive.await.unwrap();
+    let result = fixture
+        .kernel
+        .reserve_worker_lifetime_transfer(&worker, true)
+        .await;
+    assert!(matches!(
+        result,
+        Err(crate::local_actor::LifetimeTransferError::Unauthorized)
+    ));
+    assert_eq!(
+        worker_context.supervisor_identity().await.unwrap(),
+        Some(parent.identity())
+    );
+    assert!(worker.terminal().get().is_none());
+    fixture.finish().await;
 }

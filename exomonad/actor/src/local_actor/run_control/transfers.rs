@@ -79,6 +79,7 @@ impl Drop for ResourceTransferReservation {
 pub(super) struct WorkerTransfer {
     pub(super) parent: ActorRef,
     pub(super) child: ActorRef,
+    pub(super) source: SpawnOwnership,
     pub(super) destination_run: bool,
 }
 pub(super) struct ResourceTransfer {

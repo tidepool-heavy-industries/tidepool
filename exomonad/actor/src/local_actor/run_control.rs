@@ -1165,6 +1165,19 @@ impl Actor for RunControl {
                     }) || !state.entries.contains_key(&parent)
                     {
                         Err(DirectoryError::Unauthorized { actor: identity })
+                    } else if state.entries.get(&identity).is_some_and(|entry| {
+                        let parent_cell = state.entries[&parent].actor.address().get_cell();
+                        let supervisor = child.address().get_cell().try_get_supervisor();
+                        match entry.spawn_ownership {
+                            SpawnOwnership::Supervised(owner) => {
+                                owner != parent
+                                    || supervisor
+                                        .is_none_or(|cell| cell.get_id() != parent_cell.get_id())
+                            }
+                            SpawnOwnership::Independent => supervisor.is_some(),
+                        }
+                    }) {
+                        Err(DirectoryError::Unauthorized { actor: identity })
                     } else if child.terminal().get().is_some() {
                         Err(DirectoryError::Unauthorized { actor: identity })
                     } else if state
@@ -1184,6 +1197,7 @@ impl Actor for RunControl {
                             WorkerTransfer {
                                 parent,
                                 child: identity,
+                                source: state.entries[&identity].spawn_ownership,
                                 destination_run,
                             },
                         );
@@ -1198,17 +1212,41 @@ impl Actor for RunControl {
             }
             RunControlMessage::CommitWorkerTransfer { id, reply } => {
                 let result = if let Some(transfer) = state.worker_transfers.remove(&id) {
-                    if let Some(entry) = state.entries.get_mut(&transfer.child) {
-                        entry.spawn_ownership = if transfer.destination_run {
-                            SpawnOwnership::Independent
-                        } else {
-                            SpawnOwnership::Supervised(transfer.parent)
-                        };
-                        Ok(())
-                    } else {
-                        Err(DirectoryError::Unauthorized {
+                    let parent_cell = state
+                        .entries
+                        .get(&transfer.parent)
+                        .map(|entry| entry.actor.address().get_cell());
+                    match (state.entries.get_mut(&transfer.child), parent_cell) {
+                        (Some(entry), Some(parent)) if entry.spawn_ownership == transfer.source => {
+                            let cell = entry.actor.address().get_cell();
+                            let supervisor = cell.try_get_supervisor();
+                            let current_matches = match transfer.source {
+                                SpawnOwnership::Supervised(owner) => {
+                                    owner == transfer.parent
+                                        && supervisor
+                                            .is_some_and(|cell| cell.get_id() == parent.get_id())
+                                }
+                                SpawnOwnership::Independent => supervisor.is_none(),
+                            };
+                            if current_matches {
+                                if transfer.destination_run {
+                                    cell.unlink(parent);
+                                    entry.spawn_ownership = SpawnOwnership::Independent;
+                                } else {
+                                    cell.link(parent);
+                                    entry.spawn_ownership =
+                                        SpawnOwnership::Supervised(transfer.parent);
+                                }
+                                Ok(())
+                            } else {
+                                Err(DirectoryError::Unauthorized {
+                                    actor: transfer.child,
+                                })
+                            }
+                        }
+                        _ => Err(DirectoryError::Unauthorized {
                             actor: transfer.child,
-                        })
+                        }),
                     }
                 } else {
                     Err(DirectoryError::Unavailable)
