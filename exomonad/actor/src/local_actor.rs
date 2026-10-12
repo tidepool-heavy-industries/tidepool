@@ -1695,9 +1695,7 @@ async fn handle_executor_message<B: KernelBehavior>(
                 state.replacement = Some(pending);
                 return Ok(());
             }
-            state
-                .context
-                .transfer_supervised_children(&successor_context)
+            transfer_supervised_children(&state.context, &successor_context)
                 .await
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             let grant = state
@@ -1994,11 +1992,8 @@ where
             spawn_ownership: arguments.spawn_ownership,
             myself: myself.clone(),
             lifecycle: arguments.lifecycle.clone(),
-            children: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            resources: Arc::new(Mutex::new(HashMap::new())),
             directory: arguments.directory,
-            child_admission_closed: std::sync::Arc::new(tokio::sync::RwLock::new(false)),
-            forgotten_children: std::sync::Arc::new(parking_lot::Mutex::new(
+
                 crate::CleanupComponentOutcome::Confirmed,
             )),
         });
@@ -7894,7 +7889,6 @@ mod tests {
             )]))),
             directory: LocalActorDirectory::default(),
             child_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
-            resources: Arc::new(Mutex::new(HashMap::new())),
             forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
         };
         let result =
@@ -7961,8 +7955,7 @@ mod tests {
                 children: Arc::new(Mutex::new(HashMap::new())),
                 directory: LocalActorDirectory::default(),
                 child_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
-                resources: Arc::new(Mutex::new(HashMap::new())),
-                forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
+                    forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
             };
             let entered = Arc::new(Notify::new());
             let release = Arc::new(Notify::new());
@@ -8617,7 +8610,6 @@ mod tests {
             children: Arc::new(Mutex::new(HashMap::new())),
             directory: LocalActorDirectory::default(),
             child_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
-            resources: Arc::new(Mutex::new(HashMap::new())),
             forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
         });
         let mut state = LocalActorState {
