@@ -937,6 +937,46 @@ class NativeQualificationTests(unittest.TestCase):
                 execute.assert_not_called()
                 self.assertFalse(output.exists())
 
+    def test_prepared_child_smoke_seals_one_original_case_and_rejects_incomplete_receipts(self):
+        cohort = qualification.cohorts()['prepared-child-smoke']
+        self.assertEqual(cohort['tests'], [
+            'actor_host::prepared_runtime_acceptance::production_prepared_toolset_one_child_executes_original_native_probe'])
+        self.assertEqual(cohort['expected_count'], 1)
+        self.assertTrue(cohort['ignored'])
+        self.assertEqual(cohort['max_jobs'], 1)
+        self.assertEqual(cohort['compiler_mode'], 'owned-resident')
+        self.assertEqual(cohort['required_startup_mode'], 'prepared')
+        self.assertEqual(cohort['required_stdlib_mode'], 'catalog-backed')
+        for count, passed, expected in ((1, True, 0), (0, True, 1), (None, True, 1), (1, False, 1)):
+            with self.subTest(count=count, passed=passed), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                descriptor_path = root / 'qualification.json'
+                descriptor_path.write_text('frozen descriptor')
+                output = root / 'evidence'
+                descriptor = {
+                    'programs': {'runner': '/frozen/runner', 'libtest': '/frozen/libtest'},
+                    'external_inputs': {'runtime_tools': {'path': '/frozen/runtime-tools'}},
+                    'cohorts': qualification.cohorts(),
+                    'environment': {name: '/frozen/' + name for name in cohort['required_environment']},
+                    'source_oid': 'a' * 40, 'harness_revision': 'b' * 40,
+                    'profile': 'fast-dev', 'stdlib_mode': 'catalog-backed', 'startup_mode': 'prepared',
+                }
+                def execute(command, **kwargs):
+                    self.assertEqual([command[index + 1] for index, value in enumerate(command)
+                                      if value == '--exact'], cohort['tests'])
+                    self.assertEqual(command[command.index('--expected-count') + 1], '1')
+                    self.assertIn('--ignored', command)
+                    qualification.write_json(output / 'tests/case.json', {
+                        'test': cohort['tests'][0], 'passed': passed,
+                        'execution': {'executed_test_count': count, 'exit_code': 0 if passed else 101}})
+                    return subprocess.CompletedProcess(command, 0)
+                with patch.object(qualification, 'verify', return_value=descriptor), \
+                     patch.object(qualification.subprocess, 'run', side_effect=execute):
+                    self.assertEqual(qualification.main([
+                        'run', str(descriptor_path), '--cohort', 'prepared-child-smoke',
+                        '--output', str(output), '--jobs', '1']), expected)
+                self.assertEqual(json.loads((output / 'report.json').read_text())['completed'], expected == 0)
+
     def test_harness_performance_seals_resources_and_keeps_behavior_separate_from_measurement(self):
         for label, count, diagnostics, retained, expected in (
                 ('complete', 1, True, True, 0),

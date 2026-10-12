@@ -366,9 +366,9 @@ longer running, inspect its retained result instead of retrying against a PID.
 Every new prepared release also requires the `prepared-child` cohort from its
 own frozen descriptor. The one-child control
 `actor_host::prepared_runtime_acceptance::production_prepared_toolset_one_child_executes_original_native_probe`
-is the preceding focused gate; schedule the twenty-child cohort only after that
-control passes on the coherent candidate. Both use the same production fixture
-and parameterized child program. This release gate is separate from the nine
+is sealed as the `prepared-child-smoke` cohort; run it with `--jobs 1` from the
+same descriptor before scheduling the twenty-child cohort. Both use the same
+production fixture and parameterized child program. This release gate is separate from the nine
 M2 cases and is not part of routine focused spot checks.
 
 ```sh
