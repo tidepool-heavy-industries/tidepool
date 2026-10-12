@@ -185,6 +185,12 @@ pub(super) enum Request {
 pub(crate) struct InitialTransition {
     pub observation: InitialContextObservation,
     pub admitted: bool,
+    pub execution: Option<InitialExecution>,
+}
+
+pub(crate) struct InitialExecution {
+    pub answer: tokio::sync::oneshot::Receiver<crate::KernelWorkbenchReply>,
+    pub control: Arc<crate::WorkbenchExecutionControl>,
 }
 
 enum Pending {
@@ -474,7 +480,9 @@ pub(super) fn handle(
                 resident.retirement = Some(terminal);
             }
         }
-        ResidentCommand::Completed { sequence, outcome } => complete(state, sequence, outcome),
+        ResidentCommand::Completed { sequence, outcome } => {
+            complete(state, address, sequence, outcome)
+        }
         ResidentCommand::BeginBinding { origin, reply } => {
             let result = if state.is_closed() {
                 Err("successor lifecycle is closing".into())
@@ -694,7 +702,12 @@ fn refuse(request: Request, detail: &str) {
     }
 }
 
-fn complete(state: &mut LifecycleState, sequence: u64, outcome: Completion) {
+fn complete(
+    state: &mut LifecycleState,
+    address: &RactorRef<LifecycleCommand>,
+    sequence: u64,
+    outcome: Completion,
+) {
     let Some(resident) = &mut state.resident else {
         return;
     };
@@ -734,12 +747,80 @@ fn complete(state: &mut LifecycleState, sequence: u64, outcome: Completion) {
             if let Err(error) = &result {
                 resident.current.settlement = ResidentSettlement::NeedsAttention(error.clone());
             }
-            let result = result.map(|transition| {
+            let mut result = result.map(|transition| {
                 resident.current.initial_context = Some(transition.observation.clone());
                 transition
             });
+            let start = result
+                .as_ref()
+                .ok()
+                .filter(|transition| {
+                    transition.admitted
+                        && matches!(
+                            transition.observation.state,
+                            crate::InitialContextState::Preparing
+                        )
+                })
+                .and_then(|transition| transition.observation.identity.clone());
+            if let Some(identity) = start {
+                let resident = state.resident.as_ref().unwrap();
+                let request = tidepool_runtime::session::WorkbenchRequest::for_retained_operation(
+                    crate::initial_context::INITIAL_CONTEXT_SLOT,
+                    serde_json::json!({"operation":identity.operation.as_str(),"callerSeed":resident.current.initial_context.as_ref().unwrap().caller_seed}))
+                    .with_execution_id(identity.operation.clone());
+                let mut invocation = crate::ActorWorkbenchInvocation::issued(
+                    request,
+                    resident.current.installed_policy.clone(),
+                    None,
+                );
+                invocation.initial_context = true;
+                let control = crate::WorkbenchExecutionControl::untracked();
+                let (answer, receiver) = tokio::sync::oneshot::channel();
+                let enqueue = state.enqueue(
+                    address,
+                    crate::KernelMessage::Workbench {
+                        invocation,
+                        control: Some(control.clone()),
+                        reply: answer.into(),
+                    },
+                    false,
+                );
+                match enqueue {
+                    Ok(()) => {
+                        result.as_mut().unwrap().execution = Some(InitialExecution {
+                            answer: receiver,
+                            control,
+                        })
+                    }
+                    Err(error) => {
+                        let (ignore, _) = tokio::sync::oneshot::channel();
+                        state
+                            .resident
+                            .as_mut()
+                            .unwrap()
+                            .queued
+                            .push_back(Request::Initial {
+                                event: InitialContextEvent::Fail {
+                                    detail: error.to_string(),
+                                    cancelled: true,
+                                    receipts: serde_json::json!([]),
+                                },
+                                begin: false,
+                                expected: Some(identity.operation),
+                                reply: ignore.into(),
+                            });
+                        result = Err(error.to_string());
+                    }
+                }
+            }
             state.publish();
-            let _ = reply.send(result);
+            // If this observer disappeared, cancel only admitted execution;
+            // the executor's finalization still retains its eventual outcome.
+            if let Err(ractor::MessagingErr::SendErr(Ok(transition))) = reply.send(result) {
+                if let Some(execution) = transition.execution {
+                    execution.control.request_cancellation();
+                }
+            }
         }
         (Pending::Owner(reply), Completion::Owner(result)) => {
             if let Err(error) = &result {
@@ -893,6 +974,7 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
                         let _ = reply.send(Ok(InitialTransition {
                             observation,
                             admitted: false,
+                            execution: None,
                         }));
                         continue;
                     }
@@ -916,6 +998,7 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
                                         return Ok(InitialTransition {
                                             observation,
                                             admitted: false,
+                                            execution: None,
                                         });
                                     }
                                 }
@@ -948,6 +1031,7 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
                             Ok(InitialTransition {
                                 observation,
                                 admitted: true,
+                                execution: None,
                             })
                         }
                         .await;
@@ -982,7 +1066,7 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
                             crate::initial_context::apply_event(&mut next, event).map_err(|error| error.to_string())?;
                             next.unwrap()
                         };
-                        Ok(InitialTransition { observation, admitted: true })
+                        Ok(InitialTransition { observation, admitted: true, execution: None })
                     }.await;
                     Completion::Initial(result)
                 }),

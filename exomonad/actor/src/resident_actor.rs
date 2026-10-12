@@ -36,7 +36,6 @@ mod invocation_effects;
 pub(crate) mod invocation_work;
 #[cfg(test)]
 mod jev_form_runtime_tests;
-mod lifecycle;
 mod owned_workbench;
 #[cfg(test)]
 pub(crate) async fn before_publication_attempt() {
@@ -504,20 +503,7 @@ fn retain_retired_metadata<H, O>(
     actor: ActorRef,
     terminal: &ActorTerminal,
 ) {
-    let lifecycle = environment
-        .actors
-        .lock()
-        .get(&actor)
-        .map(|record| record.lifecycle.clone());
-    if let Some(lifecycle) = lifecycle {
-        lifecycle.retire();
-    }
     environment.actor_admissions.fail_issuer_checkpoints(actor);
-    if let Some(recovery) = &environment.recovery {
-        if let Err(error) = recovery.retire(actor, terminal.clone()) {
-            tracing::error!(?actor, %error, "actor terminal evidence remains uncertain");
-        }
-    }
     environment.actor_admissions.retire_actor(actor);
     if let Some(record) = environment.actors.lock().get_mut(&actor) {
         record.descriptor.source_imports().release_capture();
@@ -570,10 +556,8 @@ async fn publish_retired_confirmed<H, O>(
 #[derive(Clone)]
 struct ResidentActorRecord {
     installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
-    lifecycle: lifecycle::ActorLifecycle,
+    lifecycle: crate::LifecycleHandle,
     fresh_context_seed: Option<String>,
-    root_startup: Option<Arc<Mutex<RootStartupState>>>,
-    public_owner: ActorPublicOwnerPlane,
     recovery_claimed: bool,
     workbench_executions: Arc<Mutex<WorkbenchExecutions>>,
     forest_control: bool,
@@ -1679,58 +1663,6 @@ where
     }
 }
 
-fn settle_public_owner_record(
-    record: &mut ResidentActorRecord,
-    context: &ActorSessionContext,
-    expected_owner: &tidepool_runtime::session::RecoveryPublicOwner,
-    publication: tidepool_runtime::session::DurablePublicOwnerPublication,
-) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
-    use tidepool_runtime::session::{DurablePublicOwnerPublication, PublicManifestCommit};
-    if record.terminal.is_some()
-        || record.descriptor.placement() != context.placement
-        || !(matches!(&record.public_owner,
-                ActorPublicOwnerPlane::DurablePending(owner)
-                if owner == expected_owner)
-            || matches!(&record.public_owner, ActorPublicOwnerPlane::DurableCommitted(owner)
-                if owner.durable() == Some(expected_owner)))
-    {
-        return Err(ResidentActorWorkbenchError::ActorProtocol(
-            "public settlement requires its original pending owner".into(),
-        ));
-    }
-    match publication {
-        DurablePublicOwnerPublication::Committed(readiness) => {
-            if let ActorPublicOwnerPlane::DurableCommitted(owner) = &record.public_owner {
-                return if owner.is_current() {
-                    Ok(PublicManifestCommit::Durable)
-                } else {
-                    Err(ResidentActorWorkbenchError::ActorProtocol(
-                        "original native owner was revoked before publication settlement".into(),
-                    ))
-                };
-            }
-            record.public_owner = ActorPublicOwnerPlane::DurableCommitted(
-                WorkbenchPublicOwner::issue(context, &record.descriptor, Some(readiness)).map_err(
-                    |error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
-                )?,
-            );
-            Ok(PublicManifestCommit::Durable)
-        }
-        DurablePublicOwnerPublication::Refused { error } => {
-            Ok(PublicManifestCommit::Refused { error })
-        }
-        DurablePublicOwnerPublication::RecoveryRequired { error } => {
-            Ok(PublicManifestCommit::RecoveryRequired { error })
-        }
-    }
-}
-
-#[derive(Clone)]
-enum RootPublicOwnerPosture {
-    Pending,
-    Ready,
-}
-
 #[derive(Clone)]
 pub(crate) enum ActorPublicOwnerPlane {
     Ephemeral(Arc<WorkbenchPublicOwner>),
@@ -1750,6 +1682,7 @@ impl ActorPublicOwnerPlane {
 /// Actual actor-owner readiness for the provider composition boundary. The
 /// frontend retains this capsule across waits and revalidates it before bind.
 pub struct ActorProviderAdmission {
+    lifecycle: crate::LifecycleHandle,
     owner: Arc<WorkbenchPublicOwner>,
 }
 
@@ -1779,13 +1712,18 @@ impl ActorProviderAdmission {
         self.owner.placement()
     }
 
-    /// Admit one synchronous provider transition under the original native run
-    /// fence. The operation must not await or reenter the recovery store.
-    pub fn with_admission<T>(
+    pub fn native_readiness(
         &self,
-        operation: impl FnOnce() -> T,
-    ) -> Result<T, ResidentActorWorkbenchError> {
-        self.owner.with_admission(operation)
+    ) -> Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>> {
+        self.owner.native_readiness()
+    }
+
+    pub async fn validate(&self) -> Result<(), ResidentActorWorkbenchError> {
+        self.lifecycle
+            .public_owner(Some(self.owner.clone()), true)
+            .await
+            .map(|_| ())
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)
     }
 }
 
@@ -2203,7 +2141,7 @@ pub(crate) enum RootStartupState {
 pub struct RootStartupRelease {
     actor: ActorRef,
     placement: crate::ActorPlacement,
-    latch: Arc<Mutex<RootStartupState>>,
+    lifecycle: crate::LifecycleHandle,
     intent: crate::RootStartupIntent,
 }
 
@@ -2793,7 +2731,8 @@ pub struct ResidentKernelBehavior<H, O> {
     spawn_source: Option<crate::CheckpointSourceLayer>,
     spawn_helper_branch: Option<String>,
     spawn_admission: Option<crate::SpawnAdmission>,
-    root_startup: Option<(crate::RootStartupIntent, Arc<Mutex<RootStartupState>>)>,
+    root_startup: Option<crate::RootStartupIntent>,
+    lifecycle: Option<crate::LifecycleHandle>,
     standing: ResidentStanding,
     shutdown_hook: Option<RootCustody>,
     checkpoint: Option<StateCheckpoint>,
@@ -3052,6 +2991,7 @@ where
 }
 
 struct WorkbenchEffectState {
+    lifecycle: Option<crate::LifecycleHandle>,
     initial_context: bool,
     display_receipt_owner: Option<Arc<DisplayExecutionSettlement>>,
     park_effects: bool,
@@ -3667,6 +3607,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             spawn_helper_branch: None,
             spawn_admission: None,
             root_startup: None,
+            lifecycle: None,
             standing: ResidentStanding::Boot,
             shutdown_hook: None,
             checkpoint: None,
@@ -3945,53 +3886,27 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             context = selected;
             Some(authority)
         };
-        if self
-            .root_startup
+        let snapshot = self
+            .lifecycle
             .as_ref()
-            .is_some_and(|(_, latch)| *latch.lock() != RootStartupState::Activated)
-        {
-            return Err(KernelInvocationFailure::Rejected {
+            .and_then(|lifecycle| lifecycle.resident_snapshot())
+            .ok_or_else(|| KernelInvocationFailure::Rejected {
                 receipts: Vec::new(),
                 actor,
-                detail: "root startup is pending durable release".into(),
+                detail: "admitted execution lost its immutable resident owner".into(),
                 diagnostic: None,
-            });
-        }
-        let public_owner = {
-            let records = self.environment.actors.lock();
-            let record = records
-                .get(&actor)
-                .ok_or_else(|| KernelInvocationFailure::Rejected {
-                    receipts: Vec::new(),
-                    actor,
-                    detail: "publication owner has no registered actor".into(),
-                    diagnostic: None,
-                })?;
-            let owner =
-                record
-                    .public_owner
-                    .ready()
-                    .ok_or_else(|| KernelInvocationFailure::Rejected {
-                        receipts: Vec::new(),
-                        actor,
-                        detail: "durable actor public surface is not initialized".into(),
-                        diagnostic: None,
-                    })?;
-            if record.terminal.is_some()
-                || record.descriptor.placement() != self.descriptor.placement()
-                || record.descriptor.persistence_policy() != self.descriptor.persistence_policy()
-                || record.descriptor.actor_path() != self.descriptor.actor_path()
-                || !owner.matches_context(&context)
-            {
-                return Err(KernelInvocationFailure::Rejected {
-                    receipts: Vec::new(),
-                    actor,
-                    detail: "publication owner differs from current actor admission".into(),
-                    diagnostic: None,
-                });
-            }
-            owner.clone()
-        };
+            })?;
+        let public_owner = snapshot
+            .public_owner
+            .ready()
+            .cloned()
+            .filter(|owner| owner.matches_context(&context))
+            .ok_or_else(|| KernelInvocationFailure::Rejected {
+                receipts: Vec::new(),
+                actor,
+                detail: "admitted execution has no exact committed public owner".into(),
+                diagnostic: None,
+            })?;
         if let Some(binding) = &invocation.context_binding {
             let control = control
                 .as_ref()
@@ -7333,7 +7248,7 @@ where
                             "actor prepared its Codex application more than once".into(),
                         ));
                     }
-                    let owner = self.ready_public_owner(context)?;
+                    let owner = self.ready_public_owner(context).await?;
                     let bootstrap = self
                         .environment
                         .runner
@@ -7401,7 +7316,7 @@ where
                 Some(prepared.installation),
             ),
             None => {
-                let owner = self.ready_public_owner(context)?;
+                let owner = self.ready_public_owner(context).await?;
                 let bootstrap = self
                     .environment
                     .runner
@@ -7545,7 +7460,7 @@ where
                     ));
                 }
             };
-            self.check_application_readiness(kernel, context)?;
+            self.check_application_readiness(kernel, context).await?;
             let publication = completion.publish_if_current(|| {
                 kernel.retained_exit().claim_before_shutdown(|| {
                     if let Some(installation) = installation {
@@ -7634,30 +7549,30 @@ where
         )
     }
 
-    fn ready_public_owner(
+    async fn ready_public_owner(
         &self,
         context: &ActorSessionContext,
     ) -> Result<Arc<WorkbenchPublicOwner>, ResidentActorWorkbenchError> {
-        self.environment
-            .actors
-            .lock()
-            .get(&context.actor)
-            .and_then(|record| record.public_owner.ready())
-            .cloned()
+        let lifecycle = self
+            .lifecycle
+            .as_ref()
+            .filter(|handle| handle.identity() == context.actor)
             .ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "application readiness requires its confirmed public owner".into(),
-                )
-            })
+                ResidentActorWorkbenchError::ActorProtocol("resident lifecycle is absent".into())
+            })?;
+        lifecycle
+            .public_owner(None, false)
+            .await
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)
     }
 
-    fn commit_interactive_installation(
+    async fn commit_interactive_installation(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
         installation: LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        self.check_application_readiness(kernel, context)?;
+        self.check_application_readiness(kernel, context).await?;
         kernel
             .retained_exit()
             .claim_before_shutdown(|| {
@@ -7674,6 +7589,9 @@ where
         }
         self.publish_installation(installation);
         self.policy_installed = true;
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.policy_installed(self.installed_tools.current());
+        }
         for notice in self.deferred_child_failures.drain(..) {
             self.environment
                 .deployments
@@ -7691,9 +7609,10 @@ where
         self.publish_application_surface(kernel, context, prepared.owner, prepared.bootstrap)
             .await?;
         self.commit_interactive_installation(kernel, context, prepared.installation)
+            .await
     }
 
-    fn check_application_readiness(
+    async fn check_application_readiness(
         &self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
@@ -7703,24 +7622,7 @@ where
                 terminal,
             ));
         }
-        let records = self.environment.actors.lock();
-        let record = records.get(&context.actor).ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "application readiness lost its original actor".into(),
-            )
-        })?;
-        if record.terminal.is_some()
-            || record.descriptor.placement() != context.placement
-            || record
-                .public_owner
-                .ready()
-                .is_none_or(|owner| !owner.matches_context(context))
-        {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "application readiness lost its live confirmed public placement".into(),
-            ));
-        }
-        Ok(())
+        self.ready_public_owner(context).await.map(|_| ())
     }
 
     async fn publish_application_surface(
@@ -7730,9 +7632,10 @@ where
         owner: Arc<WorkbenchPublicOwner>,
         bootstrap: Option<tidepool_runtime::session::DurablePublicBootstrap>,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        self.check_application_readiness(kernel, context)?;
+        self.check_application_readiness(kernel, context).await?;
         if !self
             .ready_public_owner(context)
+            .await
             .is_ok_and(|current| Arc::ptr_eq(&current, &owner))
         {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -7758,9 +7661,10 @@ where
                 )))
             }
         }
-        self.check_application_readiness(kernel, context)?;
+        self.check_application_readiness(kernel, context).await?;
         if !self
             .ready_public_owner(context)
+            .await
             .is_ok_and(|current| Arc::ptr_eq(&current, &owner))
         {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -7976,7 +7880,7 @@ where
             });
         }
         if matches!(boot, ResidentBoot::Workbench) && self.explicit_installer.is_some() {
-            let owner = self.ready_public_owner(context)?;
+            let owner = self.ready_public_owner(context).await?;
             let bootstrap = self
                 .environment
                 .runner
@@ -8024,7 +7928,7 @@ where
             self.policy_installed = true;
             return Ok(KernelStep::Continue(()));
         }
-        let public_owner = self.ready_public_owner(context)?;
+        let public_owner = self.ready_public_owner(context).await?;
         let bootstrap = self
             .environment
             .runner
@@ -11120,28 +11024,7 @@ where
         Box::pin(kernel.compiler_lifecycle_scope(async move {
             placement_transfer.map_err(Self::failure)?;
             let context = self.context(kernel.identity());
-            let public_owner = match self.descriptor.persistence_policy() {
-                crate::ActorPersistencePolicy::Ephemeral => ActorPublicOwnerPlane::Ephemeral(
-                    WorkbenchPublicOwner::issue(&context, &self.descriptor, None)
-                        .map_err(KernelInvocationFailure::into_behavior_error)?,
-                ),
-                crate::ActorPersistencePolicy::Durable => {
-                    let owner = self
-                        .descriptor
-                        .actor_path()
-                        .and_then(|path| {
-                            tidepool_runtime::session::RecoveryPublicOwner::new(
-                                path,
-                                context.actor.incarnation.0,
-                            )
-                        })
-                        .ok_or_else(|| {
-                            Self::failure("durable actor requires its canonical admitted path")
-                        })?;
-                    ActorPublicOwnerPlane::DurablePending(owner)
-                }
-            };
-            if let Some((intent, _)) = &self.root_startup {
+            if let Some(intent) = &self.root_startup {
                 let Some(ResidentBoot::Startup(entry)) = &self.boot else {
                     return Err(Self::failure(
                         "pending root lost its original unexecuted startup entry",
@@ -11159,26 +11042,31 @@ where
                         context.actor,
                         &self.descriptor,
                         &self.launch_worktrees,
-                        self.root_startup.as_ref().map(|(intent, _)| intent.clone()),
+                        self.root_startup.clone(),
                     )
+                    .await
                     .map_err(|error| Self::failure(error.to_string()))?;
             }
-            kernel.install_session_context(context.clone())?;
-            let lifecycle =
-                lifecycle::ActorLifecycle::start(context.actor, self.environment.recovery.clone())
-                    .await
-                    .map_err(Self::failure)?;
+            kernel.install_session_context(context.clone()).await?;
+            let lifecycle = kernel.lifecycle().clone();
+            lifecycle
+                .configure_resident(
+                    context.clone(),
+                    self.descriptor.clone(),
+                    self.environment.recovery.clone(),
+                    Arc::new(self.environment.runner.clone()),
+                    self.root_startup.clone(),
+                    self.fresh_context_seed.clone(),
+                )
+                .await
+                .map_err(Self::failure)?;
+            self.lifecycle = Some(lifecycle.clone());
             self.environment.actors.lock().insert(
                 context.actor,
                 ResidentActorRecord {
                     installed_tools: self.installed_tools.clone(),
-                    lifecycle,
+                    lifecycle: lifecycle.clone(),
                     fresh_context_seed: self.fresh_context_seed.clone(),
-                    root_startup: self
-                        .root_startup
-                        .as_ref()
-                        .map(|(_, latch)| Arc::clone(latch)),
-                    public_owner,
                     recovery_claimed: false,
                     workbench_executions: self.workbench_executions.clone(),
                     forest_control: self.forest_control,
@@ -11232,32 +11120,10 @@ where
                         && self.descriptor.context_parent().is_none()
                         && matches!(self.boot.as_ref(), Some(ResidentBoot::Prepared(_)))))
             {
-                let owner = {
-                    let records = self.environment.actors.lock();
-                    let record = records.get(&context.actor).ok_or_else(|| {
-                        Self::failure("durable actor lost its original allocation")
-                    })?;
-                    match &record.public_owner {
-                        ActorPublicOwnerPlane::DurablePending(owner) => owner.clone(),
-                        _ => {
-                            return Err(Self::failure("durable actor lost its pending owner"));
-                        }
-                    }
-                };
-                let publication = self
-                    .environment
-                    .runner
-                    .initialize_durable_public_owner(context.clone(), owner.clone())
+                let outcome = lifecycle
+                    .publish_public_owner(None)
                     .await
-                    .map_err(Self::workbench_failure)?;
-                let outcome = {
-                    let mut records = self.environment.actors.lock();
-                    let record = records.get_mut(&context.actor).ok_or_else(|| {
-                        Self::failure("durable actor allocation retired before publication")
-                    })?;
-                    settle_public_owner_record(record, &context, &owner, publication)
-                        .map_err(Self::workbench_failure)?
-                };
+                    .map_err(Self::failure)?;
                 match outcome {
                     tidepool_runtime::session::PublicManifestCommit::Durable => {}
                     tidepool_runtime::session::PublicManifestCommit::Refused { error }
@@ -12099,6 +11965,7 @@ where
             let mut execution_state = WorkbenchExecutionState {
                 cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
+                    lifecycle: self.lifecycle.clone(),
                     initial_context,
                     display_receipt_owner,
                     park_effects: false,
@@ -12356,35 +12223,42 @@ where
         kind: crate::kernel::KernelResume,
     ) -> Result<crate::OwnedActorTask<Self, ()>, KernelBehaviorError> {
         if kind == crate::kernel::KernelResume::ReleaseRootStartup {
-            let (_, latch) = self
-                .root_startup
-                .as_ref()
-                .ok_or_else(|| Self::failure("actor has no pending root startup"))?;
-            let mut state = latch.lock();
-            match *state {
-                RootStartupState::Pending => {
-                    return Err(Self::failure("root startup has not been durably released"));
-                }
-                RootStartupState::Activated => {
-                    return Ok(crate::OwnedActorTask::new(Box::pin(async {
-                        crate::OwnedActorCompletion::new(|_| Ok(KernelStep::Continue(())))
-                    })));
-                }
-                RootStartupState::Released => *state = RootStartupState::Activated,
+            if self.root_startup.is_none() {
+                return Err(Self::failure("actor has no pending root startup"));
             }
-            drop(state);
-            let boot = self
-                .boot
-                .take()
-                .ok_or_else(|| Self::failure("original root boot was already consumed"))?;
+            let lifecycle = self
+                .lifecycle
+                .clone()
+                .ok_or_else(|| Self::failure("root lifecycle is absent"))?;
             let context = self.context(kernel.identity());
             return Ok(crate::OwnedActorTask::serial(
                 move |mut behavior: Self, kernel| {
                     Box::pin(async move {
-                        let result = behavior
-                            .initialize(&kernel, &context, boot)
-                            .await
-                            .map_err(|error| Self::invocation_failure(kernel.identity(), error));
+                        let result = async {
+                            if !lifecycle.activate_startup().await.map_err(|error| {
+                                KernelInvocationFailure::Rejected {
+                                    receipts: Vec::new(),
+                                    actor: kernel.identity(),
+                                    detail: error,
+                                    diagnostic: None,
+                                }
+                            })? {
+                                return Ok(KernelStep::Continue(()));
+                            }
+                            let boot = behavior.boot.take().ok_or_else(|| {
+                                KernelInvocationFailure::Failed {
+                                    receipts: Vec::new(),
+                                    actor: kernel.identity(),
+                                    detail: "original root boot was already consumed".into(),
+                                    diagnostic: None,
+                                }
+                            })?;
+                            behavior
+                                .initialize(&kernel, &context, boot)
+                                .await
+                                .map_err(|error| Self::invocation_failure(kernel.identity(), error))
+                        }
+                        .await;
                         (behavior, crate::OwnedActorCompletion::new(move |_| result))
                     })
                 },
@@ -13160,55 +13034,145 @@ where
 
     /// Bind recovery evidence to an actually admitted canonical root. The
     /// durable journal revalidates this placement before certifying transfer.
-    async fn lifecycle_for(&self, actor: ActorRef) -> Result<crate::LifecycleHandle, ResidentActorWorkbenchError> {
-        self.directory.resolve(actor).await.map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?
-            .map(|actor| actor.lifecycle().clone()).ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("actor lifecycle is unavailable".into()))
+    async fn lifecycle_for(
+        &self,
+        actor: ActorRef,
+    ) -> Result<crate::LifecycleHandle, ResidentActorWorkbenchError> {
+        self.directory
+            .resolve(actor)
+            .await
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?
+            .map(|actor| actor.lifecycle().clone())
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol("actor lifecycle is unavailable".into())
+            })
     }
 
-    pub async fn root_recovery_placement(&self, actor: ActorRef) -> Result<crate::RootRecoveryPlacement, ResidentActorWorkbenchError> {
-        let snapshot = self.lifecycle_for(actor).await?.resident_snapshot()
-            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("root resident allocation is absent".into()))?;
+    pub async fn root_recovery_placement(
+        &self,
+        actor: ActorRef,
+    ) -> Result<crate::RootRecoveryPlacement, ResidentActorWorkbenchError> {
+        let snapshot = self
+            .lifecycle_for(actor)
+            .await?
+            .resident_snapshot()
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "root resident allocation is absent".into(),
+                )
+            })?;
         let descriptor = &snapshot.descriptor;
-        let context = self.directory.context(actor).await.map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?
-            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("root executor context is unavailable".into()))?;
-        if !context.spawn_ownership().is_independent() || descriptor.persistence_policy() != crate::ActorPersistencePolicy::Durable
-            || descriptor.creator().is_some() || descriptor.supervisor_parent().is_some() || descriptor.context_parent().is_some() {
-            return Err(ResidentActorWorkbenchError::ActorProtocol("recovery requires exact independent durable root".into()));
+        let context = self
+            .directory
+            .context(actor)
+            .await
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "root executor context is unavailable".into(),
+                )
+            })?;
+        if !context.spawn_ownership().is_independent()
+            || descriptor.persistence_policy() != crate::ActorPersistencePolicy::Durable
+            || descriptor.creator().is_some()
+            || descriptor.supervisor_parent().is_some()
+            || descriptor.context_parent().is_some()
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "recovery requires exact independent durable root".into(),
+            ));
         }
-        let owner = descriptor.actor_path().and_then(|path| tidepool_runtime::session::RecoveryPublicOwner::new(path,actor.incarnation.0))
-            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("root owner identity is absent".into()))?;
-        Ok(crate::RootRecoveryPlacement::new(actor, owner, snapshot.context.placement))
+        let owner = descriptor
+            .actor_path()
+            .and_then(|path| {
+                tidepool_runtime::session::RecoveryPublicOwner::new(path, actor.incarnation.0)
+            })
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol("root owner identity is absent".into())
+            })?;
+        Ok(crate::RootRecoveryPlacement::new(
+            actor,
+            owner,
+            snapshot.context.placement,
+        ))
     }
 
-    pub async fn begin_root_binding_operation(&self, actor: ActorRef) -> Result<crate::RootBindingOperationClaim, ResidentActorWorkbenchError> {
-        self.lifecycle_for(actor).await?.begin_root_binding_operation().await.map_err(ResidentActorWorkbenchError::ActorProtocol)
+    pub async fn begin_root_binding_operation(
+        &self,
+        actor: ActorRef,
+    ) -> Result<crate::RootBindingOperationClaim, ResidentActorWorkbenchError> {
+        self.lifecycle_for(actor)
+            .await?
+            .begin_root_binding_operation()
+            .await
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)
     }
 
-    pub async fn begin_successor_operation(&self, actor: ActorRef, predecessor: &tidepool_runtime::session::RecoveryPublicOwner)
-        -> Result<crate::RootBindingOperationClaim, ResidentActorWorkbenchError> {
-        self.lifecycle_for(actor).await?.begin_successor_operation(predecessor.clone()).await.map_err(ResidentActorWorkbenchError::ActorProtocol)
-    }
-
-    pub async fn committed_public_readiness(&self, claim: &crate::RootBindingOperationClaim)
-        -> Result<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>, ResidentActorWorkbenchError> {
-        let snapshot = self.lifecycle_for(claim.successor_actor()).await?.resident_snapshot()
-            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("binding resident allocation is absent".into()))?;
-        snapshot.public_owner.ready().and_then(|owner| owner.native_readiness())
-            .filter(|native| native.durable_owner() == claim.successor_owner() && native.session() == claim.successor_placement().session
-                && native.scope() == claim.successor_placement().lexical_scope)
-            .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("binding has no matching committed native capability".into()))
-    }
-
-    pub async fn bind_durable_root_public_owner(&self, actor: ActorRef)
-        -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
-        self.lifecycle_for(actor).await?.publish_public_owner(None).await.map_err(ResidentActorWorkbenchError::ActorProtocol)
-    }
-
-    pub async fn transfer_recovered_root_public_owner(&self, actor: ActorRef,
+    pub async fn begin_successor_operation(
+        &self,
+        actor: ActorRef,
         predecessor: &tidepool_runtime::session::RecoveryPublicOwner,
-        authority: Arc<dyn tidepool_runtime::session::RecoverySuccessorAuthority>)
-        -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
-        self.lifecycle_for(actor).await?.publish_public_owner(Some((predecessor.clone(),authority))).await
+    ) -> Result<crate::RootBindingOperationClaim, ResidentActorWorkbenchError> {
+        self.lifecycle_for(actor)
+            .await?
+            .begin_successor_operation(predecessor.clone())
+            .await
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)
+    }
+
+    pub async fn committed_public_readiness(
+        &self,
+        claim: &crate::RootBindingOperationClaim,
+    ) -> Result<
+        Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
+        ResidentActorWorkbenchError,
+    > {
+        let snapshot = self
+            .lifecycle_for(claim.successor_actor())
+            .await?
+            .resident_snapshot()
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "binding resident allocation is absent".into(),
+                )
+            })?;
+        snapshot
+            .public_owner
+            .ready()
+            .and_then(|owner| owner.native_readiness())
+            .filter(|native| {
+                native.durable_owner() == claim.successor_owner()
+                    && native.session() == claim.successor_placement().session
+                    && native.scope() == claim.successor_placement().lexical_scope
+            })
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "binding has no matching committed native capability".into(),
+                )
+            })
+    }
+
+    pub async fn bind_durable_root_public_owner(
+        &self,
+        actor: ActorRef,
+    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
+        self.lifecycle_for(actor)
+            .await?
+            .publish_public_owner(None)
+            .await
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)
+    }
+
+    pub async fn transfer_recovered_root_public_owner(
+        &self,
+        actor: ActorRef,
+        predecessor: &tidepool_runtime::session::RecoveryPublicOwner,
+        authority: Arc<dyn tidepool_runtime::session::RecoverySuccessorAuthority>,
+    ) -> Result<tidepool_runtime::session::PublicManifestCommit, ResidentActorWorkbenchError> {
+        self.lifecycle_for(actor)
+            .await?
+            .publish_public_owner(Some((predecessor.clone(), authority)))
+            .await
             .map_err(ResidentActorWorkbenchError::ActorProtocol)
     }
 
@@ -13286,132 +13250,66 @@ where
     }
 
     /// Admit attachment only after the actual actor's requested plane is ready.
-    pub fn authorize_provider_attachment(
+    pub async fn authorize_provider_attachment(
         &self,
         actor: ActorRef,
     ) -> Result<Arc<ActorProviderAdmission>, ResidentActorWorkbenchError> {
-        let records = self.environment.actors.lock();
-        Self::validate_provider_lineage(actor, &records)?;
-        if records.get(&actor).is_some_and(|record| {
-            record
-                .root_startup
-                .as_ref()
-                .is_some_and(|latch| *latch.lock() != RootStartupState::Activated)
-        }) {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "root startup has not released provider attachment".into(),
-            ));
+        let lifecycle = self.lifecycle_for(actor).await?;
+        let snapshot = lifecycle.resident_snapshot().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "provider resident allocation is absent".into(),
+            )
+        })?;
+        if snapshot.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Ephemeral {
+            if let Some(parent) = snapshot.descriptor.creator() {
+                let parent = self
+                    .lifecycle_for(parent)
+                    .await?
+                    .resident_snapshot()
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "provider lineage is unavailable".into(),
+                        )
+                    })?;
+                if parent.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable
+                {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "provider child requires durable lineage admission".into(),
+                    ));
+                }
+            }
         }
-        let owner = records
-            .get(&actor)
-            .and_then(|record| record.public_owner.ready())
-            .cloned()
-            .ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "actor publication plane is not ready for provider attachment".into(),
-                )
-            })?;
-        drop(records);
-        let admission = Arc::new(ActorProviderAdmission { owner });
-        self.validate_provider_attachment(&admission)?;
-        Ok(admission)
+        let owner = lifecycle
+            .public_owner(None, true)
+            .await
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+        Ok(Arc::new(ActorProviderAdmission { lifecycle, owner }))
     }
 
-    /// Recheck after external setup waits and before binding or readiness.
-    pub fn validate_provider_attachment(
+    pub async fn validate_provider_attachment(
         &self,
         admission: &ActorProviderAdmission,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        let actor = admission.actor();
-        let refuse = || {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "provider admission no longer matches the live actor owner".into(),
-            )
-        };
-        let context = self.directory.session_context(actor).ok_or_else(refuse)?;
-        if self
-            .environment
-            .actors
-            .lock()
-            .get(&actor)
-            .is_some_and(|record| {
-                record
-                    .root_startup
-                    .as_ref()
-                    .is_some_and(|latch| *latch.lock() != RootStartupState::Activated)
-            })
-        {
-            return Err(refuse());
-        }
-        if !admission.owner.matches_context(&context)
-            || self.directory.resolve(actor).is_none_or(|actor| {
-                actor.terminal().get().is_some() || actor.terminal().requested_shutdown().is_some()
-            })
-        {
-            return Err(refuse());
-        }
-        let records = self.environment.actors.lock();
-        Self::validate_provider_lineage(actor, &records)?;
-        let record = records.get(&actor).ok_or_else(refuse)?;
-        if record.terminal.is_some()
-            || record.descriptor.placement() != context.placement
-            || record
-                .public_owner
-                .ready()
-                .is_none_or(|owner| !Arc::ptr_eq(owner, &admission.owner))
-        {
-            return Err(refuse());
-        }
-        Ok(())
+        admission.validate().await
     }
 
-    fn validate_provider_lineage(
-        actor: ActorRef,
-        records: &std::collections::HashMap<ActorRef, ResidentActorRecord>,
-    ) -> Result<(), ResidentActorWorkbenchError> {
-        let record = records.get(&actor).ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "provider actor has no registered lineage admission".into(),
-            )
-        })?;
-        if record.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Ephemeral
-            && record.descriptor.creator().is_some_and(|parent| {
-                records.get(&parent).is_none_or(|parent| {
-                    parent.descriptor.persistence_policy() == crate::ActorPersistencePolicy::Durable
-                })
-            })
-        {
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "provider child requires explicit durable lineage admission before attachment"
-                    .into(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn root_recovery_context(
+    async fn root_recovery_context(
         &self,
         expected: &crate::RootRecoveryPlacement,
     ) -> Result<ActorSessionContext, ResidentActorWorkbenchError> {
-        let current = self.root_recovery_placement(expected.actor())?;
-        let context = self
-            .directory
-            .session_context(expected.actor())
+        let snapshot = self
+            .lifecycle_for(expected.actor())
+            .await?
+            .resident_snapshot()
             .ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    "root recovery placement was retired".into(),
-                )
+                ResidentActorWorkbenchError::ActorProtocol("root context is unavailable".into())
             })?;
-        if current.owner() != expected.owner()
-            || current.placement() != expected.placement()
-            || context.actor != expected.actor()
-            || context.placement != expected.placement()
-        {
+        if snapshot.context.placement != expected.placement() {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "root recovery placement changed before readiness".into(),
+                "root placement changed".into(),
             ));
         }
-        Ok(context)
+        Ok(snapshot.context)
     }
 
     /// Whether `session` is still live in the shared machine registry — for

@@ -277,7 +277,9 @@ impl WorkbenchPublicOwner {
         }))
     }
 
-    pub(crate) fn native_readiness(&self) -> Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>> {
+    pub(crate) fn native_readiness(
+        &self,
+    ) -> Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>> {
         self.readiness.clone()
     }
 
@@ -1046,6 +1048,7 @@ where
             state: Box::new(WorkbenchExecutionState {
                 cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
+                    lifecycle: self.lifecycle.clone(),
                     initial_context,
                     display_receipt_owner,
                     park_effects: true,
@@ -2545,13 +2548,34 @@ where
             owned,
             move |owned| {
                 Box::pin(async move {
-                    let mut result = settle_execution_finalization(owned, environment.clone(), finalization).await;
+                    let mut result =
+                        settle_execution_finalization(owned, environment.clone(), finalization)
+                            .await;
                     if owned.state.effects.initial_context {
                         if let Err(error) = Self::retain_initial_context_execution(
-                            &environment, owned.state.effects.context.actor, &result.result,
-                        ).await {
-                            result = retain_cleanup_failure(owned.state.effects.context.actor,
-                                format!("initial context result retention remains uncertain: {error}"), result);
+                            owned
+                                .state
+                                .effects
+                                .lifecycle
+                                .as_ref()
+                                .expect("admitted initial context retains its owner"),
+                            owned.state.effects.context.actor,
+                            owned
+                                .state
+                                .request
+                                .execution_id()
+                                .expect("initial context has an issued operation"),
+                            &result.result,
+                        )
+                        .await
+                        {
+                            result = retain_cleanup_failure(
+                                owned.state.effects.context.actor,
+                                format!(
+                                    "initial context result retention remains uncertain: {error}"
+                                ),
+                                result,
+                            );
                         }
                     }
                     result
