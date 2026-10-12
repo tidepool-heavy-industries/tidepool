@@ -2913,20 +2913,20 @@ mod tests {
         let manifest = run.path().join("recovery.sqlite");
         let path = tidepool_repr::ActorPath::parse("root/recovered").unwrap();
         let root = descriptor("root").with_actor_path(path.clone());
-        let old = ActorRef::first(ActorId(33));
-        // Explicit chain authority is independent of numeric identity adjacency.
-        let next = ActorRef {
-            id: ActorId(89),
-            incarnation: Incarnation(14),
-        };
-        let placement = RootRecoveryPlacement::new(
-            next,
-            tidepool_runtime::session::RecoveryPublicOwner::new(&path, 14).unwrap(),
-            root.placement(),
-        );
+        let root = root.with_persistence_policy(crate::ActorPersistencePolicy::Durable);
+        let (previous_control, previous_task) =
+            crate::local_actor::run_control::RunControlClient::start()
+                .await
+                .unwrap();
+        let previous = previous_control.reserve(Incarnation::FIRST).await.unwrap();
+        let old = previous.identity();
         let initial = startup_intent(old, &binding, None, None, None, None);
+        let permit = previous_control
+            .authorize_root_startup(&previous, initial.clone(), journal.clone(), None)
+            .await
+            .unwrap();
         journal
-            .admit_with_startup(old, &root, &[], Some(initial.clone()))
+            .admit_with_startup(old, &root, &[], Some(initial.clone()), Some(&permit))
             .await
             .unwrap();
         journal
@@ -2934,7 +2934,39 @@ mod tests {
             .await
             .unwrap();
         let old_owner = tidepool_runtime::session::RecoveryPublicOwner::new(&path, 1).unwrap();
-        let (store, _authority) = recovery_fixture(&manifest, &old_owner, 7);
+        let (store, authority) = recovery_fixture(&manifest, &old_owner, 7);
+        drop(permit);
+        drop(previous);
+        drop(previous_control);
+        previous_task.abort();
+        let _ = previous_task.await;
+        let mut stopped = journal.owner_status();
+        drop(journal);
+        while !matches!(*stopped.borrow(), JournalOwnerStatus::Stopped { .. }) {
+            stopped.changed().await.unwrap();
+        }
+        let lease = Arc::try_unwrap(authority)
+            .ok()
+            .expect("previous native session released run lease");
+        let (journal, boot) =
+            ActorRecoveryJournal::open_for_boot(&anchor, "actors.jsonl", true, Box::new(lease))
+                .await
+                .unwrap();
+        let run_authority = boot.run.clone();
+        let (control, _task) = crate::local_actor::run_control::RunControlClient::start()
+            .await
+            .unwrap();
+        control
+            .register_recovery_boot(journal.clone(), boot)
+            .await
+            .unwrap();
+        let reservation = control.reserve(Incarnation(14)).await.unwrap();
+        let next = reservation.identity();
+        let placement = RootRecoveryPlacement::new(
+            next,
+            tidepool_runtime::session::RecoveryPublicOwner::new(&path, next.incarnation.0).unwrap(),
+            root.placement(),
+        );
         let successor = startup_intent(
             next,
             &binding,
@@ -2943,12 +2975,67 @@ mod tests {
             Some(RootStartupManifestPin::capture_for_owner(&manifest, &old_owner).unwrap()),
             Some(initial.conversation.clone()),
         );
+        let permit = control
+            .authorize_root_startup(&reservation, successor.clone(), journal.clone(), None)
+            .await
+            .unwrap();
         journal
-            .admit_with_startup(next, &root, &[], Some(successor))
+            .admit_with_startup(next, &root, &[], Some(successor.clone()), Some(&permit))
+            .await
+            .unwrap();
+        use tidepool_runtime::session::{ModuleEnv, RecoveryDomainId, ResidentSession, SessionLib};
+        let artifact_root = run.path().join("recovered-session");
+        let mut library = SessionLib::open(
+            SessionId(1),
+            &artifact_root,
+            ModuleEnv::standalone_default(),
+        )
+        .unwrap();
+        tidepool_testing::with_settlement(|settlement| {
+            library.attach_owned_recovery_domain(
+                store.clone(),
+                RecoveryDomainId::Root,
+                artifact_root,
+                run_authority,
+                settlement,
+            )
+        })
+        .unwrap();
+        let mut machine = ResidentSession::unbootstrapped(
+            frunk::HNil,
+            tidepool_mcp::CapturedOutput::new(),
+            tidepool_runtime::DEFAULT_NURSERY_SIZE,
+            Some(library),
+        );
+        let target = machine.mint_isolated_scope();
+        assert_eq!(target, root.placement().lexical_scope);
+        machine.seal_recovery_initialization_scope(target).unwrap();
+        let machines = Arc::new(crate::ActorMachineRegistry::new());
+        assert!(machines
+            .insert_idle(SessionId(1), Box::new(machine))
+            .is_none());
+        let runner = Arc::new(crate::ResidentActorRunner::new(
+            machines,
+            crate::ActorWorkbenchSource::new("", vec![]),
+        ));
+        let lifecycle = reservation.lifecycle().clone();
+        lifecycle
+            .configure_resident(
+                root.session_context(next),
+                root.clone(),
+                Some(journal.clone()),
+                runner,
+                Some(successor),
+                None,
+            )
+            .await
+            .unwrap();
+        let claim = lifecycle
+            .begin_successor_operation(old_owner.clone())
             .await
             .unwrap();
         let proof = journal
-            .certify_root_successor(old, placement.clone(), Some("source"), &binding)
+            .certify_root_successor(old, placement.clone(), Some("source"), &binding, &claim)
             .await
             .unwrap();
         assert!(proof
@@ -2995,7 +3082,13 @@ mod tests {
             )
             .unwrap());
         assert!(journal
-            .certify_root_successor(old, placement.clone(), Some("different-source"), &binding)
+            .certify_root_successor(
+                old,
+                placement.clone(),
+                Some("different-source"),
+                &binding,
+                &claim
+            )
             .await
             .is_err());
         let revision = store
@@ -3020,6 +3113,7 @@ mod tests {
                 ScopeId(1)
             )
             .unwrap());
+        claim.refuse().await.unwrap();
     }
 
     #[tokio::test]
