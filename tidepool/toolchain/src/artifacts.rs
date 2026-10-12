@@ -1483,7 +1483,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_join::ExactCompileContext>>,
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         retained: &[Arc<crate::checked_cell::CheckedValueArtifact>],
     ) -> Result<Self, CompileError> {
@@ -1502,7 +1502,7 @@ impl ModuleCandidateOffer {
         endpoint: &crate::toolchain::AdmittedCompilerEndpoint,
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_join::ExactCompileContext>>,
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         retained: &[Arc<crate::checked_cell::CheckedValueArtifact>],
         catalog: &crate::toolchain::CatalogSelection,
@@ -1535,7 +1535,9 @@ impl ModuleCandidateOffer {
             producer,
             include,
             scratch,
-            context,
+            context.map(|context| {
+                Arc::new(crate::declaration_join::ExactCompileContext::new(context))
+            }),
             values,
             retained,
         )
@@ -1546,7 +1548,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_join::ExactCompileContext>>,
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         retained: &[Arc<crate::checked_cell::CheckedValueArtifact>],
     ) -> Result<Self, CompileError> {
@@ -1567,7 +1569,7 @@ impl ModuleCandidateOffer {
         producer: &[u8],
         include: &[PathBuf],
         scratch: &Path,
-        context: Option<Arc<crate::declaration_join::ExactDeclarationContext>>,
+        context: Option<Arc<crate::declaration_join::ExactCompileContext>>,
         values: Vec<(tidepool_repr::SessionModule, Arc<[u8]>)>,
         retained: &[Arc<crate::checked_cell::CheckedValueArtifact>],
         catalog: &crate::toolchain::CatalogSelection,
@@ -1582,15 +1584,26 @@ impl ModuleCandidateOffer {
             ));
         }
         let inputs = crate::checked_cell::CheckedValueInputs::capture_checked(values, retained)?;
-        let context = checked_value_context(context, &inputs)?;
+        let declarations = checked_value_context(
+            context
+                .as_ref()
+                .map(|context| context.declarations().clone()),
+            &inputs,
+        )?;
+        let context = compile_context_with_declarations(context, declarations.clone());
         let authorization = checked_search_authorization(
             encode_inspection_authorization_for(purpose, &owners, inputs.baseline_authorization()),
             include,
         )?;
         let selected = immutable_candidates_in_context_with_catalog(
-            &context, producer, include, scratch, owners, catalog,
+            &declarations,
+            producer,
+            include,
+            scratch,
+            owners,
+            catalog,
         )?;
-        let private = private_native_availability(&context, producer, selected.as_deref())?;
+        let private = private_native_availability(&declarations, producer, selected.as_deref())?;
         Ok(Self {
             selected,
             producer: producer.to_vec(),
@@ -9333,7 +9346,9 @@ mod source_proof_pairing_tests {
                 endpoint.identity().producer_bytes(),
                 &includes,
                 &root.join("scope"),
-                Some(Arc::new(persisted)),
+                Some(Arc::new(crate::declaration_join::ExactCompileContext::new(
+                    Arc::new(persisted),
+                ))),
                 Vec::new(),
                 &[],
             )

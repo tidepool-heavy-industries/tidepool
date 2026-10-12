@@ -1,7 +1,15 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE MonoLocalBinds #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Project.SkillChecks (skills, actorReuse, routing, jev, notebookForms, reviewProvenance) where
+module Project.SkillChecks
+  ( skills
+  , actorReuse
+  , routing
+  , jev
+  , lunaApplicativeAwait
+  , notebookForms
+  , reviewProvenance
+  ) where
 
 import Prelude hiding (readFile, writeFile)
 import Control.Monad (void)
@@ -22,6 +30,35 @@ exampleBody actor skill index = do
 
 example :: Member RecipeCheck effects => CheckActor -> Text -> Int -> Eff effects Value
 example actor skill index = exampleBody actor skill index >>= turn actor
+
+lunaApplicativeAwait :: Member RecipeCheck effects => Eff effects ()
+lunaApplicativeAwait = do
+  owner <- root
+  let fixture path = readFile owner (Text.pack workspaceRoot <> "/checks/" <> path)
+  start <- fixture "luna-agent-start.hs"
+  finish <- fixture "luna-agent-settlement.hs"
+  void $ turn owner start
+  first <- activation
+  second <- activation
+  let (compiler, lookupWorker) =
+        if checkLabel first == "compiler-scout" then (first, second) else (second, first)
+  check "the two requests activate their named workers"
+    (checkLabel compiler == "compiler-scout" && checkLabel lookupWorker == "lookup-scout")
+  check "the concrete workspace recipe selects Luna for the compiler scout"
+    (checkModel compiler == Just "gpt-6-luna")
+  check "the concrete workspace recipe selects Luna for the lookup scout"
+    (checkModel lookupWorker == Just "gpt-6-luna")
+  assertCell (checkActor compiler) "the compiler scout receives its typed request"
+    "(sessionInput :: Text) == \"Summarize the named compiler boundary in one sentence.\""
+  assertCell (checkActor lookupWorker) "the lookup scout receives its typed request"
+    "(sessionInput :: Text) == \"Summarize the public lookup contract in one sentence.\""
+  void $ turn (checkActor compiler)
+    "respond (\"compiler note: \" <> (sessionInput :: Text))"
+  void $ turn (checkActor lookupWorker)
+    "respond (\"lookup note: \" <> (sessionInput :: Text))"
+  void $ turn owner finish
+  assertCell owner "one applicative await retains both typed settlements"
+    "joinedScoutSettlements == Right (Right \"compiler note: Summarize the named compiler boundary in one sentence.\", Right \"lookup note: Summarize the public lookup contract in one sentence.\")"
 
 skills :: Member RecipeCheck effects => Eff effects ()
 skills = do

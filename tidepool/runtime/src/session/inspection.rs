@@ -369,20 +369,13 @@ impl AdmittedInspectionInputs {
 
     fn matches_request(&self, request: &InspectionRequest<'_>) -> bool {
         request.session_root == self.view.session_root()
-            && request
-                .exact_context
-                .as_ref()
-                .map(|context| context.declarations().semantic_sha256())
-                == self
-                    .view
-                    .exact_declaration_context()
-                    .map(|context| context.semantic_sha256())
+            && request.exact_context == self.view.exact_compile_context()
             && request.inject_modules == self.view.injected_module_names()
     }
 }
 
 pub struct InspectionRequest<'a> {
-    /// Protected original declarations shared by every query in this batch.
+    /// Protected declarations and request-local annotations shared by every query in this batch.
     pub exact_context:
         Option<std::sync::Arc<tidepool_toolchain::declaration_join::ExactCompileContext>>,
     pub preamble: &'a str,
@@ -419,6 +412,7 @@ pub fn run_admitted_inspections(
     if view.session() != inputs.view.session()
         || view.lexical_scope() != inputs.view.lexical_scope()
         || !view.is_current_for(&inputs.view)
+        || request.exact_context != view.exact_compile_context()
     {
         return Err(invalid("inspection inputs belong to another compile view"));
     }
@@ -609,11 +603,7 @@ fn run_inspections_with_policy(
                 &endpoint,
                 &include,
                 temp.path(),
-                inputs
-                    .expect("admitted value branch")
-                    .view
-                    .exact_declaration_context()
-                    .cloned(),
+                request.exact_context.clone(),
                 values
                     .iter()
                     .map(|value| (value.module(), value.bytes_owned().clone()))

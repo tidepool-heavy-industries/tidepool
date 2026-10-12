@@ -1243,7 +1243,16 @@ async fn published_lookup_and_reflect_examples_preserve_boundary_results() {
         .run_scenario(|campaign| {
             Box::pin(async move {
                 let root = campaign.root_installation.policy.clone();
-                displayed(campaign, root.as_ref(), PublishedExample::Lookup.source()).await;
+                let lookup =
+                    displayed(campaign, root.as_ref(), PublishedExample::Lookup.source()).await;
+                let rendered_lookup = explicit_display_output(&lookup)["text"]
+                    .as_str()
+                    .unwrap();
+                assert!(
+                    rendered_lookup.contains("doc topics")
+                        && !rendered_lookup.contains("<opaque>"),
+                    "the documented lookup presenter must show query results: {lookup}"
+                );
                 let found = displayed(
                     campaign,
                     root.as_ref(),
@@ -2779,6 +2788,14 @@ async fn jev_skill_recipe_executes_the_published_packets() {
     crate::exomonad::check(Some(repository.path().to_path_buf()), true)
         .await
         .expect("the Jev recipe must execute the published typed packets");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn skill_luna_recipe_joins_typed_agent_settlements_applicatively() {
+    let repository = recipe_workspace(Some(&["Project.SkillChecks.lunaApplicativeAwait"]));
+    crate::exomonad::check(Some(repository.path().to_path_buf()), true)
+        .await
+        .expect("two Luna requests must settle through one typed applicative wait");
 }
 
 #[tokio::test(flavor = "multi_thread")]

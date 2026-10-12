@@ -147,7 +147,10 @@ maximum duration in seconds, or `null` to wait for the first event. A timeout le
 running. Ready tool outputs precede the yield result; `ready_results` identifies
 their exact operations. A wake or timeout alone proves no result. Read the
 outputs before reporting completion; do not resubmit admitted work or poll for
-its results.
+its results. For child requests or event sources inside Haskell, retain their
+typed handles and compose `Await` or settlement sources in the authored program;
+if that enclosing tool call is itself pending, `yield` observes the outer call
+rather than polling its children by repeated timed model turns.
 
 Use Haskell `Cmd` to compose commands with waiting, evidence, judgments and
 follow-up actions. Construct commands as values and connect their results to

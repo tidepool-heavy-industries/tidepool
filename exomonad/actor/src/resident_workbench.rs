@@ -22185,6 +22185,186 @@ pub(crate) mod request_tests {
     }
 
     #[test]
+    fn lookup_preserves_active_request_annotations_with_checked_values() {
+        use tidepool_runtime::session::{InspectionResult, RequestCompileAnnotations};
+        use tidepool_toolchain::declaration_join::RequestHelperRecipe;
+        let (mut session, context, mut source, inputs, _root) = activation_input_fixture(|_| {});
+        let evidence = inputs[0].type_evidence().clone();
+        source.request_evidence = Some(evidence.clone());
+        let source = source.for_workbench(
+            &context,
+            Some(&RequestWorkbenchScope {
+                response: ResponseExpectation::new("()"),
+                request: crate::RequestId(1),
+            }),
+        );
+        let view = actor_compile_view(&session, &context, &source).unwrap();
+        let values = session
+            .capture_inspection_inputs(view.session_view())
+            .unwrap();
+        let prepared = source.prepare(&view);
+        let queries = [
+            InspectionQuery::TypeOf("respond".into()),
+            InspectionQuery::TypeOf("sessionReply".into()),
+            InspectionQuery::Info("pure".into()),
+        ];
+        let results = tidepool_testing::with_settlement(|settlement| {
+            inspect_lookup_queries(
+                &view,
+                Some(&values),
+                &prepared.preamble,
+                &prepared.imports,
+                &prepared.include,
+                &prepared.injected,
+                &context.haskell_effects_alias,
+                &queries,
+                None,
+                settlement,
+            )
+        })
+        .unwrap();
+        assert_eq!(results.len(), queries.len());
+        for result in &results[..2] {
+            assert!(
+                matches!(result, InspectionResult::Type { display, .. }
+                if !display.contains("TidepoolRequestReply")),
+                "{results:?}"
+            );
+        }
+        assert!(
+            matches!(&results[2], InspectionResult::Info { entries, .. }
+            if !entries.is_empty()),
+            "{results:?}"
+        );
+
+        // A declaration-equivalent view cannot replace this request's helper recipe.
+        let unannotated_helpers = view
+            .session_view()
+            .clone()
+            .with_request_annotations(
+                &RequestCompileAnnotations::new(evidence.clone(), RequestHelperRecipe::None)
+                    .unwrap(),
+            )
+            .unwrap();
+        let include = prepared
+            .include
+            .iter()
+            .map(PathBuf::as_path)
+            .collect::<Vec<_>>();
+        let mismatched = tidepool_testing::with_settlement(|settlement| {
+            run_admitted_inspections(
+                InspectionRequest {
+                    exact_context: unannotated_helpers.exact_compile_context(),
+                    preamble: &prepared.preamble,
+                    imports: &prepared.imports,
+                    include: &include,
+                    session_root: view.session_root(),
+                    inject_modules: &prepared.injected,
+                    queries: &queries,
+                    effects: Some(&context.haskell_effects_alias),
+                },
+                view.session_view(),
+                &values,
+                settlement,
+            )
+        });
+        assert!(
+            mismatched.is_err(),
+            "another helper recipe must refuse before compilation"
+        );
+
+        let sibling = session.mint_isolated_scope();
+        let mut views = Vec::new();
+        for scope in [context.placement.lexical_scope, sibling] {
+            for helper in [RequestHelperRecipe::None, RequestHelperRecipe::ActorReply] {
+                views.push(
+                    session
+                        .compile_view_in(scope)
+                        .unwrap()
+                        .with_request_annotations(
+                            &RequestCompileAnnotations::new(evidence.clone(), helper).unwrap(),
+                        )
+                        .unwrap(),
+                );
+            }
+        }
+        let snapshots = views
+            .iter()
+            .map(|view| session.capture_inspection_inputs(view).unwrap())
+            .collect::<Vec<_>>();
+        use proptest::prelude::*;
+        let histories = proptest::collection::vec(
+            (
+                0usize..4,
+                any::<bool>(),
+                any::<bool>(),
+                0usize..4,
+                any::<bool>(),
+            ),
+            1..40,
+        );
+        let mut runner = proptest::test_runner::TestRunner::new(proptest::test_runner::Config {
+            cases: 64,
+            failure_persistence: None,
+            ..Default::default()
+        });
+        let accepted = std::cell::Cell::new(0usize);
+        let refused = std::cell::Cell::new(0usize);
+        runner
+            .run(&histories, |history| {
+                let mut retained = snapshots.clone();
+                let mut owners = [(false, false), (false, true), (true, false), (true, true)];
+                for (capture_slot, sibling, helpers, observed_slot, requested_helpers) in history {
+                    let current = usize::from(sibling) * 2 + usize::from(helpers);
+                    let requested = usize::from(sibling) * 2 + usize::from(requested_helpers);
+                    retained[capture_slot] = snapshots[current].clone();
+                    owners[capture_slot] = (sibling, helpers);
+                    let injected = views[current].injected_module_names();
+                    let result = tidepool_testing::with_settlement(|settlement| {
+                        run_admitted_inspections(
+                            InspectionRequest {
+                                exact_context: views[requested].exact_compile_context(),
+                                preamble: "",
+                                imports: "",
+                                include: &[],
+                                session_root: views[current].session_root(),
+                                inject_modules: &injected,
+                                queries: &[],
+                                effects: None,
+                            },
+                            &views[current],
+                            &retained[observed_slot],
+                            settlement,
+                        )
+                    });
+                    let expected =
+                        owners[observed_slot] == (sibling, helpers) && requested_helpers == helpers;
+                    prop_assert_eq!(
+                        result.is_ok(),
+                        expected,
+                        "captured owner/helper={:?}, current={:?}, requested helper={}",
+                        owners[observed_slot],
+                        (sibling, helpers),
+                        requested_helpers
+                    );
+                    if expected {
+                        accepted.set(accepted.get() + 1);
+                    } else {
+                        refused.set(refused.get() + 1);
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert!(accepted.get() > 0 && refused.get() > 0);
+        eprintln!(
+            "request lookup snapshot histories: 64 generated; {} accepted, {} refused",
+            accepted.get(),
+            refused.get()
+        );
+    }
+
+    #[test]
     fn request_annotations_survive_planned_admission() {
         use tidepool_runtime::session::RequestCompileAnnotations;
         use tidepool_toolchain::declaration_join::RequestHelperRecipe;
