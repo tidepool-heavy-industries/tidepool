@@ -230,7 +230,7 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         release_final: Arc::new(tokio::sync::Semaphore::new(0)),
     };
     let provider: Arc<dyn ResponsesTransport> = Arc::new(transport.clone());
-    let host = hosted_test_context::HostedTestRuntime::start(&settings, &provider)
+    let mut host = hosted_test_context::HostedTestRuntime::start(&settings, &provider)
         .await
         .expect("production notification host starts");
     host.input("Begin the round that receives queued notifications.")
@@ -397,9 +397,9 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         embedded_notification_operation_id(&binding.inbox_key, second.sequence, sender, actor);
     let second_included_head =
         assert_inclusion(&operation_id, &second_issued_request, "second queued row");
-    host.stop()
+    host.shutdown_execution()
         .await
-        .expect("production notification host acknowledges cleanup");
+        .expect("production notification executor acknowledges shutdown");
     let binding_alias = binding.clone();
     assert!(binding_alias.conversation().is_none());
     assert_eq!(
@@ -409,6 +409,11 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
     let observer = binding_alias
         .input_observer()
         .expect("retirement keeps read-only observer");
+    // Conversation retains execution/boot authority; InputObserver retains only read facts.
+    drop(conversation);
+    host.stop()
+        .await
+        .expect("production notification host acknowledges physical cleanup");
     assert!(matches!(
         observer
             .input_observation_by_operation(&operation_id)

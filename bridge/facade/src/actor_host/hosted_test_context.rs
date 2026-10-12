@@ -1692,6 +1692,12 @@ impl HostedTestRuntime {
         self.outcome.clone().await
     }
 
+    /// Drain the actual executor while retained conversation capabilities are inspected.
+    /// Physical release remains a separate obligation of `stop` after those holders drop.
+    pub(super) async fn shutdown_execution(&mut self) -> Result<(), String> {
+        Self::shutdown(self.stop.clone(), self.outcome.clone(), self.thread.take()).await
+    }
+
     pub(super) async fn stop(mut self) -> Result<(), String> {
         let mut released = self.released.clone();
         let mut journal = self.context.journal_status.clone();
@@ -1699,8 +1705,7 @@ impl HostedTestRuntime {
         let run_root = self.context.config.run_directory.path().to_path_buf();
         let runtime = Arc::downgrade(&self.runtime);
         let forest = Arc::downgrade(&self.context.forest);
-        let shutdown =
-            Self::shutdown(self.stop.clone(), self.outcome.clone(), self.thread.take()).await;
+        let shutdown = self.shutdown_execution().await;
         let mut repository = self._repository.take();
         let mut temporary_run = self._runtime.take();
         // The status receivers do not retain authority. All enclosing host
