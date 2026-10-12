@@ -64,6 +64,12 @@ impl ResidentState {
     }
 }
 
+pub(super) fn retirement_confirmed(state: &ResidentState) -> bool {
+    state.retirement_recorded
+        && state.retirement.is_some()
+        && state.current.settlement.is_confirmed()
+}
+
 pub(super) fn snapshot(state: &ResidentState) -> ResidentSnapshot {
     state.current.clone()
 }
@@ -120,9 +126,9 @@ pub(super) enum ResidentCommand {
         outcome: Completion,
     },
     Retire(crate::ActorTerminal),
-    BeginSuccessor {
-        predecessor: RecoveryPublicOwner,
-        reply: RpcReplyPort<Result<RootSuccessorOperationClaim, String>>,
+    BeginBinding {
+        origin: BindingOrigin,
+        reply: RpcReplyPort<Result<RootBindingOperationClaim, String>>,
     },
     RefuseSuccessor {
         sequence: u64,
@@ -130,14 +136,14 @@ pub(super) enum ResidentCommand {
     },
     AbandonSuccessor(u64),
     BindSuccessor {
-        claim: RootSuccessorOperationClaim,
+        claim: RootBindingOperationClaim,
         installed: Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
-        adapter: Arc<dyn SuccessorBindingAdapter>,
+        adapter: Arc<dyn RootBindingAdapter>,
         reply: RpcReplyPort<Result<(), String>>,
     },
     BindingCompleted {
         sequence: u64,
-        claim: RootSuccessorOperationClaim,
+        claim: RootBindingOperationClaim,
         result: Result<crate::JournalApplicationBindingAck, String>,
         reply: RpcReplyPort<Result<(), String>>,
     },
@@ -443,7 +449,7 @@ pub(super) fn handle(
             }
         }
         ResidentCommand::Completed { sequence, outcome } => complete(state, sequence, outcome),
-        ResidentCommand::BeginSuccessor { predecessor, reply } => {
+        ResidentCommand::BeginBinding { origin, reply } => {
             let result = if state.is_closed() {
                 Err("successor lifecycle is closing".into())
             } else if state
@@ -460,6 +466,23 @@ pub(super) fn handle(
                     ActorPublicOwnerPlane::DurableCommitted(owner) => owner.durable().cloned(),
                     _ => None,
                 };
+                let original = resident
+                    .startup_intent
+                    .as_ref()
+                    .and_then(|intent| intent.manifest.as_ref())
+                    .map(|manifest| &manifest.public_owner.owner);
+                let origin_matches = match &origin {
+                    BindingOrigin::Fresh => original.is_none(),
+                    BindingOrigin::Successor(owner) => {
+                        original.is_none_or(|original| original == owner)
+                    }
+                };
+                if !origin_matches {
+                    let _ = reply.send(Err(
+                        "binding origin differs from original startup manifest".into(),
+                    ));
+                    return;
+                }
                 let journal = resident.journal.clone();
                 owner
                     .zip(journal)
@@ -470,22 +493,25 @@ pub(super) fn handle(
                     .map(|(owner, journal)| {
                         resident.successor = Some(SuccessorOperation {
                             sequence,
-                            predecessor: predecessor.clone(),
+                            origin: origin.clone(),
                             owner: owner.clone(),
                             stage: SuccessorStage::Reserved,
                         });
-                        RootSuccessorOperationClaim {
+                        RootBindingOperationClaim {
                             sequence,
                             actor: state.identity,
                             placement: resident.current.context.placement,
                             owner,
-                            predecessor,
+                            origin,
                             lifecycle: address.clone(),
                             journal,
                             armed: true,
                         }
                     })
             };
+            if result.is_ok() && state.phase == super::LifecyclePhase::Open {
+                state.phase = super::LifecyclePhase::Installing;
+            }
             state.publish();
             let _ = reply.send(result);
         }
@@ -503,6 +529,9 @@ pub(super) fn handle(
                 }
                 _ => Err("successor refusal cannot prove absence of an admitted effect".into()),
             };
+            if result.is_ok() && state.phase == super::LifecyclePhase::Installing {
+                state.phase = super::LifecyclePhase::Open;
+            }
             state.publish();
             let _ = reply.send(result);
         }
@@ -608,6 +637,9 @@ pub(super) fn handle(
                     );
                 }
                 claim.armed = false;
+                if result.is_ok() && state.phase == super::LifecyclePhase::Installing {
+                    state.phase = super::LifecyclePhase::Open;
+                }
                 state.publish();
                 let _ = reply.send(result);
             }
@@ -884,7 +916,7 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
                         .unwrap()
                         .successor
                         .as_ref()
-                        .is_none_or(|claim| &claim.predecessor != predecessor)
+                        .is_none_or(|claim| !matches!(&claim.origin, BindingOrigin::Successor(owner) if owner == predecessor))
                     {
                         let _ = reply.send(Err(
                             "public transfer requires its issued successor operation claim".into(),
@@ -1056,9 +1088,21 @@ where
     }
 }
 
+#[derive(Clone)]
+enum BindingOrigin {
+    Fresh,
+    Successor(RecoveryPublicOwner),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RootBindingClaimError {
+    #[error("a fresh binding operation has no predecessor owner")]
+    Fresh,
+}
+
 struct SuccessorOperation {
     sequence: u64,
-    predecessor: RecoveryPublicOwner,
+    origin: BindingOrigin,
     owner: RecoveryPublicOwner,
     stage: SuccessorStage,
 }
@@ -1071,12 +1115,12 @@ enum SuccessorStage {
 
 /// Affine ownership of one successor's transfer and verified binding operation.
 /// Immutable getters authenticate journal facts; they do not admit other work.
-pub struct RootSuccessorOperationClaim {
+pub struct RootBindingOperationClaim {
     sequence: u64,
     actor: crate::ActorRef,
     placement: crate::ActorPlacement,
     owner: RecoveryPublicOwner,
-    predecessor: RecoveryPublicOwner,
+    origin: BindingOrigin,
     lifecycle: RactorRef<LifecycleCommand>,
     journal: Arc<crate::ActorRecoveryJournal>,
     armed: bool,
@@ -1086,14 +1130,14 @@ pub struct RootSuccessorOperationClaim {
 /// implementations confirm the exact Store binding before acknowledging the
 /// matching journal event. This is a trusted adapter contract, not a proof
 /// against a malicious implementation.
-pub trait SuccessorBindingAdapter: Send + Sync {
+pub trait RootBindingAdapter: Send + Sync {
     fn bind<'a>(
         &'a self,
-        claim: &'a RootSuccessorOperationClaim,
+        claim: &'a RootBindingOperationClaim,
     ) -> BoxFuture<'a, Result<crate::JournalApplicationBindingAck, String>>;
 }
 
-impl RootSuccessorOperationClaim {
+impl RootBindingOperationClaim {
     pub fn successor_actor(&self) -> crate::ActorRef {
         self.actor
     }
@@ -1103,8 +1147,11 @@ impl RootSuccessorOperationClaim {
     pub fn successor_owner(&self) -> &RecoveryPublicOwner {
         &self.owner
     }
-    pub fn predecessor_owner(&self) -> &RecoveryPublicOwner {
-        &self.predecessor
+    pub fn predecessor_owner(&self) -> Result<&RecoveryPublicOwner, RootBindingClaimError> {
+        match &self.origin {
+            BindingOrigin::Fresh => Err(RootBindingClaimError::Fresh),
+            BindingOrigin::Successor(owner) => Ok(owner),
+        }
     }
     pub fn operation(&self) -> u64 {
         self.sequence
@@ -1116,7 +1163,7 @@ impl RootSuccessorOperationClaim {
     pub async fn finish_binding(
         self,
         installed: Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
-        adapter: Arc<dyn SuccessorBindingAdapter>,
+        adapter: Arc<dyn RootBindingAdapter>,
     ) -> Result<(), String> {
         let (reply, answer) = tokio::sync::oneshot::channel();
         let lifecycle = self.lifecycle.clone();
@@ -1157,7 +1204,7 @@ impl RootSuccessorOperationClaim {
     }
 }
 
-impl Drop for RootSuccessorOperationClaim {
+impl Drop for RootBindingOperationClaim {
     fn drop(&mut self) {
         if self.armed {
             let _ = self.lifecycle.cast(LifecycleCommand::Resident(Box::new(
@@ -1171,12 +1218,24 @@ impl LifecycleHandle {
     pub async fn begin_successor_operation(
         &self,
         predecessor: RecoveryPublicOwner,
-    ) -> Result<RootSuccessorOperationClaim, String> {
+    ) -> Result<RootBindingOperationClaim, String> {
+        self.begin_binding_operation(BindingOrigin::Successor(predecessor))
+            .await
+    }
+
+    pub async fn begin_root_binding_operation(&self) -> Result<RootBindingOperationClaim, String> {
+        self.begin_binding_operation(BindingOrigin::Fresh).await
+    }
+
+    async fn begin_binding_operation(
+        &self,
+        origin: BindingOrigin,
+    ) -> Result<RootBindingOperationClaim, String> {
         let (reply, answer) = tokio::sync::oneshot::channel();
         self.address
             .cast(LifecycleCommand::Resident(Box::new(
-                ResidentCommand::BeginSuccessor {
-                    predecessor,
+                ResidentCommand::BeginBinding {
+                    origin,
                     reply: reply.into(),
                 },
             )))
