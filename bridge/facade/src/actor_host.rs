@@ -4346,7 +4346,6 @@ fn open_embedded_actor_binding(
     run_directory: &tidepool_atomic_write::DirectoryAnchor,
     actor: ActorRef,
     actor_path: harness::model::AgentPath,
-    conversation: Option<Arc<harness::embedding::Conversation>>,
 ) -> Result<embedded_harness::EmbeddedActorBinding, String> {
     let run_root = run_directory.path();
     let actor_root = run_directory
@@ -4369,11 +4368,10 @@ fn open_embedded_actor_binding(
         actor: actor_path,
         incarnation: actor.incarnation.0.to_string(),
     };
-    Ok(embedded_harness::EmbeddedActorBinding::new(
+    Ok(embedded_harness::EmbeddedActorBinding::pending(
         identity,
         Arc::new(inbox),
         inbox_key,
-        conversation,
     ))
 }
 

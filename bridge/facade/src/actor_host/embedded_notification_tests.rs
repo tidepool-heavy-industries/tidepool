@@ -152,9 +152,9 @@ async fn embedded_notification_handoff_retries_by_operation_and_waits_for_store_
                     &tidepool_atomic_write::DirectoryAnchor::open_existing(run_root).unwrap(),
                     actor,
                     harness::model::AgentPath("/root".into()),
-                    Some(conversation.clone()),
                 )
                 .unwrap();
+                binding.set_conversation(conversation.clone()).unwrap();
                 let context = DeliveryProvenance::Notification {
                     sender: actor,
                     target: actor,
@@ -194,9 +194,9 @@ async fn embedded_notification_handoff_retries_by_operation_and_waits_for_store_
                     &tidepool_atomic_write::DirectoryAnchor::open_existing(run_root).unwrap(),
                     actor,
                     harness::model::AgentPath("/root".into()),
-                    Some(conversation.clone()),
                 )
                 .unwrap();
+                reloaded.set_conversation(conversation.clone()).unwrap();
                 deliver_embedded_notifications(actor, reloaded.clone())
                     .await
                     .unwrap();

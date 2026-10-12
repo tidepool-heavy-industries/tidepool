@@ -526,29 +526,36 @@ pub(super) enum ConversationAttachError {
 }
 
 impl EmbeddedActorBinding {
+    pub(super) fn pending(
+        identity: HostIdentity,
+        inbox: Arc<super::ActorInbox>,
+        inbox_key: String,
+    ) -> Self {
+        Self {
+            identity,
+            conversation: Arc::new(Mutex::new(BoundConversation::Pending {
+                conversation: None,
+                activations: Vec::new(),
+            })),
+            observer: Arc::new(Mutex::new(None)),
+            inbox,
+            inbox_key,
+            delivery: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    #[cfg(test)]
     pub(super) fn new(
         identity: HostIdentity,
         inbox: Arc<super::ActorInbox>,
         inbox_key: String,
         conversation: Option<Arc<Conversation>>,
     ) -> Self {
-        let observer = conversation
-            .as_ref()
-            .map(|conversation| Arc::new(conversation.input_observer()));
-        Self {
-            identity,
-            conversation: Arc::new(Mutex::new(match conversation {
-                Some(conversation) => BoundConversation::Ready(conversation),
-                None => BoundConversation::Pending {
-                    conversation: None,
-                    activations: Vec::new(),
-                },
-            })),
-            observer: Arc::new(Mutex::new(observer)),
-            inbox,
-            inbox_key,
-            delivery: Arc::new(tokio::sync::Mutex::new(())),
+        let binding = Self::pending(identity, inbox, inbox_key);
+        if let Some(conversation) = conversation {
+            binding.set_conversation(conversation).unwrap();
         }
+        binding
     }
 
     pub(super) fn is_live(&self) -> bool {

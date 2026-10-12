@@ -573,7 +573,6 @@ pub(super) async fn run_interactive_applications(
                                     &launch_context.config.run_directory,
                                     actor,
                                     path.clone(),
-                                    None,
                                 ) {
                                     Ok(binding) => binding,
                                     Err(error) => {
