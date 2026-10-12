@@ -43,6 +43,13 @@ async fn seal_overtaking_prepared_input_coordinator_preserves_cleanup_reservatio
         .await
         .unwrap()
         .is_none());
+    assert!(
+        matches!(
+            control.settle_preparations(Duration::from_millis(20)).await,
+            crate::CleanupComponentOutcome::Unconfirmed(_)
+        ),
+        "an outstanding prepared reservation still owns unsettled custody"
+    );
     drop(reservation);
     assert!(matches!(
         control.settle_preparations(Duration::from_secs(2)).await,
