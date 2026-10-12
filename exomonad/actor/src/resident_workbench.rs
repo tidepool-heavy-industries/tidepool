@@ -10978,23 +10978,46 @@ where
         &self,
         session_id: tidepool_repr::SessionId,
     ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
-        self.provision_root_scope_inner(session_id, None).await
+        self.provision_root_scope_inner(session_id, None, None)
+            .await
     }
     pub(crate) async fn provision_root_scope_tracked(
         &self,
         session_id: tidepool_repr::SessionId,
         publisher: crate::local_actor::run_control::RootPlacementPublisher,
     ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
-        self.provision_root_scope_inner(session_id, Some(publisher))
+        self.provision_root_scope_inner(session_id, Some(publisher), None)
             .await
+    }
+    #[cfg(test)]
+    pub(crate) async fn provision_root_scope_paused_for_test(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        publisher: crate::local_actor::run_control::RootPlacementPublisher,
+        entered: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
+        self.provision_root_scope_inner(
+            session_id,
+            Some(publisher),
+            Some(Box::new(move || {
+                let _ = entered.send(());
+                let _ = release.blocking_recv();
+            })),
+        )
+        .await
     }
     pub(crate) async fn provision_root_scope_inner(
         &self,
         session_id: tidepool_repr::SessionId,
         publisher: Option<crate::local_actor::run_control::RootPlacementPublisher>,
+        before_mint: Option<Box<dyn FnOnce() + Send>>,
     ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
         self.access
             .with_host_machine("root", session_id, None, move |session, _| {
+                if let Some(before_mint) = before_mint {
+                    before_mint();
+                }
                 let placement = crate::ActorPlacement {
                     session: session_id,
                     resource_scope: RealmId::fresh(),

@@ -313,7 +313,18 @@ impl Actor for PreparationSupervisor {
                 let _ = reply.send(());
             }
             PreparationMessage::NativePlacement { id, custody } => {
-                for worker in state.workers.values_mut() { if let WorkerKind::Root { id: issued, native, .. } = &mut worker.kind { if *issued == id { *native = Some(custody.clone()); } } }
+                let mut reverify = Vec::new();
+                for (identity, worker) in state.workers.iter_mut() {
+                    if let WorkerKind::Root { id: issued, native, .. } = &mut worker.kind {
+                        if *issued == id {
+                            *native = Some(custody.clone());
+                            if worker.terminal && !worker.reported { reverify.push(*identity); }
+                        }
+                    }
+                }
+                // An admitted blocking mint can publish after producer death.
+                // Its retained native capability must still reach cleanup.
+                for worker in reverify { let _ = myself.send_message(PreparationMessage::VerifyTerminal { worker }); }
             }
             PreparationMessage::NativePlacementReleased { id, placement } => {
                 for worker in state.workers.values_mut() { if let WorkerKind::Root { id: issued, native, .. } = &mut worker.kind { if *issued == id && matches!(native, Some(ProducedCustody::Placement { placement: exact, .. }) if *exact == placement) { *native = None; } } }
