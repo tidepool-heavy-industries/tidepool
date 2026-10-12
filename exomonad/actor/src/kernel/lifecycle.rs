@@ -460,6 +460,10 @@ impl LifecycleHandle {
                     snapshot.native_settlement,
                     NativeSettlement::NeedsAttention(_)
                 )
+                || snapshot
+                    .resident
+                    .as_ref()
+                    .is_some_and(|resident| !resident.settlement.is_confirmed())
             {
                 return Err(KernelCallFailure::TargetUnavailable(self.identity));
             }
@@ -617,6 +621,14 @@ impl LifecycleState {
     }
 
     fn refusal(&self) -> Option<KernelCallFailure> {
+        if self
+            .resident
+            .as_ref()
+            .and_then(resident::settlement_refusal)
+            .is_some()
+        {
+            return Some(KernelCallFailure::TargetUnavailable(self.identity));
+        }
         if matches!(self.native_settlement, NativeSettlement::NeedsAttention(_)) {
             return Some(KernelCallFailure::TargetUnavailable(self.identity));
         }
@@ -667,6 +679,13 @@ impl LifecycleState {
     }
 
     fn provider_error(&self) -> Option<NativeProviderStartError> {
+        if let Some(detail) = self
+            .resident
+            .as_ref()
+            .and_then(resident::settlement_refusal)
+        {
+            return Some(NativeProviderStartError::Native(detail.to_owned()));
+        }
         if let NativeSettlement::NeedsAttention(detail) = &self.native_settlement {
             return Some(NativeProviderStartError::Native(detail.clone()));
         }
