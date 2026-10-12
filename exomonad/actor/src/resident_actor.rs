@@ -1984,7 +1984,7 @@ where
             crate::SpecReplacementError::Failed("installation identity exhausted".into())
         })?;
     let tools = workbench
-        .prepare_explicit_tools(context, install, definition.effects, installer)
+        .prepare_explicit_candidate_tools(context, install, definition.effects, installer)
         .await
         .map_err(|error| crate::SpecReplacementError::Failed(error.to_string()))?;
     state.replace_explicit(&expected, Arc::new(tools))

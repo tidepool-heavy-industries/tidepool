@@ -5110,13 +5110,54 @@ where
         'a,
         Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
     > {
+        self.prepare_explicit_tools_for(
+            context,
+            install,
+            granted_effects,
+            installer,
+            ToolInstallationPurpose::InitialTools,
+        )
+    }
+
+    /// Replacement candidates retain private installer provenance instead of
+    /// publishing it into the continuing public namespace.
+    pub(crate) fn prepare_explicit_candidate_tools<'a>(
+        &'a self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<crate::ActorEffectKey>,
+        installer: Arc<RootCustody>,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
+    > {
+        self.prepare_explicit_tools_for(
+            context,
+            install,
+            granted_effects,
+            installer,
+            ToolInstallationPurpose::CandidateTools,
+        )
+    }
+
+    fn prepare_explicit_tools_for<'a>(
+        &'a self,
+        context: crate::ActorSessionContext,
+        install: u64,
+        granted_effects: Vec<crate::ActorEffectKey>,
+        installer: Arc<RootCustody>,
+        purpose: ToolInstallationPurpose,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<ResidentWorkbenchTools, ResidentActorWorkbenchError>,
+    > {
         Box::pin(async move {
             self.prepare_explicit_installation(
                 context,
                 install,
                 granted_effects,
                 installer,
-                ToolInstallationPurpose::InitialTools,
+                purpose,
             )
             .await
             .map(|installation| installation.tools)
@@ -18082,7 +18123,16 @@ pub(crate) mod request_tests {
             let workbench = ResidentActorWorkbench::new(machines, source, None);
             let before = tidepool_extract_cmd::extract_spawn_count();
             let first = Arc::new(workbench.prepare_explicit_tools(context.clone(), 1, vec![], installer.clone()).await.unwrap());
-            let second = Arc::new(workbench.prepare_explicit_tools(context.clone(), 2, vec![], installer.clone()).await.unwrap());
+            assert!(!installer.published_source_original_selections().is_empty(),
+                "the fixture must carry actual public source provenance");
+            let public_before = workbench.access.with_machine(context.clone(), |session, context, _| {
+                Ok(session.public_visibility_snapshot_in(context.placement.lexical_scope))
+            }).await.unwrap();
+            let second = Arc::new(workbench.prepare_explicit_candidate_tools(context.clone(), 2, vec![], installer.clone()).await.unwrap());
+            let public_after = workbench.access.with_machine(context.clone(), |session, context, _| {
+                Ok(session.public_visibility_snapshot_in(context.placement.lexical_scope))
+            }).await.unwrap();
+            assert_eq!(public_after, public_before, "a replacement candidate must preserve the public namespace");
             assert_eq!(tidepool_extract_cmd::extract_spawn_count(), before);
             assert!(first.origin.is_explicit());
             let expected = InstalledToolLease::new(context.actor, crate::CheckpointSourceLayer::default(), Some(first));
@@ -18094,10 +18144,14 @@ pub(crate) mod request_tests {
             assert_eq!(expected.tools().unwrap().install, 1);
             assert_eq!(state.replace_explicit(&expected, second), Err(SpecReplacementError::Unavailable));
             let active = state.current().unwrap();
-            let mut changed = workbench.prepare_explicit_tools(context.clone(), 3, vec![], installer).await.unwrap();
+            let mut changed = workbench.prepare_explicit_candidate_tools(context.clone(), 3, vec![], installer).await.unwrap();
             changed.declarations.clear();
             assert_eq!(state.replace_explicit(&active, Arc::new(changed)), Err(SpecReplacementError::SurfaceChanged));
             assert_eq!(state.current().unwrap().tools().unwrap().install, 2);
+            let public_after_refusal = workbench.access.with_machine(context.clone(), |session, context, _| {
+                Ok(session.public_visibility_snapshot_in(context.placement.lexical_scope))
+            }).await.unwrap();
+            assert_eq!(public_after_refusal, public_before, "refused candidate preparation preserves public admission");
             for lease in [expected, state.current().unwrap()] {
                 let step = workbench.begin_tool(context.clone(), lease.tools().unwrap().dispatch.clone(), "probe".into(), serde_json::json!("input")).await.unwrap();
                 let step = match step {
