@@ -2541,34 +2541,19 @@ where
             owned,
             move |owned| {
                 Box::pin(async move {
-                    settle_execution_finalization(owned, environment, finalization).await
+                    let mut result = settle_execution_finalization(owned, environment.clone(), finalization).await;
+                    if owned.state.effects.initial_context {
+                        if let Err(error) = Self::retain_initial_context_execution(
+                            &environment, owned.state.effects.context.actor, &result.result,
+                        ).await {
+                            result = retain_cleanup_failure(owned.state.effects.context.actor,
+                                format!("initial context result retention remains uncertain: {error}"), result);
+                        }
+                    }
+                    result
                 })
             },
             |behavior, _kernel, mut owned, result| {
-                if owned.state.effects.initial_context {
-                    if let Err(error) = behavior.retain_initial_context_execution(
-                        owned.state.effects.context.actor,
-                        &result.result,
-                    ) {
-                        return Err(KernelInvocationFailure::CleanupUnconfirmed {
-                            actor: owned.state.effects.context.actor,
-                            detail: format!(
-                                "initial context result retention remains uncertain: {error}"
-                            ),
-                            publication: None,
-                            receipts: result.result.as_ref().map_or_else(
-                                |failure| failure.receipts().to_vec(),
-                                |step| match step {
-                                    KernelStep::Continue(response)
-                                    | KernelStep::ContinueLater(response)
-                                    | KernelStep::Stop {
-                                        output: response, ..
-                                    } => response.items.clone(),
-                                },
-                            ),
-                        });
-                    }
-                }
                 let (result, notifications) =
                     behavior.complete_workbench_finalization(&mut owned.state, result);
                 if !notifications.is_empty()

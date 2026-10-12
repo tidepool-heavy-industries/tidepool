@@ -11,6 +11,14 @@ fn failure(error: impl std::fmt::Display) -> ResidentActorWorkbenchError {
     ResidentActorWorkbenchError::ActorProtocol(error.to_string())
 }
 
+struct InitialContextAdmissionGuard(Option<lifecycle::ActorLifecycle>);
+
+impl Drop for InitialContextAdmissionGuard {
+    fn drop(&mut self) {
+        if let Some(owner) = self.0.take() { owner.abandon_initial_context(); }
+    }
+}
+
 struct InitialContextWaitGuard(Option<Arc<crate::WorkbenchExecutionControl>>);
 
 impl Drop for InitialContextWaitGuard {
@@ -28,8 +36,8 @@ where
 {
     /// Retention belongs to execution settlement, before its reply is released.
     /// Losing a host waiter cannot discard a completed startup result.
-    pub(super) fn retain_initial_context_execution(
-        &self,
+    pub(super) async fn retain_initial_context_execution(
+        environment: &ResidentEnvironment<H, O>,
         actor: ActorRef,
         result: &Result<KernelStep<WorkbenchResponse>, crate::KernelInvocationFailure>,
     ) -> Result<(), ResidentActorWorkbenchError> {
@@ -91,24 +99,10 @@ where
                 }
             }
         };
-        let owner = self
-            .environment
-            .actors
-            .lock()
-            .get(&actor)
-            .cloned()
+        let lifecycle = environment.actors.lock().get(&actor)
+            .map(|record| record.lifecycle.clone())
             .ok_or_else(|| failure("initial context execution has no actor owner"))?;
-        let mut current = owner.initial_context.lock();
-        let next = if let Some(journal) = &self.environment.recovery {
-            journal
-                .record_initial_context(actor, change)
-                .map_err(failure)?
-        } else {
-            let mut next = current.clone();
-            crate::initial_context::apply_event(&mut next, change).map_err(failure)?;
-            next.expect("retained execution has admitted initialization")
-        };
-        *current = Some(next);
+        lifecycle.change_initial_context(change).await.map_err(failure)?;
         Ok(())
     }
 }
@@ -127,7 +121,7 @@ where
             .lock()
             .get(&actor)
             .cloned()
-            .filter(|record| record.terminal.is_none())
+            .filter(|record| record.terminal.is_none() && !record.lifecycle.is_closed())
             .ok_or_else(|| failure("initial context actor is unavailable"))
     }
 
@@ -136,16 +130,7 @@ where
         actor: ActorRef,
     ) -> Result<InitialContextObservation, ResidentActorWorkbenchError> {
         let record = self.initial_context_record(actor)?;
-        let current = record.initial_context.lock();
-        if let Some(current) = current.as_ref() {
-            return Ok(current.clone());
-        }
-        self.environment
-            .recovery
-            .as_ref()
-            .map(|journal| journal.initial_context(actor).map_err(failure))
-            .transpose()?
-            .flatten()
+        record.lifecycle.initial_context()
             .ok_or_else(|| failure("initial context has not been admitted"))
     }
 
@@ -234,30 +219,6 @@ where
         })
     }
 
-    fn change_initial_context(
-        &self,
-        actor: ActorRef,
-        change: InitialContextEvent,
-    ) -> Result<InitialContextObservation, ResidentActorWorkbenchError> {
-        let record = self.initial_context_record(actor)?;
-        let mut current = record.initial_context.lock();
-        let owner = current
-            .as_ref()
-            .and_then(|state| state.identity.as_ref())
-            .map_or(actor, |identity| identity.actor);
-        let next = if let Some(journal) = &self.environment.recovery {
-            journal
-                .record_initial_context(owner, change)
-                .map_err(failure)?
-        } else {
-            let mut next = current.clone();
-            crate::initial_context::apply_event(&mut next, change).map_err(failure)?;
-            next.ok_or_else(|| failure("initial context transition produced no result"))?
-        };
-        *current = Some(next.clone());
-        Ok(next)
-    }
-
     /// Admit one startup operation using the actor's exact installed policy.
     /// The mailbox runs it as an owned parked workbench execution, leaving
     /// native scheduling and host service pumps available while it waits.
@@ -266,21 +227,10 @@ where
         actor: ActorRef,
     ) -> Result<InitialContextObservation, ResidentActorWorkbenchError> {
         let record = self.initial_context_record(actor)?;
+        let mut admission = InitialContextAdmissionGuard(None);
         let invocation = {
-            let mut current = record.initial_context.lock();
-            if let Some(current) = current.as_ref() {
-                return Ok(current.clone());
-            }
-            if let Some(restored) = self
-                .environment
-                .recovery
-                .as_ref()
-                .map(|journal| journal.initial_context(actor).map_err(failure))
-                .transpose()?
-                .flatten()
-            {
-                *current = Some(restored.clone());
-                return Ok(restored);
+            if let Some(current) = record.lifecycle.initial_context() {
+                return Ok(current);
             }
             if matches!(
                 record.installed_tools.observe(),
@@ -326,16 +276,10 @@ where
                     caller_seed: record.fresh_context_seed.clone(),
                 }
             };
-            let next = if let Some(journal) = &self.environment.recovery {
-                journal
-                    .record_initial_context(actor, change)
-                    .map_err(failure)?
-            } else {
-                let mut next = None;
-                crate::initial_context::apply_event(&mut next, change).map_err(failure)?;
-                next.expect("initial admission produces observation")
-            };
-            *current = Some(next.clone());
+            let transition = record.lifecycle.begin_initial_context(change).await.map_err(failure)?;
+            let next = transition.observation;
+            if !transition.admitted { return Ok(next); }
+            admission.0 = Some(record.lifecycle.clone());
             let Some(identity) = next.identity.clone() else {
                 return Ok(next);
             };
@@ -360,6 +304,7 @@ where
                 reply: reply.into(),
             })
             .map_err(failure)?;
+        admission.0.take();
         receiver
             .await
             .map_err(|_| failure("initial context execution ended without a retained outcome"))?
@@ -370,7 +315,7 @@ where
 
     /// Acknowledge publication into the current exact conversation. References
     /// remain historical evidence; the context owner alone authorizes edits.
-    pub fn acknowledge_initial_context_publication(
+    pub async fn acknowledge_initial_context_publication(
         &self,
         actor: ActorRef,
         operation: &WorkbenchExecutionId,
@@ -397,9 +342,7 @@ where
             }
         }
         let record = self.initial_context_record(actor)?;
-        if record.initial_context.lock().is_none() {
-            *record.initial_context.lock() = Some(observed);
-        }
-        self.change_initial_context(actor, InitialContextEvent::Publish { publication })
+        record.lifecycle.change_initial_context(InitialContextEvent::Publish { publication })
+            .await.map_err(failure)
     }
 }
