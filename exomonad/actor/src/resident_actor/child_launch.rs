@@ -13,6 +13,16 @@ enum ChildPlacementPhase {
     Released,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum CheckpointRemintRefusal {
+    #[error("checkpoint placement is no longer owned by startup")]
+    CustodyReleased,
+    #[error("checkpoint remint differs from its exact startup placement")]
+    PlacementMismatch,
+    #[error("checkpoint startup was abandoned before native publication")]
+    StartupAbandoned,
+}
+
 /// Exactly one owner may reclaim a launch placement. Startup transfers it
 /// before native actor initialization; terminal observation cannot take it back.
 #[derive(Clone)]
@@ -29,14 +39,14 @@ impl ChildPlacementCustody {
         )
     }
 
-    pub(super) fn new(placement: crate::ActorPlacement) -> Self {
+    pub(crate) fn new(placement: crate::ActorPlacement) -> Self {
         Self(
             Arc::new(Mutex::new(ChildPlacementPhase::Prepared(placement))),
             Arc::new(std::sync::atomic::AtomicBool::new(true)),
         )
     }
 
-    pub(super) fn startup_guard(&self) -> crate::WorkbenchAbandonGuard {
+    pub(crate) fn startup_guard(&self) -> crate::WorkbenchAbandonGuard {
         let active = self.1.clone();
         crate::WorkbenchAbandonGuard::new(move || {
             active.store(false, std::sync::atomic::Ordering::Release);
@@ -130,16 +140,16 @@ impl ChildPlacementCustody {
         session: tidepool_repr::SessionId,
         provisional_scope: tidepool_codegen::scope::ScopeId,
         actual_scope: tidepool_codegen::scope::ScopeId,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), CheckpointRemintRefusal> {
         let mut phase = self.0.lock();
         let ChildPlacementPhase::Prepared(placement) = *phase else {
-            return Err("checkpoint placement is no longer owned by startup");
+            return Err(CheckpointRemintRefusal::CustodyReleased);
         };
         if placement.session != session || placement.lexical_scope != provisional_scope {
-            return Err("checkpoint remint differs from its exact startup placement");
+            return Err(CheckpointRemintRefusal::PlacementMismatch);
         }
         if !self.1.load(std::sync::atomic::Ordering::Acquire) {
-            return Err("checkpoint startup was abandoned before native publication");
+            return Err(CheckpointRemintRefusal::StartupAbandoned);
         }
         *phase = ChildPlacementPhase::Prepared(crate::ActorPlacement {
             lexical_scope: actual_scope,
@@ -1145,6 +1155,120 @@ mod tests {
         let runner = Runner::new(machines.clone(), ActorWorkbenchSource::new("", Vec::new()));
         let (placement, captured) = captured_placement(&machines, id);
         (runner, machines, placement, captured, root)
+    }
+
+    #[tokio::test]
+    async fn checkpoint_remint_result_loss_keeps_exact_native_cleanup_custody() {
+        let mut fixture = super::super::invocation_work::tests::Fixture::start().await;
+        let (runner, machines, parent, checkpoint, _root) = shared_fixture();
+        fixture.environment.runner = runner.clone();
+        let provisional_scope = {
+            let mut checkout = machines.checkout_run(parent.session).unwrap();
+            let scope = checkout.machine().mint_isolated_scope();
+            checkout.restore_suspended(Vec::new());
+            scope
+        };
+        let placement = crate::ActorPlacement {
+            resource_scope: RealmId::fresh(),
+            lexical_scope: provisional_scope,
+            ..parent
+        };
+        let context =
+            ActorDescriptor::new("remint parent", parent).session_context(fixture.actor.identity());
+        let work = InvocationWork::new(context.actor, RequestReservationOwner::Scope(0));
+        let custody = ChildPlacementCustody::new(placement);
+        let startup = custody.startup_guard();
+        work.retain_launch_placement(&context, custody.clone())
+            .unwrap();
+        let actual_scope = runner
+            .remint_checkpoint_child_scope_from_lease(
+                context,
+                checkpoint.clone(),
+                provisional_scope,
+                custody.clone(),
+            )
+            .await
+            .unwrap();
+        let actual = crate::ActorPlacement {
+            lexical_scope: actual_scope,
+            ..placement
+        };
+        assert_ne!(actual_scope, provisional_scope);
+        // No async consumer updates custody: native publication alone retains it.
+        assert_eq!(*custody.0.lock(), ChildPlacementPhase::Prepared(actual));
+        drop(startup);
+        let cleanup = work.cleanup(&fixture.environment, &fixture.kernel).await;
+        assert_eq!(cleanup.uncertainty(), None);
+        assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
+        let mut checkout = machines.checkout_run(parent.session).unwrap();
+        assert!(checkout.machine().compile_view_in(actual_scope).is_none());
+        assert!(checkout
+            .machine()
+            .compile_view_in(provisional_scope)
+            .is_none());
+        assert!(checkout
+            .machine()
+            .validate_lexical_scope_lease(checkpoint.scope(), &checkpoint)
+            .is_ok());
+        checkout.restore_suspended(Vec::new());
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn checkpoint_remint_after_cleanup_started_refuses_native_publication() {
+        let (runner, machines, parent, checkpoint, _root) = shared_fixture();
+        let provisional_scope = {
+            let mut checkout = machines.checkout_run(parent.session).unwrap();
+            let scope = checkout.machine().mint_isolated_scope();
+            checkout.restore_suspended(Vec::new());
+            scope
+        };
+        let placement = crate::ActorPlacement {
+            resource_scope: RealmId::fresh(),
+            lexical_scope: provisional_scope,
+            ..parent
+        };
+        let context = ActorDescriptor::new("remint parent", parent)
+            .session_context(ActorRef::first(crate::ActorId(978)));
+        let custody = ChildPlacementCustody::new(placement);
+        let startup = custody.startup_guard();
+        let checkout = machines.checkout_run(parent.session).unwrap();
+        let mut remint = Box::pin(runner.remint_checkpoint_child_scope_from_lease(
+            context,
+            checkpoint.clone(),
+            provisional_scope,
+            custody.clone(),
+        ));
+        assert!(futures_util::poll!(&mut remint).is_pending());
+        drop(startup);
+        let mut cleanup = Box::pin(custody.cleanup(&runner, parent.session));
+        assert!(futures_util::poll!(&mut cleanup).is_pending());
+        assert_eq!(
+            *custody.0.lock(),
+            ChildPlacementPhase::Reclaiming(placement)
+        );
+        drop(checkout);
+        let (reminted, cleaned) = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::join!(remint, cleanup)
+        })
+        .await
+        .expect("queued native remint and cleanup must settle");
+        assert!(matches!(
+            reminted,
+            Err(ResidentActorWorkbenchError::ActorProtocol(_))
+        ));
+        cleaned.unwrap();
+        assert_eq!(*custody.0.lock(), ChildPlacementPhase::Released);
+        let mut checkout = machines.checkout_run(parent.session).unwrap();
+        assert!(checkout
+            .machine()
+            .compile_view_in(provisional_scope)
+            .is_none());
+        assert!(checkout
+            .machine()
+            .validate_lexical_scope_lease(checkpoint.scope(), &checkpoint)
+            .is_ok());
+        checkout.restore_suspended(Vec::new());
     }
 
     #[tokio::test]

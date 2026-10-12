@@ -8414,6 +8414,7 @@ where
         custody: crate::resident_actor::child_launch::ChildPlacementCustody,
     ) -> Result<ScopeId, ResidentActorWorkbenchError> {
         let source_scope = context.placement.lexical_scope;
+        let native_session = context.placement.session;
         self.access
             .with_machine(context, move |session, _, _| {
                 // The runtime validates the capsule's owner before creating any
@@ -8427,13 +8428,13 @@ where
                 }
                 // Publish from the native issuer before a dropped result can
                 // lose the new scope. Cleanup may already own the old placement.
-                if let Err(detail) = custody.publish_checkpoint_remint(
-                    context.placement.session,
-                    provisional_scope,
-                    scope,
-                ) {
+                if let Err(detail) =
+                    custody.publish_checkpoint_remint(native_session, provisional_scope, scope)
+                {
                     session.retire_scope(scope);
-                    return Err(ResidentActorWorkbenchError::ActorProtocol(detail.into()));
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        detail.to_string(),
+                    ));
                 }
                 session.retire_scope(provisional_scope);
                 Ok(scope)
