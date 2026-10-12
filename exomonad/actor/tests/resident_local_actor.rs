@@ -429,15 +429,15 @@ async fn dispatch_unbound_workbench_cell(
 ) -> Result<serde_json::Value, exomonad_actor::ResidentToolError> {
     let (reply, receive) = tokio::sync::oneshot::channel();
     actor
-        .address()
-        .send_message(exomonad_actor::KernelMessage::Workbench {
-            invocation: exomonad_actor::ActorWorkbenchInvocation::unbound(
-                WorkbenchRequest::from_cell_input(source),
-            ),
-            control: None,
-            reply: reply.into(),
-        })
-        .expect("queue direct owned workbench cell");
+        .submit_workbench(
+            exomonad_actor::ActorWorkbenchInvocation::unbound(WorkbenchRequest::from_cell_input(
+                source,
+            )),
+            None,
+            reply.into(),
+        )
+        .await
+        .expect("admit owned workbench cell");
     match receive.await.map_err(|_| {
         exomonad_actor::ResidentToolError::Unavailable(
             "actor stopped before workbench cell completion".into(),
@@ -577,7 +577,9 @@ impl ConcurrentResident {
             machine,
             None,
             exomonad_actor::Incarnation::FIRST,
-        );
+        )
+        .await
+        .expect("start resident forest");
         if let Some(layers) = layers {
             forest.set_source_layers(layers);
         }
@@ -1219,7 +1221,9 @@ async fn resident_await_watch_case(case: WatchCase) {
         machine,
         None,
         exomonad_actor::Incarnation::FIRST,
-    );
+    )
+    .await
+    .expect("start resident forest");
     let (actor, task, policy): (
         _,
         _,
@@ -1957,7 +1961,9 @@ async fn resident_cleanup_case_mode(fail_hook: bool, unjoined_green: bool) {
         machine,
         None,
         exomonad_actor::Incarnation::FIRST,
-    );
+    )
+    .await
+    .expect("start resident forest");
     for invalid in [
         ActorDescriptor::new(
             "foreign",

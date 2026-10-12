@@ -168,7 +168,9 @@ async fn run_record_case(source: &str, discriminator: u32) {
         machine,
         None,
         exomonad_actor::Incarnation::FIRST,
-    );
+    )
+    .await
+    .expect("start resident forest");
     let (actor, task) = forest.admit_root(descriptor, outcome).await.unwrap();
     let LocalResidentDeployment::PolicyInstalled(installation) = deployments.recv().await.unwrap()
     else {
