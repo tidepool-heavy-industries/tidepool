@@ -40,6 +40,7 @@ pub(super) struct RunState {
     preparations: HashMap<u64, RootPreparationRecord>,
     next_preparation: u64,
     preparation_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
+    reservations: HashMap<ActorRef, ReservationRecord>,
 }
 impl Default for RunState {
     fn default() -> Self {
@@ -53,8 +54,56 @@ impl Default for RunState {
             preparations: HashMap::new(),
             next_preparation: 0,
             preparation_waiters: Vec::new(),
+            reservations: HashMap::new(),
         }
     }
+}
+
+pub(crate) struct ActorReservation {
+    identity: ActorRef,
+    lifecycle: crate::kernel::LifecycleHandle,
+    terminal: RetainedActorExit,
+    owner: RactorRef<RunControlMessage>,
+    armed: bool,
+}
+impl ActorReservation {
+    pub(crate) fn identity(&self) -> ActorRef {
+        self.identity
+    }
+    pub(crate) fn lifecycle(&self) -> &crate::kernel::LifecycleHandle {
+        &self.lifecycle
+    }
+    pub(crate) fn terminal(&self) -> &RetainedActorExit {
+        &self.terminal
+    }
+}
+impl Drop for ActorReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.terminal.request_shutdown(ActorTerminal::new(
+                ActorExitKind::Cancelled,
+                "actor reservation abandoned",
+            ));
+            self.lifecycle.close_abandoned();
+            let _ = self
+                .owner
+                .send_message(RunControlMessage::AbandonReservation {
+                    actor: self.identity,
+                });
+        }
+    }
+}
+enum ReservationPhase {
+    Creating,
+    Ready,
+    Registered,
+    Abandoned,
+}
+struct ReservationRecord {
+    phase: ReservationPhase,
+    terminal: RetainedActorExit,
+    lifecycle: Option<crate::kernel::LifecycleHandle>,
+    reply: Option<oneshot::Sender<Result<ActorReservation, DirectoryError>>>,
 }
 
 enum PreparationPhase {
@@ -102,6 +151,13 @@ impl RunState {
 }
 
 pub(super) enum RunControlMessage {
+    ReservationReady {
+        actor: ActorRef,
+        lifecycle: Result<crate::kernel::LifecycleHandle, String>,
+    },
+    AbandonReservation {
+        actor: ActorRef,
+    },
     AttachPreparationSupervisor {
         supervisor: RactorRef<PreparationMessage>,
         reply: oneshot::Sender<()>,
@@ -131,17 +187,18 @@ pub(super) enum RunControlMessage {
     },
     Reserve {
         incarnation: crate::Incarnation,
-        reply: oneshot::Sender<Result<ActorRef, DirectoryError>>,
+        reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
     },
     ClaimExact {
         actor: ActorRef,
-        reply: oneshot::Sender<Result<(), DirectoryError>>,
+        reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
     },
     Fence {
         actors: Vec<crate::ActorId>,
         reply: oneshot::Sender<Result<(), DirectoryError>>,
     },
     Register {
+        reservation: ActorRef,
         actor: LocalActorRef,
         context: std::sync::Weak<KernelContext>,
         ownership: SpawnOwnership,
@@ -176,6 +233,42 @@ pub(super) enum RunControlMessage {
     },
 }
 
+fn begin_reservation(
+    state: &mut RunState,
+    actor: ActorRef,
+    reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
+) {
+    let terminal = RetainedActorExit::new();
+    state.reservations.insert(
+        actor,
+        ReservationRecord {
+            phase: ReservationPhase::Creating,
+            terminal: terminal.clone(),
+            lifecycle: None,
+            reply: Some(reply),
+        },
+    );
+    if state
+        .preparation_supervisor
+        .as_ref()
+        .is_none_or(|supervisor| {
+            supervisor
+                .send_message(PreparationMessage::ReserveActor {
+                    identity: actor,
+                    terminal,
+                })
+                .is_err()
+        })
+    {
+        if let Some(record) = state.reservations.get_mut(&actor) {
+            record.phase = ReservationPhase::Abandoned;
+            if let Some(reply) = record.reply.take() {
+                let _ = reply.send(Err(DirectoryError::Unavailable));
+            }
+        }
+    }
+}
+
 pub(super) struct RunControl;
 impl Actor for RunControl {
     type Msg = RunControlMessage;
@@ -190,7 +283,7 @@ impl Actor for RunControl {
     }
     async fn handle(
         &self,
-        _myself: RactorRef<Self::Msg>,
+        myself: RactorRef<Self::Msg>,
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
@@ -283,26 +376,70 @@ impl Actor for RunControl {
                 state.preparation_waiters.push(reply);
                 state.settle_preparation_waiters();
             }
+            RunControlMessage::ReservationReady { actor, lifecycle } => {
+                if let Some(record) = state.reservations.get_mut(&actor) {
+                    match lifecycle {
+                        Ok(lifecycle) => {
+                            record.lifecycle = Some(lifecycle.clone());
+                            if state.phase != RunPhase::Running
+                                || matches!(record.phase, ReservationPhase::Abandoned)
+                            {
+                                lifecycle.close_abandoned();
+                                record.phase = ReservationPhase::Abandoned;
+                                if let Some(reply) = record.reply.take() {
+                                    let _ = reply.send(Err(DirectoryError::Closed));
+                                }
+                            } else {
+                                record.phase = ReservationPhase::Ready;
+                                if let Some(reply) = record.reply.take() {
+                                    let _ = reply.send(Ok(ActorReservation {
+                                        identity: actor,
+                                        terminal: record.terminal.clone(),
+                                        lifecycle,
+                                        owner: myself.clone(),
+                                        armed: true,
+                                    }));
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            record.phase = ReservationPhase::Abandoned;
+                            if let Some(reply) = record.reply.take() {
+                                let _ = reply.send(Err(DirectoryError::Unavailable));
+                            }
+                        }
+                    }
+                } else if let Ok(lifecycle) = lifecycle {
+                    lifecycle.close_abandoned();
+                }
+            }
+            RunControlMessage::AbandonReservation { actor } => {
+                if let Some(record) = state.reservations.get_mut(&actor) {
+                    record.phase = ReservationPhase::Abandoned;
+                    if let Some(lifecycle) = &record.lifecycle {
+                        lifecycle.close_abandoned();
+                    }
+                }
+            }
             RunControlMessage::Reserve { incarnation, reply } => {
-                let result = if state.phase != RunPhase::Running {
-                    Err(DirectoryError::Closed)
+                if state.phase != RunPhase::Running {
+                    let _ = reply.send(Err(DirectoryError::Closed));
                 } else {
-                    loop {
+                    let actor = loop {
                         let id = crate::ActorId(NEXT_ACTOR_ID.fetch_add(1, Ordering::Relaxed));
                         if !state.identities.fenced.contains(&id)
                             && !state.identities.claimed.contains_key(&id)
                         {
-                            let actor = ActorRef { id, incarnation };
-                            state.identities.claimed.insert(id, actor);
-                            break Ok(actor);
+                            break ActorRef { id, incarnation };
                         }
-                    }
-                };
-                let _ = reply.send(result);
+                    };
+                    state.identities.claimed.insert(actor.id, actor);
+                    begin_reservation(state, actor, reply);
+                }
             }
             RunControlMessage::ClaimExact { actor, reply } => {
-                let result = if state.phase != RunPhase::Running {
-                    Err(DirectoryError::Closed)
+                if state.phase != RunPhase::Running {
+                    let _ = reply.send(Err(DirectoryError::Closed));
                 } else if state
                     .identities
                     .claimed
@@ -315,14 +452,13 @@ impl Actor for RunControl {
                                 .is_none_or(|entry| entry.actor.terminal().get().is_none())
                     })
                 {
-                    Err(DirectoryError::IdentityConflict { actor: actor.id })
+                    let _ = reply.send(Err(DirectoryError::IdentityConflict { actor: actor.id }));
                 } else {
                     advance_actor_ids_past(actor.id);
                     state.identities.fenced.remove(&actor.id);
                     state.identities.claimed.insert(actor.id, actor);
-                    Ok(())
-                };
-                let _ = reply.send(result);
+                    begin_reservation(state, actor, reply);
+                }
             }
             RunControlMessage::Fence { actors, reply } => {
                 let result = if state.phase != RunPhase::Running {
@@ -342,6 +478,7 @@ impl Actor for RunControl {
                 let _ = reply.send(result);
             }
             RunControlMessage::Register {
+                reservation,
                 actor,
                 context,
                 ownership,
@@ -350,7 +487,15 @@ impl Actor for RunControl {
                 let identity = actor.identity();
                 let result = if state.phase != RunPhase::Running {
                     Err(DirectoryError::Closed)
-                } else if state.identities.claimed.get(&identity.id) != Some(&identity) {
+                } else if reservation != identity
+                    || state.reservations.get(&reservation).is_none_or(|record| {
+                        !matches!(
+                            record.phase,
+                            ReservationPhase::Ready | ReservationPhase::Registered
+                        )
+                    })
+                    || state.identities.claimed.get(&identity.id) != Some(&identity)
+                {
                     Err(DirectoryError::Unauthorized { actor: identity })
                 } else if let Some(existing) = state.entries.get(&identity) {
                     if existing.actor.address().get_id() == actor.address().get_id() {
@@ -363,6 +508,11 @@ impl Actor for RunControl {
                         .identities
                         .runtime
                         .insert(actor.address().get_id(), identity);
+                    state
+                        .reservations
+                        .get_mut(&identity)
+                        .expect("registration reservation")
+                        .phase = ReservationPhase::Registered;
                     state.entries.insert(
                         identity,
                         DirectoryEntry {
@@ -424,6 +574,21 @@ impl Actor for RunControl {
             RunControlMessage::Seal { reply } => {
                 if state.phase == RunPhase::Running {
                     state.phase = RunPhase::RetiringPreparations;
+                    for record in state.reservations.values_mut() {
+                        if !matches!(record.phase, ReservationPhase::Registered) {
+                            record.terminal.request_shutdown(ActorTerminal::new(
+                                ActorExitKind::Cancelled,
+                                "forest reservation shutdown",
+                            ));
+                            if let Some(lifecycle) = &record.lifecycle {
+                                lifecycle.close_abandoned();
+                            }
+                            record.phase = ReservationPhase::Abandoned;
+                            if let Some(reply) = record.reply.take() {
+                                let _ = reply.send(Err(DirectoryError::Closed));
+                            }
+                        }
+                    }
                     for (id, record) in &state.preparations {
                         if !matches!(record.phase, PreparationPhase::Settled(_)) {
                             record.compiler.request_shutdown(ActorTerminal::new(
@@ -536,11 +701,14 @@ impl RunControlClient {
     pub(super) async fn reserve(
         &self,
         incarnation: crate::Incarnation,
-    ) -> Result<ActorRef, DirectoryError> {
+    ) -> Result<ActorReservation, DirectoryError> {
         self.ask(|reply| RunControlMessage::Reserve { incarnation, reply })
             .await?
     }
-    pub(super) async fn claim_exact(&self, actor: ActorRef) -> Result<(), DirectoryError> {
+    pub(super) async fn claim_exact(
+        &self,
+        actor: ActorRef,
+    ) -> Result<ActorReservation, DirectoryError> {
         self.ask(|reply| RunControlMessage::ClaimExact { actor, reply })
             .await?
     }
@@ -584,19 +752,23 @@ impl RunControlClient {
         self.ask(|reply| RunControlMessage::InstallSession { context, reply })
             .await?
     }
-    pub(super) async fn insert(
+    pub(crate) async fn register_executor(
         &self,
+        mut reservation: ActorReservation,
         actor: LocalActorRef,
         context: std::sync::Weak<KernelContext>,
         ownership: SpawnOwnership,
     ) -> Result<(), DirectoryError> {
         self.ask(|reply| RunControlMessage::Register {
+            reservation: reservation.identity,
             actor,
             context,
             ownership,
             reply,
         })
-        .await?
+        .await??;
+        reservation.armed = false;
+        Ok(())
     }
     pub(crate) async fn seal(&self) -> Result<SealedActorMembership, DirectoryError> {
         self.ask(|reply| RunControlMessage::Seal { reply }).await

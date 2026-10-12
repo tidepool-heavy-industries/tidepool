@@ -71,6 +71,10 @@ impl RootDelivery {
 }
 
 pub(super) enum PreparationMessage {
+    ReserveActor {
+        identity: ActorRef,
+        terminal: RetainedActorExit,
+    },
     Start {
         id: u64,
         operation: RootOperation,
@@ -117,6 +121,29 @@ impl Actor for PreparationSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            PreparationMessage::ReserveActor { identity, terminal } => {
+                let arguments = ReservationArguments {
+                    identity,
+                    terminal,
+                    control: state.control.clone(),
+                };
+                match Actor::spawn_linked(None, ReservationStarter, arguments, myself.get_cell())
+                    .await
+                {
+                    Ok((worker, task)) => {
+                        drop(task);
+                        let _ = worker.send_message(());
+                    }
+                    Err(error) => {
+                        let _ = state
+                            .control
+                            .send_message(RunControlMessage::ReservationReady {
+                                actor: identity,
+                                lifecycle: Err(error.to_string()),
+                            });
+                    }
+                }
+            }
             PreparationMessage::Start {
                 id,
                 operation,
@@ -314,6 +341,44 @@ impl Actor for RootWorker {
             .send_message(PreparationMessage::WorkerSettled {
                 id: state.id,
                 outcome,
+            });
+        myself.stop(None);
+        Ok(())
+    }
+}
+
+pub(super) struct ReservationStarter;
+pub(super) struct ReservationArguments {
+    pub(super) identity: ActorRef,
+    pub(super) terminal: RetainedActorExit,
+    pub(super) control: RactorRef<RunControlMessage>,
+}
+impl Actor for ReservationStarter {
+    type Msg = ();
+    type State = ReservationArguments;
+    type Arguments = ReservationArguments;
+    async fn pre_start(
+        &self,
+        _myself: RactorRef<Self::Msg>,
+        arguments: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(arguments)
+    }
+    async fn handle(
+        &self,
+        myself: RactorRef<Self::Msg>,
+        _: (),
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        let lifecycle =
+            crate::kernel::LifecycleHandle::start(state.identity, state.terminal.clone())
+                .await
+                .map_err(|error| error.to_string());
+        let _ = state
+            .control
+            .send_message(RunControlMessage::ReservationReady {
+                actor: state.identity,
+                lifecycle,
             });
         myself.stop(None);
         Ok(())
