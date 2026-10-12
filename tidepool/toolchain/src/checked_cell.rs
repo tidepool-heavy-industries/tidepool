@@ -1804,6 +1804,16 @@ impl CheckedValueImportAuthority {
     }
 }
 
+pub(crate) enum CheckedValueCaptureInput<'a> {
+    Ordinary {
+        produced: Option<&'a ProducedValueTypeInterfaces>,
+    },
+    Prepared {
+        support: &'a crate::declaration_context::PreparedValueSourceSupport,
+        produced: &'a ProducedValueTypeInterfaces,
+    },
+}
+
 impl CheckedValueInputs {
     pub(crate) fn capture_produced_types(
         &self,
@@ -2077,8 +2087,14 @@ impl CheckedValueInputs {
         context: &Arc<crate::declaration_context::ExactDeclarationContext>,
         source_lexical: &[crate::declaration_join::ExactLexicalNode],
         original_execution: &crate::declaration_context::ExactDeclarationContext,
-        produced: Option<&ProducedValueTypeInterfaces>,
+        capture: CheckedValueCaptureInput<'_>,
     ) -> Result<Arc<CheckedValueArtifact>, CompileError> {
+        let (produced, support) = match capture {
+            CheckedValueCaptureInput::Ordinary { produced } => (produced, None),
+            CheckedValueCaptureInput::Prepared { support, produced } => {
+                (Some(produced), Some(support))
+            }
+        };
         let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
         let (input, certificate) = match produced {
             Some(produced) => {
@@ -2112,18 +2128,31 @@ impl CheckedValueInputs {
                 )
             }
         };
-        let context = (**context).clone().extend_with_value_interfaces(
-            std::slice::from_ref(&certificate),
-            context.lexical_graph().to_vec(),
-        )?;
-        let value_view = context
-            .artifact_view()
-            .select_roots(vec![certificate.artifact_id()])?;
+        let context = match support {
+            Some(support) => {
+                if !Arc::ptr_eq(context, support.context()) {
+                    return Err(failure("prepared value support has another completed cell"));
+                }
+                context.clone()
+            }
+            None => Arc::new((**context).clone().extend_with_value_interfaces(
+                std::slice::from_ref(&certificate),
+                context.lexical_graph().to_vec(),
+            )?),
+        };
         let crate::declaration_context::RetainedValueSourceSurface {
             artifacts: artifact_view,
             compiler_artifacts: compiler_artifact_view,
             lexical: source_lexical,
-        } = context.retain_value_source_surface(&value_view, source_lexical)?;
+        } = match support {
+            Some(support) => support.retain_output(&certificate)?,
+            None => {
+                let value_view = context
+                    .artifact_view()
+                    .select_roots(vec![certificate.artifact_id()])?;
+                context.retain_value_source_surface(&value_view, source_lexical)?
+            }
+        };
         let templates = cell.specification.template_sources();
         let template_imports = crate::declaration_context::RetainedTemplateImports::capture(
             original_execution,
@@ -3849,7 +3878,12 @@ impl CheckedItemOffer {
             program_entry,
             target_imports,
         )?;
-        self.seal_prepared(output, artifact_context, source_lexical, produced)
+        self.seal_prepared(
+            output,
+            artifact_context,
+            source_lexical,
+            CheckedValueCaptureInput::Ordinary { produced },
+        )
     }
 
     pub(crate) fn seal_prepared(
@@ -3857,7 +3891,7 @@ impl CheckedItemOffer {
         output: PreparedCheckedItemOutput,
         artifact_context: &Arc<crate::declaration_context::ExactDeclarationContext>,
         source_lexical: &[crate::declaration_join::ExactLexicalNode],
-        produced: Option<&ProducedValueTypeInterfaces>,
+        capture: CheckedValueCaptureInput<'_>,
     ) -> Result<Arc<ExactCompiledItem>, CompileError> {
         if !Arc::ptr_eq(&output.item.cell, &self.item.cell)
             || output.item.index != self.item.index
@@ -3885,7 +3919,7 @@ impl CheckedItemOffer {
                 artifact_context,
                 source_lexical,
                 &original_execution,
-                produced,
+                capture,
             )?)
         } else {
             None
@@ -5211,10 +5245,95 @@ mod tests {
             ProducedValueTypeInterfaces::from_outputs(vec![output], 4..5).unwrap()
         });
         let captured = inputs
-            .capture_output(1, &cell, original, &[], original, produced.as_ref())
+            .capture_output(
+                1,
+                &cell,
+                original,
+                &[],
+                original,
+                super::CheckedValueCaptureInput::Ordinary {
+                    produced: produced.as_ref(),
+                },
+            )
             .unwrap();
         if let Some(produced) = produced {
             let output = produced.output(owner).unwrap();
+            let prepared_context = Arc::new(
+                (**original)
+                    .clone()
+                    .extend_program_value_interface(output.interface.clone())
+                    .unwrap(),
+            );
+            let support = crate::declaration_context::PreparedValueSourceSupport::new(
+                prepared_context.clone(),
+                &[],
+            )
+            .unwrap();
+            let prepared = inputs
+                .capture_output(
+                    1,
+                    &cell,
+                    &prepared_context,
+                    &[],
+                    original,
+                    super::CheckedValueCaptureInput::Prepared {
+                        support: &support,
+                        produced: &produced,
+                    },
+                )
+                .unwrap();
+            assert_eq!(
+                prepared.certified_interface(),
+                captured.certified_interface()
+            );
+            assert_eq!(
+                prepared.compiler_input_projection(),
+                captured.compiler_input_projection()
+            );
+            assert_eq!(prepared.source_lexical(), captured.source_lexical());
+            assert_eq!(
+                prepared.artifact_view().capture_graph_selection(),
+                captured.artifact_view().capture_graph_selection()
+            );
+            assert_eq!(
+                prepared.compiler_artifact_view().capture_graph_selection(),
+                captured.compiler_artifact_view().capture_graph_selection()
+            );
+            assert!(
+                inputs
+                    .capture_output(
+                        1,
+                        &cell,
+                        original,
+                        &[],
+                        original,
+                        super::CheckedValueCaptureInput::Prepared {
+                            support: &support,
+                            produced: &produced
+                        },
+                    )
+                    .is_err(),
+                "another issuer cannot borrow the prepared support"
+            );
+            let empty_support =
+                crate::declaration_context::PreparedValueSourceSupport::new(original.clone(), &[])
+                    .unwrap();
+            assert!(
+                inputs
+                    .capture_output(
+                        1,
+                        &cell,
+                        original,
+                        &[],
+                        original,
+                        super::CheckedValueCaptureInput::Prepared {
+                            support: &empty_support,
+                            produced: &produced
+                        },
+                    )
+                    .is_err(),
+                "prepared capture never readmits an absent value interface"
+            );
             let artifact = output.interface.artifact_id();
             let hidden = produced.for_segment(4..4).unwrap();
             assert!(Arc::ptr_eq(&hidden.lookup, &produced.lookup));
@@ -5410,7 +5529,7 @@ mod tests {
             .copied()
             .collect::<BTreeSet<_>>();
         assert_eq!(originals.len(), 2);
-        let captured = capture_test_value(&original, false);
+        let captured = capture_test_value_from_output(&original, false, true);
         let graph = captured.artifact_view().capture_graph_selection();
         assert!(originals.is_subset(&graph.bindings.iter().copied().collect()));
         assert_eq!(graph.native_groups, original_graph.native_groups);

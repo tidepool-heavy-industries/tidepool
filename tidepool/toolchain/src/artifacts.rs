@@ -685,6 +685,10 @@ impl PreparedCellProgram {
             Some(cell.item(0)?.initial_prefix()?)
         };
         let mut items = Vec::with_capacity(cell.item_count());
+        let value_support = crate::declaration_context::PreparedValueSourceSupport::new(
+            context.clone(),
+            &source_lexical,
+        )?;
         for index in 0..cell.item_count() {
             cancellation.checkpoint()?;
             let _item_span = tracing::debug_span!(target: "exomonad_harness::timing", "products.checked_item", index, inclusive = true).entered();
@@ -730,7 +734,10 @@ impl PreparedCellProgram {
                 })?,
                 &context,
                 &source_lexical,
-                Some(&produced_outputs.for_segment(index..index + 1)?),
+                checked_cell::CheckedValueCaptureInput::Prepared {
+                    produced: &produced_outputs.for_segment(index..index + 1)?,
+                    support: &value_support,
+                },
             )?;
             let next = completed.append(native.clone())?;
             let observation = CellProgramObservations {

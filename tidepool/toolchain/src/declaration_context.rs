@@ -60,6 +60,126 @@ pub(crate) struct RetainedValueSourceSurface {
     pub(crate) lexical: Vec<ExactLexicalNode>,
 }
 
+/// One completed cell's immutable source facts. A value selects its own exact
+/// graph from this issuer; common type custody does not publish source roots.
+pub(crate) struct PreparedValueSourceSupport {
+    context: Arc<ExactDeclarationContext>,
+    imports: BTreeMap<ExactModuleIdentity, Vec<ExactModuleIdentity>>,
+    implementations: BTreeMap<ExactModuleIdentity, crate::artifact_inventory::ArtifactKind>,
+    selected: BTreeMap<ExactModuleIdentity, Arc<ArtifactEntry>>,
+}
+
+impl PreparedValueSourceSupport {
+    pub(crate) fn context(&self) -> &Arc<ExactDeclarationContext> {
+        &self.context
+    }
+
+    pub(crate) fn new(
+        context: Arc<ExactDeclarationContext>,
+        support: &[ExactLexicalNode],
+    ) -> Result<Self, CompileError> {
+        let imports = compose_lexical_nodes(
+            context
+                .lexical
+                .iter()
+                .chain(support)
+                .filter(|node| !node.owner.module.starts_with("Tidepool.Session.")),
+        )?
+        .into_iter()
+        .map(|node| (node.owner, node.imports))
+        .collect();
+        let implementations = context.artifact_view().source_implementation_roles();
+        let selected = context.compiler_metadata_snapshot()?.entries;
+        Ok(Self {
+            context,
+            imports,
+            implementations,
+            selected,
+        })
+    }
+
+    pub(crate) fn retain_output(
+        &self,
+        value: &CertifiedValueInterface,
+    ) -> Result<RetainedValueSourceSurface, CompileError> {
+        let interface = value.interface();
+        let owner = identity(interface.unit(), interface.module());
+        let entry = self.selected.get(&owner).ok_or_else(|| {
+            failure("produced value interface is absent from its prepared context")
+        })?;
+        if entry.descriptor.id != value.artifact_id()
+            || entry.requirements != value.requirements()
+            || !matches!(&entry.payload,
+                ArtifactPayload::Interface(selected, JoinedInterfaceRole::ValueInterface)
+                if selected == interface)
+        {
+            return Err(failure(
+                "produced value interface differs from its prepared issuer",
+            ));
+        }
+        let view = self
+            .context
+            .artifact_view()
+            .select_roots(vec![value.artifact_id()])?;
+        self.retain_surface(&view)
+    }
+
+    fn retain_surface(
+        &self,
+        value: &ArtifactView,
+    ) -> Result<RetainedValueSourceSurface, CompileError> {
+        let retained = value
+            .descriptors()
+            .into_iter()
+            .map(|descriptor| descriptor.owner)
+            .collect::<BTreeSet<_>>();
+        let roots = self
+            .imports
+            .keys()
+            .filter(|owner| retained.contains(*owner))
+            .cloned()
+            .collect::<Vec<_>>();
+        let lexical = crate::declaration_join::source_lexical_surface(
+            &roots,
+            &self.imports,
+            &[],
+            &self.implementations,
+        )?
+        .lexical;
+        let entries = lexical
+            .iter()
+            .filter_map(|node| {
+                self.selected
+                    .get(&node.owner)
+                    .map(|entry| (node.owner.clone(), entry.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        if entries.len() != lexical.len() {
+            return Err(failure(
+                "retained source surface lacks its exact artifact owner",
+            ));
+        }
+        let compiler_roots = value
+            .root_entries()
+            .iter()
+            .map(|entry| entry.descriptor.id)
+            .chain(entries.values().map(|entry| entry.descriptor.id))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let compiler_artifacts = self.context.artifact_view().select_roots(compiler_roots)?;
+        let artifacts = self
+            .context
+            .artifact_view()
+            .retain_original_custody(&compiler_artifacts)?;
+        Ok(RetainedValueSourceSurface {
+            artifacts,
+            compiler_artifacts,
+            lexical,
+        })
+    }
+}
+
 /// Only the original compiler output proof can establish complete instance
 /// visibility. Type projections and generic declaration contexts have none.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -5500,64 +5620,7 @@ impl ExactDeclarationContext {
         value: &ArtifactView,
         support: &[ExactLexicalNode],
     ) -> Result<RetainedValueSourceSurface, CompileError> {
-        let retained = value
-            .descriptors()
-            .into_iter()
-            .map(|descriptor| descriptor.owner)
-            .collect::<BTreeSet<_>>();
-        let selected = compose_lexical_nodes(
-            self.lexical
-                .iter()
-                .chain(support)
-                .filter(|node| !node.owner.module.starts_with("Tidepool.Session.")),
-        )?
-        .into_iter()
-        .map(|node| (node.owner, node.imports))
-        .collect::<BTreeMap<_, _>>();
-        let roots = selected
-            .keys()
-            .filter(|owner| retained.contains(*owner))
-            .cloned()
-            .collect::<Vec<_>>();
-        let implementations = self.artifact_view().source_implementation_roles();
-        let lexical = crate::declaration_join::source_lexical_surface(
-            &roots,
-            &selected,
-            &[],
-            &implementations,
-        )?
-        .lexical;
-        let selected = self.compiler_metadata_snapshot()?.entries;
-        let entries = lexical
-            .iter()
-            .filter_map(|node| {
-                selected
-                    .get(&node.owner)
-                    .map(|entry| (node.owner.clone(), entry.clone()))
-            })
-            .collect::<BTreeMap<_, _>>();
-        if entries.len() != lexical.len() {
-            return Err(failure(
-                "retained source surface lacks its exact artifact owner",
-            ));
-        }
-        let compiler_roots = value
-            .root_entries()
-            .iter()
-            .map(|entry| entry.descriptor.id)
-            .chain(entries.values().map(|entry| entry.descriptor.id))
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
-        let compiler_artifacts = self.artifact_view().select_roots(compiler_roots.clone())?;
-        let artifacts = self
-            .artifact_view()
-            .retain_original_custody(&compiler_artifacts)?;
-        Ok(RetainedValueSourceSurface {
-            artifacts,
-            compiler_artifacts,
-            lexical,
-        })
+        PreparedValueSourceSupport::new(Arc::new(self.clone()), support)?.retain_surface(value)
     }
 
     pub(crate) fn extend_program_value_interface(
@@ -12861,6 +12924,45 @@ mod tests {
             .artifact_view()
             .select_roots(vec![entries[&owner].descriptor.id])
             .unwrap();
+        let shared =
+            PreparedValueSourceSupport::new(context.clone(), request.program_source_lexical())
+                .unwrap();
+        for roots in [
+            vec![identity("fixture", "InstanceOwner")],
+            vec![owner.clone()],
+        ] {
+            let selected = context
+                .artifact_view()
+                .entries_for_owners(roots.clone().into_iter())
+                .unwrap();
+            let selected = context
+                .artifact_view()
+                .select_roots(
+                    roots
+                        .iter()
+                        .map(|root| selected[root].descriptor.id)
+                        .collect(),
+                )
+                .unwrap();
+            let surface = shared.retain_surface(&selected).unwrap();
+            let expected = if roots == [owner.clone()] {
+                vec![identity("fixture", "InstanceOwner"), owner.clone()]
+            } else {
+                roots
+            };
+            assert_eq!(
+                surface
+                    .lexical
+                    .iter()
+                    .map(|node| node.owner.clone())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(surface
+                .lexical
+                .iter()
+                .all(|node| node.owner != identity("fixture", "Hidden")));
+        }
         let RetainedValueSourceSurface {
             artifacts: view,
             lexical,
