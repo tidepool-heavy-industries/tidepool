@@ -302,7 +302,8 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
             host.context.actor.identity(),
             &first.request,
             &[result.rendered.as_str(), "persona-activation"],
-        );
+        )
+        .await;
         let instructions = first.request.instructions.clone();
         let operation = first.operation("persona-refresh");
         first.sync_call_named(
@@ -339,7 +340,8 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
                 updated["contextText"].as_str().unwrap(),
                 "persona-activation",
             ],
-        );
+        )
+        .await;
         assert_eq!(refreshed.request.instructions, instructions);
         assert_eq!(
             host.context
@@ -367,7 +369,8 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
                 updated["contextText"].as_str().unwrap(),
                 "persona-activation",
             ],
-        );
+        )
+        .await;
         assert_eq!(refused.request.instructions, instructions);
         assert!(matches!(
             judgments.try_recv(),
@@ -422,7 +425,8 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
                 "persona-activation",
                 "persona-resume-activation",
             ],
-        );
+        )
+        .await;
         assert!(matches!(
             judgments.try_recv(),
             Err(mpsc::error::TryRecvError::Empty)
@@ -530,7 +534,8 @@ async fn shipped_persona_initializer_uses_actual_preparation_before_first_reques
                 host.context.actor.identity(),
                 &first.request,
                 &[result.rendered.as_str(), "canonical-persona-activation"],
-            );
+            )
+            .await;
             assert!(matches!(
                 judgments.try_recv(),
                 Err(mpsc::error::TryRecvError::Empty)

@@ -76,7 +76,7 @@ fn user_texts(request: &ResponsesRequest) -> Vec<&str> {
         .collect()
 }
 
-pub(super) fn assert_request_user_texts(
+pub(super) async fn assert_request_user_texts(
     host: &HostedTestRuntime,
     actor: exomonad_actor::ActorRef,
     request: &ResponsesRequest,
@@ -105,6 +105,7 @@ pub(super) fn assert_request_user_texts(
         .context
         .forest
         .initial_context_observation(actor)
+        .await
         .unwrap();
     let reference = retained
         .publication
@@ -119,7 +120,6 @@ pub(super) fn assert_request_user_texts(
             if actual.as_str() == reference && text == expected_bodies[0])));
 }
 
-
 async fn observation(host: &HostedTestRuntime) -> InitialContextObservation {
     host.context
         .forest
@@ -128,64 +128,51 @@ async fn observation(host: &HostedTestRuntime) -> InitialContextObservation {
         .unwrap()
 }
 
-fn exercise_durable_attachment(
+async fn exercise_durable_attachment(
     attachment: &super::provider_attachment::ProviderAttachment,
     retained: &InitialContextObservation,
 ) {
     let identity = retained.identity.as_ref().unwrap();
     let publication = retained.publication.as_ref().unwrap();
-    let wire = attachment.initial_context_wire_observation().unwrap();
+    let wire = attachment.initial_context_wire_observation().await.unwrap();
     assert_eq!(
         attachment
             .acknowledge_initial_context_publication(&identity.operation, publication.clone())
+            .await
             .unwrap(),
         *retained
     );
-    assert_eq!(attachment.initial_context_wire_observation().unwrap(), wire);
+    assert_eq!(
+        attachment.initial_context_wire_observation().await.unwrap(),
+        wire
+    );
     let foreign_operation = tidepool_runtime::session::WorkbenchExecutionId::from_digest([0; 16]);
     assert_ne!(foreign_operation, identity.operation);
     assert!(attachment
         .acknowledge_initial_context_publication(&foreign_operation, publication.clone())
+        .await
         .is_err());
-    assert_eq!(attachment.initial_context_wire_observation().unwrap(), wire);
-
-    // Exercise actual native admission contention, without holding a test
-    // mutex in the production callback or constructing another authority.
-    let (entered, held) = std::sync::mpsc::channel();
-    let (release, released) = std::sync::mpsc::channel();
-    let owner = attachment.clone();
-    let holder = std::thread::spawn(move || {
-        owner.with_admission(|| {
-            entered.send(()).unwrap();
-            released.recv().unwrap();
-        })
-    });
-    held.recv_timeout(Duration::from_secs(10)).unwrap();
-    let (started, starting) = std::sync::mpsc::channel();
-    let (completed, completion) = std::sync::mpsc::channel();
-    let reader = attachment.clone();
-    let observer = std::thread::spawn(move || {
-        started.send(()).unwrap();
-        completed
-            .send(reader.initial_context_wire_observation())
-            .unwrap();
-    });
-    starting.recv_timeout(Duration::from_secs(10)).unwrap();
-    let pending = completion.recv_timeout(Duration::from_millis(100));
-    release.send(()).unwrap();
-    assert!(matches!(
-        pending,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-    ));
     assert_eq!(
-        completion
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap()
-            .unwrap(),
+        attachment.initial_context_wire_observation().await.unwrap(),
         wire
     );
-    holder.join().unwrap().unwrap();
-    observer.join().unwrap();
+
+    let transition = attachment
+        .native_readiness()
+        .expect("startup root has a durable native owner")
+        .begin_provider_transition()
+        .await
+        .unwrap();
+    assert!(attachment.initial_context_wire_observation().await.is_err());
+    assert!(attachment
+        .acknowledge_initial_context_publication(&identity.operation, publication.clone())
+        .await
+        .is_err());
+    transition.complete().await.unwrap();
+    assert_eq!(
+        attachment.initial_context_wire_observation().await.unwrap(),
+        wire
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -277,14 +264,15 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
         host.context.forest.clone(),
         host.context.actor.identity(),
     )
+    .await
     .unwrap();
-    let retained_after_startup = observation(&host);
+    let retained_after_startup = observation(&host).await;
     let scenario_attachment = attachment.clone();
     host.run_scenario(|host| {
         Box::pin(async move {
             let retained = observation(host).await;
             assert_eq!(retained.state, InitialContextState::Published);
-            exercise_durable_attachment(&scenario_attachment, &retained);
+            exercise_durable_attachment(&scenario_attachment, &retained).await;
             let identity = retained.identity.as_ref().unwrap();
             assert_eq!(identity.actor, host.context.actor.identity());
             assert_eq!(held.packet["operation"], identity.operation.as_str());
@@ -317,7 +305,8 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 host.context.actor.identity(),
                 &first.request,
                 &[result.rendered.as_str(), "startup-activation"],
-            );
+            )
+            .await;
             assert!(first
                 .request
                 .input
@@ -338,7 +327,8 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 host.context.actor.identity(),
                 &refreshed.request,
                 &["startup-refreshed", "startup-activation"],
-            );
+            )
+            .await;
             assert_eq!(refreshed.request.instructions, instructions);
             assert_eq!(observation(host).await, retained);
             refreshed.call(
@@ -355,7 +345,8 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 host.context.actor.identity(),
                 &repeated.request,
                 &["startup-refreshed-again", "startup-activation"],
-            );
+            )
+            .await;
             assert_eq!(repeated.request.instructions, instructions);
             let failed_operation = repeated.operation("startup-refresh-failure");
             repeated.call(
@@ -386,7 +377,8 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 host.context.actor.identity(),
                 &failed.request,
                 &["startup-refreshed-again", "startup-activation"],
-            );
+            )
+            .await;
             assert_eq!(failed.request.instructions, instructions);
             assert_eq!(observation(host).await, retained);
             assert!(matches!(
@@ -397,12 +389,13 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
         })
     })
     .await;
-    assert!(attachment.initial_context_wire_observation().is_err());
+    assert!(attachment.initial_context_wire_observation().await.is_err());
     assert!(attachment
         .acknowledge_initial_context_publication(
             &retained_after_startup.identity.as_ref().unwrap().operation,
             retained_after_startup.publication.unwrap(),
         )
+        .await
         .is_err());
 }
 
