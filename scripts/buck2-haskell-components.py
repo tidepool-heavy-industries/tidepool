@@ -197,6 +197,28 @@ def installed_link_packages(component, roster, package_name, ancestors=()):
     return sorted(closure)
 
 
+def native_library_link_order(libraries, roster, package_name):
+    """Static archives must precede their dependency archives."""
+    visited = set()
+    ordered = []
+
+    def visit(name, ancestors):
+        if name in ancestors:
+            raise ValueError("cyclic native library dependency: " + " -> ".join((*ancestors, name)))
+        if name in visited:
+            return
+        _, dependencies = dependencies_for(roster[name], roster, package_name)
+        for dependency in reversed(dependencies):
+            visit(dependency, (*ancestors, name))
+        visited.add(name)
+        ordered.append(name)
+
+    for library in reversed(libraries):
+        visit(library, ())
+    direct = set(libraries)
+    return [name for name in reversed(ordered) if name in direct]
+
+
 def fields_for(component, roster, package_name):
     roots = component.source_dirs
     srcs = {}
@@ -216,7 +238,8 @@ def fields_for(component, roster, package_name):
             raise ValueError(f"duplicate native source module in {component.name}: {module}")
         srcs[path] = target
     packages, libraries = dependencies_for(component, roster, package_name)
-    dependencies = [":" + library.replace("-", "_") for library in libraries]
+    dependencies = [":" + library.replace("-", "_")
+                    for library in native_library_link_order(libraries, roster, package_name)]
     flags = ["-X" + component.language]
     flags += ["-X" + extension for extension in component.extensions]
     flags += list(component.ghc_options)
@@ -345,7 +368,7 @@ def render(metadata=None):
             runtime.append(":" + child)
         elif declared_tools:
             raise ValueError(f"{component.name} needs a native runtime binding for its Cabal build tools")
-        if name == "cell_splitter_test":
+        if name in {"cell_splitter_test", "module_candidates_codec"}:
             env["TIDEPOOL_CANDIDATE_FIXTURE_ISSUER"] = RuntimeInput(
                 literal("$(exe //tidepool/toolchain:candidate_fixture_issuer)"),
                 RuntimeInputRole.EXECUTABLE,
