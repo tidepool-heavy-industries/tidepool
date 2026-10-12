@@ -26,7 +26,10 @@ exampleBody :: Member RecipeCheck effects => CheckActor -> Text -> Int -> Eff ef
 exampleBody actor skill index = do
   body <- readFile actor (Text.pack workspaceRoot <> "/skills/" <> skill <> "/SKILL.md")
   let blocks = map (fst . Text.breakOn "```") (drop 1 (Text.splitOn "```haskell\n" body))
-  pure (blocks !! index)
+  case drop index blocks of
+    block : _ | index >= 0 -> pure block
+    _ -> error ("Missing Haskell example in " <> Text.unpack skill <> "/SKILL.md: requested block "
+      <> show index <> ", available blocks " <> show (length blocks))
 
 example :: Member RecipeCheck effects => CheckActor -> Text -> Int -> Eff effects Value
 example actor skill index = exampleBody actor skill index >>= turn actor
@@ -82,11 +85,7 @@ actorReuse = do
 requestRoundTrip :: Member RecipeCheck effects => CheckActor -> Eff effects Activation
 requestRoundTrip owner = do
   void $ turn owner "let privateSkillNotebook = True\nlet input = \"typed skill request\" :: Text\nRight worker <- spawnSubagent (FreshCtx \"Reply to one typed request.\") SameDir ((defaultSpawnOptions workspaceAgentSpec) { spawnModel = Just (Alias \"luna\"), spawnEffort = Just Medium, spawnInstructions = Just (projectPrompt \"task\"), spawnLabel = Just \"skill-example\" })"
-  requestExample <- exampleBody owner "exomonad-agent-work" 0
-  -- The model-free recipe drives the reply after request admission, before
-  -- executing the published example's blocking await.
-  let (requestSource, replySource) = Text.breakOn "\n" requestExample
-  void $ turn owner requestSource
+  void $ turn owner "Right pending <- request @Text worker input defaultRequestOptions"
   worker <- activation
   check "typed request activates the explicitly spawned Luna worker" (checkModel worker == Just "gpt-6-luna")
   refuseCell (checkActor worker) "fresh skill worker does not inherit parent notebook declarations"
@@ -100,7 +99,7 @@ requestRoundTrip owner = do
     , "Tidepool.Check.assertThat \"the first skill request has its own active typed identity\" (case firstScope of { SkillReply.RequestActive _ active -> active == (sessionInput :: Text); _ -> False })"
     ]
   void $ turn (checkActor worker) "respond (\"typed result\" :: Text)"
-  void $ turn owner (Text.drop 1 replySource)
+  void $ turn owner "Right reply <- await (result pending)"
   void $ turn owner $ Text.unlines
     [ "import qualified Tidepool.Check"
     , "import Tidepool.Agent.Reply (ExecutionReceipt (..), responseExecution)"
