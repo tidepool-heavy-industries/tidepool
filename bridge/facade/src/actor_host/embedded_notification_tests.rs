@@ -136,6 +136,7 @@ async fn embedded_notification_handoff_retries_by_operation_and_waits_for_store_
                             campaign.forest.clone(),
                             actor,
                         )
+                        .await
                         .unwrap(),
                         identity,
                         campaign.actor.clone(),
@@ -146,6 +147,7 @@ async fn embedded_notification_handoff_retries_by_operation_and_waits_for_store_
                         ),
                         None,
                     )
+                    .await
                     .unwrap();
                 let conversation = Arc::clone(&embedded.conversation);
                 let binding = open_embedded_actor_binding(

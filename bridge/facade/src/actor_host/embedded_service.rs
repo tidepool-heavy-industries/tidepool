@@ -224,6 +224,7 @@ async fn initialize_context(
                         &format!("spawn-context:{}:{}", actor.id.0, actor.incarnation.0),
                         caller,
                     )
+                    .await
                     .map_err(|error| error.to_string())?;
             }
         }
@@ -248,6 +249,7 @@ async fn initialize_context(
                 Some(publication) => publication,
                 None => conversation
                     .seed_initial_context(identity.operation.as_str(), caller, authored)
+                    .await
                     .map_err(|error| error.to_string())?,
             };
             if publication.caller_seed.as_deref() != caller
@@ -271,6 +273,7 @@ async fn initialize_context(
                             .map(|reference| reference.as_str().to_owned()),
                     },
                 )
+                .await
                 .map_err(|error| error.to_string())?;
         }
         state => {
@@ -279,7 +282,10 @@ async fn initialize_context(
             ))
         }
     }
-    attachment.validate().map_err(|error| error.to_string())?;
+    attachment
+        .validate()
+        .await
+        .map_err(|error| error.to_string())?;
     Ok(InitialContextReady {
         conversation: Arc::clone(conversation),
     })
@@ -517,6 +523,7 @@ pub(super) async fn attach_root_actor(
             policy,
             parent.as_ref(),
         )
+        .await
         .map_err(|error| error.to_string())?;
     if let Some(binding) = binding {
         binding
@@ -585,6 +592,7 @@ pub(super) async fn attach_checkpoint_actor(
             captured,
             &projection_target,
         )
+        .await
         .map_err(|error| error.to_string())?;
     binding
         .stage_conversation(Arc::clone(&embedded.conversation))
@@ -650,6 +658,7 @@ pub(super) async fn attach_selected_actor(
             policy,
             Some(&parent.identity().actor),
         )
+        .await
         .map_err(|error| error.to_string())?;
     binding
         .stage_conversation(Arc::clone(&embedded.conversation))
@@ -689,8 +698,16 @@ impl Drop for EmbeddedService {
 pub(super) enum EmbeddedDriverError {
     #[error(transparent)]
     Engine(#[from] harness::engine::EngineError),
-    #[error("native provider admission failed: {0}")]
-    NativeAdmission(#[source] Box<exomonad_actor::ResidentActorWorkbenchError>),
+    #[error(transparent)]
+    NativeAdmission(#[from] exomonad_actor::NativeProviderStartError),
+    #[error(transparent)]
+    ProviderSettlement(#[from] exomonad_actor::NativeProviderSettlementError),
+    #[error("provider settlement failed: {source}; primary outcome: {primary}")]
+    ProviderAndEngineSettlement {
+        #[source]
+        source: exomonad_actor::NativeProviderSettlementError,
+        primary: Box<EmbeddedDriverError>,
+    },
     #[error("round settlement failed: {source}; Engine cleanup failed: {cleanup}")]
     RoundSettlement {
         #[source]
@@ -732,7 +749,10 @@ impl EmbeddedDriverError {
             }
         }
         match self {
-            Self::NativeAdmission(error) => error.requires_recovery(),
+            Self::NativeAdmission(error) => {
+                matches!(error, exomonad_actor::NativeProviderStartError::Native(_))
+            }
+            Self::ProviderSettlement(_) | Self::ProviderAndEngineSettlement { .. } => true,
             Self::Engine(error) => engine_requires_recovery(error),
             Self::RoundSettlement { source, cleanup } => {
                 store_requires_recovery(source) || cleanup.requires_recovery()
@@ -745,8 +765,25 @@ impl EmbeddedDriverError {
         match self {
             Self::Engine(harness::engine::EngineError::Cleanup { .. }) => true,
             Self::RoundSettlement { cleanup, .. } => cleanup.cleanup_failed(),
+            Self::ProviderAndEngineSettlement { primary, .. } => primary.cleanup_failed(),
             _ => false,
         }
+    }
+}
+
+async fn fail_provider_round(
+    observed: exomonad_actor::NativeProviderTurnLease,
+    primary: EmbeddedDriverError,
+) -> EmbeddedDriverError {
+    match observed
+        .fail(exomonad_model::ProviderFailure::Other(primary.to_string()))
+        .await
+    {
+        Ok(()) => primary,
+        Err(source) => EmbeddedDriverError::ProviderAndEngineSettlement {
+            source,
+            primary: Box::new(primary),
+        },
     }
 }
 
@@ -811,7 +848,6 @@ where
     C: harness::engine::ResponsesTransport,
 {
     let EmbeddedConversation {
-        attachment,
         provider_admission,
         conversation,
         mut incoming,
@@ -916,12 +952,9 @@ where
         let round = round_control
             .begin()
             .map_err(|error| format!("could not begin embedded Engine round: {error}"))?;
-        let observed_round = match attachment
-            .with_admission(|| {
-                provider_admission
-                    .begin_provider_turn(provider_thread.clone(), round.id().0.to_string())
-            })
-            .map_err(|error| EmbeddedDriverError::NativeAdmission(Box::new(error)))?
+        let observed_round = match provider_admission
+            .begin_provider_turn(provider_thread.clone(), round.id().0.to_string())
+            .await
         {
             Ok(lease) => lease,
             Err(exomonad_actor::NativeProviderStartError::RetirementPending) => {
@@ -936,7 +969,7 @@ where
                 continue;
             }
             Err(exomonad_actor::NativeProviderStartError::Closed) => return Ok(()),
-            Err(error) => return Err(error.to_string().into()),
+            Err(error) => return Err(error.into()),
         };
         let result = {
             lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Running);
@@ -996,7 +1029,9 @@ where
                     );
                 }
                 tracing::warn!(?actor, ?head_request, %cause, "embedded provider round interrupted; awaiting explicit recovery");
-                observed_round.fail(exomonad_model::ProviderFailure::TransportFailed);
+                observed_round
+                    .fail(exomonad_model::ProviderFailure::TransportFailed)
+                    .await?;
                 recovering = true;
                 lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
                 continue;
@@ -1010,10 +1045,12 @@ where
                 ) {
                     return Err("provider refusal lacks its exact durable inference block".into());
                 }
-                observed_round.fail(exomonad_model::ProviderFailure::Other(format!(
-                    "{:?}",
-                    block.reason
-                )));
+                observed_round
+                    .fail(exomonad_model::ProviderFailure::Other(format!(
+                        "{:?}",
+                        block.reason
+                    )))
+                    .await?;
                 recovering = true;
                 lifecycle.publish(actor_ref, harness::server::HostActorLifecycle::Waiting);
                 continue;
@@ -1022,9 +1059,7 @@ where
                 let (head, cleanup) = match cancelled_round(error, head.clone()) {
                     Ok(cancelled) => cancelled,
                     Err(error) => {
-                        observed_round
-                            .fail(exomonad_model::ProviderFailure::Other(error.to_string()));
-                        return Err(error);
+                        return Err(fail_provider_round(observed_round, error).await);
                     }
                 };
                 (head, true, false, cleanup)
@@ -1057,13 +1092,11 @@ where
                     },
                     None => harness::engine::EngineError::Store(source).into(),
                 };
-                observed_round.fail(exomonad_model::ProviderFailure::Other(error.to_string()));
-                return Err(error);
+                return Err(fail_provider_round(observed_round, error).await);
             }
         };
         if let Some(error) = cleanup_failure {
-            observed_round.fail(exomonad_model::ProviderFailure::Other(error.to_string()));
-            return Err(error);
+            return Err(fail_provider_round(observed_round, error).await);
         }
         if !advanced {
             return Err(format!("embedded conversation {} lost its durable head", actor.0).into());
@@ -1072,11 +1105,13 @@ where
         // Provider idleness authorizes typed cleanup. Publish it only after
         // Engine settlement and the matching durable head transition.
         if interrupted {
-            observed_round.interrupt();
+            observed_round.interrupt().await?;
         } else if rejected {
-            observed_round.fail(exomonad_model::ProviderFailure::RequestRejected);
+            observed_round
+                .fail(exomonad_model::ProviderFailure::RequestRejected)
+                .await?;
         } else {
-            observed_round.succeed();
+            observed_round.succeed().await?;
         }
         if lifetime_stopped || *cancellation.borrow() {
             return Ok(());

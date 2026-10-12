@@ -145,7 +145,7 @@ impl EmbeddedHarnessRuntime {
             .map_err(|_| "embedded recovery owner was already configured".into())
     }
 
-    fn prepare_application(
+    async fn prepare_application(
         &self,
         actor: ActorRef,
         identity: &HostIdentity,
@@ -153,6 +153,7 @@ impl EmbeddedHarnessRuntime {
         match self.recovery.get() {
             Some(recovery) => recovery
                 .prepare(actor, identity)
+                .await
                 .map_err(EmbeddedError::Binding),
             #[cfg(test)]
             None => Ok(()),
@@ -163,7 +164,7 @@ impl EmbeddedHarnessRuntime {
         }
     }
 
-    fn bind_application(
+    async fn bind_application(
         &self,
         actor: ActorRef,
         conversation: &Conversation,
@@ -171,6 +172,7 @@ impl EmbeddedHarnessRuntime {
         match self.recovery.get() {
             Some(recovery) => recovery
                 .bind(actor, conversation.identity(), &self.store)
+                .await
                 .map_err(EmbeddedError::Binding),
             #[cfg(test)]
             None => Ok(()),
@@ -188,7 +190,7 @@ impl EmbeddedHarnessRuntime {
             .is_some_and(|recovery| recovery.root == actor && recovery.recovered_root)
     }
 
-    pub(super) fn attach(
+    pub(super) async fn attach(
         &self,
         attachment: super::provider_attachment::ProviderAttachment,
         identity: HostIdentity,
@@ -205,7 +207,7 @@ impl EmbeddedHarnessRuntime {
         let actor_identity = actor.identity();
         let provider_actor = actor.clone();
         let observation = installation.observation();
-        self.prepare_application(actor_identity, &identity)?;
+        self.prepare_application(actor_identity, &identity).await?;
         let (wakes, incoming) = mpsc::unbounded_channel();
         let round_control = Arc::new(EmbeddedRoundControl::default());
         let host = EmbeddedHostActor::new(
@@ -216,27 +218,28 @@ impl EmbeddedHarnessRuntime {
             self.store.clone(),
             wakes,
             round_control.clone(),
-        )?
+        )
+        .await?
         .with_context_models(self.context_models.clone());
         #[cfg(test)]
         let host = host.with_admission_test_hooks(self.admission_test_hooks.get().cloned());
         let host = Arc::new(host);
-        let conversation = Arc::new(Conversation::attach(
-            self.store.clone(),
-            host.clone(),
-            parent,
-        )?);
-        self.bind_application(actor_identity, &conversation)?;
+        let conversation =
+            Arc::new(Conversation::attach(self.store.clone(), host.clone(), parent).await?);
+        self.bind_application(actor_identity, &conversation).await?;
         let provider_admission = attach_native_provider(
             &provider_actor,
             &conversation,
             self.store.clone(),
             observation.clone(),
+            attachment.native_readiness().ok_or_else(|| {
+                EmbeddedError::Binding("provider lacks its issued native readiness".into())
+            })?,
             #[cfg(test)]
             self.admission_test_hooks.get().cloned(),
-        )?;
+        )
+        .await?;
         Ok(EmbeddedConversation {
-            attachment,
             provider_admission,
             conversation,
             incoming,
@@ -245,7 +248,7 @@ impl EmbeddedHarnessRuntime {
         })
     }
 
-    pub(super) fn attach_checkpoint(
+    pub(super) async fn attach_checkpoint(
         &self,
         attachment: super::provider_attachment::ProviderAttachment,
         identity: HostIdentity,
@@ -292,7 +295,7 @@ impl EmbeddedHarnessRuntime {
         let parent = checkpoint.origin().clone();
         let actor_identity = actor.identity();
         let provider_actor = actor.clone();
-        self.prepare_application(actor_identity, &identity)?;
+        self.prepare_application(actor_identity, &identity).await?;
         let (wakes, incoming) = mpsc::unbounded_channel();
         let round_control = Arc::new(EmbeddedRoundControl::default());
         let host = EmbeddedHostActor::new(
@@ -303,33 +306,40 @@ impl EmbeddedHarnessRuntime {
             self.store.clone(),
             wakes,
             round_control.clone(),
-        )?
+        )
+        .await?
         .with_context_models(self.context_models.clone());
         #[cfg(test)]
         let host = host.with_admission_test_hooks(self.admission_test_hooks.get().cloned());
         let host = Arc::new(host);
         // The embedded root also records an empty contract. This installation
         // has no authoritative checkout revision to record for the child.
-        let conversation = Arc::new(Conversation::from_checkpoint(
-            self.store.clone(),
-            host,
-            &parent,
-            checkpoint,
-            &json!({}),
-            &json!({}),
-            projection_target,
-        )?);
-        self.bind_application(actor_identity, &conversation)?;
+        let conversation = Arc::new(
+            Conversation::from_checkpoint(
+                self.store.clone(),
+                host,
+                &parent,
+                checkpoint,
+                &json!({}),
+                &json!({}),
+                projection_target,
+            )
+            .await?,
+        );
+        self.bind_application(actor_identity, &conversation).await?;
         let provider_admission = attach_native_provider(
             &provider_actor,
             &conversation,
             self.store.clone(),
             installation.runtime_observation.clone(),
+            attachment.native_readiness().ok_or_else(|| {
+                EmbeddedError::Binding("provider lacks its issued native readiness".into())
+            })?,
             #[cfg(test)]
             self.admission_test_hooks.get().cloned(),
-        )?;
+        )
+        .await?;
         Ok(EmbeddedConversation {
-            attachment,
             provider_admission,
             conversation,
             incoming,
@@ -355,39 +365,68 @@ impl EmbeddedHarnessRuntime {
     }
 }
 
-fn attach_native_provider(
+struct EmbeddedProviderIdleProbe {
+    store: Arc<Store>,
+    identity: HostIdentity,
+    #[cfg(test)]
+    test_hooks: Option<Arc<EmbeddedAdmissionTestHooks>>,
+}
+
+impl exomonad_actor::ProviderIdleProbe for EmbeddedProviderIdleProbe {
+    fn check_idle(&self) -> futures_util::future::BoxFuture<'static, Result<bool, String>> {
+        let store = Arc::clone(&self.store);
+        let identity = self.identity.clone();
+        #[cfg(test)]
+        let test_hooks = self.test_hooks.clone();
+        Box::pin(async move {
+            tidepool_runtime::spawn_blocking_in_span(move || {
+                #[cfg(test)]
+                if let Some(probe) = test_hooks
+                    .as_ref()
+                    .and_then(|hooks| hooks.before_idle_probe.as_ref())
+                {
+                    probe();
+                }
+                let frontier = store
+                    .embedded_round_frontier(&identity)
+                    .map_err(|error| error.to_string())?;
+                Ok(frontier.pending_head.is_none()
+                    && frontier.pending_interruption.is_none()
+                    && store
+                        .unread(&identity.actor.0)
+                        .map_err(|error| error.to_string())?
+                        .is_empty())
+            })
+            .await
+            .map_err(|error| error.to_string())?
+        })
+    }
+}
+
+async fn attach_native_provider(
     actor: &LocalActorRef,
     conversation: &Conversation,
     store: Arc<Store>,
     observation: exomonad_actor::ActorRuntimeObservationHandle,
+    readiness: Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>,
     #[cfg(test)] test_hooks: Option<Arc<EmbeddedAdmissionTestHooks>>,
 ) -> Result<exomonad_actor::NativeProviderAdmission, EmbeddedError> {
-    let identity = conversation.identity().clone();
     actor
-        .attach_native_provider(observation, move || {
-            // The real private claim is held; no admission or Store lock is held.
-            #[cfg(test)]
-            if let Some(probe) = test_hooks
-                .as_ref()
-                .and_then(|hooks| hooks.before_idle_probe.as_ref())
-            {
-                probe();
-            }
-            let frontier = store
-                .embedded_round_frontier(&identity)
-                .map_err(|error| error.to_string())?;
-            Ok(frontier.pending_head.is_none()
-                && frontier.pending_interruption.is_none()
-                && store
-                    .unread(&identity.actor.0)
-                    .map_err(|error| error.to_string())?
-                    .is_empty())
-        })
+        .attach_native_provider(
+            observation,
+            readiness,
+            Arc::new(EmbeddedProviderIdleProbe {
+                store,
+                identity: conversation.identity().clone(),
+                #[cfg(test)]
+                test_hooks,
+            }),
+        )
+        .await
         .map_err(|error| EmbeddedError::Binding(error.into()))
 }
 
 pub(super) struct EmbeddedConversation {
-    pub(super) attachment: super::provider_attachment::ProviderAttachment,
     pub(super) provider_admission: exomonad_actor::NativeProviderAdmission,
     pub(super) conversation: Arc<Conversation>,
     pub(super) incoming: mpsc::UnboundedReceiver<DurableMailboxWake>,
@@ -743,7 +782,7 @@ impl EmbeddedHostActor {
         self
     }
 
-    pub(super) fn new(
+    pub(super) async fn new(
         attachment: super::provider_attachment::ProviderAttachment,
         identity: HostIdentity,
         actor: LocalActorRef,
@@ -764,6 +803,7 @@ impl EmbeddedHostActor {
         }
         attachment
             .validate()
+            .await
             .map_err(|error| EmbeddedError::Binding(error.to_string()))?;
         Ok(Self {
             attachment,
@@ -809,23 +849,23 @@ impl HostActor for EmbeddedHostActor {
             .map_err(|error| error.to_string())
     }
 
-    fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+    async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
         self.store.ensure_ready()?;
         self.attachment
-            .with_admission(|| self.actor.admit_transaction())
-            .map_err(|error| EmbeddedError::Host(error.to_string()))?
+            .validate()
+            .await
+            .map_err(|error| EmbeddedError::Host(error.to_string()))?;
+        self.actor
+            .admit_transaction()
+            .await
             .map(|lease| Box::new(StoreAdmission { _lease: lease }) as Box<dyn AdmissionGuard>)
             .map_err(embedded_admission_error)
     }
 
-    fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+    async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
         // A request must pin its handler before retirement closes admission.
         // The short lease also prevents cleanup from overtaking snapshot capture.
-        let _admission = self
-            .attachment
-            .with_admission(|| self.actor.admit_transaction())
-            .map_err(|error| EmbeddedError::Host(error.to_string()))?
-            .map_err(embedded_admission_error)?;
+        let _admission = self.admit().await?;
         self.store.ensure_ready()?;
         let snapshot = Arc::new(
             self.installation
@@ -1548,12 +1588,17 @@ impl Provider for EmbeddedDispatcher {
                         Err("next-model selection requires admitted workspace policy".into())
                     })
                 });
-                let attachment = self.attachment.clone();
-                let initial_context = Arc::new(move || {
-                    attachment
-                        .initial_context_wire_observation()
-                        .map_err(|error| error.to_string())
-                });
+                let observed_initial_context =
+                    match self.attachment.initial_context_wire_observation().await {
+                        Ok(observation) => observation,
+                        Err(error) => {
+                            return unavailable_context_completion(JobOutput::Completed(Err(
+                                provider_tool_error(error, context.operation.as_ref())
+                                    .into_tool_failure(),
+                            )))
+                        }
+                    };
+                let initial_context = Arc::new(move || Ok(observed_initial_context.clone()));
                 let binding = Arc::new(EmbeddedContextBinding::new(
                     invocation,
                     snapshot,
@@ -2728,12 +2773,14 @@ mod tests {
                                     campaign.forest.clone(),
                                     actor,
                                 )
+                                .await
                                 .unwrap(),
                                 foreign,
                                 campaign.actor.clone(),
                                 installation.clone(),
                                 None,
                             )
+                            .await
                             .is_err());
                     }
                     let (wakes, _incoming) = mpsc::unbounded_channel();
@@ -2744,6 +2791,7 @@ mod tests {
                             campaign.forest.clone(),
                             actor,
                         )
+                        .await
                         .unwrap(),
                         identity,
                         campaign.actor.clone(),
@@ -2752,8 +2800,9 @@ mod tests {
                         wakes,
                         Arc::new(EmbeddedRoundControl::default()),
                     )
+                    .await
                     .unwrap();
-                    let held_store_transaction = campaign.actor.admit_transaction().unwrap();
+                    let held_store_transaction = campaign.actor.admit_transaction().await.unwrap();
                     let retiring_actor = campaign.actor.clone();
                     let retiring = tokio::spawn(async move {
                         retiring_actor
@@ -2766,7 +2815,7 @@ mod tests {
                     });
                     tokio::time::timeout(Duration::from_secs(2), async {
                         loop {
-                            if campaign.actor.admit_transaction().is_err() {
+                            if campaign.actor.admit_transaction().await.is_err() {
                                 break;
                             }
                             tokio::task::yield_now().await;
@@ -2779,7 +2828,7 @@ mod tests {
                         "the old installation remains published"
                     );
                     assert!(
-                        host.tool_surface().is_err(),
+                        host.tool_surface().await.is_err(),
                         "closed admission must reject a new request"
                     );
                     drop(held_store_transaction);

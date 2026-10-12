@@ -271,6 +271,7 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
             .context
             .forest
             .initial_context_observation(host.context.actor.identity())
+            .await
             .unwrap();
         assert_eq!(retained.state, InitialContextState::Published);
         let saved = preparation(&workspace, "startup-preparation");
@@ -337,6 +338,7 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
             host.context
                 .forest
                 .initial_context_observation(host.context.actor.identity())
+                .await
                 .unwrap(),
             retained
         );
@@ -461,6 +463,7 @@ async fn shipped_persona_initializer_uses_actual_preparation_before_first_reques
                 .context
                 .forest
                 .initial_context_observation(host.context.actor.identity())
+                .await
                 .unwrap();
             assert_eq!(retained.state, InitialContextState::Published);
             let result = retained.result.as_ref().unwrap();

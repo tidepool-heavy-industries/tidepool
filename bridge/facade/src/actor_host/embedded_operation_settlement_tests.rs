@@ -103,9 +103,10 @@ impl HostActor for AdmissionHost {
     fn active_round(&self) -> Option<harness::embedding::EmbeddedRoundId> {
         self.round_control.active_round()
     }
-    fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+    async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
         self.actor
             .admit_transaction()
+            .await
             .map(|lease| Box::new(SentinelAdmission { _lease: lease }) as Box<dyn AdmissionGuard>)
             .map_err(|error| match error {
                 exomonad_actor::KernelCallFailure::MailboxClosed(_) => {
@@ -114,8 +115,8 @@ impl HostActor for AdmissionHost {
                 error => EmbeddedError::Host(error.to_string()),
             })
     }
-    fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
-        let _admission = self.admit()?;
+    async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+        let _admission = self.admit().await?;
         let snapshot = Arc::new(
             self.installation
                 .request_snapshot()
@@ -566,16 +567,16 @@ impl HostActor for AcknowledgedSchemaRefusal {
     fn identity(&self) -> &HostIdentity {
         self.inner.identity()
     }
-    fn admit(
+    async fn admit(
         &self,
     ) -> Result<Box<dyn harness::embedding::AdmissionGuard>, harness::embedding::EmbeddedError>
     {
-        self.inner.admit()
+        self.inner.admit().await
     }
-    fn tool_surface(
+    async fn tool_surface(
         &self,
     ) -> Result<Arc<harness::embedding::ToolSurface>, harness::embedding::EmbeddedError> {
-        self.inner.tool_surface()
+        self.inner.tool_surface().await
     }
     async fn wake(&self, envelope_id: i64) -> Result<(), String> {
         self.inner.wake(envelope_id).await
@@ -739,9 +740,10 @@ async fn schema_refusal_then_native_close(close_timing: NativeCloseTiming) {
         store: store.clone(),
         retained: Default::default(),
     });
-    let conversation =
-        harness::embedding::Conversation::attach(store.clone(), host.clone(), None).unwrap();
-    host.inner.tool_surface().unwrap();
+    let conversation = harness::embedding::Conversation::attach(store.clone(), host.clone(), None)
+        .await
+        .unwrap();
+    host.inner.tool_surface().await.unwrap();
     let scheduler = Arc::new(harness::turn::JobScheduler::new(1).unwrap());
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (successor, mut successors) = tokio::sync::mpsc::unbounded_channel();
@@ -848,16 +850,16 @@ async fn schema_refusal_then_native_close(close_timing: NativeCloseTiming) {
         Some(harness::turn::JobOutput::Completed(Err(_)))
     ));
     assert!(matches!(
-        actor.admit_transaction(),
+        actor.admit_transaction().await,
         Err(exomonad_actor::KernelCallFailure::MailboxClosed(target))
             if target == actor.identity()
     ));
     assert!(matches!(
-        host.inner.tool_surface(),
+        host.inner.tool_surface().await,
         Err(harness::embedding::EmbeddedError::AdmissionClosed)
     ));
     assert!(matches!(
-        host.inner.admit(),
+        host.inner.admit().await,
         Err(harness::embedding::EmbeddedError::AdmissionClosed)
     ));
     // Engine reports the exact settled frontier; the outer driver owns its CAS.

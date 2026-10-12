@@ -423,7 +423,7 @@ pub(super) async fn run_interactive_applications(
                 {
                     continue;
                 }
-                let Ok(_admission) = local_actor.admit_transaction() else {
+                let Ok(_admission) = local_actor.admit_transaction().await else {
                     continue;
                 };
                 let Some(binding) = embedded_binding(&application_owners, actor) else {
@@ -505,7 +505,7 @@ pub(super) async fn run_interactive_applications(
                         if let Some(observer) = &test_observer { observer.installed(&installation); }
                         let provider_attachment = match provider_attachment::ProviderAttachment::admit(
                             Arc::clone(&provider_forest), installation.actor.identity(),
-                        ) {
+                        ).await {
                             Ok(admission) => admission,
                             Err(error) => {
                                 let detail = format!(
@@ -654,7 +654,7 @@ pub(super) async fn run_interactive_applications(
                             }
                             let initial_input = installation.initial_user_message.clone();
                             {
-                                let queue_admission = match local_actor.admit_transaction() {
+                                let queue_admission = match local_actor.admit_transaction().await {
                                     Ok(admission) => admission,
                                     Err(error) => {
                                         if let Err(error) = refuse_child_attachment(&installation, format!(

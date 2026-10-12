@@ -12,11 +12,11 @@ pub(super) struct ProviderAttachment {
 }
 
 impl ProviderAttachment {
-    pub(super) fn admit(
+    pub(super) async fn admit(
         forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
         actor: ActorRef,
     ) -> Result<Self, ResidentActorWorkbenchError> {
-        let admission = forest.authorize_provider_attachment(actor)?;
+        let admission = forest.authorize_provider_attachment(actor).await?;
         Ok(Self { forest, admission })
     }
 
@@ -24,46 +24,43 @@ impl ProviderAttachment {
         self.admission.actor()
     }
 
-    pub(super) fn with_admission<T>(
+    pub(super) fn native_readiness(
         &self,
-        operation: impl FnOnce() -> T,
-    ) -> Result<T, ResidentActorWorkbenchError> {
-        self.admission.with_admission(operation)
+    ) -> Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>> {
+        self.admission.native_readiness()
     }
 
-    pub(super) fn initial_context_wire_observation(
+    pub(super) async fn initial_context_wire_observation(
         &self,
     ) -> Result<tidepool_bridge_effects::InitialContextObservation, ResidentActorWorkbenchError>
     {
-        self.with_admission(|| {
-            self.validate()?;
-            self.forest.initial_context_wire_observation(self.actor())
-        })?
+        self.validate().await?;
+        self.forest
+            .initial_context_wire_observation(self.actor())
+            .await
     }
 
-    pub(super) fn validate(&self) -> Result<(), ResidentActorWorkbenchError> {
-        self.forest.validate_provider_attachment(&self.admission)
+    pub(super) async fn validate(&self) -> Result<(), ResidentActorWorkbenchError> {
+        self.forest
+            .validate_provider_attachment(&self.admission)
+            .await
     }
 
     pub(super) async fn prepare_initial_context(
         &self,
     ) -> Result<exomonad_actor::InitialContextObservation, ResidentActorWorkbenchError> {
-        self.validate()?;
+        self.validate().await?;
         self.forest.prepare_initial_context(self.actor()).await
     }
 
-    pub(super) fn acknowledge_initial_context_publication(
+    pub(super) async fn acknowledge_initial_context_publication(
         &self,
         operation: &tidepool_runtime::session::WorkbenchExecutionId,
         publication: exomonad_actor::InitialContextPublication,
     ) -> Result<exomonad_actor::InitialContextObservation, ResidentActorWorkbenchError> {
-        self.with_admission(|| {
-            self.validate()?;
-            self.forest.acknowledge_initial_context_publication(
-                self.actor(),
-                operation,
-                publication,
-            )
-        })?
+        self.validate().await?;
+        self.forest
+            .acknowledge_initial_context_publication(self.actor(), operation, publication)
+            .await
     }
 }

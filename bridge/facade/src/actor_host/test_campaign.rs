@@ -3003,10 +3003,10 @@ mod tests {
             fn identity(&self) -> &HostIdentity {
                 &self.identity
             }
-            fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+            async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
                 Ok(Box::new(Guard))
             }
-            fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+            async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
                 Ok(self.surface.clone())
             }
             async fn wake(&self, _: i64) -> Result<(), String> {
@@ -3074,6 +3074,7 @@ mod tests {
                 }),
                 None,
             )
+            .await
             .unwrap();
             let engine = conversation
                 .engine::<Offline, _>(

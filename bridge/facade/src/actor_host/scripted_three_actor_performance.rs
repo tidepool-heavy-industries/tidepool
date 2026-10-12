@@ -296,10 +296,10 @@ async fn engine_yield_claim_waits_and_settles_without_native_dispatch() {
         fn identity(&self) -> &HostIdentity {
             &self.identity
         }
-        fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+        async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
             Ok(Box::new(Guard))
         }
-        fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+        async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
             Ok(Arc::new(ToolSurface::new(
                 "yield-control".into(),
                 vec![],
@@ -355,6 +355,7 @@ async fn engine_yield_claim_waits_and_settles_without_native_dispatch() {
             }),
             None,
         )
+        .await
         .unwrap();
         let (transport, mut requests) = hosted_script_provider();
         let engine = conversation

@@ -76,10 +76,11 @@ fn user_texts(request: &ResponsesRequest) -> Vec<&str> {
         .collect()
 }
 
-fn observation(host: &HostedTestRuntime) -> InitialContextObservation {
+async fn observation(host: &HostedTestRuntime) -> InitialContextObservation {
     host.context
         .forest
         .initial_context_observation(host.context.actor.identity())
+        .await
         .unwrap()
 }
 
@@ -120,6 +121,7 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
         context
             .forest
             .initial_context_observation(context.actor.identity())
+            .await
             .unwrap()
             .state,
         InitialContextState::Preparing
@@ -169,7 +171,7 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
     let host = starting.await.unwrap();
     host.run_scenario(|host| {
         Box::pin(async move {
-            let retained = observation(host);
+            let retained = observation(host).await;
             assert_eq!(retained.state, InitialContextState::Published);
             let identity = retained.identity.as_ref().unwrap();
             assert_eq!(identity.actor, host.context.actor.identity());
@@ -222,7 +224,7 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 ["startup-refreshed", "startup-activation"]
             );
             assert_eq!(refreshed.request.instructions, instructions);
-            assert_eq!(observation(host), retained);
+            assert_eq!(observation(host).await, retained);
             refreshed.call(
                 "startup-refresh-again",
                 include_str!("fixtures/startup_context_refresh_again.hs"),
@@ -266,7 +268,7 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 ["startup-refreshed-again", "startup-activation"]
             );
             assert_eq!(failed.request.instructions, instructions);
-            assert_eq!(observation(host), retained);
+            assert_eq!(observation(host).await, retained);
             assert!(matches!(
                 judgments.try_recv(),
                 Err(mpsc::error::TryRecvError::Empty)
@@ -291,7 +293,10 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
     .unwrap();
     host.run_scenario(|host| {
         Box::pin(async move {
-            assert_eq!(observation(host).state, InitialContextState::AbsentHook);
+            assert_eq!(
+                observation(host).await.state,
+                InitialContextState::AbsentHook
+            );
             host.input("install-startup-children").await.unwrap();
             let root = harness::model::AgentPath("/root".into());
             let mut pending = VecDeque::new();
@@ -316,22 +321,24 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
                 assert_eq!(held.packet["caller_seed"], caller);
                 assert_eq!(held.packet["memory"], "child-runtime-memory");
                 operations.push(held.packet["operation"].as_str().unwrap().to_owned());
-                let node = host
-                    .context
-                    .forest
-                    .inspect_host_graph()
-                    .into_iter()
-                    .find(|node| {
-                        host.context
-                            .forest
-                            .initial_context_observation(node.actor)
-                            .ok()
-                            .and_then(|observation| observation.identity)
-                            .is_some_and(|identity| {
-                                identity.operation.as_str() == operations.last().unwrap()
-                            })
-                    })
-                    .expect("operation was issued by the fresh child owner");
+                let mut issuing_node = None;
+                for node in host.context.forest.inspect_host_graph() {
+                    if host
+                        .context
+                        .forest
+                        .initial_context_observation(node.actor)
+                        .await
+                        .ok()
+                        .and_then(|observation| observation.identity)
+                        .is_some_and(|identity| {
+                            identity.operation.as_str() == operations.last().unwrap()
+                        })
+                    {
+                        issuing_node = Some(node);
+                        break;
+                    }
+                }
+                let node = issuing_node.expect("operation was issued by the fresh child owner");
                 assert_ne!(node.actor, host.context.actor.identity());
                 assert_eq!(node.creator, Some(host.context.actor.identity()));
                 assert!(host
@@ -382,11 +389,13 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
                 .context
                 .forest
                 .initial_context_observation(child("startup-fresh").actor)
+                .await
                 .unwrap();
             let empty_caller = host
                 .context
                 .forest
                 .initial_context_observation(child("startup-empty-caller").actor)
+                .await
                 .unwrap();
             assert_eq!(fresh.state, InitialContextState::Published);
             assert_eq!(fresh.caller_seed.as_deref(), Some("fresh-caller-seed"));
@@ -401,6 +410,7 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
                 host.context
                     .forest
                     .initial_context_observation(child("startup-captured").actor)
+                    .await
                     .unwrap()
                     .state,
                 InitialContextState::Captured
@@ -409,6 +419,7 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
                 .context
                 .forest
                 .initial_context_observation(child("startup-empty-result").actor)
+                .await
                 .unwrap();
             assert_eq!(empty.state, InitialContextState::Published);
             assert_eq!(empty.result.as_ref().unwrap().rendered, "");
@@ -428,6 +439,7 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
                 host.context
                     .forest
                     .initial_context_observation(child("startup-absent").actor)
+                    .await
                     .unwrap()
                     .state,
                 InitialContextState::AbsentHook
@@ -510,6 +522,7 @@ async fn startup_refusal(cancel: bool) {
     let before = context
         .forest
         .initial_context_observation(identity)
+        .await
         .unwrap();
     assert_eq!(before.state, InitialContextState::Preparing);
     assert!(context.binding(identity).unwrap().conversation().is_none());

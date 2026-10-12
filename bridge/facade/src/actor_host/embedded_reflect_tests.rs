@@ -32,10 +32,10 @@ impl HostActor for Host {
     fn identity(&self) -> &HostIdentity {
         &self.identity
     }
-    fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+    async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
         Ok(Box::new(Lease))
     }
-    fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+    async fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
         Ok(self.surface.clone())
     }
     async fn wake(&self, _: i64) -> Result<(), String> {
@@ -187,6 +187,7 @@ async fn reflection_includes_streamed_active_request_then_records_response_compl
         }),
         None,
     )
+    .await
     .unwrap();
     assert!((reader)(actor, 2).await.unwrap().is_empty());
     let engine = conversation

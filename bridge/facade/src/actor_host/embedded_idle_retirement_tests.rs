@@ -364,7 +364,7 @@ async fn committed_input_before_wake_refuses_idle_retirement_and_runs_after_rele
         "wake has not reached the real Engine"
     );
 
-    let held_admission = actor.admit_transaction().unwrap();
+    let held_admission = actor.admit_transaction().await.unwrap();
     assert_refused(
         actor
             .retire_idle_by(actor.identity(), requested_retirement())
@@ -384,6 +384,7 @@ async fn committed_input_before_wake_refuses_idle_retirement_and_runs_after_rele
     drop(
         actor
             .admit_transaction()
+            .await
             .expect("refused Store probe reopens live admission"),
     );
 

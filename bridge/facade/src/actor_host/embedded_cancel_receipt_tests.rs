@@ -85,6 +85,7 @@ async fn cancelled_hosted_cell_delivers_performed_prefix_once_before_waiter_abor
                         campaign.forest.clone(),
                         campaign.actor.identity(),
                     )
+                    .await
                     .unwrap(),
                     identity: identity.clone(),
                     issuer: campaign.actor.identity(),

@@ -38,12 +38,12 @@ impl HostActor for TestHost {
         &self.identity
     }
 
-    fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+    async fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
         self.admissions.fetch_add(1, Ordering::Relaxed);
         Ok(Box::new(TestLease))
     }
 
-    fn tool_surface(&self) -> Result<Arc<harness::embedding::ToolSurface>, EmbeddedError> {
+    async fn tool_surface(&self) -> Result<Arc<harness::embedding::ToolSurface>, EmbeddedError> {
         Err(EmbeddedError::Surface("not used in routing test".into()))
     }
 
@@ -93,7 +93,7 @@ struct RoutingFixture {
 }
 
 impl RoutingFixture {
-    fn new() -> Self {
+    async fn new() -> Self {
         let store = Arc::new(Store::memory().expect("memory store"));
         let root_actor = actor(99);
         let first = actor(1);
@@ -133,14 +133,18 @@ impl RoutingFixture {
         });
         let root = AgentPath("/root".into());
         let root_conversation = Arc::new(
-            Conversation::attach(store.clone(), root_host.clone(), None).expect("attach root host"),
+            Conversation::attach(store.clone(), root_host.clone(), None)
+                .await
+                .expect("attach root host"),
         );
         let first_conversation = Arc::new(
             Conversation::attach(store.clone(), first_host.clone(), Some(&root))
+                .await
                 .expect("attach first host"),
         );
         let second_conversation = Arc::new(
             Conversation::attach(store.clone(), second_host.clone(), Some(&root))
+                .await
                 .expect("attach second host"),
         );
         let mut projection = embedded_projection::EmbeddedProjection::default();
@@ -243,7 +247,7 @@ fn model_node(actor: ActorRef) -> ActorGraphNode {
 
 #[tokio::test]
 async fn production_dispatch_admits_input_only_to_the_exact_actor() {
-    let fixture = RoutingFixture::new();
+    let fixture = RoutingFixture::new().await;
     let first = actor(1);
     let second = actor(2);
     let target = fixture.hosts[&second].identity.clone();
@@ -275,7 +279,7 @@ async fn production_dispatch_admits_input_only_to_the_exact_actor() {
 
 #[tokio::test]
 async fn production_dispatch_refuses_wrong_run_and_incarnation_before_admission() {
-    let fixture = RoutingFixture::new();
+    let fixture = RoutingFixture::new().await;
     let host = &fixture.hosts[&actor(2)];
     let identity = host.identity.clone();
     let mut wrong_run = identity.clone();
@@ -309,7 +313,7 @@ async fn production_dispatch_refuses_wrong_run_and_incarnation_before_admission(
 
 #[tokio::test]
 async fn production_dispatch_routes_interrupt_and_retire_to_their_exact_actors() {
-    let fixture = RoutingFixture::new();
+    let fixture = RoutingFixture::new().await;
     let first = actor(1);
     let second = actor(2);
     let first_identity = fixture.hosts[&first].identity.clone();
@@ -378,7 +382,7 @@ async fn production_dispatch_routes_interrupt_and_retire_to_their_exact_actors()
 
 #[tokio::test]
 async fn refused_retirement_does_not_publish_retiring_lifecycle() {
-    let fixture = RoutingFixture::new();
+    let fixture = RoutingFixture::new().await;
     let actor = actor(1);
     let target = fixture.hosts[&actor].identity.clone();
     fixture.hosts[&actor]
@@ -414,7 +418,7 @@ async fn refused_retirement_does_not_publish_retiring_lifecycle() {
 
 #[tokio::test]
 async fn admitted_retry_after_retirement_does_not_resolve_admit_or_wake() {
-    let mut fixture = RoutingFixture::new();
+    let mut fixture = RoutingFixture::new().await;
     let actor = actor(1);
     let operation_id = new_operation();
     let command = HostCommand::Input {
@@ -468,7 +472,7 @@ async fn admitted_retry_after_retirement_does_not_resolve_admit_or_wake() {
 
 #[tokio::test]
 async fn claimed_control_and_retained_uncertainty_never_redispatch() {
-    let fixture = RoutingFixture::new();
+    let fixture = RoutingFixture::new().await;
     let actor = actor(1);
     let operation_id = new_operation();
     let command = HostCommand::Retire {
@@ -514,7 +518,7 @@ async fn claimed_control_and_retained_uncertainty_never_redispatch() {
 
 #[tokio::test]
 async fn failed_control_acknowledgment_is_retained_as_unconfirmed() {
-    let fixture = RoutingFixture::new();
+    let fixture = RoutingFixture::new().await;
     let actor = actor(1);
     fixture.hosts[&actor]
         .uncertain_retire
@@ -552,7 +556,7 @@ async fn failed_control_acknowledgment_is_retained_as_unconfirmed() {
 #[tokio::test]
 async fn pending_retirement_keeps_command_admission_live_and_never_reclaims_its_operation() {
     for acknowledge_before_join in [false, true] {
-        let fixture = RoutingFixture::new();
+        let fixture = RoutingFixture::new().await;
         let scratch = tempfile::tempdir().unwrap();
         let bindings = command_bindings(&fixture, scratch.path());
         let (_, control, _channel) = harness::server::server(scratch.path().into());
@@ -696,7 +700,7 @@ async fn pending_browser_retirement_allows_exact_release_during_resident_shutdow
     use exomonad_actor::{ReleaseAwait, ResourceRelease};
 
     for cleanup_failed in [false, true] {
-        let fixture = RoutingFixture::new();
+        let fixture = RoutingFixture::new().await;
         let scratch = tempfile::tempdir().unwrap();
         let bindings = command_bindings(&fixture, scratch.path());
         let (_, control, _channel) = harness::server::server(scratch.path().into());
@@ -890,7 +894,7 @@ async fn observer_timeout_preserves_already_observed_failure_and_joins_remaining
 
 #[tokio::test]
 async fn retirement_owner_loss_retains_uncertainty_without_control_replay() {
-    let fixture = RoutingFixture::new();
+    let fixture = RoutingFixture::new().await;
     let scratch = tempfile::tempdir().unwrap();
     let bindings = command_bindings(&fixture, scratch.path());
     let (_, control, _channel) = harness::server::server(scratch.path().into());
@@ -959,7 +963,7 @@ async fn retirement_owner_loss_retains_uncertainty_without_control_replay() {
 
 #[tokio::test]
 async fn timed_out_command_observation_is_joined_and_does_not_fabricate_a_receipt() {
-    let fixture = RoutingFixture::new();
+    let fixture = RoutingFixture::new().await;
     let scratch = tempfile::tempdir().unwrap();
     let bindings = command_bindings(&fixture, scratch.path());
     let (_, control, _channel) = harness::server::server(scratch.path().into());
@@ -1032,7 +1036,7 @@ async fn timed_out_command_observation_is_joined_and_does_not_fabricate_a_receip
 
 #[tokio::test]
 async fn durable_command_drain_runs_without_a_channel_hint_and_skips_claimed_work() {
-    let fixture = RoutingFixture::new();
+    let fixture = RoutingFixture::new().await;
     let actor = actor(1);
     let operation_id = new_operation();
     let command = HostCommand::Input {
