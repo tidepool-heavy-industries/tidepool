@@ -1693,12 +1693,12 @@ fn native_begun(
     let transition = match outcome {
         Ok(transition) => transition,
         Err(error) => {
-            refuse_pending(state, pending, error);
+            refuse_pending(state, sequence, pending, error);
             return;
         }
     };
     if let Some(refusal) = state.refusal() {
-        refuse_pending(state, pending, refusal.to_string());
+        refuse_pending(state, sequence, pending, refusal.to_string());
         if let Some(transition) = transition {
             launch_refuse(state, myself, sequence, transition);
         }
@@ -1746,6 +1746,7 @@ fn native_begun(
         other => {
             refuse_pending(
                 state,
+                sequence,
                 other,
                 "native completion has wrong operation phase".into(),
             );
@@ -1802,7 +1803,7 @@ fn native_completed(
         }
         (pending, Err(error)) => {
             state.native_settlement = NativeSettlement::NeedsAttention(error.clone());
-            refuse_pending(state, pending, error);
+            refuse_pending(state, sequence, pending, error);
         }
         (pending, Ok(())) => {
             state.native_settlement = NativeSettlement::NeedsAttention(
@@ -1810,6 +1811,7 @@ fn native_completed(
             );
             refuse_pending(
                 state,
+                sequence,
                 pending,
                 "native completion has wrong operation phase".into(),
             );
@@ -1817,11 +1819,26 @@ fn native_completed(
     }
 }
 
-fn refuse_pending(state: &mut LifecycleState, pending: PendingOperation, error: String) {
+fn refuse_pending(
+    state: &mut LifecycleState,
+    sequence: u64,
+    pending: PendingOperation,
+    error: String,
+) {
     if let Some(provider) = state.provider.as_mut() {
-        provider.phase = ProviderPhase::NeedsAttention;
-        provider.turn.take();
-        provider.sequence = None;
+        match &pending {
+            PendingOperation::ProviderStart { .. } if provider.sequence.is_none() => {
+                provider.phase = ProviderPhase::NeedsAttention;
+            }
+            PendingOperation::ProviderCompleting { .. } if provider.sequence == Some(sequence) => {
+                // This failed issuance never handed its lease to an external driver.
+                provider.phase = ProviderPhase::NeedsAttention;
+                provider.turn.take();
+                provider.sequence = None;
+            }
+            // A transaction or another turn cannot settle an issued external lease.
+            _ => {}
+        }
     }
     match pending {
         PendingOperation::Transaction(reply)

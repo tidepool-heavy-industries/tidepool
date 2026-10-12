@@ -688,3 +688,58 @@ async fn active_provider_turn_does_not_join_the_staged_replacement_transaction_d
         .iter()
         .all(|outcome| outcome.is_confirmed()));
 }
+
+#[tokio::test]
+async fn closed_transaction_refusal_cannot_release_another_issued_provider_turn() {
+    use crate::kernel::lifecycle::{LifecyclePhase, ProviderPhase};
+    let fixture = NativeFixture::start().await;
+    let provider = admitted_provider_turn(&fixture).await;
+    let native = fixture.admission.native_readiness().unwrap();
+    let native_blocker = native.begin_provider_transition().await.unwrap();
+    let actor = fixture.actor.clone();
+    let transaction = tokio::spawn(async move { actor.admit_transaction().await });
+    fixture.pending().await;
+    fixture.actor.lifecycle().close().await.unwrap();
+    native_blocker.complete().await.unwrap();
+    assert!(transaction.await.unwrap().is_err());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        fixture.actor.lifecycle().wait_transactions(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    native.check_ready_async().await.unwrap();
+    assert_eq!(
+        fixture.actor.lifecycle().observation().provider,
+        ProviderPhase::Active
+    );
+    let forest = fixture.forest.clone();
+    let mut shutdown = tokio::spawn(async move { forest.shutdown().await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while fixture.actor.address().get_status() != ractor::ActorStatus::Stopped {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut shutdown)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fixture.actor.lifecycle().observation().phase,
+        LifecyclePhase::Closing
+    );
+    provider.succeed().await.unwrap();
+    let outcomes = tokio::time::timeout(std::time::Duration::from_secs(5), shutdown)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        outcomes.iter().all(|outcome| outcome.is_confirmed()),
+        "{outcomes:?}"
+    );
+    assert!(fixture.actor.lifecycle().run_finalized());
+}
