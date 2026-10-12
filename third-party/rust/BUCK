@@ -8,7 +8,7 @@ load("//build/rust:dependency_profiles.bzl", "tidepool_cargo_rust_library", "tid
 git_fetch(
     name = "exomonad-harness-5fdd156badd86236.git",
     repo = "https://github.com/tidepool-heavy-industries/exomonad-harness.git",
-    rev = "9f64c0505d792badf7c65fea8edd11fa30006334",
+    rev = "9fc4acf5a531f93eaf3e2df56f0f76d38dd2fb44",
     visibility = [],
 )
 
@@ -17094,8 +17094,8 @@ checked_harness_source(
     name = "exomonad-harness-5fdd156badd86236",
     cp = read_root_config("nix", "coreutils") + "/cp",
     python = read_root_config("nix", "python"),
-    revision = "9f64c0505d792badf7c65fea8edd11fa30006334",
-    nar_hash = "sha256-/Q9BhrtgwTGoLCpJQKglF4yd5k1aOlf/vi6zFOlJ7OA=",
+    revision = "9fc4acf5a531f93eaf3e2df56f0f76d38dd2fb44",
+    nar_hash = "sha256-nix3mDUT99imrjzQ6hPnPLy1O1NjvCcB5hksf8gkB+c=",
     cargo_lock = "root//:workspace_cargo_lock",
     flake_lock = "root//:workspace_flake_lock",
     provenance_script = "root//:embedded_web_provenance_script",
