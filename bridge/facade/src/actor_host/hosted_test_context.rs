@@ -717,6 +717,7 @@ pub(super) struct HostedActorContext {
     pub(super) forest: Arc<ResidentForest<ExomonadHandlerStack, CapturedOutput>>,
     pub(super) runtime: Arc<embedded_harness::EmbeddedHarnessRuntime>,
     pub(super) recovery_store: Arc<tidepool_runtime::session::RunRecoveryStore>,
+    pub(super) journal_status: watch::Receiver<exomonad_actor::JournalOwnerStatus>,
     pub(super) observer: HostTestObserver,
     pub(super) owners: InteractiveOwners,
 }
@@ -838,8 +839,9 @@ pub(super) struct HostedTestRuntime {
     diagnostics: Option<HostedTestDiagnostics>,
     preparation_elapsed: Option<Duration>,
     startup_readiness_elapsed: Duration,
-    _repository: exomonad_worktree::testing::TestRepo,
-    _runtime: tempfile::TempDir,
+    released: watch::Receiver<host_incarnation::HostLeaseRelease>,
+    _repository: Option<exomonad_worktree::testing::TestRepo>,
+    _runtime: Option<tempfile::TempDir>,
 }
 
 impl Drop for HostedTestRuntime {
@@ -1419,6 +1421,7 @@ impl HostedTestRuntime {
         }
         let lease = HostIncarnationLease::claim(&config.run_directory)
             .map_err(|error| error.to_string())?;
+        let released = lease.release_observation();
         let observer = HostTestObserver::default();
         let (assembled, mut assembly) = oneshot::channel();
         let (stop, stopping) = watch::channel(false);
@@ -1595,8 +1598,9 @@ impl HostedTestRuntime {
             diagnostics,
             preparation_elapsed,
             startup_readiness_elapsed: elapsed,
-            _repository: repository,
-            _runtime: runtime_directory,
+            released,
+            _repository: Some(repository),
+            _runtime: Some(runtime_directory),
         })
     }
 
@@ -1605,13 +1609,94 @@ impl HostedTestRuntime {
     }
 
     pub(super) async fn stop(mut self) -> Result<(), String> {
-        let outcome =
+        let mut released = self.released.clone();
+        let mut journal = self.context.journal_status.clone();
+        let diagnostics = self.diagnostics.clone();
+        let run_root = self.context.config.run_directory.path().to_path_buf();
+        let runtime = Arc::downgrade(&self.runtime);
+        let forest = Arc::downgrade(&self.context.forest);
+        let shutdown =
             Self::shutdown(self.stop.clone(), self.outcome.clone(), self.thread.take()).await;
-        if let Some(diagnostics) = &self.diagnostics {
-            diagnostics.report(
-                &ScenarioOutcome::Passed,
-                &CleanupOutcome::from_result(&outcome),
-            )?;
+        let mut repository = self._repository.take();
+        let mut temporary_run = self._runtime.take();
+        // The status receivers do not retain authority. All enclosing host
+        // handles must drop before the actual lease destructor can acknowledge.
+        drop(self);
+        let immediately_after_drop = json!({
+            "runtime_strong_count": runtime.strong_count(),
+            "forest_strong_count": forest.strong_count(),
+            "journal": format!("{:?}", *journal.borrow()),
+            "lease": format!("{:?}", *released.borrow()),
+        });
+        let physical_release = await_host_lease_release(&mut released, SHUTDOWN_BUDGET).await;
+        let journal_stopped = tokio::time::timeout(SHUTDOWN_BUDGET, async {
+            loop {
+                if matches!(
+                    *journal.borrow_and_update(),
+                    exomonad_actor::JournalOwnerStatus::Stopped { .. }
+                ) {
+                    return Ok::<(), String>(());
+                }
+                journal
+                    .changed()
+                    .await
+                    .map_err(|_| "journal status observer closed before Stopped".to_owned())?;
+            }
+        })
+        .await
+        .map_err(|_| "journal owner has not acknowledged Stopped".to_owned())
+        .and_then(|result| result);
+        let physical_probe = host_incarnation::HostRunLock::existing(&run_root)
+            .map(drop)
+            .map_err(|error| error.to_string());
+        if physical_release.is_err() {
+            // An unconfirmed owner may still use these declared inputs.
+            if let Some(repository) = &mut repository {
+                repository.disable_cleanup(true);
+            }
+            if let Some(temporary_run) = &mut temporary_run {
+                temporary_run.disable_cleanup(true);
+            }
+        }
+        let outcome = match (shutdown, &physical_release) {
+            (Err(primary), Err(release)) => Err(format!(
+                "{primary}; physical host lease release unconfirmed: {release}"
+            )),
+            (Err(primary), Ok(())) => Err(primary),
+            (Ok(()), Err(release)) => Err(format!(
+                "physical host lease release unconfirmed: {release}"
+            )),
+            (Ok(()), Ok(())) => Ok(()),
+        };
+        if let Some(diagnostics) = diagnostics {
+            let evidence = json!({
+                "schema": 1,
+                "immediately_after_drop": immediately_after_drop,
+                "journal_final": format!("{:?}", *journal.borrow()),
+                "journal_stopped": journal_stopped,
+                "physical_lease_final": format!("{:?}", *released.borrow()),
+                "physical_release": physical_release,
+                "physical_reacquisition": physical_probe,
+                "runtime_strong_count_final": runtime.strong_count(),
+                "forest_strong_count_final": forest.strong_count(),
+            });
+            let report = (|| {
+                std::fs::write(
+                    diagnostics.root.join("stop-custody-discriminator.json"),
+                    serde_json::to_vec_pretty(&evidence).map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?;
+                diagnostics.report(
+                    &ScenarioOutcome::Passed,
+                    &CleanupOutcome::from_result(&outcome),
+                )
+            })();
+            if let Err(report) = report {
+                return match outcome {
+                    Err(primary) => Err(format!("{primary}; stop diagnostics failed: {report}")),
+                    Ok(()) => Err(report),
+                };
+            }
         }
         outcome
     }

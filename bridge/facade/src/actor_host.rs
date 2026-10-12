@@ -1975,12 +1975,45 @@ fn run_journal_mode(
     }
 }
 
+async fn await_host_lease_release(
+    released: &mut watch::Receiver<host_incarnation::HostLeaseRelease>,
+    budget: Duration,
+) -> Result<(), String> {
+    tokio::time::timeout(budget, async {
+        loop {
+            match released.borrow_and_update().clone() {
+                host_incarnation::HostLeaseRelease::Released => return Ok(()),
+                host_incarnation::HostLeaseRelease::Unconfirmed(detail) => return Err(detail),
+                host_incarnation::HostLeaseRelease::Pending => {}
+            }
+            released.changed().await.map_err(|_| {
+                "host lease release observer closed without release acknowledgment".to_owned()
+            })?;
+        }
+    })
+    .await
+    .map_err(|_| "physical host lease release remains unconfirmed after shutdown".to_owned())?
+}
+
+async fn acknowledge_completed_run_release(
+    outcome: Result<(), Box<dyn std::error::Error>>,
+    mut released: watch::Receiver<host_incarnation::HostLeaseRelease>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Resource-bearing failures retain their original owner and error type.
+    // Only successful completion may promise physical run release.
+    outcome?;
+    await_host_lease_release(&mut released, APPLICATION_SHUTDOWN_TIMEOUT)
+        .await
+        .map_err(runtime_error)
+}
+
 pub(crate) async fn run(
     config: ActorHostConfig,
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
     host_incarnation: HostIncarnationLease,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_owned(
+    let released = host_incarnation.release_observation();
+    let outcome = run_owned(
         config,
         readiness,
         host_incarnation,
@@ -1989,7 +2022,8 @@ pub(crate) async fn run(
         #[cfg(test)]
         None,
     )
-    .await
+    .await;
+    acknowledge_completed_run_release(outcome, released).await
 }
 
 #[cfg(test)]
@@ -1999,7 +2033,9 @@ async fn run_with_test_transport(
     host_incarnation: HostIncarnationLease,
     transport: Arc<dyn harness::engine::ResponsesTransport>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_owned(config, readiness, host_incarnation, Some(transport), None).await
+    let released = host_incarnation.release_observation();
+    let outcome = run_owned(config, readiness, host_incarnation, Some(transport), None).await;
+    acknowledge_completed_run_release(outcome, released).await
 }
 
 #[tracing::instrument(target = "tidepool::actor_host::startup", name = "host_run", skip_all, fields(run_root = %config.run_directory.path().display()))]
@@ -2616,6 +2652,7 @@ async fn run_owned(
                 forest: Arc::clone(&forest),
                 runtime: Arc::clone(&embedded_service.runtime),
                 recovery_store: Arc::clone(&recovery_store),
+                journal_status: actor_recovery.owner_status(),
                 observer: hooks.observer.clone(),
                 owners: Arc::clone(&application_owners),
             });
