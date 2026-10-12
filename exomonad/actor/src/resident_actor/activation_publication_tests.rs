@@ -778,7 +778,11 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
     )));
     tokio::select! {
         event = native_rx.recv() => assert!(matches!(event, Some(NativeEvent::Claimed))),
-        _result = park.as_mut().unwrap().as_mut() => panic!("activation ended before native claim"),
+        result = park.as_mut().unwrap().as_mut() => match result {
+            Ok(InteractivePark::Parked) => panic!("activation parked before native claim"),
+            Ok(InteractivePark::Cancelled(request)) => panic!("activation cancelled {request:?} before native claim"),
+            Err(error) => panic!("activation failed before native claim: {error:?}"),
+        },
     }
     assert_eq!(
         fixture
