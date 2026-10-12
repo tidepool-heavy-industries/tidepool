@@ -60,8 +60,10 @@ impl RootRecoveryPlacement {
 /// prepared successor. A copied admission DTO cannot create this receipt.
 pub struct DurableRootSuccessorAdmission {
     path: PathBuf,
-    old: DurableActorRecord,
-    new: DurableActorRecord,
+    predecessor_owner: tidepool_runtime::session::RecoveryPublicOwner,
+    store_predecessor: Option<ApplicationConversation>,
+    intended_conversation: Option<ApplicationConversation>,
+    manifest: Option<RootStartupManifestPin>,
     predecessor: ActorRef,
     successor: RootRecoveryPlacement,
 }
@@ -85,16 +87,8 @@ impl DurableRootSuccessorAdmission {
         if self.path.canonicalize()?.parent() != Some(canonical.as_path()) {
             return Ok(false);
         }
-        let old = self.old.application.as_ref();
-        let new = self.new.application.as_ref();
-        Ok(self
-            .new
-            .startup
-            .as_ref()
-            .and_then(|startup| startup.store_predecessor.as_ref())
-            == Some(predecessor)
-            && old.is_some()
-            && new.and_then(|app| app.intended_conversation.as_ref()) == Some(successor)
+        Ok(self.store_predecessor.as_ref() == Some(predecessor)
+            && self.intended_conversation.as_ref() == Some(successor)
             && matches!((predecessor, successor),
                 (ApplicationConversation::Embedded {run: old_run, agent_path: old_path, ..},
                  ApplicationConversation::Embedded {run: new_run, agent_path: new_path, ..})
@@ -128,18 +122,13 @@ impl DurableRootSuccessorAdmission {
         {
             return Ok(false);
         }
-        let manifest = self
-            .new
-            .startup
-            .as_ref()
-            .and_then(|startup| startup.manifest.as_ref())
-            .ok_or_else(|| {
-                std::io::Error::other("successor startup has no exact manifest revision pin")
-            })?;
+        let manifest = self.manifest.as_ref().ok_or_else(|| {
+            std::io::Error::other("successor startup has no exact manifest revision pin")
+        })?;
         if !manifest.validate(&run_root)? {
             return Ok(false);
         }
-        Ok(owner_for_admission(&self.old.admission).as_ref() == Some(predecessor))
+        Ok(&self.predecessor_owner == predecessor)
     }
 }
 
@@ -842,24 +831,29 @@ impl JournalOwner {
             source.as_deref(),
             &binding_path,
         )?;
+        let old = self
+            .state
+            .records
+            .get(&predecessor)
+            .expect("validated predecessor");
+        let new = self
+            .state
+            .records
+            .get(&successor.actor)
+            .expect("validated successor");
+        let startup = new.startup.as_ref().expect("validated startup");
+        let application = new.application.as_ref().expect("validated application");
         Ok(Arc::new(DurableRootSuccessorAdmission {
             path: self.path.clone(),
             predecessor,
-            old: self
-                .state
-                .records
-                .get(&predecessor)
-                .expect("validated predecessor")
-                .clone(),
-            new: self
-                .state
-                .records
-                .get(&successor.actor)
-                .expect("validated successor")
-                .clone(),
             successor,
+            predecessor_owner: owner_for_admission(&old.admission).expect("validated root owner"),
+            store_predecessor: startup.store_predecessor.clone(),
+            intended_conversation: application.intended_conversation.clone(),
+            manifest: startup.manifest.clone(),
         }))
     }
+
     fn validate_root_successor(
         &self,
         state: &State,

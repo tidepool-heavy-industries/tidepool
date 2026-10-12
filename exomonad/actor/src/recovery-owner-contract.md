@@ -9,10 +9,13 @@ inside the journal owner.
 
 Queries return only the selected immutable facts. An explicitly requested full
 records inventory copies the inventory once; ordinary reads and updates never
-clone the journal state. Durable successor certification captures only its exact
-predecessor and successor records after actual durable readback. Its native
+clone the journal state. Durable successor certification captures only the exact owner,
+backend conversation and manifest facts after actual durable readback. Its native
 metadata validators inspect those immutable facts without accessing live state.
-The native owner still decides whether that certified transition is current.
+The lifecycle owner must retain an execution claim spanning certification and
+native use. Native predecessor currentness alone cannot authorize a successor
+that the lifecycle owner has since retired or superseded. Certification is
+immutable evidence and cannot independently issue this currentness claim.
 
 An uncertain append permanently fences this owner and is exposed through its
 status observation. All later commands requiring authority fail. The dedicated
