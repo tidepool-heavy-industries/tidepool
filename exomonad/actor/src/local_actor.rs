@@ -2121,6 +2121,17 @@ where
                 .await
         };
         if let Err(error) = attachment {
+            // A seal may overtake ordinary startup. Record the cleanup cell
+            // through the fenced path before settling its prepared resources.
+            if startup_refusal.is_none() {
+                if let Err(cleanup_error) = state
+                    .lifecycle
+                    .attach_cleanup_executor(state.context.myself.clone())
+                    .await
+                {
+                    tracing::error!(%cleanup_error, "cleanup executor custody is unavailable");
+                }
+            }
             startup_refusal = Some(StartupFailureCause::Lifecycle(error));
         }
         if let Some(cause) = startup_refusal {
