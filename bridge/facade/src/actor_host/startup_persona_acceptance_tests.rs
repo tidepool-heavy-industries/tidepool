@@ -340,6 +340,14 @@ async fn actual_persona_prepares_saves_activates_and_retires_without_resurrectio
             "True"
         );
         let updated = preparation(&workspace, "refresh-preparation");
+        let empty = preparation(&workspace, "empty-preparation");
+        assert_eq!(empty["outcomes"], json!([]));
+        assert_eq!(empty["batches"], json!([]));
+        assert_eq!(empty["passesUsed"], 0);
+        assert_eq!(
+            preparation(&workspace, "empty-judgment"),
+            json!({"outcome":"completed", "observations":[]})
+        );
         assert_eq!(
             updated["retainedMemories"][0]["original"],
             "persona-memory-updated"
