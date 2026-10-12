@@ -153,7 +153,7 @@
         harnessPkgs = import harnessNixpkgs { inherit system; };
         embeddedWebNpmCache = harnessPkgs.fetchNpmDeps {
           src = "${harnessWeb}/web";
-          hash = "sha256-gXYGez5cJIcLl6KoAiG3bH1wrEmyf+kax+uoMtj+99g=";
+          hash = "sha256-4K2fllv5MraU1ib4e59qOKqcaHfnLZmsfEall14vgKk=";
         };
         browserTestNpmCache = harnessPkgs.fetchNpmDeps {
           src = ./nix/browser-test;
