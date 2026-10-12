@@ -56,7 +56,7 @@ enum Facts {
 }
 
 struct History {
-    directory: tempfile::TempDir,
+    directory: Arc<tempfile::TempDir>,
     anchor: DirectoryAnchor,
     journal: Arc<ActorRecoveryJournal>,
     actor: ActorRef,
@@ -68,10 +68,12 @@ struct History {
 }
 
 impl History {
-    fn new(caller: Option<String>, output: bool) -> Self {
-        let directory = tempfile::tempdir().unwrap();
+    async fn new(caller: Option<String>, output: bool) -> Self {
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
+            .await
+            .unwrap();
         let actor = ActorRef::first(ActorId(7));
         journal
             .admit(
@@ -86,6 +88,7 @@ impl History {
                 ),
                 &[],
             )
+            .await
             .unwrap();
         let identity = InitialContextIdentity {
             operation: WorkbenchExecutionId::from_digest([1; 16]),
@@ -202,21 +205,26 @@ impl History {
         })
     }
 
-    fn run(&mut self, step: &Step) -> Result<(), TestCaseError> {
+    async fn run(&mut self, step: &Step) -> Result<(), TestCaseError> {
         let before = std::fs::read(self.directory.path().join("actors.jsonl")).unwrap();
         let (event, accepted, next, changes) = match step {
             Step::Inspect => {
                 prop_assert_eq!(
-                    self.journal.initial_context(self.actor).unwrap(),
+                    self.journal.initial_context(self.actor).await.unwrap(),
                     self.expected()
                 );
                 return Ok(());
             }
             Step::Reopen => {
-                self.journal =
-                    ActorRecoveryJournal::open_existing(&self.anchor, "actors.jsonl").unwrap();
+                self.journal = ActorRecoveryJournal::open_existing(
+                    &self.anchor,
+                    "actors.jsonl",
+                    self.directory.clone(),
+                )
+                .await
+                .unwrap();
                 prop_assert_eq!(
-                    self.journal.initial_context(self.actor).unwrap(),
+                    self.journal.initial_context(self.actor).await.unwrap(),
                     self.expected()
                 );
                 prop_assert_eq!(
@@ -289,7 +297,7 @@ impl History {
                 )
             }
         };
-        let actual = self.journal.record_initial_context(self.actor, event);
+        let actual = self.journal.record_initial_context(self.actor, event).await;
         prop_assert_eq!(
             actual.is_ok(),
             accepted,
@@ -301,7 +309,7 @@ impl History {
             self.facts = next;
         }
         prop_assert_eq!(
-            self.journal.initial_context(self.actor).unwrap(),
+            self.journal.initial_context(self.actor).await.unwrap(),
             self.expected()
         );
         if !accepted || !changes {
@@ -321,16 +329,20 @@ proptest! {
         output in any::<bool>(),
         history in steps(),
     ) {
-        let mut actual = History::new(caller, output);
-        for step in history { actual.run(&step)?; }
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let mut actual = History::new(caller, output).await;
+            for step in history { actual.run(&step).await?; }
+            Ok::<(), TestCaseError>(())
+        })?;
     }
 }
 
-#[test]
-fn retained_result_reopens_and_publication_retry_appends_nothing() {
+#[tokio::test]
+async fn retained_result_reopens_and_publication_retry_appends_nothing() {
     for caller in [None, Some(String::new()), Some("caller-seed".into())] {
         for output in [false, true] {
-            let mut actual = History::new(caller.clone(), output);
+            let mut actual = History::new(caller.clone(), output).await;
             for step in [
                 Step::Begin,
                 Step::Retain,
@@ -342,16 +354,16 @@ fn retained_result_reopens_and_publication_retry_appends_nothing() {
                 Step::Begin,
                 Step::Inspect,
             ] {
-                actual.run(&step).unwrap();
+                actual.run(&step).await.unwrap();
             }
         }
     }
 }
 
-#[test]
-fn failure_and_cancellation_do_not_become_empty_success_on_reopen() {
+#[tokio::test]
+async fn failure_and_cancellation_do_not_become_empty_success_on_reopen() {
     for cancelled in [false, true] {
-        let mut actual = History::new(None, false);
+        let mut actual = History::new(None, false).await;
         for step in [
             Step::Begin,
             Step::Fail(cancelled),
@@ -361,14 +373,14 @@ fn failure_and_cancellation_do_not_become_empty_success_on_reopen() {
             Step::Begin,
             Step::Inspect,
         ] {
-            actual.run(&step).unwrap();
+            actual.run(&step).await.unwrap();
         }
     }
 }
 
-#[test]
-fn uncertain_effects_reopen_with_receipts_and_refuse_implicit_restart() {
-    let mut actual = History::new(Some("caller-seed".into()), true);
+#[tokio::test]
+async fn uncertain_effects_reopen_with_receipts_and_refuse_implicit_restart() {
+    let mut actual = History::new(Some("caller-seed".into()), true).await;
     for step in [
         Step::Begin,
         Step::Uncertain,
@@ -379,13 +391,13 @@ fn uncertain_effects_reopen_with_receipts_and_refuse_implicit_restart() {
         Step::Fail(false),
         Step::Inspect,
     ] {
-        actual.run(&step).unwrap();
+        actual.run(&step).await.unwrap();
     }
 }
 
-#[test]
-fn foreign_startup_issuer_is_refused_before_journal_mutation() {
-    let actual = History::new(None, true);
+#[tokio::test]
+async fn foreign_startup_issuer_is_refused_before_journal_mutation() {
+    let actual = History::new(None, true).await;
     let before = std::fs::read(actual.directory.path().join("actors.jsonl")).unwrap();
     for foreign in [
         ActorRef::first(ActorId(8)),
@@ -405,8 +417,12 @@ fn foreign_startup_issuer_is_refused_before_journal_mutation() {
                     caller_seed: None,
                 },
             )
+            .await
             .is_err());
-        assert_eq!(actual.journal.initial_context(actual.actor).unwrap(), None);
+        assert_eq!(
+            actual.journal.initial_context(actual.actor).await.unwrap(),
+            None
+        );
         assert_eq!(
             std::fs::read(actual.directory.path().join("actors.jsonl")).unwrap(),
             before
