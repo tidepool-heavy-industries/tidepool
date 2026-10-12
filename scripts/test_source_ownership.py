@@ -31,6 +31,7 @@ TEST_ONLY_MODULES = {
         'tidepool/codegen/src/prepared_program/machine/literal_manifest_tests.rs',
     }),
     'tidepool': frozenset({
+        'bridge/facade/src/actor_host/startup_context_acceptance_tests.rs',
         'bridge/facade/src/actor_host/embedded_agent_spec_tests.rs',
         'bridge/facade/src/actor_host/embedded_failure_projection_tests.rs',
         'bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs',
@@ -111,6 +112,10 @@ TEST_ONLY_FIXTURES = {
         'tidepool/extract-cmd/src/fixtures/build_products_worker.rs',
     }),
     'tidepool': frozenset({
+        'bridge/facade/src/actor_host/fixtures/startup_context_spec.hs',
+        'bridge/facade/src/actor_host/fixtures/startup_context_refresh.hs',
+        'bridge/facade/src/actor_host/fixtures/startup_context_refresh_again.hs',
+        'bridge/facade/src/actor_host/fixtures/startup_context_refresh_failure.hs',
         'bridge/facade/src/actor_host/cargo_report_contract.hs',
         'bridge/facade/src/actor_host/fresh_callable_result_setup.hs',
         'bridge/facade/src/actor_host/fresh_callable_result_read.hs',
