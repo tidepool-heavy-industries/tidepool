@@ -1,7 +1,7 @@
 //! Durable restart uses the production host's journal, binding and actor owners.
 use crate::actor_host::hosted_test_context::HostedTestRuntime;
 use crate::actor_host::test_campaign::{
-    hosted_script_provider, hosted_test_settings, next_hosted_script_round,
+    configure_command_path, hosted_script_provider, hosted_test_settings, next_hosted_script_round,
 };
 use crate::actor_host::{embedded_harness::EmbeddedHarnessRuntime, ActorHostConfig};
 use harness::{
@@ -185,6 +185,7 @@ struct InterruptedStream {
     inputs: Arc<Mutex<Vec<ResponsesRequest>>>,
     calls: Arc<AtomicUsize>,
     emit_call: bool,
+    effect_path: Option<std::path::PathBuf>,
 }
 
 fn final_turn() -> ResponsesTurn {
@@ -265,6 +266,12 @@ impl ResponsesTransport for InterruptedStream {
                                 .unwrap()
                                 .is_some()
                             {
+                                assert_eq!(
+                                    std::fs::read(self.effect_path.as_ref().unwrap())
+                                        .unwrap_or_else(|error| panic!("effect witness: {error}; retained notebook output: {output:?}")),
+                                    b"x",
+                                    "the admitted command must execute exactly once before EOF"
+                                );
                                 break;
                             }
                         }
@@ -294,16 +301,21 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
         let calls = Arc::new(AtomicUsize::new(0));
         let host = HostedTestRuntime::start_with_factory(
             &settings,
-            |config| retained_config(config, repository.path(), &run_root),
+            |config| {
+                retained_config(config, repository.path(), &run_root);
+                configure_command_path(config);
+            },
             {
                 let inputs = Arc::clone(&inputs);
                 let calls = Arc::clone(&calls);
+                let effect_path = repository.path().join("restart-effect-executions");
                 move |runtime, _| {
                     Arc::new(InterruptedStream {
                         runtime: Arc::downgrade(runtime),
                         inputs,
                         calls,
                         emit_call,
+                        effect_path: Some(effect_path),
                     })
                 }
             },
@@ -460,6 +472,7 @@ async fn blocked_actor_can_be_retired_through_its_browser_owner_without_inferenc
                 inputs: Arc::new(Mutex::new(Vec::new())),
                 calls: Arc::clone(&provider_calls),
                 emit_call: false,
+                effect_path: None,
             })
         },
     )
