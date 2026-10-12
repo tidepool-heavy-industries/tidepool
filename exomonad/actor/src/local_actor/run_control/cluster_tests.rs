@@ -82,7 +82,7 @@ proptest::proptest! {
                             let _ = gate.await;
                             // This real read has no resource to retire; its error
                             // is deliberately delivered through the production result path.
-                            let error = tokio::fs::metadata(directory.path().join("absent-input")).await.unwrap_err();
+                            let error = std::fs::metadata(directory.path().join("absent-input")).unwrap_err();
                             completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             (Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>), crate::CleanupComponentOutcome::Confirmed)
                         }));
