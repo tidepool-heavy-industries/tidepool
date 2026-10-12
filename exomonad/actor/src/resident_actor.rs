@@ -13895,7 +13895,7 @@ where
         }
         let resources = self.directory.shutdown_run_resources().await;
         outcomes.push(crate::ForestRootShutdown::RunResources(
-            if preparation.is_confirmed() {
+            if matches!(preparation, crate::CleanupComponentOutcome::Confirmed) {
                 resources
             } else {
                 crate::CleanupComponentOutcome::Unconfirmed(format!(
