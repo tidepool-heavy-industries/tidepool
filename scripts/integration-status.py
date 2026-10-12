@@ -2,6 +2,7 @@
 """Read local integration history and declared native/browser Harness identities."""
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -17,9 +18,11 @@ class ObservationError(ValueError):
 
 
 def git(repo, *args, allow_failure=False):
+    location_overrides = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"}
+    environment = {key: value for key, value in os.environ.items() if key not in location_overrides}
     result = subprocess.run(
         ["git", "--no-optional-locks", "-C", str(repo), *args],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment,
     )
     if result.returncode and not allow_failure:
         # Git diagnostics can contain configured remote URLs; never relay them.

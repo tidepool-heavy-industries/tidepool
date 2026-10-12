@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SPEC = importlib.util.spec_from_file_location("integration_status", Path(__file__).parents[1] / "integration-status.py")
@@ -213,6 +214,16 @@ class IntegrationStatusTests(unittest.TestCase):
         self.assertEqual(report["checkout"]["tracked_change_count"], 1)
         self.assertEqual(report["harness_pins"]["observation"], "working_tree_files")
         self.assertEqual((self.repo / "base").read_text(), "work in progress")
+
+    def test_explicit_repository_ignores_ambient_git_location(self):
+        other = Path(self.temp.name) / "other"
+        other.mkdir()
+        self.git("init", "-b", "other", repo=other)
+        with patch.dict(os.environ, {"GIT_DIR": str(other / ".git"), "GIT_WORK_TREE": str(other)}):
+            code, report = self.invoke("--strict")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["checkout"]["head"], self.base)
+        self.assertEqual(report["checkout"]["branch"], "main")
 
     def test_observation_does_not_change_refs_or_source_files(self):
         before = self.git("show-ref")
