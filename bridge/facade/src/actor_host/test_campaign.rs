@@ -1872,9 +1872,10 @@ pub(super) fn hosted_test_settings(
     files: &tempfile::TempDir,
     concurrent_jobs: usize,
 ) -> crate::exomonad::EmbeddedLaunchConfig {
-    let assets = files.path().join("assets");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let assets = std::path::PathBuf::from(
+        std::env::var_os("EXOMONAD_EMBEDDED_ASSET_ROOT")
+            .expect("hosted tests require the declared embedded browser bundle"),
+    );
     let session_secret_file = files.path().join("session-secret");
     std::fs::write(&session_secret_file, "hosted-script-test-secret-32-bytes").unwrap();
     let credential_file = files.path().join("codex-auth.json");

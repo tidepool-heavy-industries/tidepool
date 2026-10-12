@@ -208,7 +208,17 @@ impl EmbeddedService {
             .store()
             .recover_embedded_inference_after_host_loss(&super::runtime_namespace(run_root))
             .map_err(|error| error.to_string())?;
+        let browser_identity =
+            harness::server::BrowserBundleIdentity::from_declared_source(include_bytes!(concat!(
+                env!("OUT_DIR"),
+                "/harness-browser-source-identity.json"
+            )))
+            .map_err(|error| error.to_string())?;
+        let browser_bundle =
+            harness::server::verify_browser_bundle(&settings.asset_root, &browser_identity)
+                .map_err(|error| error.to_string())?;
         let server_config = ServerConfig::new(settings.asset_root.clone())
+            .with_browser_bundle(browser_bundle)
             .with_history_store(runtime.store())
             .with_public_origin_scheme(settings.public_origin_scheme.as_str())
             .map_err(str::to_owned)?;

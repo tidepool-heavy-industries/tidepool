@@ -82,6 +82,14 @@ fn main() {
         emit_dev_source_identity(Some(&identity));
     }
 
+    let browser_source = workspace.join("build/harness-browser-source-identity.json");
+    println!("cargo:rerun-if-changed={}", browser_source.display());
+    let identity = std::fs::read(&browser_source)
+        .expect("declared Harness browser source identity must exist at build time");
+    let browser_identity = Path::new(&std::env::var("OUT_DIR").expect("OUT_DIR"))
+        .join("harness-browser-source-identity.json");
+    std::fs::write(browser_identity, identity)
+        .expect("bind declared Harness browser source identity to this binary");
     emit_scaffold_package(workspace);
 }
 
