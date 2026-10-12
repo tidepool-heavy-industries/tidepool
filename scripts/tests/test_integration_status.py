@@ -225,6 +225,36 @@ class IntegrationStatusTests(unittest.TestCase):
         self.assertEqual(report["checkout"]["head"], self.base)
         self.assertEqual(report["checkout"]["branch"], "main")
 
+    def test_nix_comments_do_not_shadow_selected_input(self):
+        source = (self.repo / "flake.nix").read_text()
+        shadow = '# harnessWeb = { url = "github:other/harness/' + "f" * 40 + '"; };\n'
+        (self.repo / "flake.nix").write_text(shadow + source)
+        code, report = self.invoke("--strict")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["harness_pins"]["sources"]["flake_manifest"]["revision"], self.base)
+
+    def test_nix_expression_is_evaluated_without_outputs(self):
+        (self.repo / "flake.nix").write_text(
+            'let revision = "' + self.base + '"; in { inputs.harnessWeb.url = '
+            '"github:example/harness/" + revision; outputs = throw "outputs must not be evaluated"; }'
+        )
+        code, report = self.invoke("--strict")
+        self.assertEqual(code, 0)
+        self.assertTrue(report["harness_pins"]["agreement"])
+
+    def test_unavailable_nix_evaluator_is_unknown_and_strict_failure(self):
+        with patch.dict(os.environ, {"EXOMONAD_NIX_BIN": str(self.repo / "missing-nix")}):
+            code, report = self.invoke("--strict")
+        self.assertEqual(code, 1)
+        self.assertIn("harness_pins_unavailable", report["errors"])
+
+    def test_invalid_nix_expression_is_unknown_and_strict_failure(self):
+        (self.repo / "flake.nix").write_text("invalid-private-token {")
+        code, report = self.invoke("--strict")
+        self.assertEqual(code, 1)
+        self.assertIn("harness_pins_unavailable", report["errors"])
+        self.assertNotIn("private-token", json.dumps(report))
+
     def test_observation_does_not_change_refs_or_source_files(self):
         before = self.git("show-ref")
         files = {p.name: p.read_bytes() for p in self.repo.iterdir() if p.is_file()}

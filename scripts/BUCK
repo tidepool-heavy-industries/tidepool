@@ -43,10 +43,12 @@ sh_test(
     args = ["scripts.tests.test_integration_status"],
     env = {
         "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "EXOMONAD_NIX_BIN": "$(location toolchains//:exomonad_runtime_tools)/bin/nix",
+        "TIDEPOOL_SCRIPT_RESOURCE_ENV": "EXOMONAD_NIX_BIN",
         "TIDEPOOL_SCRIPT_TEST_ROOT": "$(location :script_test_resources)",
         "PATH": "$(location toolchains//:test_tools)/bin:" + read_root_config("nix", "action_path"),
     },
-    resources = [":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure", "toolchains//:test_tools"],
+    resources = ["toolchains//:exomonad_runtime_tools", ":script_test_resources", "toolchains//:python", "toolchains//:test_tools_closure", "toolchains//:test_tools"],
     visibility = ["PUBLIC"],
 )
 

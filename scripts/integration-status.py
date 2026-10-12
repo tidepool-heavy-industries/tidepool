@@ -69,14 +69,19 @@ def pins(repo):
     revisions = parse_qs(locked.query).get("rev", [])
     if len(revisions) != 1:
         raise ObservationError("Cargo.lock Harness source requires one exact rev")
-    source = (repo / "flake.nix").read_text()
-    blocks = re.findall(r"\bharnessWeb\s*=\s*\{([^{}]*)\}", source, re.DOTALL)
-    if len(blocks) != 1:
-        raise ObservationError("flake.nix requires one literal harnessWeb input")
-    urls = re.findall(r'\burl\s*=\s*"github:([^"/]+)/([^"/]+)/([0-9a-f]+)"\s*;', blocks[0])
-    if len(urls) != 1:
-        raise ObservationError("flake.nix harnessWeb requires one exact GitHub revision")
-    owner, name, revision = urls[0]
+    evaluation = subprocess.run(
+        [os.environ.get("EXOMONAD_NIX_BIN", "nix"), "eval", "--offline",
+         "--option", "allow-import-from-derivation", "false", "--json",
+         "--file", str(repo / "flake.nix"), "inputs.harnessWeb.url"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    if evaluation.returncode:
+        raise ObservationError("Nix manifest input evaluation is unavailable")
+    declared = urlsplit(json.loads(evaluation.stdout))
+    parts = declared.path.split("/")
+    if declared.scheme != "github" or len(parts) != 3 or declared.query or declared.fragment:
+        raise ObservationError("Evaluated harnessWeb URL requires an exact GitHub revision")
+    owner, name, revision = parts
     lock = json.loads((repo / "flake.lock").read_text())
     node = lock["nodes"][lock["nodes"][lock["root"]]["inputs"]["harnessWeb"]]["locked"]
     if node["type"] != "github":
