@@ -6655,9 +6655,16 @@ mod tests {
         assert!(roots[0].terminal().get().is_none());
         assert!(roots[0].terminal().requested_shutdown().is_some());
         release.notify_one();
-        let (actor, task) = spawning.await.unwrap().unwrap();
-        task.await.unwrap();
-        assert_eq!(actor.identity(), roots[0].identity());
+        match spawning.await.unwrap() {
+            Err(ractor::SpawnErr::StartupFailed(error)) => assert_eq!(
+                error.downcast_ref::<KernelCallFailure>(),
+                Some(&KernelCallFailure::MailboxClosed(roots[0].identity())),
+                "closed startup must refuse publishing caller readiness",
+            ),
+            Err(error) => panic!("unexpected startup refusal: {error:?}"),
+            Ok(_) => panic!("sealed startup published caller readiness"),
+        }
+        let actor = &roots[0];
         assert_eq!(
             actor.terminal().get().unwrap().kind,
             ActorExitKind::Cancelled
@@ -8143,13 +8150,13 @@ mod tests {
                     preparations,
                     crate::CleanupComponentOutcome::Unconfirmed(_)
                 ));
-                assert!(matches!(
-                    context.child_cleanup().await,
-                    crate::CleanupComponentOutcome::Unconfirmed(_)
-                ));
             }
-            let outcome =
-                shutdown_children(&context, ActorExitKind::Cancelled, Duration::from_secs(1)).await;
+            // Preparation settlement and child routing are separate owner facts.
+            // A routed child disappearing cannot discharge preparation uncertainty.
+            let outcome = combine_cleanup(
+                preparations,
+                shutdown_children(&context, ActorExitKind::Cancelled, Duration::from_secs(1)).await,
+            );
             // Probe behavior cannot prove resource-scope cleanup even on successful startup.
             assert!(!matches!(
                 outcome,
