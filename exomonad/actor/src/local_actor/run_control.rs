@@ -467,6 +467,10 @@ impl RunState {
 }
 
 pub(super) enum RunControlMessage {
+    FinishRun {
+        members: Vec<crate::kernel::lifecycle::SuccessorDrainReceipt>,
+        reply: oneshot::Sender<Result<(), DirectoryError>>,
+    },
     RegisterRecoveryBoot {
         journal: Arc<crate::ActorRecoveryJournal>,
         registration: crate::JournalBootRegistration,
@@ -782,6 +786,64 @@ impl Actor for RunControl {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            RunControlMessage::FinishRun { members, reply } => {
+                let exact = members.len() == state.entries.len()
+                    && members
+                        .iter()
+                        .map(|member| member.predecessor())
+                        .collect::<HashSet<_>>()
+                        .len()
+                        == members.len()
+                    && members.iter().all(|receipt| {
+                        state
+                            .entries
+                            .get(&receipt.predecessor())
+                            .is_some_and(|entry| {
+                                receipt.confirms_actor_retirement()
+                                    && entry.actor.terminal().get().as_ref()
+                                        == Some(receipt.terminal())
+                                    && entry.actor.terminal().cleanup().as_ref()
+                                        == Some(receipt.cleanup())
+                                    && entry.actor.address().get_cell().get_status()
+                                        == ActorStatus::Stopped
+                            })
+                    });
+                let confirmed = state.phase == RunPhase::Retired
+                    && matches!(
+                        state.resource_retirement,
+                        ResourceRetirement::Settled(crate::CleanupComponentOutcome::Confirmed)
+                    )
+                    && state.preparations.values().all(|record| {
+                        matches!(
+                            record.phase,
+                            PreparationPhase::Settled(crate::CleanupComponentOutcome::Confirmed)
+                        )
+                    })
+                    && state.reservations.values().all(|record| {
+                        !matches!(
+                            record.phase,
+                            ReservationPhase::Creating | ReservationPhase::Abandoning
+                        )
+                    })
+                    && state.worker_transfers.is_empty()
+                    && state.resource_transfers.is_empty()
+                    && state
+                        .resources
+                        .values()
+                        .all(|resource| matches!(resource.owner, ResourceOwner::Retired { .. }))
+                    && state.child_cleanup.values().all(|outcome| {
+                        matches!(outcome, crate::CleanupComponentOutcome::Confirmed)
+                    });
+                if exact && confirmed {
+                    if let Some(supervisor) = state.preparation_supervisor.take() {
+                        supervisor.stop(None);
+                    }
+                    let _ = reply.send(Ok(()));
+                    myself.stop(None);
+                } else {
+                    let _ = reply.send(Err(DirectoryError::Unavailable));
+                }
+            }
             RunControlMessage::RegisterRecoveryBoot {
                 journal,
                 registration,
@@ -1833,6 +1895,31 @@ impl RunControlClient {
             .send_message(message(reply))
             .map_err(|_| DirectoryError::Unavailable)?;
         receiver.await.map_err(|_| DirectoryError::Unavailable)
+    }
+    pub(crate) async fn finish_run(&self) -> Result<(), DirectoryError> {
+        let membership = self.seal().await?;
+        let mut members = Vec::with_capacity(membership.actors.len());
+        for (actor, _) in membership.actors {
+            let receipt =
+                tokio::time::timeout(SHUTDOWN_BUDGET, actor.lifecycle().retire_for_successor())
+                    .await
+                    .map_err(|_| DirectoryError::Unavailable)?
+                    .map_err(|_| DirectoryError::Unavailable)?;
+            actor
+                .address()
+                .get_cell()
+                .wait(Some(SHUTDOWN_BUDGET))
+                .await
+                .map_err(|_| DirectoryError::Unavailable)?;
+            members.push(receipt);
+        }
+        self.ask(|reply| RunControlMessage::FinishRun { members, reply })
+            .await??;
+        self.owner
+            .get_cell()
+            .wait(Some(SHUTDOWN_BUDGET))
+            .await
+            .map_err(|_| DirectoryError::Unavailable)
     }
     pub(crate) async fn register_recovery_boot(
         &self,

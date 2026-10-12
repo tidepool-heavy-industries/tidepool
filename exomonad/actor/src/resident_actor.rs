@@ -14097,6 +14097,15 @@ where
             },
         ));
         drop(retirement);
+        if outcomes.iter().all(crate::ForestRootShutdown::is_confirmed) {
+            if let Err(error) = self.directory.finish_run().await {
+                outcomes.push(crate::ForestRootShutdown::RunResources(
+                    crate::CleanupComponentOutcome::Unconfirmed(format!(
+                        "run control retirement: {error}"
+                    )),
+                ));
+            }
+        }
         outcomes
     }
 
