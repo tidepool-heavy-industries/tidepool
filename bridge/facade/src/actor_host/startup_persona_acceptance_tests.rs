@@ -82,7 +82,7 @@ fn retained_location(config: &mut super::ActorHostConfig, workspace: &Path, run:
     config.root_binding_path = run.join("root-binding.json");
 }
 
-fn configure_persona(config: &mut super::ActorHostConfig) {
+fn configure_persona(config: &mut super::ActorHostConfig, entry: &str) {
     let authored = config.workspace.join(".exomonad");
     std::fs::create_dir_all(authored.join("Persona")).unwrap();
     std::fs::create_dir_all(authored.join("Jev")).unwrap();
@@ -152,7 +152,7 @@ fn configure_persona(config: &mut super::ActorHostConfig) {
             "Persona.Context".into(),
             "Jev.Operators".into(),
         ];
-        project.haskell.spec = Some("AgentSpec.agentSpec".into());
+        project.haskell.spec = Some(entry.into());
         project
             .haskell
             .flake_sources
@@ -248,7 +248,7 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
         &provider,
         |config| {
             retained_location(config, &workspace, &run);
-            configure_persona(config);
+            configure_persona(config, "AgentSpec.agentSpec");
             config.jev = Some(configured_backend);
         },
     ));
@@ -418,4 +418,94 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
         settled_head(&host).await;
     }
     host.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn shipped_persona_initializer_uses_actual_preparation_before_first_request() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let (entered, mut judgments) = mpsc::unbounded_channel();
+    let mut starting = Box::pin(HostedTestRuntime::start_configured(
+        &settings,
+        &provider,
+        move |config| {
+            configure_persona(config, "Persona.Spec.agentSpec");
+            config.jev = Some(Arc::new(PersonaJevGate(entered)));
+        },
+    ));
+    let judgment = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+        tokio::select! {
+            judgment = judgments.recv() => judgment.expect("shipped persona prepares through native Jev"),
+            started = &mut starting => match started {
+                Ok(_) => panic!("shipped persona became ready before its judgment"),
+                Err(failure) => panic!("shipped persona failed before judgment: {failure}"),
+            },
+        }
+    }).await.unwrap();
+    assert_eq!(
+        judgment.packet["state"]["occasion"],
+        "Prepare a general orientation for this fresh conversation from available memory."
+    );
+    assert!(matches!(
+        requests.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    judgment
+        .answer
+        .send(original_choices(&judgment.packet))
+        .unwrap();
+    let host = starting.await.unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            let retained = host
+                .context
+                .forest
+                .initial_context_observation(host.context.actor.identity())
+                .unwrap();
+            assert_eq!(retained.state, InitialContextState::Published);
+            let result = retained.result.as_ref().unwrap();
+            assert_eq!(result.sections.len(), 1);
+            assert_eq!(
+                result.sections[0].source.as_deref(),
+                Some("Persona.Context.prepare")
+            );
+            for (name, expected) in [
+                ("persona", "persona-memory-original"),
+                ("human", "human-memory-original"),
+                ("curiosities", "curiosity-memory-original"),
+                ("extra", "extra-memory-original"),
+            ] {
+                assert_eq!(
+                    std::fs::read_to_string(
+                        host.context
+                            .config
+                            .workspace
+                            .join(format!(".exomonad/state/memory/{name}.md"))
+                    )
+                    .unwrap(),
+                    expected
+                );
+                assert!(result.sections[0].body.contains(expected));
+            }
+            host.input("canonical-persona-activation").await.unwrap();
+            let mut pending = VecDeque::new();
+            let first = next_hosted_script_round(
+                &mut requests,
+                &mut pending,
+                &harness::model::AgentPath("/root".into()),
+            )
+            .await;
+            assert_eq!(
+                user_texts(&first.request),
+                [result.rendered.as_str(), "canonical-persona-activation"]
+            );
+            assert!(matches!(
+                judgments.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            first.finish();
+        })
+    })
+    .await;
 }

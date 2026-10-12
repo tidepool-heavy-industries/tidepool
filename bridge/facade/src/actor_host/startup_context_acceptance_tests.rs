@@ -464,3 +464,130 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
     })
     .await;
 }
+
+async fn startup_refusal(cancel: bool) {
+    let files = tempfile::tempdir().unwrap();
+    let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
+    repository
+        .writer()
+        .commit_file("README.md", "source\n", "seed")
+        .unwrap();
+    let workspace = repository.path().to_owned();
+    let run = files.path().join("refused-startup-run");
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let (entered, mut judgments) = mpsc::unbounded_channel();
+    let (assembly, mut assembled) = oneshot::channel();
+    let mut starting = Box::pin(HostedTestRuntime::start_observing_initialization(
+        &settings,
+        &provider,
+        move |config| {
+            config.workspace = workspace;
+            config.run_directory =
+                tidepool_atomic_write::DirectoryAnchor::open_existing(run.parent().unwrap())
+                    .unwrap()
+                    .child(run.file_name().unwrap())
+                    .unwrap();
+            config.root_binding_path = run.join("root-binding.json");
+            configure_startup(config, "agentSpec", "interrupted-startup-memory");
+            config.jev = Some(Arc::new(StartupJevGate(entered)));
+        },
+        assembly,
+    ));
+    let held = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+        tokio::select! {
+            judgment = judgments.recv() => judgment.expect("startup reaches real effect dispatch"),
+            result = &mut starting => match result {
+                Ok(_) => panic!("startup bypassed held judgment"),
+                Err(failure) => panic!("startup failed before controlled effect: {failure}"),
+            },
+        }
+    })
+    .await
+    .unwrap();
+    let context = assembled.try_recv().unwrap();
+    let identity = context.actor.identity();
+    let before = context
+        .forest
+        .initial_context_observation(identity)
+        .unwrap();
+    assert_eq!(before.state, InitialContextState::Preparing);
+    assert!(context.binding(identity).unwrap().conversation().is_none());
+    assert_eq!(
+        std::fs::read_to_string(
+            context
+                .config
+                .workspace
+                .join(".exomonad/state/startup-witness.txt")
+        )
+        .unwrap(),
+        before.identity.as_ref().unwrap().operation.as_str()
+    );
+    assert!(matches!(
+        requests.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    if cancel {
+        let cleanup = tokio::time::timeout(
+            COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+            context
+                .actor
+                .shutdown_with_cleanup(exomonad_actor::ActorTerminal::new(
+                    exomonad_actor::ActorExitKind::Cancelled,
+                    "cancel held startup",
+                )),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            cleanup.terminal.kind,
+            exomonad_actor::ActorExitKind::Cancelled
+        );
+    } else {
+        // Dropping the controlled backend answer makes the real interpreter fail.
+        drop(held.answer);
+    }
+    let failure = match tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, starting)
+        .await
+        .unwrap()
+    {
+        Ok(host) => {
+            host.stop().await.unwrap();
+            panic!("failed startup became ready");
+        }
+        Err(failure) => failure,
+    };
+    assert!(failure.cleanup_confirmed(), "{failure}");
+    let journal = exomonad_actor::ActorRecoveryJournal::open_existing(
+        &context.config.run_directory,
+        "actor-lifecycle.v2.jsonl",
+    )
+    .unwrap();
+    let after = journal.initial_context(identity).unwrap().unwrap();
+    if cancel {
+        assert_eq!(after.state, InitialContextState::Cancelled);
+    } else {
+        assert!(matches!(after.state, InitialContextState::Failed { .. }));
+    }
+    assert_eq!(after.identity, before.identity);
+    assert!(after.result.is_none());
+    assert!(after.publication.is_none());
+    assert!(context
+        .binding(identity)
+        .is_none_or(|binding| binding.conversation().is_none()));
+    assert!(matches!(
+        requests.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_startup_effect_refuses_readiness_and_confirms_cleanup() {
+    startup_refusal(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_startup_effect_refuses_readiness_and_confirms_cleanup() {
+    startup_refusal(true).await;
+}
