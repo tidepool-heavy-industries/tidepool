@@ -870,6 +870,14 @@ impl InvocationWork {
         kernel: &KernelContext,
         children: &[ActorRef],
     ) {
+        {
+            let mut state = self.state.lock();
+            for &actor in children {
+                if !state.unresolved_workers.contains(&actor) {
+                    state.unresolved_workers.push(actor);
+                }
+            }
+        }
         for &actor in children {
             let resolved = kernel.resolve(actor).await;
             let mut state = self.state.lock();
