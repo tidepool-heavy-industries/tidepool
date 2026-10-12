@@ -44,7 +44,7 @@ data RouteChoice effects = RouteChoice
 
 type RoutePacket effects = J.Packet
   ("route" J.::= J.Choice ("routes" J.::* RouteChoice effects))
-type RouteResponse effects = J.Response (RoutePacket effects J.Answers)
+type RouteResponse effects = RoutePacket effects J.Answers
 
 -- | These closures capture the original subject. Their forms are built and
 -- their effects run only when a caller sequences the selected continuation.
@@ -87,34 +87,31 @@ humanRouteForm subject rows =
 -- | One explicit request. The original typed response remains available for
 -- inspection and any number of pure policy judgments by later notebook cells.
 observeRoutes :: Member Jev effects => Text -> NonEmpty (RouteChoice effects)
-  -> Eff effects (Either (J.JevError JevCallError) (RouteResponse effects))
-observeRoutes criteria rows =
-  case J.prepare J.jevLatest (J.rawState (object ["criteria" .= criteria]))
-      (#route J.:= routeQuestion rows) of
-    Left failure -> pure (Left (J.Prepare failure))
-    Right prepared -> J.executePrepared prepared
+  -> Eff effects (J.Evaluation (RouteResponse effects))
+observeRoutes criteria rows = J.runQuery
+  (J.packet (J.rawState (object ["criteria" .= criteria])) (#route J.:= routeQuestion rows))
 
 -- | Projects the selected original row without executing its continuation.
 chooseRouteUnder :: J.Policy policy -> RouteResponse effects
   -> Either J.Doubt (RouteChoice effects)
 chooseRouteUnder policy response =
-  fmap J.settledValue (J.takenUnder policy (J.answers response).route)
+  fmap J.settledValue (J.takenUnder policy response.route)
 
 -- | Both judgments and the response display are pure reads of one response.
 -- Projecting keys deliberately leaves captured actions opaque and unexecuted.
-routeResponseView :: RouteResponse effects -> V.View
+routeResponseView :: J.Evaluation (RouteResponse effects) -> V.View
 routeResponseView response = V.column
   [ V.text "Retained delivery judgment"
   , V.inspect response
   , V.text "Careful policy"
-  , V.inspect (fmap semanticKey (chooseRouteUnder J.careful response))
+  , V.inspect (fmap (fmap semanticKey . chooseRouteUnder J.careful) (J.result response))
   , V.text "Strict policy"
-  , V.inspect (fmap semanticKey (chooseRouteUnder J.strict response))
+  , V.inspect (fmap (fmap semanticKey . chooseRouteUnder J.strict) (J.result response))
   ]
 
 data SelectionOrigin
   = JevSelected
-  | HumanAfterInferenceFailure (J.JevError JevCallError)
+  | HumanAfterInferenceFailure (J.EvaluationError JevCallError)
   | HumanAfterPolicyDoubt J.Doubt
   deriving (Show)
 data QuestionStage = SubjectQuestion | RouteQuestion | FollowupQuestion
@@ -131,7 +128,7 @@ data DialogueOutcome
 -- payloads, rather than a reconstructed summary of the selected route.
 data DialogueResult effects = DialogueResult
   { outcome :: DialogueOutcome
-  , retainedResponse :: Maybe (RouteResponse effects)
+  , retainedResponse :: Maybe (J.Evaluation (RouteResponse effects))
   }
 
 dialogue :: (Member AskUser effects, Member Jev effects, Member Console effects)
@@ -166,13 +163,13 @@ dialogueUnder policy = do
               F.Dismissed -> pure (DialogueResult (SelectionDismissed origin) retained)
               F.FormUnavailable cause -> pure (DialogueResult (FormFailed RouteQuestion (Just origin) cause) retained)
       inferred <- observeRoutes subject rows
-      case inferred of
-        Left failure -> askHuman Nothing (HumanAfterInferenceFailure failure)
+      case J.result inferred of
+        Left failure -> askHuman (Just inferred) (HumanAfterInferenceFailure failure)
         Right response -> do
-          _ <- display (routeResponseView response)
+          _ <- display (routeResponseView inferred)
           case chooseRouteUnder policy response of
-            Left doubt -> askHuman (Just response) (HumanAfterPolicyDoubt doubt)
-            Right selected -> finish (Just response) JevSelected selected
+            Left doubt -> askHuman (Just inferred) (HumanAfterPolicyDoubt doubt)
+            Right selected -> finish (Just inferred) JevSelected selected
 
 routeName :: Route -> Text
 routeName Express = "Express delivery"

@@ -84,7 +84,7 @@ fallbackContinues :: IO ()
 fallbackContinues = do
   let (outcome,final) = runDialogue [submitted "subject" "Inspect the change",submitted "fallback" "o0",submitted "followup" "Keep the original action"]
   case Workflow.outcome outcome of
-    Workflow.Finished (Workflow.HumanAfterInferenceFailure (J.Transport (JevCircuitOpen 503 987)))
+    Workflow.Finished (Workflow.HumanAfterInferenceFailure (J.CallFailed (J.Transport (JevCircuitOpen 503 987))))
       (Workflow.Delivery Workflow.Express)
       (Workflow.DeliveryPrepared Workflow.Express "Inspect the change" "Keep the original action") -> pure ()
     actual -> error ("typed failure or selected original value lost: " ++ show actual)
@@ -96,13 +96,13 @@ fallbackContinues = do
   assertEqual "all mounted leases settled" [] (leases final)
   assertEqual "all supplied answers consumed" [] (answers final)
   case Workflow.retainedResponse outcome of
-    Nothing -> pure ()
-    Just _ -> error "transport failure acquired a response"
+    Nothing -> error "transport failure lost its attempted observation"
+    Just evaluation -> assertEqual "failed attempt retained" 1 (length (J.observations evaluation))
 fallbackDismissed :: IO ()
 fallbackDismissed = do
   let (outcome,final) = runDialogue [submitted "subject" "Inspect the change",FormDismissed]
   case Workflow.outcome outcome of
-    Workflow.SelectionDismissed (Workflow.HumanAfterInferenceFailure (J.Transport (JevCircuitOpen 503 987))) -> pure ()
+    Workflow.SelectionDismissed (Workflow.HumanAfterInferenceFailure (J.CallFailed (J.Transport (JevCircuitOpen 503 987)))) -> pure ()
     actual -> error (show actual)
   assertEqual "dismissal ends before selected action or another inference" [Opened,Awaited,Committed,Inferred,Opened,Awaited,Closed] (events final)
   assertEqual "dismissed lease closed" [] (leases final)
@@ -112,7 +112,7 @@ fallbackMissingCriteria = do
   let (result,final) = runDialogue
         [submitted "subject" "A delivery",submitted "fallback" "o2",submitted "criteria" "Tomorrow, price 8"]
   case Workflow.outcome result of
-    Workflow.Finished (Workflow.HumanAfterInferenceFailure (J.Transport (JevCircuitOpen 503 987)))
+    Workflow.Finished (Workflow.HumanAfterInferenceFailure (J.CallFailed (J.Transport (JevCircuitOpen 503 987))))
       Workflow.MissingDeliveryCriteria (Workflow.CriteriaSupplied "A delivery" "Tomorrow, price 8") -> pure ()
     actual -> error (show actual)
   assertEqual "one inference and one selected follow-up" 1 (length [() | Inferred <- events final])
@@ -123,7 +123,7 @@ followupDismissed :: IO ()
 followupDismissed = do
   let (result,final) = runDialogue [submitted "subject" "A delivery",submitted "fallback" "o1",FormDismissed]
   case Workflow.outcome result of
-    Workflow.ContinuationDismissed (Workflow.HumanAfterInferenceFailure (J.Transport (JevCircuitOpen 503 987)))
+    Workflow.ContinuationDismissed (Workflow.HumanAfterInferenceFailure (J.CallFailed (J.Transport (JevCircuitOpen 503 987))))
       (Workflow.Delivery Workflow.Economy) -> pure ()
     actual -> error (show actual)
   assertEqual "the selected follow-up closes once" 1 (length [() | Closed <- events final])

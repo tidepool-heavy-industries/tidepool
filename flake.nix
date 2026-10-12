@@ -23,7 +23,7 @@
     # names the directory inside it that holds modules, and Exomonad captures
     # them into a run as ordinary source roots.
     jev-dsl = {
-      url = "github:inanna-malick/jev-dsl/2883fdc38cc7a64572e76ea43bd38e1df3a5e28b";
+      url = "github:inanna-malick/jev-dsl/38e8fe361b3437363e8cef7b684d4a9af7a526ef";
       flake = false;
     };
     # Browser assets must come from the exact harness source used by Cargo.
@@ -249,6 +249,8 @@
             tidepool-resume
             freer-simple
             lens
+            profunctors
+            selective
             errors
             cryptohash-sha256
             cborg
