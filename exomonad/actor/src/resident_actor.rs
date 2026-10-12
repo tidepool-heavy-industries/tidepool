@@ -14404,6 +14404,7 @@ fn workbench_response(
     cell_check: Option<&[tidepool_runtime::session::CellAnalysisItem]>,
 ) -> WorkbenchResponse {
     annotate_workbench_receipts(&mut items, cell_check);
+    group_cell_warning_presentations(&mut items);
     let essential = items.iter().rposition(|item| {
         matches!(
             item.status,
@@ -14532,6 +14533,41 @@ fn workbench_response(
         items,
         next_index,
         total,
+    }
+}
+
+/// Compiler warning evidence stays with its issuer. Receipt warnings are a
+/// presentation of that evidence; show identical full text once per cell and
+/// retain the indices of every item which reported it. Item diagnostics and
+/// outputs, including rejected-source errors, are unchanged.
+fn group_cell_warning_presentations(items: &mut [WorkbenchItemReceipt]) {
+    let mut groups: Vec<(String, usize, usize, Vec<usize>)> = Vec::new();
+    for (position, item) in items.iter_mut().enumerate() {
+        let mut warnings = Vec::new();
+        for warning in std::mem::take(&mut item.warnings) {
+            if let Some((_, _, _, indices)) =
+                groups.iter_mut().find(|(text, _, _, _)| text == &warning)
+            {
+                indices.push(item.index);
+            } else {
+                groups.push((warning.clone(), position, warnings.len(), vec![item.index]));
+                warnings.push(warning);
+            }
+        }
+        item.warnings = warnings;
+    }
+    for (_, position, warning, indices) in groups {
+        if indices.len() > 1 {
+            let count = indices.len();
+            let indices = indices
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            items[position].warnings[warning].push_str(&format!(
+                "\n(reported {count} times by cell items {indices})"
+            ));
+        }
     }
 }
 
@@ -14689,6 +14725,45 @@ async fn tracked_stopped_projection(
 
 #[cfg(test)]
 mod tests {
+    proptest::proptest! {
+        #[test]
+        fn cell_warning_groups_keep_attribution_errors_and_cell_independence(copies in 2usize..8) {
+            use super::{WorkbenchItemReceipt, WorkbenchItemStatus};
+            let diagnostic = tidepool_toolchain::diag::StructuredDiagnostic {
+                severity: tidepool_toolchain::diag::DiagnosticLevel::Error,
+                location: tidepool_toolchain::diag::DiagnosticLocation::Unlocated,
+                message: "authored error λ".into(),
+            };
+            let original: Vec<_> = (0..copies).map(|position| WorkbenchItemReceipt {
+                diagnostics: vec![diagnostic.clone()],
+                index: 1 + position * 3,
+                kind: None, span: None, source_items: Vec::new(),
+                status: WorkbenchItemStatus::Rejected,
+                output: "authored error λ".into(), value: None,
+                warnings: vec!["scaffold warning λ".into(), "different warning é".into()],
+                installed_bindings: Vec::new(), operations: Vec::new(),
+                terminal_transfer: None, failure_layer: None,
+            }).collect();
+            let mut first_cell = original.clone();
+            super::group_cell_warning_presentations(&mut first_cell);
+            proptest::prop_assert_eq!(first_cell[0].warnings.len(), 2);
+            proptest::prop_assert!(first_cell[1..].iter().all(|item| item.warnings.is_empty()));
+            for (warning, text) in first_cell[0].warnings.iter().zip(["scaffold warning λ", "different warning é"]) {
+                proptest::prop_assert!(warning.starts_with(text));
+                proptest::prop_assert!(warning.contains(&format!("reported {copies} times")), "warning count must survive");
+                let indices = original.iter().map(|item| item.index.to_string()).collect::<Vec<_>>().join(", ");
+                proptest::prop_assert!(warning.contains(&format!("cell items {indices}")), "item attribution must survive");
+            }
+            for (before, after) in original.iter().zip(&first_cell) {
+                proptest::prop_assert_eq!(&before.diagnostics, &after.diagnostics);
+                proptest::prop_assert_eq!(&before.output, &after.output);
+                proptest::prop_assert_eq!(&before.status, &after.status);
+            }
+            let mut second_cell = original;
+            super::group_cell_warning_presentations(&mut second_cell);
+            proptest::prop_assert_eq!(first_cell, second_cell);
+        }
+    }
     use super::{
         checkpoint_capture_delivered, disposition_for_non_command_failure,
         failed_checkpoint_cleanup_response, lookup_response, settlement_refusal,
