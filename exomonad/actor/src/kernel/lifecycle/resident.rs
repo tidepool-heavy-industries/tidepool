@@ -214,6 +214,7 @@ enum Pending {
 pub(super) enum Completion {
     OwnerObservation(Result<(), String>),
     Initial(Result<InitialTransition, String>),
+    InitialRefused(String),
     Owner(Result<DurablePublicOwnerPublication, String>),
     Release(Result<(), String>),
     Retirement(Result<(), String>),
@@ -730,8 +731,10 @@ fn complete(
         (
             Pending::OwnerObservation { .. },
             Completion::OwnerObservation(_)
-        ) | (Pending::Initial(_), Completion::Initial(_))
-            | (Pending::Owner(_), Completion::Owner(_))
+        ) | (
+            Pending::Initial(_),
+            Completion::Initial(_) | Completion::InitialRefused(_)
+        ) | (Pending::Owner(_), Completion::Owner(_))
             | (Pending::Release(_), Completion::Release(_))
             | (Pending::Retirement, Completion::Retirement(_))
     );
@@ -749,6 +752,11 @@ fn complete(
             };
             state.publish();
             let _ = reply.send(result);
+        }
+        (Pending::Initial(reply), Completion::InitialRefused(error)) => {
+            // This exact correlated operation established refusal before mutation.
+            // It cannot turn known nonpublication into an uncertain durable effect.
+            let _ = reply.send(Err(error));
         }
         (Pending::Initial(reply), Completion::Initial(result)) => {
             if let Err(error) = &result {
@@ -1050,34 +1058,56 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
                 operation,
                 publication,
                 reply,
-            } => (
-                Pending::Initial(reply),
-                Box::pin(async move {
-                    let result = async {
-                        let observed = current.initial_context.as_ref().ok_or("initial context has not been admitted")?;
-                        if observed.identity.as_ref().is_none_or(|identity| identity.operation != operation) {
-                            return Err("initial context publication has another operation identity".into());
-                        }
+            } => {
+                let Some(observed) = current.initial_context.as_ref() else {
+                    let _ = reply.send(Err("initial context has not been admitted".into()));
+                    continue;
+                };
+                let Some(identity) = observed
+                    .identity
+                    .as_ref()
+                    .filter(|identity| identity.operation == operation)
+                else {
+                    let _ = reply.send(Err(
+                        "initial context publication has another operation identity".into(),
+                    ));
+                    continue;
+                };
+                let owner = identity.actor;
+                (
+                    Pending::Initial(reply),
+                    Box::pin(async move {
                         if let Some(journal) = &journal {
-                            if !journal.initial_context_publication_matches(current.context.actor, &operation, &publication.conversation)
-                                .await.map_err(|error| error.to_string())? {
-                                return Err("initial context publication has another conversation association".into());
+                            match journal.initial_context_publication_matches(current.context.actor, &operation, &publication.conversation).await {
+                                Ok(true) => {},
+                                Ok(false) => return Completion::InitialRefused("initial context publication has another conversation association".into()),
+                                Err(error) => return Completion::Initial(Err(error.to_string())),
                             }
                         }
-                        let event = InitialContextEvent::Publish { publication };
-                        let owner = observed.identity.as_ref().unwrap().actor;
-                        let observation = if let Some(journal) = journal {
-                            journal.record_initial_context(owner, event).await.map_err(|error| error.to_string())?
-                        } else {
-                            let mut next = current.initial_context;
-                            crate::initial_context::apply_event(&mut next, event).map_err(|error| error.to_string())?;
-                            next.unwrap()
-                        };
-                        Ok(InitialTransition { observation, admitted: true, execution: None })
-                    }.await;
-                    Completion::Initial(result)
-                }),
-            ),
+                        let result = async {
+                            let event = InitialContextEvent::Publish { publication };
+                            let observation = if let Some(journal) = journal {
+                                journal
+                                    .record_initial_context(owner, event)
+                                    .await
+                                    .map_err(|error| error.to_string())?
+                            } else {
+                                let mut next = current.initial_context;
+                                crate::initial_context::apply_event(&mut next, event)
+                                    .map_err(|error| error.to_string())?;
+                                next.unwrap()
+                            };
+                            Ok(InitialTransition {
+                                observation,
+                                admitted: true,
+                                execution: None,
+                            })
+                        }
+                        .await;
+                        Completion::Initial(result)
+                    }),
+                )
+            }
             Request::PublishOwner { predecessor, reply } => {
                 if let Some((predecessor, _)) = &predecessor {
                     if state
