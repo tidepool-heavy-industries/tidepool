@@ -402,11 +402,18 @@ impl LifecycleHandle {
         self.close_with(Some(fence), None).await
     }
 
-    pub(crate) async fn request_shutdown(
+    pub(crate) fn dispatch_shutdown(
         &self,
         terminal: ActorTerminal,
-    ) -> Result<(), KernelCallFailure> {
-        self.close_with(None, Some(terminal)).await
+    ) -> Result<tokio::sync::oneshot::Receiver<Result<(), KernelCallFailure>>, KernelCallFailure>
+    {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.send(LifecycleCommand::Close {
+            fence: None,
+            terminal: Some(terminal),
+            reply: Some(send.into()),
+        })?;
+        Ok(receive)
     }
 
     async fn close_with(
@@ -1226,4 +1233,32 @@ fn launch_refuse(
             let _ = owner.cast(LifecycleCommand::NativeCompleted { sequence, outcome });
         }),
     );
+}
+
+impl std::fmt::Debug for LifecycleHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LifecycleHandle")
+            .field("identity", &self.identity)
+            .field("phase", &self.observations.borrow().phase)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for ActorAdmissionLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ActorAdmissionLease")
+            .field("sequence", &self.sequence)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for NativeProviderTurnLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeProviderTurnLease")
+            .field("sequence", &self.sequence)
+            .finish_non_exhaustive()
+    }
 }

@@ -852,8 +852,16 @@ impl RetirementBatch {
             .map(|(actor, terminal)| (actor.terminal.clone(), terminal.clone()))
             .collect::<Vec<_>>();
         RetainedActorExit::request_shutdown_batch(&requests, || {});
-        for (actor, terminal) in &actors {
-            let _ = actor.lifecycle.request_shutdown(terminal.clone()).await;
+        let acknowledgements = actors
+            .iter()
+            .filter_map(|(actor, terminal)| {
+                actor.lifecycle.dispatch_shutdown(terminal.clone()).ok()
+            })
+            .collect::<Vec<_>>();
+        // Dispatch the captured set before awaiting a member's close fence.
+        // Cleanup starts only after every reachable owner has acknowledged.
+        for acknowledgement in acknowledgements {
+            let _ = acknowledgement.await;
         }
         Self { actors }
     }
