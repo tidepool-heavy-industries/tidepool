@@ -165,6 +165,24 @@ class BuckProfileConfiguration(unittest.TestCase):
                     self.assertFalse(any("debuginfo" in flag for flag in toolchain_flags()))
                     self.assertEqual(emitted["CARGO_PKG_NAME"], package)
 
+    def test_plain_maintained_harness_exporter_preserves_rule_and_profile(self):
+        for profile, expected in (("fast-dev", "0"), ("debug", "0"), ("production", "2")):
+            namespace, calls = resolve(profile)
+            namespace["tidepool_rust_binary"](
+                name="exporter", package_name="harness", package_dir="web", version="0.1.0",
+                compiler_policy="harness", rustc_flags=["--cfg=retained"],
+            )
+            self.assertEqual(calls[0][0], "binary")
+            self.assertEqual(calls[0][1]["rustc_flags"], ["-Copt-level=" + expected, "--cfg=retained"])
+            self.assertNotIn("--cap-lints=allow", calls[0][1]["rustc_flags"])
+        namespace, calls = resolve("fast-dev")
+        with self.assertRaisesRegex(ValueError, "unknown generated Rust policy"):
+            namespace["tidepool_rust_binary"](
+                name="exporter", package_name="harness", package_dir="web", version="0.1.0",
+                compiler_policy="unknown",
+            )
+        self.assertEqual(calls, [])
+
     def test_shared_libtest_binary_remains_unoptimized_in_fast_dev(self):
         namespace, calls = resolve("fast-dev")
         namespace["tidepool_rust_binary"](

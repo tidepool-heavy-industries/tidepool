@@ -1,0 +1,5 @@
+# Maintained Harness follows its O0 fast/debug and O2 production policy.
+# Reindeer forwards this explicit classification to the profile wrapper, which
+# consumes it before invoking Cargo's compiler rule.
+[env]
+TIDEPOOL_NATIVE_RUST_POLICY = "harness"

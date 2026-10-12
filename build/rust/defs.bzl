@@ -1,24 +1,24 @@
 load("//build/rust:executable-companions.bzl", "executable_companions")
 load("@prelude//:rules.bzl", "rust_binary", "rust_library", "rust_test", "sh_test")
-load("//build:native_profile.bzl", "rust_optimization_flags", "rust_optimization_level")
+load("//build:native_profile.bzl", "rust_optimization_flags", "rust_optimization_level", "generated_rust_optimization_level")
 load(":test_source_participation.bzl", "test_source_requirements")
 
-def _common(name, package_name, package_dir, version, env, rustc_flags, is_library = False):
+def _common(name, package_name, package_dir, version, env, rustc_flags, is_library = False, compiler_policy = None):
     manifest_env = {
         "CARGO_MANIFEST_DIR": package_dir,
         "CARGO_PKG_NAME": package_name,
         "CARGO_PKG_VERSION": version,
     }
     manifest_env.update(env)
-    opt = rust_optimization_level(package_name, is_library)
+    opt = rust_optimization_level(package_name, is_library) if compiler_policy == None else generated_rust_optimization_level(compiler_policy)
     return (manifest_env, rust_optimization_flags(opt, rustc_flags))
 
 def tidepool_rust_library(name, package_name, package_dir, version, env = {}, rustc_flags = [], **kwargs):
     compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags, is_library = True)
     rust_library(name = name, env = compiler_env, rustc_flags = flags, **kwargs)
 
-def tidepool_rust_binary(name, package_name, package_dir, version, env = {}, rustc_flags = [], required_test_modules = [], test_fixtures = [], **kwargs):
-    compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags)
+def tidepool_rust_binary(name, package_name, package_dir, version, env = {}, rustc_flags = [], required_test_modules = [], test_fixtures = [], compiler_policy = None, **kwargs):
+    compiler_env, flags = _common(name, package_name, package_dir, version, env, rustc_flags, compiler_policy = compiler_policy)
     if "--test" in rustc_flags:
         compiler_env = _test_regression_environment(compiler_env, package_dir, name)
         compiler_env = _test_source_environment(compiler_env, name, package_name, package_dir, required_test_modules, test_fixtures)

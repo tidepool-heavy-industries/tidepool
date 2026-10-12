@@ -1,5 +1,12 @@
-load("@prelude//:rules.bzl", "genrule", "rust_binary")
+load("@prelude//:rules.bzl", "genrule", "filegroup")
+load("//build/rust:defs.bzl", "tidepool_rust_binary")
 load("@prelude//rust:sources.bzl", "rust_filegroup")
+
+filegroup(
+    name = "projection_test_sources",
+    srcs = {"web/prepare-harness-browser-inputs.py": "prepare-harness-browser-inputs.py"},
+    visibility = ["PUBLIC"],
+)
 
 # Project the npm manifests into their own content-addressed artifact. Changes
 # to other harness or web sources rerun this cheap projection without changing
@@ -77,8 +84,12 @@ rust_filegroup(
     mapped_srcs = {":harness_browser_contract_entry": "browser_contract_export.rs"},
 )
 
-rust_binary(
+tidepool_rust_binary(
     name = "harness_browser_contract_export",
+    package_name = "harness",
+    package_dir = "web",
+    version = "0.1.0",
+    compiler_policy = "harness",
     crate = "browser_contract_export",
     crate_root = "browser_contract_export.rs",
     edition = "2024",
