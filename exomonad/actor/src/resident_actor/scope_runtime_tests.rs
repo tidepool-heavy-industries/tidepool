@@ -258,7 +258,7 @@ struct ScopeFixture {
 }
 
 impl ScopeFixture {
-    fn new(case: u64, backends: Vec<Arc<ControlledBackend>>) -> Self {
+    async fn new(case: u64, backends: Vec<Arc<ControlledBackend>>) -> Self {
         eval_harness::require_extract();
         let declarations = [
             tidepool_mcp::console_decl(),
@@ -339,7 +339,9 @@ impl ScopeFixture {
             machine,
             Some(workspace.clone()),
             crate::Incarnation::FIRST,
-        );
+        )
+        .await
+        .expect("actual run-control owner");
         let request_gates = Arc::new(RequestGates::new());
         // Pair the first command with the borrowed request: activation precedes
         // execution, and native acknowledgement precedes terminal cleanup.
@@ -681,6 +683,8 @@ impl ScopeFixture {
             self.forest
                 .directory
                 .resolve(target)
+                .await
+                .expect("directory actor observation")
                 .unwrap()
                 .terminal()
                 .get()
@@ -876,7 +880,7 @@ fn assert_committed(reply: crate::KernelWorkbenchReply) {
 async fn public_scope_owns_resources_preserves_retention_and_retries_cleanup_without_replay() {
     let normal = ControlledBackend::new(false);
     let uncertain = ControlledBackend::new(true);
-    let mut fixture = ScopeFixture::new(731, vec![normal.clone(), uncertain.clone()]);
+    let mut fixture = ScopeFixture::new(731, vec![normal.clone(), uncertain.clone()]).await;
     let parent = fixture.parent().await;
     let result = fixture
         .execute(&parent, include_str!("scope_runtime_normal.hs"), None, None)
@@ -949,7 +953,7 @@ async fn public_scope_owns_resources_preserves_retention_and_retries_cleanup_wit
 #[tokio::test]
 async fn public_scope_body_failure_closes_real_resources_with_independent_cleanup_result() {
     let backend = ControlledBackend::new(false);
-    let mut fixture = ScopeFixture::new(732, vec![backend.clone()]);
+    let mut fixture = ScopeFixture::new(732, vec![backend.clone()]).await;
     let parent = fixture.parent().await;
     let result = fixture
         .execute(
@@ -984,7 +988,7 @@ async fn public_scope_body_failure_closes_real_resources_with_independent_cleanu
 #[tokio::test]
 async fn public_scope_outer_cancellation_retains_real_cleanup_without_resuming_body() {
     let backend = ControlledBackend::new(false);
-    let mut fixture = ScopeFixture::new(733, vec![backend.clone()]);
+    let mut fixture = ScopeFixture::new(733, vec![backend.clone()]).await;
     let parent = fixture.parent().await;
     let control = crate::WorkbenchExecutionControl::untracked();
     let result = fixture
@@ -1032,7 +1036,7 @@ async fn public_scope_outer_cancellation_retains_real_cleanup_without_resuming_b
 
 #[tokio::test]
 async fn native_queued_cancellation_preserves_receiver_and_accepts_later_request() {
-    let mut fixture = ScopeFixture::new(734, Vec::new());
+    let mut fixture = ScopeFixture::new(734, Vec::new()).await;
     let parent = fixture.parent().await;
     assert_committed(
         fixture

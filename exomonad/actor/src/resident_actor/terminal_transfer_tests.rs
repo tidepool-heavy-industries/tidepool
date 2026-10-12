@@ -53,7 +53,7 @@ async fn private_three_item_cell_refusal_keeps_receipts_and_actor_live() {
             machine,
             None,
             crate::Incarnation::FIRST,
-        );
+        ).await.expect("actual run-control owner");
         let actor = forest
             .new_workbench(
                 "private-publication-refusal".into(),

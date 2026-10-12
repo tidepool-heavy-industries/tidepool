@@ -157,7 +157,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(case: u64, scenario: Scenario) -> Self {
+    async fn new(case: u64, scenario: Scenario) -> Self {
         eval_harness::require_extract();
         let mut declarations = vec![tidepool_mcp::console_decl(), tidepool_mcp::askuser_decl()];
         let mut effect_keys = vec![
@@ -189,7 +189,9 @@ impl Fixture {
             machine,
             None,
             crate::Incarnation::FIRST,
-        );
+        )
+        .await
+        .expect("actual run-control owner");
         let host = Host::new(scenario);
         Self {
             _directory: directory,
@@ -322,7 +324,7 @@ fn assert_true(reply: crate::KernelWorkbenchReply) {
 
 #[tokio::test]
 async fn compiled_concurrent_forms_reverse_settlement_preserves_original_heap_closures() {
-    let fixture = Fixture::new(745, Scenario::Reverse);
+    let fixture = Fixture::new(745, Scenario::Reverse).await;
     let actor = fixture.parent().await;
     assert_true(
         fixture
@@ -337,7 +339,7 @@ async fn compiled_concurrent_forms_reverse_settlement_preserves_original_heap_cl
 
 #[tokio::test]
 async fn compiled_green_cancel_closes_only_sibling_and_preserves_selected_function() {
-    let fixture = Fixture::new(746, Scenario::CancelSibling);
+    let fixture = Fixture::new(746, Scenario::CancelSibling).await;
     let actor = fixture.parent().await;
     assert_true(
         fixture
@@ -355,7 +357,7 @@ async fn compiled_green_cancel_closes_only_sibling_and_preserves_selected_functi
 
 #[tokio::test]
 async fn compiled_green_parent_cancellation_releases_both_pending_native_forms() {
-    let fixture = Fixture::new(747, Scenario::CancelParent);
+    let fixture = Fixture::new(747, Scenario::CancelParent).await;
     let actor = fixture.parent().await;
     let control = crate::WorkbenchExecutionControl::untracked();
     let result = fixture
@@ -386,7 +388,7 @@ async fn compiled_green_parent_cancellation_releases_both_pending_native_forms()
 
 #[tokio::test]
 async fn compiled_single_form_uses_original_non_green_frontier() {
-    let fixture = Fixture::new(748, Scenario::Single);
+    let fixture = Fixture::new(748, Scenario::Single).await;
     let actor = fixture.parent().await;
     assert_true(
         fixture
@@ -400,7 +402,7 @@ async fn compiled_single_form_uses_original_non_green_frontier() {
 
 #[tokio::test]
 async fn compiled_green_evaluation_failure_is_not_success_or_authored_cancellation() {
-    let fixture = Fixture::new(749, Scenario::EvaluationFailure);
+    let fixture = Fixture::new(749, Scenario::EvaluationFailure).await;
     let actor = fixture.parent().await;
     let control = crate::WorkbenchExecutionControl::untracked();
     let result = fixture
@@ -436,7 +438,7 @@ async fn compiled_green_evaluation_failure_is_not_success_or_authored_cancellati
 
 #[tokio::test]
 async fn compiled_expression_single_form_runs_without_prior_declaration_publication() {
-    let fixture = Fixture::new(750, Scenario::Single);
+    let fixture = Fixture::new(750, Scenario::Single).await;
     let actor = fixture.bare_parent().await;
     assert_true(
         fixture
@@ -454,7 +456,7 @@ async fn compiled_expression_single_form_runs_without_prior_declaration_publicat
 
 #[tokio::test]
 async fn compiled_expression_concurrent_forms_reverse_settlement_preserves_heap_closures() {
-    let fixture = Fixture::new(751, Scenario::Reverse);
+    let fixture = Fixture::new(751, Scenario::Reverse).await;
     let actor = fixture.bare_parent().await;
     assert_true(
         fixture
@@ -477,7 +479,7 @@ async fn compiled_expression_concurrent_forms_reverse_settlement_preserves_heap_
 
 #[tokio::test]
 async fn compiled_green_completion_preserves_issued_token_and_refuses_zero() {
-    let fixture = Fixture::new(752, Scenario::Reverse);
+    let fixture = Fixture::new(752, Scenario::Reverse).await;
     let actor = fixture.parent().await;
     assert_true(fixture.execute(&actor, "_ <- do\n  thread <- Async.async (pure ())\n  Async.wait thread\n  say (tshow True)", None).await);
     let result = fixture
