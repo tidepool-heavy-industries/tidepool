@@ -309,6 +309,16 @@ struct ReservationRecord {
     reply: Option<oneshot::Sender<Result<ActorReservation, DirectoryError>>>,
 }
 
+impl ReservationRecord {
+    fn preparation_pending(&self) -> bool {
+        matches!(
+            self.phase,
+            ReservationPhase::Creating | ReservationPhase::Abandoning
+        ) || (matches!(self.purpose, ReservationPurpose::ExistingInput)
+            && matches!(self.phase, ReservationPhase::Ready))
+    }
+}
+
 enum ResourceRetirement {
     Available,
     Requested,
@@ -409,12 +419,10 @@ impl RunState {
     fn start_resource_retirement(&mut self) {
         if !self.worker_transfers.is_empty()
             || !self.resource_transfers.is_empty()
-            || self.reservations.values().any(|record| {
-                matches!(
-                    record.phase,
-                    ReservationPhase::Creating | ReservationPhase::Abandoning
-                )
-            })
+            || self
+                .reservations
+                .values()
+                .any(|record| record.preparation_pending())
         {
             return;
         }
@@ -483,12 +491,10 @@ impl RunState {
     fn settle_preparation_waiters(&mut self) {
         if !self.worker_transfers.is_empty()
             || !self.resource_transfers.is_empty()
-            || self.reservations.values().any(|record| {
-                matches!(
-                    record.phase,
-                    ReservationPhase::Creating | ReservationPhase::Abandoning
-                )
-            })
+            || self
+                .reservations
+                .values()
+                .any(|record| record.preparation_pending())
         {
             return;
         }
@@ -894,12 +900,10 @@ impl Actor for RunControl {
                             PreparationPhase::Settled(crate::CleanupComponentOutcome::Confirmed)
                         )
                     })
-                    && state.reservations.values().all(|record| {
-                        !matches!(
-                            record.phase,
-                            ReservationPhase::Creating | ReservationPhase::Abandoning
-                        )
-                    })
+                    && state
+                        .reservations
+                        .values()
+                        .all(|record| !record.preparation_pending())
                     && state.worker_transfers.is_empty()
                     && state.resource_transfers.is_empty()
                     && state
