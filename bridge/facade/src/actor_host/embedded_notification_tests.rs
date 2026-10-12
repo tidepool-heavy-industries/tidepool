@@ -292,9 +292,8 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         ReceiptLookup::Retained(ref evidence) if evidence.phase == DeliveryPhase::Accepted
     ));
 
-    let notification_positions = |request: &ResponsesRequest, text: &str| {
-        request
-            .input
+    let notification_positions = |items: &[Item], text: &str| {
+        items
             .iter()
             .enumerate()
             .filter_map(|(position, item)| {
@@ -312,8 +311,8 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
             .unwrap()
             .unwrap();
     assert_eq!(round, 2);
-    let first_positions = notification_positions(&request, "first queued row");
-    let second_positions = notification_positions(&request, "second queued row");
+    let first_positions = notification_positions(&request.input, "first queued row");
+    let second_positions = notification_positions(&request.input, "second queued row");
     assert_eq!(
         first_positions.len(),
         1,
@@ -341,8 +340,8 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
             .unwrap()
             .unwrap();
     assert_eq!(round, 3);
-    let first_positions = notification_positions(&request, "first queued row");
-    let second_positions = notification_positions(&request, "second queued row");
+    let first_positions = notification_positions(&request.input, "first queued row");
+    let second_positions = notification_positions(&request.input, "second queued row");
     assert_eq!(
         first_positions.len(),
         1,
@@ -357,23 +356,47 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         first_positions[0] < second_positions[0],
         "queued input order must remain FIFO"
     );
+    let store = host.runtime.store();
+    let assert_inclusion = |operation: &str, issued: &harness::model::RequestId, text: &str| {
+        let Some(harness::embedding::InputObservation::Included(included)) = conversation
+            .input_observation_by_operation(operation)
+            .unwrap()
+        else {
+            panic!("notification operation must have retained inclusion");
+        };
+        assert_eq!(
+            notification_positions(&store.items(&included).unwrap(), text).len(),
+            1,
+            "issuing attachment head must contain the notification exactly once"
+        );
+        let mut cursor = issued.clone();
+        let mut visited = std::collections::HashSet::new();
+        while cursor != included {
+            assert!(
+                visited.insert(cursor.clone()),
+                "request lineage must not cycle"
+            );
+            cursor = store
+                .request(&cursor)
+                .unwrap()
+                .expect("issued request lineage must remain retained")
+                .parent
+                .expect("notification attachment head must precede its provider request");
+        }
+        included
+    };
     let first_operation_id =
         embedded_notification_operation_id(&binding.inbox_key, first.sequence, sender, actor);
-    assert!(matches!(
-        conversation.input_observation_by_operation(&first_operation_id).unwrap(),
-        Some(harness::embedding::InputObservation::Included(ref included)) if included == &second_request
-    ));
-    let second_included_request = if second_in_round_two {
+    assert_inclusion(&first_operation_id, &second_request, "first queued row");
+    let second_issued_request = if second_in_round_two {
         second_request
     } else {
         third_request
     };
     let operation_id =
         embedded_notification_operation_id(&binding.inbox_key, second.sequence, sender, actor);
-    assert!(matches!(
-        conversation.input_observation_by_operation(&operation_id).unwrap(),
-        Some(harness::embedding::InputObservation::Included(ref included)) if included == &second_included_request
-    ));
+    let second_included_head =
+        assert_inclusion(&operation_id, &second_issued_request, "second queued row");
     host.stop()
         .await
         .expect("production notification host acknowledges cleanup");
@@ -390,7 +413,7 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         observer
             .input_observation_by_operation(&operation_id)
             .unwrap(),
-        Some(harness::embedding::InputObservation::Included(_))
+        Some(harness::embedding::InputObservation::Included(ref included)) if included == &second_included_head
     ));
     let mut notifications = JoinSet::new();
     schedule_embedded_notification_drain(actor, binding.clone(), &mut notifications);
