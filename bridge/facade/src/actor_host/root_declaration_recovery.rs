@@ -11,16 +11,6 @@ use tidepool_runtime::session::{
     RunRecoveryStore, SessionError, SessionLib,
 };
 
-struct RootDeclarationRunAuthority {
-    lease: Arc<HostIncarnationLease>,
-}
-
-impl RecoveryRunAuthority for RootDeclarationRunAuthority {
-    fn owns_run(&self, run_root: &Path) -> std::io::Result<bool> {
-        self.lease.owns_run(run_root)
-    }
-}
-
 struct ChildDeclarationRunAuthority {
     lease: Arc<HostIncarnationLease>,
     host_root: PathBuf,
@@ -123,7 +113,7 @@ pub(super) fn attach(
         Arc::clone(&store),
         RecoveryDomainId::Root,
         library.include_dir().to_path_buf(),
-        Arc::new(RootDeclarationRunAuthority { lease }),
+        lease,
         settlement,
     )?;
     Ok(store)

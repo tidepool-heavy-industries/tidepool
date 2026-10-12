@@ -155,7 +155,7 @@ pub(super) struct EmbeddedApplicationRecovery {
     pub(super) recovered_root: bool,
 }
 impl EmbeddedApplicationRecovery {
-    pub(super) fn prepare(&self, actor: ActorRef, identity: &HostIdentity) -> Result<(), String> {
+    pub(super) async fn prepare(&self, actor: ActorRef, identity: &HostIdentity) -> Result<(), String> {
         if !self
             .lease
             .owns_run(&self.run_root)
@@ -179,15 +179,16 @@ impl EmbeddedApplicationRecovery {
                 self.accepted_source.clone(),
                 Some(conversation(identity)),
             )
+            .await
             .map_err(|error| error.to_string())
     }
-    pub(super) fn bind(
+    pub(super) async fn bind(
         &self,
         actor: ActorRef,
         identity: &HostIdentity,
         store: &harness::store::Store,
     ) -> Result<(), String> {
-        self.prepare(actor, identity)?;
+        self.prepare(actor, identity).await?;
         if !store
             .embedded_binding_matches(identity)
             .map_err(|error| error.to_string())?
@@ -196,6 +197,8 @@ impl EmbeddedApplicationRecovery {
         }
         self.journal
             .bind_application_conversation(actor, conversation(identity))
+            .await
+            .map(|_ack| ())
             .map_err(|error| error.to_string())
     }
 }

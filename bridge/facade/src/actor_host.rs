@@ -2014,7 +2014,7 @@ async fn run_owned(
         .embedded
         .as_ref()
         .ok_or_else(|| runtime_error("embedded host requires [launch.embedded]"))?;
-    let host_incarnation = Arc::new(host_incarnation);
+    let (host_incarnation, boot_registration) = host_incarnation.into_boot_registration();
     let run_root = config.run_directory.path().to_path_buf();
     if !host_incarnation.owns_run(&run_root)? {
         return Err(runtime_error(
@@ -2064,21 +2064,13 @@ async fn run_owned(
         &actor_recovery_path,
         &run_journal_path,
     )?;
-    let actor_recovery = if actor_journal_mode == JournalOpenMode::Create {
-        exomonad_actor::ActorRecoveryJournal::open(
-            &config.run_directory,
-            "actor-lifecycle.v2.jsonl",
-            host_incarnation.clone(),
-        )
-        .await
-    } else {
-        exomonad_actor::ActorRecoveryJournal::open_existing(
-            &config.run_directory,
-            "actor-lifecycle.v2.jsonl",
-            host_incarnation.clone(),
-        )
-        .await
-    }?;
+    let (actor_recovery, recovery_boot) = exomonad_actor::ActorRecoveryJournal::open_for_boot(
+        &config.run_directory,
+        "actor-lifecycle.v2.jsonl",
+        actor_journal_mode != JournalOpenMode::Create,
+        Box::new(boot_registration),
+    )
+    .await?;
     let prior_actor_records = actor_recovery.records().await?;
 
     let run_journal_mode = run_journal_mode(
@@ -2187,6 +2179,10 @@ async fn run_owned(
         .with_child_session_factory(child_session_factory)
         .with_handler_effect_support(tidepool_mcp::InstalledEffectSupport::installed_effect_support)
         .with_image_registry(image_registry);
+    forest
+        .register_recovery_boot(recovery_boot)
+        .await
+        .map_err(|error| runtime_error(error.to_string()))?;
     // Production hosts retain the launching machine. Dedicated acceptance
     // campaigns select the existing capability with the owner-produced root.
     #[cfg(test)]
@@ -2301,6 +2297,7 @@ async fn run_owned(
         let service = &embedded_service;
         let placement = forest
             .root_recovery_placement(root_actor.identity())
+            .await
             .map_err(|error| runtime_error(error.to_string()))?;
         let claim = if let Some(predecessor) = intent.manifest_predecessor {
             let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
@@ -2397,6 +2394,7 @@ async fn run_owned(
         embedded_recovery_tests::startup_checkpoint("bound");
         forest
             .release_root_startup(release)
+            .await
             .map_err(|error| runtime_error(error.to_string()))?;
         #[cfg(test)]
         embedded_recovery_tests::startup_checkpoint("released");

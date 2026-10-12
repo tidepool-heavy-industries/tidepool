@@ -8,6 +8,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use exomonad_actor::Incarnation;
 use serde::{Deserialize, Serialize};
@@ -63,7 +64,28 @@ impl Drop for HostRunLock {
     }
 }
 
+/// Issued once by consuming the exclusive lease before sharing it with services.
+pub(super) struct HostBootRegistration(Arc<HostIncarnationLease>);
+
+impl exomonad_actor::RecoveryBootRegistration for HostBootRegistration {
+    fn into_run(self: Box<Self>) -> Arc<dyn tidepool_runtime::session::RecoveryRunAuthority> {
+        self.0
+    }
+}
+
+impl tidepool_runtime::session::RecoveryRunAuthority for HostIncarnationLease {
+    fn owns_run(&self, run_root: &Path) -> io::Result<bool> {
+        HostIncarnationLease::owns_run(self, run_root)
+    }
+}
+
 impl HostIncarnationLease {
+    pub(super) fn into_boot_registration(self) -> (Arc<Self>, HostBootRegistration) {
+        let lease = Arc::new(self);
+        let registration = HostBootRegistration(Arc::clone(&lease));
+        (lease, registration)
+    }
+
     pub(crate) fn claim(directory: &tidepool_atomic_write::DirectoryAnchor) -> io::Result<Self> {
         directory.create_dir_all("")?;
         let run_root = directory.path();
@@ -176,6 +198,44 @@ mod tests {
         .unwrap();
         assert!(owner.owns_run(first.path()).unwrap());
         assert!(!owner.owns_run(second.path()).unwrap());
+    }
+
+    #[test]
+    fn boot_registration_retains_exclusive_run_until_authority_released() {
+        use exomonad_actor::RecoveryBootRegistration;
+
+        let runtime = tempfile::tempdir().unwrap();
+        let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(runtime.path()).unwrap();
+        let (lease, registration) = HostIncarnationLease::claim(&anchor)
+            .unwrap()
+            .into_boot_registration();
+        drop(lease);
+        assert!(HostIncarnationLease::claim(&anchor).is_err());
+        let authority = Box::new(registration).into_run();
+        assert!(authority.owns_run(runtime.path()).unwrap());
+        assert!(HostIncarnationLease::claim(&anchor).is_err());
+        drop(authority);
+        assert_eq!(HostIncarnationLease::claim(&anchor).unwrap().incarnation(), Incarnation(2));
+    }
+
+    #[tokio::test]
+    async fn boot_registration_refuses_another_run_before_creating_journal() {
+        let owned = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let owned_anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(owned.path()).unwrap();
+        let other_anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(other.path()).unwrap();
+        let (_lease, registration) = HostIncarnationLease::claim(&owned_anchor)
+            .unwrap()
+            .into_boot_registration();
+        let result = exomonad_actor::ActorRecoveryJournal::open_for_boot(
+            &other_anchor,
+            "actors.jsonl",
+            false,
+            Box::new(registration),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!other.path().join("actors.jsonl").exists());
     }
 
     #[test]
