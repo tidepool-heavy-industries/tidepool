@@ -30,27 +30,19 @@ impl Fixture {
 
     fn compile_mode(ready: bool) -> Self {
         tidepool_testing::eval_harness::require_extract();
-        let declarations = if ready {
-            vec![
-                tidepool_mcp::actor_kernel_decl(),
-                tidepool_mcp::actor_local_decl(),
-            ]
-        } else {
-            Vec::new()
-        };
-        let surface = if ready {
-            TestEffectSurface::with_options(
-                &declarations,
-                tidepool_testing::effect_surface::TestEffectSurfaceOptions {
-                    row_args: tidepool_mcp::RowArgs::default()
-                        .importing(["Tidepool.Effects.Core (ActorKernel(..), ActorLocal(..))"]),
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-        } else {
-            TestEffectSurface::minimal(&declarations).unwrap()
-        };
+        let declarations = [
+            tidepool_mcp::actor_kernel_decl(),
+            tidepool_mcp::actor_local_decl(),
+        ];
+        let surface = TestEffectSurface::with_options(
+            &declarations,
+            tidepool_testing::effect_surface::TestEffectSurfaceOptions {
+                row_args: tidepool_mcp::RowArgs::default()
+                    .importing(["Tidepool.Effects.Core (ActorKernel(..), ActorLocal(..))"]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let root = tempfile::tempdir().unwrap();
         let templates = resident_workbench_templates(surface.preamble(), surface.row(), "");
         let include = surface
@@ -65,11 +57,7 @@ impl Fixture {
                 TurnRequest {
                     exact_context: None,
                     session_id: None,
-                    turn_text: if ready {
-                        include_str!("../replacement_staging_inputs.hs")
-                    } else {
-                        include_str!("../../resident_workbench/replacement_inputs.hs")
-                    },
+                    turn_text: include_str!("../replacement_staging_inputs.hs"),
                     templates: &templates,
                     include: &include,
                     session_root: root.path(),
@@ -145,22 +133,67 @@ impl Fixture {
                 lexical_scope: ScopeId::ROOT,
             },
         );
-        let checkpoint =
-            Arc::new(retain(&owner.environment.runner, id, "replacementCheckpoint").await);
         let mut behavior = Behavior::with_boot(
             descriptor,
             owner.environment.clone(),
             ResidentBoot::Workbench,
             Vec::new(),
         );
-        behavior.standing = ResidentStanding::Paused(PausedHandler {
-            checkpoint: StateCheckpoint {
-                site: 0,
-                value: checkpoint.clone(),
-            },
-            input: RetainedActorInput::Mailbox(checkpoint),
-            detail: "retained predecessor".into(),
-        });
+        let actor = owner.actor.identity();
+        let context = behavior.context(actor);
+        let entry = retain(&behavior.environment.runner, id, "predecessorEntry").await;
+        let initial =
+            Arc::new(retain(&behavior.environment.runner, id, "replacementCheckpoint").await);
+        let outcome = owner
+            .kernel
+            .compiler_lifecycle_scope(behavior.environment.runner.run_rooted_application(
+                context.clone(),
+                entry,
+                initial,
+                context.placement.resource_scope,
+            ))
+            .await
+            .unwrap();
+        owner
+            .kernel
+            .compiler_lifecycle_scope(behavior.stabilize_program(
+                &owner.kernel,
+                &context,
+                &crate::CallAncestry::begin(actor),
+                outcome,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(behavior.standing, ResidentStanding::Receiving(_)));
+        let input = retain(&behavior.environment.runner, id, "predecessorInput").await;
+        let error = crate::KernelBehavior::cast(
+            &mut behavior,
+            &owner.kernel,
+            actor,
+            MailboxValue::new(id, input),
+        )
+        .await
+        .expect_err("native predecessor handler deliberately fails");
+        assert!(
+            error
+                .detail
+                .contains("intentional predecessor handler failure"),
+            "{error}"
+        );
+        assert!(crate::KernelBehavior::pause_failed_handler(
+            &mut behavior,
+            &owner.kernel,
+            &error.detail
+        ));
+        assert!(matches!(
+            crate::KernelBehavior::resume(&mut behavior, &owner.kernel).await,
+            Ok(KernelStep::Continue(()))
+        ));
+        owner
+            .kernel
+            .compiler_lifecycle_scope(verify_retained_predecessor_custody(&behavior, actor))
+            .await;
         (behavior, owner)
     }
 
@@ -266,7 +299,7 @@ async fn retain(
     value
 }
 
-async fn verify_predecessor(behavior: &Behavior, actor: ActorRef) {
+async fn verify_retained_predecessor_custody(behavior: &Behavior, actor: ActorRef) {
     let ResidentStanding::Paused(paused) = &behavior.standing else {
         panic!("predecessor state is retained");
     };
@@ -292,18 +325,30 @@ async fn verify_predecessor(behavior: &Behavior, actor: ActorRef) {
         panic!("checkpoint verifier completes");
     };
     assert_eq!(result.to_json(), serde_json::json!(42));
-    let mut checkout = behavior
+    let RetainedActorInput::Mailbox(input) = &paused.input else {
+        panic!("failed mailbox input remains retained");
+    };
+    let entry = retain(
+        &behavior.environment.runner,
+        context.placement.session,
+        "predecessorInputValue",
+    )
+    .await;
+    let outcome = behavior
         .environment
         .runner
-        .machines_for_test()
-        .checkout_run(context.placement.session)
+        .run_rooted_application(
+            context.clone(),
+            entry,
+            input.clone(),
+            context.placement.resource_scope,
+        )
+        .await
         .unwrap();
-    assert_eq!(
-        checkout.machine().outstanding_custody(),
-        1,
-        "only original predecessor checkpoint remains"
-    );
-    checkout.restore_suspended(Vec::new());
+    let ResidentOutcome::Completed { result, .. } = outcome else {
+        panic!("failed input verifier completes");
+    };
+    assert_eq!(result.to_json(), serde_json::json!(73));
 }
 
 fn failure(
@@ -400,7 +445,7 @@ async fn replacement_refusal_preserves_reserved_collision_and_materialized_place
         }
         owner
             .kernel
-            .compiler_lifecycle_scope(verify_predecessor(&behavior, actor))
+            .compiler_lifecycle_scope(verify_retained_predecessor_custody(&behavior, actor))
             .await;
         drop(behavior);
         owner.finish().await;
@@ -483,7 +528,7 @@ async fn cancelled_replacement_stage_retains_exact_shared_and_dedicated_cleanup(
         }
         owner
             .kernel
-            .compiler_lifecycle_scope(verify_predecessor(&behavior, actor))
+            .compiler_lifecycle_scope(verify_retained_predecessor_custody(&behavior, actor))
             .await;
         drop(behavior);
         owner.finish().await;
@@ -565,7 +610,7 @@ async fn staged_successor_admission_refusal_and_cancellation_release_actual_plac
             assert_eq!(cleanup.uncertainty(), None);
             owner
                 .kernel
-                .compiler_lifecycle_scope(verify_predecessor(&behavior, actor))
+                .compiler_lifecycle_scope(verify_retained_predecessor_custody(&behavior, actor))
                 .await;
             drop(behavior);
             owner.finish().await;
@@ -657,7 +702,7 @@ async fn startup_refusal_preserves_typed_cleanup_before_and_after_actor_transfer
             checkout.restore_suspended(Vec::new());
             owner
                 .kernel
-                .compiler_lifecycle_scope(verify_predecessor(&behavior, actor))
+                .compiler_lifecycle_scope(verify_retained_predecessor_custody(&behavior, actor))
                 .await;
             drop(behavior);
             owner.finish().await;
