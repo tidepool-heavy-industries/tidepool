@@ -365,7 +365,7 @@ impl Drop for NativeProviderTurnLease {
 }
 
 /// Logical executor retirement and resident retirement have distinct obligations.
-/// An unsupported nonresident realm never certifies resident or journal cleanup.
+/// Confirmed or unsupported nonresident realms never certify resident journal cleanup.
 #[derive(Debug, Clone)]
 enum RetirementDomain {
     NonResident,
@@ -393,7 +393,8 @@ impl SuccessorDrainReceipt {
                     crate::CleanupComponentOutcome::Confirmed
                 ) && matches!(
                     self.cleanup.realm(),
-                    crate::CleanupComponentOutcome::Unsupported
+                    crate::CleanupComponentOutcome::Confirmed
+                        | crate::CleanupComponentOutcome::Unsupported
                 )
             }
         }
@@ -1064,7 +1065,8 @@ impl Actor for LifecycleCoordinator {
                                     )
                                     && matches!(
                                         cleanup.realm(),
-                                        crate::CleanupComponentOutcome::Unsupported
+                                        crate::CleanupComponentOutcome::Confirmed
+                                            | crate::CleanupComponentOutcome::Unsupported
                                     )
                             }
                     });
@@ -1119,7 +1121,8 @@ impl Actor for LifecycleCoordinator {
                                     )
                                     && matches!(
                                         cleanup.realm(),
-                                        crate::CleanupComponentOutcome::Unsupported
+                                        crate::CleanupComponentOutcome::Confirmed
+                                            | crate::CleanupComponentOutcome::Unsupported
                                     )
                             } =>
                     {
