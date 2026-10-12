@@ -121,7 +121,12 @@ genrule(
 
 genrule(
     name = "browser_contract",
-    srcs = ["//third-party/rust:matched_harness_source", ":npm_dependencies", ":harness_browser_contract", ":browser_runtime_source_identity"],
+    srcs = {
+        "harness-source": "//third-party/rust:matched_harness_source",
+        "npm-dependencies": ":npm_dependencies",
+        "native-contract": ":harness_browser_contract",
+        "runtime-source-identity.json": ":browser_runtime_source_identity",
+    },
     out = ".",
     bash = """set -euo pipefail
 SOURCE_ROOT="$PWD/$(location //third-party/rust:matched_harness_source)"
@@ -145,11 +150,11 @@ $(exe toolchains//:node) "$TMP/generator/scripts/generate-browser-contract.mjs" 
 
 genrule(
     name = "dist",
-    srcs = [
-        "//third-party/rust:matched_harness_source",
-        ":npm_dependencies",
-        ":browser_contract",
-    ],
+    srcs = {
+        "harness-source": "//third-party/rust:matched_harness_source",
+        "npm-dependencies": ":npm_dependencies",
+        "browser-contract": ":browser_contract",
+    },
     out = ".",
     bash = """set -euo pipefail
 NODE='$(exe toolchains//:node)'
