@@ -142,6 +142,10 @@ pub(super) enum LifecycleCommand {
     },
     ExecutorStarted(RpcReplyPort<Result<(), KernelCallFailure>>),
     ExecutorRetired,
+    FinishRun {
+        grant: crate::local_actor::run_control::RunRetirementGrant,
+        reply: RpcReplyPort<Result<(), KernelCallFailure>>,
+    },
     SuccessorDrainReceipt(RpcReplyPort<Result<SuccessorDrainReceipt, KernelCallFailure>>),
     Enqueue {
         message: Box<KernelMessage>,
@@ -619,6 +623,28 @@ impl LifecycleHandle {
         self.receive(receive).await?
     }
 
+    /// Consume the run owner's exact finalization authority and await owner exit.
+    pub(crate) async fn finish_run(
+        &self,
+        grant: crate::local_actor::run_control::RunRetirementGrant,
+    ) -> Result<(), KernelCallFailure> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.send(LifecycleCommand::FinishRun {
+            grant,
+            reply: send.into(),
+        })?;
+        self.receive(receive).await??;
+        self.address
+            .get_cell()
+            .wait(None)
+            .await
+            .map_err(|_| KernelCallFailure::TargetUnavailable(self.identity))
+    }
+
+    pub(crate) fn run_finalized(&self) -> bool {
+        self.address.get_status() == ractor::ActorStatus::Stopped
+    }
+
     pub async fn close(&self) -> Result<(), KernelCallFailure> {
         self.close_with(None, None).await
     }
@@ -996,6 +1022,54 @@ impl Actor for LifecycleCoordinator {
                     Err(KernelCallFailure::MailboxClosed(state.identity))
                 };
                 let _ = reply.send(result);
+            }
+            LifecycleCommand::FinishRun { grant, reply } => {
+                let exact = grant.actor() == state.identity
+                    && grant.lifecycle().address.get_id() == myself.get_id();
+                let settled = !state.has_pending()
+                    && state.tasks.is_empty()
+                    && matches!(state.native_settlement, NativeSettlement::Confirmed)
+                    && state.transfer.unconfirmed.is_none();
+                let retired = state.phase == LifecyclePhase::Retired
+                    && state.terminal.get().is_some()
+                    && state
+                        .resident
+                        .as_ref()
+                        .is_none_or(resident::retirement_confirmed)
+                    && state.terminal.cleanup().is_some_and(|cleanup| {
+                        cleanup.actor() == state.identity
+                            && if state.resident.is_some() {
+                                cleanup.is_confirmed()
+                            } else {
+                                matches!(cleanup.hook(), crate::CleanupComponentOutcome::Confirmed)
+                                    && matches!(
+                                        cleanup.children(),
+                                        crate::CleanupComponentOutcome::Confirmed
+                                    )
+                                    && matches!(
+                                        cleanup.realm(),
+                                        crate::CleanupComponentOutcome::Unsupported
+                                    )
+                            }
+                    });
+                let never_registered = state.phase == LifecyclePhase::Closing
+                    && state.executor.is_none()
+                    && state.resident.is_none();
+                if exact
+                    && settled
+                    && state.owner_available
+                    && if grant.never_registered() {
+                        never_registered
+                    } else {
+                        retired
+                    }
+                {
+                    // The owned effect survives a dropped finalization observer.
+                    let _ = reply.send(Ok(()));
+                    myself.stop(Some("confirmed run finalization".into()));
+                } else {
+                    let _ = reply.send(Err(KernelCallFailure::TargetUnavailable(state.identity)));
+                }
             }
             LifecycleCommand::ExecutorRetired => {
                 state.retirement_requested = true;
@@ -1424,6 +1498,8 @@ impl Actor for LifecycleCoordinator {
         // Retain unresolved counts: aborting an owned task is not proof that
         // its native publication or cancellation has settled.
         state.provider.take();
+        // Release durable boot custody before the coordinator stop acknowledgement.
+        state.resident.take();
         state.publish();
         Ok(())
     }
