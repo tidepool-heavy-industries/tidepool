@@ -12,7 +12,8 @@ use serde_json::json;
 
 #[derive(Clone)]
 struct HeldFirstRound {
-    entered: tokio::sync::mpsc::UnboundedSender<(usize, ResponsesRequest)>,
+    entered:
+        tokio::sync::mpsc::UnboundedSender<(usize, harness::model::RequestId, ResponsesRequest)>,
     rounds: Arc<std::sync::atomic::AtomicUsize>,
     release_first: Arc<tokio::sync::Semaphore>,
     release_final: Arc<tokio::sync::Semaphore>,
@@ -39,12 +40,13 @@ impl ResponsesTransport for HeldFirstRound {
         &self,
         request: harness::transport::PreparedProviderRequest,
     ) -> Result<ResponsesTurn, TransportError> {
+        let issued_request = request.request_id().clone();
         let request = request.request().clone();
         let round = self
             .rounds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        self.entered.send((round, request)).unwrap();
+        self.entered.send((round, issued_request, request)).unwrap();
         match round {
             1 => {
                 self.release_first
@@ -253,7 +255,7 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         wrong_binding.set_conversation(Arc::clone(&conversation)),
         Err(embedded_harness::ConversationAttachError::IdentityMismatch)
     );
-    let (round, _) = tokio::time::timeout(Duration::from_secs(30), rounds.recv())
+    let (round, _, _) = tokio::time::timeout(Duration::from_secs(30), rounds.recv())
         .await
         .unwrap()
         .unwrap();
@@ -290,46 +292,87 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         ReceiptLookup::Retained(ref evidence) if evidence.phase == DeliveryPhase::Accepted
     ));
 
+    let notification_positions = |request: &ResponsesRequest, text: &str| {
+        request
+            .input
+            .iter()
+            .enumerate()
+            .filter_map(|(position, item)| {
+                (item.0["type"] == "message"
+                    && item.0["role"] == "user"
+                    && item.0["content"] == text)
+                    .then_some(position)
+            })
+            .collect::<Vec<_>>()
+    };
     transport.release_first.add_permits(1);
-    let (round, request) = tokio::time::timeout(Duration::from_secs(60), rounds.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let (round, second_request, request) =
+        tokio::time::timeout(Duration::from_secs(60), rounds.recv())
+            .await
+            .unwrap()
+            .unwrap();
     assert_eq!(round, 2);
-    assert!(
-        request
-            .input
-            .iter()
-            .any(|item| { item.0.to_string().contains("first queued row") }),
-        "first input must be in the actual Engine request"
+    let first_positions = notification_positions(&request, "first queued row");
+    let second_positions = notification_positions(&request, "second queued row");
+    assert_eq!(
+        first_positions.len(),
+        1,
+        "first input must occur exactly once"
     );
     assert!(
-        !request
-            .input
-            .iter()
-            .any(|item| { item.0.to_string().contains("second queued row") }),
-        "second input must remain behind the front row"
+        second_positions.len() <= 1,
+        "second input must not be duplicated"
     );
+    // Reconciliation can advance the next row between the Engine's inbox
+    // admissions while one provider request is being prepared.
+    let second_in_round_two = if let Some(position) = second_positions.first() {
+        assert!(
+            first_positions[0] < *position,
+            "queued input order must be FIFO"
+        );
+        true
+    } else {
+        false
+    };
 
-    let (round, request) = tokio::time::timeout(Duration::from_secs(60), rounds.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let (round, third_request, request) =
+        tokio::time::timeout(Duration::from_secs(60), rounds.recv())
+            .await
+            .unwrap()
+            .unwrap();
     assert_eq!(round, 3);
-    assert!(
-        request
-            .input
-            .iter()
-            .any(|item| { item.0.to_string().contains("second queued row") }),
-        "second input must progress into a later Engine request"
+    let first_positions = notification_positions(&request, "first queued row");
+    let second_positions = notification_positions(&request, "second queued row");
+    assert_eq!(
+        first_positions.len(),
+        1,
+        "first input remains exactly once in history"
     );
+    assert_eq!(
+        second_positions.len(),
+        1,
+        "second input must progress exactly once"
+    );
+    assert!(
+        first_positions[0] < second_positions[0],
+        "queued input order must remain FIFO"
+    );
+    let first_operation_id =
+        embedded_notification_operation_id(&binding.inbox_key, first.sequence, sender, actor);
+    assert!(matches!(
+        conversation.input_observation_by_operation(&first_operation_id).unwrap(),
+        Some(harness::embedding::InputObservation::Included(ref included)) if included == &second_request
+    ));
+    let second_included_request = if second_in_round_two {
+        second_request
+    } else {
+        third_request
+    };
     let operation_id =
         embedded_notification_operation_id(&binding.inbox_key, second.sequence, sender, actor);
     assert!(matches!(
-        conversation
-            .input_observation_by_operation(&operation_id)
-            .unwrap(),
-        Some(harness::embedding::InputObservation::Included(_))
+        conversation.input_observation_by_operation(&operation_id).unwrap(),
+        Some(harness::embedding::InputObservation::Included(ref included)) if included == &second_included_request
     ));
     host.stop()
         .await
@@ -357,8 +400,10 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
         .unwrap()
         .unwrap();
     result.unwrap();
-    assert!(matches!(
-        binding.inbox.observe_receipt(second.sequence).unwrap(),
-        ReceiptLookup::Retained(ref evidence) if evidence.phase == DeliveryPhase::Presented
-    ));
+    for sequence in [first.sequence, second.sequence] {
+        assert!(matches!(
+            binding.inbox.observe_receipt(sequence).unwrap(),
+            ReceiptLookup::Retained(ref evidence) if evidence.phase == DeliveryPhase::Presented
+        ));
+    }
 }
