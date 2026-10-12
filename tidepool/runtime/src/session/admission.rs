@@ -41,23 +41,47 @@ impl RuntimeDurablePublicReadiness {
                 .upgrade()
                 .is_some_and(|store| store.ensure_ready().is_ok())
     }
-    pub async fn begin_provider_transition(&self) -> Result<super::ProviderTransition, SessionError> {
-        let attachment = self.attachment.upgrade().ok_or(SessionError::WrongPublicManifestTicket)?;
-        let store = self.store.upgrade().ok_or(SessionError::WrongPublicManifestTicket)?;
-        let ticket = store.begin_provider_transition().await
+    pub async fn begin_provider_transition(
+        &self,
+    ) -> Result<super::ProviderTransition, SessionError> {
+        let attachment = self
+            .attachment
+            .upgrade()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        let store = self
+            .store
+            .upgrade()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        let ticket = store
+            .begin_provider_transition()
+            .await
             .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
         if self.owner.epoch() != self.owner_epoch {
-            ticket.refuse().await.map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+            ticket
+                .refuse()
+                .await
+                .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
             return Err(SessionError::WrongPublicManifestTicket);
         }
         Ok(ticket.retain_attachment(attachment))
     }
 
     pub async fn check_ready_async(&self) -> Result<(), SessionError> {
-        let _attachment = self.attachment.upgrade().ok_or(SessionError::WrongPublicManifestTicket)?;
-        let store = self.store.upgrade().ok_or(SessionError::WrongPublicManifestTicket)?;
-        store.ensure_ready_async().await.map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-        if self.owner.epoch() != self.owner_epoch { return Err(SessionError::WrongPublicManifestTicket); }
+        let _attachment = self
+            .attachment
+            .upgrade()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        let store = self
+            .store
+            .upgrade()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        store
+            .ensure_ready_async()
+            .await
+            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
+        if self.owner.epoch() != self.owner_epoch {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
         Ok(())
     }
 
@@ -2283,7 +2307,8 @@ impl PersistentSession {
                 .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
             self.lib_mut()
                 .seed_scope(public_scope, admitted.declaration_tip);
-            let private_scope = self.mint_detached_scope(public_scope)
+            let private_scope = self
+                .mint_detached_scope(public_scope)
                 .ok_or(SessionError::DeadScope(public_scope))?;
             super::complete_native_transition(admission)?;
             private_scope

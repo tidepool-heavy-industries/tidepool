@@ -1,8 +1,8 @@
 //! The run's SQLite owner. Immutable facts live in authenticated IPLD blocks;
 //! SQL owns only their roots, public ownership, and allocation ceilings.
+use std::cell::{Cell, RefCell};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
 use cid::Cid;
@@ -200,8 +200,8 @@ struct NativeStorage {
 }
 
 mod owner;
-pub use owner::{NativeStoreStatus, ProviderTransition, RunRecoveryStore};
 pub(crate) use owner::{NativeInstallationReceipt, OwnedTransition};
+pub use owner::{NativeStoreStatus, ProviderTransition, RunRecoveryStore};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RecoveryStoreWork {
@@ -330,7 +330,9 @@ impl NativeStorage {
         self.database_id
     }
     fn ensure_ready(&self) -> Result<(), StoreError> {
-        if let Some(error) = &self.connection.borrow().fence { return Err(error.clone()); }
+        if let Some(error) = &self.connection.borrow().fence {
+            return Err(error.clone());
+        }
         self.validate_physical_identity()
     }
     fn validate_physical_identity(&self) -> Result<(), StoreError> {
@@ -531,8 +533,12 @@ impl NativeStorage {
     /// the semantic content revision. No caller-selected boolean can claim a
     /// content-changing publication is an owner transfer.
     fn transfer_owner(
-        &self, domain: RecoveryDomainId, expected: StoreRevision,
-        previous: &RecoveryPublicOwnerState, successor: RecoveryPublicOwner, successor_epoch: u64,
+        &self,
+        domain: RecoveryDomainId,
+        expected: StoreRevision,
+        previous: &RecoveryPublicOwnerState,
+        successor: RecoveryPublicOwner,
+        successor_epoch: u64,
     ) -> StoreDisposition<RecoveryDomainState> {
         let previous_key = owner_bytes(&previous.owner);
         let successor_key = owner_bytes(&successor);
@@ -594,7 +600,8 @@ impl NativeStorage {
     }
 
     fn transact<T>(
-        &self, action: impl FnOnce(&Transaction<'_>) -> Result<T, StoreRefusal>,
+        &self,
+        action: impl FnOnce(&Transaction<'_>) -> Result<T, StoreRefusal>,
         blocks: &[(Cid, Arc<[u8]>)],
     ) -> StoreDisposition<T> {
         for (cid, bytes) in blocks {
@@ -1087,7 +1094,8 @@ mod tests {
         assert_eq!(observed.content_revision, StoreRevision(1));
         assert_eq!(observed.snapshot_root, root.snapshot_root);
         assert_eq!(store.database_id(), reopened.database_id());
-        let linked: (String, String) = Connection::open(reopened.path()).unwrap()
+        let linked: (String, String) = Connection::open(reopened.path())
+            .unwrap()
             .query_row("SELECT sqlite_version(),sqlite_source_id()", [], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })
@@ -1229,7 +1237,11 @@ mod tests {
             if fault == StoreFault::BeforeCommit {
                 assert!(matches!(outcome, StoreDisposition::Refused(_)));
                 assert!(!store.is_recovery_required());
-                assert!(store.begin_native_transition().unwrap().complete_blocking().is_ok());
+                assert!(store
+                    .begin_native_transition()
+                    .unwrap()
+                    .complete_blocking()
+                    .is_ok());
             } else {
                 assert!(matches!(outcome, StoreDisposition::RecoveryRequired(_)));
                 assert!(store.is_recovery_required());
@@ -1265,7 +1277,8 @@ mod tests {
     fn keyed_reads_refuse_corruption_and_contract_refusal_does_not_change_journal() {
         let (_directory, store) = store();
         let domain = domain(&store, RecoveryDomainId::Root, 0);
-        Connection::open(store.path()).unwrap()
+        Connection::open(store.path())
+            .unwrap()
             .execute(
                 "UPDATE blocks SET bytes=?1 WHERE cid=?2",
                 params![vec![1u8, 2, 3], domain.snapshot_root.cid().to_bytes()],
@@ -1430,14 +1443,18 @@ mod tests {
         let (_directory, store) = store();
         let state = domain(&store, RecoveryDomainId::Root, 64);
         let (root, blocks) = blocks(&("installed candidate", 3u64));
-        let StoreDisposition::Committed(receipt) = store.commit_publication(PreparedRecoveryWrite {
-            domain_id: RecoveryDomainId::Root,
-            expected_revision: state.revision,
-            snapshot_root: DomainSnapshotRoot::new(root),
-            allocation_ceiling: state.allocation_ceiling,
-            blocks,
-            public_changes: Vec::new(),
-        }) else { panic!("real durable publication must commit"); };
+        let StoreDisposition::Committed(receipt) =
+            store.commit_publication(PreparedRecoveryWrite {
+                domain_id: RecoveryDomainId::Root,
+                expected_revision: state.revision,
+                snapshot_root: DomainSnapshotRoot::new(root),
+                allocation_ceiling: state.allocation_ceiling,
+                blocks,
+                public_changes: Vec::new(),
+            })
+        else {
+            panic!("real durable publication must commit");
+        };
         assert_eq!(store.status(), NativeStoreStatus::Installing);
         assert_eq!(receipt.state.revision, StoreRevision(1));
         drop(receipt);
@@ -1445,7 +1462,15 @@ mod tests {
         assert!(store.begin_native_transition().is_err());
         assert!(store.read_domain(RecoveryDomainId::Root).is_err());
         let reopened = RunRecoveryStore::open(store.path()).unwrap();
-        assert_eq!(reopened.read_domain(RecoveryDomainId::Root).unwrap().unwrap().snapshot_root.cid(), &root);
+        assert_eq!(
+            reopened
+                .read_domain(RecoveryDomainId::Root)
+                .unwrap()
+                .unwrap()
+                .snapshot_root
+                .cid(),
+            &root
+        );
         assert_eq!(reopened.status(), NativeStoreStatus::Ready);
     }
 
