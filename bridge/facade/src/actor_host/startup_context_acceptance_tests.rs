@@ -157,6 +157,30 @@ async fn exercise_durable_attachment(
         wire
     );
 
+    let mut foreign_conversation = publication.clone();
+    let exomonad_actor::ApplicationConversation::Embedded { agent_path, .. } =
+        &mut foreign_conversation.conversation
+    else {
+        panic!("startup fixture uses the retained embedded conversation");
+    };
+    agent_path.push_str("/foreign");
+    assert_ne!(foreign_conversation.conversation, publication.conversation);
+    assert!(attachment
+        .acknowledge_initial_context_publication(&identity.operation, foreign_conversation)
+        .await
+        .is_err());
+    assert_eq!(
+        attachment.initial_context_wire_observation().await.unwrap(),
+        wire
+    );
+    assert_eq!(
+        attachment
+            .acknowledge_initial_context_publication(&identity.operation, publication.clone())
+            .await
+            .unwrap(),
+        *retained
+    );
+
     let transition = attachment
         .native_readiness()
         .expect("startup root has a durable native owner")
