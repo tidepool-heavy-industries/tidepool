@@ -1,5 +1,6 @@
 //! One run owns actor membership, identity claims and preparation admission.
 use super::*;
+use ractor::ActorStatus;
 use std::collections::HashSet;
 use tokio::sync::oneshot;
 #[cfg(test)]
@@ -15,7 +16,6 @@ mod transfers;
 use preparation::{PreparationMessage, PreparationSupervisor, RootDelivery};
 pub(crate) use preparation::{
     RootAdmissionOutcome, RootOperation, RootOperationResult, RootPlacementPublisher,
-    RootPreparationTicket,
 };
 use transfers::{ResourceTransfer, WorkerTransfer};
 pub(crate) use transfers::{ResourceTransferReservation, WorkerTransferReservation};
