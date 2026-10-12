@@ -30,6 +30,7 @@ pub enum LifecyclePhase {
     IdleCheck,
     Closing,
     Retired,
+    Finalized,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -666,7 +667,8 @@ impl LifecycleHandle {
     }
 
     pub(crate) fn run_finalized(&self) -> bool {
-        self.address.get_status() == ractor::ActorStatus::Stopped
+        self.observations.borrow().phase == LifecyclePhase::Finalized
+            && self.address.get_status() == ractor::ActorStatus::Stopped
     }
 
     pub async fn close(&self) -> Result<(), KernelCallFailure> {
@@ -857,7 +859,7 @@ impl LifecycleState {
     pub(super) fn is_closed(&self) -> bool {
         matches!(
             self.phase,
-            LifecyclePhase::Closing | LifecyclePhase::Retired
+            LifecyclePhase::Closing | LifecyclePhase::Retired | LifecyclePhase::Finalized
         )
     }
 
@@ -926,6 +928,7 @@ impl LifecycleState {
             LifecyclePhase::Starting => Some(KernelCallFailure::TargetUnavailable(self.identity)),
             LifecyclePhase::Closing => Some(KernelCallFailure::MailboxClosed(self.identity)),
             LifecyclePhase::Retired => Some(KernelCallFailure::TargetExited(self.identity)),
+            LifecyclePhase::Finalized => Some(KernelCallFailure::TargetUnavailable(self.identity)),
         }
     }
 
@@ -940,7 +943,10 @@ impl LifecycleState {
                 return Err(refusal);
             }
         }
-        if self.phase == LifecyclePhase::Retired {
+        if matches!(
+            self.phase,
+            LifecyclePhase::Retired | LifecyclePhase::Finalized
+        ) {
             return Err(KernelCallFailure::TargetExited(self.identity));
         }
         let executor = self
@@ -1093,6 +1099,7 @@ impl Actor for LifecycleCoordinator {
                         retired
                     }
                 {
+                    state.phase = LifecyclePhase::Finalized;
                     // The owned effect survives a dropped finalization observer.
                     let _ = reply.send(Ok(()));
                     myself.stop(Some("confirmed run finalization".into()));
@@ -1222,7 +1229,10 @@ impl Actor for LifecycleCoordinator {
                 if let Some(terminal) = terminal {
                     state.terminal.request_shutdown(terminal);
                 }
-                if state.phase != LifecyclePhase::Retired {
+                if !matches!(
+                    state.phase,
+                    LifecyclePhase::Retired | LifecyclePhase::Finalized
+                ) {
                     state.phase = LifecyclePhase::Closing;
                 }
                 let result = match fence {
@@ -1498,7 +1508,10 @@ impl Actor for LifecycleCoordinator {
             LifecycleCommand::Resident(command) => resident::handle(state, &myself, *command),
             LifecycleCommand::Transfer(command) => transfer::handle(state, &myself, *command),
         }
-        if state.retirement_requested && !state.has_pending() {
+        if state.retirement_requested
+            && !state.has_pending()
+            && state.phase != LifecyclePhase::Finalized
+        {
             state.phase = LifecyclePhase::Retired;
         }
         state.publish();
@@ -1521,7 +1534,9 @@ impl Actor for LifecycleCoordinator {
         _myself: RactorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        state.phase = LifecyclePhase::Retired;
+        if state.phase != LifecyclePhase::Finalized {
+            state.phase = LifecyclePhase::Retired;
+        }
         state.owner_available = false;
         for task in state.tasks.values() {
             task.abort();
