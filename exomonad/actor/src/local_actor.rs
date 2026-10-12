@@ -2091,6 +2091,7 @@ where
         });
         let startup_admission = arguments.startup_admission;
         let startup_refusal = arguments.startup_refusal;
+        let cleanup_only_executor = arguments.reservation.cleanup_only();
         let mut state = Box::new(LocalActorState {
             replacement: None,
             drain: DrainState::Open,
@@ -2105,6 +2106,14 @@ where
             deferred_mailbox: VecDeque::new(),
             mailbox_drain_scheduled: false,
         });
+        if cleanup_only_executor {
+            // Cleanup-only startup still owns a real executor. Retain its exact
+            // cell before refusal so finalization can await physical termination.
+            state
+                .lifecycle
+                .attach_executor(state.context.myself.clone())
+                .await?;
+        }
         if let Some(cause) = startup_refusal {
             finish_actor(
                 &state.context.myself.clone(),
@@ -2127,10 +2136,12 @@ where
             state.context.identity,
             state.lifecycle.clone(),
         );
-        state
-            .lifecycle
-            .attach_executor(state.context.myself.clone())
-            .await?;
+        if !cleanup_only_executor {
+            state
+                .lifecycle
+                .attach_executor(state.context.myself.clone())
+                .await?;
+        }
         if let Err(detail) = state
             .context
             .directory
