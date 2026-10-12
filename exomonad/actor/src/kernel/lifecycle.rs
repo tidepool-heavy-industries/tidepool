@@ -150,6 +150,7 @@ pub(super) enum LifecycleCommand {
         reply: Option<RpcReplyPort<Result<(), KernelCallFailure>>>,
     },
     Transaction(RpcReplyPort<Result<ActorAdmissionLease, KernelCallFailure>>),
+    ResourceAdmission(RpcReplyPort<Result<ActorAdmissionLease, KernelCallFailure>>),
     TransactionReleased(u64),
     IngressReleased(u64),
     AttachProvider {
@@ -525,6 +526,17 @@ impl LifecycleHandle {
         }
     }
 
+    /// Internal executor resource publication is allowed during bootstrap.
+    /// This lease counts local ownership; native Store effects retain their
+    /// original separate admission contract.
+    pub(crate) async fn resource_admission(
+        &self,
+    ) -> Result<ActorAdmissionLease, KernelCallFailure> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.send(LifecycleCommand::ResourceAdmission(send.into()))?;
+        self.receive(receive).await?
+    }
+
     pub async fn transaction(&self) -> Result<ActorAdmissionLease, KernelCallFailure> {
         let (send, receive) = tokio::sync::oneshot::channel();
         self.send(LifecycleCommand::Transaction(send.into()))?;
@@ -877,6 +889,27 @@ impl Actor for LifecycleCoordinator {
                         .pending
                         .insert(sequence, PendingOperation::Transaction(reply));
                     begin_native(state, &myself, sequence);
+                }
+            }
+            LifecycleCommand::ResourceAdmission(reply) => {
+                let startup = state.phase == LifecyclePhase::Starting
+                    && matches!(state.native_settlement, NativeSettlement::Confirmed)
+                    && state.transfer.unconfirmed.is_none()
+                    && state
+                        .resident
+                        .as_ref()
+                        .and_then(resident::settlement_refusal)
+                        .is_none();
+                let refusal = if startup { None } else { state.refusal() };
+                if let Some(refusal) = refusal {
+                    let _ = reply.send(Err(refusal));
+                } else {
+                    let sequence = state.next_operation();
+                    state.transactions.insert(sequence);
+                    let _ = reply.send(Ok(ActorAdmissionLease {
+                        owner: myself.clone(),
+                        sequence,
+                    }));
                 }
             }
             LifecycleCommand::TransactionReleased(sequence) => {
