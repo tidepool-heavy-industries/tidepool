@@ -2,12 +2,13 @@
 {-# LANGUAGE DeriveGeneric #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedLabels #-}
 {-# LANGUAGE TypeOperators #-}
 -- | A worked actor language for revising attention while retaining sources and
 -- previous preparation. No actor is started until its caller chooses to do so.
 module Persona.AttentionNotebook
   ( Instruction(..), Notebook, Snapshot(..), notebook, snapshot, execute
-  , AttentionActor(..), AttentionEffects, definition, framing
+  , AttentionActor(..), AttentionEffects, definition, framing, repertoire, framingMenu, suggestFrame
   ) where
 
 import Prelude
@@ -15,6 +16,9 @@ import Control.Monad (void)
 import Control.Monad.Freer (Eff, Members)
 import Control.Monad.Freer.State (State, get, put)
 import Data.Text (Text)
+import Data.List.NonEmpty (NonEmpty(..))
+import qualified Jev.Operators as J
+import qualified Tidepool.View as V
 import GHC.Generics (Generic)
 import Tidepool.Actor.Record ((:-))
 import qualified Tidepool.Actor.Record as R
@@ -112,3 +116,33 @@ definition events initial = R.definition "attention-notebook" (Actor.Selected kn
 framing :: Text -> F.Form [Instruction]
 framing current = (\next -> [Occasion next, Prepare])
   <$> F.textInput "What should this memory help us attend to?" (Just current)
+
+
+-- | A seed repertoire, editable as an ordinary value. The payload is the same
+-- instruction language accepted by execute and the record actor's run endpoint.
+repertoire :: Text -> J.Uniform [Instruction]
+repertoire current = J.uniform
+  (J.alt #continuity "Revisit remembered particulars in this occasion"
+      [View A.continuity, Occasion current, Prepare]
+    J..| J.alt #connections "Look through relationships among memories"
+      [View A.connections, Occasion current, Prepare]
+    J..| J.alt #hold "Neither framing is useful yet; keep the current draft" [])
+
+-- | A human chooses the original instruction payload. An empty runtime
+-- repertoire has no form to present; it is not silently replaced with a default.
+framingMenu :: J.Uniform [Instruction] -> Maybe (F.Form [Instruction])
+framingMenu choices = case J.branches choices of
+  [] -> Nothing
+  first : rest -> Just (F.choice "Which way of attending feels useful?"
+    (option first :| map option rest))
+  where
+    option (_, description, instructions) = F.option (V.text description) instructions
+
+-- | An observation only. Inspect or compare its policy result before sending
+-- the selected instructions to execute or the actor. No preparation runs here.
+suggestFrame :: Text -> J.Uniform [Instruction]
+  -> J.Query (Either J.Doubt (J.Settled J.Careful [Instruction]))
+suggestFrame occasionText choices = J.withUniform choices $ \offers ->
+  J.takenUnder J.careful <$> J.question
+    (J.state (#occasion J.:= occasionText)) #framing
+    (J.choice "Which way of attending fits the occasion, or should we hold?" offers)

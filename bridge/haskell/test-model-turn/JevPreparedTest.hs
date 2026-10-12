@@ -18,6 +18,7 @@ import Tidepool.Inspection.Tree (DisplayTree (..))
 import qualified Jev.Operators as J
 -- Keep the response-retaining public API example in this suite's compile gate.
 import qualified Examples.JevPreparedWorkflow as Workflow
+import qualified Examples.JevComposedWorkflow as Composed
 
 -- Successful response decoding belongs to the native codec gate. These host
 -- checks exercise the generated typed failure path and the pure request view;
@@ -27,6 +28,8 @@ jevPreparedTests = testGroup "jev-prepared"
   (testCase "request inspection preserves original payload laziness" inspectPrepared
     : testCase "explicit retained executions each issue one request" explicitExecutions
     : testCase "observation uses Jev alone and preserves the typed refusal" observeWithoutConsole
+    : testCase "composed queries retain grouping and typed host failure" composedQueries
+    : testCase "empty query uses no host effect" emptyQuery
     : testCase "usage display preserves unknown versus measured zero" usageDisplay
     : [testCase ("one host call retains " ++ show failure) (retainsFailure failure)
       | failure <- failures])
@@ -104,3 +107,40 @@ usageDisplay = do
     Constructor "Jev.Usage" fields -> assertEqual "named structured usage fields"
       ["inputTokens", "outputTokens"] (map fst fields)
     _ -> error "usage was rendered as unstructured text"
+
+
+composedQueries :: IO ()
+composedQueries = do
+  let assess n = J.question (J.state (#evidence J.:= (n :: Int))) #ready
+        (J.noul "Is the evidence ready?")
+      query = traverse assess [1,2,1]
+  case J.prepareQuery "named-model" query of
+    Left issue -> error (show issue)
+    Right ready -> do
+      assertEqual "equal states group with distinct occurrences" [2,1]
+        (map (length . J.groupOccurrences) (J.queryGroups ready))
+      let (preview, omitted) = displayWith 32768 ready
+      assertBool "group preview is structural and includes the actual model"
+        ("named-model" `Text.isInfixOf` preview && not omitted)
+      let (observed, calls) = run (runState (0 :: Int)
+            (interpret (reject JevTimeout) (J.executeQuery ready)))
+      assertEqual "refusal stops before later group" 1 calls
+      assertEqual "failed attempt remains observable" 1 (length (J.observations observed))
+      case J.result observed of
+        Left actual -> assertEqual "typed cause crosses new surface" (J.CallFailed (J.Transport JevTimeout)) actual
+        Right _ -> error "scripted refusal acquired observations"
+      let (journal, _) = displayWith 32768
+            (fmap (const (error "mapped payload demanded" :: Int)) observed)
+      assertBool "failed evaluation has inspectable evidence" ("JevTimeout" `Text.isInfixOf` journal)
+
+emptyQuery :: IO ()
+emptyQuery = do
+  let pending = Composed.reviewPending []
+  case J.prepareQuery J.jevLatest pending of
+    Left issue -> error (show issue)
+    Right ready -> assertEqual "compiled profunctor/optic example is empty without observations" 0 (length (J.queryGroups ready))
+  let (observed, calls) = run (runState (0 :: Int)
+        (interpret (reject JevTimeout) (J.runQuery (pure (17 :: Int)))))
+  assertEqual "pure query result" (Right 17) (J.result observed)
+  assertEqual "no fabricated provider response" 0 (length (J.observations observed))
+  assertEqual "no host call" 0 calls

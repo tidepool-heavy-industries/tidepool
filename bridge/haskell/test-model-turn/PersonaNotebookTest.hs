@@ -22,6 +22,7 @@ import Tidepool.Records (FsError(..))
 import qualified Tidepool.Actor.Record as R
 import qualified Tidepool.Agent.Context as C
 import Tidepool.Form.Wire (prepareForm, decodeSubmission)
+import qualified Jev.Operators as J
 import qualified Persona.Attention as A
 import qualified Persona.AttentionNotebook as N
 import qualified Persona.Orientation as O
@@ -105,6 +106,20 @@ personaNotebookTests = testGroup "persona executable seeds"
           assertEqual "submitted occasion" "Look at this together" (N.occasion observed)
           assertBool "form also requests preparation" (case N.previous observed of Just (Right _) -> True; _ -> False)
           assertEqual "respects current budget" 0 calls
+  , testCase "a repertoire shares original actor instructions with a human form" $ do
+      case N.framingMenu (N.repertoire "Follow these connections") of
+        Nothing -> fail "seed repertoire unexpectedly empty"
+        Just form -> case decodeSubmission (prepareForm form) (object ["f0" .= ("o1" :: Text)]) of
+          Left problem -> fail (show problem)
+          Right commands -> do
+            let (observed, calls) = runNotebook (N.Budget (A.Limits 0 0) : commands)
+            assertEqual "original view function crosses human choice" (A.connections collection) (N.draft observed)
+            assertEqual "original occasion crosses human choice" "Follow these connections" (N.occasion observed)
+            assertEqual "chosen instructions respect current budget" 0 calls
+  , testCase "preparing a semantic repertoire does not execute its instructions" $ do
+      case J.prepareQuery J.jevLatest (N.suggestFrame "Think together" (N.repertoire "Think together")) of
+        Left problem -> fail (show problem)
+        Right ready -> assertEqual "one prepared observation" 1 (length (J.queryGroups ready))
   , testCase "an ordinary Haskell view function changes the prepared presentation" $ do
       let template values = let initial = A.continuity values in initial
             { A.nodes = [n {A.fallback = (A.fallback n) {A.text = "A question to carry: " <> A.text (A.fallback n)}} | n <- A.nodes initial] }
