@@ -661,12 +661,13 @@ impl InvocationWork {
             || state.unresolved_workers.contains(&actor)
     }
 
-    pub(super) fn publish_worker_retention(
+    pub(super) fn publish_worker_retention<T>(
         previous: Option<&Arc<Self>>,
         destination: Option<&Arc<Self>>,
         caller: ActorRef,
         child: LocalActorRef,
-        publish: impl FnOnce(),
+        prepare: impl FnOnce() -> Result<T, super::agent_retention::AgentRetentionError>,
+        publish: impl FnOnce(T),
     ) -> Result<(), super::agent_retention::AgentRetentionError> {
         use super::agent_retention::AgentRetentionError::*;
         if previous.is_some_and(|owner| owner.owner != caller)
@@ -683,13 +684,14 @@ impl InvocationWork {
                         .iter()
                         .position(|worker| worker.identity() == actor)
                         .ok_or(AgentRetainOwnerUnavailable)?;
+                    let prepared = prepare()?;
                     if source != target {
                         let child = states[source].workers.remove(index);
                         states[source].detached_workers.insert(actor);
                         states[target].detached_workers.remove(&actor);
                         states[target].workers.push(child);
                     }
-                    publish();
+                    publish(prepared);
                     Ok(())
                 })
                 .map_err(|_| AgentRetainOwnerClosed)?,
@@ -700,14 +702,16 @@ impl InvocationWork {
                         .iter()
                         .position(|worker| worker.identity() == actor)
                         .ok_or(AgentRetainOwnerUnavailable)?;
+                    let prepared = prepare()?;
                     state.workers.remove(index);
                     state.detached_workers.insert(actor);
-                    publish();
+                    publish(prepared);
                     Ok(())
                 })
                 .map_err(|_| AgentRetainOwnerClosed)?,
             (None, Some(destination)) => destination
                 .with_admission_state(|state| {
+                    let prepared = prepare()?;
                     if !state
                         .workers
                         .iter()
@@ -716,11 +720,13 @@ impl InvocationWork {
                         state.detached_workers.remove(&actor);
                         state.workers.push(child);
                     }
-                    publish();
+                    publish(prepared);
+                    Ok(())
                 })
-                .map_err(|_| AgentRetainOwnerClosed),
+                .map_err(|_| AgentRetainOwnerClosed)?,
             (None, None) => {
-                publish();
+                let prepared = prepare()?;
+                publish(prepared);
                 Ok(())
             }
         }

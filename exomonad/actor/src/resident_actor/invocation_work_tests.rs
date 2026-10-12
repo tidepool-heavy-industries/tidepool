@@ -2471,6 +2471,30 @@ async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once(
         .await
         .unwrap();
     let child_context = receive.await.unwrap();
+    fixture.environment.actors.lock().insert(
+        worker.identity(),
+        ResidentActorRecord {
+            installed_tools: Arc::default(),
+            lifecycle: child_context.lifecycle().clone(),
+            fresh_context_seed: None,
+            workbench_executions: Arc::default(),
+            interactive_policy_installed: false,
+            descriptor: ActorDescriptor::new(
+                "retention worker",
+                crate::ActorPlacement {
+                    session: tidepool_repr::SessionId(71),
+                    resource_scope: RealmId::fresh(),
+                    lexical_scope: tidepool_codegen::scope::ScopeId::ROOT,
+                },
+            )
+            .with_supervisor_parent(owner),
+            bound_worktree: None,
+            terminal: None,
+            runtime_observation: Default::default(),
+            scheduler_root: false,
+            displays: Default::default(),
+        },
+    );
     source.register_worker(worker.clone()).unwrap();
     assert_eq!(
         child_context.supervisor_identity().await.unwrap(),
@@ -2531,7 +2555,8 @@ async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once(
             Some(&closed),
             owner,
             worker.clone(),
-            || {}
+            || Ok(()),
+            |_| {}
         ),
         Err(super::super::agent_retention::AgentRetentionError::AgentRetainOwnerClosed)
     );

@@ -48,6 +48,8 @@ impl WorkerRetentionPublication {
     }
 
     pub(crate) fn publish(self, supervision: impl FnOnce()) -> Result<(), AgentRetentionError> {
+        let records = &self.records;
+        let child = self.child.identity();
         InvocationWork::publish_worker_retention(
             self.previous.as_ref(),
             self.destination.as_ref(),
@@ -55,16 +57,21 @@ impl WorkerRetentionPublication {
             self.child.clone(),
             || {
                 // Ordered scope admission/state locks precede actor-record access.
-                // Record readers release this lock before acquiring scope custody.
-                let mut records = self.records.lock();
-                supervision();
-                if let Some(record) = records.get_mut(&self.child.identity()) {
-                    record.scheduler_root = self.destination_run;
-                    record.descriptor = record
-                        .descriptor
-                        .clone()
-                        .with_supervisor_parent((!self.destination_run).then_some(self.caller));
+                // Validate the record before any membership or supervision write.
+                let records = records.lock();
+                if !records.contains_key(&child) {
+                    return Err(AgentRetentionError::AgentRetainOwnerUnavailable);
                 }
+                Ok(records)
+            },
+            |mut records| {
+                supervision();
+                let record = records.get_mut(&child).expect("validated retention record");
+                record.scheduler_root = self.destination_run;
+                record.descriptor = record
+                    .descriptor
+                    .clone()
+                    .with_supervisor_parent((!self.destination_run).then_some(self.caller));
             },
         )
     }
@@ -135,11 +142,6 @@ where
                 .into_iter()
                 .find_map(|scope| source(scope, target))
         }
-        let previous = self
-            .retained_scope_roots()
-            .into_iter()
-            .filter(|root| root.is_owned_by(context.actor))
-            .find_map(|root| source(root, target));
         let destination_run = lifetime == crate::WorkerLifetime::RunOwned;
         let reservation = kernel
             .reserve_worker_lifetime_transfer(&child, destination_run)
@@ -149,6 +151,13 @@ where
                 crate::local_actor::LifetimeTransferError::Unauthorized => AgentRetainUnauthorized,
                 crate::local_actor::LifetimeTransferError::Unavailable => AgentRetainUnavailable,
             })?;
+        // The run owner excludes a competing transfer while this reservation is
+        // live. Discover cleanup membership after that admission, without await.
+        let previous = self
+            .retained_scope_roots()
+            .into_iter()
+            .filter(|root| root.is_owned_by(context.actor))
+            .find_map(|root| source(root, target));
         let publication = WorkerRetentionPublication::new(
             previous,
             destination,
@@ -430,5 +439,88 @@ mod tests {
             other => panic!("admitted transfer misclassified: {other:?}"),
         }
         fixture.finish_without_directory().await;
+    }
+    #[tokio::test]
+    async fn retention_missing_record_refuses_before_ownership_writes() {
+        let fixture = Fixture::start().await;
+        let (child, context) = worker(&fixture).await;
+        let source = work(fixture.actor.identity());
+        source.register_worker(child.clone()).unwrap();
+        let reservation = fixture
+            .kernel
+            .reserve_worker_lifetime_transfer(&child, true)
+            .await
+            .unwrap();
+        let waiter = reservation
+            .publish(publication(
+                &fixture,
+                &child,
+                Some(source.clone()),
+                None,
+                true,
+            ))
+            .unwrap();
+        fixture
+            .environment
+            .actors
+            .lock()
+            .remove(&child.identity())
+            .unwrap();
+        assert!(matches!(
+            waiter.await,
+            Err(WorkerTransferError::Publication(
+                AgentRetentionError::AgentRetainOwnerUnavailable
+            ))
+        ));
+        assert!(source.owns_worker(child.identity()));
+        assert_eq!(
+            context.supervisor_identity().await.unwrap(),
+            Some(fixture.actor.identity())
+        );
+        assert!(!fixture
+            .environment
+            .actors
+            .lock()
+            .contains_key(&child.identity()));
+        fixture.cleanup(&source).await;
+        fixture.finish().await;
+    }
+
+    #[tokio::test]
+    async fn retention_stale_source_refuses_before_ownership_writes() {
+        let fixture = Fixture::start().await;
+        let (child, context) = worker(&fixture).await;
+        let source = work(fixture.actor.identity());
+        let stale = work(fixture.actor.identity());
+        source.register_worker(child.clone()).unwrap();
+        let reservation = fixture
+            .kernel
+            .reserve_worker_lifetime_transfer(&child, true)
+            .await
+            .unwrap();
+        let waiter = reservation
+            .publish(publication(
+                &fixture,
+                &child,
+                Some(stale.clone()),
+                None,
+                true,
+            ))
+            .unwrap();
+        assert!(matches!(
+            waiter.await,
+            Err(WorkerTransferError::Publication(
+                AgentRetentionError::AgentRetainOwnerUnavailable
+            ))
+        ));
+        assert!(source.owns_worker(child.identity()));
+        assert!(!stale.owns_worker(child.identity()));
+        assert_eq!(
+            context.supervisor_identity().await.unwrap(),
+            Some(fixture.actor.identity())
+        );
+        assert_record(&fixture, &child, false);
+        fixture.cleanup(&source).await;
+        fixture.finish().await;
     }
 }
