@@ -2404,6 +2404,69 @@ mod tests {
         );
     }
 
+    /// Runs the real kernel/coordinator registration protocol without issuing
+    /// cleanup or native binding authority. The proof-only fixture refuses its claim.
+    struct JournalCoordinatorKernel;
+    impl crate::KernelBehavior for JournalCoordinatorKernel {
+        fn start<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<crate::KernelStep<()>, crate::KernelBehaviorError>,
+        > {
+            Box::pin(async { Ok(crate::KernelStep::Continue(())) })
+        }
+        fn cast<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _sender: ActorRef,
+            _request: crate::MailboxValue,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<crate::KernelStep<()>, crate::KernelBehaviorError>,
+        > {
+            Box::pin(async { panic!("journal coordinator fixture has no casts") })
+        }
+        fn call<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _caller: ActorRef,
+            _ancestry: crate::CallAncestry,
+            _request: crate::MailboxValue,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<crate::KernelStep<crate::MailboxValue>, crate::KernelBehaviorError>,
+        > {
+            Box::pin(async { panic!("journal coordinator fixture has no calls") })
+        }
+        fn tool<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _invocation: exomonad_tool::ToolInvocation,
+            _capture: Option<Arc<dyn crate::HostedCheckpointCapture>>,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<crate::KernelStep<serde_json::Value>, crate::KernelInvocationFailure>,
+        > {
+            Box::pin(async { panic!("journal coordinator fixture has no tools") })
+        }
+        fn workbench<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _invocation: crate::ActorWorkbenchInvocation,
+            _control: Option<Arc<crate::WorkbenchExecutionControl>>,
+        ) -> futures_util::future::BoxFuture<
+            'a,
+            Result<
+                crate::KernelStep<tidepool_runtime::session::WorkbenchResponse>,
+                crate::KernelInvocationFailure,
+            >,
+        > {
+            Box::pin(async { panic!("journal coordinator fixture has no workbench") })
+        }
+    }
+
     fn descriptor(label: &str) -> ActorDescriptor {
         ActorDescriptor::new(
             label,
@@ -3010,6 +3073,14 @@ mod tests {
             )
             .await
             .unwrap();
+        let (_kernel, kernel_task) = crate::local_actor::spawn_reserved_local_actor(
+            None,
+            JournalCoordinatorKernel,
+            reservation,
+            control.clone(),
+        )
+        .await
+        .unwrap();
         let claim = lifecycle
             .begin_successor_operation(old_owner.clone())
             .await
@@ -3094,6 +3165,8 @@ mod tests {
             )
             .unwrap());
         claim.refuse().await.unwrap();
+        kernel_task.abort();
+        let _ = kernel_task.await;
     }
 
     #[tokio::test]
