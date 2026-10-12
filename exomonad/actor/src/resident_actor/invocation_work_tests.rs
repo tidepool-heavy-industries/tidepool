@@ -841,6 +841,7 @@ pub(in crate::resident_actor) struct Fixture {
     pub(in crate::resident_actor) actor: LocalActorRef,
     task: ractor::concurrency::JoinHandle<()>,
     directory: crate::LocalActorDirectory,
+    directory_task: ractor::concurrency::JoinHandle<()>,
     pub(in crate::resident_actor) kernel: KernelContext,
     pub(in crate::resident_actor) environment:
         ResidentEnvironment<frunk::HNil, tidepool_mcp::CapturedOutput>,
@@ -848,13 +849,13 @@ pub(in crate::resident_actor) struct Fixture {
 }
 
 impl Fixture {
-    pub(in crate::resident_actor) fn seal_membership(&self) {
-        self.directory.seal();
+    pub(in crate::resident_actor) async fn seal_membership(&self) {
+        self.directory.seal().await.unwrap();
     }
 
     pub(in crate::resident_actor) async fn start() -> Self {
         let (send, receive) = tokio::sync::oneshot::channel();
-        let directory = crate::LocalActorDirectory::default();
+        let (directory, directory_task) = crate::LocalActorDirectory::start().await.unwrap();
         let (actor, task) = crate::local_actor::spawn_local_actor_in_directory(
             None,
             Owner::new(send),
@@ -876,7 +877,6 @@ impl Fixture {
             commands: Default::default(),
             actors: Default::default(),
             fork_workspaces: None,
-            root_admission_closed: Default::default(),
             actor_admissions: crate::ActorAdmissionRegistry::new(),
             source_layers: None,
             jev: Arc::new(crate::jev::UnconfiguredJev),
@@ -892,6 +892,7 @@ impl Fixture {
             actor,
             task,
             directory,
+            directory_task,
             kernel,
             environment,
             deployments: receiver,
@@ -966,6 +967,11 @@ impl Fixture {
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(1), self.task)
+            .await
+            .unwrap()
+            .unwrap();
+        self.directory.stop_owner_for_test().await;
+        tokio::time::timeout(Duration::from_secs(1), self.directory_task)
             .await
             .unwrap()
             .unwrap();
@@ -2463,15 +2469,20 @@ async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once(
         .unwrap();
     let child_context = receive.await.unwrap();
     source.register_worker(worker.clone()).unwrap();
-    assert_eq!(child_context.supervisor_identity(), Some(owner));
-    fixture
+    assert_eq!(
+        child_context.supervisor_identity().await.unwrap(),
+        Some(owner)
+    );
+    let transfer = fixture
         .kernel
-        .with_worker_lifetime_transfer(&worker, true, || {
-            source.release_worker_cleanup(owner, worker.identity())
-        })
-        .unwrap()
+        .reserve_worker_lifetime_transfer(&worker, crate::WorkerLifetime::RunOwned)
+        .await
         .unwrap();
-    assert_eq!(child_context.supervisor_identity(), None);
+    source
+        .release_worker_cleanup(owner, worker.identity())
+        .unwrap();
+    transfer.commit().await.unwrap();
+    assert_eq!(child_context.supervisor_identity().await.unwrap(), None);
     assert!(!source.owns_worker(worker.identity()));
     source.close();
     fixture.cleanup(&source).await;
@@ -2479,14 +2490,17 @@ async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once(
         worker.terminal().get().is_none(),
         "released worker outlives its source scope"
     );
-    fixture
+    let transfer = fixture
         .kernel
-        .with_worker_lifetime_transfer(&worker, false, || {
-            destination.adopt_worker(owner, worker.clone())
-        })
-        .unwrap()
+        .reserve_worker_lifetime_transfer(&worker, crate::WorkerLifetime::ActorOwned)
+        .await
         .unwrap();
-    assert_eq!(child_context.supervisor_identity(), Some(owner));
+    destination.adopt_worker(owner, worker.clone()).unwrap();
+    transfer.commit().await.unwrap();
+    assert_eq!(
+        child_context.supervisor_identity().await.unwrap(),
+        Some(owner)
+    );
     assert!(destination.owns_worker(worker.identity()));
     let closed = root.new_scope().unwrap();
     closed.close();
@@ -2514,20 +2528,16 @@ async fn borrowed_worker_transfer_refuses_before_membership_callback() {
         .await
         .unwrap();
     let context = receive.await.unwrap();
-    let calls = AtomicUsize::new(0);
     let transfer = other
         .kernel
-        .with_worker_lifetime_transfer(&worker, true, || {
-            calls.fetch_add(1, Ordering::Relaxed);
-            Ok::<(), ()>(())
-        });
-    assert_eq!(
+        .reserve_worker_lifetime_transfer(&worker, crate::WorkerLifetime::RunOwned)
+        .await;
+    assert!(matches!(
         transfer,
         Err(crate::local_actor::LifetimeTransferError::Unauthorized)
-    );
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    ));
     assert_eq!(
-        context.supervisor_identity(),
+        context.supervisor_identity().await.unwrap(),
         Some(fixture.actor.identity())
     );
     other.finish().await;
@@ -2655,6 +2665,10 @@ async fn command_transfer_send_refusal_preserves_source_cleanup_before_observer_
     assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
     fixture.actor.address().stop(None);
     tokio::time::timeout(Duration::from_secs(1), fixture.task)
+        .await
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), fixture.directory_task)
         .await
         .unwrap()
         .unwrap();
