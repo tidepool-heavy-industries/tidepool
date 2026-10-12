@@ -42,3 +42,9 @@ predecessor carries an owner-issued drain result; initial and recovered issuance
 are distinct. The permit remains held through journal acknowledgement. The root
 owner closes prior incarnation admission and settles its pending successor claim
 before admitting the next incarnation. Ordinary nonstartup admission is separate.
+
+Opening requires an opaque retained enclosing lifetime owner. The dedicated
+thread holds that existing run lease through bootstrap, queued writes and exit,
+including when the opening waiter disappears. Standalone test journals retain
+their temporary-directory owner. This keepalive does not issue authority and
+adds no lock or registry; facade callers supply their existing lifetime owner.

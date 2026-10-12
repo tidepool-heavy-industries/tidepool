@@ -432,6 +432,7 @@ impl ActorRecoveryJournal {
         anchor: DirectoryAnchor,
         relative_file: PathBuf,
         require_existing: bool,
+        lifetime: Arc<dyn Send + Sync>,
     ) -> std::io::Result<Arc<Self>> {
         let identity = Arc::new(());
         let owner_identity = Arc::clone(&identity);
@@ -441,6 +442,9 @@ impl ActorRecoveryJournal {
         std::thread::Builder::new()
             .name("actor-journal-owner".into())
             .spawn(move || {
+                // The existing enclosing resource owner survives a cancelled
+                // opening waiter and remains held while queued writes drain.
+                let _lifetime = lifetime;
                 let mut fenced = false;
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut owner = match JournalOwner::initialize(
@@ -623,14 +627,28 @@ impl ActorRecoveryJournal {
     pub async fn open(
         anchor: &DirectoryAnchor,
         relative_file: impl AsRef<Path>,
+        lifetime: Arc<dyn Send + Sync>,
     ) -> std::io::Result<Arc<Self>> {
-        Self::start(anchor.clone(), relative_file.as_ref().to_owned(), false).await
+        Self::start(
+            anchor.clone(),
+            relative_file.as_ref().to_owned(),
+            false,
+            lifetime,
+        )
+        .await
     }
     pub async fn open_existing(
         anchor: &DirectoryAnchor,
         relative_file: impl AsRef<Path>,
+        lifetime: Arc<dyn Send + Sync>,
     ) -> std::io::Result<Arc<Self>> {
-        Self::start(anchor.clone(), relative_file.as_ref().to_owned(), true).await
+        Self::start(
+            anchor.clone(),
+            relative_file.as_ref().to_owned(),
+            true,
+            lifetime,
+        )
+        .await
     }
     /// Blocking offline filesystem observation; this never addresses a live
     /// journal owner or repairs its file.
@@ -1947,7 +1965,7 @@ mod tests {
 
     #[tokio::test]
     async fn created_rows_refuse_surplus_fields_without_rewriting_recovery_bytes() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
         let valid = format!("{{\"version\":{VERSION},\"sequence\":1,\"event\":\"created\"}}");
@@ -1955,9 +1973,10 @@ mod tests {
         assert_eq!(serde_json::to_string(&row).unwrap(), valid);
         let valid_bytes = format!("{valid}\n");
         std::fs::write(&path, &valid_bytes).unwrap();
-        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
-            .await
-            .unwrap();
+        let journal =
+            ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", directory.clone())
+                .await
+                .unwrap();
         assert!(journal.records().await.unwrap().is_empty());
         drop(journal);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), valid_bytes);
@@ -1976,7 +1995,7 @@ mod tests {
                 let bytes = format!("{invalid}\n");
                 std::fs::write(&path, &bytes).unwrap();
                 assert!(
-                    ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+                    ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", directory.clone())
                         .await
                         .is_err(),
                     "surplus field {field:?} accepted"
@@ -1988,9 +2007,13 @@ mod tests {
         second["sequence"] = serde_json::json!(2);
         for bytes in [format!("{second}\n"), format!("{valid}\n{second}\n")] {
             std::fs::write(&path, &bytes).unwrap();
-            assert!(ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
-                .await
-                .is_err());
+            assert!(ActorRecoveryJournal::open_existing(
+                &anchor,
+                "actors.jsonl",
+                directory.clone()
+            )
+            .await
+            .is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
         }
     }
@@ -2028,9 +2051,9 @@ mod tests {
 
     #[tokio::test]
     async fn cold_replay_preserves_optional_authored_labels_and_derives_display() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         for (index, label) in [None, Some(""), Some("duplicate"), Some("duplicate")]
@@ -2048,12 +2071,13 @@ mod tests {
             journal.admit(actor, &descriptor, &[]).await.unwrap();
         }
         drop(journal);
-        let records = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
-            .await
-            .unwrap()
-            .records()
-            .await
-            .unwrap();
+        let records =
+            ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", directory.clone())
+                .await
+                .unwrap()
+                .records()
+                .await
+                .unwrap();
         assert_eq!(records[0].admission.label, None);
         assert_eq!(records[0].admission.display_label(), "spawn-0");
         assert_eq!(records[1].admission.label.as_deref(), Some(""));
@@ -2068,13 +2092,13 @@ mod tests {
 
     #[tokio::test]
     async fn embedded_application_intent_and_binding_survive_cold_reopen() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let actor = ActorRef {
             id: ActorId(7),
             incarnation: Incarnation(3),
         };
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         journal
@@ -2109,9 +2133,10 @@ mod tests {
             .await
             .is_err());
         drop(journal);
-        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
-            .await
-            .unwrap();
+        let journal =
+            ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", directory.clone())
+                .await
+                .unwrap();
         assert!(journal.records().await.unwrap()[0]
             .application
             .as_ref()
@@ -2127,9 +2152,10 @@ mod tests {
             .await
             .unwrap();
         drop(journal);
-        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
-            .await
-            .unwrap();
+        let journal =
+            ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", directory.clone())
+                .await
+                .unwrap();
         let record = journal.records().await.unwrap().remove(0);
         let application = record.application.unwrap();
         assert_eq!(application.intended_conversation, Some(expected.clone()));
@@ -2138,28 +2164,32 @@ mod tests {
 
     #[tokio::test]
     async fn old_journal_versions_are_unsupported_and_remain_untouched() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         for version in [1, 2, 3, 4, 5, 6, 7, 8] {
             let path = directory.path().join(format!("v{version}.jsonl"));
             let bytes = format!("{{\"version\":{version},\"sequence\":1,\"event\":\"created\"}}\n");
             std::fs::write(&path, &bytes).unwrap();
-            assert!(
-                ActorRecoveryJournal::open_existing(&anchor, format!("v{version}.jsonl"))
-                    .await
-                    .is_err()
-            );
+            assert!(ActorRecoveryJournal::open_existing(
+                &anchor,
+                format!("v{version}.jsonl"),
+                directory.clone()
+            )
+            .await
+            .is_err());
             assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
         }
 
         let legacy = r#"{"version":5,"sequence":1,"event":"admitted","admission":{"actor":{"id":1,"incarnation":1},"label":"root","creator":null,"supervisor_parent":null,"context_parent":null,"actor_path":"root","role":"root","descendant_depth":8,"descendant_active_children":null,"model":null,"effort":null,"instructions":null,"launch_worktrees":[],"source_layer":[]}}"#;
         let legacy_path = directory.path().join("legacy-role.jsonl");
         std::fs::write(&legacy_path, format!("{legacy}\n")).unwrap();
-        assert!(
-            ActorRecoveryJournal::open_existing(&anchor, "legacy-role.jsonl")
-                .await
-                .is_err()
-        );
+        assert!(ActorRecoveryJournal::open_existing(
+            &anchor,
+            "legacy-role.jsonl",
+            directory.clone()
+        )
+        .await
+        .is_err());
         assert_eq!(
             std::fs::read_to_string(&legacy_path).unwrap(),
             format!("{legacy}\n")
@@ -2168,14 +2198,14 @@ mod tests {
 
     #[tokio::test]
     async fn cold_replay_refuses_binding_after_terminal_publication() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
         let actor = ActorRef {
             id: ActorId(7),
             incarnation: Incarnation(3),
         };
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         journal
@@ -2214,9 +2244,11 @@ mod tests {
         )
         .unwrap();
         drop(journal);
-        assert!(ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
-            .await
-            .is_err());
+        assert!(
+            ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", directory.clone())
+                .await
+                .is_err()
+        );
     }
 
     fn descriptor(label: &str) -> ActorDescriptor {
@@ -2232,14 +2264,14 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_reopens_with_active_and_terminal_records() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
         let actor = ActorRef {
             id: ActorId(7),
             incarnation: Incarnation(3),
         };
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         journal
@@ -2252,7 +2284,7 @@ mod tests {
         for row in stored.lines() {
             parse_row(row).unwrap();
         }
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         let records = journal.records().await.unwrap();
@@ -2281,7 +2313,7 @@ mod tests {
             .await
             .unwrap();
         drop(journal);
-        let records = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let records = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap()
             .records()
@@ -2302,10 +2334,10 @@ mod tests {
 
     #[tokio::test]
     async fn observed_read_leaves_a_live_journal_and_its_torn_tail_untouched() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let path = directory.path().join("actors.jsonl");
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         journal
@@ -2328,9 +2360,9 @@ mod tests {
 
     #[tokio::test]
     async fn identity_reuse_with_changed_parameters_is_rejected() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         let actor = ActorRef::first(ActorId(2));
@@ -2347,12 +2379,12 @@ mod tests {
 
     #[tokio::test]
     async fn every_application_publication_boundary_reopens_without_inventing_progress() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let binding = directory.path().join("binding.json");
         let actor = ActorRef::first(ActorId(9));
 
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         journal
@@ -2360,7 +2392,7 @@ mod tests {
             .await
             .unwrap();
         drop(journal);
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         assert!(journal.records().await.unwrap()[0].application.is_none());
@@ -2370,7 +2402,7 @@ mod tests {
             .await
             .unwrap();
         drop(journal);
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         let prepared = journal
@@ -2391,7 +2423,7 @@ mod tests {
             .await
             .unwrap();
         drop(journal);
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         assert_eq!(
@@ -2408,10 +2440,10 @@ mod tests {
 
     #[tokio::test]
     async fn recovered_host_requires_the_original_lifecycle_owner() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         assert_eq!(
-            ActorRecoveryJournal::open_existing(&anchor, "missing.jsonl")
+            ActorRecoveryJournal::open_existing(&anchor, "missing.jsonl", directory.clone())
                 .await
                 .err()
                 .unwrap()
@@ -2421,49 +2453,55 @@ mod tests {
 
         let empty = directory.path().join("empty.jsonl");
         std::fs::write(&empty, b"").unwrap();
-        assert!(ActorRecoveryJournal::open_existing(&anchor, "empty.jsonl")
-            .await
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("creation marker"));
+        assert!(
+            ActorRecoveryJournal::open_existing(&anchor, "empty.jsonl", directory.clone())
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("creation marker")
+        );
 
         drop(
-            ActorRecoveryJournal::open(&anchor, "initialized.jsonl")
+            ActorRecoveryJournal::open(&anchor, "initialized.jsonl", directory.clone())
                 .await
                 .unwrap(),
         );
-        ActorRecoveryJournal::open_existing(&anchor, "initialized.jsonl")
+        ActorRecoveryJournal::open_existing(&anchor, "initialized.jsonl", directory.clone())
             .await
             .unwrap();
     }
 
     #[tokio::test]
     async fn anchored_open_refuses_escape_before_mutation_and_retries_failed_parent_creation() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
 
         assert!(
-            ActorRecoveryJournal::open(&anchor, "../outside/actors.jsonl")
+            ActorRecoveryJournal::open(&anchor, "../outside/actors.jsonl", directory.clone())
                 .await
                 .is_err()
         );
         assert!(!directory.path().parent().unwrap().join("outside").exists());
-        assert!(
-            ActorRecoveryJournal::open(&anchor, directory.path().join("absolute.jsonl"))
-                .await
-                .is_err()
-        );
+        assert!(ActorRecoveryJournal::open(
+            &anchor,
+            directory.path().join("absolute.jsonl"),
+            directory.clone()
+        )
+        .await
+        .is_err());
         assert!(!directory.path().join("absolute.jsonl").exists());
 
         let obstruction = directory.path().join("nested");
         std::fs::write(&obstruction, b"file blocks directory creation").unwrap();
-        assert!(ActorRecoveryJournal::open(&anchor, "nested/actors.jsonl")
-            .await
-            .is_err());
+        assert!(
+            ActorRecoveryJournal::open(&anchor, "nested/actors.jsonl", directory.clone())
+                .await
+                .is_err()
+        );
         std::fs::remove_file(obstruction).unwrap();
 
-        let journal = ActorRecoveryJournal::open(&anchor, "nested/actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "nested/actors.jsonl", directory.clone())
             .await
             .unwrap();
         assert!(directory.path().join("nested/actors.jsonl").is_file());
@@ -2566,7 +2604,7 @@ mod tests {
 
     #[tokio::test]
     async fn root_startup_admission_and_exact_intent_reopen_atomically() {
-        let run = tempfile::tempdir().unwrap();
+        let run = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
         let path = run.path().join("actors.jsonl");
         let actor = ActorRef::first(ActorId(33));
@@ -2580,7 +2618,7 @@ mod tests {
             None,
             None,
         );
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", run.clone())
             .await
             .unwrap();
         journal
@@ -2589,7 +2627,7 @@ mod tests {
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
         drop(journal);
-        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", run.clone())
             .await
             .unwrap();
         let record = &journal.records().await.unwrap()[0];
@@ -2602,7 +2640,7 @@ mod tests {
             .unwrap();
         drop(journal);
         assert_eq!(
-            ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+            ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", run.clone())
                 .await
                 .unwrap()
                 .records()
@@ -2619,9 +2657,9 @@ mod tests {
 
     #[tokio::test]
     async fn root_successor_receipt_requires_latest_prepared_journal_and_owned_placement() {
-        let run = tempfile::tempdir().unwrap();
+        let run = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", run.clone())
             .await
             .unwrap();
         let binding = run.path().join("binding.json");
@@ -2739,9 +2777,9 @@ mod tests {
 
     #[tokio::test]
     async fn root_startup_rollforward_is_linear_and_cannot_cross_a_bound_owner() {
-        let run = tempfile::tempdir().unwrap();
+        let run = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", run.clone())
             .await
             .unwrap();
         let binding = run.path().join("binding.json");
@@ -2923,15 +2961,15 @@ mod tests {
             .await
             .is_ok());
         drop(journal);
-        ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
+        ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", run.clone())
             .await
             .unwrap();
     }
     #[tokio::test]
     async fn dropped_reply_preserves_admitted_write_and_owner_drains() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         let (entered_tx, entered) = tokio::sync::oneshot::channel();
@@ -2977,17 +3015,18 @@ mod tests {
                 fenced: false
             }
         );
-        let recovered = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
-            .await
-            .unwrap();
+        let recovered =
+            ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", directory.clone())
+                .await
+                .unwrap();
         assert_eq!(recovered.records().await.unwrap()[0].admission.actor, actor);
     }
 
     #[tokio::test]
     async fn append_failure_permanently_fences_even_after_path_repair() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         let path = directory.path().join("actors.jsonl");
@@ -3013,9 +3052,10 @@ mod tests {
         assert!(journal.validated_records().await.is_err());
         assert!(journal.records().await.unwrap().is_empty());
         drop(journal);
-        let recovered = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl")
-            .await
-            .unwrap();
+        let recovered =
+            ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", directory.clone())
+                .await
+                .unwrap();
         recovered
             .admit(actor, &descriptor("owner"), &[])
             .await
@@ -3028,9 +3068,9 @@ mod tests {
         fn journal_histories_match_independent_lifecycle_model(steps in proptest::collection::vec(0u8..7, 1..48)) {
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             runtime.block_on(async {
-                let directory = tempfile::tempdir().unwrap();
+                let directory = Arc::new(tempfile::tempdir().unwrap());
                 let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-                let mut journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").await.unwrap();
+                let mut journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone()).await.unwrap();
                 let actor = ActorRef::first(ActorId(53));
                 let binding = directory.path().join("binding.json");
                 let terminal = crate::ActorTerminal::new(ActorExitKind::Completed, "done");
@@ -3076,7 +3116,7 @@ mod tests {
                         },
                         5 => {
                             drop(journal);
-                            journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl").await.unwrap();
+                            journal = ActorRecoveryJournal::open_existing(&anchor, "actors.jsonl", directory.clone()).await.unwrap();
                             (true, true, false)
                         }
                         _ => {
@@ -3108,9 +3148,9 @@ mod tests {
     }
     #[tokio::test]
     async fn owner_crash_reports_termination_and_refuses_later_commands() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         let mut status = journal.owner_status();
@@ -3137,9 +3177,9 @@ mod tests {
     #[tokio::test]
     async fn uncertain_readback_permanently_fences_writer() {
         use std::io::Write;
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         let path = directory.path().join("actors.jsonl");
@@ -3161,12 +3201,12 @@ mod tests {
     }
     #[tokio::test]
     async fn binding_ack_is_exact_issuer_evidence_and_duplicates_do_not_append() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
-        let other = ActorRecoveryJournal::open(&anchor, "other.jsonl")
+        let other = ActorRecoveryJournal::open(&anchor, "other.jsonl", directory.clone())
             .await
             .unwrap();
         let actor = ActorRef::first(ActorId(55));
@@ -3206,9 +3246,9 @@ mod tests {
     }
     #[tokio::test]
     async fn unissued_startup_parameters_do_not_admit_or_append() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", directory.clone())
             .await
             .unwrap();
         let actor = ActorRef::first(ActorId(56));
@@ -3238,7 +3278,7 @@ mod tests {
 
     #[test]
     fn observed_read_preserves_filesystem_kind_and_malformed_data_distinction() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Arc::new(tempfile::tempdir().unwrap());
         let error = ActorRecoveryJournal::read_observed(directory.path()).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::IsADirectory);
         let path = directory.path().join("malformed.jsonl");
