@@ -405,6 +405,7 @@ pub enum KernelMessage {
     ActivateReplacement {
         backlog: std::collections::VecDeque<KernelMessage>,
         draining: bool,
+        reply: RpcReplyPort<Result<(), KernelBehaviorError>>,
     },
     Source(crate::SourceDelivery),
     RouteReady {
