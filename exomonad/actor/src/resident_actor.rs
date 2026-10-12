@@ -5459,14 +5459,12 @@ where
                 target,
                 definition,
             } => {
-                let authorized = kernel
-                    .authorize_control(target)
-                    .await
-                    .map_err(ResidentActorWorkbenchError::Directory)?;
+                let authorized = kernel.authorize_control(target).await;
                 let installed = self.installed_tools.clone();
                 let installation_context = self.context(context.actor);
                 let allowed = descriptor.capabilities().effect_keys().to_vec();
                 Box::pin(async move {
+                    let authorized = authorized.map_err(ResidentActorWorkbenchError::Directory)?;
                     let result = if !authorized {
                         Err(crate::SpecReplacementError::Unauthorized)
                     } else if target == context.actor {
@@ -11027,41 +11025,55 @@ where
         }))
     }
 
-    fn pause_failed_handler(&mut self, kernel: &KernelContext, detail: &str) -> bool {
-        if matches!(self.standing, ResidentStanding::Paused(_)) {
-            return true;
-        }
-        let (checkpoint, input) = match (self.checkpoint.take(), self.active_input.take()) {
-            (Some(checkpoint), Some(input)) => (checkpoint, input),
-            (checkpoint, input) => {
-                self.checkpoint = checkpoint;
-                self.active_input = input;
-                return false;
+    fn pause_failed_handler<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        detail: &'a str,
+    ) -> futures_util::future::BoxFuture<'a, bool> {
+        Box::pin(async move {
+            if matches!(self.standing, ResidentStanding::Paused(_)) {
+                return true;
             }
-        };
-        self.pending_checkpoint = None;
-        let failure = PausedHandler {
-            checkpoint,
-            input,
-            detail: detail.to_owned(),
-        };
-        tracing::debug!(
-            actor = ?kernel.identity(),
-            committed_state = ?failure.checkpoint.value,
-            failed_input = ?failure.input,
-            detail = %failure.detail,
-            "retaining paused handler custody"
-        );
-        self.set_standing(kernel.identity(), ResidentStanding::Paused(failure));
-        if let Some(actor) = kernel.resolve(kernel.identity()) {
-            actor.terminal().publish_paused(detail.to_owned());
-        }
-        self.notify_supervisor(
+            let (checkpoint, input) = match (self.checkpoint.take(), self.active_input.take()) {
+                (Some(checkpoint), Some(input)) => (checkpoint, input),
+                (checkpoint, input) => {
+                    self.checkpoint = checkpoint;
+                    self.active_input = input;
+                    return false;
+                }
+            };
+            self.pending_checkpoint = None;
+            let failure = PausedHandler {
+                checkpoint,
+                input,
+                detail: detail.to_owned(),
+            };
+            tracing::debug!(
+                actor = ?kernel.identity(),
+                committed_state = ?failure.checkpoint.value,
+                failed_input = ?failure.input,
+                detail = %failure.detail,
+                "retaining paused handler custody"
+            );
+            self.set_standing(kernel.identity(), ResidentStanding::Paused(failure));
+            kernel
+                .lifecycle()
+                .retained_terminal()
+                .publish_paused(detail.to_owned());
+            let parent = match kernel.supervisor_identity().await {
+                Ok(parent) => parent,
+                Err(error) => {
+                    tracing::error!(actor = ?kernel.identity(), %error, "paused handler supervisor observation unavailable");
+                    return true;
+                }
+            };
+            self.notify_supervisor(
             kernel.identity(),
-            kernel.supervisor_identity(),
+            parent,
             format!("{:?} handler paused: {detail}. State/input/queue retained; no replay. Replace actor or stop.", kernel.identity()),
         );
-        true
+            true
+        })
     }
 
     fn start<'a>(
@@ -11124,7 +11136,7 @@ where
             kernel
                 .register_authority(self.descriptor.clone(), self.forest_control)
                 .await
-                .map_err(Self::failure)?;
+                .map_err(|error| Self::failure(error.to_string()))?;
             self.environment.actors.lock().insert(
                 context.actor,
                 ResidentActorRecord {

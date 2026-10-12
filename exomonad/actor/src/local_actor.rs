@@ -927,8 +927,12 @@ pub trait KernelBehavior: Send + 'static {
     }
     /// Retain a failed input and its state instead of terminating this actor.
     /// Returning true requires closing execution while retaining mailbox admission.
-    fn pause_failed_handler(&mut self, _context: &KernelContext, _detail: &str) -> bool {
-        false
+    fn pause_failed_handler<'a>(
+        &'a mut self,
+        _context: &'a KernelContext,
+        _detail: &'a str,
+    ) -> BoxFuture<'a, bool> {
+        Box::pin(async { false })
     }
 
     fn source<'a>(
@@ -3347,6 +3351,7 @@ async fn fail_handler_with_error<B>(
         && state
             .behavior
             .pause_failed_handler(&state.context, &error.detail)
+            .await
     {
         return;
     }
@@ -8137,13 +8142,20 @@ mod tests {
             })
         }
 
-        fn pause_failed_handler(&mut self, context: &KernelContext, detail: &str) -> bool {
-            self.calls.lock().push("paused");
-            self.paused.store(true, Ordering::SeqCst);
-            if let Some(actor) = context.resolve(context.identity()) {
-                actor.terminal().publish_paused(detail.to_owned());
-            }
-            true
+        fn pause_failed_handler<'a>(
+            &'a mut self,
+            context: &'a KernelContext,
+            detail: &'a str,
+        ) -> BoxFuture<'a, bool> {
+            Box::pin(async move {
+                self.calls.lock().push("paused");
+                self.paused.store(true, Ordering::SeqCst);
+                context
+                    .lifecycle()
+                    .retained_terminal()
+                    .publish_paused(detail.to_owned());
+                true
+            })
         }
 
         fn shutdown_components<'a>(
