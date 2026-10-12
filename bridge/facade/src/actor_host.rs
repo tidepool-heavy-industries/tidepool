@@ -2062,12 +2062,14 @@ async fn run_owned(
         exomonad_actor::ActorRecoveryJournal::open(
             &config.run_directory,
             "actor-lifecycle.v2.jsonl",
+            host_incarnation.clone(),
         )
         .await
     } else {
         exomonad_actor::ActorRecoveryJournal::open_existing(
             &config.run_directory,
             "actor-lifecycle.v2.jsonl",
+            host_incarnation.clone(),
         )
         .await
     }?;
@@ -3897,7 +3899,7 @@ pub(crate) async fn prepare_workspace_toolsets(
         .ok_or("native preparation requires [launch.embedded]")?
         .clone();
     settings.validate()?;
-    let temporary = tempfile::tempdir()?;
+    let temporary = Arc::new(tempfile::tempdir()?);
     let runtime_directory =
         tidepool_atomic_write::DirectoryAnchor::open_existing(temporary.path())?;
     let config = ActorHostConfig {
@@ -3960,9 +3962,12 @@ pub(crate) async fn prepare_workspace_toolsets(
         runtime_directory.path(),
         settings.concurrent_jobs,
     )?;
-    let recovery =
-        exomonad_actor::ActorRecoveryJournal::open(&runtime_directory, "actor-lifecycle.v2.jsonl")
-            .await?;
+    let recovery = exomonad_actor::ActorRecoveryJournal::open(
+        &runtime_directory,
+        "actor-lifecycle.v2.jsonl",
+        temporary.clone(),
+    )
+    .await?;
     let (forest, _) = ResidentForest::new(
         workbench.clone(),
         tidepool_runtime::session::fresh_session_id(),

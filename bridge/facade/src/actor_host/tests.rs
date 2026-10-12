@@ -487,7 +487,7 @@ async fn direct_runtime_launch_refuses_invalid_configured_spec_before_ready() {
 
 #[tokio::test]
 async fn later_host_before_root_admission_creates_missing_journals() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = Arc::new(tempfile::tempdir().unwrap());
     let binding = directory.path().join("root-binding.json");
     let actors = directory.path().join("actor-lifecycle.v2.jsonl");
     let run = directory.path().join("run-journal.jsonl");
@@ -500,6 +500,7 @@ async fn later_host_before_root_admission_creates_missing_journals() {
     let actor_journal = exomonad_actor::ActorRecoveryJournal::open(
         &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
         "actor-lifecycle.v2.jsonl",
+        directory.clone(),
     )
     .await
     .unwrap();
@@ -522,7 +523,7 @@ async fn later_host_before_root_admission_creates_missing_journals() {
 
 #[tokio::test]
 async fn later_host_requires_missing_journals_when_prior_evidence_exists() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = Arc::new(tempfile::tempdir().unwrap());
     let binding = directory.path().join("root-binding.json");
     let actors = directory.path().join("actor-lifecycle.v2.jsonl");
     let run = directory.path().join("run-journal.jsonl");
@@ -535,7 +536,8 @@ async fn later_host_requires_missing_journals_when_prior_evidence_exists() {
     );
     assert!(exomonad_actor::ActorRecoveryJournal::open_existing(
         &tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap(),
-        "actor-lifecycle.v2.jsonl"
+        "actor-lifecycle.v2.jsonl",
+        directory.clone(),
     )
     .await
     .is_err());

@@ -466,7 +466,7 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
 }
 
 async fn startup_refusal(cancel: bool) {
-    let files = tempfile::tempdir().unwrap();
+    let files = Arc::new(tempfile::tempdir().unwrap());
     let repository = exomonad_worktree::testing::TestRepo::init().unwrap();
     repository
         .writer()
@@ -562,6 +562,7 @@ async fn startup_refusal(cancel: bool) {
     let journal = exomonad_actor::ActorRecoveryJournal::open_existing(
         &context.config.run_directory,
         "actor-lifecycle.v2.jsonl",
+        files.clone(),
     )
     .await
     .unwrap();
@@ -635,6 +636,7 @@ async fn startup_refusal(cancel: bool) {
     let restored = exomonad_actor::ActorRecoveryJournal::open_existing(
         &successor.config.run_directory,
         "actor-lifecycle.v2.jsonl",
+        files.clone(),
     )
     .await
     .unwrap();

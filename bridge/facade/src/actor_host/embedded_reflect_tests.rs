@@ -306,11 +306,15 @@ async fn reflection_includes_streamed_active_request_then_records_response_compl
 
 #[tokio::test]
 async fn journal_backed_reflection_distinguishes_missing_binding_from_fenced_owner() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = Arc::new(tempfile::tempdir().unwrap());
     let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(directory.path()).unwrap();
-    let journal = exomonad_actor::ActorRecoveryJournal::open(&anchor, "actor-lifecycle.v2.jsonl")
-        .await
-        .unwrap();
+    let journal = exomonad_actor::ActorRecoveryJournal::open(
+        &anchor,
+        "actor-lifecycle.v2.jsonl",
+        directory.clone(),
+    )
+    .await
+    .unwrap();
     let actor = ActorRef::first(ActorId(0));
     let reader = super::embedded_reflect::run_conversation_reader(
         Arc::new(Store::memory().unwrap()),
