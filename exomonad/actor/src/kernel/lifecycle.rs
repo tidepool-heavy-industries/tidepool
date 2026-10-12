@@ -617,6 +617,9 @@ impl LifecycleState {
     }
 
     fn refusal(&self) -> Option<KernelCallFailure> {
+        if matches!(self.native_settlement, NativeSettlement::NeedsAttention(_)) {
+            return Some(KernelCallFailure::TargetUnavailable(self.identity));
+        }
         match self.phase {
             LifecyclePhase::Open => None,
             LifecyclePhase::IdleCheck => Some(KernelCallFailure::RetirementPending(self.identity)),
@@ -664,6 +667,9 @@ impl LifecycleState {
     }
 
     fn provider_error(&self) -> Option<NativeProviderStartError> {
+        if let NativeSettlement::NeedsAttention(detail) = &self.native_settlement {
+            return Some(NativeProviderStartError::Native(detail.clone()));
+        }
         match self.phase {
             LifecyclePhase::Open => None,
             LifecyclePhase::IdleCheck => Some(NativeProviderStartError::RetirementPending),
@@ -888,6 +894,13 @@ impl Actor for LifecycleCoordinator {
                 ) {
                     state.tasks.remove(&sequence);
                     native_begun(state, &myself, sequence, outcome);
+                } else if matches!(&outcome, Ok(Some(_))) {
+                    // A live unmatched native ticket will be abandoned by Drop.
+                    // Its native owner fences; retain the uncertainty locally
+                    // without rewriting a later provider turn's observation.
+                    state.native_settlement = NativeSettlement::NeedsAttention(
+                        "native admission returned an unmatched live transition".into(),
+                    );
                 }
             }
             LifecycleCommand::NativeCompleted { sequence, outcome } => {
@@ -901,6 +914,10 @@ impl Actor for LifecycleCoordinator {
                 ) {
                     state.tasks.remove(&sequence);
                     native_completed(state, &myself, sequence, outcome);
+                } else if sequence > state.operation_sequence {
+                    state.native_settlement = NativeSettlement::NeedsAttention(
+                        "native completion names an operation that was never issued".into(),
+                    );
                 }
             }
             LifecycleCommand::ClaimIdle { terminal, reply } => {
