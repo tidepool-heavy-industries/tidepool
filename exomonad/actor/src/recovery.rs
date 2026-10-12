@@ -419,7 +419,9 @@ struct BootstrapPause {
     resume: std::sync::mpsc::Receiver<()>,
 }
 
-/// Trusted host adapter consumes its exclusive boot lease before sharing it.
+/// Trusted host composition consumes its exclusive boot lease before sharing it.
+/// This public adapter is a trust boundary, not a sealed proof against arbitrary
+/// external implementations. Production supplies the actual host lease here.
 pub trait RecoveryBootRegistration: Send + Sync {
     fn into_run(self: Box<Self>) -> Arc<dyn tidepool_runtime::session::RecoveryRunAuthority>;
 }
@@ -2806,6 +2808,56 @@ mod tests {
                 .as_ref(),
             Some(&intent.conversation)
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_bootstrap_retains_actual_exclusive_run_lease_until_exit() {
+        struct LeaseLifetime {
+            run: Option<Arc<dyn tidepool_runtime::session::RecoveryRunAuthority>>,
+            released: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl Drop for LeaseLifetime {
+            fn drop(&mut self) {
+                drop(self.run.take());
+                let _ = self.released.take().unwrap().send(());
+            }
+        }
+        let directory = Arc::new(tempfile::tempdir().unwrap());
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let run = recovery_test_fixture::boot_registration(directory.path()).into_run();
+        let (released, exit) = tokio::sync::oneshot::channel();
+        let lifetime: Arc<dyn Send + Sync> = Arc::new(LeaseLifetime {
+            run: Some(run.clone()),
+            released: Some(released),
+        });
+        let (entered, paused) = tokio::sync::oneshot::channel();
+        let (resume, resumed) = std::sync::mpsc::channel();
+        let opening = tokio::spawn(ActorRecoveryJournal::start_bootstrap(
+            anchor,
+            "actors.jsonl".into(),
+            false,
+            lifetime,
+            Some(run),
+            Some(BootstrapPause {
+                entered,
+                resume: resumed,
+            }),
+        ));
+        paused.await.unwrap();
+        opening.abort();
+        assert!(matches!(opening.await, Err(error) if error.is_cancelled()));
+        let competing = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(directory.path().join("recovery-owner.lock"))
+            .unwrap();
+        assert!(competing.try_lock().is_err());
+        resume.send(()).unwrap();
+        exit.await.unwrap();
+        competing.try_lock().unwrap();
+        let records =
+            ActorRecoveryJournal::read_observed(&directory.path().join("actors.jsonl")).unwrap();
+        assert!(records.is_empty());
     }
 
     #[tokio::test]
