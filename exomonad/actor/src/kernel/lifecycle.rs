@@ -529,6 +529,11 @@ impl LifecycleHandle {
         &self.terminal
     }
 
+    #[cfg(test)]
+    pub(crate) fn observations_for_test(&self) -> watch::Receiver<LifecycleSnapshot> {
+        self.observations.clone()
+    }
+
     pub fn observation(&self) -> LifecycleSnapshot {
         self.observations.borrow().clone()
     }
