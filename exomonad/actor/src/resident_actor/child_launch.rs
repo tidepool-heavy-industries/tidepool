@@ -125,6 +125,29 @@ impl ChildPlacementCustody {
         Ok(placement)
     }
 
+    pub(crate) fn publish_checkpoint_remint(
+        &self,
+        session: tidepool_repr::SessionId,
+        provisional_scope: tidepool_codegen::scope::ScopeId,
+        actual_scope: tidepool_codegen::scope::ScopeId,
+    ) -> Result<(), &'static str> {
+        let mut phase = self.0.lock();
+        let ChildPlacementPhase::Prepared(placement) = *phase else {
+            return Err("checkpoint placement is no longer owned by startup");
+        };
+        if placement.session != session || placement.lexical_scope != provisional_scope {
+            return Err("checkpoint remint differs from its exact startup placement");
+        }
+        if !self.1.load(std::sync::atomic::Ordering::Acquire) {
+            return Err("checkpoint startup was abandoned before native publication");
+        }
+        *phase = ChildPlacementPhase::Prepared(crate::ActorPlacement {
+            lexical_scope: actual_scope,
+            ..placement
+        });
+        Ok(())
+    }
+
     fn update(&self, placement: crate::ActorPlacement) {
         let mut phase = self.0.lock();
         assert!(
@@ -457,12 +480,10 @@ where
                     context.clone(),
                     retained_scope.clone(),
                     descriptor.placement().lexical_scope,
+                    continuation.placement_custody.clone(),
                 )
                 .await?;
             descriptor = descriptor.with_lexical_scope(scope);
-            continuation
-                .placement_custody
-                .update(descriptor.placement());
         }
         // Resolve placement before transferring the source-paired entry.
         // A session carrying RepoEvent stays on its existing machine.

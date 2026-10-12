@@ -8411,6 +8411,7 @@ where
         context: crate::ActorSessionContext,
         checkpoint: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
         provisional_scope: ScopeId,
+        custody: crate::resident_actor::child_launch::ChildPlacementCustody,
     ) -> Result<ScopeId, ResidentActorWorkbenchError> {
         let source_scope = context.placement.lexical_scope;
         self.access
@@ -8423,6 +8424,16 @@ where
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
                         "authored entry dependencies were unavailable".into(),
                     ));
+                }
+                // Publish from the native issuer before a dropped result can
+                // lose the new scope. Cleanup may already own the old placement.
+                if let Err(detail) = custody.publish_checkpoint_remint(
+                    context.placement.session,
+                    provisional_scope,
+                    scope,
+                ) {
+                    session.retire_scope(scope);
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(detail.into()));
                 }
                 session.retire_scope(provisional_scope);
                 Ok(scope)
@@ -24117,8 +24128,17 @@ pub(crate) mod request_tests {
                 let mut child = context;
                 child.actor = crate::ActorRef::first(crate::ActorId(actor_id));
                 child.placement.lexical_scope = provisional;
+                let custody = crate::resident_actor::child_launch::ChildPlacementCustody::new(
+                    child.placement,
+                );
+                let _startup = custody.startup_guard();
                 child.placement.lexical_scope = runner
-                    .remint_checkpoint_child_scope_from_lease(child.clone(), capsule, provisional)
+                    .remint_checkpoint_child_scope_from_lease(
+                        child.clone(),
+                        capsule,
+                        provisional,
+                        custody,
+                    )
                     .await
                     .expect("released token cannot erase admitted lexical state");
                 (child, admitted)
