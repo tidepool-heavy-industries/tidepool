@@ -278,6 +278,55 @@ pub(crate) enum LifetimeTransferError {
 }
 
 impl KernelContext {
+    pub(crate) async fn authorize_control(
+        &self,
+        target: ActorRef,
+    ) -> Result<bool, run_control::DirectoryError> {
+        self.directory
+            .authorize_control(self.identity, target)
+            .await
+    }
+    pub(crate) async fn authorize_control_as(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+    ) -> Result<bool, run_control::DirectoryError> {
+        self.directory.authorize_control(owner, target).await
+    }
+    pub(crate) async fn authorize_observe(
+        &self,
+        target: ActorRef,
+    ) -> Result<bool, run_control::DirectoryError> {
+        self.directory
+            .authorize_observe(self.identity, target)
+            .await
+    }
+    pub(crate) async fn authorize_observe_as(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+    ) -> Result<bool, run_control::DirectoryError> {
+        self.directory.authorize_observe(owner, target).await
+    }
+    pub(crate) async fn register_authority(
+        &self,
+        descriptor: crate::ActorDescriptor,
+        forest_control: bool,
+    ) -> Result<(), run_control::DirectoryError> {
+        self.directory
+            .register_authority(self.identity, descriptor, forest_control)
+            .await
+    }
+    pub(crate) async fn share_observation(
+        &self,
+        recipient: ActorRef,
+        scope: ActorRef,
+    ) -> Result<run_control::ObservationShareOutcome, run_control::DirectoryError> {
+        self.directory
+            .share_observation(self.identity, recipient, scope)
+            .await
+    }
+
     pub(crate) async fn replacement_ingress_grant(
         &self,
         successor: ActorRef,

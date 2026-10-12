@@ -3523,7 +3523,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         target: ActorRef,
     ) -> Result<LocalActorRef, ResidentActorWorkbenchError> {
         let authorized = target != context.actor
-            && actor_can_control(context.actor, target, &self.environment.actors.lock());
+            && kernel
+                .authorize_control(target)
+                .await
+                .map_err(ResidentActorWorkbenchError::Directory)?;
         if !authorized {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "actor drain is not authorized".into(),
@@ -5362,7 +5365,11 @@ where
                 .attach_command(slot, key, context.actor, &self.environment.commands)
                 .map_err(|error| format!("command source refused: {error:?}"))?,
             SourceTarget::Lifecycle(target) => {
-                if !actor_can_observe(context.actor, target, &self.environment.actors.lock()) {
+                if !kernel
+                    .authorize_observe(target)
+                    .await
+                    .map_err(|error| error.to_string())?
+                {
                     return Err("lifecycle source is not authorized".into());
                 }
                 let actor = kernel
@@ -5479,8 +5486,10 @@ where
                 target,
                 definition,
             } => {
-                let authorized =
-                    actor_can_control(context.actor, target, &environment.actors.lock());
+                let authorized = kernel
+                    .authorize_control(target)
+                    .await
+                    .map_err(ResidentActorWorkbenchError::Directory)?;
                 let installed = self.installed_tools.clone();
                 let installation_context = self.context(context.actor);
                 let allowed = descriptor.capabilities().effect_keys().to_vec();
@@ -5683,36 +5692,11 @@ where
                 recipient,
                 scope,
             } => Box::pin(async move {
-                let recipient_actor = kernel
-                    .resolve(recipient)
-                    .await
-                    .map_err(ResidentActorWorkbenchError::Directory)?;
-                let outcome = {
-                    let mut records = environment.actors.lock();
-                    if records
-                        .get(&recipient)
-                        .is_none_or(|record| record.terminal.is_some())
-                        || recipient_actor.is_none_or(|actor| actor.terminal().get().is_some())
-                    {
-                        ObservationShareResult::RecipientUnavailable
-                    } else if !records.contains_key(&scope) {
-                        ObservationShareResult::ScopeUnavailable
-                    } else if !actor_can_observe(context.actor, scope, &records) {
-                        ObservationShareResult::Unauthorized
-                    } else {
-                        #[allow(
-                            clippy::expect_used,
-                            reason = "the RecipientUnavailable branch above already \
-                                      returned unless records.get(&recipient) is Some, \
-                                      and `records` is the same lock held throughout"
-                        )]
-                        records
-                            .get_mut(&recipient)
-                            .expect("checked exact recipient")
-                            .observation_roots
-                            .insert(scope);
-                        ObservationShareResult::Shared
-                    }
+                let outcome = match kernel.share_observation(recipient, scope).await.map_err(ResidentActorWorkbenchError::Directory)? {
+                    crate::local_actor::run_control::ObservationShareOutcome::RecipientUnavailable => ObservationShareResult::RecipientUnavailable,
+                    crate::local_actor::run_control::ObservationShareOutcome::ScopeUnavailable => ObservationShareResult::ScopeUnavailable,
+                    crate::local_actor::run_control::ObservationShareOutcome::Unauthorized => ObservationShareResult::Unauthorized,
+                    crate::local_actor::run_control::ObservationShareOutcome::Shared => ObservationShareResult::Shared,
                 };
                 environment
                     .runner
@@ -6122,10 +6106,14 @@ where
             }),
 
             ResidentActorBoundary::AgentForget(forget) => Box::pin(async move {
+                let permitted = kernel
+                    .authorize_control(forget.target)
+                    .await
+                    .map_err(ResidentActorWorkbenchError::Directory)?;
                 let authorized_terminal = {
                     let records = self.environment.actors.lock();
                     records.get(&forget.target).and_then(|record| {
-                        actor_can_control(context.actor, forget.target, &records)
+                        permitted
                             .then(|| {
                                 record
                                     .terminal
@@ -6146,9 +6134,7 @@ where
                 };
                 let outcome = if authorized_terminal.is_none() {
                     let records = self.environment.actors.lock();
-                    if records.contains_key(&forget.target)
-                        && actor_can_control(context.actor, forget.target, &records)
-                    {
+                    if records.contains_key(&forget.target) && permitted {
                         crate::resident_workbench::AgentForgetProjection::Running
                     } else {
                         crate::resident_workbench::AgentForgetProjection::Unavailable
@@ -6197,12 +6183,15 @@ where
                     .await
             }),
             ResidentActorBoundary::AgentStop(stop) => Box::pin(async move {
+                let permitted = kernel
+                    .authorize_control(stop.target)
+                    .await
+                    .map_err(ResidentActorWorkbenchError::Directory)?;
                 let (known, authorized) = {
                     let records = self.environment.actors.lock();
                     (
                         records.contains_key(&stop.target),
-                        stop.target != context.actor
-                            && actor_can_control(context.actor, stop.target, &records),
+                        stop.target != context.actor && permitted,
                     )
                 };
                 let outcome = if stop.target == context.actor {
@@ -6431,7 +6420,10 @@ where
             }),
             ResidentActorBoundary::Replace { target, candidate } => Box::pin(async move {
                 let authorized = target != context.actor
-                    && actor_can_control(context.actor, target, &self.environment.actors.lock());
+                    && kernel
+                        .authorize_control(target)
+                        .await
+                        .map_err(ResidentActorWorkbenchError::Directory)?;
                 let actor = if authorized {
                     kernel
                         .resolve(target)
@@ -8120,11 +8112,11 @@ where
                                         target,
                                     ) = source.target
                                     {
-                                        if !actor_can_observe(
-                                            owner,
-                                            target,
-                                            &self.environment.actors.lock(),
-                                        ) {
+                                        if !kernel
+                                            .authorize_observe_as(owner, target)
+                                            .await
+                                            .map_err(ResidentActorWorkbenchError::Directory)?
+                                        {
                                             return Err(
                                                 ResidentActorWorkbenchError::ActorProtocol(
                                                     "lifecycle source is not authorized".into(),
@@ -11143,6 +11135,10 @@ where
                 .await
                 .map_err(Self::failure)?;
             self.lifecycle = Some(lifecycle.clone());
+            kernel
+                .register_authority(self.descriptor.clone(), self.forest_control)
+                .await
+                .map_err(Self::failure)?;
             self.environment.actors.lock().insert(
                 context.actor,
                 ResidentActorRecord {
@@ -11830,8 +11826,10 @@ where
     ) -> futures_util::future::BoxFuture<'a, Result<(), crate::SpecReplacementError>> {
         Box::pin(kernel.compiler_lifecycle_scope(async move {
             let target = kernel.identity();
-            let authorized =
-                actor_can_control(definition.caller, target, &self.environment.actors.lock());
+            let authorized = kernel
+                .authorize_control_as(definition.caller, target)
+                .await
+                .map_err(|error| crate::SpecReplacementError::Failed(error.to_string()))?;
             if !authorized {
                 return Err(crate::SpecReplacementError::Unauthorized);
             }
