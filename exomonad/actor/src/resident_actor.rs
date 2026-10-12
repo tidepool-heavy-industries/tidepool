@@ -13818,24 +13818,49 @@ where
     /// Fence every admitted member before draining run and root-owned cleanup.
     /// A forced actor stop remains unconfirmed even after its scheduler task exits.
     pub async fn shutdown(&self) -> Vec<crate::ForestRootShutdown> {
-        let retirement = self
-            .directory
-            .seal()
-            .cancel_all(ActorTerminal::new(
-                ActorExitKind::Cancelled,
-                "forest host shutdown",
-            ))
-            .await;
-        *self.environment.root_admission_closed.write().await = true;
-        self.directory.close_run_admission().await;
-        let roots = retirement.into_roots();
+        let budget = std::time::Duration::from_secs(30);
+        let retirement = match self.directory.seal().await {
+            Ok(membership) => {
+                membership
+                    .cancel_all(ActorTerminal::new(
+                        ActorExitKind::Cancelled,
+                        "forest host shutdown",
+                    ))
+                    .await
+            }
+            Err(error) => {
+                return vec![crate::ForestRootShutdown::RunResources(
+                    crate::CleanupComponentOutcome::Unconfirmed(error.to_string()),
+                )]
+            }
+        };
+        let preparation = self.directory.settle_preparations(budget).await;
+        // A transfer admitted before seal can change the independent roots.
+        let roots = match self.directory.independent_roots().await {
+            Ok(roots) => roots,
+            Err(error) => {
+                return vec![crate::ForestRootShutdown::RunResources(
+                    crate::CleanupComponentOutcome::Unconfirmed(format!(
+                        "preparation {preparation:?}; membership: {error}"
+                    )),
+                )]
+            }
+        };
         let mut outcomes = Vec::with_capacity(roots.len() + 1);
-        outcomes.push(crate::ForestRootShutdown::RunResources(
-            self.directory.shutdown_run_resources().await,
-        ));
         for root in roots {
-            outcomes.push(shutdown_forest_root(&root, std::time::Duration::from_secs(30)).await);
+            outcomes.push(shutdown_forest_root(&root, budget).await);
         }
+        let resources = self.directory.shutdown_run_resources().await;
+        outcomes.push(crate::ForestRootShutdown::RunResources(
+            if preparation.is_confirmed() {
+                resources
+            } else {
+                crate::CleanupComponentOutcome::Unconfirmed(format!(
+                    "preparation {preparation:?}; run resources {resources:?}"
+                ))
+            },
+        ));
+        drop(retirement);
         outcomes
     }
 
