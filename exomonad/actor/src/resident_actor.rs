@@ -13672,7 +13672,6 @@ where
             .admit_prepared_root(
                 descriptor,
                 outcome,
-                &admission,
                 PreparedRootAdmission {
                     identity: Some(identity),
                     launch_worktrees: durable.launch_worktrees.clone(),
@@ -13964,13 +13963,7 @@ where
         descriptor: ActorDescriptor,
         outcome: ResidentOutcome,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
-        let admission = self.environment.root_admission_closed.read().await;
-        if *admission {
-            return Err(ractor::SpawnErr::StartupFailed(
-                std::io::Error::other("swarm root admission is closed").into(),
-            ));
-        }
-        self.admit_prepared_root(descriptor, outcome, &admission, Default::default())
+        self.admit_prepared_root(descriptor, outcome, Default::default())
             .await
     }
 
@@ -14191,16 +14184,9 @@ where
         outcome: ResidentOutcome,
         identity: ActorRef,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
-        let admission = self.environment.root_admission_closed.read().await;
-        if *admission {
-            return Err(ractor::SpawnErr::StartupFailed(
-                std::io::Error::other("swarm root admission is closed").into(),
-            ));
-        }
         self.admit_prepared_root(
             descriptor,
             outcome,
-            &admission,
             PreparedRootAdmission {
                 identity: Some(identity),
                 ..Default::default()
@@ -14213,59 +14199,73 @@ where
         &self,
         descriptor: ActorDescriptor,
         outcome: ResidentOutcome,
-        _admission: &tokio::sync::RwLockReadGuard<'_, bool>,
         recovery: PreparedRootAdmission,
     ) -> Result<(LocalActorRef, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
-        // Keep the composed startup future out of each forwarding caller's
-        // inline future. It still runs in this task under the admission guard.
-        Box::pin(async move {
-            let PreparedRootAdmission {
-                replay,
-                identity,
-                launch_worktrees,
-                worktree_custody,
-            } = recovery;
-            if descriptor.placement().session != self.session
-                || (identity.is_none()
-                    && (descriptor.supervisor_parent().is_some()
-                        || descriptor.context_parent().is_some()))
-            {
-                return Err(ractor::SpawnErr::StartupFailed(Box::new(
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "forest root must be independent and belong to the forest machine",
-                    ),
-                )));
-            }
-            let mut behavior =
-                ResidentKernelBehavior::prepared(descriptor, self.environment.clone(), outcome);
-            behavior.launch_worktrees = launch_worktrees;
-            behavior.worktree_custody = worktree_custody;
-            if let Some(replay) = replay {
-                behavior.workbench_executions = replay;
-            }
-            match identity {
-                Some(identity) => {
-                    crate::local_actor::spawn_local_actor_in_directory_with_identity(
-                        None,
-                        behavior,
-                        identity,
-                        self.directory.clone(),
-                    )
-                    .await
+        let refuse =
+            |detail: &str| ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into());
+        let PreparedRootAdmission {
+            replay,
+            identity,
+            launch_worktrees,
+            worktree_custody,
+        } = recovery;
+        if descriptor.placement().session != self.session
+            || (identity.is_none()
+                && (descriptor.supervisor_parent().is_some()
+                    || descriptor.context_parent().is_some()))
+        {
+            return Err(refuse(
+                "forest root must be independent and belong to the forest machine",
+            ));
+        }
+        let reservation = match identity {
+            Some(identity) => self.directory.claim_exact(identity).await,
+            None => self.directory.reserve(self.incarnation).await,
+        }
+        .map_err(|error| refuse(&error.to_string()))?;
+        let environment = self.environment.clone();
+        let directory = self.directory.clone();
+        let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
+            Box::pin(async move {
+                ticket.placement_prepared(descriptor.placement());
+                let mut behavior =
+                    ResidentKernelBehavior::prepared(descriptor, environment, outcome);
+                behavior.launch_worktrees = launch_worktrees;
+                behavior.worktree_custody = worktree_custody;
+                if let Some(replay) = replay {
+                    behavior.workbench_executions = replay;
                 }
-                None => {
-                    crate::local_actor::spawn_local_actor_in_directory(
-                        None,
-                        behavior,
-                        self.incarnation,
-                        self.directory.clone(),
-                    )
-                    .await
-                }
+                let result = crate::local_actor::spawn_reserved_local_actor(
+                    None,
+                    behavior,
+                    reservation,
+                    directory,
+                )
+                .await
+                .map(|(actor, task)| {
+                    crate::local_actor::run_control::RootAdmissionOutcome::Actor(actor, task)
+                })
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
+                (result, crate::CleanupComponentOutcome::Confirmed)
+            })
+        });
+        match self
+            .directory
+            .prepare_root(operation)
+            .await
+            .map_err(|error| refuse(&error.to_string()))?
+        {
+            Ok(crate::local_actor::run_control::RootAdmissionOutcome::Actor(actor, task)) => {
+                Ok((actor, task))
             }
-        })
-        .await
+            Err(error) => Err(error
+                .downcast::<ractor::SpawnErr>()
+                .map(|error| *error)
+                .unwrap_or_else(ractor::SpawnErr::StartupFailed)),
+            _ => Err(refuse(
+                "prepared root producer returned incompatible result",
+            )),
+        }
     }
 }
 
