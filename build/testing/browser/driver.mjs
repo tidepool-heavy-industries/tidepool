@@ -145,6 +145,12 @@ async function sendActorInput(page, text) {
   await chat.getByRole('button', { name: 'Send input', exact: true }).click();
 }
 
+async function openHostOperations(page) {
+  const summary = page.getByRole('region', { name: 'Selected worker Chat' })
+    .locator('summary').filter({ hasText: /^Host operations$/ });
+  if (await summary.locator('..').getAttribute('open') === null) await summary.click();
+}
+
 async function waitForHostActorState(getSnapshot, actor, state, timeoutMs) {
   const deadline = performance.now() + timeoutMs;
   let expectedIdentity;
@@ -479,13 +485,15 @@ async function runJourney(ready) {
             }
             assert.ok(droppedStatusLookups.every((id) => id === lastOperation.operation_id),
               'status loss affected another original operation');
-            await page.getByRole('status').filter({ hasText: /^Session authenticated · ready$/ })
+            await page.getByRole('region', { name: 'Browser session' })
+              .getByRole('status').filter({ hasText: /Connected$/ })
               .waitFor({ timeout: 30_000 });
             const unresolved = (await retainedOperations(page)).find((record) =>
               record.submission?.operation_id === lastOperation.operation_id);
             assert.equal(unresolved?.authority, 'local', 'positive retry must precede authoritative admission');
             assert.equal(unresolved.hostRun, lastOperation.command.target.run, 'retry retained another host run');
             assert.deepEqual(unresolved.submission, lastOperation, 'unresolved original operation changed');
+            await openHostOperations(page);
             const retry = page.locator(`[data-operation-id="${lastOperation.operation_id}"]`)
               .getByRole('button', { name: 'Retry same operation' });
             const beforeRetry = hostOperations.length;
@@ -572,13 +580,16 @@ async function runJourney(ready) {
         } else if (step.action === 'reload') {
           const sentBeforeReload = hostOperations.length;
           if (!lastOperation) throw new Error('reload step has no earlier retained browser operation');
+          await openHostOperations(page);
           await page.locator(`[data-operation-id="${lastOperation.operation_id}"]`)
             .getByText(/^input\s*·\s*input_admitted$/).waitFor({ timeout: 30_000 });
           assertAdmittedOperation((await retainedOperations(page)).find((record) =>
             record.submission?.operation_id === lastOperation.operation_id), lastOperation);
           await page.reload({ waitUntil: 'domcontentloaded' });
-          await page.getByRole('status').filter({ hasText: /^Session authenticated · ready$/ }).waitFor({ timeout: 30_000 });
+          await page.getByRole('region', { name: 'Browser session' })
+            .getByRole('status').filter({ hasText: /Connected$/ }).waitFor({ timeout: 30_000 });
           await selectActorChat(page, actor);
+          await openHostOperations(page);
           await page.locator(`[data-operation-id="${lastOperation.operation_id}"]`)
             .getByText(/^input\s*·\s*input_admitted$/).waitFor({ timeout: 30_000 });
           assertAdmittedOperation((await retainedOperations(page)).find((record) =>
