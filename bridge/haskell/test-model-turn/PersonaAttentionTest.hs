@@ -132,7 +132,7 @@ personaAttentionTests = testGroup "persona attention"
       assertBool "wire request is structurally inspectable" ("request" `T.isInfixOf` preview && not truncated && not ("<opaque>" `T.isInfixOf` preview))
   , testCase "optional absent manifest preserves edited files and creates only missing blocks" $ do
       let initial = Map.fromList [("memory/persona.md", Right "I enjoy maps."), ("notes/other.md", Right "untouched")]
-          (result, files) = run (runState initial (interpret readHost (interpret writeHost C.load)))
+          (result, files) = run (runState @Files initial (interpret readHost (interpret writeHost C.load)))
           loaded = must result
       assertEqual "identity preserved" (Just (Right "I enjoy maps.")) (Map.lookup "memory/persona.md" files)
       assertEqual "unrelated state preserved" (Just (Right "untouched")) (Map.lookup "notes/other.md" files)
@@ -145,7 +145,7 @@ personaAttentionTests = testGroup "persona attention"
           action :: Eff '[FsWrite, FsRead, Jev, State Int, State Files]
             (Either Context.PreparationError (C.Loaded, A.Prepared))
           action = Context.prepare generous "Explore the imagined place" A.continuity
-          ((result, calls), after) = run (runState files (runState (0 :: Int)
+          ((result, calls), after) = run (runState @Files files (runState (0 :: Int)
             (interpret jevUnavailable (interpret readHost (interpret writeHost action)))))
           (loaded, prepared) = must result
       assertEqual "one semantic pass over loaded memory" 1 calls
@@ -155,12 +155,12 @@ personaAttentionTests = testGroup "persona attention"
       assertBool "saved human correction is present" ("The door opens inward." `T.isInfixOf` A.rendered prepared)
   , testCase "unreadable manifest and source are failures rather than missing memories" $ do
       let files = Map.fromList [("memory/collection.json", Left (FsIo "permission denied"))]
-          (result, _) = run (runState files (interpret readHost (interpret writeHost C.load)))
+          (result, _) = run (runState @Files files (interpret readHost (interpret writeHost C.load)))
       case result of
         Left (C.Storage "memory/collection.json" (FsIo "permission denied")) -> pure ()
         _ -> fail "unreadable manifest was mistaken for an absent optional manifest"
       let originals = Map.fromList [(path, Right "present") | path <- ["memory/persona.md", "memory/human.md", "memory/curiosities.md"]]
-          (extra, _) = run (runState originals (interpret readHost
+          (extra, _) = run (runState @Files originals (interpret readHost
             (C.loadEntries (C.Manifest [C.Entry "extra" "notes/missing.md" [] [] Nothing]))))
       case extra of
         Left (C.Storage "notes/missing.md" (FsNotFound _)) -> pure ()
@@ -170,7 +170,7 @@ personaAttentionTests = testGroup "persona attention"
             [object ["id" .= ("extra" :: Text), "path" .= ("notes/extra.md" :: Text),
               "tags" .= (["map"] :: [Text]), "related" .= (["persona"] :: [Text]), "availableAt" .= (20 :: Int)]]])
           files = Map.fromList [(p, Right p) | p <- ["memory/persona.md", "memory/human.md", "memory/curiosities.md", "notes/extra.md"]]
-          (result, _) = run (runState files (interpret readHost (C.loadEntries manifest)))
+          (result, _) = run (runState @Files files (interpret readHost (C.loadEntries manifest)))
           extra = last (A.memories (must result))
       assertEqual "metadata" (["map"], ["persona"], Just 20) (A.tags extra, A.related extra, A.availableAt extra)
       assertEqual "original observed body" "notes/extra.md" (A.original extra)
