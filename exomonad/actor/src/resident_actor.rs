@@ -1956,66 +1956,18 @@ where
     state.replace_explicit(&expected, Arc::new(tools))
 }
 
-fn actor_can_control(
+async fn observable_actors(
+    kernel: &KernelContext,
     owner: ActorRef,
-    candidate: ActorRef,
-    records: &std::collections::HashMap<ActorRef, ResidentActorRecord>,
-) -> bool {
-    if records
-        .get(&owner)
-        .is_some_and(|record| record.forest_control && record.terminal.is_none())
-    {
-        return true;
-    }
-    actor_in_tree(owner, candidate, records, |descriptor| {
-        descriptor.supervisor_parent().or(descriptor.creator())
-    })
-}
-
-fn actor_can_observe(
-    owner: ActorRef,
-    candidate: ActorRef,
-    records: &std::collections::HashMap<ActorRef, ResidentActorRecord>,
-) -> bool {
-    actor_can_control(owner, candidate, records)
-        || records.get(&owner).is_some_and(|record| {
-            record
-                .observation_roots
-                .iter()
-                .any(|root| actor_in_creation_tree(*root, candidate, records))
-        })
-}
-
-fn actor_in_creation_tree(
-    owner: ActorRef,
-    candidate: ActorRef,
-    records: &std::collections::HashMap<ActorRef, ResidentActorRecord>,
-) -> bool {
-    actor_in_tree(owner, candidate, records, |descriptor| {
-        descriptor.creator().or(descriptor.supervisor_parent())
-    })
-}
-
-fn actor_in_tree(
-    owner: ActorRef,
-    candidate: ActorRef,
-    records: &std::collections::HashMap<ActorRef, ResidentActorRecord>,
-    parent: impl Fn(&ActorDescriptor) -> Option<ActorRef>,
-) -> bool {
-    let mut cursor = candidate;
-    for _ in 0..=records.len() {
-        if cursor == owner {
-            return true;
+    candidates: Vec<ActorRef>,
+) -> Result<std::collections::HashSet<ActorRef>, crate::local_actor::run_control::DirectoryError> {
+    let mut observed = std::collections::HashSet::new();
+    for candidate in candidates {
+        if kernel.authorize_observe_as(owner, candidate).await? {
+            observed.insert(candidate);
         }
-        let Some(parent) = records
-            .get(&cursor)
-            .and_then(|record| parent(&record.descriptor))
-        else {
-            return false;
-        };
-        cursor = parent;
     }
-    false
+    Ok(observed)
 }
 
 /// Refines a bare `Pending` observation into `Starting` while the host is
@@ -4135,7 +4087,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
 
     /// `changes_only` applies to the concise view: once this actor has a
     /// previous summary-family roster, render only rows whose text changed.
-    fn status_text(
+    async fn status_text(
         &self,
         kernel: &KernelContext,
         actor: ActorRef,
@@ -4163,9 +4115,14 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let requests = self.environment.requests.status_for(actor);
         let records = self.environment.actors.lock().clone();
+        let observable =
+            match observable_actors(kernel, actor, records.keys().copied().collect()).await {
+                Ok(observed) => observed,
+                Err(error) => return format!("actor status unavailable: {error}"),
+            };
         let hidden_terminal_actors = records
             .iter()
-            .filter(|(identity, _)| actor_can_observe(actor, **identity, &records))
+            .filter(|(identity, _)| observable.contains(*identity))
             .filter(|(identity, record)| {
                 record
                     .terminal
@@ -4176,7 +4133,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .count();
         let mut roster = records
             .iter()
-            .filter(|(identity, _)| actor_can_observe(actor, **identity, &records))
+            .filter(|(identity, _)| observable.contains(*identity))
             .filter_map(|(identity, record)| {
                 let key = format!(
                     "{:?} ({}@{})",
@@ -4462,10 +4419,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             },
         };
         let revisions = match view {
-            StatusView::Expanded => format!(
-                "\n{}",
-                render_revisions_section(&self.revision_identities(kernel, actor))
-            ),
+            StatusView::Expanded => {
+                format!("\n{}", self.revisions_status_text(kernel, actor).await)
+            }
             _ => String::new(),
         };
         let status = format!(
@@ -4496,9 +4452,19 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     /// checkout head for the operator checkout, this actor's own checked
     /// head and source layer drift, its current assignment base, and each
     /// live descendant's checked head.
-    fn revision_identities(&self, kernel: &KernelContext, actor: ActorRef) -> RevisionIdentities {
+    async fn revision_identities(
+        &self,
+        kernel: &KernelContext,
+        actor: ActorRef,
+    ) -> Result<RevisionIdentities, crate::local_actor::run_control::DirectoryError> {
         let own = self.runtime_observation.snapshot();
-        let records = self.environment.actors.lock();
+        let records = self.environment.actors.lock().clone();
+        let mut descendants = std::collections::HashSet::new();
+        for candidate in records.keys().copied() {
+            if kernel.creation_descendant(actor, candidate).await? {
+                descendants.insert(candidate);
+            }
+        }
         let live = |identity: &ActorRef, record: &ResidentActorRecord| {
             record.terminal.is_none() && record.lifecycle.retained_terminal().get().is_none()
         };
@@ -4515,9 +4481,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let mut children = records
             .iter()
             .filter(|(identity, record)| {
-                **identity != actor
-                    && actor_in_creation_tree(actor, **identity, &records)
-                    && live(identity, record)
+                **identity != actor && descendants.contains(*identity) && live(identity, record)
             })
             .map(|(_, record)| {
                 (
@@ -4528,22 +4492,26 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .collect::<Vec<_>>();
         drop(records);
         children.sort_by(|left, right| left.0.cmp(&right.0));
-        RevisionIdentities {
+        Ok(RevisionIdentities {
             operator_checkout,
             checked: own.source_drift.checkout,
             assignment_base: self.assignment_base.clone(),
             children,
             layer: own.source_drift.layer,
-        }
+        })
     }
 
     /// The `status` tool's `revisions` view.
-    fn revisions_status_text(&self, kernel: &KernelContext, actor: ActorRef) -> String {
+    async fn revisions_status_text(&self, kernel: &KernelContext, actor: ActorRef) -> String {
+        let revisions = match self.revision_identities(kernel, actor).await {
+            Ok(revisions) => revisions,
+            Err(error) => return format!("actor revisions unavailable: {error}"),
+        };
         format!(
             "actor {}@{} revisions\n{}",
             actor.id.0,
             actor.incarnation.0,
-            render_revisions_section(&self.revision_identities(kernel, actor))
+            render_revisions_section(&revisions)
         )
     }
 
@@ -4588,27 +4556,32 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     /// inventing one. Which agent-spec revision each actor activated is
     /// omitted for a similar reason: no such tracking exists in
     /// `exomonad-actor` today, and this view does not invent any.
-    fn live_status_text(
+    async fn live_status_text(
         &self,
+        kernel: &KernelContext,
         actor: ActorRef,
         bindings: &[tidepool_runtime::session::WorkbenchBinding],
     ) -> String {
-        let records = self.environment.actors.lock();
-        let mut jobs = self
-            .environment
-            .commands
-            .snapshot()
+        let retained_jobs = self.environment.commands.snapshot();
+        let candidates = retained_jobs
+            .iter()
+            .flat_map(|job| std::iter::once(job.owner).chain(job.observers.iter().copied()))
+            .collect();
+        let observable = match observable_actors(kernel, actor, candidates).await {
+            Ok(observed) => observed,
+            Err(error) => return format!("live actor status unavailable: {error}"),
+        };
+        let mut jobs = retained_jobs
             .into_iter()
             .filter(|job| {
-                actor_can_observe(actor, job.owner, &records)
+                observable.contains(&job.owner)
                     || job
                         .observers
                         .iter()
-                        .any(|observer| actor_can_observe(actor, *observer, &records))
+                        .any(|observer| observable.contains(observer))
             })
             .map(|job| render_job_line(&job))
             .collect::<Vec<_>>();
-        drop(records);
         jobs.sort();
         let jobs = if jobs.is_empty() {
             "  (no retained command jobs)".to_owned()
@@ -5589,21 +5562,23 @@ where
                     .await
             }),
             ResidentActorBoundary::AgentInspect(inspection) => Box::pin(async move {
+                let permitted = kernel
+                    .authorize_observe(inspection.target)
+                    .await
+                    .map_err(ResidentActorWorkbenchError::Directory)?;
                 let records = environment.actors.lock().clone();
                 let observation = records.get(&inspection.target).and_then(|record| {
-                    actor_can_observe(context.actor, inspection.target, &records).then(|| {
-                        crate::resident_workbench::AgentRosterProjection {
-                            received: environment.requests.received_counts(inspection.target),
-                            requests: environment.requests.work_for_target(inspection.target),
-                            actor: inspection.target,
-                            descriptor: record.descriptor.clone(),
-                            bound_worktree: record.bound_worktree.clone(),
-                            terminal: record
-                                .terminal
-                                .clone()
-                                .or_else(|| record.lifecycle.retained_terminal().get()),
-                            runtime: record.runtime_observation.snapshot(),
-                        }
+                    permitted.then(|| crate::resident_workbench::AgentRosterProjection {
+                        received: environment.requests.received_counts(inspection.target),
+                        requests: environment.requests.work_for_target(inspection.target),
+                        actor: inspection.target,
+                        descriptor: record.descriptor.clone(),
+                        bound_worktree: record.bound_worktree.clone(),
+                        terminal: record
+                            .terminal
+                            .clone()
+                            .or_else(|| record.lifecycle.retained_terminal().get()),
+                        runtime: record.runtime_observation.snapshot(),
                     })
                 });
                 environment
@@ -5663,9 +5638,13 @@ where
             }),
             ResidentActorBoundary::AgentList(continuation) => Box::pin(async move {
                 let records = environment.actors.lock().clone();
+                let observable =
+                    observable_actors(&kernel, context.actor, records.keys().copied().collect())
+                        .await
+                        .map_err(ResidentActorWorkbenchError::Directory)?;
                 let mut roster = records
                     .iter()
-                    .filter(|(actor, _)| actor_can_observe(context.actor, **actor, &records))
+                    .filter(|(actor, _)| observable.contains(*actor))
                     .map(
                         |(actor, record)| crate::resident_workbench::AgentRosterProjection {
                             received: environment.requests.received_counts(*actor),
@@ -9775,24 +9754,30 @@ where
                 let output = match view {
                     crate::status_tool::StatusView::Changed => {
                         self.status_text(kernel, context.actor, StatusView::Concise, true)
+                            .await
                     }
                     crate::status_tool::StatusView::Summary => {
                         self.status_text(kernel, context.actor, StatusView::Concise, false)
+                            .await
                     }
                     crate::status_tool::StatusView::Revisions => {
-                        self.revisions_status_text(kernel, context.actor)
+                        self.revisions_status_text(kernel, context.actor).await
                     }
                     crate::status_tool::StatusView::Detailed => {
                         self.status_text(kernel, context.actor, StatusView::Expanded, false)
+                            .await
                     }
                     crate::status_tool::StatusView::Lineage => {
                         self.status_text(kernel, context.actor, StatusView::Lineage, false)
+                            .await
                     }
                     crate::status_tool::StatusView::Trace => {
                         self.status_text(kernel, context.actor, StatusView::Trace, false)
+                            .await
                     }
                     crate::status_tool::StatusView::Watches => {
                         self.status_text(kernel, context.actor, StatusView::Watches, false)
+                            .await
                     }
                     crate::status_tool::StatusView::Recovery => workbench
                         .status_discovery(
@@ -9813,7 +9798,8 @@ where
                             .live_bindings(context.clone())
                             .await
                             .map_err(|error| workbench_failure(&[], 0, 1, error))?;
-                        self.live_status_text(context.actor, &bindings)
+                        self.live_status_text(kernel, context.actor, &bindings)
+                            .await
                     }
                 };
                 return Ok(WorkbenchRunAdvance::Complete(KernelStep::Continue(

@@ -278,6 +278,14 @@ pub(crate) enum LifetimeTransferError {
 }
 
 impl KernelContext {
+    pub(crate) async fn creation_descendant(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+    ) -> Result<bool, run_control::DirectoryError> {
+        self.directory.creation_descendant(owner, target).await
+    }
+
     pub(crate) async fn authorize_control(
         &self,
         target: ActorRef,
