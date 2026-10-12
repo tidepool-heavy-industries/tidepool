@@ -344,7 +344,10 @@ async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
         .await
         .unwrap()
         .unwrap();
-    assert!(outcomes.iter().all(crate::ForestRootShutdown::is_confirmed));
+    assert!(
+        outcomes.iter().all(crate::ForestRootShutdown::is_confirmed),
+        "actual forest shutdown: {outcomes:#?}"
+    );
     let roots = outcomes
         .into_iter()
         .filter_map(|outcome| match outcome {
@@ -403,7 +406,7 @@ async fn sealed_forest_returns_typed_actual_owner_startup_cleanup() {
         Err(error) => error,
     };
     let cleanup = crate::local_actor::startup_cleanup(&error)
-        .expect("startup refusal retains cleanup from the placement owner");
+        .unwrap_or_else(|| panic!("startup refusal retains cleanup from the placement owner; actual refusal: {error:?}; placement still live: {}", fixture.scope_is_live(placement)));
     assert!(cleanup.is_confirmed());
     assert!(forest
         .directory
