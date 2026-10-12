@@ -17,6 +17,45 @@ async fn reservation_issued_before_seal_cannot_authorize_later_reservation() {
     control.owner.stop(None);
 }
 
+#[tokio::test]
+async fn seal_overtaking_prepared_input_coordinator_preserves_cleanup_reservation() {
+    let (control, task) = RunControlClient::start().await.unwrap();
+    let (issued, reservation) = oneshot::channel();
+    let (sealed, membership) = oneshot::channel();
+    // Enqueue both commands before yielding: Seal precedes the supervised
+    // starter's asynchronous completion on the run-control mailbox.
+    control
+        .owner
+        .send_message(RunControlMessage::ReserveExistingInput {
+            incarnation: crate::Incarnation(1),
+            reply: issued,
+        })
+        .unwrap();
+    control
+        .owner
+        .send_message(RunControlMessage::Seal { reply: sealed })
+        .unwrap();
+    assert!(membership.await.unwrap().actors.is_empty());
+    let reservation = reservation.await.unwrap().unwrap();
+    assert!(reservation.cleanup_only());
+    assert!(control
+        .resolve(reservation.identity())
+        .await
+        .unwrap()
+        .is_none());
+    drop(reservation);
+    assert!(matches!(
+        control.settle_preparations(Duration::from_secs(2)).await,
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    assert!(matches!(
+        control.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    control.finish_run().await.unwrap();
+    task.await.unwrap();
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(32))]
     #[test]
