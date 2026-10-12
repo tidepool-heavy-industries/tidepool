@@ -14,7 +14,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new() -> Self {
+    async fn new() -> Self {
         let session_root = tempfile::tempdir().unwrap();
         let session_id = tidepool_runtime::session::fresh_session_id();
         let lib = SessionLib::open(
@@ -35,7 +35,9 @@ impl Fixture {
             session,
             None,
             crate::Incarnation::FIRST,
-        );
+        )
+        .await
+        .unwrap();
         Self {
             forest: Arc::new(forest),
             _deployments: deployments,
@@ -52,12 +54,14 @@ impl Fixture {
         )
     }
 
-    fn child_placement(&self, parent: &LocalActorRef) -> crate::ActorPlacement {
+    async fn child_placement(&self, parent: &LocalActorRef) -> crate::ActorPlacement {
         let context = self
             .forest
             .directory
             .session_context(parent.identity())
-            .unwrap();
+            .await
+            .unwrap()
+            .expect("admitted parent retains its session context");
         let machines = self.forest.environment.runner.machines_for_test();
         let mut checkout = machines.checkout_run(context.placement.session).unwrap();
         let lexical_scope = checkout
@@ -248,7 +252,7 @@ impl KernelBehavior for ObservedBehavior {
 
 #[tokio::test]
 async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let forest = &fixture.forest;
     let placement = forest
         .environment
@@ -278,7 +282,7 @@ async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
     .unwrap();
     let parent_kernel = receive.await.unwrap();
 
-    let child_placement = fixture.child_placement(&parent);
+    let child_placement = fixture.child_placement(&parent).await;
     let (send, receive) = tokio::sync::oneshot::channel();
     let child = parent_kernel
         .spawn_child(
@@ -330,6 +334,8 @@ async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
     let run_owned_kernel = receive.await.unwrap();
     let run_owned = run_owned_kernel
         .resolve(run_owned_kernel.identity())
+        .await
+        .unwrap()
         .expect("pre_start has admitted the actor to the directory");
     assert!(matches!(
         run_owned_kernel.spawn_ownership(),
@@ -400,7 +406,7 @@ async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
 
 #[tokio::test]
 async fn sealed_forest_returns_typed_actual_owner_startup_cleanup() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let forest = &fixture.forest;
     let placement = forest
         .environment
@@ -410,10 +416,16 @@ async fn sealed_forest_returns_typed_actual_owner_startup_cleanup() {
         .unwrap();
     assert!(fixture.scope_is_live(placement));
 
-    let retirement = forest.directory.seal().cancel_all(ActorTerminal::new(
-        ActorExitKind::Cancelled,
-        "forest host shutdown",
-    ));
+    let retirement = forest
+        .directory
+        .seal()
+        .await
+        .unwrap()
+        .cancel_all(ActorTerminal::new(
+            ActorExitKind::Cancelled,
+            "forest host shutdown",
+        ))
+        .await;
     assert!(retirement.into_roots().is_empty());
     let error = match crate::local_actor::spawn_local_actor_in_directory(
         None,
@@ -429,7 +441,12 @@ async fn sealed_forest_returns_typed_actual_owner_startup_cleanup() {
     let cleanup = crate::local_actor::startup_cleanup(&error)
         .expect("startup refusal retains cleanup from the placement owner");
     assert!(cleanup.is_confirmed());
-    assert!(forest.directory.resolve(cleanup.actor()).is_none());
+    assert!(forest
+        .directory
+        .resolve(cleanup.actor())
+        .await
+        .unwrap()
+        .is_none());
     assert!(forest.environment.actors.lock().is_empty());
     assert!(!fixture.scope_is_live(placement));
 
@@ -462,7 +479,7 @@ async fn tool_abort_validates_original_owner_before_empty_settlement() {
         ContextCheckpointBoundary, WorkbenchExecutionId, WorkbenchRequest,
     };
 
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let forest = &fixture.forest;
     let placement = forest
         .environment
@@ -741,7 +758,9 @@ async fn native_mailbox_compiler_lifecycle_history() {
             session,
             None,
             crate::Incarnation::FIRST,
-        );
+        )
+        .await
+        .unwrap();
         let (recipient, recipient_task) = crate::local_actor::spawn_local_actor_in_directory(
             None,
             ResidentKernelBehavior::with_boot(
@@ -790,6 +809,7 @@ async fn native_mailbox_compiler_lifecycle_history() {
         for custody in casts {
             recipient
                 .cast(caller.identity(), MailboxValue::new(session_id, custody))
+                .await
                 .unwrap();
             recipient
                 .address()
@@ -919,7 +939,7 @@ impl tidepool_effect::dispatch::DispatchEffect<tidepool_mcp::CapturedOutput>
 
 #[tokio::test]
 async fn host_graph_retains_paused_owner_lifecycle_and_recorded_exit() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     let forest = &fixture.forest;
     let placement = forest
         .environment
@@ -936,19 +956,24 @@ async fn host_graph_retains_paused_owner_lifecycle_and_recorded_exit() {
     .await
     .unwrap();
     let identity = actor.identity();
-    let snapshot = || {
+    let snapshot = || async {
         forest
             .inspect_host_graph()
+            .await
+            .unwrap()
             .into_iter()
             .find(|node| node.actor == identity)
             .unwrap()
     };
-    assert_eq!(snapshot().lifecycle, Some(crate::ActorLifecycle::Live));
+    assert_eq!(
+        snapshot().await.lifecycle,
+        Some(crate::ActorLifecycle::Live)
+    );
     // The graph reads the same retained owner used by failed handler publication.
     actor
         .terminal()
         .publish_paused("retained handler input".into());
-    let paused = snapshot();
+    let paused = snapshot().await;
     assert_eq!(
         paused.lifecycle,
         Some(crate::ActorLifecycle::Paused(
@@ -962,20 +987,22 @@ async fn host_graph_retains_paused_owner_lifecycle_and_recorded_exit() {
     let terminal = ActorTerminal::new(ActorExitKind::Cancelled, "test finished");
     actor.shutdown(terminal.clone()).await.unwrap();
     task.await.unwrap();
-    let exited = snapshot();
+    let exited = snapshot().await;
     assert_eq!(
         exited.lifecycle,
         Some(crate::ActorLifecycle::Exited(terminal.clone()))
     );
     assert_eq!(exited.terminal(), Some(&terminal));
+    let (empty_directory, empty_control_task) = crate::LocalActorDirectory::start().await.unwrap();
     let without_directory = Forest {
         environment: forest.environment.clone(),
-        directory: crate::LocalActorDirectory::default(),
+        directory: empty_directory,
+        _control_task: Arc::new(empty_control_task),
         session: forest.session,
         incarnation: forest.incarnation,
     };
     assert_eq!(
-        without_directory.inspect_host_graph()[0].terminal(),
+        without_directory.inspect_host_graph().await.unwrap()[0].terminal(),
         Some(&terminal)
     );
     forest
@@ -985,5 +1012,9 @@ async fn host_graph_retains_paused_owner_lifecycle_and_recorded_exit() {
         .get_mut(&identity)
         .unwrap()
         .terminal = None;
-    assert_eq!(without_directory.inspect_host_graph()[0].lifecycle, None);
+    assert_eq!(
+        without_directory.inspect_host_graph().await.unwrap()[0].lifecycle,
+        None
+    );
+    without_directory.directory.stop_owner_for_test().await;
 }
