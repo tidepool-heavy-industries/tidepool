@@ -271,10 +271,18 @@ impl ExactDeclarationContext {
                 // source than the compiler namespace selects for this module.
                 // Only the selected full source identity admits a lexical walk.
                 if !compiler.entries.get(&root).is_some_and(|entry| {
-                    matches!(&entry.payload, ArtifactPayload::Original(product) if product.owner() == owner)
+                    matches!(&entry.payload, ArtifactPayload::Original(product)
+                        if product.owner() == owner
+                            && !product.module_interface().is_some_and(|interface| matches!(
+                                interface.origin(),
+                                crate::certified_products::CanonicalOrigin::NativeAuthoredDeclaration { .. }
+                            )))
                 }) {
                     continue;
                 }
+                // Notebook declaration implementations are native dependencies,
+                // not public source lexical carriers. Their issued native group
+                // closure still participates in publication selection below.
                 lexical.extend(
                     self.published_lexical_closure(&root)?
                         .into_iter()

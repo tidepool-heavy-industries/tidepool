@@ -9614,6 +9614,193 @@ mod tests {
     }
 
     #[test]
+    fn publication_target_selection_distinguishes_authored_native_and_source_origins() {
+        use crate::certified_products::PendingImportOwner;
+        use tidepool_repr::execution_schema::SymbolIdentity;
+
+        let issuer = published_original_history_fixture();
+        let publication = issuer
+            .issue_published_source_original("revision", "input", &identity("fixture", "Alpha"))
+            .unwrap();
+        let target = identity("main", "Tidepool.Session.Lib.G11");
+        let mut histories = 0;
+        for native_authored in [false, true] {
+            let product = support_product_in_unit(&target.unit, &target.module);
+            let product = if native_authored {
+                crate::certified_products::fixture_native_declaration_product(
+                    product,
+                    issuer.producer,
+                    11,
+                )
+            } else {
+                crate::certified_products::fixture_finalized_product(product, issuer.producer)
+            };
+            let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+                .remove(0)
+                .product;
+            for historical in [false, true] {
+                for unrelated_publication in [false, true] {
+                    for lexical_carrier in [false, true] {
+                        histories += 1;
+                        let mut context = ExactDeclarationContext::new(&[], &[], vec![]).unwrap();
+                        if unrelated_publication {
+                            context = context
+                                .with_published_source_originals(&publication)
+                                .unwrap();
+                        }
+                        context = context
+                            .extend_checked_original_products(
+                                issuer.producer,
+                                std::slice::from_ref(&product),
+                            )
+                            .unwrap();
+                        if lexical_carrier {
+                            edit_lexical(&mut context, |nodes| {
+                                nodes.push(ExactLexicalNode {
+                                    owner: target.clone(),
+                                    imports: vec![],
+                                });
+                            });
+                        }
+                        let mut owner = product.owner().clone();
+                        if historical {
+                            owner.module_version = ModuleVersion([99; 32]);
+                        }
+                        let import = PendingImportOwner::Source {
+                            owner,
+                            original_ordinal: 0,
+                            binder: SymbolIdentity {
+                                unit: target.unit.clone(),
+                                module: target.module.clone(),
+                                namespace: "value".into(),
+                                occurrence: "severity".into(),
+                                record_parent: None,
+                            },
+                        };
+                        let selected = context.published_source_original_selections_for_target(
+                            &BTreeSet::new(),
+                            &[import],
+                        );
+                        let refuses = unrelated_publication
+                            && !native_authored
+                            && !historical
+                            && !lexical_carrier;
+                        assert_eq!(
+                            selected.is_err(),
+                            refuses,
+                            "native_authored={native_authored}, historical={historical}, unrelated_publication={unrelated_publication}, lexical_carrier={lexical_carrier}"
+                        );
+                        if let Ok(selected) = selected {
+                            assert!(
+                                selected.is_empty(),
+                                "unrelated publication stays unselected"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(histories, 16);
+
+        // A source import of the exact published original still selects its policy.
+        let product = publication.context().recovery_products().remove(0);
+        let owner = product.owner().clone();
+        let import = PendingImportOwner::Source {
+            binder: SymbolIdentity {
+                unit: owner.unit.clone(),
+                module: owner.module.clone(),
+                namespace: "value".into(),
+                occurrence: "published".into(),
+                record_parent: None,
+            },
+            owner,
+            original_ordinal: 0,
+        };
+        let selected = publication
+            .context()
+            .published_source_original_selections_for_target(&BTreeSet::new(), &[import])
+            .unwrap();
+        assert_eq!(selected.as_slice(), std::slice::from_ref(&publication));
+    }
+
+    #[test]
+    fn publication_target_retains_source_policy_without_published_native_group_demand() {
+        use crate::certified_products::PendingImportOwner;
+
+        let issuer = published_original_history_fixture();
+        let root = identity("fixture", "Alpha");
+        let publication = issuer
+            .issue_published_source_original("revision", "input", &root)
+            .unwrap();
+        let consumer = crate::certified_products::tests::original_groups_fixture(
+            "InlineConsumer",
+            vec![(7, vec![])],
+            1,
+            &BTreeMap::new(),
+        );
+        let consumer = crate::certified_products::fixture_source_finalized_product(
+            consumer,
+            issuer.producer,
+            vec![crate::certified_products::CanonicalSourceImport {
+                qualifier: crate::cache::ImportQualifier::Unqualified,
+                module: root.module.clone(),
+                boot: false,
+                home_unit: Some(root.unit.clone()),
+            }],
+        );
+        let consumer = crate::certified_products::tests::recovered_witness_fixtures(&[consumer])
+            .remove(0)
+            .product;
+        let owner = consumer.owner().clone();
+        let binder = crate::certified_products::original_available_groups(&consumer)
+            .unwrap()
+            .find(|group| group.original_ordinal() == 7)
+            .unwrap()
+            .binders()[0]
+            .clone();
+        let mut context = publication
+            .context()
+            .as_ref()
+            .clone()
+            .extend_checked_original_products(issuer.producer, &[consumer])
+            .unwrap();
+        edit_lexical(&mut context, |nodes| {
+            nodes.push(ExactLexicalNode {
+                owner: identity(&owner.unit, &owner.module),
+                imports: vec![root],
+            });
+        });
+        context.normalize().unwrap();
+        let imports = [PendingImportOwner::Source {
+            binder,
+            owner,
+            original_ordinal: 7,
+        }];
+        let groups = context
+            .artifact_view()
+            .native_groups_for_target(None, &imports)
+            .unwrap();
+        let published_original = publication
+            .context()
+            .compiler_input_roles()
+            .iter()
+            .find_map(CompilerInputRole::original)
+            .unwrap();
+        assert!(!groups.is_empty());
+        assert!(groups
+            .iter()
+            .all(|group| group.binding.artifact != published_original));
+        assert_eq!(
+            context
+                .published_source_original_selections_for_target(&groups, &imports)
+                .unwrap()
+                .as_slice(),
+            std::slice::from_ref(&publication),
+            "source policy follows the selected consumer's lexical proof even when the published body has no remaining native call"
+        );
+    }
+
+    #[test]
     fn published_original_retains_lexical_only_interfaces_without_native_offer() {
         let mut issued = published_original_fixture();
         let root = identity("fixture", "Alpha");
