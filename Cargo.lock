@@ -1696,7 +1696,7 @@ dependencies = [
 [[package]]
 name = "harness"
 version = "0.1.0"
-source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=f9efb369ccba1e7b8147b1b13cd4a8bb3abf0a33#f9efb369ccba1e7b8147b1b13cd4a8bb3abf0a33"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=418ee90629dc32da850e79dace42d9996bc3df9a#418ee90629dc32da850e79dace42d9996bc3df9a"
 dependencies = [
  "async-trait",
  "axum",
@@ -1705,10 +1705,11 @@ dependencies = [
  "fs2",
  "futures-util",
  "getrandom 0.3.4",
+ "harness-presentation",
+ "harness-schema",
  "jsonwebtoken",
  "libc",
  "reqwest 0.12.28",
- "roxmltree",
  "rusqlite",
  "schemars 1.2.2",
  "serde",
@@ -1719,6 +1720,26 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "harness-presentation"
+version = "0.1.0"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=418ee90629dc32da850e79dace42d9996bc3df9a#418ee90629dc32da850e79dace42d9996bc3df9a"
+dependencies = [
+ "roxmltree",
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "harness-schema"
+version = "0.1.0"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=418ee90629dc32da850e79dace42d9996bc3df9a#418ee90629dc32da850e79dace42d9996bc3df9a"
+dependencies = [
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
