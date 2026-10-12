@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 mod activation_publication_tests;
 mod after_tool_wait;
 mod agent_retention;
+pub(crate) use agent_retention::{AgentRetentionError, WorkerRetentionPublication};
 #[cfg(test)]
 mod capture_workspace_tests;
 #[cfg(test)]

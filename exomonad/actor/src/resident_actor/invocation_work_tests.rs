@@ -698,7 +698,7 @@ async fn publication_failure_before_first_stage_closes_without_pending_obligatio
     fixture.finish().await;
 }
 
-struct Owner {
+pub(in crate::resident_actor) struct Owner {
     context: Option<tokio::sync::oneshot::Sender<KernelContext>>,
     startup_gate: Option<Arc<ShutdownGate>>,
     shutdown_gate: Option<Arc<ShutdownGate>>,
@@ -706,7 +706,9 @@ struct Owner {
 }
 
 impl Owner {
-    fn new(context: tokio::sync::oneshot::Sender<KernelContext>) -> Self {
+    pub(in crate::resident_actor) fn new(
+        context: tokio::sync::oneshot::Sender<KernelContext>,
+    ) -> Self {
         Self {
             context: Some(context),
             startup_gate: None,
@@ -892,7 +894,7 @@ impl Fixture {
         child
     }
 
-    async fn cleanup(&self, work: &InvocationWork) {
+    pub(in crate::resident_actor) async fn cleanup(&self, work: &InvocationWork) {
         let cleanup = tokio::time::timeout(
             Duration::from_secs(1),
             work.cleanup(&self.environment, &self.kernel),
@@ -931,6 +933,22 @@ impl Fixture {
         .unwrap()
         .unwrap();
         (job, backend)
+    }
+
+    pub(in crate::resident_actor) async fn finish_without_directory(self) {
+        self.actor.address().stop(None);
+        tokio::time::timeout(Duration::from_secs(1), self.task)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), self.directory_task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    pub(in crate::resident_actor) async fn stop_directory(&self) {
+        self.directory.stop_owner_for_test().await;
     }
 
     pub(in crate::resident_actor) async fn finish(self) {
@@ -2463,10 +2481,18 @@ async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once(
         .reserve_worker_lifetime_transfer(&worker, true)
         .await
         .unwrap();
-    source
-        .release_worker_cleanup(owner, worker.identity())
+    transfer
+        .publish(WorkerRetentionPublication::new(
+            Some(source.clone()),
+            None,
+            fixture.environment.actors.clone(),
+            owner,
+            worker.clone(),
+            true,
+        ))
+        .unwrap()
+        .await
         .unwrap();
-    transfer.commit().await.unwrap();
     assert_eq!(child_context.supervisor_identity().await.unwrap(), None);
     assert!(!source.owns_worker(worker.identity()));
     source.close();
@@ -2480,8 +2506,18 @@ async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once(
         .reserve_worker_lifetime_transfer(&worker, false)
         .await
         .unwrap();
-    destination.adopt_worker(owner, worker.clone()).unwrap();
-    transfer.commit().await.unwrap();
+    transfer
+        .publish(WorkerRetentionPublication::new(
+            None,
+            Some(destination.clone()),
+            fixture.environment.actors.clone(),
+            owner,
+            worker.clone(),
+            false,
+        ))
+        .unwrap()
+        .await
+        .unwrap();
     assert_eq!(
         child_context.supervisor_identity().await.unwrap(),
         Some(owner)
@@ -2490,7 +2526,13 @@ async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once(
     let closed = root.new_scope().unwrap();
     closed.close();
     assert_eq!(
-        destination.transfer_worker_to_owner(&closed, owner, worker.identity()),
+        InvocationWork::publish_worker_retention(
+            Some(&destination),
+            Some(&closed),
+            owner,
+            worker.clone(),
+            || {}
+        ),
         Err(super::super::agent_retention::AgentRetentionError::AgentRetainOwnerClosed)
     );
     assert!(

@@ -7,23 +7,41 @@ pub(crate) struct WorkerTransferReservation {
     pub(super) armed: bool,
     pub(super) parent_lease: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
 }
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WorkerTransferError {
+    #[error("worker transfer was not admitted")]
+    NotAdmitted,
+    #[error("worker transfer settlement is unconfirmed")]
+    SettlementUnconfirmed,
+    #[error(transparent)]
+    Directory(DirectoryError),
+    #[error("worker retention publication refused: {0:?}")]
+    Publication(crate::resident_actor::AgentRetentionError),
+}
+
 impl WorkerTransferReservation {
-    pub(crate) fn commit(
+    pub(crate) fn publish(
         mut self,
-    ) -> futures_util::future::BoxFuture<'static, Result<(), DirectoryError>> {
+        publication: crate::resident_actor::WorkerRetentionPublication,
+    ) -> Result<
+        futures_util::future::BoxFuture<'static, Result<(), WorkerTransferError>>,
+        WorkerTransferError,
+    > {
         let (reply, receiver) = oneshot::channel();
-        let sent = self
-            .owner
-            .send_message(RunControlMessage::CommitWorkerTransfer { id: self.id, reply });
-        if sent.is_ok() {
-            self.armed = false;
-        }
-        Box::pin(async move {
-            sent.map_err(|_| DirectoryError::Unavailable)?;
-            let result = receiver.await.map_err(|_| DirectoryError::Unavailable)?;
-            drop(self);
-            result
-        })
+        self.owner
+            .send_message(RunControlMessage::CommitWorkerTransfer {
+                id: self.id,
+                publication,
+                parent_lease: self.parent_lease.take(),
+                reply,
+            })
+            .map_err(|_| WorkerTransferError::NotAdmitted)?;
+        self.armed = false;
+        Ok(Box::pin(async move {
+            receiver
+                .await
+                .map_err(|_| WorkerTransferError::SettlementUnconfirmed)?
+        }))
     }
 }
 impl Drop for WorkerTransferReservation {

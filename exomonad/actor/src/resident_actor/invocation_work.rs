@@ -661,75 +661,69 @@ impl InvocationWork {
             || state.unresolved_workers.contains(&actor)
     }
 
-    pub(super) fn adopt_worker(
-        &self,
+    pub(super) fn publish_worker_retention(
+        previous: Option<&Arc<Self>>,
+        destination: Option<&Arc<Self>>,
         caller: ActorRef,
         child: LocalActorRef,
+        publish: impl FnOnce(),
     ) -> Result<(), super::agent_retention::AgentRetentionError> {
         use super::agent_retention::AgentRetentionError::*;
-        if caller != self.owner {
+        if previous.is_some_and(|owner| owner.owner != caller)
+            || destination.is_some_and(|owner| owner.owner != caller)
+        {
             return Err(AgentRetainUnauthorized);
         }
-        self.with_admission_state(|state| {
-            if !state
-                .workers
-                .iter()
-                .any(|worker| worker.identity() == child.identity())
-            {
-                state.detached_workers.remove(&child.identity());
-                state.workers.push(child);
+        let actor = child.identity();
+        match (previous, destination) {
+            (Some(source), Some(destination)) => source
+                .with_transfer_states(destination, |states, source, target| {
+                    let index = states[source]
+                        .workers
+                        .iter()
+                        .position(|worker| worker.identity() == actor)
+                        .ok_or(AgentRetainOwnerUnavailable)?;
+                    if source != target {
+                        let child = states[source].workers.remove(index);
+                        states[source].detached_workers.insert(actor);
+                        states[target].detached_workers.remove(&actor);
+                        states[target].workers.push(child);
+                    }
+                    publish();
+                    Ok(())
+                })
+                .map_err(|_| AgentRetainOwnerClosed)?,
+            (Some(source), None) => source
+                .with_admission_state(|state| {
+                    let index = state
+                        .workers
+                        .iter()
+                        .position(|worker| worker.identity() == actor)
+                        .ok_or(AgentRetainOwnerUnavailable)?;
+                    state.workers.remove(index);
+                    state.detached_workers.insert(actor);
+                    publish();
+                    Ok(())
+                })
+                .map_err(|_| AgentRetainOwnerClosed)?,
+            (None, Some(destination)) => destination
+                .with_admission_state(|state| {
+                    if !state
+                        .workers
+                        .iter()
+                        .any(|worker| worker.identity() == actor)
+                    {
+                        state.detached_workers.remove(&actor);
+                        state.workers.push(child);
+                    }
+                    publish();
+                })
+                .map_err(|_| AgentRetainOwnerClosed),
+            (None, None) => {
+                publish();
+                Ok(())
             }
-        })
-        .map_err(|_| AgentRetainOwnerClosed)
-    }
-
-    pub(super) fn release_worker_cleanup(
-        &self,
-        caller: ActorRef,
-        actor: ActorRef,
-    ) -> Result<(), super::agent_retention::AgentRetentionError> {
-        use super::agent_retention::AgentRetentionError::*;
-        if caller != self.owner {
-            return Err(AgentRetainUnauthorized);
         }
-        self.with_admission_state(|state| {
-            let index = state
-                .workers
-                .iter()
-                .position(|worker| worker.identity() == actor)
-                .ok_or(AgentRetainOwnerUnavailable)?;
-            state.workers.remove(index);
-            state.detached_workers.insert(actor);
-            Ok(())
-        })
-        .map_err(|_| AgentRetainOwnerClosed)?
-    }
-
-    pub(super) fn transfer_worker_to_owner(
-        self: &Arc<Self>,
-        destination: &Arc<Self>,
-        caller: ActorRef,
-        actor: ActorRef,
-    ) -> Result<(), super::agent_retention::AgentRetentionError> {
-        use super::agent_retention::AgentRetentionError::*;
-        if caller != self.owner || caller != destination.owner {
-            return Err(AgentRetainUnauthorized);
-        }
-        self.with_transfer_states(destination, |states, source, target| {
-            let index = states[source]
-                .workers
-                .iter()
-                .position(|worker| worker.identity() == actor)
-                .ok_or(AgentRetainOwnerUnavailable)?;
-            if source != target {
-                let child = states[source].workers.remove(index);
-                states[source].detached_workers.insert(actor);
-                states[target].detached_workers.remove(&actor);
-                states[target].workers.push(child);
-            }
-            Ok(())
-        })
-        .map_err(|_| AgentRetainOwnerClosed)?
     }
 
     pub(super) fn transfer_worker_to_actor(
@@ -881,7 +875,7 @@ impl InvocationWork {
     }
 
     #[cfg(test)]
-    fn register_worker(&self, child: LocalActorRef) -> Result<(), String> {
+    pub(super) fn register_worker(&self, child: LocalActorRef) -> Result<(), String> {
         self.with_admission_state(|state| {
             if !state
                 .workers

@@ -18,7 +18,9 @@ pub(crate) use preparation::{
     RootAdmissionOutcome, RootOperation, RootOperationResult, RootPlacementPublisher,
 };
 use transfers::{ResourceTransfer, WorkerTransfer};
-pub(crate) use transfers::{ResourceTransferReservation, WorkerTransferReservation};
+pub(crate) use transfers::{
+    ResourceTransferReservation, WorkerTransferError, WorkerTransferReservation,
+};
 
 pub(super) struct ActorAuthority {
     creator: Option<ActorRef>,
@@ -643,7 +645,9 @@ pub(super) enum RunControlMessage {
     },
     CommitWorkerTransfer {
         id: u64,
-        reply: oneshot::Sender<Result<(), DirectoryError>>,
+        publication: crate::resident_actor::WorkerRetentionPublication,
+        parent_lease: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
+        reply: oneshot::Sender<Result<(), WorkerTransferError>>,
     },
     AbortWorkerTransfer {
         id: u64,
@@ -1394,7 +1398,12 @@ impl Actor for RunControl {
                     };
                 let _ = reply.send(result);
             }
-            RunControlMessage::CommitWorkerTransfer { id, reply } => {
+            RunControlMessage::CommitWorkerTransfer {
+                id,
+                publication,
+                parent_lease,
+                reply,
+            } => {
                 let result = if let Some(transfer) = state.worker_transfers.remove(&id) {
                     let parent_cell = state
                         .entries
@@ -1412,29 +1421,44 @@ impl Actor for RunControl {
                                 }
                                 SpawnOwnership::Independent => supervisor.is_none(),
                             };
-                            if current_matches {
-                                if transfer.destination_run {
-                                    cell.unlink(parent);
-                                    entry.spawn_ownership = SpawnOwnership::Independent;
-                                } else {
-                                    cell.link(parent);
-                                    entry.spawn_ownership =
-                                        SpawnOwnership::Supervised(transfer.parent);
-                                }
-                                Ok(())
+                            if current_matches
+                                && publication.matches(
+                                    transfer.parent,
+                                    transfer.child,
+                                    transfer.destination_run,
+                                )
+                            {
+                                let supervision = || {
+                                    if transfer.destination_run {
+                                        cell.unlink(parent);
+                                        entry.spawn_ownership = SpawnOwnership::Independent;
+                                    } else {
+                                        cell.link(parent);
+                                        entry.spawn_ownership =
+                                            SpawnOwnership::Supervised(transfer.parent);
+                                    }
+                                };
+                                publication
+                                    .publish(supervision)
+                                    .map_err(WorkerTransferError::Publication)
                             } else {
-                                Err(DirectoryError::Unauthorized {
-                                    actor: transfer.child,
-                                })
+                                Err(WorkerTransferError::Directory(
+                                    DirectoryError::Unauthorized {
+                                        actor: transfer.child,
+                                    },
+                                ))
                             }
                         }
-                        _ => Err(DirectoryError::Unauthorized {
-                            actor: transfer.child,
-                        }),
+                        _ => Err(WorkerTransferError::Directory(
+                            DirectoryError::Unauthorized {
+                                actor: transfer.child,
+                            },
+                        )),
                     }
                 } else {
-                    Err(DirectoryError::Unavailable)
+                    Err(WorkerTransferError::Directory(DirectoryError::Unavailable))
                 };
+                drop(parent_lease);
                 let _ = reply.send(result);
                 state.settle_preparation_waiters();
                 state.start_resource_retirement();
