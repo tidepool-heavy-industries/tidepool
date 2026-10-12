@@ -1649,8 +1649,8 @@ impl HostedTestRuntime {
         let physical_probe = host_incarnation::HostRunLock::existing(&run_root)
             .map(drop)
             .map_err(|error| error.to_string());
-        if physical_release.is_err() {
-            // An unconfirmed owner may still use these declared inputs.
+        if shutdown.is_err() || physical_release.is_err() {
+            // Failed cleanup may still retain owners of these declared inputs.
             if let Some(repository) = &mut repository {
                 repository.disable_cleanup(true);
             }
