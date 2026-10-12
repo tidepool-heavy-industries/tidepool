@@ -541,6 +541,79 @@ async fn stopped_lifecycle_owner_still_cleans_prepared_native_input_without_conf
 }
 
 #[tokio::test]
+async fn refused_invocation_child_retains_physical_cleanup_before_run_finalization() {
+    let fixture = Fixture::new().await;
+    let forest = &fixture.forest;
+    let parent = forest
+        .new_workbench(
+            "invocation-parent".into(),
+            crate::ActorCapabilities::default(),
+        )
+        .await
+        .unwrap();
+    let kernel = forest
+        .directory
+        .context(parent.identity())
+        .await
+        .unwrap()
+        .unwrap();
+    let work =
+        invocation_work::InvocationWork::new(parent.identity(), RequestReservationOwner::Scope(0));
+    assert!(work
+        .cleanup(&forest.environment, &kernel)
+        .await
+        .uncertainty()
+        .is_none());
+    let placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    assert!(fixture.scope_is_live(placement));
+    let error = match kernel
+        .spawn_worker_scoped(
+            None,
+            fixture.behavior(ActorDescriptor::new("closed-invocation-child", placement)),
+            crate::WorkerLifetime::RunOwned,
+            work,
+        )
+        .await
+    {
+        Ok(_) => panic!("closed actual invocation ledger admitted a child"),
+        Err(error) => error,
+    };
+    let cause = match &error {
+        ractor::SpawnErr::StartupFailed(error) => error
+            .source()
+            .and_then(|source| source.downcast_ref::<crate::local_actor::StartupFailureCause>()),
+        _ => None,
+    };
+    assert!(
+        matches!(
+            cause,
+            Some(crate::local_actor::StartupFailureCause::Reservation(_))
+        ),
+        "production invocation owner refusal retained: {error:?}"
+    );
+    let cleanup =
+        crate::local_actor::startup_cleanup(&error).expect("actual child startup cleanup retained");
+    assert!(cleanup.is_confirmed());
+    assert!(!fixture.scope_is_live(placement));
+    assert!(forest
+        .directory
+        .resolve(cleanup.actor())
+        .await
+        .unwrap()
+        .is_none());
+    let outcomes = forest.shutdown().await;
+    assert!(
+        outcomes.iter().all(crate::ForestRootShutdown::is_confirmed),
+        "actual refused child finalization outcomes: {outcomes:?}"
+    );
+}
+
+#[tokio::test]
 async fn tool_abort_validates_original_owner_before_empty_settlement() {
     use tidepool_runtime::session::{
         ContextCheckpointBoundary, WorkbenchExecutionId, WorkbenchRequest,
