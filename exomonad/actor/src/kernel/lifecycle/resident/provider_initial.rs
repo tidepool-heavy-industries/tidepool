@@ -26,6 +26,7 @@ enum Effect {
 }
 
 pub(super) struct Pending {
+    expected: Arc<WorkbenchPublicOwner>,
     reply: RpcReplyPort<Result<InitialContextObservation, String>>,
     stage: Stage,
 }
@@ -122,6 +123,7 @@ pub(super) fn begin(
     let native = expected.native_readiness();
     Some((
         super::Pending::ProviderInitial(Pending {
+            expected,
             reply,
             stage: Stage::Beginning(effect),
         }),
@@ -161,7 +163,11 @@ pub(super) fn complete(
         unreachable!()
     };
     state.tasks.remove(&sequence);
-    let Pending { reply, stage } = pending;
+    let Pending {
+        expected,
+        reply,
+        stage,
+    } = pending;
     match (stage, outcome) {
         (_, Completion::Failed(error)) => uncertain(state, reply, error),
         (Stage::Beginning(_), Completion::Begun(Err(error))) => {
@@ -175,7 +181,7 @@ pub(super) fn complete(
                 } else {
                     Ok(observed)
                 };
-                settle(state, address, sequence, reply, ticket, result);
+                settle(state, address, sequence, expected, reply, ticket, result);
             }
             Effect::Acknowledge {
                 operation,
@@ -188,6 +194,7 @@ pub(super) fn complete(
                 resident.pending = Some((
                     sequence,
                     super::Pending::ProviderInitial(Pending {
+                        expected,
                         reply,
                         stage: Stage::Journal { ticket },
                     }),
@@ -219,11 +226,25 @@ pub(super) fn complete(
                 // Closing is preserved; admitted settlement cannot resurrect readiness.
                 state.resident.as_mut().unwrap().current.initial_context = Some(observed.clone());
                 state.publish();
-                settle(state, address, sequence, reply, ticket, Ok(observed));
+                settle(
+                    state,
+                    address,
+                    sequence,
+                    expected,
+                    reply,
+                    ticket,
+                    Ok(observed),
+                );
             }
-            Err(JournalFailure::Refused(error)) => {
-                settle(state, address, sequence, reply, ticket, Err(error))
-            }
+            Err(JournalFailure::Refused(error)) => settle(
+                state,
+                address,
+                sequence,
+                expected,
+                reply,
+                ticket,
+                Err(error),
+            ),
             Err(JournalFailure::Uncertain(error)) => {
                 drop(ticket); // Unknown mutation abandons and fences, never releases success.
                 uncertain(state, reply, error);
@@ -243,6 +264,7 @@ fn settle(
     state: &mut LifecycleState,
     address: &RactorRef<LifecycleCommand>,
     sequence: u64,
+    expected: Arc<WorkbenchPublicOwner>,
     reply: RpcReplyPort<Result<InitialContextObservation, String>>,
     ticket: Option<ProviderTransition>,
     result: Result<InitialContextObservation, String>,
@@ -251,6 +273,7 @@ fn settle(
     state.resident.as_mut().unwrap().pending = Some((
         sequence,
         super::Pending::ProviderInitial(Pending {
+            expected,
             reply,
             stage: Stage::Settling(result),
         }),
