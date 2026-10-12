@@ -8112,13 +8112,23 @@ mod tests {
             let spawning =
                 tokio::spawn(async move { spawning_context.spawn_child(None, child).await });
             entered.notified().await;
-            assert!(context.children().await.unwrap().is_empty());
+            let pending = context.children().await.unwrap();
+            assert_eq!(
+                pending.len(),
+                1,
+                "owner registers custody before startup finishes"
+            );
+            assert!(
+                pending[0].admit_transaction().await.is_err(),
+                "starting child cannot admit ordinary work"
+            );
             if cancel {
                 spawning.abort();
                 assert!(spawning.await.unwrap_err().is_cancelled());
             } else {
                 release.notify_one();
                 let child = spawning.await.unwrap().unwrap();
+                assert_eq!(child.identity(), pending[0].identity());
                 assert!(context.owns_child(child.identity()).await.unwrap());
             }
             context.directory.close_run_admission().await.unwrap();
