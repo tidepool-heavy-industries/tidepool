@@ -133,6 +133,9 @@ async fn interrupt_during_preview(
     fixture.environment.actors.lock().insert(
         context.actor,
         ResidentActorRecord {
+            installed_tools: behavior.installed_tools.clone(),
+            initial_context: Default::default(),
+            fresh_context_seed: None,
             root_startup: None,
             public_owner: if durable {
                 ActorPublicOwnerPlane::DurableReady(owner.clone())
@@ -649,6 +652,9 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
     fixture.environment.actors.lock().insert(
         context.actor,
         ResidentActorRecord {
+            installed_tools: behavior.installed_tools.clone(),
+            initial_context: Default::default(),
+            fresh_context_seed: None,
             root_startup: None,
             public_owner: if durable {
                 ActorPublicOwnerPlane::DurableReady(owner.clone())

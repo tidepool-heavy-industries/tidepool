@@ -51,6 +51,7 @@ TEST_ONLY_MODULES = {
         'bridge/facade/src/exomonad/workspace/source_capture_tests.rs',
     }),
     'exomonad-actor': frozenset({
+        'exomonad/actor/src/initial_context_properties.rs',
         'exomonad/actor/src/local_actor/reply_settlement_history.rs',
         'exomonad/actor/src/request/readiness/tests.rs',
         'exomonad/actor/src/request/result_tests.rs',
