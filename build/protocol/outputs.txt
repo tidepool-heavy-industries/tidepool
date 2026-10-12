@@ -4,6 +4,8 @@ bridge/mcp/src/generated/exec.rs
 bridge/handlers/src/generated/exec.rs
 bridge/mcp/src/generated/journal.rs
 bridge/handlers/src/generated/journal.rs
+bridge/mcp/src/generated/web.rs
+bridge/handlers/src/generated/web.rs
 bridge/mcp/src/generated/worktree.rs
 tidepool/bridge-effects/src/generated/worktree.rs
 bridge/handlers/src/generated/worktree.rs

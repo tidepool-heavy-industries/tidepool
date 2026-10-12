@@ -243,6 +243,12 @@ pub fn source() -> Effect {
         }),
         verbs: vec![
             Verb {
+                ctor: "SourceReadModule", method: "source_read_module",
+                args: vec![Arg { name: "name", ty: HsType::Text, rust: RustBinding::Derived }],
+                ret: HsType::Tuple(vec![HsType::Text, HsType::Text]),
+                errors: Some("SourceError"), handling: HandlingClass::OuterDispatch(OuterEffect::Source),
+            },
+            Verb {
                 ctor: "SourceReloadWith",
                 method: "source_reload",
                 args: vec![
@@ -271,6 +277,8 @@ pub fn source() -> Effect {
             },
         ],
         helpers: vec![
+            Helper { name: "readSourceModule", ctor: Some("SourceReadModule"), substrate: false,
+                doc: &["Read a named module from the active captured source. Returns (revision identity, source text), never pending workspace bytes."], body: HelperBody::Pointfree },
             Helper {
                 name: "reloadSource",
                 ctor: Some("SourceReloadWith"),

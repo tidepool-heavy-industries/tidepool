@@ -29,6 +29,7 @@ pub mod repo_event;
 pub mod resource_scopes;
 pub mod sleep;
 pub mod source;
+pub mod web;
 pub mod worktree;
 pub mod worktree_allocation;
 pub mod worktree_integration;
@@ -63,6 +64,7 @@ pub use repo_event::*;
 pub use resource_scopes::*;
 pub use sleep::*;
 pub use source::*;
+pub use web::*;
 pub use worktree::*;
 pub use worktree_allocation::*;
 pub use worktree_integration::*;
@@ -81,6 +83,7 @@ pub(crate) fn schema_decls() -> Vec<crate::EffectDecl> {
         console_decl(),
         exec_decl(),
         journal_decl(),
+        web_decl(),
         worktree_decl(),
         event_decl(),
         askuser_decl(),
@@ -562,6 +565,9 @@ pub(crate) const AUTHORED_HIDDEN_BY_EFFECT: &[(&str, &[&str])] = &[
             "EffectRepoEvent",
             "EffectSource",
             "EffectJournal",
+            "EffectWeb",
+            "EffectFsRead",
+            "EffectFsWrite",
             "SpawnContextWire",
             "CapturedSpawn",
             "FreshSpawn",

@@ -27,6 +27,9 @@ const EFFECTS: &[&str] = &[
     "Lookup",
     "Source",
     "Journal",
+    "Web",
+    "FsRead",
+    "FsWrite",
     "RepoEvent",
 ];
 

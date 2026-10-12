@@ -20,6 +20,8 @@ pub(crate) fn exomonad_effect_declarations() -> Vec<tidepool_mcp::EffectDecl> {
         tidepool_mcp::source_decl(),
         tidepool_mcp::sleep_decl(),
         tidepool_mcp::fs_read_decl(),
+        tidepool_mcp::fs_write_decl(),
+        tidepool_mcp::web_decl(),
         tidepool_mcp::worktree_decl(),
         tidepool_mcp::bound_worktree_decl(),
         tidepool_mcp::worktree_registry_decl(),

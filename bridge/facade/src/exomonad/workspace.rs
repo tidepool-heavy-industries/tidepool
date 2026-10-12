@@ -1386,9 +1386,15 @@ pub(crate) fn copy_authored(workspace: &Path, destination: &Path) -> Result<()> 
 /// store is immutable and is signed by its path alone.
 pub(super) fn sources_signature(roots: &[PathBuf]) -> Result<String> {
     fn walk(directory: &Path, hasher: &mut blake3::Hasher) -> Result<()> {
+        if is_runtime_state_tree(directory) {
+            return Ok(());
+        }
         let mut entries: Vec<_> = std::fs::read_dir(directory)?.collect::<std::io::Result<_>>()?;
         entries.sort_by_key(std::fs::DirEntry::file_name);
         for entry in entries {
+            if is_runtime_state_tree(&entry.path()) {
+                continue;
+            }
             let name = entry.file_name();
             if matches!(
                 name.to_str(),
@@ -1550,6 +1556,19 @@ fn capture_tree(
     inspect_source_tree(source, relative, Some(destination), files, all_authored)
 }
 
+/// Durable memory is not authored source, even when `.exomonad` is a source root.
+/// Match the runtime's exact path so ordinary authored directories named `state`
+/// remain source inputs.
+fn is_runtime_state_tree(path: &Path) -> bool {
+    path.ancestors().any(|ancestor| {
+        ancestor.file_name().is_some_and(|name| name == "state")
+            && ancestor
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == ".exomonad")
+    })
+}
+
 fn inspect_source_tree(
     source: &Path,
     relative: &Path,
@@ -1560,8 +1579,14 @@ fn inspect_source_tree(
     if let Some(destination) = destination {
         std::fs::create_dir_all(destination.join(relative))?;
     }
+    if is_runtime_state_tree(source) {
+        return Ok(());
+    }
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
+        if is_runtime_state_tree(&entry.path()) {
+            continue;
+        }
         let name = entry.file_name();
         // Source roots may be `.exomonad` itself. Runtime/build trees are not inputs.
         if matches!(

@@ -1,0 +1,14 @@
+load("@prelude//:rules.bzl", "export_file", "filegroup")
+
+[export_file(
+    name = "authored_haskell_" + source.replace("/", "_").replace(".", "_").replace("-", "_"),
+    src = ".exomonad/" + source,
+    out = source.split("/")[-1],
+    visibility = ["PUBLIC"],
+) for source in ["AgentSpec.hs", "Persona/Memory.hs", "Persona/Web.hs", "Persona/Spec.hs"]]
+
+filegroup(
+    name = "seed",
+    srcs = {source: source for source in glob([".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/config.toml", "*.md"])},
+    visibility = ["PUBLIC"],
+)
