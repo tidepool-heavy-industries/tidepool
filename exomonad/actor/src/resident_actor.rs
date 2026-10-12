@@ -8658,61 +8658,63 @@ where
         }
     }
 
-    async fn settle_fragment_effects(
-        &mut self,
-        kernel: &KernelContext,
-        context: &ActorSessionContext,
-        execution_state: &mut WorkbenchEffectState,
-        workbench: &crate::ResidentActorWorkbench<H, O>,
-        current: &mut WorkbenchFragmentExecution,
-        unit: WorkbenchUnitExecution<'_>,
-    ) -> Result<FragmentAdvance, ResidentActorWorkbenchError> {
-        loop {
-            if !execution_state.park_effects {
-                if let Some(request) = current.native_start.take() {
-                    current.native_result = Some(
-                        current
-                            .execution
-                            .native(&self.environment, context)
-                            .advance_fragment(workbench, request)
-                            .await,
-                    );
-                }
-            }
-            self.runtime_observation.publish_workbench_posture(
-                crate::ActorWorkbenchPosture::RunningUnit {
-                    input_unit_index: unit.input_unit_index,
-                    total: unit.total,
-                },
-            );
-            let native = match current.native_result.take() {
-                Some(Ok(result)) => result,
-                Some(Err(error)) => {
-                    if current.scopes.is_empty() {
-                        return Err(error);
+    fn settle_fragment_effects<'a>(
+        &'a mut self,
+        kernel: &'a KernelContext,
+        context: &'a ActorSessionContext,
+        execution_state: &'a mut WorkbenchEffectState,
+        workbench: &'a crate::ResidentActorWorkbench<H, O>,
+        current: &'a mut WorkbenchFragmentExecution,
+        unit: WorkbenchUnitExecution<'a>,
+    ) -> futures_util::future::BoxFuture<'a, Result<FragmentAdvance, ResidentActorWorkbenchError>>
+    {
+        let future = async move {
+            loop {
+                if !execution_state.park_effects {
+                    if let Some(request) = current.native_start.take() {
+                        current.native_result = Some(
+                            current
+                                .execution
+                                .native(&self.environment, context)
+                                .advance_fragment(workbench, request)
+                                .await,
+                        );
                     }
-                    self.prepare_scope_finish(
-                        kernel,
-                        context,
-                        current,
-                        Err(
-                            tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
-                                error.to_string(),
+                }
+                self.runtime_observation.publish_workbench_posture(
+                    crate::ActorWorkbenchPosture::RunningUnit {
+                        input_unit_index: unit.input_unit_index,
+                        total: unit.total,
+                    },
+                );
+                let native = match current.native_result.take() {
+                    Some(Ok(result)) => result,
+                    Some(Err(error)) => {
+                        if current.scopes.is_empty() {
+                            return Err(error);
+                        }
+                        self.prepare_scope_finish(
+                            kernel,
+                            context,
+                            current,
+                            Err(
+                                tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
+                                    error.to_string(),
+                                ),
                             ),
-                        ),
-                    )?;
-                    if execution_state.park_effects {
-                        return Ok(FragmentAdvance::ParkNative);
+                        )?;
+                        if execution_state.park_effects {
+                            return Ok(FragmentAdvance::ParkNative);
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                None => {
-                    let request = match current.resume_failure.take() {
-                        Some(error) => {
-                            if current.scopes.is_empty() {
-                                return Err(error);
-                            }
-                            self.prepare_scope_finish(
+                    None => {
+                        let request = match current.resume_failure.take() {
+                            Some(error) => {
+                                if current.scopes.is_empty() {
+                                    return Err(error);
+                                }
+                                self.prepare_scope_finish(
                                 kernel,
                                 context,
                                 current,
@@ -8722,157 +8724,161 @@ where
                                     ),
                                 ),
                             )?;
+                                if execution_state.park_effects {
+                                    return Ok(FragmentAdvance::ParkNative);
+                                }
+                                continue;
+                            }
+                            None if !current.scopes.is_empty()
+                                || current.execution.active_realm().is_some() =>
+                            {
+                                owned_workbench::WorkbenchFragmentRequest::Scoped {
+                                    fragment: current
+                                        .fragment
+                                        .take()
+                                        .expect("scope retains parent fragment"),
+                                    outcome: current
+                                        .outcome
+                                        .take()
+                                        .expect("scope owns body frontier"),
+                                    realm: current
+                                        .scopes
+                                        .last()
+                                        .map(|scope| scope.realm)
+                                        .or_else(|| current.execution.active_realm())
+                                        .expect("active native resource scope"),
+                                }
+                            }
+                            None => owned_workbench::WorkbenchFragmentRequest::Settle {
+                                fragment: current
+                                    .fragment
+                                    .take()
+                                    .expect("running unit owns its fragment"),
+                                outcome: current
+                                    .outcome
+                                    .take()
+                                    .expect("running unit owns its outcome"),
+                            },
+                        };
+                        if execution_state.park_effects {
+                            assert!(
+                                current.native_start.is_none(),
+                                "one captured native request"
+                            );
+                            current.native_start = Some(request);
                             if execution_state.park_effects {
                                 return Ok(FragmentAdvance::ParkNative);
                             }
                             continue;
                         }
-                        None if !current.scopes.is_empty()
-                            || current.execution.active_realm().is_some() =>
-                        {
-                            owned_workbench::WorkbenchFragmentRequest::Scoped {
-                                fragment: current
-                                    .fragment
-                                    .take()
-                                    .expect("scope retains parent fragment"),
-                                outcome: current.outcome.take().expect("scope owns body frontier"),
-                                realm: current
-                                    .scopes
-                                    .last()
-                                    .map(|scope| scope.realm)
-                                    .or_else(|| current.execution.active_realm())
-                                    .expect("active native resource scope"),
-                            }
+                        current
+                            .execution
+                            .native(&self.environment, context)
+                            .advance_fragment(workbench, request)
+                            .await?
+                    }
+                };
+                match native {
+                    owned_workbench::WorkbenchFragmentAdvance::ScopeFailed { fragment, error } => {
+                        current.fragment = Some(fragment);
+                        if current.scopes.is_empty() {
+                            return Err(error);
                         }
-                        None => owned_workbench::WorkbenchFragmentRequest::Settle {
-                            fragment: current
-                                .fragment
-                                .take()
-                                .expect("running unit owns its fragment"),
-                            outcome: current
-                                .outcome
-                                .take()
-                                .expect("running unit owns its outcome"),
-                        },
-                    };
-                    if execution_state.park_effects {
-                        assert!(
-                            current.native_start.is_none(),
-                            "one captured native request"
-                        );
-                        current.native_start = Some(request);
+                        self.prepare_scope_finish(
+                            kernel,
+                            context,
+                            current,
+                            Err(
+                                tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
+                                    error.to_string(),
+                                ),
+                            ),
+                        )?;
                         if execution_state.park_effects {
                             return Ok(FragmentAdvance::ParkNative);
                         }
                         continue;
                     }
-                    current
-                        .execution
-                        .native(&self.environment, context)
-                        .advance_fragment(workbench, request)
-                        .await?
-                }
-            };
-            match native {
-                owned_workbench::WorkbenchFragmentAdvance::ScopeFailed { fragment, error } => {
-                    current.fragment = Some(fragment);
-                    if current.scopes.is_empty() {
-                        return Err(error);
+                    owned_workbench::WorkbenchFragmentAdvance::Resumed(outcome) => {
+                        current.outcome = Some(outcome);
+                        continue;
                     }
-                    self.prepare_scope_finish(
-                        kernel,
-                        context,
-                        current,
-                        Err(
-                            tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
-                                error.to_string(),
-                            ),
-                        ),
-                    )?;
-                    if execution_state.park_effects {
-                        return Ok(FragmentAdvance::ParkNative);
-                    }
-                    continue;
-                }
-                owned_workbench::WorkbenchFragmentAdvance::Resumed(outcome) => {
-                    current.outcome = Some(outcome);
-                    continue;
-                }
-                owned_workbench::WorkbenchFragmentAdvance::Captured { fragment, boundary } => {
-                    current.fragment = Some(fragment);
-                    if execution_state.initial_context
-                        && matches!(
-                            &boundary,
-                            ResidentActorBoundary::Form { .. }
-                                | ResidentActorBoundary::Start(_)
-                                | ResidentActorBoundary::Replace { .. }
-                                | ResidentActorBoundary::Outbound(_)
-                                | ResidentActorBoundary::RequestReservation(_)
-                                | ResidentActorBoundary::RequestSubmission(_)
-                                | ResidentActorBoundary::AgentSession(_)
-                                | ResidentActorBoundary::AgentAttachment(_)
-                                | ResidentActorBoundary::Receive(_)
-                                | ResidentActorBoundary::ToolAwait(_)
-                        )
-                    {
-                        return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
+                    owned_workbench::WorkbenchFragmentAdvance::Captured { fragment, boundary } => {
+                        current.fragment = Some(fragment);
+                        if execution_state.initial_context
+                            && matches!(
+                                &boundary,
+                                ResidentActorBoundary::Form { .. }
+                                    | ResidentActorBoundary::Start(_)
+                                    | ResidentActorBoundary::Replace { .. }
+                                    | ResidentActorBoundary::Outbound(_)
+                                    | ResidentActorBoundary::RequestReservation(_)
+                                    | ResidentActorBoundary::RequestSubmission(_)
+                                    | ResidentActorBoundary::AgentSession(_)
+                                    | ResidentActorBoundary::AgentAttachment(_)
+                                    | ResidentActorBoundary::Receive(_)
+                                    | ResidentActorBoundary::ToolAwait(_)
+                            )
+                        {
+                            return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                             "initial-context startup does not admit {}: its continuation is not qualified in this launch phase",
                             boundary.operation(),
                         )));
-                    }
-                    let effect_owner = match current
-                        .scopes
-                        .last()
-                        .map(|frame| frame.work.clone())
-                        .or_else(|| current.execution.active_work())
-                    {
-                        Some(work) => CurrentEffectOwner::Scoped {
-                            base: Box::new(CurrentEffectOwner::Workbench(execution_state)),
-                            scope: work,
-                            wait_control: current.execution.active_wait_control(),
-                        },
-                        None => CurrentEffectOwner::Workbench(execution_state),
-                    };
-                    let boundary = match boundary {
-                        ResidentActorBoundary::Green(boundary) => {
-                            if !execution_state.park_effects {
-                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        }
+                        let effect_owner = match current
+                            .scopes
+                            .last()
+                            .map(|frame| frame.work.clone())
+                            .or_else(|| current.execution.active_work())
+                        {
+                            Some(work) => CurrentEffectOwner::Scoped {
+                                base: Box::new(CurrentEffectOwner::Workbench(execution_state)),
+                                scope: work,
+                                wait_control: current.execution.active_wait_control(),
+                            },
+                            None => CurrentEffectOwner::Workbench(execution_state),
+                        };
+                        let boundary = match boundary {
+                            ResidentActorBoundary::Green(boundary) => {
+                                if !execution_state.park_effects {
+                                    return Err(ResidentActorWorkbenchError::ActorProtocol(
                                     "async requires an independently admitted notebook execution"
                                         .into(),
                                 ));
+                                }
+                                return self.prepare_green_boundary(
+                                    kernel,
+                                    context,
+                                    &effect_owner,
+                                    current,
+                                    boundary,
+                                );
                             }
-                            return self.prepare_green_boundary(
-                                kernel,
-                                context,
-                                &effect_owner,
-                                current,
-                                boundary,
-                            );
-                        }
-                        ResidentActorBoundary::Completed
-                            if current.execution.active_realm().is_some()
-                                && current.scopes.is_empty() =>
-                        {
-                            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                                "async body completed without publishing its result marker".into(),
-                            ));
-                        }
-                        ResidentActorBoundary::ScopeResumed { outcome } => {
-                            current.outcome = Some(outcome);
-                            continue;
-                        }
-                        ResidentActorBoundary::ScopeRun {
-                            continuation,
-                            callback,
-                        } => {
-                            let (work, realm) = match self
-                                .register_resource_scope(context, &effect_owner)
+                            ResidentActorBoundary::Completed
+                                if current.execution.active_realm().is_some()
+                                    && current.scopes.is_empty() =>
                             {
-                                Ok(registered) => registered,
-                                Err(detail) => {
-                                    let runner = self.environment.runner.clone();
-                                    let context = context.clone();
-                                    current.native_start = Some(
+                                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                                    "async body completed without publishing its result marker"
+                                        .into(),
+                                ));
+                            }
+                            ResidentActorBoundary::ScopeResumed { outcome } => {
+                                current.outcome = Some(outcome);
+                                continue;
+                            }
+                            ResidentActorBoundary::ScopeRun {
+                                continuation,
+                                callback,
+                            } => {
+                                let (work, realm) = match self
+                                    .register_resource_scope(context, &effect_owner)
+                                {
+                                    Ok(registered) => registered,
+                                    Err(detail) => {
+                                        let runner = self.environment.runner.clone();
+                                        let context = context.clone();
+                                        current.native_start = Some(
                                         owned_workbench::WorkbenchFragmentRequest::ScopeResume {
                                             fragment: current
                                                 .fragment
@@ -8884,63 +8890,63 @@ where
                                             }),
                                         },
                                     );
-                                    if execution_state.park_effects {
-                                        return Ok(FragmentAdvance::ParkNative);
+                                        if execution_state.park_effects {
+                                            return Ok(FragmentAdvance::ParkNative);
+                                        }
+                                        continue;
                                     }
-                                    continue;
-                                }
-                            };
-                            let frame = scopes::ScopeFrame {
-                                continuation,
-                                work,
-                                realm,
-                            };
-                            let token =
-                                frame.work.scope_token().expect("registered scope identity");
-                            let realm = frame.realm;
-                            let work = frame.work.clone();
-                            current.scopes.push(frame);
-                            current.native_start =
-                                Some(owned_workbench::WorkbenchFragmentRequest::ScopeStart {
-                                    fragment: current
-                                        .fragment
-                                        .take()
-                                        .expect("scope retains parent fragment"),
-                                    callback,
-                                    realm,
-                                    token,
+                                };
+                                let frame = scopes::ScopeFrame {
+                                    continuation,
                                     work,
-                                });
-                            if execution_state.park_effects {
-                                return Ok(FragmentAdvance::ParkNative);
+                                    realm,
+                                };
+                                let token =
+                                    frame.work.scope_token().expect("registered scope identity");
+                                let realm = frame.realm;
+                                let work = frame.work.clone();
+                                current.scopes.push(frame);
+                                current.native_start =
+                                    Some(owned_workbench::WorkbenchFragmentRequest::ScopeStart {
+                                        fragment: current
+                                            .fragment
+                                            .take()
+                                            .expect("scope retains parent fragment"),
+                                        callback,
+                                        realm,
+                                        token,
+                                        work,
+                                    });
+                                if execution_state.park_effects {
+                                    return Ok(FragmentAdvance::ParkNative);
+                                }
+                                continue;
                             }
-                            continue;
-                        }
-                        ResidentActorBoundary::ScopeDone { token, .. }
-                            if !current.scopes.is_empty() =>
-                        {
-                            let body = if current
-                                .scopes
-                                .last()
-                                .and_then(|frame| frame.work.scope_token())
-                                == Some(token)
+                            ResidentActorBoundary::ScopeDone { token, .. }
+                                if !current.scopes.is_empty() =>
                             {
-                                Ok(())
-                            } else {
-                                Err(
+                                let body = if current
+                                    .scopes
+                                    .last()
+                                    .and_then(|frame| frame.work.scope_token())
+                                    == Some(token)
+                                {
+                                    Ok(())
+                                } else {
+                                    Err(
                                     tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(
                                         "scope completion belongs to a different delimiter".into(),
                                     ),
                                 )
-                            };
-                            self.prepare_scope_finish(kernel, context, current, body)?;
-                            if execution_state.park_effects {
-                                return Ok(FragmentAdvance::ParkNative);
+                                };
+                                self.prepare_scope_finish(kernel, context, current, body)?;
+                                if execution_state.park_effects {
+                                    return Ok(FragmentAdvance::ParkNative);
+                                }
+                                continue;
                             }
-                            continue;
-                        }
-                        ResidentActorBoundary::Completed if !current.scopes.is_empty() => {
-                            self.prepare_scope_finish(
+                            ResidentActorBoundary::Completed if !current.scopes.is_empty() => {
+                                self.prepare_scope_finish(
                                 kernel,
                                 context,
                                 current,
@@ -8950,310 +8956,231 @@ where
                                     ),
                                 ),
                             )?;
-                            if execution_state.park_effects {
-                                return Ok(FragmentAdvance::ParkNative);
+                                if execution_state.park_effects {
+                                    return Ok(FragmentAdvance::ParkNative);
+                                }
+                                continue;
                             }
-                            continue;
-                        }
-                        boundary => boundary,
-                    };
-                    let next_fragment = current
-                        .fragment
-                        .as_mut()
-                        .expect("captured effect retains its fragment");
-                    let success_disposition = boundary.success_disposition();
-                    let effect = boundary.operation().to_owned();
-                    self.runtime_observation.publish_workbench_posture(
-                        crate::ActorWorkbenchPosture::AwaitingEffect {
-                            input_unit_index: unit.input_unit_index,
-                            total: unit.total,
-                            effect: effect.clone(),
-                        },
-                    );
-                    let ordinal = *unit.effect_ordinal;
-                    *unit.effect_ordinal += 1;
-                    // Timed from here, not from `capture_boundary` above:
-                    // this brackets the boundary's own service work, which
-                    // is what `record_workbench_operation` reports as
-                    // `elapsed_ms` once the match below settles it.
-                    let effect_started = std::time::Instant::now();
-                    let display_settlement = if matches!(
-                        &boundary,
-                        ResidentActorBoundary::DisplayPublish { .. }
-                            | ResidentActorBoundary::DisplayExpand { .. }
-                    ) {
-                        unit.execution.map(|execution| {
-                            Arc::new(DisplayOperationSettlement::new(
-                                WorkbenchOperationId {
-                                    execution: execution.clone(),
-                                    input_unit_index: unit.input_unit_index,
-                                    effect_ordinal: ordinal,
-                                },
-                                effect.clone(),
-                                success_disposition,
-                            ))
-                        })
-                    } else {
-                        None
-                    };
-                    if let Some(settlement) = &display_settlement {
-                        let owner =
-                            execution_state
-                                .display_receipt_owner
-                                .as_ref()
-                                .ok_or_else(|| {
+                            boundary => boundary,
+                        };
+                        let next_fragment = current
+                            .fragment
+                            .as_mut()
+                            .expect("captured effect retains its fragment");
+                        let success_disposition = boundary.success_disposition();
+                        let effect = boundary.operation().to_owned();
+                        self.runtime_observation.publish_workbench_posture(
+                            crate::ActorWorkbenchPosture::AwaitingEffect {
+                                input_unit_index: unit.input_unit_index,
+                                total: unit.total,
+                                effect: effect.clone(),
+                            },
+                        );
+                        let ordinal = *unit.effect_ordinal;
+                        *unit.effect_ordinal += 1;
+                        // Timed from here, not from `capture_boundary` above:
+                        // this brackets the boundary's own service work, which
+                        // is what `record_workbench_operation` reports as
+                        // `elapsed_ms` once the match below settles it.
+                        let effect_started = std::time::Instant::now();
+                        let display_settlement = if matches!(
+                            &boundary,
+                            ResidentActorBoundary::DisplayPublish { .. }
+                                | ResidentActorBoundary::DisplayExpand { .. }
+                        ) {
+                            unit.execution.map(|execution| {
+                                Arc::new(DisplayOperationSettlement::new(
+                                    WorkbenchOperationId {
+                                        execution: execution.clone(),
+                                        input_unit_index: unit.input_unit_index,
+                                        effect_ordinal: ordinal,
+                                    },
+                                    effect.clone(),
+                                    success_disposition,
+                                ))
+                            })
+                        } else {
+                            None
+                        };
+                        if let Some(settlement) = &display_settlement {
+                            let owner = execution_state.display_receipt_owner.as_ref().ok_or_else(
+                                || {
                                     ResidentActorWorkbenchError::ActorProtocol(
                                         "display has no original admitted receipt owner".into(),
                                     )
-                                })?;
-                        owner.retain(settlement.clone())?;
-                    }
-                    current.inflight_effect = Some(WorkbenchEffectStamp {
-                        display: None,
-                        display_settlement: display_settlement.clone(),
-                        success_disposition,
-                        ordinal,
-                        effect: effect.clone(),
-                        started: effect_started,
-                    });
-                    // The effect level. The boundary's own service work is
-                    // spread across the match below, so this is an event on
-                    // the input-unit span rather than a span of its own;
-                    // its disposition arrives with the unit's receipt.
-                    tracing::info!(
-                        input_unit_index = unit.input_unit_index,
-                        ordinal,
-                        effect = %effect,
-                        "effect boundary captured"
-                    );
-                    let mut boundary = prepare_execution_effect(context, &effect_owner, boundary);
-                    match &mut boundary {
-                        ResidentActorBoundary::Form { publication, .. }
-                        | ResidentActorBoundary::RichView { publication, .. } => {
-                            publication.operation =
+                                },
+                            )?;
+                            owner.retain(settlement.clone())?;
+                        }
+                        current.inflight_effect = Some(WorkbenchEffectStamp {
+                            display: None,
+                            display_settlement: display_settlement.clone(),
+                            success_disposition,
+                            ordinal,
+                            effect: effect.clone(),
+                            started: effect_started,
+                        });
+                        // The effect level. The boundary's own service work is
+                        // spread across the match below, so this is an event on
+                        // the input-unit span rather than a span of its own;
+                        // its disposition arrives with the unit's receipt.
+                        tracing::info!(
+                            input_unit_index = unit.input_unit_index,
+                            ordinal,
+                            effect = %effect,
+                            "effect boundary captured"
+                        );
+                        let mut boundary =
+                            prepare_execution_effect(context, &effect_owner, boundary);
+                        match &mut boundary {
+                            ResidentActorBoundary::Form { publication, .. }
+                            | ResidentActorBoundary::RichView { publication, .. } => {
+                                publication.operation =
+                                    unit.execution.map(|execution| WorkbenchOperationId {
+                                        execution: execution.clone(),
+                                        input_unit_index: unit.input_unit_index,
+                                        effect_ordinal: ordinal,
+                                    });
+                            }
+                            _ => {}
+                        }
+                        if execution_state.park_effects
+                            && matches!(
+                                &boundary,
+                                ResidentActorBoundary::DisplayPublish { .. }
+                                    | ResidentActorBoundary::DisplayExpand { .. }
+                            )
+                        {
+                            current.parked_effect = Some(ParkedWorkbenchEffect {
+                                display: None,
+                                success_disposition,
+                                wait: OwnedWorkbenchWait::Display {
+                                    boundary,
+                                    allowance: display_character_allowance(*unit.display_remaining),
+                                    operation: unit.execution.map(|execution| {
+                                        WorkbenchOperationId {
+                                            execution: execution.clone(),
+                                            input_unit_index: unit.input_unit_index,
+                                            effect_ordinal: ordinal,
+                                        }
+                                    }),
+                                },
+                                ordinal,
+                                effect,
+                                started: effect_started,
+                            });
+                            return Ok(FragmentAdvance::ParkEffect);
+                        }
+                        let (boundary, mut display) = current
+                            .execution
+                            .native(&self.environment, context)
+                            .prepare_display(
+                                boundary,
+                                display_character_allowance(*unit.display_remaining),
                                 unit.execution.map(|execution| WorkbenchOperationId {
                                     execution: execution.clone(),
                                     input_unit_index: unit.input_unit_index,
                                     effect_ordinal: ordinal,
-                                });
-                        }
-                        _ => {}
-                    }
-                    if execution_state.park_effects
-                        && matches!(
-                            &boundary,
-                            ResidentActorBoundary::DisplayPublish { .. }
-                                | ResidentActorBoundary::DisplayExpand { .. }
-                        )
-                    {
-                        current.parked_effect = Some(ParkedWorkbenchEffect {
-                            display: None,
-                            success_disposition,
-                            wait: OwnedWorkbenchWait::Display {
-                                boundary,
-                                allowance: display_character_allowance(*unit.display_remaining),
-                                operation: unit.execution.map(|execution| WorkbenchOperationId {
-                                    execution: execution.clone(),
-                                    input_unit_index: unit.input_unit_index,
-                                    effect_ordinal: ordinal,
                                 }),
-                            },
-                            ordinal,
-                            effect,
-                            started: effect_started,
-                        });
-                        return Ok(FragmentAdvance::ParkEffect);
-                    }
-                    let (boundary, mut display) = current
-                        .execution
-                        .native(&self.environment, context)
-                        .prepare_display(
-                            boundary,
-                            display_character_allowance(*unit.display_remaining),
-                            unit.execution.map(|execution| WorkbenchOperationId {
-                                execution: execution.clone(),
-                                input_unit_index: unit.input_unit_index,
-                                effect_ordinal: ordinal,
-                            }),
-                            Some(DisplayReceiptSubmission {
-                                owner: execution_state.display_receipt_owner.clone(),
-                                settlement: display_settlement,
-                                fragment: &mut *next_fragment,
-                                remaining: &mut *unit.display_remaining,
-                            }),
-                        )
-                        .await?;
-                    current
-                        .inflight_effect
-                        .as_mut()
-                        .expect("captured display retains its effect stamp")
-                        .display = display.clone();
-                    if let Some(display) = &mut display {
-                        let rendered = display.text.clone();
+                                Some(DisplayReceiptSubmission {
+                                    owner: execution_state.display_receipt_owner.clone(),
+                                    settlement: display_settlement,
+                                    fragment: &mut *next_fragment,
+                                    remaining: &mut *unit.display_remaining,
+                                }),
+                            )
+                            .await?;
                         current
                             .inflight_effect
                             .as_mut()
-                            .expect("display retains its effect stamp")
-                            .display = Some(display.clone());
-                        if !rendered.is_empty() {
-                            unit.command_output.push(rendered);
-                        }
-                    }
-                    if let ResidentActorBoundary::Console { text, .. } = &boundary {
-                        let rendered = crate::workbench_display::bounded_output(
-                            text,
-                            (*unit.display_remaining).min(32768),
-                        );
-                        let rendered =
-                            next_fragment.present_output(&rendered, unit.display_remaining);
-                        if !rendered.is_empty() {
-                            unit.command_output.push(rendered);
-                        }
-                    }
-                    let boundary = if execution_state.park_effects {
-                        let captured = match boundary {
-                            ResidentActorBoundary::Start(start) => Ok(OwnedWorkbenchWait::Launch(
-                                self.prepare_child_launch(context, effect_owner.clone(), start),
-                            )),
-                            boundary => {
-                                self.prepare_invocation_wait(
-                                    kernel,
-                                    context,
-                                    &effect_owner,
-                                    boundary,
-                                )
-                                .await?
+                            .expect("captured display retains its effect stamp")
+                            .display = display.clone();
+                        if let Some(display) = &mut display {
+                            let rendered = display.text.clone();
+                            current
+                                .inflight_effect
+                                .as_mut()
+                                .expect("display retains its effect stamp")
+                                .display = Some(display.clone());
+                            if !rendered.is_empty() {
+                                unit.command_output.push(rendered);
                             }
-                        };
-                        match captured {
-                            Ok(wait) => {
-                                if matches!(
-                                    &wait,
-                                    OwnedWorkbenchWait::Watch(_)
-                                        | OwnedWorkbenchWait::Sleep { .. }
-                                        | OwnedWorkbenchWait::Exit { .. }
-                                        | OwnedWorkbenchWait::Drain { .. }
-                                ) || matches!(&wait, OwnedWorkbenchWait::Command { request, .. }
+                        }
+                        if let ResidentActorBoundary::Console { text, .. } = &boundary {
+                            let rendered = crate::workbench_display::bounded_output(
+                                text,
+                                (*unit.display_remaining).min(32768),
+                            );
+                            let rendered =
+                                next_fragment.present_output(&rendered, unit.display_remaining);
+                            if !rendered.is_empty() {
+                                unit.command_output.push(rendered);
+                            }
+                        }
+                        let boundary = if execution_state.park_effects {
+                            let captured = match boundary {
+                                ResidentActorBoundary::Start(start) => {
+                                    Ok(OwnedWorkbenchWait::Launch(self.prepare_child_launch(
+                                        context,
+                                        effect_owner.clone(),
+                                        start,
+                                    )))
+                                }
+                                boundary => {
+                                    self.prepare_invocation_wait(
+                                        kernel,
+                                        context,
+                                        &effect_owner,
+                                        boundary,
+                                    )
+                                    .await?
+                                }
+                            };
+                            match captured {
+                                Ok(wait) => {
+                                    if matches!(
+                                        &wait,
+                                        OwnedWorkbenchWait::Watch(_)
+                                            | OwnedWorkbenchWait::Sleep { .. }
+                                            | OwnedWorkbenchWait::Exit { .. }
+                                            | OwnedWorkbenchWait::Drain { .. }
+                                    ) || matches!(&wait, OwnedWorkbenchWait::Command { request, .. }
                                     if commands::waits_for_completion(request)
                                         && self.descriptor.capabilities().effect_keys().contains(&crate::ActorEffectKey::Commands))
-                                {
-                                    execution_state
-                                        .control
-                                        .get_or_insert_with(
-                                            crate::WorkbenchExecutionControl::untracked,
-                                        )
-                                        .arm_sleep();
+                                    {
+                                        execution_state
+                                            .control
+                                            .get_or_insert_with(
+                                                crate::WorkbenchExecutionControl::untracked,
+                                            )
+                                            .arm_sleep();
+                                    }
+                                    current.parked_effect = Some(ParkedWorkbenchEffect {
+                                        display: display.clone(),
+                                        success_disposition: current
+                                            .inflight_effect
+                                            .as_ref()
+                                            .expect("parked effect retains its boundary stamp")
+                                            .success_disposition,
+                                        wait,
+                                        ordinal,
+                                        effect,
+                                        started: effect_started,
+                                    });
+                                    return Ok(FragmentAdvance::ParkEffect);
                                 }
-                                current.parked_effect = Some(ParkedWorkbenchEffect {
-                                    display: display.clone(),
-                                    success_disposition: current
-                                        .inflight_effect
-                                        .as_ref()
-                                        .expect("parked effect retains its boundary stamp")
-                                        .success_disposition,
-                                    wait,
-                                    ordinal,
-                                    effect,
-                                    started: effect_started,
-                                });
-                                return Ok(FragmentAdvance::ParkEffect);
+                                Err(boundary) => boundary,
                             }
-                            Err(boundary) => boundary,
-                        }
-                    } else {
-                        boundary
-                    };
-                    match boundary {
-                        ResidentActorBoundary::ReplyAttempt(attempt) => match self
-                            .environment
-                            .requests
-                            .begin_reply(context.actor, attempt.request)
-                        {
-                            Ok(claim) => {
-                                current.inflight_effect = None;
-                                record_workbench_operation(
-                                    unit.operations,
-                                    unit.execution,
-                                    unit.input_unit_index,
-                                    ordinal,
-                                    &effect,
-                                    display.clone(),
-                                    effect_started.elapsed(),
-                                    WorkbenchOperationDisposition::Committed,
-                                );
-                                return Ok(FragmentAdvance::Settled(
-                                    ResidentWorkbenchStep::Replied {
-                                        claim,
-                                        request: attempt.request,
-                                        result: attempt.result,
-                                        preview: attempt.preview,
-                                    },
-                                ));
-                            }
-                            Err(error) if attempt.recoverable => {
-                                tracing::info!(rejection = ?error, "reply rejected");
-                                current.inflight_effect = None;
-                                record_workbench_operation(
-                                    unit.operations,
-                                    unit.execution,
-                                    unit.input_unit_index,
-                                    ordinal,
-                                    &effect,
-                                    display.clone(),
-                                    effect_started.elapsed(),
-                                    WorkbenchOperationDisposition::Rejected,
-                                );
-                                drop(attempt.result);
-                                if execution_state.park_effects
-                                    && !execution_state.after_tool_active
-                                {
-                                    current.native_start = Some(
-                                        owned_workbench::WorkbenchFragmentRequest::ReplyRejection {
-                                            continuation: attempt.continuation,
-                                            error,
-                                        },
-                                    );
-                                    return Ok(FragmentAdvance::ParkNative);
-                                }
-                                current.outcome = Some(
-                                    current
-                                        .execution
-                                        .native(&self.environment, context)
-                                        .resume_reply_rejection(attempt.continuation, error)
-                                        .await?,
-                                );
-                                continue;
-                            }
-                            Err(error) => {
-                                tracing::info!(rejection = ?error, "reply rejected");
-                                current.inflight_effect = None;
-                                record_workbench_operation(
-                                    unit.operations,
-                                    unit.execution,
-                                    unit.input_unit_index,
-                                    ordinal,
-                                    &effect,
-                                    display.clone(),
-                                    effect_started.elapsed(),
-                                    WorkbenchOperationDisposition::Rejected,
-                                );
-                                drop(attempt.result);
-                                return Ok(FragmentAdvance::Settled(
-                                    ResidentWorkbenchStep::Rejected(
-                                        settlement_refusal("reply", attempt.request, error).into(),
-                                    ),
-                                ));
-                            }
-                        },
-                        ResidentActorBoundary::CancellationAcknowledgement(acknowledgement) => {
-                            match self
+                        } else {
+                            boundary
+                        };
+                        match boundary {
+                            ResidentActorBoundary::ReplyAttempt(attempt) => match self
                                 .environment
                                 .requests
-                                .begin_cancellation_acknowledgement(
-                                    context.actor,
-                                    acknowledgement.request,
-                                ) {
-                                Ok(_) => {
+                                .begin_reply(context.actor, attempt.request)
+                            {
+                                Ok(claim) => {
                                     current.inflight_effect = None;
                                     record_workbench_operation(
                                         unit.operations,
@@ -9266,12 +9193,16 @@ where
                                         WorkbenchOperationDisposition::Committed,
                                     );
                                     return Ok(FragmentAdvance::Settled(
-                                        ResidentWorkbenchStep::CancellationAcknowledged {
-                                            request: acknowledgement.request,
+                                        ResidentWorkbenchStep::Replied {
+                                            claim,
+                                            request: attempt.request,
+                                            result: attempt.result,
+                                            preview: attempt.preview,
                                         },
                                     ));
                                 }
-                                Err(error) if acknowledgement.recoverable => {
+                                Err(error) if attempt.recoverable => {
+                                    tracing::info!(rejection = ?error, "reply rejected");
                                     current.inflight_effect = None;
                                     record_workbench_operation(
                                         unit.operations,
@@ -9283,30 +9214,29 @@ where
                                         effect_started.elapsed(),
                                         WorkbenchOperationDisposition::Rejected,
                                     );
+                                    drop(attempt.result);
                                     if execution_state.park_effects
                                         && !execution_state.after_tool_active
                                     {
                                         current.native_start = Some(
-                                            owned_workbench::WorkbenchFragmentRequest::ReplyRejection {
-                                                continuation: acknowledgement.continuation,
-                                                error,
-                                            },
-                                        );
+                                        owned_workbench::WorkbenchFragmentRequest::ReplyRejection {
+                                            continuation: attempt.continuation,
+                                            error,
+                                        },
+                                    );
                                         return Ok(FragmentAdvance::ParkNative);
                                     }
                                     current.outcome = Some(
                                         current
                                             .execution
                                             .native(&self.environment, context)
-                                            .resume_reply_rejection(
-                                                acknowledgement.continuation,
-                                                error,
-                                            )
+                                            .resume_reply_rejection(attempt.continuation, error)
                                             .await?,
                                     );
                                     continue;
                                 }
                                 Err(error) => {
+                                    tracing::info!(rejection = ?error, "reply rejected");
                                     current.inflight_effect = None;
                                     record_workbench_operation(
                                         unit.operations,
@@ -9318,165 +9248,249 @@ where
                                         effect_started.elapsed(),
                                         WorkbenchOperationDisposition::Rejected,
                                     );
+                                    drop(attempt.result);
                                     return Ok(FragmentAdvance::Settled(
                                         ResidentWorkbenchStep::Rejected(
-                                            settlement_refusal(
-                                                "cancellation acknowledgement",
-                                                acknowledgement.request,
-                                                error,
-                                            )
-                                            .into(),
+                                            settlement_refusal("reply", attempt.request, error)
+                                                .into(),
                                         ),
                                     ));
                                 }
-                            }
-                        }
-                        boundary => {
-                            let presentation = match &boundary {
-                                ResidentActorBoundary::Command {
-                                    request:
-                                        crate::generated::commands::CommandsReq::CommandPresentWith(
-                                            job,
-                                            presentation,
-                                        ),
-                                    ..
-                                } => Some((job.clone(), presentation.clone())),
-                                _ => None,
-                            };
-                            if let Some((job, presentation)) = presentation {
-                                let prepared = current
-                                    .execution
-                                    .native(&self.environment, context)
-                                    .prepare_command_presentation(
-                                        workbench,
-                                        command_presentation::CommandPresentationRequest {
-                                            job,
-                                            presentation,
-                                            summarize: !unit.named_tool
-                                                && next_fragment.summarizes_bound_commands(),
-                                            named_tool: unit.named_tool,
-                                            display_remaining: *unit.display_remaining,
-                                        },
-                                        self.descriptor
-                                            .capabilities()
-                                            .effect_keys()
-                                            .contains(&crate::ActorEffectKey::Commands),
-                                    )
-                                    .await?;
-                                prepared.apply(
-                                    &self.environment.commands,
-                                    context.actor,
-                                    next_fragment,
-                                    unit.display_remaining,
-                                    unit.command_output,
-                                    unit.recovered_bindings,
-                                )?;
-                            }
-                            let (resolved, command_disposition) = match boundary {
-                                ResidentActorBoundary::Command {
-                                    continuation,
-                                    request,
-                                } => {
-                                    let exec_started = std::time::Instant::now();
-                                    let environment = self.environment.clone();
-                                    let resolved = current
-                                        .execution
-                                        .native(&environment, context)
-                                        .resolve_command(
-                                            self,
-                                            kernel,
-                                            continuation,
-                                            request,
-                                            Some(execution_state.invocation_work.as_ref()),
-                                        )
-                                        .await;
-                                    crate::call_timing::add_exec_ms(
-                                        exec_started.elapsed().as_millis(),
-                                    );
-                                    if let Some(job) = resolved.started_job {
-                                        // Record the job id against this
-                                        // item's fragment: on commit, a sole
-                                        // command-job-typed binder installed
-                                        // by this item is discoverable by
-                                        // this exact id, the same as a
-                                        // host-mounted binding. See
-                                        // `resident_workbench::settle_fragment`.
-                                        next_fragment.record_started_job(job);
+                            },
+                            ResidentActorBoundary::CancellationAcknowledgement(acknowledgement) => {
+                                match self
+                                    .environment
+                                    .requests
+                                    .begin_cancellation_acknowledgement(
+                                        context.actor,
+                                        acknowledgement.request,
+                                    ) {
+                                    Ok(_) => {
+                                        current.inflight_effect = None;
+                                        record_workbench_operation(
+                                            unit.operations,
+                                            unit.execution,
+                                            unit.input_unit_index,
+                                            ordinal,
+                                            &effect,
+                                            display.clone(),
+                                            effect_started.elapsed(),
+                                            WorkbenchOperationDisposition::Committed,
+                                        );
+                                        return Ok(FragmentAdvance::Settled(
+                                            ResidentWorkbenchStep::CancellationAcknowledged {
+                                                request: acknowledgement.request,
+                                            },
+                                        ));
                                     }
-                                    (resolved.outcome, Some(resolved.disposition))
-                                }
-                                boundary => {
-                                    let ancestry = crate::CallAncestry::begin(context.actor);
-                                    let environment = self.environment.clone();
-                                    let outcome = current
-                                        .execution
-                                        .native(&environment, context)
-                                        .resolve_effect(
-                                            self,
-                                            kernel,
-                                            effect_owner.clone(),
-                                            &ancestry,
-                                            boundary,
-                                        )
-                                        .await;
-                                    (outcome, None)
-                                }
-                            };
-                            current.outcome = Some(match resolved {
-                                Ok(outcome) => {
-                                    current.inflight_effect = None;
-                                    record_workbench_operation(
-                                        unit.operations,
-                                        unit.execution,
-                                        unit.input_unit_index,
-                                        ordinal,
-                                        &effect,
-                                        display.clone(),
-                                        effect_started.elapsed(),
-                                        scoped_operation_disposition(
-                                            success_disposition,
-                                            command_disposition.unwrap_or(
-                                                WorkbenchOperationDisposition::Committed,
+                                    Err(error) if acknowledgement.recoverable => {
+                                        current.inflight_effect = None;
+                                        record_workbench_operation(
+                                            unit.operations,
+                                            unit.execution,
+                                            unit.input_unit_index,
+                                            ordinal,
+                                            &effect,
+                                            display.clone(),
+                                            effect_started.elapsed(),
+                                            WorkbenchOperationDisposition::Rejected,
+                                        );
+                                        if execution_state.park_effects
+                                            && !execution_state.after_tool_active
+                                        {
+                                            current.native_start = Some(
+                                            owned_workbench::WorkbenchFragmentRequest::ReplyRejection {
+                                                continuation: acknowledgement.continuation,
+                                                error,
+                                            },
+                                        );
+                                            return Ok(FragmentAdvance::ParkNative);
+                                        }
+                                        current.outcome = Some(
+                                            current
+                                                .execution
+                                                .native(&self.environment, context)
+                                                .resume_reply_rejection(
+                                                    acknowledgement.continuation,
+                                                    error,
+                                                )
+                                                .await?,
+                                        );
+                                        continue;
+                                    }
+                                    Err(error) => {
+                                        current.inflight_effect = None;
+                                        record_workbench_operation(
+                                            unit.operations,
+                                            unit.execution,
+                                            unit.input_unit_index,
+                                            ordinal,
+                                            &effect,
+                                            display.clone(),
+                                            effect_started.elapsed(),
+                                            WorkbenchOperationDisposition::Rejected,
+                                        );
+                                        return Ok(FragmentAdvance::Settled(
+                                            ResidentWorkbenchStep::Rejected(
+                                                settlement_refusal(
+                                                    "cancellation acknowledgement",
+                                                    acknowledgement.request,
+                                                    error,
+                                                )
+                                                .into(),
                                             ),
-                                        ),
-                                    );
-                                    outcome
-                                }
-                                Err(error) => {
-                                    current.inflight_effect = None;
-                                    record_workbench_operation(
-                                        unit.operations,
-                                        unit.execution,
-                                        unit.input_unit_index,
-                                        ordinal,
-                                        &effect,
-                                        display.clone(),
-                                        effect_started.elapsed(),
-                                        scoped_operation_disposition(
-                                            success_disposition,
-                                            command_disposition.unwrap_or_else(|| {
-                                                disposition_for_non_command_failure(&error)
-                                            }),
-                                        ),
-                                    );
-                                    if current.scopes.is_empty() {
-                                        return Err(error);
+                                        ));
                                     }
-                                    self.prepare_scope_finish(kernel, context, current, Err(tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(error.to_string())))?;
-                                    if execution_state.park_effects {
-                                        return Ok(FragmentAdvance::ParkNative);
-                                    }
-                                    continue;
                                 }
-                            });
+                            }
+                            boundary => {
+                                let presentation = match &boundary {
+                                    ResidentActorBoundary::Command {
+                                        request:
+                                            crate::generated::commands::CommandsReq::CommandPresentWith(
+                                                job,
+                                                presentation,
+                                            ),
+                                        ..
+                                    } => Some((job.clone(), presentation.clone())),
+                                    _ => None,
+                                };
+                                if let Some((job, presentation)) = presentation {
+                                    let prepared = current
+                                        .execution
+                                        .native(&self.environment, context)
+                                        .prepare_command_presentation(
+                                            workbench,
+                                            command_presentation::CommandPresentationRequest {
+                                                job,
+                                                presentation,
+                                                summarize: !unit.named_tool
+                                                    && next_fragment.summarizes_bound_commands(),
+                                                named_tool: unit.named_tool,
+                                                display_remaining: *unit.display_remaining,
+                                            },
+                                            self.descriptor
+                                                .capabilities()
+                                                .effect_keys()
+                                                .contains(&crate::ActorEffectKey::Commands),
+                                        )
+                                        .await?;
+                                    prepared.apply(
+                                        &self.environment.commands,
+                                        context.actor,
+                                        next_fragment,
+                                        unit.display_remaining,
+                                        unit.command_output,
+                                        unit.recovered_bindings,
+                                    )?;
+                                }
+                                let (resolved, command_disposition) = match boundary {
+                                    ResidentActorBoundary::Command {
+                                        continuation,
+                                        request,
+                                    } => {
+                                        let exec_started = std::time::Instant::now();
+                                        let environment = self.environment.clone();
+                                        let resolved = current
+                                            .execution
+                                            .native(&environment, context)
+                                            .resolve_command(
+                                                self,
+                                                kernel,
+                                                continuation,
+                                                request,
+                                                Some(execution_state.invocation_work.as_ref()),
+                                            )
+                                            .await;
+                                        crate::call_timing::add_exec_ms(
+                                            exec_started.elapsed().as_millis(),
+                                        );
+                                        if let Some(job) = resolved.started_job {
+                                            // Record the job id against this
+                                            // item's fragment: on commit, a sole
+                                            // command-job-typed binder installed
+                                            // by this item is discoverable by
+                                            // this exact id, the same as a
+                                            // host-mounted binding. See
+                                            // `resident_workbench::settle_fragment`.
+                                            next_fragment.record_started_job(job);
+                                        }
+                                        (resolved.outcome, Some(resolved.disposition))
+                                    }
+                                    boundary => {
+                                        let ancestry = crate::CallAncestry::begin(context.actor);
+                                        let environment = self.environment.clone();
+                                        let outcome = current
+                                            .execution
+                                            .native(&environment, context)
+                                            .resolve_effect(
+                                                self,
+                                                kernel,
+                                                effect_owner.clone(),
+                                                &ancestry,
+                                                boundary,
+                                            )
+                                            .await;
+                                        (outcome, None)
+                                    }
+                                };
+                                current.outcome = Some(match resolved {
+                                    Ok(outcome) => {
+                                        current.inflight_effect = None;
+                                        record_workbench_operation(
+                                            unit.operations,
+                                            unit.execution,
+                                            unit.input_unit_index,
+                                            ordinal,
+                                            &effect,
+                                            display.clone(),
+                                            effect_started.elapsed(),
+                                            scoped_operation_disposition(
+                                                success_disposition,
+                                                command_disposition.unwrap_or(
+                                                    WorkbenchOperationDisposition::Committed,
+                                                ),
+                                            ),
+                                        );
+                                        outcome
+                                    }
+                                    Err(error) => {
+                                        current.inflight_effect = None;
+                                        record_workbench_operation(
+                                            unit.operations,
+                                            unit.execution,
+                                            unit.input_unit_index,
+                                            ordinal,
+                                            &effect,
+                                            display.clone(),
+                                            effect_started.elapsed(),
+                                            scoped_operation_disposition(
+                                                success_disposition,
+                                                command_disposition.unwrap_or_else(|| {
+                                                    disposition_for_non_command_failure(&error)
+                                                }),
+                                            ),
+                                        );
+                                        if current.scopes.is_empty() {
+                                            return Err(error);
+                                        }
+                                        self.prepare_scope_finish(kernel, context, current, Err(tidepool_bridge_effects::ScopeFailure::ScopeEvaluationFailed(error.to_string())))?;
+                                        if execution_state.park_effects {
+                                            return Ok(FragmentAdvance::ParkNative);
+                                        }
+                                        continue;
+                                    }
+                                });
+                            }
                         }
                     }
-                }
-                owned_workbench::WorkbenchFragmentAdvance::Settled(step) => {
-                    return Ok(FragmentAdvance::Settled(step));
+                    owned_workbench::WorkbenchFragmentAdvance::Settled(step) => {
+                        return Ok(FragmentAdvance::Settled(step));
+                    }
                 }
             }
-        }
+        };
+        Box::pin(future)
     }
 
     /// Apply the retained after-tool slot at the tool-result boundary, and
