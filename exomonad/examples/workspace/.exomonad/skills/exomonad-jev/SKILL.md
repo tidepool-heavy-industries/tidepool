@@ -68,6 +68,44 @@ function. Those operations reuse the same judgment. A new call belongs after
 changed evidence or a changed question, or when another service observation is
 deliberately wanted.
 
+
+## Compose assessments and revise reflexes
+
+`J.question world #label question` and `J.packet world packet` capture their
+own evidence and original payloads in `J.Query`. Compose with ordinary
+`Applicative`, `traverse`, and optics. `J.assessment` returns standard
+`Star (Core.Query Value)`, so `lmap` adapts input and ordinary traversals place
+assessments inside your own data. The compiled `Examples.JevComposedWorkflow`
+shows a report lens, a profunctor assessment, and a traversal over pending reports.
+
+`J.prepareQuery model query` validates the whole independent query; inspect
+`J.queryGroups` or display the prepared query. Occurrences receive hygienic paths,
+so several helpers can all use `#supported`. Only equal serialized states batch;
+other evidence remains separate. `J.runQuery query` uses the hosted Jev effect;
+`J.runQueryWith model` selects a model explicitly. A pure query or empty traversal
+makes no call. `J.result` reads the typed outcome; `J.observations` and
+`J.evaluationPreview` retain actual requests, failures, metadata, and original
+answer evidence, including the successful prefix of a failed evaluation.
+
+`J.payloads #label` is a type-changing traversal over one static payload or all
+rows of a runtime group. It preserves wording and keys. `J.Uniform` is Functor,
+Foldable, and Traversable, useful for instruction functors and shared repertoires
+whose payloads serve actor instructions, human choices, and semantic continuations.
+
+Retain an answer to compare policies without calling Jev again. `J.choiceWeights`
+uses exhaustive handlers; `J.carriedWeights`, `J.noulWeights`, and `J.scoreWeights`
+project raw weights over original payloads. `J.normalize` explicitly returns a
+validated distribution; `J.expected` computes expected loss and `J.covering`
+selects cumulative mass with authored-order ties. Mapping never coalesces branches.
+
+`J.liftQuery` embeds a query in a standard Selective program. `J.runProgram
+J.SkipUnused` executes active frontiers; `J.BatchKnown` observes statically known
+branches, grouped by exact state. Speculation never executes carried actions.
+Use ordinary Eff/actors for answer-dependent acquisition and explicit continuation
+execution. `J.replayQuery` and `J.replayProgram` require identical complete wire
+requests: local payload changes can replay; changed evidence or questions require
+fresh observations. `J.recordings` retains raw outcomes for this purpose.
+
 ## Compose the questions
 
 Choose the question's structure before its wording. A `choice` models competing

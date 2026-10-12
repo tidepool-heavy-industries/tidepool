@@ -771,12 +771,16 @@ test-suite model-turn-test
   other-modules:
     JevPreparedTest
     Examples.JevPreparedWorkflow
+    Examples.JevComposedWorkflow
     Examples.JevFormWorkflow
     FormJevDialogueTest
     Jev.Core
     Jev.Core.Contract
     Jev.Core.Json
     Jev.Core.Schema
+    Jev.Core.Query
+    Jev.Core.Distribution
+    Jev.Core.Program
     Jev.Host
     Jev.Operators
     Jev.Tidepool
@@ -839,7 +843,7 @@ test-suite model-turn-test
     Tidepool.Worktree
   build-depends:    base >= 4.20 && < 5, freer-simple, containers, text,
                    bytestring, random, splitmix, time, filepath, directory,
-                   cryptohash-sha256, lens, safe, errors, witherable
+                   cryptohash-sha256, lens, profunctors, selective, safe, errors, witherable
   default-language: GHC2024
   ghc-options: -Wall
 
@@ -921,6 +925,9 @@ test-suite automation-helper-contract
     Jev.Core.Contract
     Jev.Core.Json
     Jev.Core.Schema
+    Jev.Core.Query
+    Jev.Core.Distribution
+    Jev.Core.Program
     Jev.Host
     Jev.Operators
     Jev.Tidepool
@@ -989,7 +996,7 @@ test-suite automation-helper-contract
     Tidepool.Records.Stable
     Tidepool.Render
     Tidepool.Worktree
-  build-depends:    base >= 4.20 && < 5, freer-simple, text, containers, lens, safe, errors, witherable, template-haskell
+  build-depends:    base >= 4.20 && < 5, freer-simple, text, containers, lens, profunctors, selective, safe, errors, witherable, template-haskell
   default-language: GHC2024
   ghc-options: -Wall -Wno-simplifiable-class-constraints
 
