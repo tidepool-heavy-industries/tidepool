@@ -1213,7 +1213,8 @@ impl InvocationWork {
                     )
                 })
                 .collect(),
-        );
+        )
+        .await;
         let worker_cleanup = futures_util::future::join_all(workers.into_actors().into_iter().map(
             |(child, terminal)| async move {
                 let actor = child.identity();
