@@ -11,6 +11,7 @@ import Control.Monad.Freer.State (State, get, modify, runState)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Map.Strict as Map
+import Data.Profunctor (Star(..))
 import Test.Tasty.HUnit (assertBool, assertEqual)
 import Test.Tasty.QuickCheck (testProperty, NonNegative(..), (===), conjoin)
 import Tidepool.Test.Runner (TestTree, testGroup, testCase)
@@ -21,6 +22,7 @@ import Tidepool.Inspection.Display (Display(..))
 import qualified Persona.Attention as A
 import qualified Persona.Collection as C
 import qualified Persona.Context as Context
+import qualified Jev.Operators as J
 
 must :: Show e => Either e a -> a
 must = either (error . show) id
@@ -122,6 +124,35 @@ personaAttentionTests = testGroup "persona attention"
       assertEqual "roots retained" 2 (length (A.outcomes retained))
       assertBool "unavailability visible" ("JevCircuitOpen" `T.isInfixOf` A.contextText retained)
       assertEqual "no children silently interpreted" ["shared", "unread"] (A.notVisited retained)
+  , testCase "empty attention judgment retains an empty completed observation without Jev" $ do
+      let (batch, calls) = run (runState (0 :: Int) (interpret jevUnavailable
+            (Context.judge "An empty occasion" [])))
+      assertEqual "no inference" 0 calls
+      assertEqual "no invented decisions" [] (A.decisions batch)
+      assertEqual "empty observation remains a JSON value"
+        (object ["outcome" .= ("completed" :: Text), "observations" .= ([] :: [Value])])
+        (A.observation batch)
+      let (prepared, preparationCalls) = run (runState (0 :: Int) (interpret jevUnavailable
+            (Context.prepareView generous "An empty occasion" source (A.View [] []))))
+      assertEqual "empty preparation needs no inference" 0 preparationCalls
+      assertEqual "no fabricated batches in the saved snapshot" [] (A.batches (A.inspect (must prepared)))
+  , testCase "repeated scopes retain distinct occurrences while duplicate graph nodes refuse" $ do
+      let repeated = node "same" []
+          ready = must $ J.prepareQuery J.jevLatest $ traverse
+            (runStar (Context.presentationAssessment "maps")) [repeated, repeated]
+          groups = J.queryGroups ready
+          occurrences = concatMap J.groupOccurrences groups
+          questions = concatMap J.occurrenceQuestions occurrences
+      assertEqual "equal occasion groups requests" 1 (length groups)
+      assertEqual "original scopes remain inspectable" [["same"], ["same"]]
+        (map J.occurrenceScopes occurrences)
+      assertEqual "each observation has its own identity" [0,1] (map J.occurrenceIndex occurrences)
+      assertEqual "wire questions never alias" (length questions)
+        (Map.size (Map.fromList [(key, ()) | key <- questions]))
+      let (refused, calls) = run (runState (0 :: Int) (interpret jevUnavailable
+            (Context.prepareView generous "maps" source (A.View ["same"] [repeated, repeated]))))
+      assertEqual "graph owner rejects duplicate identity" (Left (A.DuplicateNode "same")) refused
+      assertEqual "refusal precedes inference" 0 calls
   , testCase "default memory lens sends one valid batch and retains full originals on Jev failure" $ do
       let (result, calls) = run (runState (0 :: Int) (interpret jevUnavailable
             (Context.prepareView generous "maps" source (A.continuity source))))
