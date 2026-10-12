@@ -165,6 +165,7 @@ pub struct KernelContext {
     terminal: RetainedActorExit,
     spawn_ownership: SpawnOwnership,
     myself: RactorRef<KernelMessage>,
+    lifecycle: crate::kernel::LifecycleHandle,
     children: std::sync::Arc<parking_lot::Mutex<HashMap<ractor::ActorId, LocalActorRef>>>,
     resources: Arc<Mutex<HashMap<ractor::ActorId, ResourceChild>>>,
     directory: LocalActorDirectory,
@@ -786,7 +787,7 @@ impl KernelContext {
             accounted: false,
         };
         let terminal = RetainedActorExit::new();
-        let mailbox_admission = crate::kernel::MailboxAdmission::default();
+        let lifecycle = crate::kernel::LifecycleHandle::default();
         let identity = self
             .directory
             .reserve(self.identity.incarnation)
@@ -818,7 +819,7 @@ impl KernelContext {
             terminal: terminal.clone(),
             directory: self.directory.clone(),
             identity,
-            mailbox_admission: mailbox_admission.clone(),
+            lifecycle: lifecycle.clone(),
         };
         let spawned = if cleanup_only {
             Box::pin(LocalActor::<C>::spawn(
@@ -867,8 +868,7 @@ impl KernelContext {
             }
         };
         drop(task);
-        let child =
-            LocalActorRef::with_identity_admission(address, terminal, identity, mailbox_admission);
+        let child = LocalActorRef::with_identity_admission(address, terminal, identity, lifecycle);
         if lifetime != crate::WorkerLifetime::RunOwned {
             self.children
                 .lock()
@@ -1281,22 +1281,15 @@ pub struct LocalActorArguments<B> {
     /// Logical identity is allocated by the routing owner before scheduler
     /// admission. It deliberately does not reuse Ractor's process ID.
     pub identity: ActorRef,
-    pub(crate) mailbox_admission: crate::kernel::MailboxAdmission,
-}
-
-#[derive(Default)]
-enum HostedAdmission {
-    #[default]
-    Open,
-    Sealed,
-    Closing,
+    pub(crate) lifecycle: crate::kernel::LifecycleHandle,
+    pub(crate) reservation: crate::local_actor::run_control::ActorReservation,
 }
 
 pub struct LocalActorState<B> {
     replacement: Option<PendingReplacement>,
     drain: DrainState,
-    mailbox_admission: crate::kernel::MailboxAdmission,
-    hosted_admission: HostedAdmission,
+    lifecycle: crate::kernel::LifecycleHandle,
+    active_ingress: Option<crate::kernel::lifecycle::AdmittedKernelLease>,
     context: std::sync::Arc<KernelContext>,
     behavior: BehaviorSlot<B>,
     pending_tasks: HashMap<u64, PendingActorTask>,
@@ -1307,9 +1300,48 @@ pub struct LocalActorState<B> {
     mailbox_drain_scheduled: bool,
 }
 
+impl<B> LocalActorState<B> {
+    fn accept_message(
+        &mut self,
+        message: KernelMessage,
+    ) -> Result<KernelMessage, ActorProcessingErr> {
+        match message {
+            KernelMessage::Admitted(envelope) => {
+                let (message, lease) = envelope
+                    .into_parts(self.context.identity)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                self.active_ingress = Some(lease);
+                Ok(message)
+            }
+            message => Ok(message),
+        }
+    }
+    fn defer_back(&mut self, message: KernelMessage) {
+        let message = match self.active_ingress.take() {
+            Some(lease) => lease.wrap(message),
+            None => message,
+        };
+        self.deferred_mailbox.push_back(message);
+    }
+    fn defer_front(&mut self, message: KernelMessage) {
+        let message = match self.active_ingress.take() {
+            Some(lease) => lease.wrap(message),
+            None => message,
+        };
+        self.deferred_mailbox.push_front(message);
+    }
+    fn take_deferred(&mut self, index: usize) -> Option<KernelMessage> {
+        let message = self.deferred_mailbox.remove(index)?;
+        Some(
+            self.accept_message(message)
+                .expect("deferred custody keeps its exact issuer"),
+        )
+    }
+}
+
 impl<B> Drop for LocalActorState<B> {
     fn drop(&mut self) {
-        self.mailbox_admission.close();
+        self.lifecycle.close_abandoned();
         let detail = "actor stopped while its owned task was still running; execution and cleanup are unconfirmed";
         let mut unconfirmed = false;
         for (_, pending) in self.pending_tasks.drain() {
@@ -1356,16 +1388,14 @@ impl<B> Drop for LocalActorState<B> {
                 "actor execution ended before publishing its terminal; execution and cleanup are unconfirmed",
             );
         }
-        for control in self.mailbox_admission.hosted_cell().take_all_and_clear() {
+        for control in self.lifecycle.hosted_cell().take_all_and_clear() {
             control.request_cancellation();
             control.mark_unconfirmed();
             control.settle(Err(KernelInvocationFailure::ActorExited(
                 self.context.identity,
             )));
         }
-        self.mailbox_admission
-            .hosted_cell()
-            .finalization_owner_lost();
+        self.lifecycle.hosted_cell().finalization_owner_lost();
     }
 }
 
@@ -1391,6 +1421,7 @@ impl<B> std::ops::DerefMut for BehaviorSlot<B> {
 }
 
 struct PendingWorkbench {
+    _ingress: Option<crate::kernel::lifecycle::AdmittedKernelLease>,
     step: crate::WorkbenchStepKey,
     reply: ractor::RpcReplyPort<crate::KernelWorkbenchReply>,
     control: Option<Arc<crate::WorkbenchExecutionControl>>,
@@ -1401,6 +1432,7 @@ struct PendingWorkbench {
 }
 
 struct PendingTool {
+    _ingress: Option<crate::kernel::lifecycle::AdmittedKernelLease>,
     step: crate::WorkbenchStepKey,
     reply: ractor::RpcReplyPort<crate::KernelInvocationReply>,
     control: Arc<crate::WorkbenchExecutionControl>,
@@ -1477,6 +1509,7 @@ impl PendingActorTask {
 }
 
 struct PendingKernel {
+    _ingress: Option<crate::kernel::lifecycle::AdmittedKernelLease>,
     step: crate::WorkbenchStepKey,
 }
 
@@ -1525,14 +1558,11 @@ async fn handle_parked_message<B: KernelBehavior>(
             state.mailbox_drain_scheduled = false;
             let ready = state.deferred_mailbox.iter().position(|message| {
                 can_apply_independent_settlement(state, message)
-                    || matches!(message, KernelMessage::Workbench { invocation, .. }
+                    || matches!(message.payload(), KernelMessage::Workbench { invocation, .. }
                         if can_admit_deferred_workbench(state, &invocation.request))
             });
             if let Some(index) = ready {
-                let message = state
-                    .deferred_mailbox
-                    .remove(index)
-                    .expect("selected deferred work");
+                let message = state.take_deferred(index).expect("selected deferred work");
                 match message {
                     KernelMessage::Workbench {
                         invocation,
@@ -1553,13 +1583,12 @@ async fn handle_parked_message<B: KernelBehavior>(
             Ok(())
         }
         KernelMessage::SealHostedWork { reply } => {
-            if !matches!(state.hosted_admission, HostedAdmission::Closing)
+            if true
                 && !state
                     .deferred_mailbox
                     .iter()
-                    .any(|message| matches!(message, KernelMessage::Shutdown { .. }))
+                    .any(|message| matches!(message.payload(), KernelMessage::Shutdown { .. }))
             {
-                state.hosted_admission = HostedAdmission::Sealed;
                 reply
                     .send(crate::HostedWorkSeal {
                         actor: state.context.identity,
@@ -1582,10 +1611,8 @@ async fn handle_parked_message<B: KernelBehavior>(
                     PendingActorTask::Kernel(_) => {}
                 }
             }
-            state.mailbox_admission.close();
-            state
-                .deferred_mailbox
-                .push_back(KernelMessage::Shutdown { terminal, reply });
+            state.lifecycle.close().await?;
+            state.defer_back(KernelMessage::Shutdown { terminal, reply });
             Ok(())
         }
         KernelMessage::ReconcileWorkbenchCancellation {
@@ -1600,13 +1627,11 @@ async fn handle_parked_message<B: KernelBehavior>(
                     })
                     .ok();
             } else {
-                state
-                    .deferred_mailbox
-                    .push_back(KernelMessage::ReconcileWorkbenchCancellation {
-                        execution,
-                        invocation,
-                        reply,
-                    });
+                state.defer_back(KernelMessage::ReconcileWorkbenchCancellation {
+                    execution,
+                    invocation,
+                    reply,
+                });
             }
             Ok(())
         }
@@ -1618,9 +1643,7 @@ async fn handle_parked_message<B: KernelBehavior>(
                     .send(crate::WorkbenchBoundaryReconciliation::Pending)
                     .ok();
             } else {
-                state
-                    .deferred_mailbox
-                    .push_back(KernelMessage::ReconcileWorkbenchBoundary { boundary, reply });
+                state.defer_back(KernelMessage::ReconcileWorkbenchBoundary { boundary, reply });
             }
             Ok(())
         }
@@ -1629,25 +1652,12 @@ async fn handle_parked_message<B: KernelBehavior>(
             control,
             reply,
         } if can_admit_workbench_request(state, &invocation.request) => {
-            if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                let rejection = Err(KernelInvocationFailure::Rejected {
-                    receipts: Vec::new(),
-                    actor: state.context.identity,
-                    detail: "hosted work admission is sealed".into(),
-                    diagnostic: None,
-                });
-                if let Some(control) = control {
-                    control.settle_not_admitted(rejection.clone());
-                    state.mailbox_admission.hosted_cell().complete(&control);
-                }
-                reply.send(rejection).ok();
-            } else {
-                start_workbench(myself, state, invocation, control, reply);
-            }
+            start_workbench(myself, state, invocation, control, reply);
+
             Ok(())
         }
         other => {
-            state.deferred_mailbox.push_back(other);
+            state.defer_back(other);
             Ok(())
         }
     }
@@ -1659,13 +1669,13 @@ fn admit_idle_message<B: KernelBehavior>(
 ) -> Result<MessageDisposition, ActorProcessingErr> {
     let message = match message {
         message @ KernelMessage::Shutdown { .. } if state.behavior.replacement_staged() => {
-            state.deferred_mailbox.push_back(message);
+            state.defer_back(message);
             return Ok(MessageDisposition::Consumed);
         }
         message @ KernelMessage::RouteReady { .. }
             if state.replacement.is_some() || state.behavior.replacement_staged() =>
         {
-            state.deferred_mailbox.push_back(message);
+            state.defer_back(message);
             return Ok(MessageDisposition::Consumed);
         }
         message @ (KernelMessage::Cast { .. }
@@ -1675,7 +1685,7 @@ fn admit_idle_message<B: KernelBehavior>(
                 || !state.deferred_mailbox.is_empty()
                 || !state.behavior.accepts_mailbox() =>
         {
-            state.deferred_mailbox.push_back(message);
+            state.defer_back(message);
             schedule_deferred_mailbox(myself, state)?;
             return Ok(MessageDisposition::Consumed);
         }
@@ -1684,7 +1694,7 @@ fn admit_idle_message<B: KernelBehavior>(
                 && matches!(&message, KernelMessage::Workbench { invocation, .. }
                     if state.behavior.serializes_workbench_publication(&invocation.request)) =>
         {
-            state.deferred_mailbox.push_back(message);
+            state.defer_back(message);
             schedule_deferred_mailbox(myself, state)?;
             return Ok(MessageDisposition::Consumed);
         }
@@ -1694,13 +1704,13 @@ fn admit_idle_message<B: KernelBehavior>(
                 return Ok(MessageDisposition::Consumed);
             }
             let message = if state.behavior.accepts_mailbox() {
-                state.deferred_mailbox.pop_front()
+                state.take_deferred(0)
             } else if !state.behavior.replacement_staged() {
                 state
                     .deferred_mailbox
                     .iter()
                     .position(|message| deferred_control(message).is_some())
-                    .and_then(|index| state.deferred_mailbox.remove(index))
+                    .and_then(|index| state.take_deferred(index))
             } else {
                 None
             };
@@ -1712,6 +1722,360 @@ fn admit_idle_message<B: KernelBehavior>(
         message => message,
     };
     Ok(MessageDisposition::Dispatch(message))
+}
+async fn handle_executor_message<B: KernelBehavior>(
+    myself: &RactorRef<KernelMessage>,
+    state: &mut LocalActorState<B>,
+    message: KernelMessage,
+) -> Result<(), ActorProcessingErr> {
+    if !state.pending_tasks.is_empty() {
+        handle_parked_message(&myself, state, message).await?;
+        return Ok(());
+    }
+    let message = match admit_idle_message(&myself, state, message)? {
+        MessageDisposition::Consumed => return Ok(()),
+        MessageDisposition::Dispatch(message) => message,
+    };
+    match message {
+        KernelMessage::AbortReplacement { reply } => {
+            if !state.behavior.replacement_staged() {
+                reply
+                    .send(Err(KernelBehaviorError {
+                        detail: "actor is not a prepared replacement".into(),
+                        diagnostic: None,
+                    }))
+                    .ok();
+                return Ok(());
+            }
+            let terminal = finish_actor(
+                &myself,
+                state,
+                Disposition::Stop(ActorTerminal {
+                    kind: ActorExitKind::Cancelled,
+                    summary: "replacement preparation aborted".into(),
+                    diagnostic: None,
+                }),
+            )
+            .await;
+            let result = if state
+                .terminal
+                .cleanup()
+                .is_some_and(|cleanup| cleanup.is_confirmed())
+            {
+                Ok(())
+            } else {
+                Err(KernelBehaviorError {
+                    detail: format!("prepared actor cleanup unconfirmed: {}", terminal.summary),
+                    diagnostic: None,
+                })
+            };
+            reply.send(result).ok();
+        }
+        KernelMessage::ReplaceSpec { definition, reply } => {
+            let outcome = if state.replacement.is_some() {
+                Err(crate::SpecReplacementError::Unavailable)
+            } else {
+                state
+                    .behavior
+                    .replace_spec(&state.context, *definition)
+                    .await
+            };
+            reply.send(outcome).ok();
+        }
+        KernelMessage::Replace { definition, reply } => {
+            if state.replacement.is_some() {
+                let failure = match state.behavior.discard_replacement(*definition).await {
+                        Ok(()) => crate::KernelInvocationFailure::Rejected {
+                            receipts: Vec::new(),
+                            actor: state.context.identity,
+                            detail: "actor replacement is already in progress".into(),
+                            diagnostic: None,
+                        },
+                        Err(error) => crate::KernelInvocationFailure::Failed {
+                            receipts: Vec::new(),
+                            actor: state.context.identity,
+                            detail: format!(
+                                "actor replacement is already in progress; rejected recipe cleanup unconfirmed: {error}"
+                            ),
+                            diagnostic: error.diagnostic,
+                        },
+                    };
+                reply.send(Err(failure)).ok();
+            } else {
+                match state.behavior.replace(&state.context, *definition).await {
+                    Ok(successor) => {
+                        state.replacement = Some(PendingReplacement {
+                            successor,
+                            reply: Some(reply),
+                            shutdown_waiters: Vec::new(),
+                        })
+                    }
+                    Err(error) => {
+                        reply
+                            .send(Err(crate::KernelInvocationFailure::Rejected {
+                                receipts: Vec::new(),
+                                actor: state.context.identity,
+                                detail: error.detail,
+                                diagnostic: error.diagnostic,
+                            }))
+                            .ok();
+                    }
+                }
+            }
+        }
+        KernelMessage::ReplacementFence => {
+            state
+                .lifecycle
+                .wait_transactions()
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let Some(mut pending) = state.replacement.take() else {
+                return Err(
+                    std::io::Error::other("replacement fence has no prepared successor").into(),
+                );
+            };
+            let successor_context = state
+                .context
+                .directory
+                .context(pending.successor.identity())
+                .ok_or_else(|| {
+                    std::io::Error::other("prepared successor lost its execution context")
+                })?;
+            *state.context.child_admission_closed.write().await = true;
+            if let Err(error) = state
+                .behavior
+                .commit_replacement(&state.context, &successor_context)
+            {
+                if let Some(reply) = pending.reply.take() {
+                    reply
+                        .send(Err(crate::KernelInvocationFailure::Failed {
+                            receipts: Vec::new(),
+                            actor: state.context.identity,
+                            detail: error.detail,
+                            diagnostic: error.diagnostic,
+                        }))
+                        .ok();
+                }
+                state.replacement = Some(pending);
+                return Ok(());
+            }
+            transfer_supervised_children(&state.context, &successor_context);
+            let summary = format!("replaced by {:?}", pending.successor.identity());
+            pending
+                .successor
+                .address()
+                .send_message(KernelMessage::ActivateReplacement {
+                    backlog: std::mem::take(&mut state.deferred_mailbox),
+                    draining: !matches!(state.drain, DrainState::Open),
+                })?;
+            if let Some(parent) = state
+                .context
+                .supervisor_identity()
+                .and_then(|parent| state.context.directory.context(parent))
+            {
+                parent.children.lock().remove(&myself.get_id());
+                myself.get_cell().unlink(parent.myself.get_cell());
+            }
+            let terminal = finish_actor(
+                &myself,
+                state,
+                Disposition::Replaced {
+                    successor: pending.successor.identity(),
+                    summary,
+                },
+            )
+            .await;
+            for reply in pending.shutdown_waiters {
+                reply.send(terminal.clone()).ok();
+            }
+            if let Some(reply) = pending.reply {
+                reply.send(Ok(pending.successor)).ok();
+            }
+            return Ok(());
+        }
+        KernelMessage::ActivateReplacement {
+            mut backlog,
+            draining,
+        } => {
+            backlog.append(&mut state.deferred_mailbox);
+            state.deferred_mailbox = backlog;
+            if draining {
+                state.lifecycle.close().await?;
+                state.drain = DrainState::Draining;
+            }
+            match state.behavior.activate_replacement(&state.context).await {
+                Ok(step) => {
+                    if let Some(terminal) = state.context.requested_shutdown() {
+                        finish_actor(&myself, state, Disposition::Stop(terminal)).await;
+                    } else {
+                        finish_after_step(&myself, state, step).await;
+                    }
+                }
+                Err(error) => fail_actor_with_error(&myself, state, error).await,
+            }
+        }
+        KernelMessage::Drain { reply } => {
+            if state.replacement.is_some() {
+                reply
+                    .send(Err(KernelBehaviorError {
+                        detail: "actor replacement is in progress".into(),
+                        diagnostic: None,
+                    }))
+                    .ok();
+                return Ok(());
+            }
+            let result = state.behavior.begin_drain().and_then(|()| {
+                if !matches!(state.drain, DrainState::Open) {
+                    return Ok(());
+                }
+                myself
+                    .send_message(KernelMessage::DrainFence)
+                    .map_err(|error| KernelBehaviorError {
+                        detail: error.to_string(),
+                        diagnostic: None,
+                    })?;
+                state.behavior.close_sources();
+                state.drain = DrainState::Fencing;
+                Ok(())
+            });
+            reply.send(result).ok();
+        }
+        KernelMessage::DrainFence => {
+            state.drain = DrainState::Draining;
+        }
+        KernelMessage::Source(delivery) => {
+            match state.behavior.source(&state.context, delivery).await {
+                Ok(step) => finish_after_step(&myself, state, step).await,
+                Err(error) => {
+                    let detail = format!("source handler failed: {error}");
+                    fail_handler_with_error(&myself, state, error.context(detail)).await
+                }
+            }
+        }
+        KernelMessage::SealHostedWork { reply } => {
+            reply
+                .send(crate::HostedWorkSeal {
+                    actor: state.context.identity,
+                })
+                .ok();
+        }
+        KernelMessage::Cast { sender, request } => {
+            match state.behavior.cast(&state.context, sender, request).await {
+                Ok(step) => finish_after_step(&myself, state, step).await,
+                Err(error) => {
+                    let detail = format!("actor cast failed: {error}");
+                    fail_handler_with_error(&myself, state, error.context(detail)).await
+                }
+            }
+        }
+        KernelMessage::Call {
+            caller,
+            ancestry,
+            request,
+            reply,
+        } => match ancestry.enter(state.context.identity) {
+            Err(error) => {
+                reply.send(Err(error)).ok();
+            }
+            Ok(ancestry) => match state
+                .behavior
+                .call(&state.context, caller, ancestry, request)
+                .await
+            {
+                Ok(step) => {
+                    settle_step(&myself, state, step, |value| {
+                        reply.send(Ok(value)).ok();
+                    })
+                    .await;
+                }
+                Err(error) => {
+                    let detail = error.to_string();
+                    reply
+                        .send(Err(KernelCallFailure::Handler {
+                            actor: state.context.identity,
+                            detail: detail.clone(),
+                            diagnostic: error.diagnostic.clone(),
+                        }))
+                        .ok();
+                    fail_handler_with_error(
+                        &myself,
+                        state,
+                        error.context(format!("actor call failed: {detail}")),
+                    )
+                    .await;
+                }
+            },
+        },
+        KernelMessage::Tool { invocation, reply } => {
+            start_tool(&myself, state, invocation, None, reply);
+            return Ok(());
+        }
+        KernelMessage::ToolWithHostedCheckpoint {
+            invocation,
+            capture,
+            reply,
+        } => {
+            start_tool(&myself, state, invocation, Some(capture), reply);
+            return Ok(());
+        }
+        settlement @ (KernelMessage::ReconcileWorkbenchBoundary { .. }
+        | KernelMessage::ToolCompleted { .. }
+        | KernelMessage::ToolAborted { .. }) => {
+            apply_hosted_settlement(state, settlement).await;
+        }
+        KernelMessage::Workbench {
+            invocation,
+            control,
+            reply,
+        } => {
+            start_workbench(&myself, state, invocation, control, reply);
+            return Ok(());
+        }
+        KernelMessage::ActorStepCompleted { step, .. } => {
+            tracing::warn!(actor = %state.context.identity, ?step, "stale actor completion ignored");
+        }
+        settlement @ KernelMessage::ReconcileWorkbenchCancellation { .. } => {
+            apply_hosted_settlement(state, settlement).await;
+        }
+        KernelMessage::DrainMailbox => {
+            unreachable!("mailbox drain messages are normalized before dispatch")
+        }
+        KernelMessage::RouteReady { watch } => {
+            match state.behavior.route(&state.context, watch).await {
+                Ok(step) => finish_after_step(&myself, state, step).await,
+                Err(error) => tracing::error!(?watch, %error, "watch continuation rejected"),
+            }
+        }
+        KernelMessage::Resume { kind } => {
+            start_kernel_task(&myself, state, |behavior, context| {
+                behavior.dispatch_resume(context, kind)
+            })
+            .await;
+            return Ok(());
+        }
+        KernelMessage::ExternalApplicationFailed { failure, reply } => {
+            let detail = format!("native actor application failed: {}", failure.detail);
+            let disposition = state
+                .behavior
+                .external_application_failed(&state.context, failure)
+                .await;
+            reply.send(disposition).ok();
+            if disposition == ExternalFailureDisposition::Applied {
+                fail_actor(&myself, state, detail).await;
+            }
+        }
+        KernelMessage::Shutdown { terminal, reply } => {
+            if let Some(replacement) = &mut state.replacement {
+                replacement.shutdown_waiters.push(reply);
+                return Ok(());
+            }
+            let terminal = finish_actor(&myself, state, Disposition::Stop(terminal)).await;
+            reply.send(terminal).ok();
+        }
+    }
+    maybe_drain(&myself, state).await;
+    schedule_deferred_mailbox(&myself, state)?;
+    Ok(())
 }
 impl<B> Actor for LocalActor<B>
 where
@@ -1733,7 +2097,8 @@ where
             identity,
             terminal: arguments.terminal.clone(),
             spawn_ownership: arguments.spawn_ownership,
-            myself,
+            myself: myself.clone(),
+            lifecycle: arguments.lifecycle.clone(),
             children: std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new())),
             resources: Arc::new(Mutex::new(HashMap::new())),
             directory: arguments.directory,
@@ -1747,7 +2112,8 @@ where
         let mut state = Box::new(LocalActorState {
             replacement: None,
             drain: DrainState::Open,
-            mailbox_admission: arguments.mailbox_admission,
+            lifecycle: arguments.lifecycle,
+            active_ingress: None,
             context,
             behavior: BehaviorSlot(Some(*arguments.behavior)),
             pending_tasks: HashMap::new(),
@@ -1756,7 +2122,6 @@ where
             terminal: arguments.terminal,
             deferred_mailbox: VecDeque::new(),
             mailbox_drain_scheduled: false,
-            hosted_admission: HostedAdmission::Open,
         });
         if let Some(cause) = startup_refusal {
             finish_actor(
@@ -1778,19 +2143,29 @@ where
             state.context.myself.clone(),
             state.terminal.clone(),
             state.context.identity,
-            state.mailbox_admission.clone(),
+            state.lifecycle.clone(),
         );
-        if let Err(detail) = state.context.directory.insert(
-            child.clone(),
-            std::sync::Arc::downgrade(&state.context),
-            state.context.spawn_ownership,
-        ) {
+        state
+            .lifecycle
+            .attach_executor(state.context.myself.clone())
+            .await?;
+        if let Err(detail) = state
+            .context
+            .directory
+            .register_executor(
+                arguments.reservation,
+                child.clone(),
+                std::sync::Arc::downgrade(&state.context),
+                state.context.spawn_ownership,
+            )
+            .await
+        {
             finish_actor(
                 &state.context.myself.clone(),
                 &mut state,
                 Disposition::Stop(ActorTerminal {
                     kind: ActorExitKind::Cancelled,
-                    summary: detail.into(),
+                    summary: detail.to_string(),
                     diagnostic: None,
                 }),
             )
@@ -1871,6 +2246,7 @@ where
                 .await;
             }
         }
+        state.lifecycle.executor_started().await?;
         Ok(state)
     }
 
@@ -1900,393 +2276,10 @@ where
         message: Self::Msg,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        if !state.pending_tasks.is_empty() {
-            handle_parked_message(&myself, state, message).await?;
-            return Ok(());
-        }
-        let message = match admit_idle_message(&myself, state, message)? {
-            MessageDisposition::Consumed => return Ok(()),
-            MessageDisposition::Dispatch(message) => message,
-        };
-        match message {
-            KernelMessage::AbortReplacement { reply } => {
-                if !state.behavior.replacement_staged() {
-                    reply
-                        .send(Err(KernelBehaviorError {
-                            detail: "actor is not a prepared replacement".into(),
-                            diagnostic: None,
-                        }))
-                        .ok();
-                    return Ok(());
-                }
-                let terminal = finish_actor(
-                    &myself,
-                    state,
-                    Disposition::Stop(ActorTerminal {
-                        kind: ActorExitKind::Cancelled,
-                        summary: "replacement preparation aborted".into(),
-                        diagnostic: None,
-                    }),
-                )
-                .await;
-                let result = if state
-                    .terminal
-                    .cleanup()
-                    .is_some_and(|cleanup| cleanup.is_confirmed())
-                {
-                    Ok(())
-                } else {
-                    Err(KernelBehaviorError {
-                        detail: format!("prepared actor cleanup unconfirmed: {}", terminal.summary),
-                        diagnostic: None,
-                    })
-                };
-                reply.send(result).ok();
-            }
-            KernelMessage::ReplaceSpec { definition, reply } => {
-                let outcome = if state.replacement.is_some() {
-                    Err(crate::SpecReplacementError::Unavailable)
-                } else {
-                    state
-                        .behavior
-                        .replace_spec(&state.context, *definition)
-                        .await
-                };
-                reply.send(outcome).ok();
-            }
-            KernelMessage::Replace { definition, reply } => {
-                if state.replacement.is_some() {
-                    let failure = match state.behavior.discard_replacement(*definition).await {
-                        Ok(()) => crate::KernelInvocationFailure::Rejected {
-                            receipts: Vec::new(),
-                            actor: state.context.identity,
-                            detail: "actor replacement is already in progress".into(),
-                            diagnostic: None,
-                        },
-                        Err(error) => crate::KernelInvocationFailure::Failed {
-                            receipts: Vec::new(),
-                            actor: state.context.identity,
-                            detail: format!(
-                                "actor replacement is already in progress; rejected recipe cleanup unconfirmed: {error}"
-                            ),
-                            diagnostic: error.diagnostic,
-                        },
-                    };
-                    reply.send(Err(failure)).ok();
-                } else {
-                    match state.behavior.replace(&state.context, *definition).await {
-                        Ok(successor) => {
-                            state.replacement = Some(PendingReplacement {
-                                successor,
-                                reply: Some(reply),
-                                shutdown_waiters: Vec::new(),
-                            })
-                        }
-                        Err(error) => {
-                            reply
-                                .send(Err(crate::KernelInvocationFailure::Rejected {
-                                    receipts: Vec::new(),
-                                    actor: state.context.identity,
-                                    detail: error.detail,
-                                    diagnostic: error.diagnostic,
-                                }))
-                                .ok();
-                        }
-                    }
-                }
-            }
-            KernelMessage::ReplacementFence => {
-                state.mailbox_admission.wait_transactions().await;
-                let Some(mut pending) = state.replacement.take() else {
-                    return Err(std::io::Error::other(
-                        "replacement fence has no prepared successor",
-                    )
-                    .into());
-                };
-                let successor_context = state
-                    .context
-                    .directory
-                    .context(pending.successor.identity())
-                    .ok_or_else(|| {
-                        std::io::Error::other("prepared successor lost its execution context")
-                    })?;
-                *state.context.child_admission_closed.write().await = true;
-                if let Err(error) = state
-                    .behavior
-                    .commit_replacement(&state.context, &successor_context)
-                {
-                    if let Some(reply) = pending.reply.take() {
-                        reply
-                            .send(Err(crate::KernelInvocationFailure::Failed {
-                                receipts: Vec::new(),
-                                actor: state.context.identity,
-                                detail: error.detail,
-                                diagnostic: error.diagnostic,
-                            }))
-                            .ok();
-                    }
-                    state.replacement = Some(pending);
-                    return Ok(());
-                }
-                transfer_supervised_children(&state.context, &successor_context);
-                let summary = format!("replaced by {:?}", pending.successor.identity());
-                pending
-                    .successor
-                    .address()
-                    .send_message(KernelMessage::ActivateReplacement {
-                        backlog: std::mem::take(&mut state.deferred_mailbox),
-                        draining: !matches!(state.drain, DrainState::Open),
-                    })?;
-                if let Some(parent) = state
-                    .context
-                    .supervisor_identity()
-                    .and_then(|parent| state.context.directory.context(parent))
-                {
-                    parent.children.lock().remove(&myself.get_id());
-                    myself.get_cell().unlink(parent.myself.get_cell());
-                }
-                let terminal = finish_actor(
-                    &myself,
-                    state,
-                    Disposition::Replaced {
-                        successor: pending.successor.identity(),
-                        summary,
-                    },
-                )
-                .await;
-                for reply in pending.shutdown_waiters {
-                    reply.send(terminal.clone()).ok();
-                }
-                if let Some(reply) = pending.reply {
-                    reply.send(Ok(pending.successor)).ok();
-                }
-                return Ok(());
-            }
-            KernelMessage::ActivateReplacement {
-                mut backlog,
-                draining,
-            } => {
-                backlog.append(&mut state.deferred_mailbox);
-                state.deferred_mailbox = backlog;
-                if draining {
-                    state.mailbox_admission.close();
-                    state.drain = DrainState::Draining;
-                }
-                match state.behavior.activate_replacement(&state.context).await {
-                    Ok(step) => {
-                        if let Some(terminal) = state.context.requested_shutdown() {
-                            finish_actor(&myself, state, Disposition::Stop(terminal)).await;
-                        } else {
-                            finish_after_step(&myself, state, step).await;
-                        }
-                    }
-                    Err(error) => fail_actor_with_error(&myself, state, error).await,
-                }
-            }
-            KernelMessage::Drain { reply } => {
-                if state.replacement.is_some() {
-                    reply
-                        .send(Err(KernelBehaviorError {
-                            detail: "actor replacement is in progress".into(),
-                            diagnostic: None,
-                        }))
-                        .ok();
-                    return Ok(());
-                }
-                let result = state.behavior.begin_drain().and_then(|()| {
-                    if !matches!(state.drain, DrainState::Open) {
-                        return Ok(());
-                    }
-                    state
-                        .mailbox_admission
-                        .close_with_fence(&myself)
-                        .map_err(|error| KernelBehaviorError {
-                            detail: error.to_string(),
-                            diagnostic: None,
-                        })?;
-                    state.behavior.close_sources();
-                    state.drain = DrainState::Fencing;
-                    Ok(())
-                });
-                reply.send(result).ok();
-            }
-            KernelMessage::DrainFence => {
-                state.drain = DrainState::Draining;
-            }
-            KernelMessage::Source(delivery) => {
-                match state.behavior.source(&state.context, delivery).await {
-                    Ok(step) => finish_after_step(&myself, state, step).await,
-                    Err(error) => {
-                        let detail = format!("source handler failed: {error}");
-                        fail_handler_with_error(&myself, state, error.context(detail)).await
-                    }
-                }
-            }
-            KernelMessage::SealHostedWork { reply } => {
-                if matches!(state.hosted_admission, HostedAdmission::Closing) {
-                    drop(reply);
-                    return Ok(());
-                }
-                state.hosted_admission = HostedAdmission::Sealed;
-                reply
-                    .send(crate::HostedWorkSeal {
-                        actor: state.context.identity,
-                    })
-                    .ok();
-            }
-            KernelMessage::Cast { sender, request } => {
-                match state.behavior.cast(&state.context, sender, request).await {
-                    Ok(step) => finish_after_step(&myself, state, step).await,
-                    Err(error) => {
-                        let detail = format!("actor cast failed: {error}");
-                        fail_handler_with_error(&myself, state, error.context(detail)).await
-                    }
-                }
-            }
-            KernelMessage::Call {
-                caller,
-                ancestry,
-                request,
-                reply,
-            } => match ancestry.enter(state.context.identity) {
-                Err(error) => {
-                    reply.send(Err(error)).ok();
-                }
-                Ok(ancestry) => match state
-                    .behavior
-                    .call(&state.context, caller, ancestry, request)
-                    .await
-                {
-                    Ok(step) => {
-                        settle_step(&myself, state, step, |value| {
-                            reply.send(Ok(value)).ok();
-                        })
-                        .await;
-                    }
-                    Err(error) => {
-                        let detail = error.to_string();
-                        reply
-                            .send(Err(KernelCallFailure::Handler {
-                                actor: state.context.identity,
-                                detail: detail.clone(),
-                                diagnostic: error.diagnostic.clone(),
-                            }))
-                            .ok();
-                        fail_handler_with_error(
-                            &myself,
-                            state,
-                            error.context(format!("actor call failed: {detail}")),
-                        )
-                        .await;
-                    }
-                },
-            },
-            KernelMessage::Tool { invocation, reply } => {
-                if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                    reply
-                        .send(Err(KernelInvocationFailure::Rejected {
-                            receipts: Vec::new(),
-                            actor: state.context.identity,
-                            detail: "hosted work admission is sealed".into(),
-                            diagnostic: None,
-                        }))
-                        .ok();
-                } else {
-                    start_tool(&myself, state, invocation, None, reply);
-                    return Ok(());
-                }
-            }
-            KernelMessage::ToolWithHostedCheckpoint {
-                invocation,
-                capture,
-                reply,
-            } => {
-                if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                    reply
-                        .send(Err(KernelInvocationFailure::Rejected {
-                            receipts: Vec::new(),
-                            actor: state.context.identity,
-                            detail: "hosted work admission is sealed".into(),
-                            diagnostic: None,
-                        }))
-                        .ok();
-                } else {
-                    start_tool(&myself, state, invocation, Some(capture), reply);
-                    return Ok(());
-                }
-            }
-            settlement @ (KernelMessage::ReconcileWorkbenchBoundary { .. }
-            | KernelMessage::ToolCompleted { .. }
-            | KernelMessage::ToolAborted { .. }) => {
-                apply_hosted_settlement(state, settlement).await;
-            }
-            KernelMessage::Workbench {
-                invocation,
-                control,
-                reply,
-            } => {
-                if !matches!(state.hosted_admission, HostedAdmission::Open) {
-                    let rejection = Err(KernelInvocationFailure::Rejected {
-                        receipts: Vec::new(),
-                        actor: state.context.identity,
-                        detail: "hosted work admission is sealed".into(),
-                        diagnostic: None,
-                    });
-                    if let Some(control) = control {
-                        control.settle_not_admitted(rejection.clone());
-                        state.mailbox_admission.hosted_cell().complete(&control);
-                    }
-                    reply.send(rejection).ok();
-                } else {
-                    start_workbench(&myself, state, invocation, control, reply);
-                    return Ok(());
-                }
-            }
-            KernelMessage::ActorStepCompleted { step, .. } => {
-                tracing::warn!(actor = %state.context.identity, ?step, "stale actor completion ignored");
-            }
-            settlement @ KernelMessage::ReconcileWorkbenchCancellation { .. } => {
-                apply_hosted_settlement(state, settlement).await;
-            }
-            KernelMessage::DrainMailbox => {
-                unreachable!("mailbox drain messages are normalized before dispatch")
-            }
-            KernelMessage::RouteReady { watch } => {
-                match state.behavior.route(&state.context, watch).await {
-                    Ok(step) => finish_after_step(&myself, state, step).await,
-                    Err(error) => tracing::error!(?watch, %error, "watch continuation rejected"),
-                }
-            }
-            KernelMessage::Resume { kind } => {
-                start_kernel_task(&myself, state, |behavior, context| {
-                    behavior.dispatch_resume(context, kind)
-                })
-                .await;
-                return Ok(());
-            }
-            KernelMessage::ExternalApplicationFailed { failure, reply } => {
-                let detail = format!("native actor application failed: {}", failure.detail);
-                let disposition = state
-                    .behavior
-                    .external_application_failed(&state.context, failure)
-                    .await;
-                reply.send(disposition).ok();
-                if disposition == ExternalFailureDisposition::Applied {
-                    fail_actor(&myself, state, detail).await;
-                }
-            }
-            KernelMessage::Shutdown { terminal, reply } => {
-                if let Some(replacement) = &mut state.replacement {
-                    replacement.shutdown_waiters.push(reply);
-                    return Ok(());
-                }
-                let terminal = finish_actor(&myself, state, Disposition::Stop(terminal)).await;
-                reply.send(terminal).ok();
-            }
-        }
-        maybe_drain(&myself, state).await;
-        schedule_deferred_mailbox(&myself, state)?;
-        Ok(())
+        let message = state.accept_message(message)?;
+        let result = handle_executor_message(&myself, state, message).await;
+        state.active_ingress.take();
+        result
     }
 
     async fn handle_supervisor_evt(
@@ -2372,7 +2365,7 @@ fn start_workbench<B: KernelBehavior>(
         });
         if let Some(control) = control {
             control.settle_not_admitted(failure.clone());
-            state.mailbox_admission.hosted_cell().complete(&control);
+            state.lifecycle.hosted_cell().complete(&control);
         }
         reply.send(failure).ok();
         return;
@@ -2382,6 +2375,7 @@ fn start_workbench<B: KernelBehavior>(
     let step = crate::WorkbenchStepKey::new(state.context.identity, generation, execution.clone());
     let concurrent = !state.pending_tasks.is_empty();
     let mut pending = PendingActorTask::Workbench(PendingWorkbench {
+        _ingress: state.active_ingress.take(),
         step,
         reply,
         control: control.clone(),
@@ -2390,7 +2384,7 @@ fn start_workbench<B: KernelBehavior>(
         publication: state
             .behavior
             .serializes_workbench_publication(&invocation.request),
-        hosted_cell: Arc::clone(state.mailbox_admission.hosted_cell()),
+        hosted_cell: Arc::clone(state.lifecycle.hosted_cell()),
     });
     let dispatch = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         state
@@ -2424,7 +2418,7 @@ fn start_workbench<B: KernelBehavior>(
                     .hosted_cell
                     .complete(control);
             }
-            state.deferred_mailbox.push_front(KernelMessage::Workbench {
+            state.defer_front(KernelMessage::Workbench {
                 invocation,
                 control,
                 reply: match pending {
@@ -2481,10 +2475,9 @@ fn can_admit_independent_workbench<B: KernelBehavior>(state: &LocalActorState<B>
             matches!(
                 deferred_control(message),
                 Some(DeferredControl::HostedSettlement)
-            ) || matches!(message, KernelMessage::Workbench { invocation, .. }
+            ) || matches!(message.payload(), KernelMessage::Workbench { invocation, .. }
                     if state.behavior.serializes_workbench_publication(&invocation.request))
         })
-        && matches!(state.hosted_admission, HostedAdmission::Open)
 }
 
 fn pending_cancellation<B: KernelBehavior>(
@@ -2521,9 +2514,9 @@ fn can_apply_independent_settlement<B: KernelBehavior>(
     if !has_independent_workbench_tasks(state) {
         return false;
     }
-    match message {
+    match message.payload() {
         KernelMessage::ReplaceSpec { .. } => state.replacement.is_none()
-            && matches!(state.hosted_admission, HostedAdmission::Open)
+
             && !state.pending_tasks.values().any(|pending| {
                 matches!(pending, PendingActorTask::Workbench(workbench) if workbench.publication)
             }),
@@ -2554,7 +2547,7 @@ async fn apply_hosted_settlement<B: KernelBehavior>(
     state: &mut LocalActorState<B>,
     message: KernelMessage,
 ) {
-    match message {
+    match message.payload() {
         KernelMessage::ReplaceSpec { definition, reply } => {
             let result = state
                 .behavior
@@ -2581,17 +2574,6 @@ async fn apply_hosted_settlement<B: KernelBehavior>(
             reply.send(outcome).ok();
         }
         KernelMessage::ToolCompleted { boundary, reply } => {
-            if matches!(state.hosted_admission, HostedAdmission::Closing) {
-                reply
-                    .send(Err(KernelInvocationFailure::Rejected {
-                        receipts: Vec::new(),
-                        actor: state.context.identity,
-                        detail: "hosted completion boundary is closed".into(),
-                        diagnostic: None,
-                    }))
-                    .ok();
-                return;
-            }
             let result = state
                 .behavior
                 .tool_completed(&state.context, boundary)
@@ -2655,14 +2637,15 @@ fn start_tool<B: KernelBehavior>(
         "tool admission is exclusive"
     );
     let control = crate::WorkbenchExecutionControl::from_invocation(invocation.context.clone());
-    state.mailbox_admission.hosted_cell().claim(&control);
+    state.lifecycle.hosted_cell().claim(&control);
     let Some(generation) = state.next_task_generation.checked_add(1) else {
         settle_pending_tool(
             PendingTool {
+                _ingress: state.active_ingress.take(),
                 step: crate::WorkbenchStepKey::new(state.context.identity, u64::MAX, None),
                 reply,
                 control,
-                hosted_cell: Arc::clone(state.mailbox_admission.hosted_cell()),
+                hosted_cell: Arc::clone(state.lifecycle.hosted_cell()),
             },
             Err(KernelInvocationFailure::Failed {
                 receipts: Vec::new(),
@@ -2676,10 +2659,11 @@ fn start_tool<B: KernelBehavior>(
     state.next_task_generation = generation;
     let execution = control.execution_id(state.context.identity);
     let pending = PendingActorTask::Tool(PendingTool {
+        _ingress: state.active_ingress.take(),
         step: crate::WorkbenchStepKey::new(state.context.identity, generation, Some(execution)),
         reply,
         control: Arc::clone(&control),
-        hosted_cell: Arc::clone(state.mailbox_admission.hosted_cell()),
+        hosted_cell: Arc::clone(state.lifecycle.hosted_cell()),
     });
     let task = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         state.behavior.dispatch_tool(
@@ -2720,6 +2704,7 @@ async fn start_kernel_task<B: KernelBehavior>(
         "kernel admission is exclusive"
     );
     let pending = PendingActorTask::Kernel(PendingKernel {
+        _ingress: state.active_ingress.take(),
         step: crate::WorkbenchStepKey::new(state.context.identity, generation, None),
     });
     let key = pending.generation();
@@ -3083,8 +3068,8 @@ fn fail_unconfirmed_task<B: KernelBehavior>(
         }
         PendingActorTask::Kernel(_) => {}
     }
-    state.hosted_admission = HostedAdmission::Closing;
-    state.mailbox_admission.close();
+
+    state.lifecycle.close_abandoned();
     retain_unconfirmed_exit(&state.terminal, state.context.identity, &detail);
     myself.stop(Some(detail));
 }
@@ -3176,7 +3161,7 @@ enum DeferredControl {
 }
 
 fn deferred_control(message: &KernelMessage) -> Option<DeferredControl> {
-    match message {
+    match message.payload() {
         // ContinueLater owns progress while the behavior has no mailbox
         // receiver. It remains exclusive until every parked task has settled.
         KernelMessage::Resume { .. } => Some(DeferredControl::ActorContinuation),
@@ -3222,7 +3207,7 @@ where
     } else {
         state.deferred_mailbox.iter().any(|message| {
             can_apply_independent_settlement(state, message)
-                || matches!(message, KernelMessage::Workbench { invocation, .. }
+                || matches!(message.payload(), KernelMessage::Workbench { invocation, .. }
                     if can_admit_deferred_workbench(state, &invocation.request))
         })
     };
@@ -3325,7 +3310,7 @@ where
     B: KernelBehavior,
 {
     let terminal = RetainedActorExit::new();
-    let mailbox_admission = crate::kernel::MailboxAdmission::default();
+    let lifecycle = crate::kernel::LifecycleHandle::default();
     let (address, task) = Actor::spawn(
         name,
         LocalActor::<B>(PhantomData),
@@ -3337,12 +3322,12 @@ where
             terminal: terminal.clone(),
             directory,
             identity,
-            mailbox_admission: mailbox_admission.clone(),
+            lifecycle: lifecycle.clone(),
         },
     )
     .await?;
     Ok((
-        LocalActorRef::with_identity_admission(address, terminal, identity, mailbox_admission),
+        LocalActorRef::with_identity_admission(address, terminal, identity, lifecycle),
         task,
     ))
 }
@@ -3447,9 +3432,18 @@ where
     }
     // Serialized mailbox execution closes completion admission here: queued
     // completion cannot run across this snapshot or after stopping the actor.
-    state.hosted_admission = HostedAdmission::Closing;
-    state.mailbox_admission.close();
-    state.mailbox_admission.wait_transactions().await;
+
+    let admission_cleanup = match state.lifecycle.close().await {
+        Ok(()) => match state.lifecycle.wait_transactions().await {
+            Ok(()) => crate::CleanupComponentOutcome::Confirmed,
+            Err(error) => crate::CleanupComponentOutcome::Unconfirmed(format!(
+                "lifecycle drain unavailable: {error}"
+            )),
+        },
+        Err(error) => crate::CleanupComponentOutcome::Unconfirmed(format!(
+            "lifecycle closure unavailable: {error}"
+        )),
+    };
     // Wait for admitted startup to register, then permanently reject creation,
     // including through cloned contexts and shutdown hooks.
     *state.context.child_admission_closed.write().await = true;
@@ -3462,7 +3456,10 @@ where
             // reports its own `Unconfirmed` outcome instead of being killed.
             let deadline = tokio::time::Instant::now() + SHUTDOWN_BUDGET;
             let children_budget = SHUTDOWN_BUDGET.saturating_sub(SHUTDOWN_CHILD_MARGIN);
-            let children = shutdown_children(&state.context, requested.kind, children_budget).await;
+            let children = combine_cleanup(
+                shutdown_children(&state.context, requested.kind, children_budget).await,
+                admission_cleanup,
+            );
             let (hook, realm) = state
                 .behavior
                 .shutdown_components(&state.context, &requested, deadline)
@@ -3487,6 +3484,8 @@ where
                 },
             );
             state.behavior.stopped(&state.context, &requested).await;
+            state.lifecycle.retire_resident(requested.clone());
+            state.lifecycle.executor_retired();
             myself.stop(Some(requested.summary.clone()));
             requested
         }
@@ -3507,7 +3506,7 @@ where
                     actor: state.context.identity,
                     hook: crate::CleanupComponentOutcome::Confirmed,
                     realm: crate::CleanupComponentOutcome::Confirmed,
-                    children: crate::CleanupComponentOutcome::Confirmed,
+                    children: admission_cleanup,
                 });
             let children_snapshot: Vec<LocalActorRef> =
                 state.context.children.lock().values().cloned().collect();
@@ -3521,6 +3520,8 @@ where
             state
                 .behavior
                 .replacement_retired(&state.context, &terminal);
+            state.lifecycle.retire_resident(terminal.clone());
+            state.lifecycle.executor_retired();
             myself.stop(Some(terminal.summary.clone()));
             terminal
         }
@@ -7246,7 +7247,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mailbox_admission_is_shared_with_shutdown_and_releases_rejected_inputs() {
+    async fn lifecycle_is_shared_with_shutdown_and_releases_rejected_inputs() {
         let fixture = behavior(false);
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
         let handle = actor.clone();
@@ -8740,8 +8741,7 @@ mod tests {
         let mut state = LocalActorState {
             replacement: None,
             drain: DrainState::Open,
-            mailbox_admission: crate::kernel::MailboxAdmission::default(),
-            hosted_admission: HostedAdmission::Open,
+            lifecycle: crate::kernel::LifecycleHandle::default(),
             context,
             behavior: BehaviorSlot(Some(behavior(false).behavior)),
             pending_tasks: HashMap::new(),
