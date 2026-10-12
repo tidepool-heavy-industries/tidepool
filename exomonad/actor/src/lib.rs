@@ -110,7 +110,7 @@ pub use interactive_session::{
     ActivationId, InteractiveSessionCaptureError, InteractiveSessionRequest, ResidentActivation,
     ResidentInteractiveSession, SiblingPreview,
 };
-pub use kernel::lifecycle::resident::{RootSuccessorOperationClaim, SuccessorBindingAdapter};
+pub use kernel::lifecycle::resident::{RootBindingOperationClaim, RootBindingAdapter, RootBindingClaimError};
 pub use kernel::{
     ActorAdmissionLease, ActorWorkbenchInvocation, CallAncestry, KernelCallFailure,
     KernelCallReply, KernelInvocationFailure, KernelInvocationReply, KernelMessage, KernelResume,
