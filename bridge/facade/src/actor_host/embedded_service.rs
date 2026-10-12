@@ -126,6 +126,12 @@ impl harness::engine::ResponsesTransport for TestResponsesTransport {
         self.0.response_contract()
     }
 
+    fn prepare_submission(
+        &self,
+    ) -> Result<harness::transport::PreparedTransportSelection, TransportError> {
+        self.0.prepare_submission()
+    }
+
     async fn create(
         &self,
         request: harness::transport::PreparedProviderRequest,
