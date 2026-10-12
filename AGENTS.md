@@ -346,6 +346,10 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   belongs to the exact integrated bundle. Separate implementation, qualification
   and deployment in estimates, and state the unresolved uncertainty rather than
   predicting completion from the number of known bugs.
+  For changes spanning the pinned Harness browser and native host, build
+  `//web:dist` through `just build` before full host assembly. This exercises
+  the matched schema, dependency and sealing graph; it is not a substitute for
+  native asset admission or browser execution.
 - Use actual process peaks, enclosing cgroup limits and host headroom to admit
   independent builds and tests in parallel. Coordinate concrete conflicts over
   checkout/configuration/output ownership or insufficient resources, not every
