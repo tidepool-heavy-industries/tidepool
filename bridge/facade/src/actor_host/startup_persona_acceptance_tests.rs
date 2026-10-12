@@ -291,7 +291,9 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
         let mut pending = VecDeque::new();
         let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
         super::startup_context_acceptance_tests::assert_request_user_texts(
-            &host, host.context.actor.identity(), &first.request,
+            &host,
+            host.context.actor.identity(),
+            &first.request,
             &[result.rendered.as_str(), "persona-activation"],
         );
         let instructions = first.request.instructions.clone();
@@ -323,8 +325,13 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
             "persona-memory-updated"
         );
         super::startup_context_acceptance_tests::assert_request_user_texts(
-            &host, host.context.actor.identity(), &refreshed.request,
-            &[updated["contextText"].as_str().unwrap(), "persona-activation"],
+            &host,
+            host.context.actor.identity(),
+            &refreshed.request,
+            &[
+                updated["contextText"].as_str().unwrap(),
+                "persona-activation",
+            ],
         );
         assert_eq!(refreshed.request.instructions, instructions);
         assert_eq!(
@@ -346,8 +353,13 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
             "True"
         );
         super::startup_context_acceptance_tests::assert_request_user_texts(
-            &host, host.context.actor.identity(), &refused.request,
-            &[updated["contextText"].as_str().unwrap(), "persona-activation"],
+            &host,
+            host.context.actor.identity(),
+            &refused.request,
+            &[
+                updated["contextText"].as_str().unwrap(),
+                "persona-activation",
+            ],
         );
         assert_eq!(refused.request.instructions, instructions);
         assert!(matches!(
@@ -395,8 +407,14 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
         let mut pending = VecDeque::new();
         let resumed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
         super::startup_context_acceptance_tests::assert_request_user_texts(
-            &host, host.context.actor.identity(), &resumed.request,
-            &[updated["contextText"].as_str().unwrap(), "persona-activation", "persona-resume-activation"],
+            &host,
+            host.context.actor.identity(),
+            &resumed.request,
+            &[
+                updated["contextText"].as_str().unwrap(),
+                "persona-activation",
+                "persona-resume-activation",
+            ],
         );
         assert!(matches!(
             judgments.try_recv(),
@@ -485,7 +503,9 @@ async fn shipped_persona_initializer_uses_actual_preparation_before_first_reques
             )
             .await;
             super::startup_context_acceptance_tests::assert_request_user_texts(
-                host, host.context.actor.identity(), &first.request,
+                host,
+                host.context.actor.identity(),
+                &first.request,
                 &[result.rendered.as_str(), "canonical-persona-activation"],
             );
             assert!(matches!(

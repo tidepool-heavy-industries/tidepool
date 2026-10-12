@@ -84,12 +84,21 @@ pub(super) fn assert_request_user_texts(
 ) {
     let binding = host.context.binding(actor).unwrap();
     let store = host.context.runtime.store();
-    let projected = store.embedded_conversation_history(binding.identity()).unwrap();
+    let projected = store
+        .embedded_conversation_history(binding.identity())
+        .unwrap();
     let head = projected.head.as_ref().unwrap();
     let canonical = store.context_history(head).unwrap();
-    let user_bodies = |items: &[(harness::model::RequestId, harness::item::ItemHash, harness::item::Item)]| {
-        items.iter().filter(|(_, _, item)| item.0["type"] == "message" && item.0["role"] == "user")
-            .map(|(_, _, item)| item.0["content"].as_str().unwrap().to_owned()).collect::<Vec<_>>()
+    let user_bodies = |items: &[(
+        harness::model::RequestId,
+        harness::item::ItemHash,
+        harness::item::Item,
+    )]| {
+        items
+            .iter()
+            .filter(|(_, _, item)| item.0["type"] == "message" && item.0["role"] == "user")
+            .map(|(_, _, item)| item.0["content"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
     };
     assert_eq!(user_bodies(&canonical), expected_bodies);
     assert_eq!(user_texts(request), user_bodies(&projected.history));
@@ -146,13 +155,24 @@ fn exercise_durable_attachment(
     let reader = attachment.clone();
     let observer = std::thread::spawn(move || {
         started.send(()).unwrap();
-        completed.send(reader.initial_context_wire_observation()).unwrap();
+        completed
+            .send(reader.initial_context_wire_observation())
+            .unwrap();
     });
     starting.recv_timeout(Duration::from_secs(10)).unwrap();
     let pending = completion.recv_timeout(Duration::from_millis(100));
     release.send(()).unwrap();
-    assert!(matches!(pending, Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
-    assert_eq!(completion.recv_timeout(Duration::from_secs(10)).unwrap().unwrap(), wire);
+    assert!(matches!(
+        pending,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    assert_eq!(
+        completion
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap(),
+        wire
+    );
     holder.join().unwrap().unwrap();
     observer.join().unwrap();
 }
@@ -281,8 +301,12 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
             let root = harness::model::AgentPath("/root".into());
             let mut pending = VecDeque::new();
             let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            assert_request_user_texts(host, host.context.actor.identity(), &first.request,
-                &[result.rendered.as_str(), "startup-activation"]);
+            assert_request_user_texts(
+                host,
+                host.context.actor.identity(),
+                &first.request,
+                &[result.rendered.as_str(), "startup-activation"],
+            );
             assert!(first
                 .request
                 .input
@@ -298,8 +322,12 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 committed_display_text(&refreshed.settled_output("startup-refresh")),
                 "True"
             );
-            assert_request_user_texts(host, host.context.actor.identity(), &refreshed.request,
-                &["startup-refreshed", "startup-activation"]);
+            assert_request_user_texts(
+                host,
+                host.context.actor.identity(),
+                &refreshed.request,
+                &["startup-refreshed", "startup-activation"],
+            );
             assert_eq!(refreshed.request.instructions, instructions);
             assert_eq!(observation(host).await, retained);
             refreshed.call(
@@ -311,8 +339,12 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 committed_display_text(&repeated.settled_output("startup-refresh-again")),
                 "True"
             );
-            assert_request_user_texts(host, host.context.actor.identity(), &repeated.request,
-                &["startup-refreshed-again", "startup-activation"]);
+            assert_request_user_texts(
+                host,
+                host.context.actor.identity(),
+                &repeated.request,
+                &["startup-refreshed-again", "startup-activation"],
+            );
             assert_eq!(repeated.request.instructions, instructions);
             let failed_operation = repeated.operation("startup-refresh-failure");
             repeated.call(
@@ -338,8 +370,12 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 tidepool_toolchain::failclass::Phase::Run.tag(),
                 "{failure}"
             );
-            assert_request_user_texts(host, host.context.actor.identity(), &failed.request,
-                &["startup-refreshed-again", "startup-activation"]);
+            assert_request_user_texts(
+                host,
+                host.context.actor.identity(),
+                &failed.request,
+                &["startup-refreshed-again", "startup-activation"],
+            );
             assert_eq!(failed.request.instructions, instructions);
             assert_eq!(observation(host).await, retained);
             assert!(matches!(
