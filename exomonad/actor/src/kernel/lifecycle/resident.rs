@@ -150,6 +150,11 @@ pub(super) enum ResidentCommand {
 }
 
 pub(super) enum Request {
+    ObserveOwner {
+        expected: Option<Arc<WorkbenchPublicOwner>>,
+        provider: bool,
+        reply: RpcReplyPort<Result<Arc<WorkbenchPublicOwner>, String>>,
+    },
     Initial {
         event: InitialContextEvent,
         begin: bool,
@@ -183,6 +188,10 @@ pub(crate) struct InitialTransition {
 }
 
 enum Pending {
+    OwnerObservation {
+        owner: Arc<WorkbenchPublicOwner>,
+        reply: RpcReplyPort<Result<Arc<WorkbenchPublicOwner>, String>>,
+    },
     Initial(RpcReplyPort<Result<InitialTransition, String>>),
     Owner(RpcReplyPort<Result<PublicManifestCommit, String>>),
     Release(RpcReplyPort<Result<(), String>>),
@@ -190,6 +199,7 @@ enum Pending {
 }
 
 pub(super) enum Completion {
+    OwnerObservation(Result<(), String>),
     Initial(Result<InitialTransition, String>),
     Owner(Result<DurablePublicOwnerPublication, String>),
     Release(Result<(), String>),
@@ -197,6 +207,22 @@ pub(super) enum Completion {
 }
 
 impl LifecycleHandle {
+    pub(crate) async fn public_owner(
+        &self,
+        expected: Option<Arc<WorkbenchPublicOwner>>,
+        provider: bool,
+    ) -> Result<Arc<WorkbenchPublicOwner>, String> {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.send_resident(Request::ObserveOwner {
+            expected,
+            provider,
+            reply: reply.into(),
+        })?;
+        answer
+            .await
+            .map_err(|_| "public owner ended before observation".to_owned())?
+    }
+
     pub(crate) async fn configure_resident(
         &self,
         context: ActorSessionContext,
@@ -650,6 +676,9 @@ pub(super) fn handle(
 
 fn refuse(request: Request, detail: &str) {
     match request {
+        Request::ObserveOwner { reply, .. } => {
+            let _ = reply.send(Err(detail.into()));
+        }
         Request::Initial { reply, .. } | Request::AcknowledgeInitial { reply, .. } => {
             let _ = reply.send(Err(detail.into()));
         }
@@ -678,7 +707,10 @@ fn complete(state: &mut LifecycleState, sequence: u64, outcome: Completion) {
     }
     let stage_matches = matches!(
         (&resident.pending.as_ref().unwrap().1, &outcome),
-        (Pending::Initial(_), Completion::Initial(_))
+        (
+            Pending::OwnerObservation { .. },
+            Completion::OwnerObservation(_)
+        ) | (Pending::Initial(_), Completion::Initial(_))
             | (Pending::Owner(_), Completion::Owner(_))
             | (Pending::Release(_), Completion::Release(_))
             | (Pending::Retirement, Completion::Retirement(_))
@@ -689,6 +721,15 @@ fn complete(state: &mut LifecycleState, sequence: u64, outcome: Completion) {
     let (_, pending) = resident.pending.take().expect("matched resident operation");
     state.tasks.remove(&sequence);
     match (pending, outcome) {
+        (Pending::OwnerObservation { owner, reply }, Completion::OwnerObservation(result)) => {
+            let result = if state.is_closed() {
+                Err("public-owner observation closed during native validation".into())
+            } else {
+                result.map(|()| owner)
+            };
+            state.publish();
+            let _ = reply.send(result);
+        }
         (Pending::Initial(reply), Completion::Initial(result)) => {
             if let Err(error) = &result {
                 resident.current.settlement = ResidentSettlement::NeedsAttention(error.clone());
@@ -803,6 +844,44 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
         let intent = resident.startup_intent.clone();
         let sequence = state.next_operation();
         let (pending, work): (Pending, BoxFuture<'static, Completion>) = match request {
+            Request::ObserveOwner {
+                expected,
+                provider,
+                reply,
+            } => {
+                let owner = current.public_owner.ready().cloned();
+                if closed
+                    || owner.as_ref().is_none_or(|owner| {
+                        expected
+                            .as_ref()
+                            .is_some_and(|expected| !Arc::ptr_eq(owner, expected))
+                    })
+                    || (provider
+                        && (state.resident.as_ref().unwrap().successor.is_some()
+                            || current
+                                .startup
+                                .is_some_and(|startup| startup != RootStartupState::Activated)))
+                {
+                    let _ = reply.send(Err(
+                        "public owner does not match its live exact admission".into()
+                    ));
+                    continue;
+                }
+                let owner = owner.unwrap();
+                let native = owner.native_readiness();
+                (
+                    Pending::OwnerObservation { owner, reply },
+                    Box::pin(async move {
+                        Completion::OwnerObservation(match native {
+                            Some(native) => native
+                                .check_ready_async()
+                                .await
+                                .map_err(|error| error.to_string()),
+                            None => Ok(()),
+                        })
+                    }),
+                )
+            }
             Request::Initial {
                 event,
                 begin,
@@ -1025,6 +1104,7 @@ fn spawn(
 ) {
     let address = address.clone();
     let kind = match &state.resident.as_ref().unwrap().pending.as_ref().unwrap().1 {
+        Pending::OwnerObservation { .. } => 4,
         Pending::Initial(_) => 0,
         Pending::Owner(_) => 1,
         Pending::Release(_) => 2,
@@ -1156,7 +1236,7 @@ impl RootBindingOperationClaim {
     pub fn operation(&self) -> u64 {
         self.sequence
     }
-    pub(crate) fn journal_matches(&self, journal: &crate::ActorRecoveryJournal) -> bool {
+    pub fn journal_matches(&self, journal: &crate::ActorRecoveryJournal) -> bool {
         std::ptr::eq(self.journal.as_ref(), journal)
     }
 
