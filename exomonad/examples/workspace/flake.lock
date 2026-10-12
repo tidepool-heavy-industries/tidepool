@@ -3,17 +3,17 @@
     "jev-dsl": {
       "flake": false,
       "locked": {
-        "lastModified": 1791413637,
-        "narHash": "sha256-U69UxL1CZ7dtgLQzl9MHce98RLyz7p6Fe1QYK3PoJ9w=",
+        "lastModified": 1791841051,
+        "narHash": "sha256-hiFK1zPdWzYImdCZH4LZ+cvC/8AVZhQ0ZzmcevKsQZM=",
         "owner": "inanna-malick",
         "repo": "jev-dsl",
-        "rev": "2883fdc38cc7a64572e76ea43bd38e1df3a5e28b",
+        "rev": "74ecea515617906d1a126289709ae9fc4c32cbc4",
         "type": "github"
       },
       "original": {
         "owner": "inanna-malick",
         "repo": "jev-dsl",
-        "rev": "2883fdc38cc7a64572e76ea43bd38e1df3a5e28b",
+        "rev": "74ecea515617906d1a126289709ae9fc4c32cbc4",
         "type": "github"
       }
     },
