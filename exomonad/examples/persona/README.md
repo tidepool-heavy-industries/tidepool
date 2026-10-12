@@ -68,7 +68,11 @@ separate OS user or process sandbox.
 compare-and-swap. It never overwrites an existing identity, and storage errors
 remain distinct from absence. The startup prompt asks the companion to read those blocks explicitly;
 there is no hidden before-model memory injection. Small notes and change requests
-are individual Markdown files. The operator can review `state/changes/*.md` in a
+are individual Markdown files. The [attention pipeline](ATTENTION.md) adds
+Haskell-authored views, bounded Jev selection, retained inspection and explicit
+context replacement. It is available through notebook composition. The
+[AgentSpec PRD](INITIAL-CONTEXT.md) requests startup publication and its editable
+reference; that hook is not implemented by this seed. The operator can review `state/changes/*.md` in a
 stock coding session, implement a proposal, and redeploy. Direct, reversible
 persistent self-editing is the intended direction; the proposal path describes
 the current capability gap, not a permanent approval policy. A request does not

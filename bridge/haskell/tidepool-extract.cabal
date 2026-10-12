@@ -801,9 +801,14 @@ test-suite model-turn-test
   hs-source-dirs:   test-model-turn examples/model-turns ../../exomonad/examples/persona/.exomonad ../../exomonad/examples/workspace/.exomonad generated/jev/core generated/effects generated/protocol lib
   other-modules:
     PersonaSeedTest
+    PersonaAttentionTest
     Persona.Memory
     Persona.Web
     Persona.Spec
+    Persona.Attention
+    Persona.Collection
+    Persona.Context
+    Tidepool.Agent.Context
     JevPreparedTest
     Examples.JevPreparedWorkflow
     Examples.JevFormWorkflow
@@ -874,7 +879,8 @@ test-suite model-turn-test
     Tidepool.Worktree
   build-depends:    base >= 4.20 && < 5, freer-simple, containers, text,
                    bytestring, random, splitmix, time, filepath, directory,
-                   cryptohash-sha256, lens, safe, errors, witherable
+                   cryptohash-sha256, lens, safe, errors, witherable,
+                   QuickCheck, tasty-quickcheck
   default-language: GHC2024
   ghc-options: -Wall
 

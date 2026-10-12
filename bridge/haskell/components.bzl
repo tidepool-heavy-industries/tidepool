@@ -46,6 +46,7 @@ NATIVE_CATALOG_COHORT = {
         "Tidepool.Aeson.Schema": "lib/Tidepool/Aeson/Schema.hs",
         "Tidepool.Aeson.Scientific": "lib/Tidepool/Aeson/Scientific.hs",
         "Tidepool.Aeson.Value": "lib/Tidepool/Aeson/Value.hs",
+        "Tidepool.Agent.Context": "lib/Tidepool/Agent/Context.hs",
         "Tidepool.Agent.Contract": "lib/Tidepool/Agent/Contract.hs",
         "Tidepool.Agent.Launch": "lib/Tidepool/Agent/Launch.hs",
         "Tidepool.Agent.Ref": "lib/Tidepool/Agent/Ref.hs",
@@ -5949,9 +5950,14 @@ def declare_haskell_components():
         "Main.hs": "test-model-turn/Main.hs",
         "Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
         "PersonaSeedTest.hs": "test-model-turn/PersonaSeedTest.hs",
+        "PersonaAttentionTest.hs": "test-model-turn/PersonaAttentionTest.hs",
         "Persona/Memory.hs": "//exomonad/examples/persona:authored_haskell_Persona_Memory_hs",
         "Persona/Web.hs": "//exomonad/examples/persona:authored_haskell_Persona_Web_hs",
         "Persona/Spec.hs": "//exomonad/examples/persona:authored_haskell_Persona_Spec_hs",
+        "Persona/Attention.hs": "//exomonad/examples/persona:authored_haskell_Persona_Attention_hs",
+        "Persona/Collection.hs": "//exomonad/examples/persona:authored_haskell_Persona_Collection_hs",
+        "Persona/Context.hs": "//exomonad/examples/persona:authored_haskell_Persona_Context_hs",
+        "Tidepool/Agent/Context.hs": "lib/Tidepool/Agent/Context.hs",
         "JevPreparedTest.hs": "test-model-turn/JevPreparedTest.hs",
         "Examples/JevPreparedWorkflow.hs": "examples/model-turns/Examples/JevPreparedWorkflow.hs",
         "Examples/JevFormWorkflow.hs": "examples/model-turns/Examples/JevFormWorkflow.hs",
@@ -6025,6 +6031,7 @@ def declare_haskell_components():
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
         compiler_flags = haskell_component_flags([
+        "QuickCheck",
         "bytestring",
         "containers",
         "cryptohash-sha256",
@@ -6038,6 +6045,7 @@ def declare_haskell_components():
         "splitmix",
         "tasty",
         "tasty-hunit",
+        "tasty-quickcheck",
         "text",
         "time",
         "witherable"
@@ -6047,6 +6055,7 @@ def declare_haskell_components():
         "-Wall"
     ]),
         linker_flags = haskell_component_link_flags([
+        "QuickCheck",
         "bytestring",
         "containers",
         "cryptohash-sha256",
@@ -6060,6 +6069,7 @@ def declare_haskell_components():
         "splitmix",
         "tasty",
         "tasty-hunit",
+        "tasty-quickcheck",
         "text",
         "time",
         "witherable"
@@ -6073,6 +6083,9 @@ def declare_haskell_components():
         name = "model_turn_test_resources",
         srcs = {
         "persona/.exomonad/AgentSpec.hs": "//exomonad/examples/persona:authored_haskell_AgentSpec_hs",
+        "persona/.exomonad/Persona/Attention.hs": "//exomonad/examples/persona:authored_haskell_Persona_Attention_hs",
+        "persona/.exomonad/Persona/Collection.hs": "//exomonad/examples/persona:authored_haskell_Persona_Collection_hs",
+        "persona/.exomonad/Persona/Context.hs": "//exomonad/examples/persona:authored_haskell_Persona_Context_hs",
         "persona/.exomonad/Persona/Memory.hs": "//exomonad/examples/persona:authored_haskell_Persona_Memory_hs",
         "persona/.exomonad/Persona/Spec.hs": "//exomonad/examples/persona:authored_haskell_Persona_Spec_hs",
         "persona/.exomonad/Persona/Web.hs": "//exomonad/examples/persona:authored_haskell_Persona_Web_hs",
@@ -6327,6 +6340,7 @@ def declare_haskell_components():
         "test-model-turn/FormLifecycleTest.hs": "test-model-turn/FormLifecycleTest.hs",
         "test-model-turn/JevPreparedTest.hs": "test-model-turn/JevPreparedTest.hs",
         "test-model-turn/Main.hs": "test-model-turn/Main.hs",
+        "test-model-turn/PersonaAttentionTest.hs": "test-model-turn/PersonaAttentionTest.hs",
         "test-model-turn/PersonaSeedTest.hs": "test-model-turn/PersonaSeedTest.hs",
         "test-model-turn/form-choice-response.json": "test-model-turn/form-choice-response.json",
         "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",

@@ -92,6 +92,36 @@ and recall Persona, Human and Curiosities. Initialisation creates only absent
 blocks. State persists under .exomonad/state; notebook values live in the current
 machine session. Memory and note failures remain failures, not empty memories.
 
+You can also author how memory comes into view. Persona.Attention offers editable
+attention lenses: ordinary Haskell functions assembling views over shared
+sources. A source can offer its original wording, an outline, a connection, an
+open question or an interpretation. Resolution and perspective are different
+choices. Templates can juxtapose memories or change with signals you supply;
+the continuity and connections lenses are small starting examples, yours to
+reshape. This is another place to give System 1 a practiced way of seeing and
+let System 2 invent what it should notice.
+
+Persona.Context.prepare reads the memory collection and applies your lens with
+bounded batched Jev judgments. Supply an occasion and explicit judgment-pass and
+evidence-character budgets. Expansion visits chosen branches; shared views reuse
+their judgments within the preparation. Doubt or an exhausted budget retains an
+available fallback with uncertainty. The example continuity lens keeps original
+words on uncertainty. Persona.Attention.inspect and rendered read the retained
+result without calling Jev again. You can compare other lenses or deterministic
+policies against the same source material through prepareWith. Omitted material
+remains inspectable: a useful surprise may be precisely what a familiar filter
+misses.
+
+Prepare deliberately, rather than on every message. A view can serve many
+exchanges. Saving memory, preparing a view and activating it are separate acts.
+Persona.Context.save records an inspection in state notes. Explicit activation
+uses the synchronous context effect and a runtime-issued editable block reference;
+it does not replace frozen instructions. Automatic startup publication and the
+receipt identifying its block are still an Exomonad integration dependency in
+this seed. Until supplied, inspect prepared views in the notebook and read memory
+explicitly; do not infer an owned block from a matching heading. No sleeper or
+background recollection process is installed.
+
 Persona.Web supplies search, open, follow, addressed line windows and literal
 find. Optional Jev selection retains the original Page, omissions, uncertainty
 and judgment evidence. Bind that Page before viewing a selection. ExplicitOnly
