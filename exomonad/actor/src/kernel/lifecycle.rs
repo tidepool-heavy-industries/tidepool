@@ -654,6 +654,17 @@ impl LifecycleHandle {
             .map_err(|_| KernelCallFailure::TargetUnavailable(self.identity))
     }
 
+    #[cfg(test)]
+    pub(crate) async fn stop_owner_for_test(&self) {
+        self.address.stop(Some("test lifecycle owner loss".into()));
+        self.address
+            .get_cell()
+            .wait(None)
+            .await
+            .expect("lifecycle stop completes");
+        assert_eq!(self.address.get_status(), ractor::ActorStatus::Stopped);
+    }
+
     pub(crate) fn run_finalized(&self) -> bool {
         self.address.get_status() == ractor::ActorStatus::Stopped
     }
