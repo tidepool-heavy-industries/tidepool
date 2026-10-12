@@ -2744,7 +2744,18 @@ mod tests {
                 WorkspacePreparation::Completed {
                     original,
                     revision: "a".repeat(64),
-                    coverage: Vec::new(),
+                    // This is source selection metadata, not a compiled entry
+                    // or a claim that the deployment is ready to execute.
+                    coverage: vec![super::super::workspace::PreparedToolsetCoverage {
+                        requested_effects: exomonad_actor::ActorCapabilities::default()
+                            .effect_keys()
+                            .to_vec(),
+                        effective_effects: Vec::new(),
+                        program: exomonad_actor::ToolsetProgramSelection::WorkspaceOriginal {
+                            recipe: "a".repeat(64),
+                            original,
+                        },
+                    }],
                 }
             } else {
                 WorkspacePreparation::Preparing { original }
