@@ -5597,10 +5597,11 @@ impl ExactDeclarationContext {
         for value in values {
             let interface = value.certified_interface();
             self.admit_producer(interface.interface().toolchain_identity_sha256())?;
-            self.inventory = self.inventory.merge(value.compiler_artifact_view())?;
-            self.compiler_projection = self
-                .compiler_projection
-                .merge(value.compiler_input_projection())?;
+            (self.inventory, self.compiler_projection) = self.inventory.merge_compiler_inputs(
+                &self.compiler_projection,
+                value.compiler_artifact_view(),
+                value.compiler_input_projection(),
+            )?;
             lexical.extend_from_slice(value.source_lexical());
             if let Some(retained) = value.template_imports() {
                 self.inventory = self.inventory.merge(&retained.artifacts)?;

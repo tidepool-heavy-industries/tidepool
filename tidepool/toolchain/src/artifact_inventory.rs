@@ -5047,6 +5047,89 @@ impl ArtifactView {
         }))
     }
 
+    /// Join compiler inputs using each surviving role's issuing view. Other
+    /// exact roots retain custody without becoming competing source choices.
+    pub(crate) fn merge_compiler_inputs(
+        &self,
+        projection: &CompilerInputProjection,
+        other: &Self,
+        incoming: &CompilerInputProjection,
+    ) -> Result<(Self, CompilerInputProjection), CompileError> {
+        projection.validate(self)?;
+        incoming.validate(other)?;
+        let selected = projection.merge(incoming)?;
+        let mut namespace = BTreeMap::new();
+        let mut groups = BTreeMap::<NativeGroupKey, NativeGroupBinding>::new();
+        for (owner, role) in selected.snapshot_roles() {
+            let source = if projection.snapshot_roles().get(owner) == Some(role) {
+                self
+            } else if incoming.snapshot_roles().get(owner) == Some(role) {
+                other
+            } else {
+                return Err(failure("merged compiler role lost its issuer"));
+            };
+            {
+                let state = source.lease.inventory.0.lock().expect("inventory lock");
+                let owned = &source.read_projection(&state).nodes;
+                for id in std::iter::once(role.interface()).chain(role.original()) {
+                    namespace.insert(id, source.resolve_binding(id, owned)?);
+                }
+            }
+            let Some(original) = role.original() else {
+                continue;
+            };
+            let requirement = match NativeOriginalRequirement::from_role(role.clone()) {
+                Some(issued) => Some(issued),
+                None => NativeOriginalRequirement::from_selected_view(original, source)?,
+            };
+            for requirement in requirement {
+                for root in &requirement.selection.graph_selection().roots {
+                    let ArtifactBindingNode::Group(group) = root else {
+                        continue;
+                    };
+                    if group.binding.artifact != original {
+                        continue;
+                    }
+                    let key = NativeGroupKey {
+                        artifact: original,
+                        original_ordinal: group.original_ordinal,
+                    };
+                    if groups
+                        .insert(key, *group)
+                        .is_some_and(|previous| previous != *group)
+                    {
+                        return Err(admission_failure(
+                            ArtifactInventoryFailure::BindingAmbiguity { artifact: original },
+                        ));
+                    }
+                }
+            }
+        }
+        let joined = self.merge(other)?;
+        let roots = namespace
+            .values()
+            .copied()
+            .map(InventoryNodeKey::Artifact)
+            .chain(groups.values().copied().map(InventoryNodeKey::Group))
+            .collect::<BTreeSet<_>>();
+        let custody = joined
+            .roots()
+            .iter()
+            .copied()
+            .chain(joined.custody_roots().iter().copied())
+            .filter(|node| !roots.contains(node))
+            .collect::<BTreeSet<_>>();
+        let retained = joined.inventory().retain(
+            roots.into_iter().collect(),
+            custody.into_iter().collect(),
+            Vec::new(),
+            Vec::new(),
+        );
+        let mut retained = joined.retain_projected_materializations(retained)?;
+        retained.replace_namespace(&namespace);
+        Ok((retained, selected))
+    }
+
     pub(crate) fn merge_selected(
         &self,
         other: &Self,

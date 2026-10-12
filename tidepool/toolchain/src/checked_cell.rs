@@ -5168,10 +5168,19 @@ mod tests {
         demands_epoch: bool,
         reuse: bool,
     ) -> Arc<super::CheckedValueArtifact> {
+        capture_test_value_from_output_for_generation(original, demands_epoch, reuse, 1)
+    }
+
+    fn capture_test_value_from_output_for_generation(
+        original: &Arc<crate::declaration_context::ExactDeclarationContext>,
+        demands_epoch: bool,
+        reuse: bool,
+        generation: u64,
+    ) -> Arc<super::CheckedValueArtifact> {
         use super::*;
         let producer = [2; 32];
         let inputs = CheckedValueInputs::capture_raw(vec![]).unwrap();
-        let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(1));
+        let owner = tidepool_repr::SessionModule::val(tidepool_repr::Generation(generation));
         let path = inputs.root().join(owner.relative_hi_path());
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let bytes = b"opaque checked package-only value interface";
@@ -5246,7 +5255,7 @@ mod tests {
         });
         let captured = inputs
             .capture_output(
-                1,
+                generation,
                 &cell,
                 original,
                 &[],
@@ -5302,7 +5311,7 @@ mod tests {
             assert!(
                 inputs
                     .capture_output(
-                        1,
+                        generation,
                         &cell,
                         original,
                         &[],
@@ -5321,7 +5330,7 @@ mod tests {
             assert!(
                 inputs
                     .capture_output(
-                        1,
+                        generation,
                         &cell,
                         original,
                         &[],
@@ -5436,6 +5445,220 @@ mod tests {
         let custody = captured.artifact_view().artifact_ids();
         drop(original);
         assert_eq!(captured.artifact_view().artifact_ids(), custody);
+    }
+
+    #[test]
+    fn independently_captured_values_preserve_one_compiler_native_issuer() {
+        use super::*;
+        use crate::artifact_inventory::{
+            ArtifactBindingNode, ArtifactEntry, ArtifactInventory, ArtifactInventoryFailure,
+            CompilerInputProjection, NativeOriginalRequirement, NativeRequirementRoot,
+        };
+        use crate::declaration_context::ExactDeclarationContext;
+        use crate::declaration_join::{ExactLexicalNode, ExactModuleIdentity};
+        let producer = [2; 32];
+        let child_interface = crate::certified_products::fixture_module_interface(
+            producer,
+            "fixture",
+            "Child",
+            BTreeMap::new(),
+        );
+        let child = Arc::new(ArtifactEntry::canonical(child_interface.clone()));
+        let product = crate::certified_products::fixture_finalized_product_with_requirements(
+            crate::certified_products::tests::original_groups_fixture(
+                "Epoch",
+                vec![(7, vec![])],
+                1,
+                &BTreeMap::new(),
+            ),
+            producer,
+            Some(BTreeMap::from([(
+                ("fixture".into(), "Child".into()),
+                child_interface.interface_sha256(),
+            )])),
+        );
+        let product = crate::certified_products::tests::recovered_witness_fixtures(&[product])
+            .remove(0)
+            .product;
+        let native = Arc::new(ArtifactEntry::original(producer, product).unwrap());
+        let native_id = native.descriptor.id;
+        let owner = ExactModuleIdentity {
+            unit: "fixture".into(),
+            module: "Epoch".into(),
+        };
+        let sources = ["Left", "Right"].map(|module| {
+            let sibling = Arc::new(
+                ArtifactEntry::original(
+                    producer,
+                    crate::certified_products::fixture_finalized_product(
+                        crate::certified_products::tests::original_groups_fixture(
+                            module,
+                            vec![(7, vec![])],
+                            1,
+                            &BTreeMap::new(),
+                        ),
+                        producer,
+                    ),
+                )
+                .unwrap(),
+            );
+            let inventory = ArtifactInventory::default();
+            let view = inventory
+                .admit_shared(
+                    &inventory.empty_view(),
+                    vec![native.clone(), child.clone(), sibling],
+                )
+                .unwrap();
+            let projection =
+                CompilerInputProjection::from_issued_entries(&[native.clone(), child.clone()])
+                    .unwrap();
+            Arc::new(
+                ExactDeclarationContext::from_authenticated_execution(
+                    producer,
+                    &view,
+                    projection,
+                    vec![ExactLexicalNode {
+                        owner: owner.clone(),
+                        imports: vec![],
+                    }],
+                    owner.clone(),
+                    &[],
+                )
+                .unwrap(),
+            )
+        });
+        let captured = std::array::from_fn::<_, 2, _>(|index| {
+            capture_test_value_from_output_for_generation(
+                &sources[index],
+                true,
+                false,
+                index as u64 + 1,
+            )
+        });
+        for reverse in [false, true] {
+            let first = usize::from(reverse);
+            let context = ExactDeclarationContext::new(&[], &[], vec![])
+                .unwrap()
+                .extend_retained_value_artifacts(&[
+                    captured[first].clone(),
+                    captured[1 - first].clone(),
+                ])
+                .unwrap();
+            let view = context.artifact_view();
+            let projection = context.compiler_input_projection();
+            let graph = view.capture_graph_selection();
+            let source_roots =
+                |graph: &crate::artifact_inventory::ArtifactGraphSelection| {
+                    graph.roots.iter().filter(|root| matches!(root,
+                    ArtifactBindingNode::Group(group) if group.binding.artifact == native_id
+                )).copied().collect::<BTreeSet<_>>()
+                };
+            assert_eq!(
+                source_roots(&graph),
+                source_roots(&sources[first].artifact_view().capture_graph_selection())
+            );
+            assert_eq!(
+                graph
+                    .bindings
+                    .iter()
+                    .filter(|binding| binding.artifact == native_id)
+                    .count(),
+                2
+            );
+            assert_eq!(
+                graph
+                    .native_groups
+                    .iter()
+                    .filter(|group| group.binding.artifact == native_id)
+                    .count(),
+                2
+            );
+            let selected_child = sources[first]
+                .artifact_view()
+                .capture_graph_selection()
+                .namespace
+                .into_iter()
+                .find(|binding| binding.artifact == child.descriptor.id)
+                .unwrap();
+            let canonical_id = projection
+                .roles()
+                .iter()
+                .find(|role| role.original() == Some(native_id))
+                .unwrap()
+                .interface();
+            let child_edges = view.binding_dependencies().into_iter().filter(|(source, target, _)| {
+                matches!((source, target), (ArtifactBindingNode::Artifact(source), ArtifactBindingNode::Artifact(target))
+                    if source.artifact == canonical_id && target.artifact == child.descriptor.id)
+            }).collect::<BTreeSet<_>>();
+            assert_eq!(child_edges.len(), 2);
+            assert!(captured.iter().all(|value| value
+                .compiler_artifact_view()
+                .binding_dependencies()
+                .iter()
+                .all(|edge| view.binding_dependencies().contains(edge))));
+            let inventory = ArtifactInventory::default();
+            let recovered = inventory
+                .recover_selection(
+                    &inventory.empty_view(),
+                    view.entries(),
+                    &graph,
+                    &view.binding_dependencies(),
+                )
+                .unwrap();
+            assert_eq!(recovered.capture_graph_selection(), graph);
+            for available in [view, &recovered] {
+                let requirements =
+                    NativeOriginalRequirement::for_projection(projection, available, &[]).unwrap();
+                let selected = requirements
+                    .iter()
+                    .find(|requirement| requirement.original == native_id)
+                    .unwrap();
+                let child_bindings = selected
+                    .selection
+                    .graph_selection()
+                    .bindings
+                    .iter()
+                    .filter(|binding| binding.artifact == child.descriptor.id)
+                    .copied()
+                    .collect::<Vec<_>>();
+                assert_eq!(child_bindings, vec![selected_child]);
+                let admitted = available
+                    .inventory()
+                    .admit_projected_with_native_requirements(
+                        available,
+                        vec![],
+                        projection,
+                        &requirements,
+                    )
+                    .unwrap();
+                admitted
+                    .native_requirements_from_roots(&[NativeRequirementRoot::Group {
+                        artifact: native_id,
+                        original_ordinal: 7,
+                    }])
+                    .unwrap();
+                assert_eq!(
+                    source_roots(&admitted.capture_graph_selection()),
+                    source_roots(&graph)
+                );
+            }
+            let ambiguous = captured[first]
+                .compiler_artifact_view()
+                .merge(captured[1 - first].compiler_artifact_view())
+                .unwrap();
+            let requirements =
+                NativeOriginalRequirement::for_projection(projection, &ambiguous, &[]).unwrap();
+            let before = ambiguous.capture_graph_selection();
+            let nodes = ambiguous.inventory().node_count();
+            assert!(
+                matches!(ambiguous.inventory().admit_projected_with_native_requirements(
+                &ambiguous, vec![], projection, &requirements,
+            ), Err(CompileError::ArtifactInventory(error)) if matches!(error.failure,
+                ArtifactInventoryFailure::BindingAmbiguity { artifact } if artifact == native_id))
+            );
+            assert_eq!(ambiguous.capture_graph_selection(), before);
+            assert_eq!(ambiguous.inventory().node_count(), nodes);
+        }
     }
 
     #[test]
