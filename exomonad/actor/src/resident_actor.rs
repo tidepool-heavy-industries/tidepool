@@ -6435,15 +6435,15 @@ where
             ResidentActorBoundary::Replace { target, candidate } => Box::pin(async move {
                 let authorized = target != context.actor
                     && actor_can_control(context.actor, target, &self.environment.actors.lock());
-                let actor = authorized
-                    .then(|| {
-                        kernel
-                            .resolve(target)
-                            .await
-                            .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
-                    })
-                    .flatten()
-                    .filter(|actor| actor.terminal().get().is_none());
+                let actor = if authorized {
+                    kernel
+                        .resolve(target)
+                        .await
+                        .map_err(ResidentActorWorkbenchError::Directory)?
+                } else {
+                    None
+                }
+                .filter(|actor| actor.terminal().get().is_none());
                 let Some(actor) = actor else {
                     let placement = candidate.child.descriptor.placement();
                     drop(candidate);

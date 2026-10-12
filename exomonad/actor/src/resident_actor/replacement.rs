@@ -63,6 +63,7 @@ pub(super) struct ReplacementCustody {
 }
 
 pub(super) struct ReplacementTransfer {
+    successor: LocalActorRef,
     send: tokio::sync::oneshot::Sender<ReplacementCustody>,
 }
 
@@ -164,16 +165,20 @@ where
             return Err(error);
         }
         let grant = kernel
-            .directory
-            .replacement_ingress_grant(kernel.identity(), successor.identity())
+            .replacement_ingress_grant(successor.identity())
             .await
             .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         let fence = kernel.lifecycle().begin_replacement(grant.clone()).await;
         if let Err(error) = fence {
             // A lost reply may follow the committed close. Preserve staged
             // custody rather than undoing a possibly installed relationship.
-            self.replacement_transfer = Some(ReplacementTransfer { send: transfer });
-            return Err(ResidentActorWorkbenchError::ActorProtocol(error.to_string()));
+            self.replacement_transfer = Some(ReplacementTransfer {
+                send: transfer,
+                successor: successor.clone(),
+            });
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                error.to_string(),
+            ));
         }
         if let Some(sources) = &mut self.source_connections {
             sources
@@ -181,7 +186,10 @@ where
                 .await
                 .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         }
-        self.replacement_transfer = Some(ReplacementTransfer { send: transfer });
+        self.replacement_transfer = Some(ReplacementTransfer {
+            send: transfer,
+            successor: successor.clone(),
+        });
         Ok(successor)
     }
 
@@ -207,16 +215,18 @@ where
         predecessor: &KernelContext,
         successor: &KernelContext,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        let successor_actor = successor.resolve(successor.identity()).ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "replacement successor is absent from its directory".into(),
-            )
-        })?;
         let transfer = self.replacement_transfer.take().ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
                 "replacement transfer requested before a prepared replacement was admitted".into(),
             )
         })?;
+        let successor_actor = transfer.successor.clone();
+        if successor_actor.identity() != successor.identity() {
+            self.replacement_transfer = Some(transfer);
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "replacement successor differs from admitted relationship".into(),
+            ));
+        }
         let retained = RetainedHandler {
             placement: self.descriptor.placement(),
             _standing: std::mem::replace(&mut self.standing, ResidentStanding::Terminal),

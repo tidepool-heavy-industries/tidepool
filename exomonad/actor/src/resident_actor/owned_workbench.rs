@@ -1794,19 +1794,33 @@ where
                     move |behavior, kernel, mut owned, prepared| match prepared {
                         Ok((boundary, display)) => {
                             let context = &owned.state.effects.context;
-                            let operation = behavior
-                                .prepare_independent_effect(
-                                    kernel,
-                                    context,
-                                    &CurrentEffectOwner::Workbench(&owned.state.effects),
-                                    boundary,
-                                )
-                                .await
-                                .unwrap_or_else(|_| {
-                                    unreachable!(
-                                        "display acknowledgement is independently resumable"
-                                    )
-                                });
+                            let runner = behavior.environment.runner.clone();
+                            let context = context.clone();
+                            let operation: futures_util::future::BoxFuture<
+                                'static,
+                                Result<ResidentOutcome, ResidentActorWorkbenchError>,
+                            > = match boundary {
+                                ResidentActorBoundary::DisplayAllowanceGranted {
+                                    continuation,
+                                    allowance,
+                                } => Box::pin(async move {
+                                    runner.resume_value(context, continuation, allowance).await
+                                }),
+                                ResidentActorBoundary::DisplayPublished {
+                                    continuation,
+                                    identity,
+                                } => Box::pin(async move {
+                                    runner.resume_value(context, continuation, identity).await
+                                }),
+                                ResidentActorBoundary::DisplayExpanded { continuation, keys } => {
+                                    Box::pin(async move {
+                                        runner.resume_value(context, continuation, keys).await
+                                    })
+                                }
+                                _ => unreachable!(
+                                    "display acknowledgement is independently resumable"
+                                ),
+                            };
                             let pending = ParkedWorkbenchEffect {
                                 wait: OwnedWorkbenchWait::Prepared(operation),
                                 display,

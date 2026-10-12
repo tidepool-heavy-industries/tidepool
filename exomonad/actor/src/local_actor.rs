@@ -277,6 +277,15 @@ pub(crate) enum LifetimeTransferError {
 }
 
 impl KernelContext {
+    pub(crate) async fn replacement_ingress_grant(
+        &self,
+        successor: ActorRef,
+    ) -> Result<run_control::ReplacementIngressGrant, run_control::DirectoryError> {
+        self.directory
+            .replacement_ingress_grant(self.identity, successor)
+            .await
+    }
+
     pub(crate) fn lifecycle(&self) -> &crate::LifecycleHandle {
         &self.lifecycle
     }
