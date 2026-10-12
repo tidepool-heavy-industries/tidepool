@@ -22,6 +22,7 @@ enum Step {
     Retain,
     Publish(bool),
     Fail(bool),
+    Uncertain,
     Inspect,
     Reopen,
 }
@@ -34,6 +35,7 @@ fn steps() -> impl Strategy<Value = Vec<Step>> {
             Just(Step::Retain),
             any::<bool>().prop_map(Step::Publish),
             any::<bool>().prop_map(Step::Fail),
+            Just(Step::Uncertain),
             Just(Step::Inspect),
             Just(Step::Reopen),
         ],
@@ -49,6 +51,7 @@ enum Facts {
     Returned,
     Published,
     Failed(bool),
+    Uncertain,
 }
 
 struct History {
@@ -178,6 +181,15 @@ impl History {
                 None,
                 serde_json::json!(["partial-effect-receipt"]),
             ),
+            Facts::Uncertain => (
+                Some(self.identity.clone()),
+                InitialContextState::RecoveryRequired {
+                    detail: "effects are uncertain".into(),
+                },
+                None,
+                None,
+                serde_json::json!(["uncertain-effect-receipt"]),
+            ),
         };
         Some(InitialContextObservation {
             identity,
@@ -247,6 +259,15 @@ impl History {
                 },
                 matches!(self.facts, Facts::Begun),
                 Facts::Failed(*cancelled),
+                true,
+            ),
+            Step::Uncertain => (
+                InitialContextEvent::Uncertain {
+                    detail: "effects are uncertain".into(),
+                    receipts: serde_json::json!(["uncertain-effect-receipt"]),
+                },
+                matches!(self.facts, Facts::Begun),
+                Facts::Uncertain,
                 true,
             ),
             Step::Publish(valid) => {
@@ -341,5 +362,22 @@ fn failure_and_cancellation_do_not_become_empty_success_on_reopen() {
         ] {
             actual.run(&step).unwrap();
         }
+    }
+}
+
+#[test]
+fn uncertain_effects_reopen_with_receipts_and_refuse_implicit_restart() {
+    let mut actual = History::new(Some("caller-seed".into()), true);
+    for step in [
+        Step::Begin,
+        Step::Uncertain,
+        Step::Reopen,
+        Step::Begin,
+        Step::Retain,
+        Step::Publish(true),
+        Step::Fail(false),
+        Step::Inspect,
+    ] {
+        actual.run(&step).unwrap();
     }
 }
