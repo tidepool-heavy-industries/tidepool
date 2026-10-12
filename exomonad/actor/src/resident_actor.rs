@@ -14286,44 +14286,72 @@ where
         .map_err(|error| refuse(&error.to_string()))?;
         // The borrowed intent callback ends before owned work enters supervision.
         let intent = intent(reservation.identity());
-        let permit = self
-            .directory
-            .authorize_root_startup(&reservation, intent.clone(), journal, None)
-            .await
-            .map_err(|error| refuse(&error.to_string()))?;
         let placement = descriptor.placement();
         let environment = self.environment.clone();
         let directory = self.directory.clone();
         let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
             Box::pin(async move {
-                ticket.placement_prepared(placement);
-                let mut behavior = ResidentKernelBehavior::with_boot(
-                    descriptor,
-                    environment,
-                    ResidentBoot::Startup(entry),
-                    Vec::new(),
-                );
-                behavior.root_startup = Some(intent.clone());
-                behavior.root_startup_admission = Some(permit);
-                let result = crate::local_actor::spawn_reserved_local_actor(
-                    None,
-                    behavior,
-                    reservation,
-                    directory,
-                )
-                .await
-                .map(|(actor, task)| {
-                    let release = RootStartupRelease {
-                        actor: actor.identity(),
-                        placement,
-                        lifecycle: actor.lifecycle().clone(),
-                        intent,
-                    };
-                    crate::local_actor::run_control::RootAdmissionOutcome::Pending(
-                        actor, task, release,
+                let runner = environment.runner.clone();
+                let publisher = ticket.placement_publisher(Arc::new(move |placement| {
+                    let runner = runner.clone();
+                    Box::pin(async move {
+                        match runner
+                            .retire_root_placement_wait(
+                                placement,
+                                Some(std::time::Duration::from_secs(30)),
+                            )
+                            .await
+                        {
+                            Ok(()) => crate::CleanupComponentOutcome::Confirmed,
+                            Err(error) => {
+                                crate::CleanupComponentOutcome::Unconfirmed(error.to_string())
+                            }
+                        }
+                    })
+                }));
+                let result: crate::local_actor::run_control::RootOperationResult = async {
+                    publisher.publish(placement)?;
+                    let permit = directory
+                        .authorize_root_startup(&reservation, intent.clone(), journal, None)
+                        .await?;
+                    let mut behavior = ResidentKernelBehavior::with_boot(
+                        descriptor,
+                        environment,
+                        ResidentBoot::Startup(entry),
+                        Vec::new(),
+                    );
+                    behavior.root_startup = Some(intent.clone());
+                    behavior.root_startup_admission = Some(permit);
+                    crate::local_actor::spawn_reserved_local_actor(
+                        None,
+                        behavior,
+                        reservation,
+                        directory,
                     )
-                })
-                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
+                    .await
+                    .map(|(actor, task)| {
+                        let release = RootStartupRelease {
+                            actor: actor.identity(),
+                            placement,
+                            lifecycle: actor.lifecycle().clone(),
+                            intent,
+                        };
+                        crate::local_actor::run_control::RootAdmissionOutcome::Pending(
+                            actor, task, release,
+                        )
+                    })
+                    .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+                }
+                .await;
+                if result
+                    .as_ref()
+                    .err()
+                    .and_then(|error| error.downcast_ref::<ractor::SpawnErr>())
+                    .and_then(crate::local_actor::startup_cleanup)
+                    .is_some_and(|cleanup| cleanup.is_confirmed())
+                {
+                    let _ = ticket.placement_released(placement);
+                }
                 (result, crate::CleanupComponentOutcome::Confirmed)
             })
         });
