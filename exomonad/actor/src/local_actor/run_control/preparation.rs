@@ -602,7 +602,7 @@ impl Actor for ReservationStarter {
                         .map_err(|_| "predecessor retirement remains in flight".to_owned())?
                         .map_err(|error| error.to_string())?;
                 if receipt.predecessor() != predecessor.identity()
-                    || !receipt.cleanup().is_confirmed()
+                    || !receipt.confirms_actor_retirement()
                 {
                     return Err("predecessor retirement is unconfirmed".to_owned());
                 }
