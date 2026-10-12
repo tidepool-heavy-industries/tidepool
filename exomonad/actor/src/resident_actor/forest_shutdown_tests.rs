@@ -461,7 +461,18 @@ async fn stopped_lifecycle_owner_still_cleans_prepared_native_input_without_conf
         .await
         .unwrap();
     assert!(fixture.scope_is_live(placement));
-    assert!(forest.directory.seal().await.unwrap().actors.is_empty());
+    assert!(forest
+        .directory
+        .seal()
+        .await
+        .unwrap()
+        .cancel_all(ActorTerminal::new(
+            ActorExitKind::Cancelled,
+            "owner-loss fault control"
+        ))
+        .await
+        .into_roots()
+        .is_empty());
     let reservation = forest
         .directory
         .reserve_existing_input(forest.incarnation)
