@@ -925,6 +925,7 @@ enum AuthorityChecks<'a> {
     RefusalBranches,
     TypedEntryRefusalBranches(&'static str),
     FreshTargetWork,
+    PrivateAuthoredLifetime(tidepool_repr::SessionModule),
     SegmentWorkCounts(SegmentWorkShape),
     NativeEmissionOwnersAbsent(&'a std::collections::BTreeSet<(String, String)>),
 }
@@ -1729,6 +1730,7 @@ where
             .admit_checked_item(prefix.clone(), item.clone())
             .unwrap();
         if item.kind() == CheckedItemKind::Declaration {
+            let generation = reservation.generation();
             measured(
                 resident,
                 images,
@@ -1739,6 +1741,66 @@ where
                     resident.adopt_checked_declaration(reservation).unwrap();
                 },
             );
+            if let AuthorityChecks::PrivateAuthoredLifetime(binding_module) = authority_checks {
+                let context = resident
+                    .compile_view_in(execution.private_scope())
+                    .unwrap()
+                    .exact_declaration_context()
+                    .unwrap()
+                    .clone();
+                let original = context.authored_native_root(generation.0).unwrap();
+                assert!(context.artifact_view().artifact_ids().contains(&original));
+                assert!(
+                    context
+                        .artifact_view()
+                        .selected_native_groups()
+                        .iter()
+                        .all(|group| group.artifact != original),
+                    "the lexical projection retains authored custody without selecting its body"
+                );
+                let ScalePublication::Durable { recovery, .. } = publication_target else {
+                    panic!("private authored lifetime requires durable recovery");
+                };
+                let domain = crate::session::RecoveryDomainId::Root;
+                let state = recovery.store.read_domain(domain).unwrap().unwrap();
+                let graph = crate::session::recovery::RecoveryGraph::hydrate_domain(
+                    recovery.store.clone(),
+                    domain,
+                    &state,
+                )
+                .unwrap();
+                let node = graph.node(generation).unwrap().unwrap();
+                assert_eq!(
+                    node.kind,
+                    crate::session::recovery::RecoveryNodeKind::Authored
+                );
+                assert!(matches!(
+                    node.state,
+                    crate::session::recovery::RecoveryNodeState::LiveValueDependency { .. }
+                ));
+                assert!(node
+                    .live_dependencies
+                    .iter()
+                    .any(|dependency| matches!(dependency,
+                    crate::session::recovery::RecoveryLiveDependency::NativeBinding {
+                        binding, generation, ..
+                    } if binding.unit == "main"
+                        && binding.module == binding_module.module_name()
+                        && binding.occurrence == "x"
+                        && *generation == binding_module.gen().0)));
+                super::super::recovery_hydration::validate_recovery_native_markers(&node, &context)
+                    .unwrap();
+                let mut missing = (*node).clone();
+                missing.live_dependencies.clear();
+                missing.state = crate::session::recovery::RecoveryNodeState::ExactArtifactClosure;
+                assert!(
+                    super::super::recovery_hydration::validate_recovery_native_markers(
+                        &missing, &context,
+                    )
+                    .is_err(),
+                    "hydration must independently reject omitted authored lifetime markers"
+                );
+            }
         } else {
             let TurnResult::Bind {
                 bound, compiled, ..
@@ -3520,6 +3582,71 @@ fn persisted_root_state(
         .declaration_root
         .unwrap();
     graph.node(root).unwrap().unwrap().state.clone()
+}
+
+#[test]
+#[ignore = "requires the matched compiler and native authored publication"]
+fn private_authored_projection_retains_exact_live_binding_before_publication() {
+    tidepool_testing::eval_harness::require_extract();
+    let root = tempfile::tempdir().unwrap();
+    let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+    let owner = RecoveryPublicOwner::new(
+        &tidepool_repr::ActorPath::parse("root/private-lifetime").unwrap(),
+        1,
+    )
+    .unwrap();
+    let effects = TestEffectSurface::minimal(&[]).unwrap();
+    let images = Arc::new(ImageRegistry::new());
+    let mut lib = SessionLib::open(
+        SessionId(1004),
+        &root.path().join("compiler"),
+        ModuleEnv::standalone_default(),
+    )
+    .unwrap()
+    .with_validation_include(effects.include_paths().to_vec());
+    tidepool_testing::with_settlement(|settlement| recovery.attach_root(&mut lib, settlement))
+        .unwrap();
+    let mut persistent = PersistentSession::new(Some(lib), 1024 * 1024);
+    persistent.set_image_registry(images.clone());
+    let public = persistent.mint_scope(ScopeId::ROOT).unwrap();
+    let mut resident =
+        ResidentSession::from_persistent_for_test(frunk::HNil, QuietOutput, persistent);
+    let publication = ScalePublication::Durable {
+        owner: owner.clone(),
+        recovery,
+    };
+    assert!(matches!(
+        resident
+            .initialize_durable_public_scope(owner, public)
+            .unwrap(),
+        PublicManifestCommit::Durable
+    ));
+    execute_cell(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "live_x",
+        "x <- pure (1 :: Int)",
+        0,
+        &publication,
+    );
+    let view = resident.compile_view_in(public).unwrap();
+    assert_eq!(view.visible_values().len(), 1);
+    let binding_module = view.visible_values()[0];
+    execute_cell_with_authority_checks(
+        &mut resident,
+        public,
+        &effects,
+        &images,
+        (0, 0),
+        "private_dependent",
+        include_str!("fixtures/compiled-cell-mixed-original.hs"),
+        1,
+        &publication,
+        AuthorityChecks::PrivateAuthoredLifetime(binding_module),
+    );
 }
 
 #[test]

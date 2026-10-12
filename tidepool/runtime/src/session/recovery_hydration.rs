@@ -585,11 +585,10 @@ pub(super) fn validate_recovery_native_markers(
 ) -> Result<(), String> {
     let expected = match node.kind {
         recovery::RecoveryNodeKind::Authored => {
-            let artifacts = BTreeSet::from([context
+            let original = context
                 .authored_native_root(node.id.0)
-                .map_err(|error| error.to_string())?]);
-            let roots = selected_native_roots(context.artifact_view(), &artifacts);
-            certified_native_dependencies(context, &roots).map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            authored_native_dependencies(context, original).map_err(|error| error.to_string())?
         }
         recovery::RecoveryNodeKind::Join => {
             let owners = node

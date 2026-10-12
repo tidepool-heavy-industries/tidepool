@@ -805,32 +805,23 @@ impl PublicManifestBase {
     }
 }
 
-/// Query only compiler-admitted groups of these owned implementation carriers.
-/// Carrier custody does not imply demand for every group in its full product.
-fn selected_native_roots(
-    view: &tidepool_toolchain::artifact_inventory::ArtifactView,
-    artifacts: &std::collections::BTreeSet<tidepool_toolchain::artifact_inventory::ArtifactId>,
-) -> Vec<tidepool_toolchain::artifact_inventory::NativeRequirementRoot> {
-    view.selected_native_groups()
-        .into_iter()
-        .filter(|key| artifacts.contains(&key.artifact))
-        .map(
-            |key| tidepool_toolchain::artifact_inventory::NativeRequirementRoot::Group {
-                artifact: key.artifact,
-                original_ordinal: key.original_ordinal,
-            },
-        )
-        .collect()
-}
-
-fn certified_native_dependencies(
+/// Retaining an authored body preserves its exact live bindings even when the
+/// lexical projection offers only its interface and selects no executable groups.
+fn authored_native_dependencies(
     context: &tidepool_toolchain::declaration_join::ExactDeclarationContext,
-    roots: &[tidepool_toolchain::artifact_inventory::NativeRequirementRoot],
+    original: tidepool_toolchain::artifact_inventory::ArtifactId,
 ) -> Result<Vec<recovery::RecoveryLiveDependency>, SessionError> {
+    let owner = context
+        .artifact_view()
+        .descriptors()
+        .into_iter()
+        .find(|descriptor| descriptor.id == original)
+        .ok_or(SessionError::StaleStagedDeclaration)?
+        .owner;
     Ok(native_binding_dependencies(
-        context
-            .artifact_view()
-            .native_binding_requirements_from_roots(roots)?,
+        context.authored_native_binding_custody_requirements(&std::collections::BTreeSet::from(
+            [owner],
+        ))?,
     ))
 }
 
@@ -2670,13 +2661,7 @@ impl SessionLib {
             ));
         }
         let authored_root = certified_root;
-        let live_dependencies = certified_native_dependencies(
-            context,
-            &selected_native_roots(
-                context.artifact_view(),
-                &std::collections::BTreeSet::from([certified_root]),
-            ),
-        )?;
+        let live_dependencies = authored_native_dependencies(context, certified_root)?;
         let context_root = graph
             .insert_context(context, previous.as_ref())
             .map_err(|e| recovery::graph_error(&state.path, e))?;
