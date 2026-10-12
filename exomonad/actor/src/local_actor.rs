@@ -168,11 +168,7 @@ pub struct KernelContext {
     spawn_ownership: SpawnOwnership,
     myself: RactorRef<KernelMessage>,
     lifecycle: crate::kernel::LifecycleHandle,
-    children: std::sync::Arc<parking_lot::Mutex<HashMap<ractor::ActorId, LocalActorRef>>>,
-    resources: Arc<Mutex<HashMap<ractor::ActorId, ResourceChild>>>,
     directory: LocalActorDirectory,
-    forgotten_children: std::sync::Arc<parking_lot::Mutex<crate::CleanupComponentOutcome>>,
-    child_admission_closed: std::sync::Arc<tokio::sync::RwLock<bool>>,
 }
 
 #[derive(Clone)]
@@ -285,55 +281,22 @@ impl KernelContext {
         &self.lifecycle
     }
 
-    pub(crate) fn with_worker_lifetime_transfer<T, E>(
+    pub(crate) async fn reserve_worker_lifetime_transfer(
         &self,
         child: &LocalActorRef,
         destination_run: bool,
-        operation: impl FnOnce() -> Result<T, E>,
-    ) -> Result<Result<T, E>, LifetimeTransferError> {
-        let admission = self
-            .child_admission_closed
-            .try_read()
-            .map_err(|_| LifetimeTransferError::Closed)?;
-        if *admission {
-            return Err(LifetimeTransferError::Closed);
-        }
+    ) -> Result<run_control::WorkerTransferReservation, LifetimeTransferError> {
         self.directory
-            .with_run_admission(|| {
-                if self
-                    .directory
-                    .resolve(child.identity())
-                    .is_none_or(|known| known.address().get_id() != child.address().get_id())
-                {
-                    return Err(LifetimeTransferError::Unauthorized);
-                }
-                if child.terminal().get().is_some() {
-                    return Err(LifetimeTransferError::Unavailable);
-                }
-                let cell = child.address().get_cell();
-                if cell
-                    .try_get_supervisor()
-                    .is_some_and(|supervisor| supervisor.get_id() != self.myself.get_id())
-                {
-                    return Err(LifetimeTransferError::Unauthorized);
-                }
-                let mut children = self.children.lock();
-                let result = operation();
-                if result.is_ok() {
-                    if destination_run {
-                        children.remove(&child.address().get_id());
-                        cell.unlink(self.myself.get_cell());
-                    } else {
-                        cell.link(self.myself.get_cell());
-                        children.insert(child.address().get_id(), child.clone());
-                    }
-                }
-                Ok(result)
+            .reserve_worker_transfer(self.identity, child.clone(), destination_run)
+            .await
+            .map_err(|error| match error {
+                run_control::DirectoryError::Closed => LifetimeTransferError::Closed,
+                run_control::DirectoryError::Unavailable => LifetimeTransferError::Unavailable,
+                _ => LifetimeTransferError::Unauthorized,
             })
-            .map_err(|_| LifetimeTransferError::Closed)?
     }
 
-    /// Internal resources use Ractor supervision without a resident machine or model.
+    /// The producer owns registration even when its original waiter disappears.
     pub(crate) async fn spawn_resource<A: ractor::Actor>(
         &self,
         name: Option<String>,
@@ -344,118 +307,151 @@ impl KernelContext {
             + Sync
             + 'static,
     ) -> Result<RactorRef<A::Msg>, ractor::SpawnErr> {
-        let admission = self.child_admission_closed.clone().read_owned().await;
-        if *admission {
-            return Err(ractor::SpawnErr::StartupFailed(
-                std::io::Error::other("resource owner is retiring").into(),
-            ));
+        let context = self.clone();
+        let result = self
+            .directory
+            .prepare_root(Box::new(move |ticket| {
+                Box::pin(async move {
+                    let produced: run_control::RootOperationResult = async {
+                        let _admission = context.lifecycle.resource_admission().await?;
+                        let mut custody = StartupCustody {
+                            directory: context.directory.clone(),
+                            parent: context.identity,
+                            accounted: false,
+                        };
+                        let (child, task) =
+                            match context.myself.spawn_linked(name, actor, arguments).await {
+                                Ok(spawned) => spawned,
+                                Err(error) => {
+                                    context.directory.retain_child_cleanup(
+                                        context.identity,
+                                        cleanup(ResourceCleanup::Retire).await,
+                                    );
+                                    custody.accounted = true;
+                                    return Err(
+                                        Box::new(error) as Box<dyn std::error::Error + Send + Sync>
+                                    );
+                                }
+                            };
+                        let resource = ResourceChild {
+                            cell: child.get_cell(),
+                            cleanup: Arc::new(cleanup),
+                        };
+                        if let Err(error) = context
+                            .directory
+                            .register_resource(context.identity, ticket.id, resource.clone())
+                            .await
+                        {
+                            resource.cell.stop(None);
+                            let outcome = match tokio::time::timeout(SHUTDOWN_BUDGET, async {
+                                resource.cell.wait(Some(SHUTDOWN_BUDGET)).await?;
+                                Ok::<_, ractor::concurrency::Timeout>(
+                                    (resource.cleanup)(ResourceCleanup::Retire).await,
+                                )
+                            })
+                            .await
+                            {
+                                Ok(Ok(outcome)) => outcome,
+                                _ => crate::CleanupComponentOutcome::Unconfirmed(
+                                    "resource registration refusal cleanup is unconfirmed".into(),
+                                ),
+                            };
+                            context
+                                .directory
+                                .retain_child_cleanup(context.identity, outcome);
+                            drop(task);
+                            custody.accounted = true;
+                            return Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
+                        }
+                        drop(task);
+                        custody.accounted = true;
+                        Ok(run_control::RootAdmissionOutcome::NativeResource(resource))
+                    }
+                    .await;
+                    let cleanup = if produced.is_ok() {
+                        crate::CleanupComponentOutcome::Confirmed
+                    } else {
+                        context.directory.child_cleanup(context.identity).await
+                    };
+                    (produced, cleanup)
+                })
+            }))
+            .await
+            .map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?
+            .map_err(ractor::SpawnErr::StartupFailed)?;
+        match result {
+            // This exact cell was created by the same generic A producer.
+            run_control::RootAdmissionOutcome::NativeResource(resource) => Ok(resource.cell.into()),
+            _ => Err(ractor::SpawnErr::StartupFailed(
+                std::io::Error::other("resource preparation returned another result kind").into(),
+            )),
         }
-        let (child, task) = self.myself.spawn_linked(name, actor, arguments).await?;
-        self.resources.lock().insert(
-            child.get_id(),
-            ResourceChild {
-                cell: child.get_cell(),
-                cleanup: Arc::new(cleanup),
-            },
-        );
-        drop(task);
-        Ok(child)
     }
 
-    /// Transfer existing native-resource finalizers while the actor and run
-    /// admission fences hold. Membership publication cannot await or reenter
-    /// these resource maps; a refused publication leaves supervision intact.
-    pub(crate) fn with_resource_lifetime_transfer<T, E>(
+    pub(crate) async fn reserve_resource_lifetime_transfer(
         &self,
         cells: &[ractor::ActorCell],
         source_run: bool,
         destination_run: bool,
-        operation: impl FnOnce() -> Result<T, E>,
-    ) -> Result<Result<T, E>, String> {
-        let actor_admission = self
-            .child_admission_closed
-            .try_read()
-            .map_err(|_| "actor resource admission is closing".to_string())?;
-        if *actor_admission {
-            return Err("actor resource admission is closed".into());
-        }
-        self.directory.with_run_admission(|| {
-            let mut actor = self.resources.lock();
-            let mut run = self.directory.run_resources.lock();
-            let (source, destination) = if source_run {
-                (&mut run, &mut actor)
-            } else {
-                (&mut actor, &mut run)
-            };
-            for cell in cells {
-                let id = cell.get_id();
-                if !source.contains_key(&id) {
-                    if destination.contains_key(&id)
-                        || cell.get_status() != ractor::ActorStatus::Stopped
-                    {
-                        return Err("native resource has another cleanup owner".to_string());
-                    }
-                }
-            }
-            let result = operation();
-            if result.is_ok() && source_run != destination_run {
-                for cell in cells {
-                    if let Some(resource) = source.remove(&cell.get_id()) {
-                        if destination_run {
-                            resource.cell.unlink(self.myself.get_cell());
-                        } else {
-                            resource.cell.link(self.myself.get_cell());
-                        }
-                        destination.insert(cell.get_id(), resource);
-                    }
-                }
-            }
-            Ok(result)
-        })?
+    ) -> Result<run_control::ResourceTransferReservation, String> {
+        self.directory
+            .reserve_resource_transfer(self.identity, cells.to_vec(), source_run, destination_run)
+            .await
+            .map_err(|error| error.to_string())
     }
 
-    pub(crate) fn supervisor_identity(&self) -> Option<ActorRef> {
-        self.myself
-            .get_cell()
-            .try_get_supervisor()
-            .and_then(|supervisor| self.directory.runtime_identity(supervisor.get_id()))
+    pub(crate) async fn supervisor_identity(
+        &self,
+    ) -> Result<Option<ActorRef>, run_control::DirectoryError> {
+        match self.myself.get_cell().try_get_supervisor() {
+            Some(supervisor) => self.directory.runtime_identity(supervisor.get_id()).await,
+            None => Ok(None),
+        }
     }
+
     pub(crate) async fn spawn_successor<B: KernelBehavior>(
         &self,
         behavior: B,
-    ) -> Result<
-        (
-            LocalActorRef,
-            Option<tokio::sync::OwnedRwLockReadGuard<bool>>,
-        ),
-        ractor::SpawnErr,
-    > {
-        if let Some(parent) = self.supervisor_identity() {
-            let context = self.directory.context(parent).ok_or_else(|| {
-                ractor::SpawnErr::StartupFailed(
-                    std::io::Error::other("replacement supervisor is no longer running").into(),
-                )
-            })?;
-            context
-                .spawn_worker_retained(
-                    None,
-                    Box::new(behavior),
-                    crate::WorkerLifetime::ActorOwned,
-                    None,
-                )
-                .await
-                .map(|(actor, admission)| (actor, Some(admission)))
-        } else {
-            let (actor, task) = spawn_local_actor_in_directory(
-                None,
-                behavior,
-                self.identity.incarnation,
-                self.directory.clone(),
-            )
-            .await?;
-            drop(task);
-            Ok((actor, None))
-        }
+    ) -> Result<LocalActorRef, ractor::SpawnErr> {
+        self.prepare_worker(
+            None,
+            Box::new(behavior),
+            crate::WorkerLifetime::ActorOwned,
+            None,
+            true,
+        )
+        .await
+    }
+
+    pub(crate) async fn children(&self) -> Result<Vec<LocalActorRef>, run_control::DirectoryError> {
+        self.directory.children(self.identity).await
+    }
+
+    pub(crate) async fn child_cleanup(&self) -> crate::CleanupComponentOutcome {
+        self.directory.child_cleanup(self.identity).await
+    }
+
+    pub(crate) async fn retire_resources(
+        &self,
+        timeout: Duration,
+    ) -> crate::CleanupComponentOutcome {
+        self.directory
+            .retire_actor_resources(self.identity, timeout)
+            .await
+    }
+
+    pub(crate) async fn owned_resource(
+        &self,
+        id: ractor::ActorId,
+    ) -> Result<Option<ResourceChild>, run_control::DirectoryError> {
+        self.directory.owned_resource(self.identity, id).await
+    }
+
+    pub(crate) async fn forget_resource(
+        &self,
+        id: ractor::ActorId,
+    ) -> Result<(), run_control::DirectoryError> {
+        self.directory.forget_resource(self.identity, id).await
     }
 
     pub(crate) fn spawn_ownership(&self) -> SpawnOwnership {
@@ -485,8 +481,7 @@ impl KernelContext {
     }
 
     pub(crate) fn retain_child_startup_cleanup(&self, outcome: crate::CleanupComponentOutcome) {
-        let mut retained = self.forgotten_children.lock();
-        *retained = combine_cleanup(retained.clone(), outcome);
+        self.directory.retain_child_cleanup(self.identity, outcome);
     }
 
     pub(crate) async fn wait_requested_shutdown(&self) -> ActorTerminal {
@@ -498,72 +493,50 @@ impl KernelContext {
         self.identity
     }
 
-    #[must_use]
-    pub fn resolve(&self, actor: ActorRef) -> Option<LocalActorRef> {
-        self.directory.resolve(actor)
+    pub async fn resolve(
+        &self,
+        actor: ActorRef,
+    ) -> Result<Option<LocalActorRef>, run_control::DirectoryError> {
+        self.directory.resolve(actor).await
     }
 
-    pub fn install_session_context(
+    pub async fn install_session_context(
         &self,
         context: crate::ActorSessionContext,
     ) -> Result<(), KernelBehaviorError> {
         if context.actor != self.identity {
-            return Err(KernelBehaviorError {
-                detail: format!(
-                    "actor {:?} cannot install session context for {:?}",
-                    self.identity, context.actor
-                ),
-                diagnostic: None,
-            });
+            return Err(KernelBehaviorError::new(format!(
+                "actor {:?} cannot install session context for {:?}",
+                self.identity, context.actor
+            )));
         }
         self.directory
-            .sessions
-            .write()
-            .insert(context.actor, context);
-        Ok(())
+            .install_session_context(context)
+            .await
+            .map_err(|error| KernelBehaviorError::new(error.to_string()))
     }
 
-    #[must_use]
-    pub fn session_context(&self, actor: ActorRef) -> Option<crate::ActorSessionContext> {
-        self.directory.session_context(actor)
+    pub async fn session_context(
+        &self,
+        actor: ActorRef,
+    ) -> Result<Option<crate::ActorSessionContext>, run_control::DirectoryError> {
+        self.directory.session_context(actor).await
     }
 
-    #[must_use]
-    pub fn owns_child(&self, actor: ActorRef) -> bool {
-        self.children
-            .lock()
-            .values()
-            .any(|child| child.identity() == actor)
+    pub async fn owns_child(&self, actor: ActorRef) -> Result<bool, run_control::DirectoryError> {
+        Ok(self
+            .children()
+            .await?
+            .iter()
+            .any(|child| child.identity() == actor))
     }
 
-    /// Release routing and terminal metadata for an exact, already-terminal
-    /// actor. Live Haskell handles become explicitly unavailable afterward.
-    pub fn forget_terminal_actor(&self, actor: ActorRef) -> bool {
-        let mut children = self.children.lock();
-        let child = children
-            .values()
-            .find(|child| child.identity() == actor)
-            .cloned();
-        let forgotten = self.directory.forget_terminal(actor);
-        if forgotten {
-            if let Some(child) = child {
-                if !child
-                    .terminal()
-                    .cleanup()
-                    .is_some_and(|outcome| outcome.actor() == actor && outcome.is_confirmed())
-                {
-                    let mut retained = self.forgotten_children.lock();
-                    *retained = combine_cleanup(
-                        retained.clone(),
-                        crate::CleanupComponentOutcome::Unconfirmed(format!(
-                            "forgotten child {actor:?} lacked confirmed cleanup"
-                        )),
-                    );
-                }
-            }
-            children.retain(|_, child| child.identity() != actor);
-        }
-        forgotten
+    /// The directory retains exact cleanup evidence before forgetting its owner.
+    pub async fn forget_terminal_actor(
+        &self,
+        actor: ActorRef,
+    ) -> Result<bool, run_control::DirectoryError> {
+        self.directory.forget_terminal(actor).await
     }
 
     /// Start a linked child and return its exact handle only after startup.
@@ -578,134 +551,97 @@ impl KernelContext {
         self.spawn_worker(name, behavior, crate::WorkerLifetime::ActorOwned)
     }
 
-    pub(crate) fn spawn_worker<C>(
+    pub(crate) async fn spawn_worker<C: KernelBehavior>(
         &self,
         name: Option<String>,
         behavior: C,
         lifetime: crate::WorkerLifetime,
-    ) -> impl std::future::Future<Output = Result<LocalActorRef, ractor::SpawnErr>> + '_
-    where
-        C: KernelBehavior,
-    {
-        self.spawn_worker_retained(name, Box::new(behavior), lifetime, None)
-            .map(|result| result.map(|(actor, _)| actor))
+    ) -> Result<LocalActorRef, ractor::SpawnErr> {
+        self.prepare_worker(name, Box::new(behavior), lifetime, None, false)
+            .await
     }
 
-    pub(crate) fn spawn_worker_scoped<C: KernelBehavior>(
+    pub(crate) async fn spawn_worker_scoped<C: KernelBehavior>(
         &self,
         name: Option<String>,
         behavior: C,
         lifetime: crate::WorkerLifetime,
         admission: Arc<dyn WorkerStartupAdmission>,
-    ) -> impl std::future::Future<Output = Result<LocalActorRef, ractor::SpawnErr>> + '_ {
-        self.spawn_worker_retained(name, Box::new(behavior), lifetime, Some(admission))
-            .map(|result| result.map(|(actor, _)| actor))
+    ) -> Result<LocalActorRef, ractor::SpawnErr> {
+        self.prepare_worker(name, Box::new(behavior), lifetime, Some(admission), false)
+            .await
     }
 
-    async fn spawn_worker_retained<C: KernelBehavior>(
+    async fn prepare_worker<C: KernelBehavior>(
         &self,
         name: Option<String>,
         behavior: Box<C>,
         lifetime: crate::WorkerLifetime,
         startup_admission: Option<Arc<dyn WorkerStartupAdmission>>,
-    ) -> Result<(LocalActorRef, tokio::sync::OwnedRwLockReadGuard<bool>), ractor::SpawnErr> {
-        // Hold admission through registration so retirement cannot miss a
-        // child whose startup is already in flight.
-        let admission = self.child_admission_closed.clone().read_owned().await;
-        let mut custody = StartupCustody {
-            retained: self.forgotten_children.clone(),
-            accounted: false,
-        };
-        let terminal = RetainedActorExit::new();
-        let lifecycle = crate::kernel::LifecycleHandle::default();
-        let identity = self
-            .directory
-            .reserve(self.identity.incarnation)
-            .map_err(|error| {
-                ractor::SpawnErr::StartupFailed(std::io::Error::other(error).into())
-            })?;
-        let startup_refusal = if *admission {
-            Some(StartupFailureCause::ChildAdmissionClosed)
-        } else {
-            startup_admission
-                .as_ref()
-                .and_then(|admission| admission.reserve(identity).err())
-                .map(StartupFailureCause::Reservation)
-        };
-        // An already prepared behavior still owns real resources on refusal.
-        // Run its ordinary cleanup in an unlinked startup, never registering or
-        // starting authored work after the admission boundary has closed.
-        let cleanup_only = startup_refusal.is_some();
-        let arguments = LocalActorArguments {
-            spawn_ownership: match lifetime {
-                crate::WorkerLifetime::RunOwned => SpawnOwnership::Independent,
-                crate::WorkerLifetime::InvocationOwned
-                | crate::WorkerLifetime::ActorOwned
-                | crate::WorkerLifetime::InScope(_) => SpawnOwnership::Supervised(self.identity),
-            },
-            behavior,
-            startup_refusal,
-            startup_admission,
-            terminal: terminal.clone(),
-            directory: self.directory.clone(),
-            identity,
-            lifecycle: lifecycle.clone(),
-        };
-        let spawned = if cleanup_only {
-            Box::pin(LocalActor::<C>::spawn(
-                name,
-                LocalActor::<C>(PhantomData),
-                arguments,
-            ))
-            .await
-        } else {
-            match lifetime {
-                crate::WorkerLifetime::InvocationOwned
-                | crate::WorkerLifetime::ActorOwned
-                | crate::WorkerLifetime::InScope(_) => {
-                    Box::pin(self.myself.spawn_linked(
-                        name,
-                        LocalActor::<C>(PhantomData),
-                        arguments,
-                    ))
-                    .await
-                }
-                crate::WorkerLifetime::RunOwned => {
-                    Box::pin(LocalActor::<C>::spawn(
-                        name,
-                        LocalActor::<C>(PhantomData),
-                        arguments,
-                    ))
-                    .await
-                }
-            }
-        };
-        let (address, task) = match spawned {
-            Ok(spawned) => spawned,
-            Err(error) => {
-                if let Some(cleanup) = startup_cleanup(&error) {
-                    self.retain_child_startup_cleanup(combine_cleanup(
-                        combine_cleanup(cleanup.hook, cleanup.realm),
-                        cleanup.children,
-                    ));
-                } else {
-                    self.retain_child_startup_cleanup(crate::CleanupComponentOutcome::Unconfirmed(
-                        format!("child startup failed without retained cleanup: {error}"),
-                    ));
-                }
+        successor: bool,
+    ) -> Result<LocalActorRef, ractor::SpawnErr> {
+        let context = self.clone();
+        let result = self.directory.prepare_root(Box::new(move |_ticket| Box::pin(async move {
+            let produced: run_control::RootOperationResult = async {
+                let admission = context.lifecycle.resource_admission().await;
+                let mut custody = StartupCustody { directory: context.directory.clone(), parent: context.identity, accounted: false };
+                let reservation = if successor {
+                    context.directory.reserve_successor(context.identity, context.identity.incarnation).await?
+                } else { context.directory.reserve_worker(context.identity, context.identity.incarnation).await? };
+                let identity = reservation.identity();
+                let terminal = reservation.terminal().clone();
+                let lifecycle = reservation.lifecycle().clone();
+                let startup_refusal = match &admission {
+                    Err(_) => Some(StartupFailureCause::ChildAdmissionClosed),
+                    Ok(_) => startup_admission.as_ref().and_then(|admission| admission.reserve(identity).err())
+                        .map(StartupFailureCause::Reservation),
+                };
+                let supervisor = if successor {
+                    match context.supervisor_identity().await? {
+                        Some(parent) => Some(context.directory.context(parent).await?.ok_or(run_control::DirectoryError::Unauthorized { actor: parent })?),
+                        None => None,
+                    }
+                } else if lifetime == crate::WorkerLifetime::RunOwned { None } else { Some(Arc::new(context.clone())) };
+                let ownership = supervisor.as_ref().map_or(SpawnOwnership::Independent, |supervisor| SpawnOwnership::Supervised(supervisor.identity));
+                let cleanup_only = startup_refusal.is_some();
+                let arguments = LocalActorArguments { spawn_ownership: ownership, behavior, startup_refusal,
+                    startup_admission, terminal: terminal.clone(), directory: context.directory.clone(), identity,
+                    lifecycle: lifecycle.clone(), reservation };
+                let spawned = if !cleanup_only {
+                    match supervisor {
+                        Some(supervisor) => Actor::spawn_linked(name, LocalActor::<C>(PhantomData), arguments, supervisor.myself.get_cell()).await,
+                        None => Actor::spawn(name, LocalActor::<C>(PhantomData), arguments).await,
+                    }
+                } else { Actor::spawn(name, LocalActor::<C>(PhantomData), arguments).await };
+                let (address, task) = match spawned {
+                    Ok(spawned) => spawned,
+                    Err(error) => {
+                        let cleanup = startup_cleanup(&error).map(|cleanup| combine_cleanup(combine_cleanup(cleanup.hook, cleanup.realm), cleanup.children))
+                            .unwrap_or_else(|| crate::CleanupComponentOutcome::Unconfirmed(format!("child startup failed without retained cleanup: {error}")));
+                        context.retain_child_startup_cleanup(cleanup);
+                        custody.accounted = true;
+                        return Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
+                    }
+                };
+                let child = LocalActorRef::with_identity_admission(address, terminal, identity, lifecycle);
                 custody.accounted = true;
-                return Err(error);
+                drop(admission);
+                Ok(run_control::RootAdmissionOutcome::Actor(child, task))
+            }.await;
+            let cleanup = if produced.is_ok() { crate::CleanupComponentOutcome::Confirmed }
+                else { context.directory.child_cleanup(context.identity).await };
+            (produced, cleanup)
+        }))).await.map_err(|error| ractor::SpawnErr::StartupFailed(Box::new(error)))?
+            .map_err(ractor::SpawnErr::StartupFailed)?;
+        match result {
+            run_control::RootAdmissionOutcome::Actor(child, task) => {
+                drop(task);
+                Ok(child)
             }
-        };
-        drop(task);
-        let child = LocalActorRef::with_identity_admission(address, terminal, identity, lifecycle);
-        if lifetime != crate::WorkerLifetime::RunOwned {
-            self.children
-                .lock()
-                .insert(child.address().get_id(), child.clone());
+            _ => Err(ractor::SpawnErr::StartupFailed(
+                std::io::Error::other("worker preparation returned another result kind").into(),
+            )),
         }
-        custody.accounted = true;
-        Ok((child, admission))
     }
 }
 
@@ -3498,90 +3434,34 @@ pub(crate) fn combine_cleanup(
     }
 }
 
-// Declared after the admission lease: cancellation records uncertainty before
-// releasing that lease, so retirement cannot overtake the evidence write.
+// Cancellation records uncertainty before the producer drops its local lease.
 struct StartupCustody {
-    retained: std::sync::Arc<parking_lot::Mutex<crate::CleanupComponentOutcome>>,
+    directory: LocalActorDirectory,
+    parent: ActorRef,
     accounted: bool,
 }
 impl Drop for StartupCustody {
     fn drop(&mut self) {
         if !self.accounted {
-            let mut retained = self.retained.lock();
-            *retained = combine_cleanup(
-                retained.clone(),
+            self.directory.retain_child_cleanup(
+                self.parent,
                 crate::CleanupComponentOutcome::Unconfirmed(
-                    "child startup waiter lost before registration; cleanup unavailable".into(),
+                    "child producer ended before registration; cleanup unavailable".into(),
                 ),
             );
         }
     }
 }
 
-async fn shutdown_resources(
-    resources: &Arc<Mutex<HashMap<ractor::ActorId, ResourceChild>>>,
-    timeout: Duration,
-) -> crate::CleanupComponentOutcome {
-    let snapshot: Vec<_> = resources.lock().values().cloned().collect();
-    for resource in &snapshot {
-        resource.cell.stop(None);
-    }
-    let mut shutdowns = FuturesUnordered::new();
-    for resource in snapshot {
-        shutdowns.push(async move {
-            let id = resource.cell.get_id();
-            let outcome = match tokio::time::timeout(timeout, async {
-                resource.cell.wait(Some(timeout)).await?;
-                Ok::<_, ractor::concurrency::Timeout>(
-                    (resource.cleanup)(ResourceCleanup::Retire).await,
-                )
-            })
-            .await
-            {
-                Ok(Ok(outcome)) => outcome,
-                _ => crate::CleanupComponentOutcome::Unconfirmed(
-                    "resource child cleanup is unconfirmed".into(),
-                ),
-            };
-            (id, outcome)
-        });
-    }
-    let mut outcome = crate::CleanupComponentOutcome::Confirmed;
-    while let Some((id, settled)) = shutdowns.next().await {
-        if settled == crate::CleanupComponentOutcome::Confirmed {
-            resources.lock().remove(&id);
-        }
-        outcome = combine_cleanup(outcome, settled);
-    }
-    outcome
-}
-
-/// The accepted replacement owns the same children and resource scopes. This
-/// changes live Ractor supervision, never the spawn fact used at startup.
-fn transfer_supervised_children(predecessor: &KernelContext, successor: &KernelContext) {
-    {
-        let mut children = predecessor.children.lock();
-        let mut inherited = successor.children.lock();
-        for (id, child) in children.drain() {
-            child.address().get_cell().link(successor.myself.get_cell());
-            inherited.insert(id, child);
-        }
-    }
-    {
-        let mut resources = predecessor.resources.lock();
-        for (id, child) in resources.drain() {
-            child.cell.link(successor.myself.get_cell());
-            successor.resources.lock().insert(id, child);
-        }
-    }
-    let mut inherited = successor.forgotten_children.lock();
-    *inherited = combine_cleanup(
-        inherited.clone(),
-        std::mem::replace(
-            &mut *predecessor.forgotten_children.lock(),
-            crate::CleanupComponentOutcome::Confirmed,
-        ),
-    );
+/// RunControl moves the actual supervision and cleanup ownership together.
+async fn transfer_supervised_children(
+    predecessor: &KernelContext,
+    successor: &KernelContext,
+) -> Result<(), run_control::DirectoryError> {
+    predecessor
+        .directory
+        .transfer_children(predecessor.identity, successor.identity)
+        .await
 }
 
 async fn shutdown_children(
@@ -3593,11 +3473,11 @@ async fn shutdown_children(
         Ok(children) => children,
         Err(error) => {
             return crate::CleanupComponentOutcome::Unconfirmed(format!(
-                "child ownership observation unavailable: {error}"
+                "child ownership is unavailable: {error}"
             ))
         }
     };
-    let mut outcome = context.child_cleanup_outcome().await;
+    let mut outcome = context.child_cleanup().await;
     let requested = ActorTerminal {
         kind: match owner_exit {
             ActorExitKind::Failed => ActorExitKind::Failed,
@@ -3613,8 +3493,9 @@ async fn shutdown_children(
             .collect(),
     )
     .await;
-    outcome = combine_cleanup(outcome, context.retire_owned_resources(timeout).await);
-    outcome = combine_cleanup(outcome, context.child_cleanup_outcome().await);
+    let resources = context.retire_resources(timeout).await;
+    context.retain_child_startup_cleanup(resources);
+    outcome = combine_cleanup(outcome, context.child_cleanup().await);
     let mut shutdowns = FuturesUnordered::new();
     for (child, requested) in batch.into_actors() {
         shutdowns.push(async move {
