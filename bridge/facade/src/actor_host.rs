@@ -2285,17 +2285,37 @@ async fn run_owned(
         let placement = forest
             .root_recovery_placement(root_actor.identity())
             .map_err(|error| runtime_error(error.to_string()))?;
-        let admission = intent
-            .manifest_predecessor
-            .map(|predecessor| {
-                actor_recovery.certify_root_successor(
-                    predecessor,
-                    placement,
-                    accepted_source.as_deref(),
-                    &config.root_binding_path,
-                )
-            })
-            .transpose()?;
+        let claim = if let Some(predecessor) = intent.manifest_predecessor {
+            let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+                &root_declaration_recovery::root_path(),
+                predecessor.incarnation.0,
+            )
+            .ok_or_else(|| runtime_error("root manifest predecessor has no incarnation"))?;
+            forest
+                .begin_successor_operation(root_actor.identity(), &owner)
+                .await
+                .map_err(|error| runtime_error(error.to_string()))?
+        } else {
+            forest
+                .begin_root_binding_operation(root_actor.identity())
+                .await
+                .map_err(|error| runtime_error(error.to_string()))?
+        };
+        let admission = if let Some(predecessor) = intent.manifest_predecessor {
+            Some(
+                actor_recovery
+                    .certify_root_successor(
+                        predecessor,
+                        placement,
+                        accepted_source.as_deref(),
+                        &config.root_binding_path,
+                        &claim,
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
         let manifest = match (intent.manifest_predecessor, admission.as_ref()) {
             (Some(predecessor), Some(admission)) => {
                 let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
@@ -2334,40 +2354,28 @@ async fn run_owned(
         }
         #[cfg(test)]
         embedded_recovery_tests::startup_checkpoint("manifest");
-        let identity = embedded_recovery::host_identity(&run_root, "/root", root_actor.identity());
-        let store = service.runtime.store();
-        #[cfg(test)]
-        let _uncertain_reader = embedded_recovery_tests::uncertain_store_reader();
-        if let Some(predecessor) = &intent.store_predecessor {
-            let predecessor = embedded_recovery::identity_from_conversation(predecessor)
-                .map_err(runtime_error)?;
-            let admission = admission
-                .ok_or_else(|| runtime_error("Store successor lacks exact manifest admission"))?;
-            let authority = embedded_recovery::EmbeddedBindingSuccessorAuthority {
-                lease: Arc::clone(&host_incarnation),
-                run_root: run_root.clone(),
-                admission,
-            };
-            store.transfer_embedded_binding(&predecessor, &identity, &authority)?;
-        } else {
-            let authority = embedded_recovery::EmbeddedBindingInitialAuthority {
-                lease: Arc::clone(&host_incarnation),
-                journal: Arc::clone(&actor_recovery),
-                run_root: run_root.clone(),
-                actor: root_actor.identity(),
-                intent: intent.clone(),
-            };
-            store.bind_initial_embedded_binding(&identity, None, &authority)?;
-        }
-        if !store.embedded_binding_matches(&identity)? {
-            return Err(runtime_error(
-                "root startup Store binding readback differs after durable commit",
-            ));
-        }
-        #[cfg(test)]
-        embedded_recovery_tests::startup_checkpoint("store");
-        actor_recovery
-            .bind_application_conversation(root_actor.identity(), intent.conversation.clone())?;
+        let installed = forest
+            .committed_public_readiness(&claim)
+            .await
+            .map_err(|error| runtime_error(error.to_string()))?;
+        let origin = match admission {
+            Some(admission) => embedded_recovery::EmbeddedBindingOrigin::Successor(admission),
+            None => embedded_recovery::EmbeddedBindingOrigin::Fresh,
+        };
+        claim
+            .finish_binding(
+                installed,
+                Arc::new(embedded_recovery::EmbeddedRootBinding {
+                    lease: Arc::clone(&host_incarnation),
+                    journal: Arc::clone(&actor_recovery),
+                    store: service.runtime.store(),
+                    run_root: run_root.clone(),
+                    intent: intent.clone(),
+                    origin,
+                }),
+            )
+            .await
+            .map_err(runtime_error)?;
         #[cfg(test)]
         embedded_recovery_tests::startup_checkpoint("bound");
         forest

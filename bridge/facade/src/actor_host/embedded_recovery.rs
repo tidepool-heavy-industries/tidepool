@@ -216,44 +216,6 @@ pub(super) fn host_identity(run_root: &Path, path: &str, actor: ActorRef) -> Hos
     }
 }
 
-/// Initial binding uses the actual admitted intent and retained journal under
-/// the Store transaction. Readback alone cannot authorize this transition.
-pub(super) struct EmbeddedBindingInitialAuthority {
-    pub(super) lease: Arc<HostIncarnationLease>,
-    pub(super) journal: Arc<ActorRecoveryJournal>,
-    pub(super) run_root: PathBuf,
-    pub(super) actor: ActorRef,
-    pub(super) intent: exomonad_actor::RootStartupIntent,
-}
-impl BindingInitialAuthority for EmbeddedBindingInitialAuthority {
-    fn validate_initial_binding(&self, identity: &HostIdentity) -> Result<bool, String> {
-        if !self
-            .lease
-            .owns_run(&self.run_root)
-            .map_err(|error| error.to_string())?
-            || self.intent.store_predecessor.is_some()
-            || self.intent.conversation != conversation(identity)
-        {
-            return Ok(false);
-        }
-        let records = self
-            .journal
-            .validated_records()
-            .map_err(|error| error.to_string())?;
-        let head =
-            super::latest_durable_root_application(&records).map_err(|error| error.to_string())?;
-        Ok(head.is_some_and(|record| {
-            record.admission.actor == self.actor
-                && record.terminal.is_none()
-                && record.startup.as_ref() == Some(&self.intent)
-                && record
-                    .application
-                    .as_ref()
-                    .is_some_and(|application| application.conversation.is_none())
-        }))
-    }
-}
-
 pub(super) fn identity_from_conversation(
     value: &ApplicationConversation,
 ) -> Result<HostIdentity, String> {
@@ -268,5 +230,160 @@ pub(super) fn identity_from_conversation(
             incarnation: incarnation.clone(),
         }),
         _ => Err("root startup requires its exact Embedded conversation".into()),
+    }
+}
+
+/// The lifecycle retains the affine claim while this adapter commits the Store
+/// binding and records its exact journal acknowledgement.
+pub(super) enum EmbeddedBindingOrigin {
+    Fresh,
+    Successor(Arc<DurableRootSuccessorAdmission>),
+}
+
+pub(super) struct EmbeddedRootBinding {
+    pub(super) lease: Arc<HostIncarnationLease>,
+    pub(super) journal: Arc<ActorRecoveryJournal>,
+    pub(super) store: Arc<harness::store::Store>,
+    pub(super) run_root: PathBuf,
+    pub(super) intent: exomonad_actor::RootStartupIntent,
+    pub(super) origin: EmbeddedBindingOrigin,
+}
+
+impl exomonad_actor::RootBindingAdapter for EmbeddedRootBinding {
+    fn bind<'a>(
+        &'a self,
+        claim: &'a exomonad_actor::RootBindingOperationClaim,
+    ) -> futures_util::future::BoxFuture<
+        'a,
+        Result<exomonad_actor::JournalApplicationBindingAck, String>,
+    > {
+        Box::pin(async move {
+            let actor = claim.successor_actor();
+            let identity = host_identity(&self.run_root, "/root", actor);
+            if !claim.journal_matches(&self.journal)
+                || self.intent.conversation != conversation(&identity)
+            {
+                return Err("binding differs from its issued lifecycle operation".into());
+            }
+            let admission = match &self.origin {
+                EmbeddedBindingOrigin::Fresh => {
+                    if claim.predecessor_owner().is_ok()
+                        || self.intent.manifest_predecessor.is_some()
+                        || self.intent.store_predecessor.is_some()
+                    {
+                        return Err("fresh binding carries successor evidence".into());
+                    }
+                    None
+                }
+                EmbeddedBindingOrigin::Successor(admission) => {
+                    let predecessor = claim.predecessor_owner().map_err(|e| e.to_string())?;
+                    if admission.operation() != claim.operation()
+                        || admission.successor().actor() != actor
+                        || admission.successor().placement() != claim.successor_placement()
+                        || admission.successor().owner() != claim.successor_owner()
+                        || !admission
+                            .validate_successor(
+                                &self.run_root,
+                                predecessor,
+                                claim.successor_owner(),
+                                claim.successor_placement().session,
+                                claim.successor_placement().lexical_scope,
+                            )
+                            .map_err(|e| e.to_string())?
+                    {
+                        return Err(
+                            "successor binding differs from certified native placement".into()
+                        );
+                    }
+                    Some(Arc::clone(admission))
+                }
+            };
+            // No journal request runs while the synchronous Store transaction
+            // owns its connection. The retained lifecycle claim prevents a later
+            // successor from invalidating this admitted transition.
+            if self.intent.store_predecessor.is_none() {
+                let records = self
+                    .journal
+                    .validated_records()
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let head =
+                    super::latest_durable_root_application(&records).map_err(|e| e.to_string())?;
+                if !head.is_some_and(|record| {
+                    record.admission.actor == actor
+                        && record.terminal.is_none()
+                        && record.startup.as_ref() == Some(&self.intent)
+                        && record
+                            .application
+                            .as_ref()
+                            .is_some_and(|application| application.conversation.is_none())
+                }) {
+                    return Err(
+                        "initial Store binding differs from admitted successor intent".into(),
+                    );
+                }
+            }
+            let lease = Arc::clone(&self.lease);
+            let run_root = self.run_root.clone();
+            let store = Arc::clone(&self.store);
+            let predecessor = self.intent.store_predecessor.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), String> {
+                #[cfg(test)]
+                let _uncertain_reader = super::embedded_recovery_tests::uncertain_store_reader();
+                if let Some(predecessor) = predecessor {
+                    let predecessor = identity_from_conversation(&predecessor)?;
+                    let admission =
+                        admission.ok_or("Store successor lacks native successor evidence")?;
+                    let authority = EmbeddedBindingSuccessorAuthority {
+                        lease,
+                        run_root,
+                        admission,
+                    };
+                    store
+                        .transfer_embedded_binding(&predecessor, &identity, &authority)
+                        .map_err(|e| e.to_string())?;
+                } else {
+                    let authority = ClaimedInitialBinding {
+                        lease,
+                        run_root,
+                        identity: identity.clone(),
+                    };
+                    store
+                        .bind_initial_embedded_binding(&identity, None, &authority)
+                        .map_err(|e| e.to_string())?;
+                }
+                if !store
+                    .embedded_binding_matches(&identity)
+                    .map_err(|e| e.to_string())?
+                {
+                    return Err("successor Store binding differs after durable commit".into());
+                }
+                #[cfg(test)]
+                super::embedded_recovery_tests::startup_checkpoint("store");
+                Ok(())
+            })
+            .await
+            .map_err(|e| format!("successor Store binding task failed: {e}"))??;
+            self.journal
+                .bind_application_conversation(actor, self.intent.conversation.clone())
+                .await
+                .map_err(|e| e.to_string())
+        })
+    }
+}
+
+/// Constructed only after journal evidence is checked under a lifecycle claim.
+struct ClaimedInitialBinding {
+    lease: Arc<HostIncarnationLease>,
+    run_root: PathBuf,
+    identity: HostIdentity,
+}
+impl BindingInitialAuthority for ClaimedInitialBinding {
+    fn validate_initial_binding(&self, identity: &HostIdentity) -> Result<bool, String> {
+        Ok(identity == &self.identity
+            && self
+                .lease
+                .owns_run(&self.run_root)
+                .map_err(|e| e.to_string())?)
     }
 }
