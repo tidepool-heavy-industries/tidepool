@@ -77,23 +77,54 @@ pub(crate) struct PromptArtifact {
 /// workspace modules existed.
 /// The skills an Exomonad workspace ships, named so an unknown topic can point at
 /// the one that answers it. These are the same names the `topics` body lists.
-const SHIPPED_SKILLS: [&str; 9] = [
-    "exomonad-jev",
-    "exomonad-agent-work",
-    "exomonad-workbench",
-    "exomonad-cleanup",
-    "exomonad-project-work",
-    "exomonad-review",
-    "exomonad-command",
-    "exomonad-define-actors",
-    "exomonad-agent-spec",
+const SHIPPED_SKILLS: [(&str, &str); 9] = [
+    (
+        "exomonad-jev",
+        include_str!("../../../.exomonad/workspace/skills/exomonad-jev/SKILL.md"),
+    ),
+    (
+        "exomonad-agent-work",
+        include_str!("../../../.exomonad/workspace/skills/exomonad-agent-work/SKILL.md"),
+    ),
+    (
+        "exomonad-workbench",
+        include_str!("../../../.exomonad/workspace/skills/exomonad-workbench/SKILL.md"),
+    ),
+    (
+        "exomonad-cleanup",
+        include_str!("../../../.exomonad/workspace/skills/exomonad-cleanup/SKILL.md"),
+    ),
+    (
+        "exomonad-project-work",
+        include_str!("../../../.exomonad/workspace/skills/exomonad-project-work/SKILL.md"),
+    ),
+    (
+        "exomonad-review",
+        include_str!("../../../.exomonad/workspace/skills/exomonad-review/SKILL.md"),
+    ),
+    (
+        "exomonad-command",
+        include_str!("../../../.exomonad/workspace/skills/exomonad-command/SKILL.md"),
+    ),
+    (
+        "exomonad-define-actors",
+        include_str!("../../../.exomonad/workspace/skills/exomonad-define-actors/SKILL.md"),
+    ),
+    (
+        "exomonad-agent-spec",
+        include_str!("../../../.exomonad/workspace/skills/exomonad-agent-spec/SKILL.md"),
+    ),
 ];
+
+const JEV_RECENT_CHANGES: &str =
+    include_str!("../../../.exomonad/workspace/skills/exomonad-jev/references/recent-changes.md");
 
 /// A topic naming a shipped skill, either bare (`command`) or in full
 /// (`exomonad-command`).
 fn skill_for_topic(topic: &str) -> Option<&'static str> {
     SHIPPED_SKILLS
         .into_iter()
+        .map(|(name, _)| name)
         .find(|skill| *skill == topic || skill.strip_prefix("exomonad-") == Some(topic))
 }
 
@@ -101,6 +132,9 @@ pub(crate) fn workbench_doc(
     topic: &str,
     workspace_modules: &[String],
 ) -> Result<Cow<'static, str>, String> {
+    if let Some((_, body)) = SHIPPED_SKILLS.iter().find(|(name, _)| *name == topic) {
+        return Ok(Cow::Borrowed(body));
+    }
     match topic {
         "tree" | "worktree" | "worktrees" => {
             Ok(Cow::Borrowed(include_str!("../../prompts/docs/tree.md")))
@@ -109,10 +143,9 @@ pub(crate) fn workbench_doc(
             "../../prompts/docs/workbench.md"
         ))),
         "request" | "requests" => Ok(Cow::Borrowed(include_str!("../../prompts/docs/request.md"))),
-        "agents" | "agent-work" => Ok(Cow::Borrowed(include_str!(
-            "../../prompts/docs/agents.md"
-        ))),
-        "jev" => Ok(Cow::Borrowed(include_str!("../../prompts/docs/jev.md"))),
+        "agents" | "agent-work" => Ok(Cow::Borrowed(include_str!("../../prompts/docs/agents.md"))),
+        "jev" => workbench_doc("exomonad-jev", workspace_modules),
+        "exomonad-jev/references/recent-changes.md" => Ok(Cow::Borrowed(JEV_RECENT_CHANGES)),
         "actors" | "actor" | "record" => {
             Ok(Cow::Borrowed(include_str!("../../prompts/docs/actors.md")))
         }
@@ -138,7 +171,7 @@ pub(crate) fn workbench_doc(
         "help" | "topics" => {
             let mut body = String::from(
                 "Exomonad topics: tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors, reflect. Use hosted `lookup` with `doc <topic>`.\n\
-                 Load the skill first where one exists; a topic is the fallback. Workspace skills: exomonad-workbench (Kleisli composition, optics and local languages), exomonad-define-actors (stateful interpreters for typed calls and events), exomonad-jev (semantic predicates, choices and continuations), exomonad-project-work (optional Git delivery workflow), exomonad-agent-work (typed agents, requests and waits), exomonad-agent-spec (model-facing tools and reloads), exomonad-command (commands as values and retained results), exomonad-review (exact-source review and repair), exomonad-cleanup (retiring actors and scoped resources).",
+                 Use `doc <skill-name>` to read a bundled skill without filesystem access. Jev reference: `doc exomonad-jev/references/recent-changes.md`. Workspace skills: exomonad-workbench (Kleisli composition, optics and local languages), exomonad-define-actors (stateful interpreters for typed calls and events), exomonad-jev (semantic predicates, choices and continuations), exomonad-project-work (optional Git delivery workflow), exomonad-agent-work (typed agents, requests and waits), exomonad-agent-spec (model-facing tools and reloads), exomonad-command (commands as values and retained results), exomonad-review (exact-source review and repair), exomonad-cleanup (retiring actors and scoped resources).",
             );
             if !workspace_modules.is_empty() {
                 body.push_str(
@@ -152,9 +185,7 @@ pub(crate) fn workbench_doc(
             let mut message = format!("unknown Exomonad documentation topic `{other}`");
             // Route skill names and their short aliases to the shipped entrypoint.
             if let Some(skill) = skill_for_topic(other) {
-                message.push_str(&format!(
-                    "; the `{skill}` skill covers this — load it first, a topic is the fallback"
-                ));
+                message.push_str(&format!("; use `doc {skill}` to read the bundled skill"));
             }
             message.push_str(
                 "; topics: tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors; `doc topics` lists the workspace skills"
@@ -266,15 +297,53 @@ mod tests {
         }
         assert_eq!(
             installed,
-            SHIPPED_SKILLS.into_iter().map(str::to_owned).collect(),
+            SHIPPED_SKILLS
+                .into_iter()
+                .map(|(name, _)| name.to_owned())
+                .collect(),
             "discovery must describe the skills in the actual pinned bundle",
         );
-        for skill in SHIPPED_SKILLS {
+        for (skill, body) in SHIPPED_SKILLS {
             assert!(
                 root.join(skill).join("SKILL.md").is_file(),
                 "missing {skill}"
             );
+            let canonical = std::fs::read_to_string(root.join(skill).join("SKILL.md")).unwrap();
+            assert_eq!(
+                body, canonical,
+                "doc {skill} must deliver the pinned skill bytes"
+            );
+            assert_eq!(workbench_doc(skill, &[]).unwrap(), canonical);
         }
+        assert_eq!(
+            JEV_RECENT_CHANGES,
+            std::fs::read_to_string(root.join("exomonad-jev/references/recent-changes.md"))
+                .unwrap(),
+        );
+    }
+
+    #[test]
+    fn skill_documents_are_local_exact_and_refuse_arbitrary_paths() {
+        assert_eq!(
+            workbench_doc("jev", &[]).unwrap(),
+            workbench_doc("exomonad-jev", &[]).unwrap()
+        );
+        assert_eq!(
+            workbench_doc("exomonad-jev/references/recent-changes.md", &[]).unwrap(),
+            JEV_RECENT_CHANGES
+        );
+        for topic in [
+            "../config.toml",
+            "exomonad-jev/../SKILL.md",
+            "exomonad-jev/SKILL.md",
+            "exomonad-missing",
+            "/etc/passwd",
+        ] {
+            assert!(workbench_doc(topic, &[]).is_err(), "{topic}");
+        }
+        assert!(workbench_doc("topics", &[])
+            .unwrap()
+            .contains("doc <skill-name>"));
     }
 
     #[test]

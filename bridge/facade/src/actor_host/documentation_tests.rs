@@ -1338,6 +1338,107 @@ async fn published_lookup_and_reflect_examples_preserve_boundary_results() {
         .await;
 }
 
+
+fn configure_persona_skill_workspace(config: &mut ActorHostConfig, helper: bool) {
+    let authored = config.workspace.join(".exomonad");
+    std::fs::create_dir_all(authored.join("Persona")).unwrap();
+    std::fs::write(
+        authored.join("Persona/Spec.hs"),
+        tidepool_testing::fixture_source("exomonad/examples/persona/.exomonad/Persona/Spec.hs"),
+    )
+    .unwrap();
+    let spec = tidepool_testing::fixture_source("exomonad/examples/persona/.exomonad/AgentSpec.hs");
+    std::fs::write(authored.join("AgentSpec.hs"), spec).unwrap();
+    let outside = config.workspace.join(".agents/skills/exomonad-jev");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("SKILL.md"), "outside the state root").unwrap();
+    crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+        project.haskell.source_roots = vec![".".into()];
+        project.haskell.modules = vec!["Persona.Spec".into()];
+        project.haskell.spec = Some(if helper {
+            "Persona.Spec.helperSpec".into()
+        } else {
+            "AgentSpec.agentSpec".into()
+        });
+    });
+    super::test_campaign::commit_workspace(&config.workspace);
+    std::fs::create_dir_all(authored.join("state")).unwrap();
+    std::fs::write(authored.join("state/probe.md"), "state marker").unwrap();
+    config.workspace_inputs = Some(
+        crate::exomonad::workspace::FrozenWorkspace::load(
+            &config.workspace,
+            config.run_directory.path(),
+        )
+        .unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn persona_and_helper_lookup_deliver_pinned_skills_with_state_files_confined() {
+    let expected = [
+        include_str!("../../../../.exomonad/workspace/skills/exomonad-jev/SKILL.md"),
+        include_str!("../../../../.exomonad/workspace/skills/exomonad-agent-work/SKILL.md"),
+        include_str!("../../../../.exomonad/workspace/skills/exomonad-workbench/SKILL.md"),
+        include_str!("../../../../.exomonad/workspace/skills/exomonad-cleanup/SKILL.md"),
+        include_str!("../../../../.exomonad/workspace/skills/exomonad-project-work/SKILL.md"),
+        include_str!("../../../../.exomonad/workspace/skills/exomonad-review/SKILL.md"),
+        include_str!("../../../../.exomonad/workspace/skills/exomonad-command/SKILL.md"),
+        include_str!("../../../../.exomonad/workspace/skills/exomonad-define-actors/SKILL.md"),
+        include_str!("../../../../.exomonad/workspace/skills/exomonad-agent-spec/SKILL.md"),
+        include_str!("../../../../.exomonad/workspace/skills/exomonad-jev/SKILL.md"),
+        include_str!(
+            "../../../../.exomonad/workspace/skills/exomonad-jev/references/recent-changes.md"
+        ),
+    ];
+    for helper in [false, true] {
+        let campaign = TestCampaign::start_with_config(
+            |admission| admission,
+            |config| configure_persona_skill_workspace(config, helper),
+        )
+        .await;
+        campaign
+            .run_scenario(|campaign| {
+                Box::pin(async move {
+                    let policy = campaign.root_installation.policy.clone();
+                    let shown = displayed(
+                        campaign,
+                        policy.as_ref(),
+                        &tidepool_testing::fixture_source(
+                            "bridge/facade/src/actor_host/persona_skill_lookup.hs",
+                        ),
+                    )
+                    .await;
+                    let received: serde_json::Value = serde_json::from_str(
+                        explicit_display_output(&shown)["text"].as_str().unwrap(),
+                    )
+                    .unwrap();
+                    let docs = received["documents"].as_array().unwrap();
+                    assert_eq!(docs.len(), expected.len() + 2, "helper={helper}");
+                    for (actual, canonical) in docs.iter().zip(expected) {
+                        assert_eq!(
+                            actual[0].as_u64(),
+                            Some(canonical.chars().count() as u64),
+                            "helper={helper}"
+                        );
+                        assert_eq!(
+                            actual[1].as_str(),
+                            Some(canonical.chars().take(256).collect::<String>().as_str()),
+                            "helper={helper}"
+                        );
+                    }
+                    assert!(docs[expected.len()..]
+                        .iter()
+                        .all(serde_json::Value::is_null));
+                    assert_eq!(
+                        received["files_confined"], true,
+                        "helper={helper}: {received}"
+                    );
+                })
+            })
+            .await;
+    }
+}
+
 #[tokio::test]
 async fn activation_presents_prose_and_preserves_exact_inputs() {
     let campaign = TestCampaign::start().await;

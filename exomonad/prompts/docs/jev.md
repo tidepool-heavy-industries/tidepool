@@ -1,5 +1,5 @@
 # Jev
 
-For current Jev concepts, syntax, policies, examples and failure handling, use
-the canonical [Jev skill](../../examples/workspace/.exomonad/skills/exomonad-jev/SKILL.md).
-This topic intentionally does not duplicate that reference.
+Read the canonical bundled Jev skill with `doc exomonad-jev`.
+Its compiled continuation reference is available with
+`doc exomonad-jev/references/recent-changes.md`.

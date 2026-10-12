@@ -952,6 +952,16 @@ tidepool_rust_isolated_test(
 rust_filegroup(
     name = "tidepool_unit_tests_sources",
     mapped_srcs = {
+        "//:actor_skill_exomonad_agent_spec": ".exomonad/workspace/skills/exomonad-agent-spec/SKILL.md",
+        "//:facade_doc__exomonad_workspace_skills_exomonad_agent_work_SKILL_md": ".exomonad/workspace/skills/exomonad-agent-work/SKILL.md",
+        "//:actor_skill_exomonad_cleanup": ".exomonad/workspace/skills/exomonad-cleanup/SKILL.md",
+        "//:actor_skill_exomonad_command": ".exomonad/workspace/skills/exomonad-command/SKILL.md",
+        "//:actor_skill_exomonad_define_actors": ".exomonad/workspace/skills/exomonad-define-actors/SKILL.md",
+        "//:facade_doc__exomonad_workspace_skills_exomonad_jev_SKILL_md": ".exomonad/workspace/skills/exomonad-jev/SKILL.md",
+        "//:facade_doc__exomonad_workspace_skills_exomonad_jev_references_recent_changes_md": ".exomonad/workspace/skills/exomonad-jev/references/recent-changes.md",
+        "//:actor_skill_exomonad_project_work": ".exomonad/workspace/skills/exomonad-project-work/SKILL.md",
+        "//:actor_skill_exomonad_review": ".exomonad/workspace/skills/exomonad-review/SKILL.md",
+        "//:facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md": ".exomonad/workspace/skills/exomonad-workbench/SKILL.md",
         "//bridge/atomic-write:directory_fault_fixture": "bridge/atomic-write/tests/fixtures/directory_fault.c",
         "Cargo.toml": "bridge/facade/Cargo.toml",
         "src/actor_host.rs": "bridge/facade/src/actor_host.rs",
@@ -4388,6 +4398,13 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f6f70657261746f725f726571756573742e6873",
     src = "src/actor_host/operator_request.hs",
     out = "operator_request.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f706572736f6e615f736b696c6c5f6c6f6f6b75702e6873",
+    src = "src/actor_host/persona_skill_lookup.hs",
+    out = "persona_skill_lookup.hs",
     visibility = ["PUBLIC"],
 )
 

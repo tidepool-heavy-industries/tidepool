@@ -25,6 +25,13 @@ export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_jev_reference
 export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_agent_work_SKILL_md", src = ".exomonad/workspace/skills/exomonad-agent-work/SKILL.md", visibility = ["PUBLIC"])
 export_file(name = "facade_doc__exomonad_workspace_skills_exomonad_workbench_SKILL_md", src = ".exomonad/workspace/skills/exomonad-workbench/SKILL.md", visibility = ["PUBLIC"])
 
+export_file(name = "actor_skill_exomonad_cleanup", src = ".exomonad/workspace/skills/exomonad-cleanup/SKILL.md", visibility = ["PUBLIC"])
+export_file(name = "actor_skill_exomonad_project_work", src = ".exomonad/workspace/skills/exomonad-project-work/SKILL.md", visibility = ["PUBLIC"])
+export_file(name = "actor_skill_exomonad_review", src = ".exomonad/workspace/skills/exomonad-review/SKILL.md", visibility = ["PUBLIC"])
+export_file(name = "actor_skill_exomonad_command", src = ".exomonad/workspace/skills/exomonad-command/SKILL.md", visibility = ["PUBLIC"])
+export_file(name = "actor_skill_exomonad_define_actors", src = ".exomonad/workspace/skills/exomonad-define-actors/SKILL.md", visibility = ["PUBLIC"])
+export_file(name = "actor_skill_exomonad_agent_spec", src = ".exomonad/workspace/skills/exomonad-agent-spec/SKILL.md", visibility = ["PUBLIC"])
+
 export_file(name = "test_fixture_manifest", src = "build/test-fixtures.json", visibility = ["PUBLIC"])
 
 export_file(name = "workspace_clippy", src = ".clippy.toml", visibility = ["PUBLIC"])
