@@ -502,7 +502,7 @@ impl InvocationWork {
         .map_err(CommandError::CommandUnavailable)?
     }
 
-    pub(super) fn transfer_command_to_run(
+    pub(super) async fn transfer_command_to_run(
         &self,
         jobs: &CommandJobs,
         kernel: &KernelContext,
@@ -512,17 +512,21 @@ impl InvocationWork {
         if caller != self.owner {
             return Err(CommandError::CommandUnauthorized);
         }
-        self.with_admission_state(|state| {
-            if !state.commands.iter().any(|command| command == id) {
-                return Err(CommandError::CommandUnauthorized);
-            }
-            jobs.transfer_cleanup_owner_in_context(
+        let transfer = jobs
+            .reserve_cleanup_owner_transfer(
                 kernel,
                 caller,
                 id,
                 &self.resource_cleanup_owner(),
                 ResourceCleanupOwner::Run,
-                |probe| {
+            )
+            .await?;
+        let (_, completion) = self
+            .with_admission_state(|state| {
+                if !state.commands.iter().any(|command| command == id) {
+                    return Err(CommandError::CommandUnauthorized);
+                }
+                transfer.publish(|probe| {
                     state
                         .commands
                         .retain(|job| job != id && probe != Some(job.as_str()));
@@ -530,13 +534,13 @@ impl InvocationWork {
                     if let Some(probe) = probe {
                         state.detached_commands.insert(probe.into());
                     }
-                },
-            )
-        })
-        .map_err(CommandError::CommandUnavailable)?
+                })
+            })
+            .map_err(CommandError::CommandUnavailable)??;
+        completion.await
     }
 
-    pub(super) fn adopt_run_command(
+    pub(super) async fn adopt_run_command(
         &self,
         jobs: &CommandJobs,
         kernel: &KernelContext,
@@ -546,14 +550,18 @@ impl InvocationWork {
         if caller != self.owner {
             return Err(CommandError::CommandUnauthorized);
         }
-        self.with_admission_state(|state| {
-            jobs.transfer_cleanup_owner_in_context(
+        let transfer = jobs
+            .reserve_cleanup_owner_transfer(
                 kernel,
                 caller,
                 id,
                 &ResourceCleanupOwner::Run,
                 self.resource_cleanup_owner(),
-                |probe| {
+            )
+            .await?;
+        let (_, completion) = self
+            .with_admission_state(|state| {
+                transfer.publish(|probe| {
                     if !state.commands.iter().any(|job| job == id) {
                         state.commands.push(id.into());
                     }
@@ -566,10 +574,10 @@ impl InvocationWork {
                     if let Some(probe) = probe {
                         state.detached_commands.remove(probe);
                     }
-                },
-            )
-        })
-        .map_err(CommandError::CommandUnavailable)?
+                })
+            })
+            .map_err(CommandError::CommandUnavailable)??;
+        completion.await
     }
 
     pub(super) fn transfer_command_to_actor(

@@ -17,6 +17,64 @@ use tokio::sync::{oneshot, watch};
 
 mod discard_hold;
 
+/// Exact command/probe custody captured before run-owner admission.
+pub(crate) struct CommandCleanupTransfer {
+    command: Arc<Shared>,
+    probe: Option<String>,
+    owners: Vec<Arc<Shared>>,
+    caller: ActorRef,
+    expected: ResourceCleanupOwner,
+    destination: ResourceCleanupOwner,
+    reservation: Option<crate::local_actor::run_control::ResourceTransferReservation>,
+}
+
+impl CommandCleanupTransfer {
+    /// Publish local membership and submit irreversible run-custody completion
+    /// before returning. No local guard survives the completion future.
+    pub(crate) fn publish<T>(
+        self,
+        publish_membership: impl FnOnce(Option<&str>) -> T,
+    ) -> Result<(T, BoxFuture<'static, Result<(), CommandError>>), CommandError> {
+        let result = {
+            let probe = self.command.source_probe.lock();
+            if *probe != self.probe {
+                return Err(CommandError::CommandUnauthorized);
+            }
+            let mut authority = Vec::new();
+            let mut membership = Vec::new();
+            for owner in &self.owners {
+                let actor = owner.owner.lock();
+                if *actor != self.caller {
+                    return Err(CommandError::CommandUnauthorized);
+                }
+                authority.push(actor);
+                let marker = owner.cleanup_owner.lock();
+                if *marker != self.expected {
+                    return Err(CommandError::CommandUnauthorized);
+                }
+                membership.push(marker);
+            }
+            let result = publish_membership(probe.as_deref());
+            for marker in &mut membership {
+                **marker = self.destination.clone();
+            }
+            result
+        };
+        let completion: BoxFuture<'static, Result<(), CommandError>> = match self.reservation {
+            Some(reservation) => {
+                let completion = reservation.commit();
+                Box::pin(async move {
+                    completion
+                        .await
+                        .map_err(|error| CommandError::CommandUnavailable(error.to_string()))
+                })
+            }
+            None => Box::pin(async { Ok(()) }),
+        };
+        Ok((result, completion))
+    }
+}
+
 /// Bound on a single native-backend call reached from inside an actor's one
 /// active turn: cancellation acknowledgement and cleanup confirmation both use
 /// this so an unresponsive backend cannot freeze the actor indefinitely.
@@ -671,8 +729,7 @@ impl CommandJobs {
         Ok(owner)
     }
 
-    /// Called under both cleanup owners' admission gates. One registry fence
-    /// moves the command and its source probe with the membership callback.
+    /// Move actor-local cleanup membership without run-custody changes.
     pub(crate) fn transfer_cleanup_owner<T>(
         &self,
         caller: ActorRef,
@@ -681,51 +738,53 @@ impl CommandJobs {
         destination: ResourceCleanupOwner,
         publish_membership: impl FnOnce(Option<&str>) -> T,
     ) -> Result<T, CommandError> {
-        self.transfer_cleanup_owner_internal(
-            None,
-            caller,
-            id,
-            expected,
-            destination,
-            publish_membership,
-        )
+        if *expected == ResourceCleanupOwner::Run || destination == ResourceCleanupOwner::Run {
+            return Err(CommandError::CommandUnavailable(
+                "run transfer requires a resource-owner reservation".into(),
+            ));
+        }
+        let (transfer, _) = self.capture_cleanup_transfer(caller, id, expected, destination)?;
+        let (result, _) = transfer.publish(publish_membership)?;
+        Ok(result)
     }
 
-    pub(crate) fn transfer_cleanup_owner_in_context<T>(
+    pub(crate) async fn reserve_cleanup_owner_transfer(
         &self,
         kernel: &KernelContext,
         caller: ActorRef,
         id: &str,
         expected: &ResourceCleanupOwner,
         destination: ResourceCleanupOwner,
-        publish_membership: impl FnOnce(Option<&str>) -> T,
-    ) -> Result<T, CommandError> {
+    ) -> Result<CommandCleanupTransfer, CommandError> {
         if kernel.identity() != caller {
             return Err(CommandError::CommandUnauthorized);
         }
-        self.transfer_cleanup_owner_internal(
-            Some(kernel),
-            caller,
-            id,
-            expected,
-            destination,
-            publish_membership,
-        )
+        let (mut transfer, cells) =
+            self.capture_cleanup_transfer(caller, id, expected, destination)?;
+        let source_run = transfer.expected == ResourceCleanupOwner::Run;
+        let destination_run = transfer.destination == ResourceCleanupOwner::Run;
+        if source_run || destination_run {
+            transfer.reservation = Some(
+                kernel
+                    .reserve_resource_lifetime_transfer(&cells, source_run, destination_run)
+                    .await
+                    .map_err(CommandError::CommandUnavailable)?,
+            );
+        }
+        Ok(transfer)
     }
 
-    fn transfer_cleanup_owner_internal<T>(
+    fn capture_cleanup_transfer(
         &self,
-        kernel: Option<&KernelContext>,
         caller: ActorRef,
         id: &str,
         expected: &ResourceCleanupOwner,
         destination: ResourceCleanupOwner,
-        publish_membership: impl FnOnce(Option<&str>) -> T,
-    ) -> Result<T, CommandError> {
+    ) -> Result<(CommandCleanupTransfer, Vec<ractor::ActorCell>), CommandError> {
         let command = self.shared(id)?;
-        let probe_id = command.source_probe.lock();
+        let probe = command.source_probe.lock().clone();
         let mut owners = vec![(id.to_owned(), command.clone())];
-        if let Some(probe) = probe_id.as_ref() {
+        if let Some(probe) = &probe {
             owners.push((probe.clone(), self.shared(probe)?));
         }
         owners.sort_by(|(left, _), (right, _)| left.cmp(right));
@@ -746,40 +805,18 @@ impl CommandJobs {
                 })
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let mut authority = Vec::new();
-        let mut membership = Vec::new();
-        for (_, owner) in &owners {
-            let actor = owner.owner.lock();
-            if *actor != caller {
-                return Err(CommandError::CommandUnauthorized);
-            }
-            authority.push(actor);
-            let marker = owner.cleanup_owner.lock();
-            if &*marker != expected {
-                return Err(CommandError::CommandUnauthorized);
-            }
-            membership.push(marker);
-        }
-        let source_run = *expected == ResourceCleanupOwner::Run;
-        let destination_run = destination == ResourceCleanupOwner::Run;
-        let result = if source_run || destination_run {
-            let kernel = kernel.ok_or_else(|| {
-                CommandError::CommandUnavailable(
-                    "run transfer requires its actor resource owner".into(),
-                )
-            })?;
-            kernel
-                .with_resource_lifetime_transfer(&cells, source_run, destination_run, || {
-                    Ok::<_, CommandError>(publish_membership(probe_id.as_deref()))
-                })
-                .map_err(CommandError::CommandUnavailable)??
-        } else {
-            publish_membership(probe_id.as_deref())
-        };
-        for marker in &mut membership {
-            **marker = destination.clone();
-        }
-        Ok(result)
+        Ok((
+            CommandCleanupTransfer {
+                command,
+                probe,
+                owners: owners.into_iter().map(|(_, owner)| owner).collect(),
+                caller,
+                expected: expected.clone(),
+                destination,
+                reservation: None,
+            },
+            cells,
+        ))
     }
 
     /// Replace a job's settlement with a newly reserved request, after the

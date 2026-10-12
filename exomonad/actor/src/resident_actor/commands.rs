@@ -41,6 +41,21 @@ struct CommandRetention {
     destination_run: bool,
 }
 
+async fn commit_cleanup_transfer(
+    jobs: &crate::command_jobs::CommandJobs,
+    kernel: &KernelContext,
+    caller: ActorRef,
+    id: &str,
+    expected: &ResourceCleanupOwner,
+    destination: ResourceCleanupOwner,
+) -> Result<(), CommandError> {
+    let transfer = jobs
+        .reserve_cleanup_owner_transfer(kernel, caller, id, expected, destination)
+        .await?;
+    let ((), completion) = transfer.publish(|_| ())?;
+    completion.await
+}
+
 impl CommandRetention {
     async fn commit(self) -> Result<(), CommandError> {
         let Self {
@@ -58,15 +73,22 @@ impl CommandRetention {
             // grants. Until then, retirement still belongs to the old owner.
             jobs.supplied(&id).await?;
             return match source {
-                Some(source) => source.transfer_command_to_run(&jobs, &kernel, caller, &id),
-                None => jobs.transfer_cleanup_owner_in_context(
-                    &kernel,
-                    caller,
-                    &id,
-                    &marker,
-                    ResourceCleanupOwner::Run,
-                    |_| (),
-                ),
+                Some(source) => {
+                    source
+                        .transfer_command_to_run(&jobs, &kernel, caller, &id)
+                        .await
+                }
+                None => {
+                    commit_cleanup_transfer(
+                        &jobs,
+                        &kernel,
+                        caller,
+                        &id,
+                        &marker,
+                        ResourceCleanupOwner::Run,
+                    )
+                    .await
+                }
             };
         }
         match (source, destination) {
@@ -75,17 +97,22 @@ impl CommandRetention {
             }
             (Some(source), None) => source.transfer_command_to_actor(&jobs, caller, &id),
             (None, Some(destination)) if marker == ResourceCleanupOwner::Run => {
-                destination.adopt_run_command(&jobs, &kernel, caller, &id)
+                destination
+                    .adopt_run_command(&jobs, &kernel, caller, &id)
+                    .await
             }
             (None, Some(destination)) => destination.adopt_actor_command(&jobs, caller, &id),
-            (None, None) => jobs.transfer_cleanup_owner_in_context(
-                &kernel,
-                caller,
-                &id,
-                &marker,
-                ResourceCleanupOwner::Actor,
-                |_| (),
-            ),
+            (None, None) => {
+                commit_cleanup_transfer(
+                    &jobs,
+                    &kernel,
+                    caller,
+                    &id,
+                    &marker,
+                    ResourceCleanupOwner::Actor,
+                )
+                .await
+            }
         }
     }
 }
@@ -162,14 +189,17 @@ where
                                 .await;
                         if let Ok(id) = &result {
                             let transfer = match environment.commands.supplied(id).await {
-                                Ok(()) => environment.commands.transfer_cleanup_owner_in_context(
-                                    &kernel,
-                                    context.actor,
-                                    id,
-                                    &ResourceCleanupOwner::Actor,
-                                    ResourceCleanupOwner::Run,
-                                    |_| (),
-                                ),
+                                Ok(()) => {
+                                    commit_cleanup_transfer(
+                                        &environment.commands,
+                                        &kernel,
+                                        context.actor,
+                                        id,
+                                        &ResourceCleanupOwner::Actor,
+                                        ResourceCleanupOwner::Run,
+                                    )
+                                    .await
+                                }
                                 Err(error) => Err(error),
                             };
                             if let Err(error) = transfer {

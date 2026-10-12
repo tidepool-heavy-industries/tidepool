@@ -351,6 +351,7 @@ async fn run_owned_command_and_probe_survive_actor_retirement_until_run_cleanup(
     scope.register_command_with_jobs(jobs, &job).unwrap();
     scope
         .transfer_command_to_run(jobs, &fixture.kernel, owner, &job)
+        .await
         .unwrap();
     fixture.cleanup(&work).await;
     let retired = fixture
@@ -408,10 +409,12 @@ async fn run_command_can_return_to_scope_and_refused_transfer_keeps_run_attachme
     target.register_command_with_jobs(jobs, &job).unwrap();
     target
         .transfer_command_to_run(jobs, &fixture.kernel, owner, &job)
+        .await
         .unwrap();
     closed.close();
     assert!(closed
         .adopt_run_command(jobs, &fixture.kernel, owner, &job)
+        .await
         .is_err());
     assert_eq!(
         jobs.cleanup_owner(owner, &job).unwrap(),
@@ -420,6 +423,7 @@ async fn run_command_can_return_to_scope_and_refused_transfer_keeps_run_attachme
     assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
     target
         .adopt_run_command(jobs, &fixture.kernel, owner, &job)
+        .await
         .unwrap();
     assert_eq!(
         jobs.cleanup_owner(owner, &job).unwrap(),
@@ -449,6 +453,7 @@ async fn closed_run_refuses_command_transfer_without_detaching_actor_cleanup() {
     fixture.directory.close_run_admission().await;
     assert!(work
         .transfer_command_to_run(jobs, &fixture.kernel, owner, &job)
+        .await
         .is_err());
     assert_eq!(
         jobs.cleanup_owner(owner, &job).unwrap(),
