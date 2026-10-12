@@ -192,6 +192,9 @@ pub(super) struct RootDelivery {
     accepted: oneshot::Sender<()>,
 }
 impl RootDelivery {
+    pub(super) fn is_error(&self) -> bool {
+        self.outcome.is_err()
+    }
     pub(super) fn accept(self) -> RootOperationResult {
         let _ = self.accepted.send(());
         self.outcome

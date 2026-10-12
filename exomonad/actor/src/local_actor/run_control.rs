@@ -232,6 +232,7 @@ pub(super) enum RunFinalizationTargets {
 }
 
 pub(crate) struct ActorReservation {
+    cleanup_only: bool,
     parent_admission: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
     identity: ActorRef,
     lifecycle: crate::kernel::LifecycleHandle,
@@ -240,6 +241,9 @@ pub(crate) struct ActorReservation {
     armed: bool,
 }
 impl ActorReservation {
+    pub(crate) fn cleanup_only(&self) -> bool {
+        self.cleanup_only
+    }
     pub(crate) fn retain_parent_admission(
         &mut self,
         lease: crate::kernel::lifecycle::ActorAdmissionLease,
@@ -282,6 +286,7 @@ impl Drop for ActorReservation {
     }
 }
 enum ReservationPurpose {
+    CleanupOnly,
     Root,
     Worker { parent: ActorRef },
     Replacement { predecessor: ActorRef },
@@ -309,6 +314,10 @@ enum ResourceRetirement {
     Requested,
     Running,
     Settled(crate::CleanupComponentOutcome),
+}
+enum PreparationIntent {
+    Creation,
+    ExistingInput,
 }
 enum PreparationPhase {
     Running,
@@ -673,6 +682,7 @@ pub(super) enum RunControlMessage {
         reply: oneshot::Sender<()>,
     },
     BeginPreparation {
+        intent: PreparationIntent,
         operation: RootOperation,
         reply: oneshot::Sender<Result<oneshot::Receiver<RootDelivery>, DirectoryError>>,
     },
@@ -694,6 +704,10 @@ pub(super) enum RunControlMessage {
     },
     ObservePreparations {
         reply: oneshot::Sender<crate::CleanupComponentOutcome>,
+    },
+    ReserveExistingInput {
+        incarnation: crate::Incarnation,
+        reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
     },
     Reserve {
         incarnation: crate::Incarnation,
@@ -1556,12 +1570,19 @@ impl Actor for RunControl {
                 state.preparation_supervisor = Some(supervisor);
                 let _ = reply.send(());
             }
-            RunControlMessage::BeginPreparation { operation, reply } => {
+            RunControlMessage::BeginPreparation {
+                intent,
+                operation,
+                reply,
+            } => {
                 let Some(supervisor) = state.preparation_supervisor.as_ref() else {
                     let _ = reply.send(Err(DirectoryError::Unavailable));
                     return Ok(());
                 };
-                if state.phase != RunPhase::Running {
+                if state.phase != RunPhase::Running
+                    && !(matches!(intent, PreparationIntent::ExistingInput)
+                        && state.phase == RunPhase::RetiringPreparations)
+                {
                     let _ = reply.send(Err(DirectoryError::Closed));
                     return Ok(());
                 }
@@ -1646,7 +1667,8 @@ impl Actor for RunControl {
                     match lifecycle {
                         Ok(lifecycle) => {
                             record.lifecycle = Some(lifecycle.clone());
-                            if state.phase != RunPhase::Running
+                            if (state.phase != RunPhase::Running
+                                && !matches!(record.purpose, ReservationPurpose::CleanupOnly))
                                 || matches!(
                                     record.phase,
                                     ReservationPhase::Abandoned | ReservationPhase::Abandoning
@@ -1661,6 +1683,10 @@ impl Actor for RunControl {
                                 record.phase = ReservationPhase::Ready;
                                 if let Some(reply) = record.reply.take() {
                                     let _ = reply.send(Ok(ActorReservation {
+                                        cleanup_only: matches!(
+                                            record.purpose,
+                                            ReservationPurpose::CleanupOnly
+                                        ),
                                         parent_admission: None,
                                         identity: actor,
                                         terminal: record.terminal.clone(),
@@ -1706,6 +1732,30 @@ impl Actor for RunControl {
                     if let Some(lifecycle) = &record.lifecycle {
                         lifecycle.close_abandoned();
                     }
+                }
+            }
+            RunControlMessage::ReserveExistingInput { incarnation, reply } => {
+                if !matches!(
+                    state.phase,
+                    RunPhase::Running | RunPhase::RetiringPreparations
+                ) {
+                    let _ = reply.send(Err(DirectoryError::Closed));
+                } else {
+                    let actor = loop {
+                        let id = crate::ActorId(NEXT_ACTOR_ID.fetch_add(1, Ordering::Relaxed));
+                        if !state.identities.fenced.contains(&id)
+                            && !state.identities.claimed.contains_key(&id)
+                        {
+                            break ActorRef { id, incarnation };
+                        }
+                    };
+                    state.identities.claimed.insert(actor.id, actor);
+                    let purpose = if state.phase == RunPhase::Running {
+                        ReservationPurpose::Root
+                    } else {
+                        ReservationPurpose::CleanupOnly
+                    };
+                    begin_reservation(state, actor, purpose, reply);
                 }
             }
             RunControlMessage::Reserve { incarnation, reply } => {
@@ -2382,15 +2432,51 @@ impl RunControlClient {
         operation: RootOperation,
     ) -> Result<RootOperationResult, DirectoryError> {
         let receiver = self
-            .ask(|reply| RunControlMessage::BeginPreparation { operation, reply })
+            .ask(|reply| RunControlMessage::BeginPreparation {
+                intent: PreparationIntent::Creation,
+                operation,
+                reply,
+            })
             .await??;
         let delivery = receiver.await.map_err(|_| DirectoryError::Unavailable)?;
+        if delivery.is_error() {
+            return Ok(delivery.accept());
+        }
         self.ask(|reply| RunControlMessage::AcceptPreparation {
             id: delivery.id,
             reply,
         })
         .await??;
         Ok(delivery.accept())
+    }
+    pub(crate) async fn prepare_existing_input(
+        &self,
+        operation: RootOperation,
+    ) -> Result<RootOperationResult, DirectoryError> {
+        let receiver = self
+            .ask(|reply| RunControlMessage::BeginPreparation {
+                intent: PreparationIntent::ExistingInput,
+                operation,
+                reply,
+            })
+            .await??;
+        let delivery = receiver.await.map_err(|_| DirectoryError::Unavailable)?;
+        if delivery.is_error() {
+            return Ok(delivery.accept());
+        }
+        self.ask(|reply| RunControlMessage::AcceptPreparation {
+            id: delivery.id,
+            reply,
+        })
+        .await??;
+        Ok(delivery.accept())
+    }
+    pub(crate) async fn reserve_existing_input(
+        &self,
+        incarnation: crate::Incarnation,
+    ) -> Result<ActorReservation, DirectoryError> {
+        self.ask(|reply| RunControlMessage::ReserveExistingInput { incarnation, reply })
+            .await?
     }
     pub(crate) async fn settle_preparations(
         &self,
