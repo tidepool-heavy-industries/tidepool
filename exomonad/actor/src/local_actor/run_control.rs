@@ -203,6 +203,7 @@ impl ReplacementIngressGrant {
 }
 
 pub(crate) struct ActorReservation {
+    parent_admission: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
     identity: ActorRef,
     lifecycle: crate::kernel::LifecycleHandle,
     terminal: RetainedActorExit,
@@ -210,6 +211,21 @@ pub(crate) struct ActorReservation {
     armed: bool,
 }
 impl ActorReservation {
+    pub(crate) fn retain_parent_admission(
+        &mut self,
+        lease: crate::kernel::lifecycle::ActorAdmissionLease,
+    ) {
+        assert!(
+            self.parent_admission.is_none(),
+            "actor reservation already retains its parent admission"
+        );
+        self.parent_admission = Some(lease);
+    }
+    pub(crate) fn take_parent_admission(
+        &mut self,
+    ) -> Option<crate::kernel::lifecycle::ActorAdmissionLease> {
+        self.parent_admission.take()
+    }
     pub(crate) fn identity(&self) -> ActorRef {
         self.identity
     }
@@ -1405,6 +1421,7 @@ impl Actor for RunControl {
                                 record.phase = ReservationPhase::Ready;
                                 if let Some(reply) = record.reply.take() {
                                     let _ = reply.send(Ok(ActorReservation {
+                                        parent_admission: None,
                                         identity: actor,
                                         terminal: record.terminal.clone(),
                                         lifecycle,
@@ -1675,6 +1692,11 @@ pub struct RunControlClient {
     owner: RactorRef<RunControlMessage>,
 }
 impl RunControlClient {
+    #[cfg(test)]
+    pub(crate) async fn stop_owner_for_test(&self) {
+        self.owner.stop(None);
+        let _ = self.owner.get_cell().wait(Some(SHUTDOWN_BUDGET)).await;
+    }
     pub async fn start() -> Result<(Self, ractor::concurrency::JoinHandle<()>), ractor::SpawnErr> {
         let (owner, task) = Actor::spawn(None, RunControl, ()).await?;
         let (supervisor, supervisor_task) =

@@ -42,22 +42,28 @@ pub(crate) struct ResourceTransferReservation {
     pub(super) parent_lease: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
 }
 impl ResourceTransferReservation {
-    pub(crate) fn commit(
+    pub(crate) fn try_commit(
         mut self,
-    ) -> futures_util::future::BoxFuture<'static, Result<(), DirectoryError>> {
+    ) -> Result<futures_util::future::BoxFuture<'static, Result<(), DirectoryError>>, DirectoryError>
+    {
         let (reply, receiver) = oneshot::channel();
-        let sent = self
-            .owner
-            .send_message(RunControlMessage::CommitResourceTransfer { id: self.id, reply });
-        if sent.is_ok() {
-            self.armed = false;
-        }
-        Box::pin(async move {
-            sent.map_err(|_| DirectoryError::Unavailable)?;
+        self.owner
+            .send_message(RunControlMessage::CommitResourceTransfer { id: self.id, reply })
+            .map_err(|_| DirectoryError::Unavailable)?;
+        self.armed = false;
+        Ok(Box::pin(async move {
             let result = receiver.await.map_err(|_| DirectoryError::Unavailable)?;
             drop(self);
             result
-        })
+        }))
+    }
+    pub(crate) fn commit(
+        self,
+    ) -> futures_util::future::BoxFuture<'static, Result<(), DirectoryError>> {
+        match self.try_commit() {
+            Ok(receipt) => receipt,
+            Err(error) => Box::pin(async move { Err(error) }),
+        }
     }
 }
 impl Drop for ResourceTransferReservation {
