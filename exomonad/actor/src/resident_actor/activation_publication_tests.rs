@@ -998,7 +998,7 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
 }
 
 fn registered_public_visibility(
-    machines: &ActorMachineRegistry,
+    machines: &ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>,
     context: &ActorSessionContext,
 ) -> tidepool_runtime::session::PublicVisibilitySnapshot {
     let (resident, receipt) = machines
