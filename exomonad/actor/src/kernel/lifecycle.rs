@@ -50,6 +50,8 @@ pub enum NativeSettlement {
 
 #[derive(Clone)]
 pub struct LifecycleSnapshot {
+    #[cfg(test)]
+    pub(crate) provider_initial: Option<(u64, resident::ProviderInitialTestStage)>,
     executor: Option<RactorRef<KernelMessage>>,
     pub owner_available: bool,
     source_forward: Option<LifecycleHandle>,
@@ -440,6 +442,8 @@ impl LifecycleHandle {
         supervisor: Option<ractor::ActorCell>,
     ) -> Result<Self, ractor::SpawnErr> {
         let (observations, observe) = watch::channel(LifecycleSnapshot {
+            #[cfg(test)]
+            provider_initial: None,
             executor: None,
             owner_available: true,
             source_forward: None,
@@ -819,18 +823,24 @@ impl LifecycleHandle {
             .map_err(|_| "idle retirement outcome unavailable".to_string())?
     }
 
+    pub(crate) fn unavailable_failure(&self) -> KernelCallFailure {
+        if self.terminal.get().is_some() {
+            KernelCallFailure::TargetExited(self.identity)
+        } else {
+            KernelCallFailure::TargetUnavailable(self.identity)
+        }
+    }
+
     fn send(&self, command: LifecycleCommand) -> Result<(), KernelCallFailure> {
         self.address
             .cast(command)
-            .map_err(|_| KernelCallFailure::TargetExited(self.identity))
+            .map_err(|_| self.unavailable_failure())
     }
     async fn receive<T>(
         &self,
         receive: tokio::sync::oneshot::Receiver<T>,
     ) -> Result<T, KernelCallFailure> {
-        receive
-            .await
-            .map_err(|_| KernelCallFailure::TargetExited(self.identity))
+        receive.await.map_err(|_| self.unavailable_failure())
     }
 }
 
@@ -892,6 +902,11 @@ impl LifecycleState {
 
     pub(super) fn publish(&self) {
         self.observations.send_replace(LifecycleSnapshot {
+            #[cfg(test)]
+            provider_initial: self
+                .resident
+                .as_ref()
+                .and_then(resident::provider_initial_pending_for_test),
             executor: self.executor.clone(),
             owner_available: self.owner_available,
             source_forward: self.source_forward.clone(),
@@ -991,7 +1006,13 @@ impl LifecycleState {
         };
         executor
             .cast(KernelMessage::Admitted(envelope))
-            .map_err(|_| KernelCallFailure::TargetExited(self.identity))
+            .map_err(|_| {
+                if self.terminal.get().is_some() {
+                    KernelCallFailure::TargetExited(self.identity)
+                } else {
+                    KernelCallFailure::TargetUnavailable(self.identity)
+                }
+            })
     }
 
     fn provider_error(&self) -> Option<NativeProviderStartError> {

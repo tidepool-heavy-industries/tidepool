@@ -7311,6 +7311,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lost_lifecycle_owner_does_not_claim_the_running_executor_exited() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        actor.lifecycle().stop_owner_for_test().await;
+        assert_eq!(actor.address().get_status(), ractor::ActorStatus::Running);
+        assert!(actor.terminal().get().is_none());
+        assert_eq!(
+            actor.lifecycle().transaction().await.err().unwrap(),
+            KernelCallFailure::TargetUnavailable(actor.identity()),
+        );
+        let caller = ActorRef::first(crate::ActorId(99));
+        assert_eq!(
+            actor
+                .call(
+                    caller,
+                    crate::CallAncestry::begin(caller),
+                    MailboxValue::probe(SessionId(1), Arc::new(AtomicUsize::new(0)))
+                )
+                .await
+                .err()
+                .unwrap(),
+            KernelCallFailure::TargetUnavailable(actor.identity()),
+        );
+        assert!(matches!(actor.seal_hosted_work().await,
+            Err(KernelInvocationFailure::CleanupUnconfirmed { actor: target, .. })
+                if target == actor.identity()));
+        assert!(
+            matches!(actor.shutdown(ActorTerminal::new(ActorExitKind::Cancelled, "owner unavailable")).await,
+            Err(KernelInvocationFailure::CleanupUnconfirmed { actor: target, .. })
+                if target == actor.identity())
+        );
+        assert!(actor.terminal().get().is_none());
+        actor.address().stop(None);
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lost_lifecycle_owner_preserves_the_actual_retained_executor_exit() {
+        let fixture = behavior(false);
+        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        actor
+            .shutdown(ActorTerminal::new(
+                ActorExitKind::Completed,
+                "actual retirement",
+            ))
+            .await
+            .unwrap();
+        task.await.unwrap();
+        assert!(actor.terminal().get().is_some());
+        actor.lifecycle().stop_owner_for_test().await;
+        assert_eq!(
+            actor.lifecycle().transaction().await.err().unwrap(),
+            KernelCallFailure::TargetExited(actor.identity())
+        );
+        assert!(matches!(actor.seal_hosted_work().await,
+            Err(KernelInvocationFailure::ActorExited(target)) if target == actor.identity()));
+    }
+
+    #[tokio::test]
     async fn lifecycle_is_shared_with_shutdown_and_releases_rejected_inputs() {
         let fixture = behavior(false);
         let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
