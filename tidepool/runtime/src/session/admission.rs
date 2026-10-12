@@ -85,28 +85,6 @@ impl RuntimeDurablePublicReadiness {
         Ok(())
     }
 
-    /// Admit a short synchronous native operation through this exact owner.
-    /// Preparation and asynchronous work must occur outside this closure.
-    pub fn with_admission<T>(&self, operation: impl FnOnce() -> T) -> Result<T, SessionError> {
-        let _attachment = self
-            .attachment
-            .upgrade()
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
-        let store = self
-            .store
-            .upgrade()
-            .ok_or(SessionError::WrongPublicManifestTicket)?;
-        let admission = store
-            .begin_native_transition()
-            .map_err(|error| SessionError::RecoveryStore(Box::new(error)))?;
-        if self.owner.epoch() != self.owner_epoch {
-            super::complete_native_transition(Some(admission))?;
-            return Err(SessionError::WrongPublicManifestTicket);
-        }
-        let result = operation();
-        super::complete_native_transition(Some(admission))?;
-        Ok(result)
-    }
     pub fn session(&self) -> super::SessionId {
         self.session
     }
