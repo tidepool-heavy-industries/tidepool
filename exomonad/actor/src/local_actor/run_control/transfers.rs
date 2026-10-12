@@ -5,6 +5,7 @@ pub(crate) struct WorkerTransferReservation {
     pub(super) id: u64,
     pub(super) owner: RactorRef<RunControlMessage>,
     pub(super) armed: bool,
+    pub(super) parent_lease: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
 }
 impl WorkerTransferReservation {
     pub(crate) async fn commit(mut self) -> Result<(), DirectoryError> {
@@ -30,6 +31,7 @@ pub(crate) struct ResourceTransferReservation {
     pub(super) id: u64,
     pub(super) owner: RactorRef<RunControlMessage>,
     pub(super) armed: bool,
+    pub(super) parent_lease: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
 }
 impl ResourceTransferReservation {
     pub(crate) async fn commit(mut self) -> Result<(), DirectoryError> {

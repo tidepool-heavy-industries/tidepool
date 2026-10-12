@@ -936,6 +936,7 @@ impl Actor for RunControl {
                             id,
                             owner: myself.clone(),
                             armed: true,
+                            parent_lease: None,
                         })
                     };
                 let _ = reply.send(result);
@@ -994,7 +995,7 @@ impl Actor for RunControl {
                         if matches!(resource.owner, ResourceOwner::Owned(_)) { resource.owner = ResourceOwner::Transfer { id, source }; resources.push(cell.get_id()); }
                     }
                     state.resource_transfers.insert(id, ResourceTransfer { source, destination, resources });
-                    Ok(ResourceTransferReservation { id, owner: myself.clone(), armed: true })
+                    Ok(ResourceTransferReservation { id, owner: myself.clone(), armed: true, parent_lease: None })
                 };
                 let _ = reply.send(result);
             }
@@ -1659,13 +1660,25 @@ impl RunControlClient {
         child: LocalActorRef,
         destination_run: bool,
     ) -> Result<WorkerTransferReservation, DirectoryError> {
-        self.ask(|reply| RunControlMessage::ReserveWorkerTransfer {
-            parent,
-            child,
-            destination_run,
-            reply,
-        })
-        .await?
+        let endpoint = self
+            .resolve(parent)
+            .await?
+            .ok_or(DirectoryError::Unauthorized { actor: parent })?;
+        let lease = endpoint
+            .lifecycle()
+            .resource_admission()
+            .await
+            .map_err(|_| DirectoryError::Unauthorized { actor: parent })?;
+        let mut reservation = self
+            .ask(|reply| RunControlMessage::ReserveWorkerTransfer {
+                parent,
+                child,
+                destination_run,
+                reply,
+            })
+            .await??;
+        reservation.parent_lease = Some(lease);
+        Ok(reservation)
     }
     pub(super) async fn reserve_resource_transfer(
         &self,
@@ -1674,14 +1687,26 @@ impl RunControlClient {
         source_run: bool,
         destination_run: bool,
     ) -> Result<ResourceTransferReservation, DirectoryError> {
-        self.ask(|reply| RunControlMessage::ReserveResourceTransfer {
-            parent,
-            cells,
-            source_run,
-            destination_run,
-            reply,
-        })
-        .await?
+        let endpoint = self
+            .resolve(parent)
+            .await?
+            .ok_or(DirectoryError::Unauthorized { actor: parent })?;
+        let lease = endpoint
+            .lifecycle()
+            .resource_admission()
+            .await
+            .map_err(|_| DirectoryError::Unauthorized { actor: parent })?;
+        let mut reservation = self
+            .ask(|reply| RunControlMessage::ReserveResourceTransfer {
+                parent,
+                cells,
+                source_run,
+                destination_run,
+                reply,
+            })
+            .await??;
+        reservation.parent_lease = Some(lease);
+        Ok(reservation)
     }
     pub(crate) async fn independent_roots(&self) -> Result<Vec<LocalActorRef>, DirectoryError> {
         self.ask(|reply| RunControlMessage::IndependentRoots { reply })
