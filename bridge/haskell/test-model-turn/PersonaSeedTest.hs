@@ -21,6 +21,7 @@ import qualified Tidepool.View as V
 import qualified Persona.Memory as M
 import qualified Persona.Web as W
 import qualified Persona.Spec as Spec
+import qualified Tidepool.Agent.Contract as Contract
 
 writeHost :: FsWrite a -> Eff '[State (Map.Map Text Text)] a
 writeHost (FsWrite file body) = modify (Map.insert file body) >> pure (Right ())
@@ -108,4 +109,16 @@ personaSeedTests = testGroup "persona seed"
       assertBool "default helper returns findings rather than writing shared memory or mounting human forms"
         ("FsWrite" `notElem` helper && "AskUser" `notElem` helper)
       Spec.agentSpec @ActorEffects `seq` Spec.helperSpec @ActorEffects `seq` pure ()
+  , testCase "startup seeds preserve authored order and distinguish absent from empty caller input" $ do
+      let first = Contract.contextSection "first" (Just "memory/a.md") "A"
+          second = Contract.contextSection "second" Nothing "B"
+      assertEqual "left identity" first (mempty <> first)
+      assertEqual "right identity" first (first <> mempty)
+      assertEqual "ordered append" "[first; source: memory/a.md]\nA\n\n[second]\nB"
+        (Contract.renderContextSeed (first <> second))
+      assertEqual "empty seed" "" (Contract.renderContextSeed mempty)
+      assertEqual "absent caller seed" (Success (Contract.StartupInput "operation" Nothing))
+        (fromJSON (object ["operation" .= ("operation" :: Text)]))
+      assertEqual "explicit empty caller seed" (Success (Contract.StartupInput "operation" (Just "")))
+        (fromJSON (object ["operation" .= ("operation" :: Text), "callerSeed" .= ("" :: Text)]))
   ]
