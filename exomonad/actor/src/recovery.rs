@@ -601,6 +601,10 @@ impl ActorRecoveryJournal {
         })??;
         Ok(journal)
     }
+    /// Exact process-local writer endpoint identity, independent of file names.
+    pub fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.identity, &other.identity)
+    }
     pub fn owner_status(&self) -> tokio::sync::watch::Receiver<JournalOwnerStatus> {
         self.status.clone()
     }
@@ -762,7 +766,7 @@ impl ActorRecoveryJournal {
         descriptor: &ActorDescriptor,
         launch_worktrees: &[String],
     ) -> std::io::Result<()> {
-        self.admit_with_startup(actor, descriptor, launch_worktrees, None)
+        self.admit_with_startup(actor, descriptor, launch_worktrees, None, None)
             .await
     }
     pub(crate) async fn admit_with_startup(
@@ -771,7 +775,16 @@ impl ActorRecoveryJournal {
         descriptor: &ActorDescriptor,
         launch_worktrees: &[String],
         startup: Option<RootStartupIntent>,
+        admission: Option<&crate::local_actor::run_control::RootStartupAdmission>,
     ) -> std::io::Result<()> {
+        if let Some(startup) = startup.as_ref() {
+            let permit = admission.ok_or_else(|| {
+                std::io::Error::other("startup journal admission requires its root owner permit")
+            })?;
+            permit
+                .validate_journal_admission(actor, startup, self)
+                .map_err(std::io::Error::other)?;
+        }
         let admission = DurableActorAdmission::capture(actor, descriptor, launch_worktrees);
         self.request(|reply| Command::Admit {
             admission,

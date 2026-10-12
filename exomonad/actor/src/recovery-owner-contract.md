@@ -35,3 +35,10 @@ exact actor, conversation, issuing journal and committed prefix. This ack only
 certifies journal evidence. The verified enclosing facade bind composition must
 confirm the native backend binding under the same lifecycle claim before issuing
 a distinct final settlement receipt; appending a journal row cannot issue it.
+
+Startup admission requires the sealed RunControl-issued RootStartupAdmission
+permit for the exact actor, predecessor option and journal endpoint. A live
+predecessor carries an owner-issued drain result; initial and recovered issuance
+are distinct. The permit remains held through journal acknowledgement. The root
+owner closes prior incarnation admission and settles its pending successor claim
+before admitting the next incarnation. Ordinary nonstartup admission is separate.
