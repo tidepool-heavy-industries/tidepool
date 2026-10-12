@@ -31,8 +31,8 @@ impl RootStartupRecoveryAuthority {
         if !self.boot.qualifies(predecessor, journal) {
             return Err(DirectoryError::Unauthorized { actor: predecessor });
         }
-        let run = self.boot.run.clone();
-        let root = self.boot.run_root.clone();
+        let run = self.boot.run_authority();
+        let root = self.boot.run_root().to_owned();
         let owns = tokio::task::spawn_blocking(move || run.owns_run(&root))
             .await
             .map_err(|_| DirectoryError::Unavailable)?

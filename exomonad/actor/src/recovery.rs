@@ -430,11 +430,17 @@ pub trait RecoveryBootRegistration: Send + Sync {
 pub struct JournalBootRegistration {
     issuer: Arc<()>,
     actors: Vec<ActorRef>,
-    pub(crate) run_root: PathBuf,
-    pub(crate) run: Arc<dyn tidepool_runtime::session::RecoveryRunAuthority>,
+    run_root: PathBuf,
+    run: Arc<dyn tidepool_runtime::session::RecoveryRunAuthority>,
 }
 
 impl JournalBootRegistration {
+    pub(crate) fn run_authority(&self) -> Arc<dyn tidepool_runtime::session::RecoveryRunAuthority> {
+        self.run.clone()
+    }
+    pub(crate) fn run_root(&self) -> &Path {
+        &self.run_root
+    }
     pub(crate) fn qualifies(&self, actor: ActorRef, journal: &ActorRecoveryJournal) -> bool {
         Arc::ptr_eq(&self.issuer, &journal.identity) && self.actors.contains(&actor)
     }
