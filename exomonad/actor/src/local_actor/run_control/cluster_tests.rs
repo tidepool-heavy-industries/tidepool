@@ -93,7 +93,7 @@ proptest::proptest! {
                             if let Some(observer) = observers[slot].take() { observer.abort(); dropped_observers.push(observer); }
                             let client = control.clone();
                             observers[slot] = Some(tokio::spawn(async move {
-                                assert!(matches!(client.prepare_root(producer).await, Ok(Err(_)) | Err(DirectoryError::Closed)));
+                                assert!(matches!(client.prepare_root(producer).await, Ok(Err(_))));
                             }));
                             tokio::time::timeout(Duration::from_secs(2), start).await.unwrap().unwrap();
                             releases.push(release);
