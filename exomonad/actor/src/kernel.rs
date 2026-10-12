@@ -121,6 +121,8 @@ pub enum KernelCallFailure {
     TargetExited(ActorRef),
     #[error("target actor {0} is unavailable")]
     TargetUnavailable(ActorRef),
+    #[error("public owner installation for target actor {0} is pending")]
+    InstallationPending(ActorRef),
     #[error("idle retirement for target actor {0} is being checked")]
     RetirementPending(ActorRef),
     #[error("target actor {0} has closed mailbox admission")]
@@ -475,6 +477,14 @@ pub enum KernelMessage {
 }
 
 impl KernelMessage {
+    /// Inspect the dispatched payload while retaining its affine admission.
+    pub(crate) fn payload(&self) -> &Self {
+        match self {
+            Self::Admitted(envelope) => envelope.payload(),
+            message => message,
+        }
+    }
+
     /// The variant name alone. The derived-style `Debug` above carries
     /// request payloads with it; a trace field wants the shape of the
     /// dispatch and none of its content.
@@ -995,7 +1005,7 @@ impl LocalActorRef {
     async fn request_drain(&self) -> Result<(), KernelInvocationFailure> {
         let (reply, receive) = tokio::sync::oneshot::channel();
         self.lifecycle
-            .control(KernelMessage::Drain {
+            .close_with_fence(KernelMessage::Drain {
                 reply: reply.into(),
             })
             .await

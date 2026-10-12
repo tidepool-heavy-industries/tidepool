@@ -16,6 +16,8 @@ use super::{HostedCellPublications, HostedCellSlot, KernelCallFailure, KernelMes
 use crate::{ActorRef, ActorRuntimeObservationHandle, ActorTerminal, RetainedActorExit};
 
 pub(crate) mod resident;
+mod transfer;
+pub(crate) use transfer::ReplacementIngressError;
 
 #[cfg(test)]
 mod control_cluster_tests;
@@ -24,6 +26,7 @@ mod control_cluster_tests;
 pub enum LifecyclePhase {
     Starting,
     Open,
+    Installing,
     IdleCheck,
     Closing,
     Retired,
@@ -48,6 +51,7 @@ pub enum NativeSettlement {
 pub struct LifecycleSnapshot {
     pub owner_available: bool,
     pub native_settlement: NativeSettlement,
+    pub transfer_unconfirmed: Option<String>,
     pub phase: LifecyclePhase,
     pub transactions: usize,
     pub ingress: usize,
@@ -84,6 +88,7 @@ pub(super) struct LifecycleState {
     terminal: RetainedActorExit,
     pub(super) phase: LifecyclePhase,
     executor: Option<RactorRef<KernelMessage>>,
+    hosted_sealed: bool,
     operation_sequence: u64,
     retirement_requested: bool,
     owner_available: bool,
@@ -93,6 +98,7 @@ pub(super) struct LifecycleState {
     provider: Option<NativeProvider>,
     pending: BTreeMap<u64, PendingOperation>,
     pub(super) resident: Option<resident::ResidentState>,
+    transfer: transfer::TransferState,
     observations: watch::Sender<LifecycleSnapshot>,
     tasks: BTreeMap<u64, tokio::task::JoinHandle<()>>,
 }
@@ -179,6 +185,7 @@ pub(super) enum LifecycleCommand {
         outcome: Result<bool, String>,
     },
     Resident(Box<resident::ResidentCommand>),
+    Transfer(Box<transfer::TransferCommand>),
 }
 
 pub(super) enum ProviderOutcome {
@@ -197,6 +204,10 @@ pub struct AdmittedKernelEnvelope {
 }
 
 impl AdmittedKernelEnvelope {
+    pub(crate) fn payload(&self) -> &KernelMessage {
+        self.message.payload()
+    }
+
     pub(crate) fn into_parts(
         self,
         expected: ActorRef,
@@ -259,6 +270,8 @@ pub struct NativeProviderAdmission {
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum NativeProviderStartError {
+    #[error("actor public owner installation is pending")]
+    InstallationPending,
     #[error("idle retirement is being checked")]
     RetirementPending,
     #[error("actor admission is closed")]
@@ -334,25 +347,43 @@ impl LifecycleHandle {
         identity: ActorRef,
         terminal: RetainedActorExit,
     ) -> Result<Self, ractor::SpawnErr> {
+        Self::start_with_supervisor(identity, terminal, None).await
+    }
+
+    pub(crate) async fn start_linked(
+        identity: ActorRef,
+        terminal: RetainedActorExit,
+        supervisor: ractor::ActorCell,
+    ) -> Result<Self, ractor::SpawnErr> {
+        Self::start_with_supervisor(identity, terminal, Some(supervisor)).await
+    }
+
+    async fn start_with_supervisor(
+        identity: ActorRef,
+        terminal: RetainedActorExit,
+        supervisor: Option<ractor::ActorCell>,
+    ) -> Result<Self, ractor::SpawnErr> {
         let (observations, observe) = watch::channel(LifecycleSnapshot {
             owner_available: true,
             native_settlement: NativeSettlement::Confirmed,
+            transfer_unconfirmed: None,
             phase: LifecyclePhase::Starting,
             transactions: 0,
             ingress: 0,
             provider: ProviderPhase::Detached,
             resident: None,
         });
-        let (address, _task) = Actor::spawn(
-            None,
-            LifecycleCoordinator,
-            LifecycleArguments {
-                identity,
-                terminal,
-                observations,
-            },
-        )
-        .await?;
+        let arguments = LifecycleArguments {
+            identity,
+            terminal,
+            observations,
+        };
+        let (address, _task) = match supervisor {
+            Some(supervisor) => {
+                Actor::spawn_linked(None, LifecycleCoordinator, arguments, supervisor).await?
+            }
+            None => Actor::spawn(None, LifecycleCoordinator, arguments).await?,
+        };
         Ok(Self {
             identity,
             address,
@@ -472,7 +503,8 @@ impl LifecycleHandle {
         let mut observe = self.observations.clone();
         loop {
             let snapshot = observe.borrow_and_update().clone();
-            if !snapshot.owner_available
+            if snapshot.transfer_unconfirmed.is_some()
+                || !snapshot.owner_available
                 || matches!(
                     snapshot.native_settlement,
                     NativeSettlement::NeedsAttention(_)
@@ -587,6 +619,7 @@ impl LifecycleState {
         !self.transactions.is_empty()
             || !self.ingress.is_empty()
             || !self.pending.is_empty()
+            || self.transfer.has_pending()
             || self
                 .resident
                 .as_ref()
@@ -609,8 +642,10 @@ impl LifecycleState {
         self.observations.send_replace(LifecycleSnapshot {
             owner_available: self.owner_available,
             native_settlement: self.native_settlement.clone(),
+            transfer_unconfirmed: self.transfer.unconfirmed.clone(),
             phase: self.phase,
             transactions: self.transactions.len()
+                + self.transfer.pending_count()
                 + self
                     .pending
                     .values()
@@ -638,6 +673,9 @@ impl LifecycleState {
     }
 
     fn refusal(&self) -> Option<KernelCallFailure> {
+        if self.transfer.unconfirmed.is_some() {
+            return Some(KernelCallFailure::TargetUnavailable(self.identity));
+        }
         if self
             .resident
             .as_ref()
@@ -651,6 +689,9 @@ impl LifecycleState {
         }
         match self.phase {
             LifecyclePhase::Open => None,
+            LifecyclePhase::Installing => {
+                Some(KernelCallFailure::InstallationPending(self.identity))
+            }
             LifecyclePhase::IdleCheck => Some(KernelCallFailure::RetirementPending(self.identity)),
             LifecyclePhase::Starting => Some(KernelCallFailure::TargetUnavailable(self.identity)),
             LifecyclePhase::Closing => Some(KernelCallFailure::MailboxClosed(self.identity)),
@@ -696,6 +737,9 @@ impl LifecycleState {
     }
 
     fn provider_error(&self) -> Option<NativeProviderStartError> {
+        if let Some(detail) = &self.transfer.unconfirmed {
+            return Some(NativeProviderStartError::Native(detail.clone()));
+        }
         if let Some(detail) = self
             .resident
             .as_ref()
@@ -708,6 +752,7 @@ impl LifecycleState {
         }
         match self.phase {
             LifecyclePhase::Open => None,
+            LifecyclePhase::Installing => Some(NativeProviderStartError::InstallationPending),
             LifecyclePhase::IdleCheck => Some(NativeProviderStartError::RetirementPending),
             _ => Some(NativeProviderStartError::Closed),
         }
@@ -729,6 +774,7 @@ impl Actor for LifecycleCoordinator {
             terminal: arguments.terminal,
             phase: LifecyclePhase::Starting,
             executor: None,
+            hosted_sealed: false,
             operation_sequence: 0,
             retirement_requested: false,
             owner_available: true,
@@ -738,6 +784,7 @@ impl Actor for LifecycleCoordinator {
             provider: None,
             pending: BTreeMap::new(),
             resident: None,
+            transfer: transfer::TransferState::default(),
             observations: arguments.observations,
             tasks: BTreeMap::new(),
         })
@@ -784,7 +831,20 @@ impl Actor for LifecycleCoordinator {
                 control,
                 reply,
             } => {
-                let result = state.enqueue(&myself, *message, control);
+                if matches!(message.payload(), KernelMessage::SealHostedWork { .. }) {
+                    state.hosted_sealed = true;
+                }
+                let result = if state.hosted_sealed
+                    && matches!(
+                        message.payload(),
+                        KernelMessage::Tool { .. }
+                            | KernelMessage::ToolWithHostedCheckpoint { .. }
+                            | KernelMessage::Workbench { .. }
+                    ) {
+                    Err(KernelCallFailure::MailboxClosed(state.identity))
+                } else {
+                    state.enqueue(&myself, *message, control)
+                };
                 let _ = reply.send(result);
             }
             LifecycleCommand::Close {
@@ -1048,6 +1108,7 @@ impl Actor for LifecycleCoordinator {
                 }
             }
             LifecycleCommand::Resident(command) => resident::handle(state, &myself, *command),
+            LifecycleCommand::Transfer(command) => transfer::handle(state, &myself, *command),
         }
         if state.retirement_requested && !state.has_pending() {
             state.phase = LifecyclePhase::Retired;
