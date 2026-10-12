@@ -1347,7 +1347,7 @@ async fn bound_command_result_is_summarized_and_remains_readable() {
                 let recovered_observation = committed(
                     campaign,
                     &format!(
-                        "if Cmd.stdout {observation} == Right \"U\" then pure () else error \"retained expression result was not readable\""
+                        "if Cmd.stdout ({observation} ()) == Right \"U\" then pure () else error \"retained expression result was not readable\""
                     ),
                 )
                 .await;
