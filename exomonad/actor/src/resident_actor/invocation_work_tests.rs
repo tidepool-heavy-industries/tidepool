@@ -2475,7 +2475,7 @@ async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once(
     );
     let transfer = fixture
         .kernel
-        .reserve_worker_lifetime_transfer(&worker, crate::WorkerLifetime::RunOwned)
+        .reserve_worker_lifetime_transfer(&worker, true)
         .await
         .unwrap();
     source
@@ -2492,7 +2492,7 @@ async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once(
     );
     let transfer = fixture
         .kernel
-        .reserve_worker_lifetime_transfer(&worker, crate::WorkerLifetime::ActorOwned)
+        .reserve_worker_lifetime_transfer(&worker, false)
         .await
         .unwrap();
     destination.adopt_worker(owner, worker.clone()).unwrap();
@@ -2530,7 +2530,7 @@ async fn borrowed_worker_transfer_refuses_before_membership_callback() {
     let context = receive.await.unwrap();
     let transfer = other
         .kernel
-        .reserve_worker_lifetime_transfer(&worker, crate::WorkerLifetime::RunOwned)
+        .reserve_worker_lifetime_transfer(&worker, true)
         .await;
     assert!(matches!(
         transfer,
