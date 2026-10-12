@@ -789,6 +789,58 @@ impl SourceRootOwner {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimePreparationIdentity {
+    original: uuid::Uuid,
+}
+
+/// A run keeps its installer issuer across host incarnations. The recipe still
+/// selects source and effect inputs; this identity selects the exact completed
+/// original, including contextual certificates that recompilation can change.
+fn runtime_preparation_identity(
+    workspace: &tidepool_atomic_write::DirectoryAnchor,
+    entries: &tidepool_atomic_write::DirectoryAnchor,
+) -> Result<uuid::Uuid> {
+    let path = workspace.resolve("runtime-preparation.json")?;
+    let read = || -> std::io::Result<File> {
+        let file = File::from(rustix::fs::open(
+            &path,
+            rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::CLOEXEC
+                | rustix::fs::OFlags::NOFOLLOW
+                | rustix::fs::OFlags::NONBLOCK,
+            rustix::fs::Mode::empty(),
+        )?);
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::other(
+                "runtime preparation identity is not a regular file",
+            ));
+        }
+        Ok(file)
+    };
+    let file = match read() {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if std::fs::read_dir(entries.path())?
+                .next()
+                .transpose()?
+                .is_some()
+            {
+                return Err("runtime entries have no retained preparation identity; start a new run rather than selecting an arbitrary original".into());
+            }
+            let identity = RuntimePreparationIdentity {
+                original: uuid::Uuid::new_v4(),
+            };
+            tidepool_atomic_write::write_durable_new(&path, &serde_json::to_vec(&identity)?)?;
+            read()?
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let identity: RuntimePreparationIdentity = serde_json::from_reader(file)?;
+    Ok(identity.original)
+}
+
 struct RetainedSourceGraph {
     _root_owner: Arc<SourceRootOwner>,
     _prepared_owner: Option<Arc<tidepool_atomic_write::DirectoryAnchor>>,
@@ -863,14 +915,18 @@ impl ExomonadSourceReload {
     ) -> Result<Self> {
         owner.validate(&run_root)?;
         let run_root = std::fs::canonicalize(run_root)?;
-        let entries = tidepool_atomic_write::DirectoryAnchor::open_existing(&run_root)?
-            .child("workspace/entries")?;
+        let workspace_directory =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(&run_root)?.child("workspace")?;
+        let entries = workspace_directory.child("entries")?;
         let preparation = match (&owner, &frozen.preparation) {
             (
                 SourceRootOwner::Prepared(_),
-                Some(super::workspace::WorkspacePreparation::Preparing { original }),
+                Some(
+                    super::workspace::WorkspacePreparation::Preparing { original }
+                    | super::workspace::WorkspacePreparation::Completed { original, .. },
+                ),
             ) => *original,
-            _ => uuid::Uuid::new_v4(),
+            _ => runtime_preparation_identity(&workspace_directory, &entries)?,
         };
         let fresh_entry_storage = exomonad_actor::SourceEntryStorage::FreshCompilation {
             directory: entries.path().to_owned(),
