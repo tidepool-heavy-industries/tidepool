@@ -286,6 +286,7 @@ impl WorkbenchPublicOwner {
     pub(crate) fn durable(&self) -> Option<&tidepool_runtime::session::RecoveryPublicOwner> {
         self.readiness.as_ref().map(|native| native.durable_owner())
     }
+    #[cfg(test)]
     pub(crate) fn is_ready(&self) -> bool {
         self.readiness
             .as_ref()

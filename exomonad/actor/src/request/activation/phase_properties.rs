@@ -811,7 +811,7 @@ fn run_history(
                         }
                     });
                 let (resources, decision) = fixture.fresh_resources();
-                prop_assert_eq!(resources.confirmed(), owner_ready);
+                prop_assert_eq!(resources.observed_native_ready(), owner_ready);
                 if !permit {
                     decision.request_cancellation();
                 }
@@ -998,7 +998,7 @@ fn run_history(
                 if owner_ready {
                     fixture.make_ready();
                 } else {
-                    prop_assert!(!fixture.fresh_resources().0.confirmed());
+                    prop_assert!(!fixture.fresh_resources().0.observed_native_ready());
                 }
                 coverage.owner_observations += 1;
                 coverage.confirmations_after_lost_waiter +=
@@ -1013,7 +1013,7 @@ fn run_history(
                     owner_ready = false;
                     coverage.owner_fences += 1;
                 }
-                prop_assert!(!fixture.fresh_resources().0.confirmed());
+                prop_assert!(!fixture.fresh_resources().0.observed_native_ready());
             }
             Action::ShutdownTarget => {
                 if caller == Caller::Exact {
@@ -1302,7 +1302,7 @@ fn run_history(
                 step,
                 operation
             );
-            prop_assert_eq!(cap.resources.confirmed(), owner_ready);
+            prop_assert_eq!(cap.resources.observed_native_ready(), owner_ready);
         }
         for (key, model) in facts.iter().enumerate() {
             let state = registry.state.lock();
@@ -1331,7 +1331,7 @@ fn run_history(
                 if let Some(ActivationRecord::Pending(retained)) = &record.activation {
                     let cap = capabilities.iter().find(|cap| cap.request == key).unwrap();
                     prop_assert!(Arc::ptr_eq(retained, &cap.resources));
-                    prop_assert_eq!(retained.confirmed(), owner_ready);
+                    prop_assert_eq!(retained.observed_native_ready(), owner_ready);
                     let actual = match retained.phase() {
                         PublicationPhase::CommitClaimed { .. }
                             if expected == ExpectedNative::Unknown =>

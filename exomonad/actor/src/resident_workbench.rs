@@ -2703,7 +2703,8 @@ pub(crate) struct ActivationPublicationResources {
 }
 
 impl ActivationPublicationResources {
-    pub(crate) fn confirmed(&self) -> bool {
+    #[cfg(test)]
+    pub(crate) fn observed_native_ready(&self) -> bool {
         self.execution.owner.is_ready()
     }
     pub(crate) fn authorizes(&self, actor: crate::ActorRef) -> bool {
