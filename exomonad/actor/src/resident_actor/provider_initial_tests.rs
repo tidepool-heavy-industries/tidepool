@@ -90,8 +90,10 @@ impl NativeFixture {
         let publication = journal_data.then(|| crate::InitialContextPublication {
             conversation: crate::ApplicationConversation::Embedded {
                 run: "provider-span-data".into(),
-                agent_path: "/root/provider-initial".into(),
-                incarnation: "1".into(),
+                // Independent-root conversation identity comes from admission,
+                // not the descriptor's display/recovery label path.
+                agent_path: "/root".into(),
+                incarnation: actor.identity().incarnation.0.to_string(),
             },
             request: "initial-data-publication".into(),
             caller_reference: None,
