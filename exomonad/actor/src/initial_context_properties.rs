@@ -10,6 +10,7 @@ use crate::{
     ApplicationConversation, Incarnation,
 };
 use proptest::prelude::*;
+use std::sync::Arc;
 use tidepool_atomic_write::DirectoryAnchor;
 use tidepool_codegen::{scope::ScopeId, suspension::RealmId};
 use tidepool_repr::SessionId;
@@ -57,7 +58,7 @@ enum Facts {
 struct History {
     directory: tempfile::TempDir,
     anchor: DirectoryAnchor,
-    journal: ActorRecoveryJournal,
+    journal: Arc<ActorRecoveryJournal>,
     actor: ActorRef,
     caller: Option<String>,
     result: RetainedContextSeed,
