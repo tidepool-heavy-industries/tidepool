@@ -218,17 +218,24 @@ impl<A: Send + 'static> InvocationExecution<A> {
     }
     // Ready completions remain in MaybeDone until the original scheduler selects
     // them. Dropping this await never detaches or transfers frontier ownership.
-    async fn drive<T>(&mut self, operation: impl Future<Output = T>) -> T {
-        tokio::pin!(operation);
-        poll_fn(|cx| {
-            if let Some(green) = &mut self.green {
-                for pending in &mut green.pending {
-                    let _ = Pin::new(&mut pending.future).poll(cx);
+    // Native adapters retain only the boxed operation while polling frontiers;
+    // its concrete future stays in one allocation through completion or drop.
+    fn drive<'a, T>(
+        &'a mut self,
+        operation: impl Future<Output = T> + 'a,
+    ) -> impl Future<Output = T> + 'a {
+        let mut operation = Box::pin(operation);
+        async move {
+            poll_fn(|cx| {
+                if let Some(green) = &mut self.green {
+                    for pending in &mut green.pending {
+                        let _ = Pin::new(&mut pending.future).poll(cx);
+                    }
                 }
-            }
-            operation.as_mut().poll(cx)
-        })
-        .await
+                operation.as_mut().poll(cx)
+            })
+            .await
+        }
     }
 }
 

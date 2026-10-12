@@ -440,3 +440,25 @@ fn generated_fifo_histories_preserve_cancelled_and_buffered_frontier_ownership()
         eprintln!("FIFO ownership partition={partition} completed_cases=8");
     }
 }
+
+#[test]
+fn large_native_operation_is_heap_owned_before_poll_and_drops_once() {
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let lease = Released(dropped.clone());
+    let payload = [7_u8; 65536];
+    let operation = async move {
+        let _lease = lease;
+        std::future::pending::<()>().await;
+        std::hint::black_box(payload)
+    };
+    let operation_size = std::mem::size_of_val(&operation);
+    assert!(operation_size >= payload.len());
+    let mut execution = InvocationExecution::<()>::default();
+    let driver = execution.drive(operation);
+    let driver_size = std::mem::size_of_val(&driver);
+    println!("FUTURE_SIZE large_operation {operation_size} drive {driver_size}");
+    assert!(driver_size < 256);
+    assert_eq!(dropped.load(Ordering::SeqCst), 0);
+    drop(driver);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+}
