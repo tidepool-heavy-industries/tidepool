@@ -25,6 +25,7 @@ enum AuthoredCase {
 
 #[derive(Default)]
 struct HostState {
+    waiting_for_submission: bool,
     authored: Option<AuthoredCase>,
     forms: BTreeMap<String, MountedForm>,
     committed: Vec<String>,
@@ -32,11 +33,16 @@ struct HostState {
 }
 
 #[derive(Default)]
-struct Host(Mutex<HostState>);
+struct Host(Mutex<HostState>, Arc<tokio::sync::Notify>);
 
 impl FormHost for Host {
     fn changed(&self) -> futures_util::future::BoxFuture<'static, Result<(), FormCause>> {
-        Box::pin(std::future::pending())
+        let mut changed = Box::pin(self.1.clone().notified_owned());
+        changed.as_mut().enable();
+        Box::pin(async move {
+            changed.await;
+            Ok(())
+        })
     }
 
     fn open(
@@ -68,6 +74,9 @@ impl FormHost for Host {
         let form = state.forms.get(mount).expect("actual mounted form");
         assert_eq!(form.actor, actor);
         assert!(!form.committed, "settled forms must not be awaited again");
+        if state.waiting_for_submission {
+            return Ok(None);
+        }
         // Draft identities come from the production descriptor, rather than
         // duplicating Form's occurrence-ID encoding in the scripted host.
         let root = control(&form.descriptor["root"]);
@@ -311,10 +320,13 @@ impl Fixture {
             None,
             crate::Incarnation::FIRST,
         );
-        let host = Arc::new(Host(Mutex::new(HostState {
-            authored,
-            ..HostState::default()
-        })));
+        let host = Arc::new(Host(
+            Mutex::new(HostState {
+                authored,
+                ..HostState::default()
+            }),
+            Arc::new(tokio::sync::Notify::new()),
+        ));
         let jev = Arc::new(Jev {
             requests: Mutex::new(Vec::new()),
             failure,
@@ -408,6 +420,56 @@ async fn compiled_form_choice_preserves_prepared_jev_decoder_and_selected_action
         assert!(view.contains("original-quick"), "{view}");
         assert!(!view.contains("unselected"), "{view}");
     }
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn compiled_form_wait_observation_belongs_to_interpreter_and_clears_on_resume() {
+    let fixture = Fixture::new(757, false);
+    fixture.host.0.lock().waiting_for_submission = true;
+    let execution = fixture.execute(include_str!("jev_form_runtime_success.hs"));
+    tokio::pin!(execution);
+    let wait = tokio::time::timeout(Duration::from_secs(300), async {
+        loop {
+            tokio::select! {
+                () = &mut execution => panic!("authored form must await a submission"),
+                () = tokio::time::sleep(Duration::from_millis(10)) => {},
+            }
+            let nodes = fixture.forest.inspect_host_graph();
+            if let Some((actor, wait)) = nodes.iter().find_map(|node| {
+                node.form_waits
+                    .first()
+                    .map(|wait| (node.actor, wait.clone()))
+            }) {
+                let state = fixture.host.0.lock();
+                assert_eq!(state.forms[&wait.mount_id].actor, actor);
+                assert!(state.committed.is_empty());
+                assert!(wait.since_unix_ms > 0);
+                assert_eq!(
+                    fixture
+                        .forest
+                        .inspect_host_graph()
+                        .iter()
+                        .find(|node| node.actor == actor)
+                        .unwrap()
+                        .form_waits[0],
+                    wait
+                );
+                break wait;
+            }
+        }
+    })
+    .await
+    .expect("actual suspended native form");
+    fixture.host.0.lock().waiting_for_submission = false;
+    fixture.host.1.notify_waiters();
+    execution.await;
+    assert!(fixture
+        .forest
+        .inspect_host_graph()
+        .iter()
+        .all(|node| node.form_waits.is_empty()));
+    assert!(fixture.host.0.lock().forms[&wait.mount_id].committed);
     fixture.finish().await;
 }
 
