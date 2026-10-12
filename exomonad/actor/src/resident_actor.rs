@@ -3498,26 +3498,34 @@ impl CheckpointPublication {
 }
 
 impl<H, O> ResidentKernelBehavior<H, O> {
-    fn capture_exit_target(
+    async fn capture_exit_target(
         &self,
         kernel: &KernelContext,
         _effect_owner: &CurrentEffectOwner<'_>,
         target: ActorRef,
     ) -> Result<crate::RetainedActorExit, ResidentActorWorkbenchError> {
-        let actor = kernel.resolve(target).ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                KernelCallFailure::TargetUnavailable(target).to_string(),
-            )
-        })?;
-        kernel.session_context(target).ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                KernelCallFailure::TargetUnavailable(target).to_string(),
-            )
-        })?;
+        let actor = kernel
+            .resolve(target)
+            .await
+            .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    KernelCallFailure::TargetUnavailable(target).to_string(),
+                )
+            })?;
+        kernel
+            .session_context(target)
+            .await
+            .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    KernelCallFailure::TargetUnavailable(target).to_string(),
+                )
+            })?;
         Ok(actor.terminal().clone())
     }
 
-    fn capture_drain_target(
+    async fn capture_drain_target(
         &self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
@@ -3530,9 +3538,13 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 "actor drain is not authorized".into(),
             ));
         }
-        kernel.resolve(target).ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol("drain target is unavailable".into())
-        })
+        kernel
+            .resolve(target)
+            .await
+            .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol("drain target is unavailable".into())
+            })
     }
 
     /// Replace `standing`, logging the transition. The sole place `standing`
@@ -4163,11 +4175,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 record
                     .terminal
                     .clone()
-                    .or_else(|| {
-                        kernel
-                            .resolve(**identity)
-                            .and_then(|actor| actor.terminal().get())
-                    })
+                    .or_else(|| record.lifecycle.retained_terminal().get())
                     .is_some_and(|terminal| terminal.kind != ActorExitKind::Failed)
             })
             .count();
@@ -4182,9 +4190,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     identity.incarnation.0
                 );
                 let terminal = record.terminal.clone().or_else(|| {
-                    kernel
-                        .resolve(*identity)
-                        .and_then(|actor| actor.terminal().get())
+                    record.lifecycle.retained_terminal().get()
                 });
                 if terminal.as_ref().is_some_and(|terminal| terminal.kind != ActorExitKind::Failed)
                     && view == StatusView::Concise {
@@ -4499,11 +4505,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let own = self.runtime_observation.snapshot();
         let records = self.environment.actors.lock();
         let live = |identity: &ActorRef, record: &ResidentActorRecord| {
-            record.terminal.is_none()
-                && kernel
-                    .resolve(*identity)
-                    .and_then(|actor| actor.terminal().get())
-                    .is_none()
+            record.terminal.is_none() && record.lifecycle.retained_terminal().get().is_none()
         };
         let operator_checkout = if self.descriptor.is_root() {
             own.source_drift.checkout.clone()
@@ -4831,6 +4833,10 @@ where
         ancestry.enter(target).map_err(ResidentCallError::Call)?;
         let target_ref = kernel
             .resolve(target)
+            .await
+            .map_err(|error| {
+                ResidentCallError::Runtime(ResidentActorWorkbenchError::Directory(error))
+            })?
             .ok_or_else(|| ResidentCallError::Call(KernelCallFailure::TargetUnavailable(target)))?;
         if target_ref.terminal().get().is_some() {
             return Err(ResidentCallError::Call(KernelCallFailure::TargetExited(
@@ -4839,6 +4845,10 @@ where
         }
         let target_context = kernel
             .session_context(target)
+            .await
+            .map_err(|error| {
+                ResidentCallError::Runtime(ResidentActorWorkbenchError::Directory(error))
+            })?
             .ok_or_else(|| ResidentCallError::Call(KernelCallFailure::TargetUnavailable(target)))?;
         let request = self
             .environment
@@ -5165,8 +5175,16 @@ where
                 KernelCallFailure::TargetUnavailable(target).to_string(),
             )
         };
-        let target_ref = kernel.resolve(target).ok_or_else(&unavailable)?;
-        let target_context = kernel.session_context(target).ok_or_else(&unavailable)?;
+        let target_ref = kernel
+            .resolve(target)
+            .await
+            .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+            .ok_or_else(&unavailable)?;
+        let target_context = kernel
+            .session_context(target)
+            .await
+            .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+            .ok_or_else(&unavailable)?;
         let request = self
             .environment
             .runner
@@ -5315,7 +5333,7 @@ where
         settled
     }
 
-    fn attach_source(
+    async fn attach_source(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
@@ -5329,6 +5347,8 @@ where
         if self.source_connections.is_none() {
             let recipient = kernel
                 .resolve(context.actor)
+                .await
+                .map_err(|error| error.to_string())?
                 .ok_or_else(|| "current actor is absent from its directory".to_owned())?;
             self.source_connections = Some(
                 self.environment
@@ -5355,6 +5375,8 @@ where
                 }
                 let actor = kernel
                     .resolve(target)
+                    .await
+                    .map_err(|error| error.to_string())?
                     .ok_or_else(|| "lifecycle source target is unavailable".to_owned())?;
                 connections.attach_lifecycle(slot, &actor);
             }
@@ -5364,7 +5386,7 @@ where
     }
 
     /// Admit actor-owned decisions before transferring the native or service wait.
-    fn prepare_independent_effect(
+    async fn prepare_independent_effect(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
@@ -5484,6 +5506,8 @@ where
                         .await
                     } else if let Some(actor) = kernel
                         .resolve(target)
+                        .await
+                        .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
                         .filter(|actor| actor.terminal().get().is_none())
                     {
                         actor.replace_spec(definition).await
@@ -5543,7 +5567,7 @@ where
                 owner,
                 source,
             } => {
-                let result = self.attach_source(&kernel, &context, owner, source);
+                let result = self.attach_source(&kernel, &context, owner, source).await;
                 Box::pin(async move {
                     environment
                         .runner
@@ -5573,11 +5597,10 @@ where
                             actor: inspection.target,
                             descriptor: record.descriptor.clone(),
                             bound_worktree: record.bound_worktree.clone(),
-                            terminal: record.terminal.clone().or_else(|| {
-                                kernel
-                                    .resolve(inspection.target)
-                                    .and_then(|actor| actor.terminal().get())
-                            }),
+                            terminal: record
+                                .terminal
+                                .clone()
+                                .or_else(|| record.lifecycle.retained_terminal().get()),
                             runtime: record.runtime_observation.snapshot(),
                         }
                     })
@@ -5649,11 +5672,10 @@ where
                             actor: *actor,
                             descriptor: record.descriptor.clone(),
                             bound_worktree: record.bound_worktree.clone(),
-                            terminal: record.terminal.clone().or_else(|| {
-                                kernel
-                                    .resolve(*actor)
-                                    .and_then(|actor| actor.terminal().get())
-                            }),
+                            terminal: record
+                                .terminal
+                                .clone()
+                                .or_else(|| record.lifecycle.retained_terminal().get()),
                             runtime: record.runtime_observation.snapshot(),
                         },
                     )
@@ -5669,14 +5691,16 @@ where
                 recipient,
                 scope,
             } => Box::pin(async move {
+                let recipient_actor = kernel
+                    .resolve(recipient)
+                    .await
+                    .map_err(ResidentActorWorkbenchError::Directory)?;
                 let outcome = {
                     let mut records = environment.actors.lock();
                     if records
                         .get(&recipient)
                         .is_none_or(|record| record.terminal.is_some())
-                        || kernel
-                            .resolve(recipient)
-                            .is_none_or(|actor| actor.terminal().get().is_some())
+                        || recipient_actor.is_none_or(|actor| actor.terminal().get().is_some())
                     {
                         ObservationShareResult::RecipientUnavailable
                     } else if !records.contains_key(&scope) {
@@ -6003,11 +6027,13 @@ where
             )
             .await?;
         let _ = display;
-        let boundary =
-            match self.prepare_independent_effect(kernel, context, &effect_owner, boundary) {
-                Ok(operation) => return operation.await,
-                Err(boundary) => boundary,
-            };
+        let boundary = match self
+            .prepare_independent_effect(kernel, context, &effect_owner, boundary)
+            .await
+        {
+            Ok(operation) => return operation.await,
+            Err(boundary) => boundary,
+        };
         self.prepare_actor_effect(kernel, context, effect_owner, ancestry, boundary)
             .await
     }
@@ -6109,11 +6135,10 @@ where
                     records.get(&forget.target).and_then(|record| {
                         actor_can_control(context.actor, forget.target, &records)
                             .then(|| {
-                                record.terminal.clone().or_else(|| {
-                                    kernel
-                                        .resolve(forget.target)
-                                        .and_then(|actor| actor.terminal().get())
-                                })
+                                record
+                                    .terminal
+                                    .clone()
+                                    .or_else(|| record.lifecycle.retained_terminal().get())
                             })
                             .flatten()
                     })
@@ -6150,7 +6175,7 @@ where
                             self.publish_watch_notifications(notifications).await;
                             self.environment.actors.lock().remove(&forget.target);
                             self.environment.retired.lock().remove(&forget.target);
-                            let _ = kernel.forget_terminal_actor(forget.target);
+                            let _ = kernel.forget_terminal_actor(forget.target).await;
                             crate::resident_workbench::AgentForgetProjection::Forgotten
                         }
                         Err((requests, watches)) => {
@@ -6171,8 +6196,9 @@ where
                 target,
                 lifetime,
             } => Box::pin(async move {
-                let outcome =
-                    self.retain_agent_resource(kernel, context, &effect_owner, target, lifetime);
+                let outcome = self
+                    .retain_agent_resource(kernel, context, &effect_owner, target, lifetime)
+                    .await;
                 self.environment
                     .runner
                     .resume_value(context.clone(), continuation, outcome)
@@ -6195,11 +6221,17 @@ where
                     crate::resident_workbench::AgentStopProjection::Unauthorized
                 } else if kernel
                     .resolve(stop.target)
+                    .await
+                    .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
                     .and_then(|actor| actor.terminal().get())
                     .is_some()
                 {
                     crate::resident_workbench::AgentStopProjection::AlreadyStopped
-                } else if let Some(target) = kernel.resolve(stop.target) {
+                } else if let Some(target) = kernel
+                    .resolve(stop.target)
+                    .await
+                    .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+                {
                     match target
                         .retire_by(
                             context.actor,
@@ -6409,7 +6441,12 @@ where
                 let authorized = target != context.actor
                     && actor_can_control(context.actor, target, &self.environment.actors.lock());
                 let actor = authorized
-                    .then(|| kernel.resolve(target))
+                    .then(|| {
+                        kernel
+                            .resolve(target)
+                            .await
+                            .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+                    })
                     .flatten()
                     .filter(|actor| actor.terminal().get().is_none());
                 let Some(actor) = actor else {
@@ -6469,7 +6506,7 @@ where
                 continuation,
                 target,
             } => Box::pin(async move {
-                let actor = self.capture_drain_target(kernel, context, target)?;
+                let actor = self.capture_drain_target(kernel, context, target).await?;
                 actor.drain().await.map_err(|error| {
                     ResidentActorWorkbenchError::ActorProtocol(error.to_string())
                 })?;
@@ -6479,7 +6516,9 @@ where
                     .await
             }),
             ResidentActorBoundary::Wait(wait) => Box::pin(async move {
-                let target = self.capture_exit_target(kernel, &effect_owner, wait.target)?;
+                let target = self
+                    .capture_exit_target(kernel, &effect_owner, wait.target)
+                    .await?;
                 self.record_child_observation(wait.target);
                 target.wait().await;
                 self.environment
@@ -6490,6 +6529,8 @@ where
             ResidentActorBoundary::Poll(poll) => Box::pin(async move {
                 let terminal = kernel
                     .resolve(poll.target)
+                    .await
+                    .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
                     .map(|target| target.terminal().clone())
                     .filter(|terminal| terminal.get().is_some());
                 let observed = terminal.is_some();
@@ -6533,7 +6574,10 @@ where
                 // params), not a resident value -- there is nothing rooted
                 // in either machine for a session-equality gate to protect,
                 // so liveness is the only thing checked below.
-                let destination = kernel.resolve(target);
+                let destination = kernel
+                    .resolve(target)
+                    .await
+                    .map_err(|error| ResidentActorWorkbenchError::Directory(error))?;
                 let outcome = if !permitted {
                     Err(crate::NotificationError::Unauthorized)
                 } else if destination
@@ -6642,7 +6686,12 @@ where
                                 .await;
                         }
                     };
-                if kernel.resolve(reservation.target).is_none() {
+                if kernel
+                    .resolve(reservation.target)
+                    .await
+                    .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+                    .is_none()
+                {
                     return self
                         .environment
                         .runner
@@ -6725,8 +6774,14 @@ where
                     .map(crate::request::ActiveRequestDeadline::start)
                     .transpose()
                     .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-                let target = kernel.resolve(submission.target);
-                let target_context = kernel.session_context(submission.target);
+                let target = kernel
+                    .resolve(submission.target)
+                    .await
+                    .map_err(|error| ResidentActorWorkbenchError::Directory(error))?;
+                let target_context = kernel
+                    .session_context(submission.target)
+                    .await
+                    .map_err(|error| ResidentActorWorkbenchError::Directory(error))?;
                 // Session equality is no longer part of deliverability: a
                 // target on another resident session still receives the
                 // message, via `transfer_mailbox_value` below, rather than
@@ -6957,9 +7012,15 @@ where
                 registration,
                 entry,
             } => Box::pin(async move {
-                let owner = kernel.resolve(context.actor).ok_or_else(|| {
-                    ResidentActorWorkbenchError::ActorProtocol("route owner is unavailable".into())
-                })?;
+                let owner = kernel
+                    .resolve(context.actor)
+                    .await
+                    .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+                    .ok_or_else(|| {
+                        ResidentActorWorkbenchError::ActorProtocol(
+                            "route owner is unavailable".into(),
+                        )
+                    })?;
                 let settlements = command_settlement::CommandSettlements::new(&self.environment);
                 let dependencies =
                     settlements
@@ -7181,11 +7242,15 @@ where
                             .await?;
                     }
                     if !self.policy_installed {
-                        let actor = kernel.resolve(context.actor).ok_or_else(|| {
-                            ResidentActorWorkbenchError::ActorProtocol(
-                                "local actor was absent from its routing directory".into(),
-                            )
-                        })?;
+                        let actor = kernel
+                            .resolve(context.actor)
+                            .await
+                            .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+                            .ok_or_else(|| {
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "local actor was absent from its routing directory".into(),
+                                )
+                            })?;
                         let local_policy = crate::resident_tools::install_local_resident_tools(
                             actor.clone(),
                             &awaiting,
@@ -7703,11 +7768,15 @@ where
         initial_user_message: Option<String>,
         source: crate::CheckpointSourceLayer,
     ) -> Result<LocalResidentInstallation, ResidentActorWorkbenchError> {
-        let actor = kernel.resolve(context.actor).ok_or_else(|| {
-            ResidentActorWorkbenchError::ActorProtocol(
-                "local actor was absent from its routing directory".into(),
-            )
-        })?;
+        let actor = kernel
+            .resolve(context.actor)
+            .await
+            .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+            .ok_or_else(|| {
+                ResidentActorWorkbenchError::ActorProtocol(
+                    "local actor was absent from its routing directory".into(),
+                )
+            })?;
         self.spec_installs = 1;
         let prepare_started = std::time::Instant::now();
         let (compile_context, authority) = WorkbenchCompilationAuthority::admit(
@@ -8031,11 +8100,15 @@ where
                                         "source actor has no creator".into(),
                                     )
                                 })?;
-                                let recipient = kernel.resolve(context.actor).ok_or_else(|| {
-                                    ResidentActorWorkbenchError::ActorProtocol(
-                                        "source actor is absent from its directory".into(),
-                                    )
-                                })?;
+                                let recipient = kernel
+                                    .resolve(context.actor)
+                                    .await
+                                    .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+                                    .ok_or_else(|| {
+                                        ResidentActorWorkbenchError::ActorProtocol(
+                                            "source actor is absent from its directory".into(),
+                                        )
+                                    })?;
                                 let sources = self
                                     .sources
                                     .iter()
@@ -8066,11 +8139,17 @@ where
                                                 ),
                                             );
                                         }
-                                        let actor = kernel.resolve(target).ok_or_else(|| {
-                                            ResidentActorWorkbenchError::ActorProtocol(
-                                                "lifecycle source target is unavailable".into(),
-                                            )
-                                        })?;
+                                        let actor = kernel
+                                            .resolve(target)
+                                            .await
+                                            .map_err(|error| {
+                                                ResidentActorWorkbenchError::Directory(error)
+                                            })?
+                                            .ok_or_else(|| {
+                                                ResidentActorWorkbenchError::ActorProtocol(
+                                                    "lifecycle source target is unavailable".into(),
+                                                )
+                                            })?;
                                         lifecycle.push((slot, actor));
                                     }
                                 }
@@ -8298,11 +8377,15 @@ where
             .await?;
         let reply_continuation = reply.continuation;
         let reply = if let Some(caller) = caller {
-            let caller_context = kernel.session_context(caller).ok_or_else(|| {
-                ResidentActorWorkbenchError::ActorProtocol(
-                    KernelCallFailure::TargetUnavailable(caller).to_string(),
-                )
-            })?;
+            let caller_context = kernel
+                .session_context(caller)
+                .await
+                .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
+                .ok_or_else(|| {
+                    ResidentActorWorkbenchError::ActorProtocol(
+                        KernelCallFailure::TargetUnavailable(caller).to_string(),
+                    )
+                })?;
             let value = MailboxValue::new(context.placement.session, reply.value);
             Some(
                 self.environment
@@ -8921,12 +9004,15 @@ where
                             ResidentActorBoundary::Start(start) => Ok(OwnedWorkbenchWait::Launch(
                                 self.prepare_child_launch(context, effect_owner.clone(), start),
                             )),
-                            boundary => self.prepare_invocation_wait(
-                                kernel,
-                                context,
-                                &effect_owner,
-                                boundary,
-                            )?,
+                            boundary => {
+                                self.prepare_invocation_wait(
+                                    kernel,
+                                    context,
+                                    &effect_owner,
+                                    boundary,
+                                )
+                                .await?
+                            }
                         };
                         match captured {
                             Ok(wait) => {

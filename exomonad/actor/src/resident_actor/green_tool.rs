@@ -225,7 +225,10 @@ where
                     .native(&self.environment, context)
                     .prepare_display(boundary, DEFAULT_DISPLAY_CHARACTER_ALLOWANCE, None, None)
                     .await?;
-                match self.prepare_invocation_wait(kernel, context, &owner, boundary)? {
+                match self
+                    .prepare_invocation_wait(kernel, context, &owner, boundary)
+                    .await?
+                {
                     Ok(wait) => {
                         let observed_child = wait.observe_after_resume();
                         let control = owner.control().expect("tool frontier wait owner");

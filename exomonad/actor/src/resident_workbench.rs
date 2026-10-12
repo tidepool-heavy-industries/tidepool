@@ -4242,6 +4242,8 @@ fn admit_explicit_effects(
 
 #[derive(Debug, thiserror::Error)]
 pub enum ResidentActorWorkbenchError {
+    #[error(transparent)]
+    Directory(#[from] crate::local_actor::run_control::DirectoryError),
     #[error("compiler work requires an invocation or actor lifecycle cleanup owner")]
     CompilerCleanupOwnerUnavailable,
     #[error("compiler cleanup owner has closed native work admission")]

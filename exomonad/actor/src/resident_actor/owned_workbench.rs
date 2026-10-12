@@ -1801,6 +1801,7 @@ where
                                     &CurrentEffectOwner::Workbench(&owned.state.effects),
                                     boundary,
                                 )
+                                .await
                                 .unwrap_or_else(|_| {
                                     unreachable!(
                                         "display acknowledgement is independently resumable"

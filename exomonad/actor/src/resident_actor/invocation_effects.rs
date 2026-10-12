@@ -6,7 +6,7 @@ where
     H: DispatchEffect<O> + Send + 'static,
     O: OutputSink + Sync + 'static,
 {
-    pub(super) fn prepare_invocation_wait(
+    pub(super) async fn prepare_invocation_wait(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
@@ -20,10 +20,12 @@ where
                 target,
             } => Ok(OwnedWorkbenchWait::Drain {
                 continuation,
-                target: self.capture_drain_target(kernel, context, target)?,
+                target: self.capture_drain_target(kernel, context, target).await?,
             }),
             ResidentActorBoundary::Wait(wait) => {
-                let terminal = self.capture_exit_target(kernel, effect_owner, wait.target)?;
+                let terminal = self
+                    .capture_exit_target(kernel, effect_owner, wait.target)
+                    .await?;
                 Ok(OwnedWorkbenchWait::Exit {
                     continuation: wait.continuation,
                     target: wait.target,
@@ -33,6 +35,8 @@ where
             ResidentActorBoundary::Poll(poll) => {
                 let terminal = kernel
                     .resolve(poll.target)
+                    .await
+                    .map_err(|error| ResidentActorWorkbenchError::Directory(error))?
                     .map(|target| target.terminal().clone())
                     .filter(|terminal| terminal.get().is_some());
                 Ok(OwnedWorkbenchWait::PollExit {
@@ -42,7 +46,10 @@ where
                 })
             }
             boundary => {
-                match self.prepare_independent_effect(kernel, context, effect_owner, boundary) {
+                match self
+                    .prepare_independent_effect(kernel, context, effect_owner, boundary)
+                    .await
+                {
                     Ok(operation) => Ok(OwnedWorkbenchWait::Prepared(operation)),
                     Err(boundary) => OwnedWorkbenchWait::capture(boundary),
                 }

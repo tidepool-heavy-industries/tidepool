@@ -486,6 +486,10 @@ impl LifecycleHandle {
     pub fn identity(&self) -> ActorRef {
         self.identity
     }
+    pub(crate) fn retained_terminal(&self) -> &RetainedActorExit {
+        &self.terminal
+    }
+
     pub fn observation(&self) -> LifecycleSnapshot {
         self.observations.borrow().clone()
     }
