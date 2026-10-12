@@ -621,6 +621,7 @@ fn startup_head_follows_predecessors_across_fresh_ids_and_lower_incarnations() {
             conversation: embedded_recovery::conversation(&conversation),
         };
         exomonad_actor::DurableActorRecord {
+            initial_context: None,
             admission: serde_json::from_value(json!({
                 "actor": actor, "label": "root", "creator": null,
                 "supervisor_parent": null, "context_parent": null,

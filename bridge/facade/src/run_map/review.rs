@@ -1529,6 +1529,7 @@ mod tests {
         ]
         .into_iter()
         .map(|(id, parent, label, thread)| DurableActorRecord {
+            initial_context: None,
             admission: DurableActorAdmission {
                 actor: actor(id),
                 label: Some(label.into()),

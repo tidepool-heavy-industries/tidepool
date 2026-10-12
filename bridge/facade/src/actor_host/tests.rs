@@ -1098,6 +1098,7 @@ async fn progress_retains_closures_and_watch_snapshots_across_calls() {
 
 fn durable_root(actor: ActorRef) -> exomonad_actor::DurableActorRecord {
     exomonad_actor::DurableActorRecord {
+        initial_context: None,
         admission: exomonad_actor::DurableActorAdmission {
             actor,
             label: Some("exomonad-root".into()),
