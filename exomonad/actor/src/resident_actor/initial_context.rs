@@ -140,82 +140,45 @@ where
         actor: ActorRef,
     ) -> Result<tidepool_bridge_effects::InitialContextObservation, ResidentActorWorkbenchError>
     {
-        use tidepool_bridge_effects::{
-            ContextReference, InitialContextIdentity as Identity,
-            InitialContextObservation as Wire, InitialContextPublicationReceipt as Receipt,
-        };
-        let observed = self.initial_context_observation(actor).await?;
-        match observed.state {
-            InitialContextState::AbsentHook => return Ok(Wire::InitialContextAbsent),
-            InitialContextState::Captured => return Ok(Wire::InitialContextCaptured),
-            _ => {}
+        wire_initial_context(self.initial_context_observation(actor).await?)
+    }
+
+    /// Observe under one exact provider-owner admission and native transition.
+    pub async fn initial_context_wire_observation_for_provider(
+        &self,
+        admission: &ActorProviderAdmission,
+    ) -> Result<tidepool_bridge_effects::InitialContextObservation, ResidentActorWorkbenchError>
+    {
+        if !self.directory.same_owner(&admission.issuer) {
+            return Err(failure(
+                "provider attachment belongs to another forest owner",
+            ));
         }
-        let original = observed
-            .identity
-            .ok_or_else(|| failure("startup observation has no issued identity"))?;
-        let identity = Identity {
-            operation: original.operation.as_str().to_owned(),
-            actor: (
-                i64::try_from(original.actor.id.0).map_err(failure)?,
-                i64::try_from(original.actor.incarnation.0).map_err(failure)?,
-            ),
-            spec_install: i64::try_from(original.spec_install).map_err(failure)?,
-            spec_revision: original.spec_revision,
-            spec_entry: original.spec_entry,
-            spec_source: original.spec_source,
-        };
-        Ok(match observed.state {
-            InitialContextState::Preparing => Wire::InitialContextPreparing(identity),
-            InitialContextState::ResultRetained => Wire::InitialContextRetained(
-                identity,
-                observed
-                    .result
-                    .ok_or_else(|| failure("startup retained result is absent"))?
-                    .rendered,
-            ),
-            InitialContextState::Published => {
-                let publication = observed
-                    .publication
-                    .ok_or_else(|| failure("startup publication evidence is absent"))?;
-                let ApplicationConversation::Embedded {
-                    run,
-                    agent_path,
-                    incarnation,
-                } = publication.conversation
-                else {
-                    return Err(failure(
-                        "startup publication has unsupported conversation transport",
-                    ));
-                };
-                let receipt = Receipt {
-                    run,
-                    actor_path: agent_path,
-                    conversation_incarnation: incarnation,
-                    request: publication.request,
-                    caller_reference: publication.caller_reference.map(ContextReference::new),
-                };
-                let result = observed
-                    .result
-                    .ok_or_else(|| failure("startup published result is absent"))?;
-                match publication.authored_reference {
-                    Some(reference) => Wire::InitialContextPublished(
-                        identity,
-                        receipt,
-                        result.rendered,
-                        ContextReference::new(reference),
-                    ),
-                    None => Wire::InitialContextPublishedEmpty(identity, receipt),
-                }
-            }
-            InitialContextState::Failed { detail } => Wire::InitialContextFailed(identity, detail),
-            InitialContextState::Cancelled => Wire::InitialContextCancelled(identity),
-            InitialContextState::RecoveryRequired { detail } => {
-                Wire::InitialContextUncertain(identity, detail)
-            }
-            InitialContextState::AbsentHook | InitialContextState::Captured => {
-                unreachable!("handled without identity")
-            }
-        })
+        let observed = admission
+            .lifecycle
+            .provider_initial_observation(admission.owner.clone())
+            .await
+            .map_err(failure)?;
+        wire_initial_context(observed)
+    }
+
+    /// Retain publication and native settlement before releasing the provider reply.
+    pub async fn acknowledge_initial_context_publication_for_provider(
+        &self,
+        admission: &ActorProviderAdmission,
+        operation: &WorkbenchExecutionId,
+        publication: InitialContextPublication,
+    ) -> Result<InitialContextObservation, ResidentActorWorkbenchError> {
+        if !self.directory.same_owner(&admission.issuer) {
+            return Err(failure(
+                "provider attachment belongs to another forest owner",
+            ));
+        }
+        admission
+            .lifecycle
+            .provider_initial_acknowledge(admission.owner.clone(), operation.clone(), publication)
+            .await
+            .map_err(failure)
     }
 
     /// Admit one startup operation using the actor's exact installed policy.
@@ -298,4 +261,84 @@ where
             .await
             .map_err(failure)
     }
+}
+
+fn wire_initial_context(
+    observed: InitialContextObservation,
+) -> Result<tidepool_bridge_effects::InitialContextObservation, ResidentActorWorkbenchError> {
+    use tidepool_bridge_effects::{
+        ContextReference, InitialContextIdentity as Identity, InitialContextObservation as Wire,
+        InitialContextPublicationReceipt as Receipt,
+    };
+    match observed.state {
+        InitialContextState::AbsentHook => return Ok(Wire::InitialContextAbsent),
+        InitialContextState::Captured => return Ok(Wire::InitialContextCaptured),
+        _ => {}
+    }
+    let original = observed
+        .identity
+        .ok_or_else(|| failure("startup observation has no issued identity"))?;
+    let identity = Identity {
+        operation: original.operation.as_str().to_owned(),
+        actor: (
+            i64::try_from(original.actor.id.0).map_err(failure)?,
+            i64::try_from(original.actor.incarnation.0).map_err(failure)?,
+        ),
+        spec_install: i64::try_from(original.spec_install).map_err(failure)?,
+        spec_revision: original.spec_revision,
+        spec_entry: original.spec_entry,
+        spec_source: original.spec_source,
+    };
+    Ok(match observed.state {
+        InitialContextState::Preparing => Wire::InitialContextPreparing(identity),
+        InitialContextState::ResultRetained => Wire::InitialContextRetained(
+            identity,
+            observed
+                .result
+                .ok_or_else(|| failure("startup retained result is absent"))?
+                .rendered,
+        ),
+        InitialContextState::Published => {
+            let publication = observed
+                .publication
+                .ok_or_else(|| failure("startup publication evidence is absent"))?;
+            let ApplicationConversation::Embedded {
+                run,
+                agent_path,
+                incarnation,
+            } = publication.conversation
+            else {
+                return Err(failure(
+                    "startup publication has unsupported conversation transport",
+                ));
+            };
+            let receipt = Receipt {
+                run,
+                actor_path: agent_path,
+                conversation_incarnation: incarnation,
+                request: publication.request,
+                caller_reference: publication.caller_reference.map(ContextReference::new),
+            };
+            let result = observed
+                .result
+                .ok_or_else(|| failure("startup published result is absent"))?;
+            match publication.authored_reference {
+                Some(reference) => Wire::InitialContextPublished(
+                    identity,
+                    receipt,
+                    result.rendered,
+                    ContextReference::new(reference),
+                ),
+                None => Wire::InitialContextPublishedEmpty(identity, receipt),
+            }
+        }
+        InitialContextState::Failed { detail } => Wire::InitialContextFailed(identity, detail),
+        InitialContextState::Cancelled => Wire::InitialContextCancelled(identity),
+        InitialContextState::RecoveryRequired { detail } => {
+            Wire::InitialContextUncertain(identity, detail)
+        }
+        InitialContextState::AbsentHook | InitialContextState::Captured => {
+            unreachable!("handled without identity")
+        }
+    })
 }
