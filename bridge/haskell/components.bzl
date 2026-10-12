@@ -104,6 +104,36 @@ NATIVE_CATALOG_COHORT = {
 
 def declare_haskell_components():
     haskell_library(
+        name = "tidepool_execution_schema",
+        srcs = {
+        "Tidepool/ExecutionSchema.hs": "execution-schema/Tidepool/ExecutionSchema.hs",
+        "Tidepool/ExecutionEncode.hs": "execution-schema/Tidepool/ExecutionEncode.hs"
+    },
+        deps = [],
+        _haskell_toolchain = "toolchains//:haskell",
+        compiler_flags = haskell_component_flags([
+        "bytestring",
+        "cborg",
+        "containers",
+        "text"
+    ], [
+        "-XGHC2024",
+        "-XOverloadedStrings",
+        "-Wall",
+        "-Werror=missing-fields"
+    ]),
+        linker_flags = haskell_component_link_flags([
+        "bytestring",
+        "cborg",
+        "containers",
+        "text"
+    ], [
+        "-Wall",
+        "-Werror=missing-fields"
+    ], dynamic = False),
+        visibility = ["PUBLIC"],
+    )
+    haskell_library(
         name = "tidepool_extract_internal",
         srcs = {
         "Tidepool/Binders.hs": "src/Tidepool/Binders.hs",
@@ -165,9 +195,7 @@ def declare_haskell_components():
         "Tidepool/PreparedSites.hs": "src/Tidepool/PreparedSites.hs",
         "Tidepool/RetainedUnfoldings.hs": "src/Tidepool/RetainedUnfoldings.hs",
         "Tidepool/ExecutionIR.hs": "src/Tidepool/ExecutionIR.hs",
-        "Tidepool/ExecutionSchema.hs": "src/Tidepool/ExecutionSchema.hs",
         "Tidepool/ExecutionProjection.hs": "src/Tidepool/ExecutionProjection.hs",
-        "Tidepool/ExecutionEncode.hs": "src/Tidepool/ExecutionEncode.hs",
         "Tidepool/Json.hs": "src/Tidepool/Json.hs",
         "Tidepool/Resolve.hs": "src/Tidepool/Resolve.hs",
         "Tidepool/Session.hs": "src/Tidepool/Session.hs",
@@ -183,7 +211,9 @@ def declare_haskell_components():
         "Tidepool/OwnedInputTransport.hs": "src/Tidepool/OwnedInputTransport.hs",
         "Tidepool/NativeOriginalCensus.hs": "src/Tidepool/NativeOriginalCensus.hs"
     },
-        deps = [],
+        deps = [
+        ":tidepool_execution_schema"
+    ],
         _haskell_toolchain = "toolchains//:haskell_with_extractor_source_inputs",
         compiler_flags = haskell_component_flags([
         "bytestring",
@@ -303,9 +333,7 @@ def declare_haskell_components():
         "Tidepool/PreparedSites.hs": "src/Tidepool/PreparedSites.hs",
         "Tidepool/RetainedUnfoldings.hs": "src/Tidepool/RetainedUnfoldings.hs",
         "Tidepool/ExecutionIR.hs": "src/Tidepool/ExecutionIR.hs",
-        "Tidepool/ExecutionSchema.hs": "src/Tidepool/ExecutionSchema.hs",
         "Tidepool/ExecutionProjection.hs": "src/Tidepool/ExecutionProjection.hs",
-        "Tidepool/ExecutionEncode.hs": "src/Tidepool/ExecutionEncode.hs",
         "Tidepool/Json.hs": "src/Tidepool/Json.hs",
         "Tidepool/Resolve.hs": "src/Tidepool/Resolve.hs",
         "Tidepool/Session.hs": "src/Tidepool/Session.hs",
@@ -321,7 +349,9 @@ def declare_haskell_components():
         "Tidepool/OwnedInputTransport.hs": "src/Tidepool/OwnedInputTransport.hs",
         "Tidepool/NativeOriginalCensus.hs": "src/Tidepool/NativeOriginalCensus.hs"
     },
-        deps = [],
+        deps = [
+        ":tidepool_execution_schema"
+    ],
         _haskell_toolchain = "toolchains//:haskell_with_extractor_source_inputs",
         compiler_flags = haskell_component_flags([
         "bytestring",
@@ -388,7 +418,8 @@ def declare_haskell_components():
         "Main.hs": "app/Main.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_extract_internal",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell",
@@ -447,7 +478,8 @@ def declare_haskell_components():
         "Main.hs": "app/Main.hs"
     },
         deps = [
-        ":tidepool_extract_internal_profile"
+        ":tidepool_extract_internal_profile",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell",
@@ -510,7 +542,8 @@ def declare_haskell_components():
         "DeclarationJoinCases.hs": "test-cell-splitter/DeclarationJoinCases.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_extract_internal",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
@@ -572,7 +605,8 @@ def declare_haskell_components():
         "Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_extract_internal",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
@@ -679,7 +713,8 @@ def declare_haskell_components():
         "ExecutionCorpusInventory.hs": "test-execution-corpus/ExecutionCorpusInventory.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_extract_internal",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell",
@@ -741,7 +776,8 @@ def declare_haskell_components():
         "QuasiQuoteOccurrencesTest.hs": "test-cell-splitter/QuasiQuoteOccurrencesTest.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_extract_internal",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
@@ -1090,7 +1126,8 @@ def declare_haskell_components():
         "DeclarationJoinCases.hs": "test-cell-splitter/DeclarationJoinCases.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_extract_internal",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
@@ -2345,14 +2382,14 @@ def declare_haskell_components():
         "Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
         compiler_flags = haskell_component_flags([
         "bytestring",
         "cborg",
-        "directory",
+        "containers",
         "tasty",
         "tasty-hunit",
         "text"
@@ -2366,26 +2403,9 @@ def declare_haskell_components():
         "bytestring",
         "cborg",
         "containers",
-        "cryptohash-sha256",
-        "deepseq",
-        "directory",
-        "errors",
-        "filepath",
-        "ghc",
-        "ghc-boot",
-        "ghci",
-        "lens",
-        "mtl",
-        "process",
-        "safe",
-        "syb",
         "tasty",
         "tasty-hunit",
-        "template-haskell",
-        "text",
-        "time",
-        "unix",
-        "witherable"
+        "text"
     ], [
         "-Werror=missing-fields",
         "-Wall"
@@ -2532,6 +2552,207 @@ def declare_haskell_components():
         visibility = ["PUBLIC"],
     )
     haskell_binary(
+        name = "module_candidates_codec_bin",
+        srcs = {
+        "Main.hs": "test-module-candidates-codec/Main.hs",
+        "Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs",
+        "Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
+        "Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs"
+    },
+        deps = [
+        ":tidepool_extract_internal"
+    ],
+        link_style = "static_pic",
+        _haskell_toolchain = "toolchains//:haskell_tests",
+        compiler_flags = haskell_component_flags([
+        "bytestring",
+        "cborg",
+        "containers",
+        "cryptohash-sha256",
+        "directory",
+        "filepath",
+        "process",
+        "tasty",
+        "tasty-hunit",
+        "text"
+    ], [
+        "-XGHC2024",
+        "-XOverloadedStrings",
+        "-Werror=missing-fields",
+        "-Wall"
+    ]),
+        linker_flags = haskell_component_link_flags([
+        "bytestring",
+        "cborg",
+        "containers",
+        "cryptohash-sha256",
+        "deepseq",
+        "directory",
+        "errors",
+        "filepath",
+        "ghc",
+        "ghc-boot",
+        "ghci",
+        "lens",
+        "mtl",
+        "process",
+        "safe",
+        "syb",
+        "tasty",
+        "tasty-hunit",
+        "template-haskell",
+        "text",
+        "time",
+        "unix",
+        "witherable"
+    ], [
+        "-Werror=missing-fields",
+        "-Wall"
+    ], dynamic = True),
+        visibility = ["PUBLIC"],
+    )
+    filegroup(
+        name = "module_candidates_codec_resources",
+        srcs = {
+        "actors/Tidepool/Actors/Exomonad.hs": "actors/Tidepool/Actors/Exomonad.hs",
+        "actors/Tidepool/Actors/Internal/Agent.hs": "actors/Tidepool/Actors/Internal/Agent.hs",
+        "actors/Tidepool/Actors/Internal/ExomonadDriver.hs": "actors/Tidepool/Actors/Internal/ExomonadDriver.hs",
+        "actors/Tidepool/Actors/Observe.hs": "actors/Tidepool/Actors/Observe.hs",
+        "actors/Tidepool/Actors/Role.hs": "actors/Tidepool/Actors/Role.hs",
+        "actors/Tidepool/Actors/Spawn.hs": "actors/Tidepool/Actors/Spawn.hs",
+        "actors/Tidepool/Actors/Worktree.hs": "actors/Tidepool/Actors/Worktree.hs",
+        "actors/Tidepool/Check.hs": "actors/Tidepool/Check.hs",
+        "actors/evidence/RetainedSurvey.hs": "actors/evidence/RetainedSurvey.hs",
+        "actors/evidence/Review.hs": "actors/evidence/Review.hs",
+        "actors/evidence/Selection.hs": "actors/evidence/Selection.hs",
+        "actors/evidence/Tests.hs": "actors/evidence/Tests.hs",
+        "lib/Jev/Host.hs": "lib/Jev/Host.hs",
+        "lib/Jev/Tidepool.hs": "lib/Jev/Tidepool.hs",
+        "lib/Tidepool/Actor/Internal.hs": "lib/Tidepool/Actor/Internal.hs",
+        "lib/Tidepool/Actor/Record.hs": "lib/Tidepool/Actor/Record.hs",
+        "lib/Tidepool/Actor/Source.hs": "lib/Tidepool/Actor/Source.hs",
+        "lib/Tidepool/Actor.hs": "lib/Tidepool/Actor.hs",
+        "lib/Tidepool/Aeson/FromJSON.hs": "lib/Tidepool/Aeson/FromJSON.hs",
+        "lib/Tidepool/Aeson/KeyMap.hs": "lib/Tidepool/Aeson/KeyMap.hs",
+        "lib/Tidepool/Aeson/Lens.hs": "lib/Tidepool/Aeson/Lens.hs",
+        "lib/Tidepool/Aeson/Schema.hs": "lib/Tidepool/Aeson/Schema.hs",
+        "lib/Tidepool/Aeson/Scientific.hs": "lib/Tidepool/Aeson/Scientific.hs",
+        "lib/Tidepool/Aeson/Value.hs": "lib/Tidepool/Aeson/Value.hs",
+        "lib/Tidepool/Aeson.hs": "lib/Tidepool/Aeson.hs",
+        "lib/Tidepool/Agent/Context.hs": "lib/Tidepool/Agent/Context.hs",
+        "lib/Tidepool/Agent/Contract.hs": "lib/Tidepool/Agent/Contract.hs",
+        "lib/Tidepool/Agent/Launch.hs": "lib/Tidepool/Agent/Launch.hs",
+        "lib/Tidepool/Agent/Ref/Internal.hs": "lib/Tidepool/Agent/Ref/Internal.hs",
+        "lib/Tidepool/Agent/Ref.hs": "lib/Tidepool/Agent/Ref.hs",
+        "lib/Tidepool/Agent/Reply/Internal.hs": "lib/Tidepool/Agent/Reply/Internal.hs",
+        "lib/Tidepool/Agent/Reply.hs": "lib/Tidepool/Agent/Reply.hs",
+        "lib/Tidepool/Agent/Session.hs": "lib/Tidepool/Agent/Session.hs",
+        "lib/Tidepool/Agent/ToolEffects.hs": "lib/Tidepool/Agent/ToolEffects.hs",
+        "lib/Tidepool/Agent/Watch/Internal.hs": "lib/Tidepool/Agent/Watch/Internal.hs",
+        "lib/Tidepool/Agent/Watch.hs": "lib/Tidepool/Agent/Watch.hs",
+        "lib/Tidepool/Async/Internal.hs": "lib/Tidepool/Async/Internal.hs",
+        "lib/Tidepool/Async/Types.hs": "lib/Tidepool/Async/Types.hs",
+        "lib/Tidepool/Async.hs": "lib/Tidepool/Async.hs",
+        "lib/Tidepool/Cargo.hs": "lib/Tidepool/Cargo.hs",
+        "lib/Tidepool/Command/Tools.hs": "lib/Tidepool/Command/Tools.hs",
+        "lib/Tidepool/Command/Types.hs": "lib/Tidepool/Command/Types.hs",
+        "lib/Tidepool/Command.hs": "lib/Tidepool/Command.hs",
+        "lib/Tidepool/Data/Text.hs": "lib/Tidepool/Data/Text.hs",
+        "lib/Tidepool/Data/Time.hs": "lib/Tidepool/Data/Time.hs",
+        "lib/Tidepool/Double.hs": "lib/Tidepool/Double.hs",
+        "lib/Tidepool/Duration.hs": "lib/Tidepool/Duration.hs",
+        "lib/Tidepool/Effects/Row.hs": "lib/Tidepool/Effects/Row.hs",
+        "lib/Tidepool/Event.hs": "lib/Tidepool/Event.hs",
+        "lib/Tidepool/FilePath.hs": "lib/Tidepool/FilePath.hs",
+        "lib/Tidepool/Form/Algebra.hs": "lib/Tidepool/Form/Algebra.hs",
+        "lib/Tidepool/Form/Check.hs": "lib/Tidepool/Form/Check.hs",
+        "lib/Tidepool/Form/GForm.hs": "lib/Tidepool/Form/GForm.hs",
+        "lib/Tidepool/Form/Schema.hs": "lib/Tidepool/Form/Schema.hs",
+        "lib/Tidepool/Form/Wire.hs": "lib/Tidepool/Form/Wire.hs",
+        "lib/Tidepool/Form.hs": "lib/Tidepool/Form.hs",
+        "lib/Tidepool/Git.hs": "lib/Tidepool/Git.hs",
+        "lib/Tidepool/Inspection/Display.hs": "lib/Tidepool/Inspection/Display.hs",
+        "lib/Tidepool/Inspection/Tree.hs": "lib/Tidepool/Inspection/Tree.hs",
+        "lib/Tidepool/Inspection.hs": "lib/Tidepool/Inspection.hs",
+        "lib/Tidepool/Internal/ActorExit.hs": "lib/Tidepool/Internal/ActorExit.hs",
+        "lib/Tidepool/Internal/ActorProfiles.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ActorProfiles_hs]",
+        "lib/Tidepool/Internal/ActorRef.hs": "lib/Tidepool/Internal/ActorRef.hs",
+        "lib/Tidepool/Internal/ExitCell.hs": "lib/Tidepool/Internal/ExitCell.hs",
+        "lib/Tidepool/Internal/ModelControl.hs": "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ModelControl_hs]",
+        "lib/Tidepool/Internal/RequestSite.hs": "lib/Tidepool/Internal/RequestSite.hs",
+        "lib/Tidepool/Introspection.hs": "lib/Tidepool/Introspection.hs",
+        "lib/Tidepool/Journal.hs": "lib/Tidepool/Journal.hs",
+        "lib/Tidepool/Kv.hs": "lib/Tidepool/Kv.hs",
+        "lib/Tidepool/Llm.hs": "lib/Tidepool/Llm.hs",
+        "lib/Tidepool/Lookup/Tools.hs": "lib/Tidepool/Lookup/Tools.hs",
+        "lib/Tidepool/Lookup.hs": "lib/Tidepool/Lookup.hs",
+        "lib/Tidepool/Model.hs": "lib/Tidepool/Model.hs",
+        "lib/Tidepool/Patch.hs": "lib/Tidepool/Patch.hs",
+        "lib/Tidepool/Prelude.hs": "lib/Tidepool/Prelude.hs",
+        "lib/Tidepool/QQ/Bash.hs": "lib/Tidepool/QQ/Bash.hs",
+        "lib/Tidepool/QQ/Fmt/Runtime.hs": "lib/Tidepool/QQ/Fmt/Runtime.hs",
+        "lib/Tidepool/QQ/Fmt.hs": "lib/Tidepool/QQ/Fmt.hs",
+        "lib/Tidepool/QQ/HsMeta/Parse.hs": "lib/Tidepool/QQ/HsMeta/Parse.hs",
+        "lib/Tidepool/QQ/HsMeta/Settings.hs": "lib/Tidepool/QQ/HsMeta/Settings.hs",
+        "lib/Tidepool/QQ/HsMeta/Translate.hs": "lib/Tidepool/QQ/HsMeta/Translate.hs",
+        "lib/Tidepool/QQ/Json.hs": "lib/Tidepool/QQ/Json.hs",
+        "lib/Tidepool/QQ/Patch.hs": "lib/Tidepool/QQ/Patch.hs",
+        "lib/Tidepool/QQ/PyF/Spec.hs": "lib/Tidepool/QQ/PyF/Spec.hs",
+        "lib/Tidepool/QQ/Validate.hs": "lib/Tidepool/QQ/Validate.hs",
+        "lib/Tidepool/QQ.hs": "lib/Tidepool/QQ.hs",
+        "lib/Tidepool/Random.hs": "lib/Tidepool/Random.hs",
+        "lib/Tidepool/Records/Bridged.hs": "lib/Tidepool/Records/Bridged.hs",
+        "lib/Tidepool/Records/Stable.hs": "lib/Tidepool/Records/Stable.hs",
+        "lib/Tidepool/Records.hs": "lib/Tidepool/Records.hs",
+        "lib/Tidepool/Render.hs": "lib/Tidepool/Render.hs",
+        "lib/Tidepool/Scope/Internal.hs": "lib/Tidepool/Scope/Internal.hs",
+        "lib/Tidepool/Scope.hs": "lib/Tidepool/Scope.hs",
+        "lib/Tidepool/Shell.hs": "lib/Tidepool/Shell.hs",
+        "lib/Tidepool/Swarm.hs": "lib/Tidepool/Swarm.hs",
+        "lib/Tidepool/Table.hs": "lib/Tidepool/Table.hs",
+        "lib/Tidepool/TextFormat.hs": "lib/Tidepool/TextFormat.hs",
+        "lib/Tidepool/Tools.hs": "lib/Tidepool/Tools.hs",
+        "lib/Tidepool/View/Types.hs": "lib/Tidepool/View/Types.hs",
+        "lib/Tidepool/View/Wire.hs": "lib/Tidepool/View/Wire.hs",
+        "lib/Tidepool/View.hs": "lib/Tidepool/View.hs",
+        "lib/Tidepool/Worktree.hs": "lib/Tidepool/Worktree.hs",
+        "test-module-candidates-codec/Main.hs": "test-module-candidates-codec/Main.hs",
+        "test-support/Tidepool/Test/CandidateCodec.hs": "test-support/Tidepool/Test/CandidateCodec.hs",
+        "test-support/Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs",
+        "test-support/Tidepool/Test/GenuineCandidate.hs": "test-support/Tidepool/Test/GenuineCandidate.hs",
+        "test-support/Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
+    },
+    )
+    sh_test(
+        name = "module_candidates_codec",
+        test = "test-with-fixtures.sh",
+        args = [
+        "$(exe :module_candidates_codec_bin)",
+        "$(location :module_candidates_codec_resources)"
+    ],
+        resources = [
+        ":module_candidates_codec_bin",
+        ":module_candidates_codec_resources",
+        "//bridge/mcp:effects_generated",
+        ":facade_embedded_sources",
+        "toolchains//:haskell_test_closure",
+        "toolchains//:test_tools_closure",
+        "//tidepool/toolchain:candidate_fixture_issuer"
+    ],
+        env = {
+        "PATH": read_root_config("nix", "ghc_bin") + ":" + read_root_config("nix", "action_path"),
+        "TIDEPOOL_GHC_LIBDIR": read_root_config("nix", "ghc_libdir"),
+        "TIDEPOOL_TEST_EFFECTS_DIR": "$(location //bridge/mcp:effects_generated)",
+        "TIDEPOOL_PRELUDE_DIR": "$(location :facade_embedded_sources)/lib",
+        "TIDEPOOL_TEST_PYTHON": "$(exe toolchains//:python)",
+        "TIDEPOOL_CANDIDATE_FIXTURE_ISSUER": "$(exe //tidepool/toolchain:candidate_fixture_issuer)",
+        "TIDEPOOL_TEST_INPUT_PATHS": "PATH:search-list TIDEPOOL_GHC_LIBDIR:directory TIDEPOOL_TEST_EFFECTS_DIR:directory TIDEPOOL_PRELUDE_DIR:directory TIDEPOOL_TEST_PYTHON:executable TIDEPOOL_CANDIDATE_FIXTURE_ISSUER:executable",
+    },
+        labels = ["haskell_component_suite"],
+        test_rule_timeout_ms = 14400000,
+        visibility = ["PUBLIC"],
+    )
+    haskell_binary(
         name = "execution_schema_projection_bin",
         srcs = {
         "Main.hs": "test-prepared-stg/ExecutionProjectionProbe.hs",
@@ -2542,7 +2763,8 @@ def declare_haskell_components():
         "ModuleEvidenceProjectionTest.hs": "test-prepared-stg/ModuleEvidenceProjectionTest.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_extract_internal",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
@@ -2874,7 +3096,8 @@ def declare_haskell_components():
         "ExecutionCorpusInventory.hs": "test-execution-corpus/ExecutionCorpusInventory.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_extract_internal",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
@@ -3298,7 +3521,8 @@ def declare_haskell_components():
         "Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_extract_internal",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
@@ -3676,7 +3900,8 @@ def declare_haskell_components():
         "Tidepool/Test/FixturePacket.hs": "test-support/Tidepool/Test/FixturePacket.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_extract_internal",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
@@ -4680,7 +4905,8 @@ def declare_haskell_components():
         "Tidepool/Test/Runner.hs": "test-support/Tidepool/Test/Runner.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_extract_internal",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
@@ -5010,7 +5236,8 @@ def declare_haskell_components():
         "RecoveryEntryScopeTest.hs": "test-prepared-stg/RecoveryEntryScopeTest.hs"
     },
         deps = [
-        ":tidepool_extract_internal"
+        ":tidepool_extract_internal",
+        ":tidepool_execution_schema"
     ],
         link_style = "static_pic",
         _haskell_toolchain = "toolchains//:haskell_tests",
