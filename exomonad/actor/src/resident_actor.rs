@@ -13870,40 +13870,54 @@ where
         label: String,
         role: crate::ActorCapabilities,
     ) -> Result<LocalActorRef, Box<dyn std::error::Error + Send + Sync>> {
-        let admission = self.environment.root_admission_closed.read().await;
-        if *admission {
-            return Err(std::io::Error::other("swarm root admission is closed").into());
-        }
-        let placement = self
-            .environment
-            .runner
-            .provision_root_scope(self.session)
-            .await?;
-        let descriptor = ActorDescriptor::new(label, placement).with_capabilities(role);
-        let mut behavior = ResidentKernelBehavior::with_boot(
-            descriptor,
-            self.environment.clone(),
-            ResidentBoot::Workbench,
-            Vec::new(),
-        );
-        behavior.forest_control = true;
-        match crate::local_actor::spawn_local_actor_in_directory(
-            None,
-            behavior,
-            self.incarnation,
-            self.directory.clone(),
-        )
-        .await
-        {
-            Ok((actor, _task)) => Ok(actor),
-            Err(error) => {
-                if crate::local_actor::startup_cleanup(&error).is_none() {
-                    self.environment
-                        .runner
-                        .retire_root_placement(placement)
-                        .await?;
+        let reservation = self.directory.reserve(self.incarnation).await?;
+        let environment = self.environment.clone();
+        let directory = self.directory.clone();
+        let session = self.session;
+        let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
+            Box::pin(async move {
+                let result = async {
+                    let placement = environment.runner.provision_root_scope(session).await?;
+                    ticket.placement_prepared(placement);
+                    let descriptor = ActorDescriptor::new(label, placement).with_capabilities(role);
+                    let mut behavior = ResidentKernelBehavior::with_boot(
+                        descriptor,
+                        environment.clone(),
+                        ResidentBoot::Workbench,
+                        Vec::new(),
+                    );
+                    behavior.forest_control = true;
+                    match crate::local_actor::spawn_reserved_local_actor(
+                        None,
+                        behavior,
+                        reservation,
+                        directory,
+                    )
+                    .await
+                    {
+                        Ok((actor, _task)) => Ok(
+                            crate::local_actor::run_control::RootAdmissionOutcome::Workbench(actor),
+                        ),
+                        Err(error) => {
+                            if crate::local_actor::startup_cleanup(&error).is_none() {
+                                environment.runner.retire_root_placement(placement).await?;
+                                ticket.placement_released(placement);
+                            }
+                            Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>)
+                        }
+                    }
                 }
-                Err(Box::new(error))
+                .await;
+                (result, crate::CleanupComponentOutcome::Confirmed)
+            })
+        });
+        match self.directory.prepare_root(operation).await? {
+            Ok(crate::local_actor::run_control::RootAdmissionOutcome::Workbench(actor)) => {
+                Ok(actor)
+            }
+            Err(error) => Err(error),
+            _ => {
+                Err(std::io::Error::other("workbench producer returned incompatible result").into())
             }
         }
     }
