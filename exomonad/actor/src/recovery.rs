@@ -385,6 +385,7 @@ struct State {
 /// Exact evidence of a durably confirmed journal binding, not native binding
 /// authority. Only the verified enclosing bind operation may issue a final
 /// lifecycle settlement receipt.
+#[derive(Debug)]
 pub struct JournalApplicationBindingAck {
     issuer: Arc<()>,
     actor: ActorRef,
@@ -619,6 +620,8 @@ impl ActorRecoveryJournal {
     ) -> std::io::Result<Arc<Self>> {
         Self::start(anchor.clone(), relative_file.as_ref().to_owned(), true).await
     }
+    /// Blocking offline filesystem observation; this never addresses a live
+    /// journal owner or repairs its file.
     pub fn read_observed(path: &std::path::Path) -> std::io::Result<Vec<DurableActorRecord>> {
         let (rows, _torn) = tidepool_repr::jsonl::read_tail(
             path,
@@ -628,6 +631,8 @@ impl ActorRecoveryJournal {
         .map_err(std::io::Error::other)?;
         Ok(replay(rows)?.0.into_values().collect())
     }
+    /// Explicit full inventory with linear copying cost. Selected hot-path
+    /// queries return only their named actor facts.
     pub async fn records(&self) -> std::io::Result<Vec<DurableActorRecord>> {
         self.request(|reply| Command::Records { reply }).await
     }
@@ -1013,10 +1018,10 @@ impl JournalOwner {
         }
         observed
     }
-    pub fn validated_records(&mut self) -> std::io::Result<Vec<DurableActorRecord>> {
+    fn validated_records(&mut self) -> std::io::Result<Vec<DurableActorRecord>> {
         Ok(self.validated_state_records()?.into_values().collect())
     }
-    pub fn active_application_conversation(
+    fn active_application_conversation(
         &mut self,
         actor: ActorRef,
     ) -> std::io::Result<Option<ApplicationConversation>> {
@@ -1033,10 +1038,10 @@ impl JournalOwner {
             .as_ref()
             .and_then(|app| app.conversation.clone()))
     }
-    pub fn records(&mut self) -> Vec<DurableActorRecord> {
+    fn records(&mut self) -> Vec<DurableActorRecord> {
         self.state.records.values().cloned().collect()
     }
-    pub fn initial_context(
+    fn initial_context(
         &mut self,
         actor: ActorRef,
     ) -> std::io::Result<Option<crate::InitialContextObservation>> {
@@ -1062,7 +1067,7 @@ impl JournalOwner {
         }
         Ok(None)
     }
-    pub(crate) fn record_initial_context(
+    fn record_initial_context(
         &mut self,
         actor: ActorRef,
         change: crate::initial_context::InitialContextEvent,
@@ -1091,7 +1096,7 @@ impl JournalOwner {
             std::io::Error::other("initial context transition produced no observation")
         })
     }
-    pub(crate) fn initial_context_publication_matches(
+    fn initial_context_publication_matches(
         &mut self,
         actor: ActorRef,
         operation: &tidepool_runtime::session::WorkbenchExecutionId,
@@ -1134,11 +1139,7 @@ impl JournalOwner {
         }
         Ok(false)
     }
-    pub(crate) fn retire(
-        &mut self,
-        actor: ActorRef,
-        terminal: crate::ActorTerminal,
-    ) -> std::io::Result<()> {
+    fn retire(&mut self, actor: ActorRef, terminal: crate::ActorTerminal) -> std::io::Result<()> {
         let terminal = terminal.bound_diagnostic();
         let state = &mut self.state;
         ensure_writable(&state)?;
@@ -1169,7 +1170,7 @@ impl JournalOwner {
             .terminal = Some(terminal);
         Ok(())
     }
-    pub fn prepare_application_with_intent(
+    fn prepare_application_with_intent(
         &mut self,
         actor: ActorRef,
         binding_path: PathBuf,
@@ -1228,7 +1229,7 @@ impl JournalOwner {
         });
         Ok(())
     }
-    pub fn bind_application_conversation(
+    fn bind_application_conversation(
         &mut self,
         actor: ActorRef,
         conversation: ApplicationConversation,
