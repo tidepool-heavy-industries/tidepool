@@ -497,7 +497,19 @@ async fn stopped_lifecycle_owner_still_cleans_prepared_native_input_without_conf
     let cleanup = crate::local_actor::startup_cleanup(&error)
         .expect("actual prepared placement cleanup survives lifecycle owner loss");
     assert_eq!(cleanup.actor(), identity);
-    assert!(cleanup.is_confirmed());
+    assert!(matches!(
+        cleanup.hook(),
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    assert!(matches!(
+        cleanup.realm(),
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    assert!(matches!(
+        cleanup.children(),
+        crate::CleanupComponentOutcome::Unconfirmed(_)
+    ));
+    assert!(!cleanup.is_confirmed());
     assert!(!fixture.scope_is_live(placement));
     assert!(forest.directory.resolve(identity).await.unwrap().is_none());
     assert!(matches!(
