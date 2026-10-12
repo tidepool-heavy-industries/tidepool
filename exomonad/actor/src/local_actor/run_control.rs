@@ -1,9 +1,12 @@
 //! One run owns actor membership, identity claims and preparation admission.
 use super::*;
+use ractor::ActorStatus;
 use std::collections::HashSet;
 use tokio::sync::oneshot;
 #[cfg(test)]
 mod cluster_tests;
+#[cfg(test)]
+mod finalization_tests;
 mod preparation;
 mod startup;
 pub(crate) use startup::{
@@ -13,7 +16,6 @@ mod transfers;
 use preparation::{PreparationMessage, PreparationSupervisor, RootDelivery};
 pub(crate) use preparation::{
     RootAdmissionOutcome, RootOperation, RootOperationResult, RootPlacementPublisher,
-    RootPreparationTicket,
 };
 use transfers::{ResourceTransfer, WorkerTransfer};
 pub(crate) use transfers::{ResourceTransferReservation, WorkerTransferReservation};
@@ -111,6 +113,7 @@ pub(crate) enum RunPhase {
     RetiringPreparations,
     RetiringResources,
     Retired,
+    Finalizing,
 }
 
 pub(super) struct RunState {
@@ -198,6 +201,29 @@ impl ReplacementIngressGrant {
     }
 }
 
+/// Issued only after every sealed run population has confirmed settlement.
+/// It authorizes release of one exact retained lifecycle owner.
+pub(crate) struct RunRetirementGrant {
+    actor: ActorRef,
+    lifecycle: crate::kernel::LifecycleHandle,
+    never_registered: bool,
+}
+impl RunRetirementGrant {
+    pub(crate) fn actor(&self) -> ActorRef {
+        self.actor
+    }
+    pub(crate) fn lifecycle(&self) -> &crate::kernel::LifecycleHandle {
+        &self.lifecycle
+    }
+    pub(crate) fn never_registered(&self) -> bool {
+        self.never_registered
+    }
+}
+pub(super) enum RunFinalizationTargets {
+    Retire(Vec<(crate::kernel::LifecycleHandle, Option<ractor::ActorCell>)>),
+    Finalize(Vec<RunRetirementGrant>),
+}
+
 pub(crate) struct ActorReservation {
     parent_admission: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
     identity: ActorRef,
@@ -255,6 +281,7 @@ enum ReservationPurpose {
 }
 enum ReservationPhase {
     Creating,
+    Abandoning,
     Ready,
     Registered,
     Abandoned,
@@ -263,8 +290,10 @@ struct ReservationRecord {
     phase: ReservationPhase,
     purpose: ReservationPurpose,
     startup: Option<crate::RootStartupIntent>,
+    previous_claim: Option<ActorRef>,
     terminal: RetainedActorExit,
     lifecycle: Option<crate::kernel::LifecycleHandle>,
+    executor: Option<ractor::ActorCell>,
     reply: Option<oneshot::Sender<Result<ActorReservation, DirectoryError>>>,
 }
 
@@ -362,7 +391,15 @@ impl RunState {
         }
     }
     fn start_resource_retirement(&mut self) {
-        if !self.worker_transfers.is_empty() || !self.resource_transfers.is_empty() {
+        if !self.worker_transfers.is_empty()
+            || !self.resource_transfers.is_empty()
+            || self.reservations.values().any(|record| {
+                matches!(
+                    record.phase,
+                    ReservationPhase::Creating | ReservationPhase::Abandoning
+                )
+            })
+        {
             return;
         }
         if !matches!(self.resource_retirement, ResourceRetirement::Requested)
@@ -412,8 +449,31 @@ impl RunState {
             let _ = waiter.send(outcome.clone());
         }
     }
+    fn finalization_grants(&self) -> Vec<RunRetirementGrant> {
+        self.reservations
+            .iter()
+            .filter_map(|(actor, record)| {
+                record
+                    .lifecycle
+                    .as_ref()
+                    .map(|lifecycle| RunRetirementGrant {
+                        actor: *actor,
+                        lifecycle: lifecycle.clone(),
+                        never_registered: matches!(record.phase, ReservationPhase::Abandoned),
+                    })
+            })
+            .collect()
+    }
     fn settle_preparation_waiters(&mut self) {
-        if !self.worker_transfers.is_empty() || !self.resource_transfers.is_empty() {
+        if !self.worker_transfers.is_empty()
+            || !self.resource_transfers.is_empty()
+            || self.reservations.values().any(|record| {
+                matches!(
+                    record.phase,
+                    ReservationPhase::Creating | ReservationPhase::Abandoning
+                )
+            })
+        {
             return;
         }
         if self
@@ -449,6 +509,16 @@ impl RunState {
 }
 
 pub(super) enum RunControlMessage {
+    FinishRun {
+        members: Vec<crate::kernel::lifecycle::SuccessorDrainReceipt>,
+        reply: oneshot::Sender<Result<Vec<RunRetirementGrant>, DirectoryError>>,
+    },
+    FinalizationTargets {
+        reply: oneshot::Sender<Result<RunFinalizationTargets, DirectoryError>>,
+    },
+    CompleteRun {
+        reply: oneshot::Sender<Result<Option<ractor::ActorCell>, DirectoryError>>,
+    },
     RegisterRecoveryBoot {
         journal: Arc<crate::ActorRecoveryJournal>,
         registration: crate::JournalBootRegistration,
@@ -699,6 +769,15 @@ fn begin_reservation(
     purpose: ReservationPurpose,
     reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
 ) {
+    begin_reservation_after(state, actor, purpose, None, reply);
+}
+fn begin_reservation_after(
+    state: &mut RunState,
+    actor: ActorRef,
+    purpose: ReservationPurpose,
+    predecessor: Option<crate::kernel::LifecycleHandle>,
+    reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
+) {
     let terminal = RetainedActorExit::new();
     state.reservations.insert(
         actor,
@@ -706,8 +785,12 @@ fn begin_reservation(
             phase: ReservationPhase::Creating,
             purpose,
             startup: None,
+            previous_claim: predecessor
+                .as_ref()
+                .map(crate::kernel::LifecycleHandle::identity),
             terminal: terminal.clone(),
             lifecycle: None,
+            executor: None,
             reply: Some(reply),
         },
     );
@@ -719,6 +802,7 @@ fn begin_reservation(
                 .send_message(PreparationMessage::ReserveActor {
                     identity: actor,
                     terminal,
+                    predecessor,
                 })
                 .is_err()
         })
@@ -751,6 +835,112 @@ impl Actor for RunControl {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            RunControlMessage::FinishRun { members, reply } => {
+                let exact = members.len()
+                    == state
+                        .reservations
+                        .values()
+                        .filter(|record| matches!(record.phase, ReservationPhase::Registered))
+                        .count()
+                    && members
+                        .iter()
+                        .map(|member| member.predecessor())
+                        .collect::<HashSet<_>>()
+                        .len()
+                        == members.len()
+                    && members.iter().all(|receipt| {
+                        state
+                            .reservations
+                            .get(&receipt.predecessor())
+                            .is_some_and(|record| {
+                                matches!(record.phase, ReservationPhase::Registered)
+                                    && receipt.confirms_actor_retirement()
+                                    && record.terminal.get().as_ref() == Some(receipt.terminal())
+                                    && record.terminal.cleanup().as_ref() == Some(receipt.cleanup())
+                                    && record.executor.as_ref().is_some_and(|executor| {
+                                        executor.get_status() == ActorStatus::Stopped
+                                    })
+                            })
+                    });
+                let confirmed = state.phase == RunPhase::Retired
+                    && matches!(
+                        state.resource_retirement,
+                        ResourceRetirement::Settled(crate::CleanupComponentOutcome::Confirmed)
+                    )
+                    && state.preparations.values().all(|record| {
+                        matches!(
+                            record.phase,
+                            PreparationPhase::Settled(crate::CleanupComponentOutcome::Confirmed)
+                        )
+                    })
+                    && state.reservations.values().all(|record| {
+                        !matches!(
+                            record.phase,
+                            ReservationPhase::Creating | ReservationPhase::Abandoning
+                        )
+                    })
+                    && state.worker_transfers.is_empty()
+                    && state.resource_transfers.is_empty()
+                    && state
+                        .resources
+                        .values()
+                        .all(|resource| matches!(resource.owner, ResourceOwner::Retired { .. }))
+                    && state.child_cleanup.values().all(|outcome| {
+                        matches!(outcome, crate::CleanupComponentOutcome::Confirmed)
+                    });
+                if exact && confirmed {
+                    state.phase = RunPhase::Finalizing;
+                    let _ = reply.send(Ok(state.finalization_grants()));
+                } else {
+                    let _ = reply.send(Err(DirectoryError::Unavailable));
+                }
+            }
+            RunControlMessage::FinalizationTargets { reply } => {
+                let result = match state.phase {
+                    RunPhase::Retired => Ok(RunFinalizationTargets::Retire(
+                        state
+                            .reservations
+                            .values()
+                            .filter(|record| matches!(record.phase, ReservationPhase::Registered))
+                            .filter_map(|record| {
+                                record.lifecycle.clone().map(|lifecycle| {
+                                    let cell = record.executor.clone();
+                                    (lifecycle, cell)
+                                })
+                            })
+                            .collect(),
+                    )),
+                    RunPhase::Finalizing => Ok(RunFinalizationTargets::Finalize(
+                        state.finalization_grants(),
+                    )),
+                    _ => Err(DirectoryError::Unavailable),
+                };
+                let _ = reply.send(result);
+            }
+            RunControlMessage::CompleteRun { reply } => {
+                if state.phase == RunPhase::Finalizing
+                    && state.reservations.values().all(|record| {
+                        record
+                            .executor
+                            .as_ref()
+                            .is_none_or(|executor| executor.get_status() == ActorStatus::Stopped)
+                            && record
+                                .lifecycle
+                                .as_ref()
+                                .is_none_or(|lifecycle| lifecycle.run_finalized())
+                    })
+                {
+                    let supervisor = state.preparation_supervisor.take().map(|supervisor| {
+                        let cell = supervisor.get_cell();
+                        supervisor.stop(None);
+                        cell
+                    });
+                    let _ = reply.send(Ok(supervisor));
+                    myself.stop(None);
+                } else {
+                    let _ = reply.send(Err(DirectoryError::Unavailable));
+                }
+            }
             RunControlMessage::RegisterRecoveryBoot {
                 journal,
                 registration,
@@ -1134,6 +1324,19 @@ impl Actor for RunControl {
                     }) || !state.entries.contains_key(&parent)
                     {
                         Err(DirectoryError::Unauthorized { actor: identity })
+                    } else if state.entries.get(&identity).is_some_and(|entry| {
+                        let parent_cell = state.entries[&parent].actor.address().get_cell();
+                        let supervisor = child.address().get_cell().try_get_supervisor();
+                        match entry.spawn_ownership {
+                            SpawnOwnership::Supervised(owner) => {
+                                owner != parent
+                                    || supervisor
+                                        .is_none_or(|cell| cell.get_id() != parent_cell.get_id())
+                            }
+                            SpawnOwnership::Independent => supervisor.is_some(),
+                        }
+                    }) {
+                        Err(DirectoryError::Unauthorized { actor: identity })
                     } else if child.terminal().get().is_some() {
                         Err(DirectoryError::Unauthorized { actor: identity })
                     } else if state
@@ -1153,6 +1356,7 @@ impl Actor for RunControl {
                             WorkerTransfer {
                                 parent,
                                 child: identity,
+                                source: state.entries[&identity].spawn_ownership,
                                 destination_run,
                             },
                         );
@@ -1167,17 +1371,41 @@ impl Actor for RunControl {
             }
             RunControlMessage::CommitWorkerTransfer { id, reply } => {
                 let result = if let Some(transfer) = state.worker_transfers.remove(&id) {
-                    if let Some(entry) = state.entries.get_mut(&transfer.child) {
-                        entry.spawn_ownership = if transfer.destination_run {
-                            SpawnOwnership::Independent
-                        } else {
-                            SpawnOwnership::Supervised(transfer.parent)
-                        };
-                        Ok(())
-                    } else {
-                        Err(DirectoryError::Unauthorized {
+                    let parent_cell = state
+                        .entries
+                        .get(&transfer.parent)
+                        .map(|entry| entry.actor.address().get_cell());
+                    match (state.entries.get_mut(&transfer.child), parent_cell) {
+                        (Some(entry), Some(parent)) if entry.spawn_ownership == transfer.source => {
+                            let cell = entry.actor.address().get_cell();
+                            let supervisor = cell.try_get_supervisor();
+                            let current_matches = match transfer.source {
+                                SpawnOwnership::Supervised(owner) => {
+                                    owner == transfer.parent
+                                        && supervisor
+                                            .is_some_and(|cell| cell.get_id() == parent.get_id())
+                                }
+                                SpawnOwnership::Independent => supervisor.is_none(),
+                            };
+                            if current_matches {
+                                if transfer.destination_run {
+                                    cell.unlink(parent);
+                                    entry.spawn_ownership = SpawnOwnership::Independent;
+                                } else {
+                                    cell.link(parent);
+                                    entry.spawn_ownership =
+                                        SpawnOwnership::Supervised(transfer.parent);
+                                }
+                                Ok(())
+                            } else {
+                                Err(DirectoryError::Unauthorized {
+                                    actor: transfer.child,
+                                })
+                            }
+                        }
+                        _ => Err(DirectoryError::Unauthorized {
                             actor: transfer.child,
-                        })
+                        }),
                     }
                 } else {
                     Err(DirectoryError::Unavailable)
@@ -1412,7 +1640,10 @@ impl Actor for RunControl {
                         Ok(lifecycle) => {
                             record.lifecycle = Some(lifecycle.clone());
                             if state.phase != RunPhase::Running
-                                || matches!(record.phase, ReservationPhase::Abandoned)
+                                || matches!(
+                                    record.phase,
+                                    ReservationPhase::Abandoned | ReservationPhase::Abandoning
+                                )
                             {
                                 lifecycle.close_abandoned();
                                 record.phase = ReservationPhase::Abandoned;
@@ -1434,6 +1665,15 @@ impl Actor for RunControl {
                             }
                         }
                         Err(_) => {
+                            // No affine reservation was issued and no executor can
+                            // have used this failed starter's identity.
+                            if state.identities.claimed.get(&actor.id) == Some(&actor) {
+                                if let Some(previous) = record.previous_claim {
+                                    state.identities.claimed.insert(actor.id, previous);
+                                } else {
+                                    state.identities.claimed.remove(&actor.id);
+                                }
+                            }
                             record.phase = ReservationPhase::Abandoned;
                             if let Some(reply) = record.reply.take() {
                                 let _ = reply.send(Err(DirectoryError::Unavailable));
@@ -1443,10 +1683,19 @@ impl Actor for RunControl {
                 } else if let Ok(lifecycle) = lifecycle {
                     lifecycle.close_abandoned();
                 }
+                state.settle_preparation_waiters();
+                state.start_resource_retirement();
             }
             RunControlMessage::AbandonReservation { actor } => {
                 if let Some(record) = state.reservations.get_mut(&actor) {
-                    record.phase = ReservationPhase::Abandoned;
+                    record.phase = if matches!(
+                        record.phase,
+                        ReservationPhase::Creating | ReservationPhase::Abandoning
+                    ) {
+                        ReservationPhase::Abandoning
+                    } else {
+                        ReservationPhase::Abandoned
+                    };
                     if let Some(lifecycle) = &record.lifecycle {
                         lifecycle.close_abandoned();
                     }
@@ -1478,17 +1727,29 @@ impl Actor for RunControl {
                     .is_some_and(|previous| {
                         actor.incarnation <= previous.incarnation
                             || state
-                                .entries
+                                .reservations
                                 .get(previous)
-                                .is_none_or(|entry| entry.actor.terminal().get().is_none())
+                                .is_none_or(|record| record.terminal.get().is_none())
                     })
                 {
                     let _ = reply.send(Err(DirectoryError::IdentityConflict { actor: actor.id }));
                 } else {
+                    let predecessor = state
+                        .identities
+                        .claimed
+                        .get(&actor.id)
+                        .and_then(|previous| state.reservations.get(previous))
+                        .and_then(|record| record.lifecycle.clone());
                     advance_actor_ids_past(actor.id);
                     state.identities.fenced.remove(&actor.id);
                     state.identities.claimed.insert(actor.id, actor);
-                    begin_reservation(state, actor, ReservationPurpose::Root, reply);
+                    begin_reservation_after(
+                        state,
+                        actor,
+                        ReservationPurpose::Root,
+                        predecessor,
+                        reply,
+                    );
                 }
             }
             RunControlMessage::Fence { actors, reply } => {
@@ -1539,11 +1800,12 @@ impl Actor for RunControl {
                         .identities
                         .runtime
                         .insert(actor.address().get_id(), identity);
-                    state
+                    let record = state
                         .reservations
                         .get_mut(&identity)
-                        .expect("registration reservation")
-                        .phase = ReservationPhase::Registered;
+                        .expect("registration reservation");
+                    record.executor = Some(actor.address().get_cell());
+                    record.phase = ReservationPhase::Registered;
                     state.entries.insert(
                         identity,
                         DirectoryEntry {
@@ -1634,7 +1896,14 @@ impl Actor for RunControl {
                             if let Some(lifecycle) = &record.lifecycle {
                                 lifecycle.close_abandoned();
                             }
-                            record.phase = ReservationPhase::Abandoned;
+                            record.phase = if matches!(
+                                record.phase,
+                                ReservationPhase::Creating | ReservationPhase::Abandoning
+                            ) {
+                                ReservationPhase::Abandoning
+                            } else {
+                                ReservationPhase::Abandoned
+                            };
                             if let Some(reply) = record.reply.take() {
                                 let _ = reply.send(Err(DirectoryError::Closed));
                             }
@@ -1694,6 +1963,9 @@ pub struct RunControlClient {
     owner: RactorRef<RunControlMessage>,
 }
 impl RunControlClient {
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        self.owner.get_id() == other.owner.get_id()
+    }
     #[cfg(test)]
     pub(crate) async fn stop_owner_for_test(&self) {
         self.owner.stop(None);
@@ -1721,6 +1993,56 @@ impl RunControlClient {
             .send_message(message(reply))
             .map_err(|_| DirectoryError::Unavailable)?;
         receiver.await.map_err(|_| DirectoryError::Unavailable)
+    }
+    pub(crate) async fn finish_run(&self) -> Result<(), DirectoryError> {
+        self.seal().await?;
+        let targets = self
+            .ask(|reply| RunControlMessage::FinalizationTargets { reply })
+            .await??;
+        let grants = match targets {
+            RunFinalizationTargets::Finalize(grants) => grants,
+            RunFinalizationTargets::Retire(lifecycles) => {
+                let mut members = Vec::with_capacity(lifecycles.len());
+                for (lifecycle, cell) in lifecycles {
+                    let receipt =
+                        tokio::time::timeout(SHUTDOWN_BUDGET, lifecycle.retire_for_successor())
+                            .await
+                            .map_err(|_| DirectoryError::Unavailable)?
+                            .map_err(|_| DirectoryError::Unavailable)?;
+                    if let Some(cell) = cell {
+                        cell.wait(Some(SHUTDOWN_BUDGET))
+                            .await
+                            .map_err(|_| DirectoryError::Unavailable)?;
+                    }
+                    members.push(receipt);
+                }
+                self.ask(|reply| RunControlMessage::FinishRun { members, reply })
+                    .await??
+            }
+        };
+        for grant in grants {
+            let lifecycle = grant.lifecycle().clone();
+            if !lifecycle.run_finalized() {
+                tokio::time::timeout(SHUTDOWN_BUDGET, lifecycle.finish_run(grant))
+                    .await
+                    .map_err(|_| DirectoryError::Unavailable)?
+                    .map_err(|_| DirectoryError::Unavailable)?;
+            }
+        }
+        if let Some(supervisor) = self
+            .ask(|reply| RunControlMessage::CompleteRun { reply })
+            .await??
+        {
+            supervisor
+                .wait(Some(SHUTDOWN_BUDGET))
+                .await
+                .map_err(|_| DirectoryError::Unavailable)?;
+        }
+        self.owner
+            .get_cell()
+            .wait(Some(SHUTDOWN_BUDGET))
+            .await
+            .map_err(|_| DirectoryError::Unavailable)
     }
     pub(crate) async fn register_recovery_boot(
         &self,

@@ -125,7 +125,7 @@ struct CaptureFixture {
 }
 
 impl CaptureFixture {
-    fn new(case: u64, permits: usize) -> Self {
+    async fn new(case: u64, permits: usize) -> Self {
         eval_harness::require_extract();
         let declarations = [
             tidepool_mcp::agent_tools_decl(),
@@ -172,7 +172,9 @@ impl CaptureFixture {
             machine,
             Some(workspaces.clone()),
             crate::Incarnation::FIRST,
-        );
+        )
+        .await
+        .expect("actual run-control owner");
         Self {
             _root: root,
             forest,
@@ -215,6 +217,8 @@ impl CaptureFixture {
             .forest
             .directory
             .session_context(issuer.identity())
+            .await
+            .expect("directory context observation")
             .expect("issuer context");
         let (scope, retained) = self
             .forest
@@ -406,7 +410,7 @@ async fn stop_reader(child: Box<LocalResidentInstallation>) {
 
 #[tokio::test]
 async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_issuer_failure() {
-    let mut fixture = CaptureFixture::new(184, 0);
+    let mut fixture = CaptureFixture::new(184, 0).await;
     let issuer = fixture.parent("checkpoint-issuer").await;
     let (token, scope) = fixture
         .checkpoint(&issuer, crate::CheckpointSourceLayer::default())
@@ -491,7 +495,7 @@ async fn two_checkpoint_children_remint_after_workspace_wait_token_release_and_i
 
 #[tokio::test]
 async fn two_captured_readers_reply_before_parent_failure_and_survive_final_checkpoint_release() {
-    let mut fixture = CaptureFixture::new(185, 2);
+    let mut fixture = CaptureFixture::new(185, 2).await;
     let parent = fixture.parent("private-capture-parent").await;
     let (token, scope) = fixture
         .checkpoint(&parent, crate::CheckpointSourceLayer::default())
@@ -573,7 +577,7 @@ async fn two_captured_readers_reply_before_parent_failure_and_survive_final_chec
 
 #[tokio::test]
 async fn partial_idle_spawn_failure_cleans_invocation_child_and_preserves_capture() {
-    let mut fixture = CaptureFixture::new(186, 1);
+    let mut fixture = CaptureFixture::new(186, 1).await;
     let parent = fixture.parent("partial-capture-parent").await;
     let (token, scope) = fixture
         .checkpoint(&parent, crate::CheckpointSourceLayer::default())
@@ -699,7 +703,7 @@ impl crate::ActorSourceLayers for EmptySourceAuthority {
 
 #[tokio::test]
 async fn checkpoint_issuer_source_authority_is_checked_before_workspace_effects() {
-    let mut fixture = CaptureFixture::new(187, 1);
+    let mut fixture = CaptureFixture::new(187, 1).await;
     fixture
         .forest
         .set_source_layers(Arc::new(EmptySourceAuthority));

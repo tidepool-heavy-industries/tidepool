@@ -2465,6 +2465,30 @@ mod tests {
         > {
             Box::pin(async { panic!("journal coordinator fixture has no workbench") })
         }
+        fn external_application_failed<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _failure: crate::ExternalApplicationFailure,
+        ) -> futures_util::future::BoxFuture<'a, crate::ExternalFailureDisposition> {
+            Box::pin(async { panic!("journal coordinator fixture has no external application") })
+        }
+        fn shutdown<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _terminal: &'a crate::ActorTerminal,
+        ) -> futures_util::future::BoxFuture<'a, Result<(), crate::KernelBehaviorError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn stopped<'a>(
+            &'a mut self,
+            _context: &'a crate::KernelContext,
+            _terminal: &'a crate::ActorTerminal,
+        ) -> futures_util::future::BoxFuture<'a, ()> {
+            Box::pin(async {})
+        }
+        fn child_exited(&mut self, _notice: crate::ChildExitNotice) {
+            panic!("journal coordinator fixture has no children")
+        }
     }
 
     fn descriptor(label: &str) -> ActorDescriptor {

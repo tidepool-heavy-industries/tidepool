@@ -808,16 +808,23 @@ mod tests {
 
     #[tokio::test]
     async fn repeated_handoff_keeps_original_source_path_and_ordered_settlements() {
+        eprintln!("source-order stage: start directory");
         let fixture = DirectoryFixture::start().await;
+        eprintln!("source-order stage: directory started");
         let registry = Arc::new(RequestRegistry::default());
         let (first_send, mut first_events) = mpsc::unbounded_channel();
         let (first, first_address, first_task) = fixture.spawn(first_send, None).await;
+        eprintln!("source-order stage: A registered {:?}", first.identity());
         let (second_send, mut second_events) = mpsc::unbounded_channel();
         let (second, second_address, second_task) =
             fixture.spawn(second_send, Some(first.identity())).await;
+        eprintln!("source-order stage: B registered {:?}", second.identity());
         let (third_send, mut third_events) = mpsc::unbounded_channel();
         let (third, third_address, third_task) =
             fixture.spawn(third_send, Some(second.identity())).await;
+        eprintln!("source-order stage: C registered {:?}", third.identity());
+        let fixture_started = std::time::Instant::now();
+        eprintln!("source-order stage: compile real request wrappers");
         let requests = (0..4)
             .map(|_| {
                 let request = registry.reserve_native(actor(100), actor(101));
@@ -828,6 +835,11 @@ mod tests {
                 request
             })
             .collect::<Vec<_>>();
+        eprintln!(
+            "source-order stage: request wrappers prepared; setup_elapsed={:?}",
+            fixture_started.elapsed()
+        );
+        let protocol_started = std::time::Instant::now();
         let bindings = requests
             .iter()
             .enumerate()
@@ -841,20 +853,30 @@ mod tests {
             let mut claim = Some(registry.begin_reply(actor(101), request).unwrap());
             crate::request::test_support::complete_optional_reply(&registry, &mut claim, None);
         };
+        eprintln!("source-order stage: settle first publication");
         settle(requests[0]);
+        eprintln!("source-order stage: first publication queued");
         assert_eq!(receive(&mut first_events).await.slot, 0);
         for (predecessor, successor) in [(&first, &second), (&second, &third)] {
+            eprintln!(
+                "source-order stage: acquire {:?}->{:?} grant",
+                predecessor.identity(),
+                successor.identity()
+            );
             let grant = fixture
                 .directory
                 .replacement_ingress_grant(predecessor.identity(), successor.identity())
                 .await
                 .unwrap();
+            eprintln!("source-order stage: grant issued");
             predecessor
                 .lifecycle()
                 .begin_replacement(grant.clone())
                 .await
                 .unwrap();
+            eprintln!("source-order stage: predecessor closed");
             sources.handoff(grant).await.unwrap();
+            eprintln!("source-order stage: source handoff acknowledged");
         }
         assert!(sources.recipient.same_connections(&original_destination));
         assert_eq!(sources.recipient.0.identity(), first.identity());
@@ -862,6 +884,7 @@ mod tests {
         for request in &requests[1..] {
             settle(*request);
         }
+        eprintln!("source-order stage: three publications queued");
         for slot in 1..4 {
             let delivery = receive(&mut third_events).await;
             assert_eq!(delivery.slot, slot);
@@ -882,9 +905,14 @@ mod tests {
         first_address.stop(None);
         second_address.stop(None);
         third_address.stop(None);
+        eprintln!("source-order stage: joining collectors");
         first_task.await.unwrap();
         second_task.await.unwrap();
         third_task.await.unwrap();
+        eprintln!(
+            "source-order stage: collectors joined; protocol_elapsed={:?}",
+            protocol_started.elapsed()
+        );
     }
 
     #[tokio::test]

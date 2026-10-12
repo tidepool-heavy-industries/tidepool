@@ -49,6 +49,7 @@ pub enum NativeSettlement {
 
 #[derive(Clone)]
 pub struct LifecycleSnapshot {
+    executor: Option<RactorRef<KernelMessage>>,
     pub owner_available: bool,
     source_forward: Option<LifecycleHandle>,
     pub native_settlement: NativeSettlement,
@@ -142,6 +143,10 @@ pub(super) enum LifecycleCommand {
     },
     ExecutorStarted(RpcReplyPort<Result<(), KernelCallFailure>>),
     ExecutorRetired,
+    FinishRun {
+        grant: crate::local_actor::run_control::RunRetirementGrant,
+        reply: RpcReplyPort<Result<(), KernelCallFailure>>,
+    },
     SuccessorDrainReceipt(RpcReplyPort<Result<SuccessorDrainReceipt, KernelCallFailure>>),
     Enqueue {
         message: Box<KernelMessage>,
@@ -359,16 +364,43 @@ impl Drop for NativeProviderTurnLease {
     }
 }
 
-/// The lifecycle owner issues this only after exact executor cleanup and
-/// configured resident retirement have both settled successfully.
+/// Logical executor retirement and resident retirement have distinct obligations.
+/// An unsupported nonresident realm never certifies resident or journal cleanup.
+#[derive(Debug, Clone)]
+enum RetirementDomain {
+    NonResident,
+    Resident,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct SuccessorDrainReceipt {
+    domain: RetirementDomain,
     predecessor: ActorRef,
     terminal: ActorTerminal,
     cleanup: crate::ResidentCleanupOutcome,
 }
 
 impl SuccessorDrainReceipt {
+    pub(crate) fn confirms_actor_retirement(&self) -> bool {
+        match self.domain {
+            RetirementDomain::Resident => self.cleanup.is_confirmed(),
+            RetirementDomain::NonResident => {
+                matches!(
+                    self.cleanup.hook(),
+                    crate::CleanupComponentOutcome::Confirmed
+                ) && matches!(
+                    self.cleanup.children(),
+                    crate::CleanupComponentOutcome::Confirmed
+                ) && matches!(
+                    self.cleanup.realm(),
+                    crate::CleanupComponentOutcome::Unsupported
+                )
+            }
+        }
+    }
+    pub(crate) fn confirms_resident_retirement(&self) -> bool {
+        matches!(self.domain, RetirementDomain::Resident) && self.cleanup.is_confirmed()
+    }
     pub(crate) fn predecessor(&self) -> ActorRef {
         self.predecessor
     }
@@ -402,6 +434,7 @@ impl LifecycleHandle {
         supervisor: Option<ractor::ActorCell>,
     ) -> Result<Self, ractor::SpawnErr> {
         let (observations, observe) = watch::channel(LifecycleSnapshot {
+            executor: None,
             owner_available: true,
             source_forward: None,
             native_settlement: NativeSettlement::Confirmed,
@@ -590,6 +623,38 @@ impl LifecycleHandle {
             reply: send.into(),
         })?;
         self.receive(receive).await?
+    }
+
+    /// Consume the run owner's exact finalization authority and await owner exit.
+    pub(crate) async fn finish_run(
+        &self,
+        grant: crate::local_actor::run_control::RunRetirementGrant,
+    ) -> Result<(), KernelCallFailure> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        // A retirement completion can precede the executor's physical stop.
+        // This cell observation grants no execution; the owner rechecks below.
+        let executor = self.observations.borrow().executor.clone();
+        if let Some(executor) = executor {
+            executor
+                .get_cell()
+                .wait(None)
+                .await
+                .map_err(|_| KernelCallFailure::TargetUnavailable(self.identity))?;
+        }
+        self.send(LifecycleCommand::FinishRun {
+            grant,
+            reply: send.into(),
+        })?;
+        self.receive(receive).await??;
+        self.address
+            .get_cell()
+            .wait(None)
+            .await
+            .map_err(|_| KernelCallFailure::TargetUnavailable(self.identity))
+    }
+
+    pub(crate) fn run_finalized(&self) -> bool {
+        self.address.get_status() == ractor::ActorStatus::Stopped
     }
 
     pub async fn close(&self) -> Result<(), KernelCallFailure> {
@@ -791,6 +856,7 @@ impl LifecycleState {
 
     pub(super) fn publish(&self) {
         self.observations.send_replace(LifecycleSnapshot {
+            executor: self.executor.clone(),
             owner_available: self.owner_available,
             source_forward: self.source_forward.clone(),
             native_settlement: self.native_settlement.clone(),
@@ -970,10 +1036,62 @@ impl Actor for LifecycleCoordinator {
                 };
                 let _ = reply.send(result);
             }
+            LifecycleCommand::FinishRun { grant, reply } => {
+                let exact = grant.actor() == state.identity
+                    && grant.lifecycle().address.get_id() == myself.get_id();
+                let settled = !state.has_pending()
+                    && state.tasks.is_empty()
+                    && matches!(state.native_settlement, NativeSettlement::Confirmed)
+                    && state.transfer.unconfirmed.is_none();
+                let retired = state.phase == LifecyclePhase::Retired
+                    && state.executor.as_ref().is_some_and(|executor| {
+                        executor.get_status() == ractor::ActorStatus::Stopped
+                    })
+                    && state.terminal.get().is_some()
+                    && state
+                        .resident
+                        .as_ref()
+                        .is_none_or(resident::retirement_confirmed)
+                    && state.terminal.cleanup().is_some_and(|cleanup| {
+                        cleanup.actor() == state.identity
+                            && if state.resident.is_some() {
+                                cleanup.is_confirmed()
+                            } else {
+                                matches!(cleanup.hook(), crate::CleanupComponentOutcome::Confirmed)
+                                    && matches!(
+                                        cleanup.children(),
+                                        crate::CleanupComponentOutcome::Confirmed
+                                    )
+                                    && matches!(
+                                        cleanup.realm(),
+                                        crate::CleanupComponentOutcome::Unsupported
+                                    )
+                            }
+                    });
+                let never_registered = state.phase == LifecyclePhase::Closing
+                    && state.executor.is_none()
+                    && state.resident.is_none();
+                if exact
+                    && settled
+                    && state.owner_available
+                    && if grant.never_registered() {
+                        never_registered || retired
+                    } else {
+                        retired
+                    }
+                {
+                    // The owned effect survives a dropped finalization observer.
+                    let _ = reply.send(Ok(()));
+                    myself.stop(Some("confirmed run finalization".into()));
+                } else {
+                    let _ = reply.send(Err(KernelCallFailure::TargetUnavailable(state.identity)));
+                }
+            }
             LifecycleCommand::ExecutorRetired => {
                 state.retirement_requested = true;
                 state.phase = LifecyclePhase::Closing;
-                state.executor = None;
+                // Retain the exact cell for finalization, including forgotten membership.
+                // Closing/Retired phases already prohibit new executor ingress.
                 if let Some(provider) = state.provider.as_mut() {
                     provider.turn.take();
                     provider.phase = ProviderPhase::NeedsAttention;
@@ -991,9 +1109,26 @@ impl Actor for LifecycleCoordinator {
                             && matches!(state.native_settlement, NativeSettlement::Confirmed)
                             && state.transfer.unconfirmed.is_none()
                             && cleanup.actor() == state.identity
-                            && cleanup.is_confirmed() =>
+                            && if state.resident.is_some() {
+                                cleanup.is_confirmed()
+                            } else {
+                                matches!(cleanup.hook(), crate::CleanupComponentOutcome::Confirmed)
+                                    && matches!(
+                                        cleanup.children(),
+                                        crate::CleanupComponentOutcome::Confirmed
+                                    )
+                                    && matches!(
+                                        cleanup.realm(),
+                                        crate::CleanupComponentOutcome::Unsupported
+                                    )
+                            } =>
                     {
                         Ok(SuccessorDrainReceipt {
+                            domain: if state.resident.is_some() {
+                                RetirementDomain::Resident
+                            } else {
+                                RetirementDomain::NonResident
+                            },
                             predecessor: state.identity,
                             terminal,
                             cleanup,
@@ -1380,6 +1515,8 @@ impl Actor for LifecycleCoordinator {
         // Retain unresolved counts: aborting an owned task is not proof that
         // its native publication or cancellation has settled.
         state.provider.take();
+        // Release durable boot custody before the coordinator stop acknowledgement.
+        state.resident.take();
         state.publish();
         Ok(())
     }

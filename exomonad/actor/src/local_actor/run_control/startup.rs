@@ -82,7 +82,8 @@ impl RootStartupAdmission {
         match (&self.predecessor, startup.predecessor) {
             (StartupPredecessorSettlement::Initial, None) => Ok(()),
             (StartupPredecessorSettlement::Live(receipt), Some(predecessor))
-                if receipt.predecessor() == predecessor && receipt.cleanup().is_confirmed() =>
+                if receipt.predecessor() == predecessor
+                    && receipt.confirms_resident_retirement() =>
             {
                 Ok(())
             }
@@ -115,7 +116,7 @@ pub(super) async fn authorize(
                         "root startup predecessor did not confirm retirement");
                 DirectoryError::Unavailable
             })?;
-            if receipt.predecessor() != expected || !receipt.cleanup().is_confirmed() {
+            if receipt.predecessor() != expected || !receipt.confirms_resident_retirement() {
                 return Err(unauthorized());
             }
             StartupPredecessorSettlement::Live(receipt)

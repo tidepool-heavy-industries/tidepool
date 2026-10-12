@@ -900,11 +900,15 @@ mod tests {
                 assert!(fixture
                     .native
                     .kernel
-                    .forget_terminal_actor(children[1].identity()));
+                    .forget_terminal_actor(children[1].identity())
+                    .await
+                    .expect("terminal forget acknowledgement"));
                 assert!(fixture
                     .native
                     .kernel
                     .resolve(children[1].identity())
+                    .await
+                    .expect("directory actor observation")
                     .is_none());
                 // The scope's retained LocalActorRef, not a fresh directory
                 // lookup, carries the same failed cleanup across retries.

@@ -866,28 +866,11 @@ impl Fixture {
         .unwrap();
         let kernel = receive.await.unwrap();
         let (deployments, receiver) = mpsc::channel(DEPLOYMENT_CHANNEL_CAPACITY);
-        let environment = ResidentEnvironment {
-            runner: ResidentActorRunner::new(
-                Arc::new(ActorMachineRegistry::new()),
-                ActorWorkbenchSource::new("", Vec::new()),
-            ),
-            deployments,
-            retired: Default::default(),
-            requests: Default::default(),
-            commands: Default::default(),
-            actors: Default::default(),
-            fork_workspaces: None,
-            actor_admissions: crate::ActorAdmissionRegistry::new(),
-            source_layers: None,
-            jev: Arc::new(crate::jev::UnconfiguredJev),
-            cell_model_factory: None,
-            form_host: None,
-            form_registry: Default::default(),
-            release_tracked: Default::default(),
-            conversation_reader: None,
-            usage_pointers: Default::default(),
-            recovery: None,
-        };
+        let runner = ResidentActorRunner::new(
+            Arc::new(ActorMachineRegistry::new()),
+            ActorWorkbenchSource::new("", Vec::new()),
+        );
+        let environment = ResidentEnvironment::new(runner, deployments, None);
         Self {
             actor,
             task,
@@ -1766,7 +1749,8 @@ async fn interrupted_failed_admission_cleanup_retains_worker_for_retry() {
     let _worker_context = receive.await.unwrap();
     let child = worker.identity();
     let work = InvocationWork::new(fixture.actor.identity(), reservation());
-    work.retain_aborted_children(&fixture.kernel, &[child]).await;
+    work.retain_aborted_children(&fixture.kernel, &[child])
+        .await;
     assert!(work.owns_worker(child));
 
     let mut first_cleanup = Box::pin(work.cleanup(&fixture.environment, &fixture.kernel));
@@ -1814,7 +1798,8 @@ async fn unresolved_failed_admission_worker_remains_uncertain_across_cleanup_ret
     };
     assert!(fixture.kernel.resolve(missing).await.unwrap().is_none());
     let work = InvocationWork::new(fixture.actor.identity(), reservation());
-    work.retain_aborted_children(&fixture.kernel, &[missing]).await;
+    work.retain_aborted_children(&fixture.kernel, &[missing])
+        .await;
     for _ in 0..2 {
         let cleanup = tokio::time::timeout(
             Duration::from_secs(1),
@@ -2475,7 +2460,7 @@ async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once(
     );
     let transfer = fixture
         .kernel
-        .reserve_worker_lifetime_transfer(&worker, crate::WorkerLifetime::RunOwned)
+        .reserve_worker_lifetime_transfer(&worker, true)
         .await
         .unwrap();
     source
@@ -2492,7 +2477,7 @@ async fn worker_lifetime_transfer_changes_supervision_and_scope_membership_once(
     );
     let transfer = fixture
         .kernel
-        .reserve_worker_lifetime_transfer(&worker, crate::WorkerLifetime::ActorOwned)
+        .reserve_worker_lifetime_transfer(&worker, false)
         .await
         .unwrap();
     destination.adopt_worker(owner, worker.clone()).unwrap();
@@ -2530,7 +2515,7 @@ async fn borrowed_worker_transfer_refuses_before_membership_callback() {
     let context = receive.await.unwrap();
     let transfer = other
         .kernel
-        .reserve_worker_lifetime_transfer(&worker, crate::WorkerLifetime::RunOwned)
+        .reserve_worker_lifetime_transfer(&worker, true)
         .await;
     assert!(matches!(
         transfer,
@@ -2672,4 +2657,36 @@ async fn command_transfer_send_refusal_preserves_source_cleanup_before_observer_
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn worker_transfer_refuses_another_parent_in_the_same_run() {
+    let fixture = Fixture::start().await;
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let parent = fixture
+        .kernel
+        .spawn_child(None, Owner::new(send))
+        .await
+        .unwrap();
+    let parent_context = receive.await.unwrap();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let worker = parent_context
+        .spawn_child(None, Owner::new(send))
+        .await
+        .unwrap();
+    let worker_context = receive.await.unwrap();
+    let result = fixture
+        .kernel
+        .reserve_worker_lifetime_transfer(&worker, true)
+        .await;
+    assert!(matches!(
+        result,
+        Err(crate::local_actor::LifetimeTransferError::Unauthorized)
+    ));
+    assert_eq!(
+        worker_context.supervisor_identity().await.unwrap(),
+        Some(parent.identity())
+    );
+    assert!(worker.terminal().get().is_none());
+    fixture.finish().await;
 }

@@ -105,48 +105,58 @@ async fn interrupt_during_preview(
         tidepool_runtime::session::RecoveryPublicOwner::new(&path, context.actor.incarnation.0)
             .unwrap()
     });
-    if let Some(owner) = &durable_owner {
-        resident
-            .initialize_durable_public_scope(owner.clone(), context.placement.lexical_scope)
-            .unwrap();
-    }
     let original_public = resident
         .public_visibility_snapshot_in(context.placement.lexical_scope)
+        .unwrap();
+    machines.insert_idle(context.placement.session, Box::new(resident));
+    fixture
+        .kernel
+        .lifecycle()
+        .configure_resident(
+            context.clone(),
+            descriptor.clone(),
+            None,
+            Arc::new(fixture.environment.runner.clone()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    if durable {
+        fixture
+            .kernel
+            .lifecycle()
+            .publish_public_owner(None)
+            .await
+            .unwrap();
+    }
+    let owner = fixture
+        .kernel
+        .lifecycle()
+        .public_owner(None, false)
+        .await
         .unwrap();
     let original_manifest = durable_owner
         .as_ref()
         .map(|owner| recovery.as_ref().unwrap().public_owner(owner));
-    let readiness = durable_owner.as_ref().map(|owner| {
-        resident
-            .durable_public_readiness(owner, context.placement.lexical_scope)
-            .unwrap()
-    });
-    machines.insert_idle(context.placement.session, Box::new(resident));
-    let owner = WorkbenchPublicOwner::issue(&context, &descriptor, readiness).unwrap();
     let mut behavior = ResidentKernelBehavior::with_boot(
         descriptor.clone(),
         fixture.environment.clone(),
         ResidentBoot::Workbench,
         Vec::new(),
     );
+    // This fixture invokes the resident method directly after configuring the
+    // real owner, so retain the exact handle that production start installs.
+    behavior.lifecycle = Some(fixture.kernel.lifecycle().clone());
     behavior.policy_installed = already_installed;
     fixture.environment.actors.lock().insert(
         context.actor,
         ResidentActorRecord {
             installed_tools: behavior.installed_tools.clone(),
-            initial_context: Default::default(),
+            lifecycle: fixture.kernel.lifecycle().clone(),
             fresh_context_seed: None,
-            root_startup: None,
-            public_owner: if durable {
-                ActorPublicOwnerPlane::DurableCommitted(owner.clone())
-            } else {
-                ActorPublicOwnerPlane::Ephemeral(owner.clone())
-            },
-            recovery_claimed: false,
             workbench_executions: behavior.workbench_executions.clone(),
-            forest_control: false,
             interactive_policy_installed: already_installed,
-            observation_roots: Default::default(),
             descriptor: descriptor.clone(),
             bound_worktree: None,
             terminal: None,
@@ -314,6 +324,7 @@ async fn interrupt_during_preview(
                         summary: "retirement during original preview".into(),
                         diagnostic: None,
                     });
+                fixture.kernel.lifecycle().close().await.unwrap();
             }
         }
         assert!(fixture.deployments.try_recv().is_err());
@@ -622,50 +633,59 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         tidepool_runtime::session::RecoveryPublicOwner::new(&path, context.actor.incarnation.0)
             .unwrap()
     });
-    if let Some(owner) = &durable_owner {
-        resident
-            .initialize_durable_public_scope(owner.clone(), context.placement.lexical_scope)
-            .unwrap();
-    }
     let original_public = resident
         .public_visibility_snapshot_in(context.placement.lexical_scope)
+        .unwrap();
+    let machines = Arc::new(ActorMachineRegistry::new());
+    machines.insert_idle(context.placement.session, Box::new(resident));
+    fixture.environment.runner = ResidentActorRunner::new(machines.clone(), source);
+    fixture
+        .kernel
+        .lifecycle()
+        .configure_resident(
+            context.clone(),
+            descriptor.clone(),
+            None,
+            Arc::new(fixture.environment.runner.clone()),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    if durable {
+        fixture
+            .kernel
+            .lifecycle()
+            .publish_public_owner(None)
+            .await
+            .unwrap();
+    }
+    let owner = fixture
+        .kernel
+        .lifecycle()
+        .public_owner(None, false)
+        .await
         .unwrap();
     let original_manifest = durable_owner
         .as_ref()
         .map(|owner| recovery.as_ref().unwrap().public_owner(owner));
-    let readiness = durable_owner.as_ref().map(|owner| {
-        resident
-            .durable_public_readiness(owner, context.placement.lexical_scope)
-            .unwrap()
-    });
-    let owner = WorkbenchPublicOwner::issue(&context, &descriptor, readiness).unwrap();
-    let machines = Arc::new(ActorMachineRegistry::new());
-    machines.insert_idle(context.placement.session, Box::new(resident));
-    fixture.environment.runner = ResidentActorRunner::new(machines.clone(), source);
     let mut behavior = ResidentKernelBehavior::with_boot(
         descriptor.clone(),
         fixture.environment.clone(),
         ResidentBoot::Workbench,
         Vec::new(),
     );
+    // Match production start's cached handle for the genuinely configured owner.
+    behavior.lifecycle = Some(fixture.kernel.lifecycle().clone());
     behavior.policy_installed = true;
     fixture.environment.actors.lock().insert(
         context.actor,
         ResidentActorRecord {
             installed_tools: behavior.installed_tools.clone(),
-            initial_context: Default::default(),
+            lifecycle: fixture.kernel.lifecycle().clone(),
             fresh_context_seed: None,
-            root_startup: None,
-            public_owner: if durable {
-                ActorPublicOwnerPlane::DurableCommitted(owner.clone())
-            } else {
-                ActorPublicOwnerPlane::Ephemeral(owner.clone())
-            },
-            recovery_claimed: false,
             workbench_executions: behavior.workbench_executions.clone(),
-            forest_control: false,
             interactive_policy_installed: true,
-            observation_roots: Default::default(),
             descriptor,
             bound_worktree: None,
             terminal: None,
@@ -763,7 +783,11 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
     )));
     tokio::select! {
         event = native_rx.recv() => assert!(matches!(event, Some(NativeEvent::Claimed))),
-        _result = park.as_mut().unwrap().as_mut() => panic!("activation ended before native claim"),
+        result = park.as_mut().unwrap().as_mut() => match result {
+            Ok(InteractivePark::Parked) => panic!("activation parked before native claim"),
+            Ok(InteractivePark::Cancelled(request)) => panic!("activation cancelled {request:?} before native claim"),
+            Err(error) => panic!("activation failed before native claim: {error:?}"),
+        },
     }
     assert_eq!(
         fixture
@@ -808,11 +832,18 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
             let ObservedCommit::RecoveryRequired = &commit else {
                 panic!("expected held run fence: {commit:?}");
             };
-            assert!(!owner.is_ready());
-            assert!(fixture.environment.actors.lock()[&context.actor]
-                .public_owner
-                .ready()
-                .is_none());
+            assert!(!owner
+                .native_readiness()
+                .unwrap()
+                .check_ready_async()
+                .await
+                .is_ok());
+            assert!(fixture
+                .kernel
+                .lifecycle()
+                .public_owner(Some(owner.clone()), false)
+                .await
+                .is_err());
             assert_eq!(
                 fixture
                     .environment
@@ -858,7 +889,12 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
                 tidepool_runtime::session::SessionError::RecoveryStore(_)
             ))
         ));
-        assert!(!owner.is_ready());
+        assert!(!owner
+            .native_readiness()
+            .unwrap()
+            .check_ready_async()
+            .await
+            .is_ok());
         let run = recovery.as_ref().unwrap();
         assert!(run.store.is_recovery_required());
         let reopened = run.reopen();
@@ -868,7 +904,12 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
             original_manifest.clone().unwrap()
         );
         assert!(
-            !owner.is_ready(),
+            !owner
+                .native_readiness()
+                .unwrap()
+                .check_ready_async()
+                .await
+                .is_ok(),
             "authenticated reopen cannot revive an old admission"
         );
     }

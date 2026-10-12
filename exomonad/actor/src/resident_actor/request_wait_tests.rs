@@ -312,7 +312,8 @@ async fn issued_sibling_retirement_beats_ready_watch_in_both_cleanup_orders() {
                 .into_iter()
                 .map(|child| (child, terminal.clone()))
                 .collect(),
-        );
+        )
+        .await;
         assert_eq!(
             target.terminal().requested_shutdown(),
             Some(terminal.clone())

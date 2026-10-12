@@ -246,10 +246,10 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(case: u64, failure: bool) -> Self {
-        Self::configured(case, failure, None)
+    async fn new(case: u64, failure: bool) -> Self {
+        Self::configured(case, failure, None).await
     }
-    fn configured(case: u64, failure: bool, authored: Option<AuthoredCase>) -> Self {
+    async fn configured(case: u64, failure: bool, authored: Option<AuthoredCase>) -> Self {
         eval_harness::require_extract();
         let declarations = vec![
             tidepool_mcp::console_decl(),
@@ -319,7 +319,9 @@ impl Fixture {
             machine,
             None,
             crate::Incarnation::FIRST,
-        );
+        )
+        .await
+        .expect("actual run-control owner");
         let host = Arc::new(Host(
             Mutex::new(HostState {
                 authored,
@@ -403,7 +405,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn compiled_form_choice_preserves_prepared_jev_decoder_and_selected_action() {
-    let fixture = Fixture::new(752, false);
+    let fixture = Fixture::new(752, false).await;
     fixture
         .execute(include_str!("jev_form_runtime_success.hs"))
         .await;
@@ -425,7 +427,7 @@ async fn compiled_form_choice_preserves_prepared_jev_decoder_and_selected_action
 
 #[tokio::test]
 async fn compiled_form_wait_observation_belongs_to_interpreter_and_clears_on_resume() {
-    let fixture = Fixture::new(757, false);
+    let fixture = Fixture::new(757, false).await;
     fixture.host.0.lock().waiting_for_submission = true;
     let wait = {
         let execution = fixture.execute(include_str!("jev_form_runtime_success.hs"));
@@ -436,7 +438,11 @@ async fn compiled_form_wait_observation_belongs_to_interpreter_and_clears_on_res
                     () = &mut execution => panic!("authored form must await a submission"),
                     () = tokio::time::sleep(Duration::from_millis(10)) => {},
                 }
-                let nodes = fixture.forest.inspect_host_graph();
+                let nodes = fixture
+                    .forest
+                    .inspect_host_graph()
+                    .await
+                    .expect("directory graph observation");
                 if let Some((actor, wait)) = nodes.iter().find_map(|node| {
                     node.form_waits
                         .first()
@@ -451,6 +457,8 @@ async fn compiled_form_wait_observation_belongs_to_interpreter_and_clears_on_res
                         fixture
                             .forest
                             .inspect_host_graph()
+                            .await
+                            .expect("directory graph observation")
                             .iter()
                             .find(|node| node.actor == actor)
                             .unwrap()
@@ -471,6 +479,8 @@ async fn compiled_form_wait_observation_belongs_to_interpreter_and_clears_on_res
     assert!(fixture
         .forest
         .inspect_host_graph()
+        .await
+        .expect("directory graph observation")
         .iter()
         .all(|node| node.form_waits.is_empty()));
     assert!(fixture.host.0.lock().forms[&wait.mount_id].committed);
@@ -479,7 +489,7 @@ async fn compiled_form_wait_observation_belongs_to_interpreter_and_clears_on_res
 
 #[tokio::test]
 async fn compiled_form_jev_transport_refusal_preserves_cause_and_runs_no_action() {
-    let fixture = Fixture::new(753, true);
+    let fixture = Fixture::new(753, true).await;
     fixture
         .execute(include_str!("jev_form_runtime_failure.hs"))
         .await;
@@ -497,7 +507,7 @@ async fn compiled_form_jev_transport_refusal_preserves_cause_and_runs_no_action(
 
 #[tokio::test]
 async fn compiled_public_jev_response_histories_preserve_evidence_and_explicit_effect_counts() {
-    let fixture = Fixture::new(754, false);
+    let fixture = Fixture::new(754, false).await;
     fixture
         .execute(include_str!("jev_response_semantics.hs"))
         .await;
@@ -533,7 +543,7 @@ async fn compiled_authored_jev_form_dialogue_retains_success_doubt_and_missing_i
     .into_iter()
     .enumerate()
     {
-        let fixture = Fixture::configured(755 + index as u64, false, Some(case));
+        let fixture = Fixture::configured(755 + index as u64, false, Some(case)).await;
         fixture
             .execute(include_str!("jev_authored_dialogue.hs"))
             .await;

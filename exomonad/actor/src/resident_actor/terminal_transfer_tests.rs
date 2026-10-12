@@ -53,7 +53,7 @@ async fn private_three_item_cell_refusal_keeps_receipts_and_actor_live() {
             machine,
             None,
             crate::Incarnation::FIRST,
-        );
+        ).await.expect("actual run-control owner");
         let actor = forest
             .new_workbench(
                 "private-publication-refusal".into(),
@@ -63,7 +63,7 @@ async fn private_three_item_cell_refusal_keeps_receipts_and_actor_live() {
             .expect("root workbench");
         let context = forest
             .directory
-            .session_context(actor.identity())
+            .session_context(actor.identity()).await.expect("directory context observation")
             .expect("actual root context");
         let public_workbench = forest.environment.runner.application_workbench();
         let before = public_workbench

@@ -181,11 +181,14 @@ impl Fixture {
                 .contains("intentional predecessor handler failure"),
             "{error}"
         );
-        assert!(crate::KernelBehavior::pause_failed_handler(
-            &mut behavior,
-            &owner.kernel,
-            &error.detail
-        ));
+        assert!(
+            crate::KernelBehavior::pause_failed_handler(
+                &mut behavior,
+                &owner.kernel,
+                &error.detail
+            )
+            .await
+        );
         assert!(matches!(
             crate::KernelBehavior::resume(&mut behavior, &owner.kernel).await,
             Ok(KernelStep::Continue(()))
@@ -546,6 +549,11 @@ async fn staged_successor_admission_refusal_and_cancellation_release_actual_plac
             let candidate = if dedicated { SessionId(0xE204) } else { parent };
             fixture.with_factory(&mut behavior, false);
             let (definition, _) = fixture.definition(&behavior, candidate).await;
+            let reservation = owner
+                .kernel
+                .reserve_successor_creation()
+                .await
+                .expect("actual staged replacement reservation before preparation");
             let staged = owner
                 .kernel
                 .compiler_lifecycle_scope(behavior.stage_replacement(actor, definition))
@@ -553,34 +561,28 @@ async fn staged_successor_admission_refusal_and_cancellation_release_actual_plac
                 .expect("real replacement reaches readiness, checkpoint and receive");
             let actual = staged.descriptor.placement();
             let custody = staged.placement_custody.clone();
-            let mut admission = behavior
-                .environment
-                .root_admission_closed
-                .clone()
-                .write_owned()
-                .await;
-            let mut starting =
-                Box::pin(owner.kernel.compiler_lifecycle_scope(
-                    behavior.admit_staged_successor(&owner.kernel, staged),
+            owner.seal_membership().await;
+            let starting = owner
+                .kernel
+                .compiler_lifecycle_scope(behavior.admit_staged_successor(
+                    &owner.kernel,
+                    staged,
+                    reservation,
                 ));
-            assert!(futures_util::poll!(&mut starting).is_pending());
             if cancelled {
+                // Cancellation before producer submission drops the actual
+                // affine reservation; native placement custody still settles.
                 drop(starting);
-                drop(admission);
-                custody
-                    .cleanup(&behavior.environment.runner, parent)
-                    .await
-                    .unwrap();
             } else {
-                *admission = true;
-                drop(admission);
-                match starting.await {
-                    Err(error) => {
-                        assert!(error.to_string().contains("swarm admission is closed"))
-                    }
-                    Ok(_) => panic!("closed admission must refuse the candidate"),
-                }
+                assert!(
+                    starting.await.is_err(),
+                    "closed owner must refuse successor publication"
+                );
             }
+            custody
+                .cleanup(&behavior.environment.runner, parent)
+                .await
+                .unwrap();
             if dedicated {
                 assert!(
                     behavior
@@ -627,6 +629,11 @@ async fn startup_refusal_preserves_typed_cleanup_before_and_after_actor_transfer
             let actor = owner.actor.identity();
             let parent = behavior.descriptor.placement().session;
             let (definition, _) = fixture.definition(&behavior, parent).await;
+            let reservation = owner
+                .kernel
+                .reserve_successor_creation()
+                .await
+                .expect("actual staged reservation before preparation");
             let mut staged = owner
                 .kernel
                 .compiler_lifecycle_scope(behavior.stage_replacement(actor, definition))
@@ -635,7 +642,7 @@ async fn startup_refusal_preserves_typed_cleanup_before_and_after_actor_transfer
             let actual = staged.descriptor.placement();
             let custody = staged.placement_custody.clone();
             if before_start {
-                owner.seal_membership();
+                owner.seal_membership().await;
             } else {
                 staged.descriptor = staged
                     .descriptor
@@ -646,7 +653,11 @@ async fn startup_refusal_preserves_typed_cleanup_before_and_after_actor_transfer
             let work = behavior.workbench_executions.lock().actor_scope_root(actor);
             let result = owner
                 .kernel
-                .compiler_lifecycle_scope(behavior.admit_staged_successor(&owner.kernel, staged))
+                .compiler_lifecycle_scope(behavior.admit_staged_successor(
+                    &owner.kernel,
+                    staged,
+                    reservation,
+                ))
                 .await;
             let error = match result {
                 Err(error) => error,

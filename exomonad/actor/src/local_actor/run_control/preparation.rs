@@ -219,6 +219,7 @@ pub(super) enum PreparationMessage {
     ReserveActor {
         identity: ActorRef,
         terminal: RetainedActorExit,
+        predecessor: Option<crate::kernel::LifecycleHandle>,
     },
     Start {
         id: u64,
@@ -279,6 +280,21 @@ enum WorkerKind {
         custody: ProducedCustody,
     },
 }
+impl WorkerKind {
+    // Completion reporting does not release an uncertain cleanup capability.
+    // These records remain owned until confirmed run finalization stops us.
+    fn retains_cleanup_custody(&self) -> bool {
+        matches!(
+            self,
+            Self::Abandoned { .. }
+                | Self::Root {
+                    native: Some(_),
+                    ..
+                }
+        )
+    }
+}
+
 struct TrackedWorker {
     cell: ractor::ActorCell,
     kind: WorkerKind,
@@ -312,7 +328,18 @@ impl Actor for PreparationSupervisor {
                 let _ = reply.send(());
             }
             PreparationMessage::NativePlacement { id, custody } => {
-                for worker in state.workers.values_mut() { if let WorkerKind::Root { id: issued, native, .. } = &mut worker.kind { if *issued == id { *native = Some(custody.clone()); } } }
+                let mut reverify = Vec::new();
+                for (identity, worker) in state.workers.iter_mut() {
+                    if let WorkerKind::Root { id: issued, native, .. } = &mut worker.kind {
+                        if *issued == id {
+                            *native = Some(custody.clone());
+                            if worker.terminal && !worker.reported { reverify.push(*identity); }
+                        }
+                    }
+                }
+                // An admitted blocking mint can publish after producer death.
+                // Its retained native capability must still reach cleanup.
+                for worker in reverify { let _ = myself.send_message(PreparationMessage::VerifyTerminal { worker }); }
             }
             PreparationMessage::NativePlacementReleased { id, placement } => {
                 for worker in state.workers.values_mut() { if let WorkerKind::Root { id: issued, native, .. } = &mut worker.kind { if *issued == id && matches!(native, Some(ProducedCustody::Placement { placement: exact, .. }) if *exact == placement) { *native = None; } } }
@@ -327,8 +354,8 @@ impl Actor for PreparationSupervisor {
                     Err(error) => { let _ = state.control.send_message(RunControlMessage::RunResourceWorkerFailed { owner, detail: format!("resource retirement worker failed to start: {error}") }); }
                 }
             }
-            PreparationMessage::ReserveActor { identity, terminal } => {
-                let arguments = ReservationArguments { identity, terminal: terminal.clone(), supervisor: myself.clone() };
+            PreparationMessage::ReserveActor { identity, terminal, predecessor } => {
+                let arguments = ReservationArguments { identity, terminal: terminal.clone(), supervisor: myself.clone(), predecessor };
                 match Actor::spawn_linked(None, ReservationStarter, arguments, myself.get_cell()).await {
                     Ok((worker, task)) => {
                         state.workers.insert(worker.get_id(), TrackedWorker { cell: worker.get_cell(), kind: WorkerKind::Reserve { identity, terminal }, terminal: false, reported: false });
@@ -364,7 +391,10 @@ impl Actor for PreparationSupervisor {
                     let arguments = AbandonedCleanupArguments { id, custody: custody.clone(), supervisor: myself.clone(), prior: outcome.clone(), compiler };
                     match Actor::spawn_linked(None, AbandonedCleanupWorker, arguments, myself.get_cell()).await {
                         Ok((cleanup, task)) => { state.workers.insert(cleanup.get_id(), TrackedWorker { cell: cleanup.get_cell(), kind: WorkerKind::Abandoned { id, custody }, terminal: false, reported: false }); drop(task); let _ = cleanup.send_message(()); }
-                        Err(error) => { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome: crate::CleanupComponentOutcome::Unconfirmed(format!("native placement cleanup worker failed to start: {error}; original {outcome:?}")) }); }
+                        Err(error) => {
+                            for worker in state.workers.values_mut() { if let WorkerKind::Root { id: issued, native, .. } = &mut worker.kind { if *issued == id { *native = Some(custody.clone()); } } }
+                            let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome: crate::CleanupComponentOutcome::Unconfirmed(format!("native placement cleanup worker failed to start: {error}; original {outcome:?}")) });
+                        }
                     }
                 } else { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome }); }
             }
@@ -384,7 +414,10 @@ impl Actor for PreparationSupervisor {
             }
             PreparationMessage::VerifyTerminal { worker } => {
                 let Some(record) = state.workers.get_mut(&worker) else { return Ok(()); };
-                if record.reported { state.workers.remove(&worker); return Ok(()); }
+                if record.reported {
+                    if !record.kind.retains_cleanup_custody() { state.workers.remove(&worker); }
+                    return Ok(());
+                }
                 match &mut record.kind {
                     WorkerKind::Root { id, compiler, produced, native } => {
                         compiler.request_shutdown(ActorTerminal::new(ActorExitKind::Cancelled, "root preparation worker lost"));
@@ -393,7 +426,10 @@ impl Actor for PreparationSupervisor {
                             let arguments = AbandonedCleanupArguments { id, custody: custody.clone(), supervisor: myself.clone(), prior: crate::CleanupComponentOutcome::Unconfirmed("root producer exited before its completion receipt".into()), compiler: Some(compiler.clone()) };
                             match Actor::spawn_linked(None, AbandonedCleanupWorker, arguments, myself.get_cell()).await {
                                 Ok((cleanup, task)) => { state.workers.insert(cleanup.get_id(), TrackedWorker { cell: cleanup.get_cell(), kind: WorkerKind::Abandoned { id, custody }, terminal: false, reported: false }); drop(task); let _ = cleanup.send_message(()); }
-                                Err(error) => { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome: crate::CleanupComponentOutcome::Unconfirmed(format!("abandoned root cleanup worker failed to start: {error}")) }); }
+                                Err(error) => {
+                                    if let Some(record) = state.workers.get_mut(&worker) { if let WorkerKind::Root { native, .. } = &mut record.kind { *native = Some(custody); } }
+                                    let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome: crate::CleanupComponentOutcome::Unconfirmed(format!("abandoned root cleanup worker failed to start: {error}")) });
+                                }
                             }
                         } else { let _ = state.control.send_message(RunControlMessage::PreparationLost { id }); }
                     }
@@ -406,9 +442,9 @@ impl Actor for PreparationSupervisor {
                 }
             }
         }
-        state
-            .workers
-            .retain(|_, worker| !(worker.terminal && worker.reported));
+        state.workers.retain(|_, worker| {
+            !(worker.terminal && worker.reported) || worker.kind.retains_cleanup_custody()
+        });
         Ok(())
     }
     async fn handle_supervisor_evt(
@@ -560,6 +596,7 @@ impl Actor for RootWorker {
 
 pub(super) struct ReservationStarter;
 pub(super) struct ReservationArguments {
+    pub(super) predecessor: Option<crate::kernel::LifecycleHandle>,
     pub(super) identity: ActorRef,
     pub(super) terminal: RetainedActorExit,
     pub(super) supervisor: RactorRef<PreparationMessage>,
@@ -581,13 +618,31 @@ impl Actor for ReservationStarter {
         _: (),
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let lifecycle = crate::kernel::LifecycleHandle::start_linked(
-            state.identity,
-            state.terminal.clone(),
-            state.supervisor.get_cell(),
-        )
-        .await
-        .map_err(|error| error.to_string());
+        let lifecycle = async {
+            if let Some(predecessor) = &state.predecessor {
+                let receipt =
+                    tokio::time::timeout(SHUTDOWN_BUDGET, predecessor.retire_for_successor())
+                        .await
+                        .map_err(|_| "predecessor retirement remains in flight".to_owned())?
+                        .map_err(|error| error.to_string())?;
+                if receipt.predecessor() != predecessor.identity()
+                    || !receipt.confirms_actor_retirement()
+                {
+                    return Err("predecessor retirement is unconfirmed".to_owned());
+                }
+            }
+            if state.terminal.requested_shutdown().is_some() {
+                return Err("actor reservation was closed before lifecycle startup".to_owned());
+            }
+            crate::kernel::LifecycleHandle::start_linked(
+                state.identity,
+                state.terminal.clone(),
+                state.supervisor.get_cell(),
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+        .await;
         let _ = state
             .supervisor
             .send_message(PreparationMessage::ReservationReady {

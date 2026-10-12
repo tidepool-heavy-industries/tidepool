@@ -8411,8 +8411,10 @@ where
         context: crate::ActorSessionContext,
         checkpoint: Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>,
         provisional_scope: ScopeId,
+        custody: crate::resident_actor::child_launch::ChildPlacementCustody,
     ) -> Result<ScopeId, ResidentActorWorkbenchError> {
         let source_scope = context.placement.lexical_scope;
+        let native_session = context.placement.session;
         self.access
             .with_machine(context, move |session, _, _| {
                 // The runtime validates the capsule's owner before creating any
@@ -8422,6 +8424,16 @@ where
                     session.retire_scope(scope);
                     return Err(ResidentActorWorkbenchError::ActorProtocol(
                         "authored entry dependencies were unavailable".into(),
+                    ));
+                }
+                // Publish from the native issuer before a dropped result can
+                // lose the new scope. Cleanup may already own the old placement.
+                if let Err(detail) =
+                    custody.publish_checkpoint_remint(native_session, provisional_scope, scope)
+                {
+                    session.retire_scope(scope);
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        detail.to_string(),
                     ));
                 }
                 session.retire_scope(provisional_scope);
@@ -10978,23 +10990,46 @@ where
         &self,
         session_id: tidepool_repr::SessionId,
     ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
-        self.provision_root_scope_inner(session_id, None).await
+        self.provision_root_scope_inner(session_id, None, None)
+            .await
     }
     pub(crate) async fn provision_root_scope_tracked(
         &self,
         session_id: tidepool_repr::SessionId,
         publisher: crate::local_actor::run_control::RootPlacementPublisher,
     ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
-        self.provision_root_scope_inner(session_id, Some(publisher))
+        self.provision_root_scope_inner(session_id, Some(publisher), None)
             .await
+    }
+    #[cfg(test)]
+    pub(crate) async fn provision_root_scope_paused_for_test(
+        &self,
+        session_id: tidepool_repr::SessionId,
+        publisher: crate::local_actor::run_control::RootPlacementPublisher,
+        entered: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
+        self.provision_root_scope_inner(
+            session_id,
+            Some(publisher),
+            Some(Box::new(move || {
+                let _ = entered.send(());
+                let _ = release.blocking_recv();
+            })),
+        )
+        .await
     }
     pub(crate) async fn provision_root_scope_inner(
         &self,
         session_id: tidepool_repr::SessionId,
         publisher: Option<crate::local_actor::run_control::RootPlacementPublisher>,
+        before_mint: Option<Box<dyn FnOnce() + Send>>,
     ) -> Result<crate::ActorPlacement, ResidentActorWorkbenchError> {
         self.access
             .with_host_machine("root", session_id, None, move |session, _| {
+                if let Some(before_mint) = before_mint {
+                    before_mint();
+                }
                 let placement = crate::ActorPlacement {
                     session: session_id,
                     resource_scope: RealmId::fresh(),
@@ -19680,27 +19715,49 @@ pub(crate) mod request_tests {
         use ractor::{Actor, ActorProcessingErr};
         use tidepool_effect::{EffectRunPolicy, LivePayloadPolicy};
 
+        struct SourceCollectorState {
+            identity: crate::ActorRef,
+            lifecycle: crate::LifecycleHandle,
+            sender: tokio::sync::mpsc::UnboundedSender<SourceDelivery>,
+        }
         struct SourceCollector;
         impl Actor for SourceCollector {
             type Msg = crate::KernelMessage;
-            type State = tokio::sync::mpsc::UnboundedSender<SourceDelivery>;
+            type State = SourceCollectorState;
             type Arguments = Self::State;
             async fn pre_start(
                 &self,
                 _: ractor::ActorRef<Self::Msg>,
-                sender: Self::Arguments,
+                state: Self::Arguments,
             ) -> Result<Self::State, ActorProcessingErr> {
-                Ok(sender)
+                Ok(state)
             }
             async fn handle(
                 &self,
                 _: ractor::ActorRef<Self::Msg>,
                 message: Self::Msg,
-                sender: &mut Self::State,
+                state: &mut Self::State,
             ) -> Result<(), ActorProcessingErr> {
+                let (message, lease) = match message {
+                    crate::KernelMessage::Admitted(envelope) => {
+                        let (message, lease) = envelope.into_parts(state.identity)?;
+                        (message, Some(lease))
+                    }
+                    message => (message, None),
+                };
                 if let crate::KernelMessage::Source(delivery) = message {
-                    sender.send(delivery)?;
+                    state.sender.send(delivery)?;
                 }
+                drop(lease);
+                Ok(())
+            }
+            async fn post_stop(
+                &self,
+                _: ractor::ActorRef<Self::Msg>,
+                state: &mut Self::State,
+            ) -> Result<(), ActorProcessingErr> {
+                state.lifecycle.close().await?;
+                state.lifecycle.executor_retired();
                 Ok(())
             }
         }
@@ -19832,14 +19889,46 @@ pub(crate) mod request_tests {
             .unwrap();
         assert!(initial.is_empty());
         let (source_send, mut source_events) = tokio::sync::mpsc::unbounded_channel();
-        let (source_address, source_task) =
-            SourceCollector::spawn(None, SourceCollector, source_send)
-                .await
-                .unwrap();
+        let (directory, directory_task) = crate::LocalActorDirectory::start().await.unwrap();
+        let reservation = directory.reserve(crate::Incarnation::FIRST).await.unwrap();
+        let source_identity = reservation.identity();
+        let source_lifecycle = reservation.lifecycle().clone();
+        let source_terminal = reservation.terminal().clone();
+        let (source_address, source_task) = SourceCollector::spawn(
+            None,
+            SourceCollector,
+            SourceCollectorState {
+                identity: source_identity,
+                lifecycle: source_lifecycle.clone(),
+                sender: source_send,
+            },
+        )
+        .await
+        .unwrap();
+        let source_actor = crate::LocalActorRef::with_identity_admission(
+            source_address.clone(),
+            source_terminal,
+            source_identity,
+            source_lifecycle.clone(),
+        );
+        source_lifecycle
+            .attach_executor(source_address.clone())
+            .await
+            .unwrap();
+        directory
+            .register_executor(
+                reservation,
+                source_actor.clone(),
+                std::sync::Weak::new(),
+                crate::local_actor::SpawnOwnership::Independent,
+            )
+            .await
+            .unwrap();
+        source_lifecycle.executor_started().await.unwrap();
         let sources = registry
             .attach_sources(
                 owner,
-                crate::LocalActorRef::new(source_address.clone(), crate::RetainedActorExit::new()),
+                source_actor,
                 &[(0, request, RequestSourceKind::Progress)],
             )
             .unwrap();
@@ -20303,6 +20392,7 @@ pub(crate) mod request_tests {
         ));
         source_address.stop(None);
         source_task.await.unwrap();
+        directory_task.abort();
         assert!(source_events.try_recv().is_err());
         drop(observer_root);
     }
@@ -24039,8 +24129,17 @@ pub(crate) mod request_tests {
                 let mut child = context;
                 child.actor = crate::ActorRef::first(crate::ActorId(actor_id));
                 child.placement.lexical_scope = provisional;
+                let custody = crate::resident_actor::child_launch::ChildPlacementCustody::new(
+                    child.placement,
+                );
+                let _startup = custody.startup_guard();
                 child.placement.lexical_scope = runner
-                    .remint_checkpoint_child_scope_from_lease(child.clone(), capsule, provisional)
+                    .remint_checkpoint_child_scope_from_lease(
+                        child.clone(),
+                        capsule,
+                        provisional,
+                        custody,
+                    )
                     .await
                     .expect("released token cannot erase admitted lexical state");
                 (child, admitted)

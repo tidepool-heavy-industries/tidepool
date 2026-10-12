@@ -1,6 +1,5 @@
 //! Canonical Ractor wrapper for Tidepool actor behavior.
 
-use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -3503,10 +3502,10 @@ where
                 summary,
                 diagnostic: None,
             };
-            // Custody of every child and resource already moved to the
-            // successor before this call (the replacement fence transfers
-            // them under `child_admission_closed`); cleanup is confirmed by
-            // that transfer, not by a hook or resource scope this actor still owns.
+            // The RunControl transfer has acknowledged successor custody of
+            // every child and resource before this call. The predecessor's
+            // retained ingress and resource leases prevent retirement from
+            // overtaking that ownership handoff.
             state
                 .terminal
                 .retain_cleanup(crate::ResidentCleanupOutcome {
@@ -3541,10 +3540,11 @@ where
 }
 
 /// The only caller of [`RetainedActorExit::publish`] outside `termination`'s
-/// own tests. `Own` asserts that every child already has an exit: the
-/// snapshot is valid because `child_admission_closed` was set before it was
-/// taken, and `shutdown_children`/the replacement fence's ownership transfer
-/// both already guarantee the property. A violation does not withhold
+/// own tests. `Own` asserts that every retained child already has an exit.
+/// Lifecycle admission has closed and admitted creation and transfer work
+/// has settled before RunControl supplies the child inventory. Child shutdown
+/// or acknowledged successor ownership supplies the corresponding exits.
+/// A violation does not withhold
 /// publication — an owner with no exit at all is worse — it only records the
 /// invariant break.
 fn publish_exit(
@@ -6655,9 +6655,16 @@ mod tests {
         assert!(roots[0].terminal().get().is_none());
         assert!(roots[0].terminal().requested_shutdown().is_some());
         release.notify_one();
-        let (actor, task) = spawning.await.unwrap().unwrap();
-        task.await.unwrap();
-        assert_eq!(actor.identity(), roots[0].identity());
+        match spawning.await.unwrap() {
+            Err(ractor::SpawnErr::StartupFailed(error)) => assert_eq!(
+                error.downcast_ref::<KernelCallFailure>(),
+                Some(&KernelCallFailure::MailboxClosed(roots[0].identity())),
+                "closed startup must refuse publishing caller readiness",
+            ),
+            Err(error) => panic!("unexpected startup refusal: {error:?}"),
+            Ok(_) => panic!("sealed startup published caller readiness"),
+        }
+        let actor = &roots[0];
         assert_eq!(
             actor.terminal().get().unwrap().kind,
             ActorExitKind::Cancelled
@@ -7611,7 +7618,12 @@ mod tests {
             .unwrap()
             .is_some());
         assert_eq!(
-            directory.context(owner.identity()).unwrap().identity(),
+            directory
+                .context(owner.identity())
+                .await
+                .unwrap()
+                .unwrap()
+                .identity(),
             owner.identity()
         );
         assert!(directory
@@ -7638,6 +7650,8 @@ mod tests {
         assert!(directory.resolve(child.identity()).await.unwrap().is_some());
         assert!(directory
             .context(owner.identity())
+            .await
+            .unwrap()
             .unwrap()
             .owns_child(child.identity())
             .await
@@ -7651,8 +7665,12 @@ mod tests {
             .await
             .expect("retire first");
         owner_task.await.expect("first task");
-        assert!(directory.context(owner.identity()).is_none());
-        assert!(directory.context(sibling.identity()).is_some());
+        assert!(directory.context(owner.identity()).await.unwrap().is_none());
+        assert!(directory
+            .context(sibling.identity())
+            .await
+            .unwrap()
+            .is_some());
         assert!(child.terminal().get().is_some());
         assert!(sibling.terminal().get().is_none());
         // Exact retired addresses retain their exits for late observers.
@@ -8008,8 +8026,13 @@ mod tests {
         assert!(terminal_only.get().is_some());
         assert!(terminal_only.cleanup().is_none());
 
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let (parent, parent_task) = spawn_local_actor(None, observed_probe(&observations))
+            .await
+            .unwrap();
+        let context = observations.lock()[0].0.clone();
         let fixture = behavior(false);
-        let (actor, task) = spawn_local_actor(None, fixture.behavior).await.unwrap();
+        let actor = context.spawn_child(None, fixture.behavior).await.unwrap();
         let (reply, receiver) = tokio::sync::oneshot::channel();
         actor
             .address()
@@ -8025,28 +8048,20 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert!(fixture.calls.lock().contains(&"first-start"));
-        let context = KernelContext {
-            identity: actor.identity(),
-            terminal: actor.terminal().clone(),
-            spawn_ownership: SpawnOwnership::Independent,
-            myself: actor.address().clone(),
-            children: Arc::new(Mutex::new(HashMap::from([(
-                actor.address().get_id(),
-                actor.clone(),
-            )]))),
-            directory: LocalActorDirectory::default(),
-            child_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
-            forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
-        };
         let result =
             shutdown_children(&context, ActorExitKind::Cancelled, Duration::from_millis(1)).await;
         assert!(matches!(
             result,
             crate::CleanupComponentOutcome::Unconfirmed(_)
         ));
-        task.await.unwrap();
         // best-effort: draining the paired oneshot; its value isn't asserted here.
         receiver.await.ok();
+        for _ in 0..1000 {
+            if actor.terminal().cleanup().is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
         let cleanup = actor
             .terminal()
             .cleanup()
@@ -8069,19 +8084,11 @@ mod tests {
             .unwrap();
         assert!(!observed.cleanup.is_confirmed());
         assert_eq!(observed.cleanup.actor(), actor.identity());
-        context
-            .directory
-            .insert(
-                actor.clone(),
-                std::sync::Weak::new(),
-                SpawnOwnership::Independent,
-            )
-            .unwrap();
         assert!(context
             .forget_terminal_actor(actor.identity())
             .await
             .unwrap());
-        assert!(context.children.lock().is_empty());
+        assert!(context.children().await.unwrap().is_empty());
         assert!(
             matches!(
                 shutdown_children(&context, ActorExitKind::Cancelled, Duration::from_millis(1))
@@ -8090,23 +8097,20 @@ mod tests {
             ),
             "forgetting routing must not erase cleanup uncertainty"
         );
+        parent
+            .shutdown(ActorTerminal::new(ActorExitKind::Completed, "parent done"))
+            .await
+            .unwrap();
+        parent_task.await.unwrap();
     }
     #[tokio::test]
     async fn startup_admission_cancellation_is_retained_before_barrier() {
         for cancel in [false, true] {
-            let (owner, task) = spawn_local_actor(None, behavior(false).behavior)
+            let observations = Arc::new(Mutex::new(Vec::new()));
+            let (owner, task) = spawn_local_actor(None, observed_probe(&observations))
                 .await
                 .unwrap();
-            let context = KernelContext {
-                identity: owner.identity(),
-                terminal: owner.terminal().clone(),
-                spawn_ownership: SpawnOwnership::Independent,
-                myself: owner.address().clone(),
-                children: Arc::new(Mutex::new(HashMap::new())),
-                directory: LocalActorDirectory::default(),
-                child_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
-                forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
-            };
+            let context = observations.lock()[0].0.clone();
             let entered = Arc::new(Notify::new());
             let release = Arc::new(Notify::new());
             let mut child = behavior(false).behavior;
@@ -8115,26 +8119,44 @@ mod tests {
             let spawning =
                 tokio::spawn(async move { spawning_context.spawn_child(None, child).await });
             entered.notified().await;
-            assert!(context.child_admission_closed.try_write().is_err());
-            assert!(context.children.lock().is_empty());
+            let pending = context.children().await.unwrap();
+            assert_eq!(
+                pending.len(),
+                1,
+                "owner registers custody before startup finishes"
+            );
+            assert!(
+                pending[0].admit_transaction().await.is_err(),
+                "starting child cannot admit ordinary work"
+            );
             if cancel {
                 spawning.abort();
                 assert!(spawning.await.unwrap_err().is_cancelled());
             } else {
                 release.notify_one();
                 let child = spawning.await.unwrap().unwrap();
+                assert_eq!(child.identity(), pending[0].identity());
                 assert!(context.owns_child(child.identity()).await.unwrap());
             }
-            *context.child_admission_closed.write().await = true;
+            context.directory.close_run_admission().await.unwrap();
+            // Admitted work survives its observer; release the real startup barrier.
+            release.notify_one();
+            let preparations = context
+                .directory
+                .settle_preparations(Duration::from_secs(1))
+                .await;
             if cancel {
-                assert!(context.children.lock().is_empty());
                 assert!(matches!(
-                    *context.forgotten_children.lock(),
+                    preparations,
                     crate::CleanupComponentOutcome::Unconfirmed(_)
                 ));
             }
-            let outcome =
-                shutdown_children(&context, ActorExitKind::Cancelled, Duration::from_secs(1)).await;
+            // Preparation settlement and child routing are separate owner facts.
+            // A routed child disappearing cannot discharge preparation uncertainty.
+            let outcome = combine_cleanup(
+                preparations,
+                shutdown_children(&context, ActorExitKind::Cancelled, Duration::from_secs(1)).await,
+            );
             // Probe behavior cannot prove resource-scope cleanup even on successful startup.
             assert!(!matches!(
                 outcome,
@@ -8749,30 +8771,23 @@ mod tests {
         let (successor, successor_task) = spawn_local_actor(None, behavior(false).behavior)
             .await
             .unwrap();
-        // A real actor supplies a legitimate `RactorRef` for `finish_actor`'s
-        // `myself.stop(..)`; its own internal state is otherwise unused here.
-        let (placeholder, placeholder_task) = spawn_local_actor(None, behavior(false).behavior)
-            .await
-            .unwrap();
-
-        let terminal = RetainedActorExit::new();
+        let observations = Arc::new(Mutex::new(Vec::new()));
+        let (placeholder, placeholder_task) =
+            spawn_local_actor(None, observed_probe(&observations))
+                .await
+                .unwrap();
+        let terminal = placeholder.terminal().clone();
         let (tx, rx) = std::sync::mpsc::channel();
         let _connection = terminal.connect_lifecycle(move |event| tx.send(event).is_ok());
-
-        let context = std::sync::Arc::new(KernelContext {
-            identity: placeholder.identity(),
-            terminal: terminal.clone(),
-            spawn_ownership: SpawnOwnership::Independent,
-            myself: placeholder.address().clone(),
-            children: Arc::new(Mutex::new(HashMap::new())),
-            directory: LocalActorDirectory::default(),
-            child_admission_closed: Arc::new(tokio::sync::RwLock::new(false)),
-            forgotten_children: Arc::new(Mutex::new(crate::CleanupComponentOutcome::Confirmed)),
-        });
+        let context = Arc::new(observations.lock()[0].0.clone());
+        let lifecycle = context.lifecycle().clone();
+        // This unit boundary checks publication by finish_actor after its
+        // caller has selected a disposition; transfer authority is tested separately.
         let mut state = LocalActorState {
+            active_ingress: None,
             replacement: None,
             drain: DrainState::Open,
-            lifecycle: crate::kernel::LifecycleHandle::default(),
+            lifecycle,
             context,
             behavior: BehaviorSlot(Some(behavior(false).behavior)),
             pending_tasks: HashMap::new(),
