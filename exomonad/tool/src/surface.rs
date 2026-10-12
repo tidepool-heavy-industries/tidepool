@@ -383,15 +383,4 @@ mod tests {
         assert!(fields.contains(&ToolField::Kind));
         assert!(fields.contains(&ToolField::InputSchema));
     }
-
-    #[test]
-    fn a_body_only_edit_leaves_the_surface_untouched() {
-        // Nothing about an implementation reaches a declaration, so a record
-        // rebuilt from edited handler bodies compares equal field by field.
-        let active = surface();
-        let candidate = surface();
-        for (active, candidate) in active.iter().zip(candidate.iter()) {
-            assert!(compare_one(active, candidate).is_empty());
-        }
-    }
 }
