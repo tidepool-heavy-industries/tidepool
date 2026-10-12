@@ -357,3 +357,92 @@ async fn provider_publication_drop_and_close_retain_real_journal_commit() {
     assert!(fixture.admission.lifecycle.transaction().await.is_err());
     fixture.forest.shutdown().await;
 }
+
+#[tokio::test]
+async fn provider_publication_known_refusals_preserve_retained_state_and_allow_valid_ack() {
+    let fixture = NativeFixture::start_with_journal(true).await;
+    let journal = fixture.journal.as_ref().unwrap();
+    let initial = journal
+        .initial_context(fixture.actor.identity())
+        .await
+        .unwrap()
+        .unwrap();
+    let rows = std::fs::read(fixture._root.path().join("actors.jsonl")).unwrap();
+    let operation = fixture.operation.as_ref().unwrap();
+    let publication = fixture.publication.as_ref().unwrap();
+    assert!(fixture
+        .forest
+        .acknowledge_initial_context_publication_for_provider(
+            &fixture.admission,
+            &WorkbenchExecutionId::from_digest([74; 16]),
+            publication.clone(),
+        )
+        .await
+        .is_err());
+    let mut foreign = publication.clone();
+    if let crate::ApplicationConversation::Embedded { agent_path, .. } = &mut foreign.conversation {
+        agent_path.push_str("/foreign");
+    }
+    assert!(fixture
+        .forest
+        .acknowledge_initial_context_publication_for_provider(
+            &fixture.admission,
+            operation,
+            foreign,
+        )
+        .await
+        .is_err());
+    // Foreign conversation reaches a real native grant but performs no journal mutation.
+    fixture
+        .admission
+        .native_readiness()
+        .unwrap()
+        .check_ready_async()
+        .await
+        .unwrap();
+    assert_eq!(
+        journal
+            .initial_context(fixture.actor.identity())
+            .await
+            .unwrap(),
+        Some(initial.clone())
+    );
+    assert_eq!(
+        fixture
+            .forest
+            .initial_context_observation(fixture.actor.identity())
+            .await
+            .unwrap(),
+        initial
+    );
+    assert_eq!(
+        std::fs::read(fixture._root.path().join("actors.jsonl")).unwrap(),
+        rows
+    );
+    let published = fixture
+        .forest
+        .acknowledge_initial_context_publication_for_provider(
+            &fixture.admission,
+            operation,
+            publication.clone(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(published.state, crate::InitialContextState::Published);
+    assert_eq!(published.publication.as_ref(), Some(publication));
+    assert_eq!(
+        journal
+            .initial_context(fixture.actor.identity())
+            .await
+            .unwrap(),
+        Some(published)
+    );
+    fixture
+        .admission
+        .native_readiness()
+        .unwrap()
+        .check_ready_async()
+        .await
+        .unwrap();
+    fixture.forest.shutdown().await;
+}
