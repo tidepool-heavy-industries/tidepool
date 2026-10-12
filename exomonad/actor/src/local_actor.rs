@@ -5263,60 +5263,137 @@ mod tests {
             .await
             .expect("spawn");
         let execution = tidepool_runtime::session::WorkbenchExecutionId::from_digest([7; 16]);
-        let first = send_workbench_request(
-            &actor,
-            WorkbenchRequest::from_cell_input("pure ()").with_execution_id(execution.clone()),
-            Some(crate::WorkbenchExecutionControl::untracked()),
-        );
-        entered.notified().await;
+        let first_control = crate::WorkbenchExecutionControl::untracked();
+        let (first_tx, first) = oneshot::channel();
+        actor
+            .submit_workbench(
+                crate::ActorWorkbenchInvocation::unbound(
+                    WorkbenchRequest::from_cell_input("pure ()")
+                        .with_execution_id(execution.clone()),
+                ),
+                Some(Arc::clone(&first_control)),
+                first_tx.into(),
+            )
+            .await
+            .expect("admit first notebook");
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("first notebook starts");
         let (reconcile_tx, reconcile_rx) = oneshot::channel();
         actor
-            .address()
-            .send_message(KernelMessage::ReconcileWorkbenchCancellation {
+            .lifecycle()
+            .control(KernelMessage::ReconcileWorkbenchCancellation {
                 execution: execution.clone(),
                 invocation: None,
                 reply: reconcile_tx.into(),
             })
-            .expect("reconcile active workbench");
+            .await
+            .expect("admit reconciliation of active notebook");
         assert!(matches!(
-            reconcile_rx.await.expect("reconciliation"),
+            tokio::time::timeout(Duration::from_secs(2), reconcile_rx)
+                .await.expect("reconciliation remains responsive").expect("reconciliation"),
             crate::WorkbenchCancellationOutcome::Unconfirmed { execution: actual }
                 if actual == execution
         ));
-        let rejected_control = crate::WorkbenchExecutionControl::untracked();
-        let second = send_workbench_request(
-            &actor,
-            WorkbenchRequest::from_cell_input("pure ()"),
-            Some(Arc::clone(&rejected_control)),
-        );
+        let second_control = crate::WorkbenchExecutionControl::untracked();
+        let (second_tx, mut second) = oneshot::channel();
         actor
-            .seal_hosted_work()
+            .submit_workbench(
+                crate::ActorWorkbenchInvocation::unbound(WorkbenchRequest::from_cell_input(
+                    "pure ()",
+                )),
+                Some(Arc::clone(&second_control)),
+                second_tx.into(),
+            )
             .await
+            .expect("admit second notebook before seal");
+        tokio::time::timeout(Duration::from_secs(2), actor.seal_hosted_work())
+            .await
+            .expect("seal remains responsive")
             .expect("seal while notebook runs");
         assert_eq!(&*fixture.calls.lock(), &["workbench-start"]);
+        assert!(matches!(
+            second.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(first_control.terminal_reply().is_none());
+        assert!(second_control.terminal_reply().is_none());
+
+        let rejected_control = crate::WorkbenchExecutionControl::untracked();
+        let (rejected_tx, rejected_rx) = oneshot::channel();
+        assert_eq!(
+            actor
+                .submit_workbench(
+                    crate::ActorWorkbenchInvocation::unbound(WorkbenchRequest::from_cell_input(
+                        "pure ()"
+                    )),
+                    Some(Arc::clone(&rejected_control)),
+                    rejected_tx.into(),
+                )
+                .await,
+            Err(KernelCallFailure::MailboxClosed(actor.identity()))
+        );
+        assert!(
+            rejected_rx.await.is_err(),
+            "refused admission issues no execution reply"
+        );
+        assert!(
+            rejected_control.terminal_reply().is_none(),
+            "never-admitted work has no actor-owned terminal result"
+        );
+
         release.notify_one();
-        assert!(first.await.expect("first reply").is_ok());
-        assert!(matches!(
-            second.await.expect("second reply"),
-            Err(KernelInvocationFailure::Rejected { .. })
-        ));
-        assert!(matches!(
-            rejected_control.terminal_reply(),
-            Some(Err(KernelInvocationFailure::Rejected { .. }))
-        ));
+        let first_response = tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .expect("first notebook settles")
+            .expect("first reply")
+            .expect("first result");
+        assert_eq!(first_response.status, WorkbenchRunStatus::Committed);
+        tokio::time::timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .expect("admitted second notebook starts after first settles");
         assert_eq!(
             &*fixture.calls.lock(),
-            &["workbench-start", "workbench-end"]
+            &["workbench-start", "workbench-end", "workbench-start"]
         );
-        actor
-            .shutdown(ActorTerminal {
+        assert!(matches!(
+            second.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(first_control.terminal_reply(), Some(Ok(_))));
+        assert!(second_control.terminal_reply().is_none());
+        release.notify_one();
+        let second_response = tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .expect("admitted second notebook settles after seal")
+            .expect("second reply")
+            .expect("second result");
+        assert_eq!(second_response.status, WorkbenchRunStatus::Committed);
+        assert!(matches!(second_control.terminal_reply(), Some(Ok(_))));
+        assert_eq!(
+            &*fixture.calls.lock(),
+            &[
+                "workbench-start",
+                "workbench-end",
+                "workbench-start",
+                "workbench-end"
+            ]
+        );
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            actor.shutdown(ActorTerminal {
                 kind: ActorExitKind::Completed,
                 summary: "done".into(),
                 diagnostic: None,
-            })
+            }),
+        )
+        .await
+        .expect("shutdown remains responsive")
+        .expect("shutdown");
+        tokio::time::timeout(Duration::from_secs(2), task)
             .await
-            .expect("shutdown");
-        task.await.expect("actor task");
+            .expect("physical actor shutdown")
+            .expect("actor task");
     }
 
     #[tokio::test]
