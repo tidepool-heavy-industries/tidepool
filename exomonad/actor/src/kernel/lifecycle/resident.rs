@@ -1284,6 +1284,15 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
     }
 }
 
+enum WorkerKind {
+    ProviderInitial(provider_initial::StageKind),
+    OwnerObservation,
+    Initial,
+    Owner,
+    Release,
+    Retirement,
+}
+
 fn spawn(
     state: &mut LifecycleState,
     address: &RactorRef<LifecycleCommand>,
@@ -1292,12 +1301,12 @@ fn spawn(
 ) {
     let address = address.clone();
     let kind = match &state.resident.as_ref().unwrap().pending.as_ref().unwrap().1 {
-        Pending::ProviderInitial(_) => 6,
-        Pending::OwnerObservation { .. } => 4,
-        Pending::Initial(_) => 0,
-        Pending::Owner(_) => 1,
-        Pending::Release(_) => 2,
-        Pending::Retirement => 3,
+        Pending::ProviderInitial(pending) => WorkerKind::ProviderInitial(pending.kind()),
+        Pending::OwnerObservation { .. } => WorkerKind::OwnerObservation,
+        Pending::Initial(_) => WorkerKind::Initial,
+        Pending::Owner(_) => WorkerKind::Owner,
+        Pending::Release(_) => WorkerKind::Release,
+        Pending::Retirement => WorkerKind::Retirement,
     };
     state.tasks.insert(
         sequence,
@@ -1308,13 +1317,17 @@ fn spawn(
                     let error =
                         "resident owner task panicked before confirmed settlement".to_owned();
                     match kind {
-                        6 => {
-                            Completion::ProviderInitial(provider_initial::Completion::Failed(error))
+                        WorkerKind::ProviderInitial(stage) => {
+                            Completion::ProviderInitial(provider_initial::Completion::Failed {
+                                stage,
+                                error,
+                            })
                         }
-                        0 => Completion::Initial(Err(error)),
-                        1 => Completion::Owner(Err(error)),
-                        2 => Completion::Release(Err(error)),
-                        _ => Completion::Retirement(Err(error)),
+                        WorkerKind::OwnerObservation => Completion::OwnerObservation(Err(error)),
+                        WorkerKind::Initial => Completion::Initial(Err(error)),
+                        WorkerKind::Owner => Completion::Owner(Err(error)),
+                        WorkerKind::Release => Completion::Release(Err(error)),
+                        WorkerKind::Retirement => Completion::Retirement(Err(error)),
                     }
                 }
             };

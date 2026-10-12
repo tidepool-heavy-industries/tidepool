@@ -1279,6 +1279,9 @@ impl Actor for LifecycleCoordinator {
                     Some(fence) => state.enqueue(&myself, *fence, true),
                     None => Ok(()),
                 };
+                // Publish the closed observation before acknowledging its linearized cutoff.
+                // The projection remains evidence, never execution permission.
+                state.publish();
                 if let Some(reply) = reply {
                     let _ = reply.send(result);
                 }

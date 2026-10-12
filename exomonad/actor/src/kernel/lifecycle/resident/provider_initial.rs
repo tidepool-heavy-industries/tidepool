@@ -31,6 +31,23 @@ pub(super) struct Pending {
     stage: Stage,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum StageKind {
+    Beginning,
+    Journal,
+    Settling,
+}
+
+impl Pending {
+    pub(super) fn kind(&self) -> StageKind {
+        match self.stage {
+            Stage::Beginning(_) => StageKind::Beginning,
+            Stage::Journal { .. } => StageKind::Journal,
+            Stage::Settling(_) => StageKind::Settling,
+        }
+    }
+}
+
 enum Stage {
     Beginning(Effect),
     Journal { ticket: Option<ProviderTransition> },
@@ -41,7 +58,7 @@ pub(super) enum Completion {
     Begun(Result<Option<ProviderTransition>, String>),
     Journal(Result<InitialContextObservation, JournalFailure>),
     Settled(Result<(), String>),
-    Failed(String),
+    Failed { stage: StageKind, error: String },
 }
 
 pub(super) enum JournalFailure {
@@ -154,7 +171,7 @@ pub(super) fn complete(
             matches!((&pending.stage, &outcome),
                 (Stage::Beginning(_), Completion::Begun(_)) |
                 (Stage::Journal { .. }, Completion::Journal(_)) |
-                (Stage::Settling(_), Completion::Settled(_))) || matches!(outcome, Completion::Failed(_)))
+                (Stage::Settling(_), Completion::Settled(_))) || matches!(&outcome, Completion::Failed { stage, .. } if pending.kind() == *stage))
     });
     if !matches {
         return;
@@ -169,7 +186,7 @@ pub(super) fn complete(
         stage,
     } = pending;
     match (stage, outcome) {
-        (_, Completion::Failed(error)) => uncertain(state, reply, error),
+        (_, Completion::Failed { error, .. }) => uncertain(state, reply, error),
         (Stage::Beginning(_), Completion::Begun(Err(error))) => {
             // No native grant and no local mutation occurred.
             let _ = reply.send(Err(error));
