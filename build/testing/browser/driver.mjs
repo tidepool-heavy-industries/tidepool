@@ -141,8 +141,9 @@ async function selectActorChat(page, actor) {
 
 async function sendActorInput(page, text) {
   const chat = page.getByRole('region', { name: 'Selected worker Chat' });
-  await chat.getByLabel('Message to selected actor').fill(text);
-  await chat.getByRole('button', { name: 'Send input', exact: true }).click();
+  const composer = chat.getByRole('form', { name: 'Send actor message', exact: true });
+  await composer.getByRole('textbox').fill(text);
+  await composer.getByRole('button', { name: 'Send input', exact: true }).click();
 }
 
 async function openHostOperations(page) {
