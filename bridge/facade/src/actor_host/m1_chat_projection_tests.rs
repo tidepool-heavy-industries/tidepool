@@ -5,7 +5,7 @@ use harness::{
     model::{AgentPath, Effort, RequestId},
     provider::{CallContext, Provider, ProviderError, ToolScheduling},
     store::{actor_output::ActorOutputOrigin, chat::ChatEntry, Store, Usage},
-    transport::{Auth, ResponsesRequest, ResponsesTurn, TransportError},
+    transport::{Auth, ResponsesTurn, TransportError},
     turn::JobScheduler,
 };
 use proptest::prelude::*;
@@ -62,7 +62,10 @@ impl ResponsesTransport for Script {
         ))
     }
 
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        _: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         Ok(ResponsesTurn {
             response_id: "projection".into(),
             items: vec![self

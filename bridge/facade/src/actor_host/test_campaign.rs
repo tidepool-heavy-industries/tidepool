@@ -1736,17 +1736,20 @@ impl harness::engine::ResponsesTransport for HostedScriptProvider {
 
     async fn create(
         &self,
-        request: harness::transport::ResponsesRequest,
+        request: harness::transport::PreparedProviderRequest,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
-        self.round(None, request).await
+        let request_id = request.request_id().clone();
+        let request = request.request().clone();
+        self.round(Some(request_id), request).await
     }
 
-    async fn create_streaming_for_request(
+    async fn create_streaming(
         &self,
-        request_id: &harness::model::RequestId,
-        request: harness::transport::ResponsesRequest,
+        prepared: harness::transport::PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+        let request_id = prepared.request_id();
+        let request = prepared.request().clone();
         let turn = self.round(Some(request_id.clone()), request).await?;
         let mut assembly = harness::transport::sse::ResponseAssembly::default();
         for (index, item) in turn.items.iter().enumerate() {
@@ -2840,9 +2843,13 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_script_observer_returns_transport_error() {
-        let (provider, requests) = hosted_script_provider();
+        let (sender, requests) = tokio::sync::mpsc::unbounded_channel();
+        let provider = HostedScriptProvider {
+            requests: sender,
+            provider_envelopes: false,
+        };
         drop(requests);
-        let result = provider.create(request()).await;
+        let result = provider.round(None, request()).await;
         assert!(matches!(
             result,
             Err(TransportError::Stream(message)) if message == "script observer closed"
@@ -2851,8 +2858,12 @@ mod tests {
 
     #[tokio::test]
     async fn dropped_held_script_reply_returns_transport_error() {
-        let (provider, mut requests) = hosted_script_provider();
-        let pending = tokio::spawn(async move { provider.create(request()).await });
+        let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let provider = HostedScriptProvider {
+            requests: sender,
+            provider_envelopes: false,
+        };
+        let pending = tokio::spawn(async move { provider.round(None, request()).await });
         let held = requests
             .recv()
             .await
@@ -2870,8 +2881,12 @@ mod tests {
 
     #[tokio::test]
     async fn live_script_reply_still_completes_provider_request() {
-        let (provider, mut requests) = hosted_script_provider();
-        let pending = tokio::spawn(async move { provider.create(request()).await });
+        let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        let provider = HostedScriptProvider {
+            requests: sender,
+            provider_envelopes: false,
+        };
+        let pending = tokio::spawn(async move { provider.round(None, request()).await });
         requests
             .recv()
             .await
@@ -2911,57 +2926,195 @@ mod tests {
 
     #[tokio::test]
     async fn scripted_provider_retains_engine_issued_original_operation() {
+        use harness::{
+            embedding::{
+                AdmissionGuard, Conversation, EmbeddedError, HostActor, HostControl,
+                HostControlError, HostIdentity, ToolSurface,
+            },
+            engine::{EngineConfig, ResponsesTransport},
+            model::{AgentPath, Effort, OperationId},
+            provider::{CallContext, Provider, ProviderError},
+            store::Store,
+            transport::{Auth, PreparedProviderRequest, ResponsesTurn},
+            turn::JobScheduler,
+        };
+        struct Offline;
+        impl Auth for Offline {
+            fn access(&self) -> Result<(String, String), TransportError> {
+                panic!("scripted provider must not use credentials")
+            }
+        }
+        struct Guard;
+        impl AdmissionGuard for Guard {}
+        struct Echo(tokio::sync::mpsc::UnboundedSender<(OperationId, String)>);
+        #[async_trait::async_trait]
+        impl Provider for Echo {
+            async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
+                panic!("script selects a custom tool")
+            }
+            async fn call_custom_with_context(
+                &self,
+                name: &str,
+                input: String,
+                context: CallContext,
+            ) -> Result<Value, ProviderError> {
+                assert_eq!(name, "haskell_sync");
+                self.0
+                    .send((
+                        context
+                            .operation
+                            .expect("Engine supplies the issued operation"),
+                        input.clone(),
+                    ))
+                    .unwrap();
+                Ok(serde_json::json!(input))
+            }
+            fn tools(&self) -> Vec<Value> {
+                vec![]
+            }
+        }
+        struct Host {
+            identity: HostIdentity,
+            surface: Arc<ToolSurface>,
+        }
+        #[async_trait::async_trait]
+        impl HostActor for Host {
+            fn identity(&self) -> &HostIdentity {
+                &self.identity
+            }
+            fn admit(&self) -> Result<Box<dyn AdmissionGuard>, EmbeddedError> {
+                Ok(Box::new(Guard))
+            }
+            fn tool_surface(&self) -> Result<Arc<ToolSurface>, EmbeddedError> {
+                Ok(self.surface.clone())
+            }
+            async fn wake(&self, _: i64) -> Result<(), String> {
+                Ok(())
+            }
+            async fn control(&self, _: HostControl) -> Result<Value, HostControlError> {
+                panic!("script does not control actor lifecycle")
+            }
+        }
+        struct Transport(Arc<dyn ResponsesTransport>);
+        #[async_trait::async_trait]
+        impl ResponsesTransport for Transport {
+            fn response_contract(
+                &self,
+            ) -> Result<
+                (
+                    harness::transport::ResponsesRoute,
+                    harness::transport::ResponsesProtocol,
+                ),
+                TransportError,
+            > {
+                self.0.response_contract()
+            }
+            async fn create(
+                &self,
+                request: PreparedProviderRequest,
+            ) -> Result<ResponsesTurn, TransportError> {
+                self.0.create(request).await
+            }
+            async fn create_streaming(
+                &self,
+                request: PreparedProviderRequest,
+                sink: tokio::sync::mpsc::Sender<harness::transport::sse::StreamEvent>,
+            ) -> Result<ResponsesTurn, TransportError> {
+                self.0.create_streaming(request, sink).await
+            }
+        }
         for envelopes in [false, true] {
             let (provider, mut rounds) = if envelopes {
                 hosted_script_provider_with_envelopes()
             } else {
                 hosted_script_provider()
             };
-            assert_eq!(
-                provider.response_contract().unwrap(),
-                (
-                    harness::transport::ResponsesRoute::Codex,
-                    harness::transport::ResponsesProtocol::Standard,
+            let store = Arc::new(Store::memory().unwrap());
+            let identity = HostIdentity {
+                run: "exact-run".into(),
+                actor: AgentPath("/root".into()),
+                incarnation: "7".into(),
+            };
+            let (observed, mut effects) = tokio::sync::mpsc::unbounded_channel();
+            let surface = Arc::new(ToolSurface::new("scripted-operation-control".into(), vec![serde_json::json!({
+                "type":"custom", "name":"haskell_sync", "description":"Echo the issued script input",
+            })], Arc::new(Echo(observed))).unwrap());
+            let conversation = Conversation::attach(
+                store.clone(),
+                Arc::new(Host {
+                    identity: identity.clone(),
+                    surface,
+                }),
+                None,
+            )
+            .unwrap();
+            let engine = conversation
+                .engine::<Offline, _>(
+                    Transport(provider),
+                    Arc::new(JobScheduler::new(1).unwrap()),
+                    EngineConfig {
+                        instructions: "scripted operation control".into(),
+                        tools: vec![],
+                        model: "test-model".into(),
+                        effort: Effort::Low,
+                        session_id: "exact-run:/root:7".into(),
+                        agent: identity.actor.clone(),
+                    },
+                    std::num::NonZeroU64::new(100_000).unwrap(),
                 )
-            );
-            let mut request = request();
-            request.session_id = "exact-run:/root:7".into();
-            request.tools =
-                vec![serde_json::json!({"type":"custom", "name":"haskell_sync"})].into();
-            let request_id = harness::model::RequestId("exact-engine-request".into());
-            let issued = request_id.clone();
-            let (sink, mut events) = tokio::sync::mpsc::channel(3);
+                .unwrap();
             let task = tokio::spawn(async move {
-                provider
-                    .create_streaming_for_request(&issued, request, sink)
+                let (_cancel, cancellation) = tokio::sync::watch::channel(false);
+                let (_wake, incoming) = tokio::sync::mpsc::unbounded_channel();
+                engine
+                    .run_embedded(None, vec![], cancellation, incoming)
                     .await
             });
             let round = rounds.recv().await.unwrap();
+            let operation = round.operation("expected-call");
             assert_eq!(
-                round.operation("expected-call"),
-                harness::model::OperationId {
-                    origin: harness::model::ConversationIdentity::Embedded {
-                        run: "exact-run".into(),
-                        actor: harness::model::AgentPath("/root".into()),
-                        incarnation: "7".into(),
-                    },
-                    request: request_id,
-                    call: harness::model::CallId("expected-call".into()),
+                operation.origin,
+                harness::model::ConversationIdentity::Embedded {
+                    run: identity.run,
+                    actor: identity.actor,
+                    incarnation: identity.incarnation,
                 }
             );
+            assert!(
+                store.request(&operation.request).unwrap().is_some(),
+                "request is durable before transport observes it"
+            );
             round.call("expected-call", "display True");
-            let turn = task.await.unwrap().unwrap();
-            assert_eq!(turn.items.len(), if envelopes { 3 } else { 1 });
-            for (index, expected) in turn.items.iter().enumerate() {
-                let Some(harness::transport::sse::StreamEvent::CompletedItem(item)) =
-                    events.recv().await
-                else {
-                    panic!("scripted response must expose each indexed completed output");
-                };
-                assert_eq!(item.output_index(), index as u64);
-                assert_eq!(item.item(), expected);
-            }
-            assert!(events.recv().await.is_none());
+            let (executed, input) = effects.recv().await.unwrap();
+            assert_eq!(executed, operation);
+            assert_eq!(input, "display True");
+            let next = rounds.recv().await.unwrap();
+            assert!(next
+                .request
+                .input
+                .iter()
+                .any(|item| item.0["type"] == "custom_tool_call_output"
+                    && item.0["call_id"] == "expected-call"));
+            next.finish();
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .expect("scripted Engine settles")
+                .unwrap()
+                .unwrap();
+            let claims = store.claims(&operation.call).unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].operation, operation);
+            let turns = store.replay_turns(&operation.request).unwrap();
+            assert_eq!(turns.len(), 1);
+            assert_eq!(
+                turns[0].model_response.items.len(),
+                if envelopes { 3 } else { 1 }
+            );
+            assert!(matches!(
+                effects.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty
+                    | tokio::sync::mpsc::error::TryRecvError::Disconnected)
+            ));
         }
     }
 

@@ -57,7 +57,10 @@ impl ResponsesTransport for InterruptibleRoundTransport {
         ))
     }
 
-    async fn create(&self, _request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        _request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         match self.requests.fetch_add(1, Ordering::SeqCst) + 1 {
             1 => {
                 self.first_started.notify_one();
@@ -169,7 +172,11 @@ impl ResponsesTransport for CompactionTransport {
         ))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         if request.tools_allowed.as_ref().is_some_and(Vec::is_empty) {
             assert!(request.tools.is_empty());
             self.compactions.fetch_add(1, Ordering::Relaxed);
@@ -522,7 +529,11 @@ impl ResponsesTransport for FailedCompactionTransport {
         ))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         if request.tools_allowed.as_ref().is_some_and(Vec::is_empty) {
             assert!(request.tools.is_empty());
             let _ = self.compaction_seen.send(());

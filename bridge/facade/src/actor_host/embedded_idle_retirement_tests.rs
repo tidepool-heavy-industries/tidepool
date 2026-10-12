@@ -156,16 +156,20 @@ impl ResponsesTransport for IdleTransport {
         ))
     }
 
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        _: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         panic!("Engine must provide its actual durable request ID")
     }
 
-    async fn create_streaming_for_request(
+    async fn create_streaming(
         &self,
-        request_id: &RequestId,
-        request: ResponsesRequest,
+        prepared: harness::transport::PreparedProviderRequest,
         sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
+        let request_id = prepared.request_id();
+        let request = prepared.request().clone();
         let (response, completed) = oneshot::channel();
         self.0
             .send(ScriptedRound {

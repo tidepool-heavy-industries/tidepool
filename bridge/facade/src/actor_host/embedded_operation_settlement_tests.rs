@@ -494,17 +494,17 @@ impl harness::engine::ResponsesTransport for SchemaRefusalTransport {
 
     async fn create(
         &self,
-        _: harness::transport::ResponsesRequest,
+        _: harness::transport::PreparedProviderRequest,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
         panic!("the Engine must issue the exact durable request identity")
     }
 
-    async fn create_streaming_for_request(
+    async fn create_streaming(
         &self,
-        request: &RequestId,
-        _: harness::transport::ResponsesRequest,
+        prepared: harness::transport::PreparedProviderRequest,
         sink: tokio::sync::mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
+        let request = prepared.request_id();
         match self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
             0 => {
                 let turn = harness::transport::ResponsesTurn {

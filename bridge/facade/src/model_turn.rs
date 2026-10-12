@@ -552,7 +552,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use harness::transport::{ResponsesRequest, ResponsesTurn, TransportError, Usage};
+    use harness::transport::{ResponsesTurn, TransportError, Usage};
     use std::collections::VecDeque;
     #[test]
     fn export_production_effect_core_for_haskell_check() {
@@ -588,7 +588,10 @@ mod tests {
             ))
         }
 
-        async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+        async fn create(
+            &self,
+            _: harness::transport::PreparedProviderRequest,
+        ) -> Result<ResponsesTurn, TransportError> {
             self.0
                 .lock()
                 .unwrap()

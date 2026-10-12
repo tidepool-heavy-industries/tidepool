@@ -161,7 +161,11 @@ impl ResponsesTransport for PendingCellTransport {
         ))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         if request.tools_allowed.as_ref().is_some_and(Vec::is_empty) {
             self.compaction_seen.send(()).map_err(|_| {
                 TransportError::Stream("test closed before compaction began".into())

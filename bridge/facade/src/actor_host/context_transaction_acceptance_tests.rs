@@ -130,7 +130,11 @@ impl ResponsesTransport for ScriptedProvider {
         ))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         let (reply, completed) = oneshot::channel();
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.requests

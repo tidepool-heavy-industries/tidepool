@@ -285,7 +285,7 @@ impl ResponsesTransport for FixtureModelTransport {
 
     async fn create(
         &self,
-        _request: harness::transport::ResponsesRequest,
+        _request: harness::transport::PreparedProviderRequest,
     ) -> Result<harness::transport::ResponsesTurn, harness::transport::TransportError> {
         Ok(harness::transport::ResponsesTurn {
             response_id: uuid::Uuid::new_v4().to_string(),

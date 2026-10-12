@@ -70,7 +70,11 @@ impl ResponsesTransport for Script {
         ))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         let instructions = request.instructions.clone();
         let resumed = request
             .input

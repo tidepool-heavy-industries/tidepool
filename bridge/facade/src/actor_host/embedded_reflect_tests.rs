@@ -11,7 +11,7 @@ use harness::{
     model::{AgentPath, Effort, RequestId},
     provider::{Provider, ProviderError},
     store::{EmbeddedRoundOutcome, Store},
-    transport::{sse::StreamEvent, Auth, ResponsesRequest, ResponsesTurn, TransportError},
+    transport::{sse::StreamEvent, Auth, ResponsesTurn, TransportError},
     turn::JobScheduler,
 };
 use serde_json::{json, Value};
@@ -91,15 +91,18 @@ impl ResponsesTransport for Stream {
         ))
     }
 
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        _: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         unreachable!("must stream")
     }
-    async fn create_streaming_for_request(
+    async fn create_streaming(
         &self,
-        request: &RequestId,
-        _: ResponsesRequest,
+        prepared: harness::transport::PreparedProviderRequest,
         sink: mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
+        let request = prepared.request_id();
         let round = self.calls.fetch_add(1, Ordering::SeqCst);
         let mut assembly = harness::transport::sse::ResponseAssembly::default();
         let items = if round == 1 {

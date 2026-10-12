@@ -101,7 +101,10 @@ impl ResponsesTransport for CancelRunningCellTransport {
         ))
     }
 
-    async fn create(&self, _request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        _request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         let round = self.requests.fetch_add(1, Ordering::SeqCst) + 1;
         let items = match round {
             1 => vec![haskell_call(
@@ -145,7 +148,11 @@ impl ResponsesTransport for HostCellTransport {
         ))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         let round = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         self.requests.lock().push(request.clone());
         match round {
@@ -657,7 +664,11 @@ impl ResponsesTransport for RejectFirstRequest {
         ))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request = request.request().clone();
         let round = {
             let mut requests = self.requests.lock();
             requests.push(request);

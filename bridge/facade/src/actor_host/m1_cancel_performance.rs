@@ -111,16 +111,20 @@ impl ResponsesTransport for CancelTransport {
         ))
     }
 
-    async fn create(&self, _: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
+    async fn create(
+        &self,
+        _: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
         panic!("cancellation samples require exact durable Engine request identities")
     }
 
-    async fn create_streaming_for_request(
+    async fn create_streaming(
         &self,
-        request_id: &RequestId,
-        request: ResponsesRequest,
+        prepared: harness::transport::PreparedProviderRequest,
         sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
+        let request_id = prepared.request_id();
+        let request = prepared.request().clone();
         let turn = self.turn(request_id, &request);
         let mut assembly = harness::transport::sse::ResponseAssembly::default();
         for (index, item) in turn.items.iter().enumerate() {

@@ -60,16 +60,22 @@ impl ResponsesTransport for ReloadTransport {
         ))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        self.offer(None, request).await
+    async fn create(
+        &self,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request_id = request.request_id().clone();
+        let request = request.request().clone();
+        self.offer(Some(request_id), request).await
     }
 
-    async fn create_streaming_for_request(
+    async fn create_streaming(
         &self,
-        id: &RequestId,
-        request: ResponsesRequest,
+        prepared: harness::transport::PreparedProviderRequest,
         sink: mpsc::Sender<StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
+        let id = prepared.request_id();
+        let request = prepared.request().clone();
         let turn = self.offer(Some(id.clone()), request).await?;
         let mut assembly = harness::transport::sse::ResponseAssembly::default();
         for (index, item) in turn.items.iter().enumerate() {

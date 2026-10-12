@@ -312,16 +312,22 @@ impl ResponsesTransport for BrowserTransport {
         ))
     }
 
-    async fn create(&self, request: ResponsesRequest) -> Result<ResponsesTurn, TransportError> {
-        self.create_for_request(request, None).await
+    async fn create(
+        &self,
+        request: harness::transport::PreparedProviderRequest,
+    ) -> Result<ResponsesTurn, TransportError> {
+        let request_id = request.request_id().clone();
+        let request = request.request().clone();
+        self.create_for_request(request, Some(&request_id)).await
     }
 
-    async fn create_streaming_for_request(
+    async fn create_streaming(
         &self,
-        request_id: &harness::model::RequestId,
-        request: ResponsesRequest,
+        prepared: harness::transport::PreparedProviderRequest,
         sink: mpsc::Sender<harness::transport::sse::StreamEvent>,
     ) -> Result<ResponsesTurn, TransportError> {
+        let request_id = prepared.request_id();
+        let request = prepared.request().clone();
         let turn = self.create_for_request(request, Some(request_id)).await?;
         let mut assembly = harness::transport::sse::ResponseAssembly::default();
         for (index, item) in turn.items.iter().enumerate() {
