@@ -413,6 +413,12 @@ impl JournalApplicationBindingAck {
     }
 }
 
+#[cfg(test)]
+struct BootstrapPause {
+    entered: tokio::sync::oneshot::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
 /// A channel handle to one dedicated, supervised blocking journal owner.
 pub struct ActorRecoveryJournal {
     identity: Arc<()>,
@@ -433,6 +439,7 @@ impl ActorRecoveryJournal {
         relative_file: PathBuf,
         require_existing: bool,
         lifetime: Arc<dyn Send + Sync>,
+        #[cfg(test)] bootstrap_pause: Option<BootstrapPause>,
     ) -> std::io::Result<Arc<Self>> {
         let identity = Arc::new(());
         let owner_identity = Arc::clone(&identity);
@@ -445,6 +452,11 @@ impl ActorRecoveryJournal {
                 // The existing enclosing resource owner survives a cancelled
                 // opening waiter and remains held while queued writes drain.
                 let _lifetime = lifetime;
+                #[cfg(test)]
+                if let Some(pause) = bootstrap_pause {
+                    let _ = pause.entered.send(());
+                    let _ = pause.resume.recv();
+                }
                 let mut fenced = false;
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut owner = match JournalOwner::initialize(
@@ -634,6 +646,8 @@ impl ActorRecoveryJournal {
             relative_file.as_ref().to_owned(),
             false,
             lifetime,
+            #[cfg(test)]
+            None,
         )
         .await
     }
@@ -647,6 +661,8 @@ impl ActorRecoveryJournal {
             relative_file.as_ref().to_owned(),
             true,
             lifetime,
+            #[cfg(test)]
+            None,
         )
         .await
     }
@@ -3353,6 +3369,66 @@ mod tests {
             panic!("queued admission did not drain");
         };
         assert_eq!(admission.actor, actor);
+        assert!(weak.upgrade().is_none());
+        assert!(!path.exists());
+    }
+    #[tokio::test]
+    async fn cancelled_open_retains_enclosing_lifetime_until_real_bootstrap_exits() {
+        struct LifetimeProbe {
+            directory: Option<tempfile::TempDir>,
+            closed: Option<tokio::sync::oneshot::Sender<std::io::Result<Vec<u8>>>>,
+        }
+        impl Drop for LifetimeProbe {
+            fn drop(&mut self) {
+                let observed =
+                    std::fs::read(self.directory.as_ref().unwrap().path().join("actors.jsonl"));
+                drop(self.directory.take());
+                if let Some(reply) = self.closed.take() {
+                    let _ = reply.send(observed);
+                }
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_owned();
+        let anchor = DirectoryAnchor::open_existing(&path).unwrap();
+        let (closed_tx, closed) = tokio::sync::oneshot::channel();
+        let lifetime = Arc::new(LifetimeProbe {
+            directory: Some(directory),
+            closed: Some(closed_tx),
+        });
+        let weak = Arc::downgrade(&lifetime);
+        let (entered_tx, entered) = tokio::sync::oneshot::channel();
+        let (resume, paused) = std::sync::mpsc::channel();
+        let mut opening = Box::pin(ActorRecoveryJournal::start(
+            anchor,
+            "actors.jsonl".into(),
+            false,
+            lifetime.clone(),
+            Some(BootstrapPause {
+                entered: entered_tx,
+                resume: paused,
+            }),
+        ));
+        tokio::select! {
+            _ = &mut opening => panic!("opening completed before bootstrap overlap was released"),
+            entered = entered => entered.unwrap(),
+        }
+        drop(opening);
+        drop(lifetime);
+        assert!(weak.upgrade().is_some());
+        assert!(!path.join("actors.jsonl").exists());
+        resume.send(()).unwrap();
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(5), closed)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        assert!(matches!(
+            parse_row(text.lines().next().unwrap()).unwrap().event,
+            EventKind::Created {}
+        ));
         assert!(weak.upgrade().is_none());
         assert!(!path.exists());
     }
