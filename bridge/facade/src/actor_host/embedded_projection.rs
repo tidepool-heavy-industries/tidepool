@@ -6,7 +6,10 @@ use exomonad_actor::{ActorExitKind, ActorGraphNode, ActorRef, ActorWorkbenchPost
 use harness::{
     embedding::{EmbeddedRoundId, HostIdentity, HostInferenceState},
     model::AgentPath,
-    server::{HostActorKind, HostActorLifecycle, HostActorProjection, ServerControl},
+    server::{
+        browser_contract::{ConversationProjection, ConversationState},
+        HostActorKind, HostActorLifecycle, HostActorProjection, ServerControl,
+    },
 };
 use tokio::sync::watch;
 
@@ -124,7 +127,7 @@ impl EmbeddedProjection {
         active_round_for: impl Fn(ActorRef) -> Option<EmbeddedRoundId>,
         head_for: impl Fn(&HostIdentity) -> Result<Option<String>, harness::store::StoreError>,
         history_finished_for: impl Fn(ActorRef) -> bool,
-    ) -> Result<(Vec<HostActorProjection>, Vec<serde_json::Value>), harness::store::StoreError>
+    ) -> Result<(Vec<HostActorProjection>, Vec<ConversationProjection>), harness::store::StoreError>
     {
         let mut actors = Vec::new();
         let mut conversations = Vec::new();
@@ -182,11 +185,14 @@ impl EmbeddedProjection {
                 };
             actors.push(HostActorProjection {
                 identity,
-                output_origin: Some(harness::store::actor_output::ActorOutputOrigin {
-                    run: run.to_owned(),
-                    native_actor: node.actor.id.0,
-                    incarnation: node.actor.incarnation.0,
-                }),
+                output_origin: Some(
+                    (&harness::store::actor_output::ActorOutputOrigin {
+                        run: run.to_owned(),
+                        native_actor: node.actor.id.0,
+                        incarnation: node.actor.incarnation.0,
+                    })
+                        .into(),
+                ),
                 parent: node
                     .supervisor_parent
                     .or(node.creator)
@@ -197,7 +203,7 @@ impl EmbeddedProjection {
                     HostActorKind::Workflow
                 },
                 lifecycle,
-                inference,
+                inference: inference.as_ref().map(Into::into),
                 active_round: if matches!(
                     lifecycle,
                     HostActorLifecycle::Retired | HostActorLifecycle::Lost
@@ -210,11 +216,14 @@ impl EmbeddedProjection {
                 model_head_request,
             });
             if let Some(path) = conversation {
-                conversations.push(serde_json::json!({
-                    "id": path,
-                    "path": path,
-                    "state": conversation_state(lifecycle),
-                }));
+                conversations.push(ConversationProjection {
+                    id: path.clone(),
+                    path,
+                    parent_id: None,
+                    fork_source_request_id: None,
+                    state: conversation_state(lifecycle),
+                    version: None,
+                });
             }
         }
         Ok((actors, conversations))
@@ -273,12 +282,12 @@ impl EmbeddedProjection {
     }
 }
 
-fn conversation_state(lifecycle: HostActorLifecycle) -> &'static str {
+fn conversation_state(lifecycle: HostActorLifecycle) -> ConversationState {
     match lifecycle {
-        HostActorLifecycle::Running => "requesting",
-        HostActorLifecycle::Waiting => "idle",
-        HostActorLifecycle::Retiring => "paused",
-        HostActorLifecycle::Retired | HostActorLifecycle::Lost => "cancelled",
+        HostActorLifecycle::Running => ConversationState::Requesting,
+        HostActorLifecycle::Waiting => ConversationState::Idle,
+        HostActorLifecycle::Retiring => ConversationState::Paused,
+        HostActorLifecycle::Retired | HostActorLifecycle::Lost => ConversationState::Cancelled,
     }
 }
 
@@ -357,7 +366,10 @@ mod tests {
             panic!("the projection must publish its typed actor observation");
         };
         assert_eq!(actors.borrow()[0].lifecycle, HostActorLifecycle::Waiting);
-        assert_eq!(actors.borrow()[0].inference, Some(HostInferenceState::Idle));
+        assert_eq!(
+            actors.borrow()[0].inference,
+            Some((&HostInferenceState::Idle).into())
+        );
         assert!(!actors.has_changed().unwrap());
         assert!(received.try_recv().is_err());
         let block = harness::embedding::InferenceBlock {
@@ -390,7 +402,7 @@ mod tests {
         );
         assert_eq!(
             actors.borrow()[0].inference,
-            Some(HostInferenceState::Blocked { block })
+            Some((&HostInferenceState::Blocked { block }).into())
         );
         root.lifecycle = Some(exomonad_actor::ActorLifecycle::Exited(ActorTerminal {
             kind: ActorExitKind::Failed,
