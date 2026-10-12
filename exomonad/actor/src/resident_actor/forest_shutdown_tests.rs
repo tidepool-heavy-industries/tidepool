@@ -614,6 +614,67 @@ async fn refused_invocation_child_retains_physical_cleanup_before_run_finalizati
 }
 
 #[tokio::test]
+async fn seal_overtaking_issued_worker_still_retains_actual_cleanup_executor() {
+    let fixture = Fixture::new().await;
+    let forest = &fixture.forest;
+    let parent = forest
+        .new_workbench("seal-parent".into(), crate::ActorCapabilities::default())
+        .await
+        .unwrap();
+    let kernel = forest
+        .directory
+        .context(parent.identity())
+        .await
+        .unwrap()
+        .unwrap();
+    let reservation = kernel
+        .reserve_worker_creation(crate::WorkerLifetime::RunOwned)
+        .await
+        .unwrap();
+    let identity = reservation.identity();
+    let placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    assert!(fixture.scope_is_live(placement));
+    forest.directory.seal().await.unwrap();
+    let error = match crate::local_actor::spawn_reserved_local_actor(
+        None,
+        fixture.behavior(ActorDescriptor::new("issued-before-seal", placement)),
+        reservation,
+        forest.directory.clone(),
+    )
+    .await
+    {
+        Ok(_) => panic!("sealed run published an issued worker"),
+        Err(error) => error,
+    };
+    let cause = match &error {
+        ractor::SpawnErr::StartupFailed(error) => error
+            .source()
+            .and_then(|source| source.downcast_ref::<crate::local_actor::StartupFailureCause>()),
+        _ => None,
+    };
+    assert!(
+        matches!(cause, Some(crate::local_actor::StartupFailureCause::Lifecycle(crate::KernelCallFailure::MailboxClosed(actor))) if *actor == identity),
+        "actual closed lifecycle attachment refused: {error:?}"
+    );
+    let cleanup = crate::local_actor::startup_cleanup(&error)
+        .expect("actual prepared worker cleanup retained");
+    assert_eq!(cleanup.actor(), identity);
+    assert!(cleanup.is_confirmed());
+    assert!(!fixture.scope_is_live(placement));
+    assert!(forest.directory.resolve(identity).await.unwrap().is_none());
+    let outcomes = forest.shutdown().await;
+    assert!(
+        outcomes.iter().all(crate::ForestRootShutdown::is_confirmed),
+        "issued worker cleanup/finalization: {outcomes:?}"
+    );
+}
+
+#[tokio::test]
 async fn tool_abort_validates_original_owner_before_empty_settlement() {
     use tidepool_runtime::session::{
         ContextCheckpointBoundary, WorkbenchExecutionId, WorkbenchRequest,
