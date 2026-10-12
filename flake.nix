@@ -162,11 +162,12 @@
         matchedHarnessSource =
           pkgs.runCommand "tidepool-matched-harness-source"
             {
+              src = harnessWeb;
               nativeBuildInputs = [ pkgs.coreutils ];
             }
             ''
               mkdir -p "$out"
-              cp -a "${harnessWeb}/." "$out/"
+              cp -a "$src/." "$out/"
             '';
         playwrightChromium = harnessPkgs.playwright-driver.browsers.override {
           withFirefox = false;
@@ -271,20 +272,6 @@
           pathsToLink = [ "/bin" ];
           paths = testToolPackages;
         };
-        embeddedWebAssets = harnessPkgs.buildNpmPackage {
-          pname = "exomonad-harness-web";
-          version = "5e5444fdb4e3255338608a6db06b9e1fc40990f9";
-          src = "${harnessWeb}/web";
-          nodejs = harnessPkgs.nodejs_24;
-          npmDeps = embeddedWebNpmCache;
-          installPhase = ''
-            runHook preInstall
-            mkdir -p "$out/share/exomonad/web"
-            cp -R dist/. "$out/share/exomonad/web/"
-            runHook postInstall
-          '';
-          passthru.sourceRevision = "5e5444fdb4e3255338608a6db06b9e1fc40990f9";
-        };
         devShell = haskellEnv: pkgs.mkShell {
           nativeBuildInputs = [
             pkgs.pkg-config
@@ -333,7 +320,6 @@
           ]
           ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.systemd ];
           EXOMONAD_NIX_STORE_BIN = "${pkgs.nix}/bin/nix-store";
-          EXOMONAD_EMBEDDED_ASSET_ROOT = "${embeddedWebAssets}/share/exomonad/web";
           # Fetches the project's flake inputs when `[haskell.flake_sources]`
           # pins Haskell source outside the workspace.
           EXOMONAD_NIX_BIN = "${pkgs.nix}/bin/nix";
@@ -343,7 +329,6 @@
           '';
         };
 
-        packages.exomonad-embedded-assets = embeddedWebAssets;
 
         packages.buck-rust = rust;
         packages.buck-buck2 = buck2Release;
@@ -468,7 +453,6 @@
 
           embedded-web-provenance = pkgs.runCommand "embedded-web-provenance" { } ''
             ${pkgs.python3}/bin/python3 ${./scripts/embedded_web_provenance.py} --self-test --check --root ${./.}
-            test -s ${embeddedWebAssets}/share/exomonad/web/index.html
             touch "$out"
           '';
         };
