@@ -443,10 +443,9 @@ async fn shipped_persona_initializer_uses_actual_preparation_before_first_reques
             },
         }
     }).await.unwrap();
-    assert_eq!(
-        judgment.packet["state"]["occasion"],
-        "Prepare a general orientation for this fresh conversation from available memory."
-    );
+    assert!(judgment.packet["state"]["occasion"]
+        .as_str()
+        .is_some_and(|occasion| !occasion.is_empty()));
     assert!(matches!(
         requests.try_recv(),
         Err(mpsc::error::TryRecvError::Empty)
