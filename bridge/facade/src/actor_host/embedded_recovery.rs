@@ -11,72 +11,25 @@ pub(super) struct EmbeddedStartupRecovery {
     pub(super) manifest: Option<(ActorRef, exomonad_actor::RootStartupManifestPin)>,
 }
 impl EmbeddedStartupRecovery {
-    /// Observe each owner independently before admitting a successor. Runtime
-    /// validates manifest contents; journal admission validates chain membership.
-    pub(super) fn observe_manifest(
+    /// Capture journal evidence before entering the synchronous compiler owner.
+    pub(super) async fn observe_manifest(
         &mut self,
-        library: &tidepool_runtime::session::SessionLib,
-        run_root: &Path,
-        accepted_source: Option<&str>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.lease.owns_run(run_root)? {
-            return Err("startup binding lacks its exact run lease".into());
-        }
-        let records = self.journal.validated_records()?;
-        if let Some(head) = super::latest_durable_root_application(&records)? {
-            let application = head
-                .application
-                .as_ref()
-                .ok_or("root startup application is absent")?;
-            if application.accepted_source.as_deref() != accepted_source
-                || application.binding_path != self.root_binding_path
-            {
-                return Err("root startup changed its accepted source or binding path".into());
-            }
-        }
-        let path = super::root_declaration_recovery::store_path(run_root);
-        if library.recovered_domain_presence()?
-            != tidepool_runtime::session::RecoveredDomainPresence::Published
-        {
-            if super::root_startup_chain(&records)?.iter().any(|record| {
-                record
-                    .startup
-                    .as_ref()
-                    .is_some_and(|intent| intent.manifest.is_some())
-                    || record
-                        .application
-                        .as_ref()
-                        .is_some_and(|application| application.conversation.is_some())
-            }) {
-                return Err("root startup lost its retained public recovery domain".into());
-            }
-            return Ok(());
-        }
-        for record in super::root_startup_chain(&records)? {
-            let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
-                &super::root_declaration_recovery::root_path(),
-                record.admission.actor.incarnation.0,
-            )
-            .ok_or("root startup owner has no incarnation")?;
-            if library.validate_recovered_public_owner(&owner)? {
-                self.manifest = Some((
-                    record.admission.actor,
-                    exomonad_actor::RootStartupManifestPin::capture_for_owner(&path, &owner)?,
-                ));
-                return Ok(());
-            }
-        }
-        Err("root recovery domain owner is outside the exact startup chain".into())
+    ) -> Result<ObservedStartupRecovery<'_>, Box<dyn std::error::Error>> {
+        let records = self.journal.validated_records().await?;
+        Ok(ObservedStartupRecovery {
+            startup: self,
+            records,
+        })
     }
 
-    pub(super) fn intent(
+    pub(super) async fn intent(
         &self,
         run_root: &Path,
         actor: ActorRef,
         accepted_source: Option<String>,
         bootstrap_identity: String,
     ) -> Result<exomonad_actor::RootStartupIntent, Box<dyn std::error::Error>> {
-        let records = self.journal.validated_records()?;
+        let records = self.journal.validated_records().await?;
         let head = super::latest_durable_root_application(&records)?;
         let mut store_predecessor = None;
         for record in super::root_startup_chain(&records)? {
@@ -107,6 +60,72 @@ impl EmbeddedStartupRecovery {
             accepted_source,
             conversation: conversation(&host_identity(run_root, "/root", actor)),
         })
+    }
+}
+/// Owner-observed journal facts paired with their startup adapter. These
+/// observations select a retained manifest; they do not authorize its successor.
+pub(super) struct ObservedStartupRecovery<'a> {
+    startup: &'a mut EmbeddedStartupRecovery,
+    records: Vec<exomonad_actor::DurableActorRecord>,
+}
+
+impl ObservedStartupRecovery<'_> {
+    /// Runtime validates the manifest against the journal snapshot obtained
+    /// before compiler preparation, without calling the async journal owner.
+    pub(super) fn validate_manifest(
+        self,
+        library: &tidepool_runtime::session::SessionLib,
+        run_root: &Path,
+        accepted_source: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !self.startup.lease.owns_run(run_root)? {
+            return Err("startup binding lacks its exact run lease".into());
+        }
+        let records = &self.records;
+        if let Some(head) = super::latest_durable_root_application(records)? {
+            let application = head
+                .application
+                .as_ref()
+                .ok_or("root startup application is absent")?;
+            if application.accepted_source.as_deref() != accepted_source
+                || application.binding_path != self.startup.root_binding_path
+            {
+                return Err("root startup changed its accepted source or binding path".into());
+            }
+        }
+        let path = super::root_declaration_recovery::store_path(run_root);
+        if library.recovered_domain_presence()?
+            != tidepool_runtime::session::RecoveredDomainPresence::Published
+        {
+            if super::root_startup_chain(records)?.iter().any(|record| {
+                record
+                    .startup
+                    .as_ref()
+                    .is_some_and(|intent| intent.manifest.is_some())
+                    || record
+                        .application
+                        .as_ref()
+                        .is_some_and(|application| application.conversation.is_some())
+            }) {
+                return Err("root startup lost its retained public recovery domain".into());
+            }
+            return Ok(());
+        }
+        for record in super::root_startup_chain(records)? {
+            let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
+                &super::root_declaration_recovery::root_path(),
+                record.admission.actor.incarnation.0,
+            )
+            .ok_or("root startup owner has no incarnation")?;
+            if library.validate_recovered_public_owner(&owner)? {
+                self.startup.manifest = Some((
+                    record.admission.actor,
+                    exomonad_actor::RootStartupManifestPin::capture_for_owner(&path, &owner)?,
+                ));
+                return Ok(());
+            }
+        }
+        Err("root recovery domain owner is outside the exact startup chain".into())
     }
 }
 use exomonad_actor::{

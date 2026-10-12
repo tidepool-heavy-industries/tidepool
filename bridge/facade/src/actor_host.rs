@@ -2110,6 +2110,7 @@ async fn run_owned(
         root_binding_path: config.root_binding_path.clone(),
         manifest: None,
     };
+    let startup_observation = embedded_startup.observe_manifest().await?;
     let CompiledRoot {
         source,
         root,
@@ -2127,7 +2128,7 @@ async fn run_owned(
             source_layers.as_ref(),
             Arc::clone(&host_incarnation),
             run_journal_mode,
-            Some(&mut embedded_startup),
+            Some(startup_observation),
             settlement,
         )
     })?;
@@ -2230,14 +2231,16 @@ async fn run_owned(
         )
         .await
         .map_err(runtime_error)?;
-    let mut startup_intent = embedded_startup.intent(
-        &run_root,
-        recovered_root
-            .map(|(_, identity)| identity)
-            .unwrap_or(ActorRef::first(exomonad_actor::ActorId(0))),
-        accepted_source.clone(),
-        bootstrap_identity.clone(),
-    )?;
+    let mut startup_intent = embedded_startup
+        .intent(
+            &run_root,
+            recovered_root
+                .map(|(_, identity)| identity)
+                .unwrap_or(ActorRef::first(exomonad_actor::ActorId(0))),
+            accepted_source.clone(),
+            bootstrap_identity.clone(),
+        )
+        .await?;
     let (root_actor, mut root_task, startup_release) = async {
         Ok::<_, Box<dyn std::error::Error>>(match recovered_root {
             Some((_, identity)) => {
@@ -2271,14 +2274,17 @@ async fn run_owned(
     );
     #[cfg(test)]
     embedded_recovery_tests::startup_checkpoint("admitted");
-    if let Err(error) = actor_recovery.prepare_application_with_intent(
-        root_actor.identity(),
-        config.root_binding_path.clone(),
-        accepted_source.clone(),
-        Some(embedded_recovery::conversation(
-            &embedded_recovery::host_identity(&run_root, "/root", root_actor.identity()),
-        )),
-    ) {
+    if let Err(error) = actor_recovery
+        .prepare_application_with_intent(
+            root_actor.identity(),
+            config.root_binding_path.clone(),
+            accepted_source.clone(),
+            Some(embedded_recovery::conversation(
+                &embedded_recovery::host_identity(&run_root, "/root", root_actor.identity()),
+            )),
+        )
+        .await
+    {
         forest.shutdown().await;
         return Err(runtime_error(format!(
             "root application ownership could not be journalled before declaration recovery: {error}"
@@ -3582,7 +3588,7 @@ fn compile_root(
     source: Option<&Arc<crate::exomonad::source::ExomonadSourceReload>>,
     host_incarnation: Arc<HostIncarnationLease>,
     run_journal_mode: JournalOpenMode,
-    embedded_startup: Option<&mut embedded_recovery::EmbeddedStartupRecovery>,
+    embedded_startup: Option<embedded_recovery::ObservedStartupRecovery<'_>>,
     settlement: &mut dyn FnMut(tidepool_runtime::CompilerTransactionClose),
 ) -> Result<CompiledRoot, Box<dyn std::error::Error>> {
     let state_root = config.workspace.join(".exomonad/state");
@@ -3624,7 +3630,7 @@ fn compile_root(
         settlement,
     )?;
     if let Some(startup) = embedded_startup {
-        startup.observe_manifest(
+        startup.validate_manifest(
             &library,
             run_root,
             active_source_identity(run_root, config.workspace_inputs.is_some())?.as_deref(),
