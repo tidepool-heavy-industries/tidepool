@@ -7611,7 +7611,12 @@ mod tests {
             .unwrap()
             .is_some());
         assert_eq!(
-            directory.context(owner.identity()).unwrap().identity(),
+            directory
+                .context(owner.identity())
+                .await
+                .unwrap()
+                .unwrap()
+                .identity(),
             owner.identity()
         );
         assert!(directory
@@ -7638,6 +7643,8 @@ mod tests {
         assert!(directory.resolve(child.identity()).await.unwrap().is_some());
         assert!(directory
             .context(owner.identity())
+            .await
+            .unwrap()
             .unwrap()
             .owns_child(child.identity())
             .await
@@ -7651,8 +7658,12 @@ mod tests {
             .await
             .expect("retire first");
         owner_task.await.expect("first task");
-        assert!(directory.context(owner.identity()).is_none());
-        assert!(directory.context(sibling.identity()).is_some());
+        assert!(directory.context(owner.identity()).await.unwrap().is_none());
+        assert!(directory
+            .context(sibling.identity())
+            .await
+            .unwrap()
+            .is_some());
         assert!(child.terminal().get().is_some());
         assert!(sibling.terminal().get().is_none());
         // Exact retired addresses retain their exits for late observers.
