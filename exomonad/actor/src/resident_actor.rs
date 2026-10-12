@@ -13108,10 +13108,15 @@ where
     /// parcel 7. A thin, read-only observability primitive: callers decide
     /// what to do with the id, this never mutates anything.
     #[must_use]
-    pub fn actor_session(&self, actor: ActorRef) -> Option<tidepool_repr::SessionId> {
-        self.directory
+    pub async fn actor_session(
+        &self,
+        actor: ActorRef,
+    ) -> Result<Option<tidepool_repr::SessionId>, crate::DirectoryError> {
+        Ok(self
+            .directory
             .session_context(actor)
-            .map(|context| context.placement.session)
+            .await?
+            .map(|context| context.placement.session))
     }
 
     /// Bind recovery evidence to an actually admitted canonical root. The
@@ -13419,12 +13424,15 @@ where
     /// Observe the machine actually mounted for this actor incarnation.
     /// Unknown placements and running or retired machines have no snapshot.
     #[must_use]
-    pub fn measurement_snapshot_for(
+    pub async fn measurement_snapshot_for(
         &self,
         actor: ActorRef,
-    ) -> Option<crate::resident_workbench::ResidentMachineMeasurement> {
-        self.actor_session(actor)
-            .and_then(|session| self.environment.runner.measurement_snapshot(session))
+    ) -> Result<Option<crate::resident_workbench::ResidentMachineMeasurement>, crate::DirectoryError>
+    {
+        Ok(self
+            .actor_session(actor)
+            .await?
+            .and_then(|session| self.environment.runner.measurement_snapshot(session)))
     }
 
     pub async fn new(
@@ -13536,17 +13544,22 @@ where
 
     /// Observe only actors the exact requester can inspect. This does not enter
     /// an actor turn or wait for its Haskell workbench, so running work is visible.
-    pub fn inspect_graph(&self, requester: ActorRef) -> Option<Vec<ActorGraphNode>> {
+    pub async fn inspect_graph(
+        &self,
+        requester: ActorRef,
+    ) -> Result<Option<Vec<ActorGraphNode>>, crate::DirectoryError> {
         if self
             .directory
-            .resolve(requester)?
+            .resolve(requester)
+            .await?
+            .ok_or(crate::DirectoryError::Unauthorized { actor: requester })?
             .terminal()
             .get()
             .is_some()
         {
-            return None;
+            return Ok(None);
         }
-        self.actor_graph(Some(requester))
+        Ok(self.actor_graph(Some(requester)))
     }
 
     /// Host-owned observation of this forest, including surviving children and

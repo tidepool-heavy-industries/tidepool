@@ -1801,7 +1801,7 @@ impl RunControlClient {
         self.ask(|reply| RunControlMessage::Session { actor, reply })
             .await
     }
-    pub(super) async fn context(
+    pub(crate) async fn context(
         &self,
         actor: ActorRef,
     ) -> Result<Option<Arc<KernelContext>>, DirectoryError> {
