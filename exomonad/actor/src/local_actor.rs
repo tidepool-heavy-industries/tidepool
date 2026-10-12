@@ -1737,6 +1737,9 @@ async fn handle_executor_message<B: KernelBehavior>(
         MessageDisposition::Dispatch(message) => message,
     };
     match message {
+        KernelMessage::Admitted(_) => {
+            return Err(std::io::Error::other("nested admitted envelope is invalid").into())
+        }
         KernelMessage::AbortReplacement { reply } => {
             if !state.behavior.replacement_staged() {
                 reply
@@ -1838,43 +1841,96 @@ async fn handle_executor_message<B: KernelBehavior>(
                 .context
                 .directory
                 .context(pending.successor.identity())
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?
                 .ok_or_else(|| {
                     std::io::Error::other("prepared successor lost its execution context")
                 })?;
-            *state.context.child_admission_closed.write().await = true;
             if let Err(error) = state
                 .behavior
                 .commit_replacement(&state.context, &successor_context)
             {
                 if let Some(reply) = pending.reply.take() {
-                    reply
-                        .send(Err(crate::KernelInvocationFailure::Failed {
-                            receipts: Vec::new(),
-                            actor: state.context.identity,
-                            detail: error.detail,
-                            diagnostic: error.diagnostic,
-                        }))
-                        .ok();
+                    let _ = reply.send(Err(crate::KernelInvocationFailure::Failed {
+                        receipts: Vec::new(),
+                        actor: state.context.identity,
+                        detail: error.detail,
+                        diagnostic: error.diagnostic,
+                    }));
                 }
                 state.replacement = Some(pending);
                 return Ok(());
             }
-            transfer_supervised_children(&state.context, &successor_context);
-            let summary = format!("replaced by {:?}", pending.successor.identity());
-            pending
+            state
+                .context
+                .transfer_supervised_children(&successor_context)
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let grant = state
+                .context
+                .directory
+                .replacement_ingress_grant(state.context.identity, pending.successor.identity())
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let transfer = state
+                .lifecycle
+                .transfer_backlog(std::mem::take(&mut state.deferred_mailbox), grant.clone())
+                .await;
+            if let Err(error) = transfer {
+                if matches!(
+                    error,
+                    crate::kernel::lifecycle::ReplacementIngressError::Refused(_)
+                ) {
+                    state.deferred_mailbox = state
+                        .lifecycle
+                        .take_refused_transfer_backlog()
+                        .await
+                        .map_err(|_| {
+                            std::io::Error::other(
+                                "refused replacement custody observation was lost",
+                            )
+                        })?;
+                }
+                if let Some(reply) = pending.reply.take() {
+                    let _ = reply.send(Err(crate::KernelInvocationFailure::CleanupUnconfirmed {
+                        receipts:Vec::new(),actor:state.context.identity,publication:None,
+                        detail:"replacement ingress adoption was not confirmed; retained custody requires cleanup".into(),
+                    }));
+                }
+                state.replacement = Some(pending);
+                return Ok(());
+            }
+            if let Err(_error) = pending
                 .successor
-                .address()
-                .send_message(KernelMessage::ActivateReplacement {
-                    backlog: std::mem::take(&mut state.deferred_mailbox),
-                    draining: !matches!(state.drain, DrainState::Open),
-                })?;
+                .lifecycle()
+                .activate_transferred_replacement(grant, !matches!(state.drain, DrainState::Open))
+                .await
+            {
+                if let Some(reply) = pending.reply.take() {
+                    let _ = reply.send(Err(crate::KernelInvocationFailure::CleanupUnconfirmed {
+                        receipts:Vec::new(),actor:state.context.identity,publication:None,
+                        detail:"replacement activation was not confirmed; successor retains transferred custody".into(),
+                    }));
+                }
+                state.replacement = Some(pending);
+                return Ok(());
+            }
+            let summary = format!("replaced by {:?}", pending.successor.identity());
             if let Some(parent) = state
                 .context
                 .supervisor_identity()
-                .and_then(|parent| state.context.directory.context(parent))
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?
             {
-                parent.children.lock().remove(&myself.get_id());
-                myself.get_cell().unlink(parent.myself.get_cell());
+                if let Some(parent) = state
+                    .context
+                    .directory
+                    .context(parent)
+                    .await
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                {
+                    myself.get_cell().unlink(parent.myself.get_cell());
+                }
             }
             let terminal = finish_actor(
                 &myself,
@@ -1896,6 +1952,7 @@ async fn handle_executor_message<B: KernelBehavior>(
         KernelMessage::ActivateReplacement {
             mut backlog,
             draining,
+            reply,
         } => {
             backlog.append(&mut state.deferred_mailbox);
             state.deferred_mailbox = backlog;
@@ -1905,13 +1962,17 @@ async fn handle_executor_message<B: KernelBehavior>(
             }
             match state.behavior.activate_replacement(&state.context).await {
                 Ok(step) => {
+                    let _ = reply.send(Ok(()));
                     if let Some(terminal) = state.context.requested_shutdown() {
                         finish_actor(&myself, state, Disposition::Stop(terminal)).await;
                     } else {
                         finish_after_step(&myself, state, step).await;
                     }
                 }
-                Err(error) => fail_actor_with_error(&myself, state, error).await,
+                Err(error) => {
+                    let _ = reply.send(Err(error.clone()));
+                    fail_actor_with_error(&myself, state, error).await;
+                }
             }
         }
         KernelMessage::Drain { reply } => {
@@ -2303,7 +2364,11 @@ where
                 failed_terminal(format!("linked child actor failed: {error}")),
             ),
         };
-        let resource = state.context.resources.lock().get(&cell.get_id()).cloned();
+        let resource = state
+            .context
+            .owned_resource(cell.get_id())
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
         if let Some(resource) = resource {
             if matches!(
                 tokio::time::timeout(
@@ -2313,11 +2378,21 @@ where
                 .await,
                 Ok(crate::CleanupComponentOutcome::Confirmed)
             ) {
-                state.context.resources.lock().remove(&cell.get_id());
+                state
+                    .context
+                    .forget_resource(cell.get_id())
+                    .await
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
             }
             return Ok(());
         }
-        let child = state.context.children.lock().get(&cell.get_id()).cloned();
+        let child = state
+            .context
+            .children()
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .into_iter()
+            .find(|child| child.address().get_id() == cell.get_id());
         let Some(child) = child else {
             // Cleanup forgets a child before its supervisor's final lifecycle
             // event can arrive; the late event carries nothing to act on.
@@ -3446,7 +3521,6 @@ where
     };
     // Wait for admitted startup to register, then permanently reject creation,
     // including through cloned contexts and shutdown hooks.
-    *state.context.child_admission_closed.write().await = true;
     match disposition {
         Disposition::Stop(requested) => {
             let requested = requested.bound_diagnostic();
@@ -3474,8 +3548,13 @@ where
                     realm,
                     children,
                 });
-            let children_snapshot: Vec<LocalActorRef> =
-                state.context.children.lock().values().cloned().collect();
+            let children_snapshot = match state.context.children().await {
+                Ok(children) => children,
+                Err(error) => {
+                    tracing::error!(%error,"child retirement observation is unavailable");
+                    Vec::new()
+                }
+            };
             publish_exit(
                 &state.terminal,
                 &requested,
@@ -3508,8 +3587,13 @@ where
                     realm: crate::CleanupComponentOutcome::Confirmed,
                     children: admission_cleanup,
                 });
-            let children_snapshot: Vec<LocalActorRef> =
-                state.context.children.lock().values().cloned().collect();
+            let children_snapshot = match state.context.children().await {
+                Ok(children) => children,
+                Err(error) => {
+                    tracing::error!(%error,"child retirement observation is unavailable");
+                    Vec::new()
+                }
+            };
             publish_exit(
                 &state.terminal,
                 &terminal,
@@ -3670,13 +3754,15 @@ async fn shutdown_children(
     owner_exit: ActorExitKind,
     timeout: Duration,
 ) -> crate::CleanupComponentOutcome {
-    let (children, mut outcome) = {
-        let children = context.children.lock();
-        (
-            children.values().cloned().collect::<Vec<_>>(),
-            context.forgotten_children.lock().clone(),
-        )
+    let children = match context.children().await {
+        Ok(children) => children,
+        Err(error) => {
+            return crate::CleanupComponentOutcome::Unconfirmed(format!(
+                "child ownership observation unavailable: {error}"
+            ))
+        }
     };
+    let mut outcome = context.child_cleanup_outcome().await;
     let requested = ActorTerminal {
         kind: match owner_exit {
             ActorExitKind::Failed => ActorExitKind::Failed,
@@ -3690,13 +3776,10 @@ async fn shutdown_children(
             .into_iter()
             .map(|child| (child, requested.clone()))
             .collect(),
-    );
-    let resources = shutdown_resources(&context.resources, timeout).await;
-    {
-        let mut retained = context.forgotten_children.lock();
-        *retained = combine_cleanup(retained.clone(), resources);
-    }
-    outcome = combine_cleanup(outcome, context.forgotten_children.lock().clone());
+    )
+    .await;
+    outcome = combine_cleanup(outcome, context.retire_owned_resources(timeout).await);
+    outcome = combine_cleanup(outcome, context.child_cleanup_outcome().await);
     let mut shutdowns = FuturesUnordered::new();
     for (child, requested) in batch.into_actors() {
         shutdowns.push(async move {
