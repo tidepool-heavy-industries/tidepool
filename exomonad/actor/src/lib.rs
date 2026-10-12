@@ -110,11 +110,12 @@ pub use interactive_session::{
     ActivationId, InteractiveSessionCaptureError, InteractiveSessionRequest, ResidentActivation,
     ResidentInteractiveSession, SiblingPreview,
 };
+pub use kernel::lifecycle::resident::{RootSuccessorOperationClaim, SuccessorBindingAdapter};
 pub use kernel::{
     ActorAdmissionLease, ActorWorkbenchInvocation, CallAncestry, KernelCallFailure,
     KernelCallReply, KernelInvocationFailure, KernelInvocationReply, KernelMessage, KernelResume,
     KernelWorkbenchFailure, KernelWorkbenchReply, LocalActorRef, NativeProviderAdmission,
-    NativeProviderStartError, NativeProviderTurnLease, WorkbenchStepKey,
+    NativeProviderStartError, NativeProviderTurnLease, WorkbenchStepKey, LifecycleHandle, ProviderIdleProbe,
 };
 pub use lineage::{
     ActorAdmissionRegistry, CheckpointLease, CheckpointRefusal, SpawnAdmission,
@@ -139,6 +140,7 @@ pub use notification::{
 };
 pub use prompt_catalog::hosted_prompt_fingerprint as exomonad_hosted_prompt_fingerprint;
 pub use recovery::{
+    JournalApplicationBindingAck, JournalOwnerStatus,
     ActorRecoveryJournal, ApplicationConversation, DurableActorAdmission, DurableActorApplication,
     DurableActorRecord, DurableActorTerminal, DurableRootSuccessorAdmission, RootRecoveryPlacement,
     RootStartupIntent, RootStartupManifestPin,

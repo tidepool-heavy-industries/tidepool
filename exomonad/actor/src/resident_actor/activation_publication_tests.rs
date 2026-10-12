@@ -138,7 +138,7 @@ async fn interrupt_during_preview(
             fresh_context_seed: None,
             root_startup: None,
             public_owner: if durable {
-                ActorPublicOwnerPlane::DurableReady(owner.clone())
+                ActorPublicOwnerPlane::DurableCommitted(owner.clone())
             } else {
                 ActorPublicOwnerPlane::Ephemeral(owner.clone())
             },
@@ -657,7 +657,7 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
             fresh_context_seed: None,
             root_startup: None,
             public_owner: if durable {
-                ActorPublicOwnerPlane::DurableReady(owner.clone())
+                ActorPublicOwnerPlane::DurableCommitted(owner.clone())
             } else {
                 ActorPublicOwnerPlane::Ephemeral(owner.clone())
             },

@@ -1685,7 +1685,7 @@ fn settle_public_owner_record(
         || !(matches!(&record.public_owner,
                 ActorPublicOwnerPlane::DurablePending(owner)
                 if owner == expected_owner)
-            || matches!(&record.public_owner, ActorPublicOwnerPlane::DurableReady(owner)
+            || matches!(&record.public_owner, ActorPublicOwnerPlane::DurableCommitted(owner)
                 if owner.durable() == Some(expected_owner)))
     {
         return Err(ResidentActorWorkbenchError::ActorProtocol(
@@ -1694,7 +1694,7 @@ fn settle_public_owner_record(
     }
     match publication {
         DurablePublicOwnerPublication::Committed(readiness) => {
-            if let ActorPublicOwnerPlane::DurableReady(owner) = &record.public_owner {
+            if let ActorPublicOwnerPlane::DurableCommitted(owner) = &record.public_owner {
                 return if owner.is_current() {
                     Ok(PublicManifestCommit::Durable)
                 } else {
@@ -1703,7 +1703,7 @@ fn settle_public_owner_record(
                     ))
                 };
             }
-            record.public_owner = ActorPublicOwnerPlane::DurableReady(
+            record.public_owner = ActorPublicOwnerPlane::DurableCommitted(
                 WorkbenchPublicOwner::issue(context, &record.descriptor, Some(readiness)).map_err(
                     |error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()),
                 )?,
@@ -1729,13 +1729,13 @@ enum RootPublicOwnerPosture {
 pub(crate) enum ActorPublicOwnerPlane {
     Ephemeral(Arc<WorkbenchPublicOwner>),
     DurablePending(tidepool_runtime::session::RecoveryPublicOwner),
-    DurableReady(Arc<WorkbenchPublicOwner>),
+    DurableCommitted(Arc<WorkbenchPublicOwner>),
 }
 
 impl ActorPublicOwnerPlane {
     pub(crate) fn ready(&self) -> Option<&Arc<WorkbenchPublicOwner>> {
         match self {
-            Self::Ephemeral(owner) | Self::DurableReady(owner) => Some(owner),
+            Self::Ephemeral(owner) | Self::DurableCommitted(owner) => Some(owner),
             Self::DurablePending(_) => None,
         }
     }
@@ -13253,7 +13253,7 @@ where
             ActorPublicOwnerPlane::DurablePending(owner) if owner == placement.owner() => {
                 Ok(RootPublicOwnerPosture::Pending)
             }
-            ActorPublicOwnerPlane::DurableReady(owner)
+            ActorPublicOwnerPlane::DurableCommitted(owner)
                 if owner.durable() == Some(placement.owner()) =>
             {
                 if owner.is_ready() {
