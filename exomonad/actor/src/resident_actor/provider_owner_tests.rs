@@ -1,11 +1,12 @@
 use super::*;
 use tidepool_runtime::session::{ModuleEnv, SessionLib};
 
-type Forest = ResidentForest<frunk::HNil, tidepool_mcp::CapturedOutput>;
+use super::test_forest::{Forest, TestForest};
 
 #[tokio::test]
 async fn retirement_releases_inherited_capture_while_metadata_remains() {
-    let (forest, _root) = forest().await;
+    let fixture = TestForest::new().await;
+    let forest = &fixture.forest;
     let actor = path_workbench(&forest, crate::ActorPersistencePolicy::Ephemeral).await;
     let mut session = tidepool_runtime::session::PersistentSession::new(None, 1024);
     let source = session.mint_isolated_scope();
@@ -60,29 +61,6 @@ async fn retirement_releases_inherited_capture_while_metadata_remains() {
     forest.shutdown().await;
 }
 
-async fn forest() -> (Forest, tempfile::TempDir) {
-    let root = tempfile::tempdir().expect("session root");
-    let session = tidepool_runtime::session::fresh_session_id();
-    let library = SessionLib::open(session, root.path(), ModuleEnv::standalone_default())
-        .expect("ephemeral declaration owner");
-    let machine = ResidentSession::unbootstrapped(
-        frunk::HNil,
-        tidepool_mcp::CapturedOutput::new(),
-        tidepool_runtime::DEFAULT_NURSERY_SIZE,
-        Some(library),
-    );
-    let (forest, _deployments) = ResidentForest::new(
-        ActorWorkbenchSource::new("", Vec::new()),
-        session,
-        machine,
-        None,
-        crate::Incarnation::FIRST,
-    )
-    .await
-    .unwrap();
-    (forest, root)
-}
-
 async fn path_workbench(forest: &Forest, policy: crate::ActorPersistencePolicy) -> LocalActorRef {
     workbench_with_parent(forest, policy, None).await
 }
@@ -123,7 +101,8 @@ async fn workbench_with_parent(
 
 #[tokio::test]
 async fn allocated_actor_path_does_not_upgrade_ephemeral_provider_admission() {
-    let (forest, _root) = forest().await;
+    let fixture = TestForest::new().await;
+    let forest = &fixture.forest;
     let actor = path_workbench(&forest, crate::ActorPersistencePolicy::Ephemeral).await;
     let admission = forest
         .authorize_provider_attachment(actor.identity())
@@ -157,7 +136,8 @@ async fn allocated_actor_path_does_not_upgrade_ephemeral_provider_admission() {
 
 #[tokio::test]
 async fn pending_durable_actor_refuses_provider_and_cell_admission_after_failed_initialization() {
-    let (forest, _root) = forest().await;
+    let fixture = TestForest::new().await;
+    let forest = &fixture.forest;
     let actor = path_workbench(&forest, crate::ActorPersistencePolicy::Durable).await;
     assert!(forest
         .authorize_provider_attachment(actor.identity())
@@ -198,8 +178,10 @@ async fn pending_durable_actor_refuses_provider_and_cell_admission_after_failed_
 
 #[tokio::test]
 async fn provider_admission_is_bound_to_the_original_forest_owner() {
-    let (forest_a, _root_a) = forest().await;
-    let (forest_b, _root_b) = forest().await;
+    let fixture_a = TestForest::new().await;
+    let forest_a = &fixture_a.forest;
+    let fixture_b = TestForest::new().await;
+    let forest_b = &fixture_b.forest;
     let actor_a = forest_a
         .new_workbench("a".into(), crate::ActorCapabilities::default())
         .await
@@ -231,7 +213,8 @@ async fn provider_admission_is_bound_to_the_original_forest_owner() {
 
 #[tokio::test]
 async fn unscoped_program_child_of_durable_actor_cannot_gain_provider_attachment() {
-    let (forest, _root) = forest().await;
+    let fixture = TestForest::new().await;
+    let forest = &fixture.forest;
     let parent = path_workbench(&forest, crate::ActorPersistencePolicy::Durable).await;
     let child = workbench_with_parent(
         &forest,
@@ -252,7 +235,8 @@ async fn unscoped_program_child_of_durable_actor_cannot_gain_provider_attachment
 
 #[tokio::test]
 async fn requested_retirement_refuses_provider_before_terminal_publication() {
-    let (forest, _root) = forest().await;
+    let fixture = TestForest::new().await;
+    let forest = &fixture.forest;
     let actor = path_workbench(&forest, crate::ActorPersistencePolicy::Ephemeral).await;
     let admission = forest
         .authorize_provider_attachment(actor.identity())

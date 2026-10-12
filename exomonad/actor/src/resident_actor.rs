@@ -40,6 +40,8 @@ mod owned_workbench;
 #[cfg(test)]
 mod root_preparation_tests;
 #[cfg(test)]
+mod test_forest;
+#[cfg(test)]
 pub(crate) async fn before_publication_attempt() {
     owned_workbench::counting_publication_tests::before_publication_attempt().await;
 }

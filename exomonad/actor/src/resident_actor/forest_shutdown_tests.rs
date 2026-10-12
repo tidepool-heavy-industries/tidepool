@@ -4,47 +4,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tidepool_runtime::session::{ModuleEnv, SessionLib};
 
-type Forest = ResidentForest<frunk::HNil, tidepool_mcp::CapturedOutput>;
+use super::test_forest::{Forest, TestForest as Fixture};
+
 type Behavior = ResidentKernelBehavior<frunk::HNil, tidepool_mcp::CapturedOutput>;
 
-struct Fixture {
-    forest: Arc<Forest>,
-    _deployments: mpsc::Receiver<LocalResidentDeployment>,
-    _session_root: tempfile::TempDir,
-}
-
 impl Fixture {
-    async fn new() -> Self {
-        let session_root = tempfile::tempdir().unwrap();
-        let session_id = tidepool_runtime::session::fresh_session_id();
-        let lib = SessionLib::open(
-            session_id,
-            session_root.path(),
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap();
-        let session = ResidentSession::unbootstrapped(
-            frunk::HNil,
-            tidepool_mcp::CapturedOutput::new(),
-            tidepool_runtime::DEFAULT_NURSERY_SIZE,
-            Some(lib),
-        );
-        let (forest, deployments) = Forest::new(
-            ActorWorkbenchSource::new("", Vec::new()),
-            session_id,
-            session,
-            None,
-            crate::Incarnation::FIRST,
-        )
-        .await
-        .unwrap();
-        Self {
-            forest: Arc::new(forest),
-            _deployments: deployments,
-            _session_root: session_root,
-        }
-    }
-
     fn behavior(&self, descriptor: ActorDescriptor) -> Behavior {
         Behavior::with_boot(
             descriptor,
