@@ -1,4 +1,3 @@
-import qualified Data.Text as T
 import qualified Persona.Attention as Attention
 import qualified Persona.Context as PersonaContext
 import qualified Persona.Memory as Memory

@@ -1,4 +1,3 @@
-import qualified Data.Text as T
 import Control.Lens (over, view)
 import qualified Tidepool.Agent.Context as C
 
