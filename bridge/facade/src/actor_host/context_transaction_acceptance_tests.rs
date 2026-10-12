@@ -499,9 +499,7 @@ fn assert_context_operations_uncommitted(output: &Value) {
 
 fn settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchConfig) {
     let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let assets = super::test_campaign::hosted_browser_assets();
     let session_secret_file = files.path().join("secret");
     std::fs::write(&session_secret_file, SECRET).unwrap();
     let credential_file = files.path().join("unused-auth.json");

@@ -208,9 +208,7 @@ async fn start_host(
     tempfile::TempDir,
 ) {
     let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let assets = super::test_campaign::hosted_browser_assets();
     let secret = files.path().join("browser-secret");
     std::fs::write(&secret, "native-idle-retirement-test-secret-32-bytes").unwrap();
     let credentials = files.path().join("offline-auth.json");

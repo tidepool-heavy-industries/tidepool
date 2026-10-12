@@ -430,9 +430,7 @@ pub(super) async fn submit_host_input(
 #[tokio::test]
 async fn real_host_retains_one_late_haskell_output_across_compaction() {
     let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let assets = super::test_campaign::hosted_browser_assets();
     let secret = "m1-late-output-secret-is-long-enough";
     let secret_file = files.path().join("browser-secret");
     std::fs::write(&secret_file, secret).unwrap();

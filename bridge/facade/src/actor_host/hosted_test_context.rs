@@ -1344,9 +1344,7 @@ impl HostedTestRuntime {
                 .as_deref(),
         )?;
         let mut settings = settings.clone();
-        if let Some(root) = std::env::var_os("EXOMONAD_EMBEDDED_ASSET_ROOT") {
-            settings.asset_root = std::path::PathBuf::from(root);
-        }
+        settings.asset_root = super::test_campaign::hosted_browser_assets();
         settings.validate().map_err(|error| error.to_string())?;
         tidepool_testing::eval_harness::require_extract();
         let diagnostic_root = match diagnostics_root_override {

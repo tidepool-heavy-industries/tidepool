@@ -229,9 +229,7 @@ async fn embedded_operation(
 #[tokio::test]
 async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
     let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let assets = super::test_campaign::hosted_browser_assets();
     let secret_file = files.path().join("session-secret");
     std::fs::write(&secret_file, "embedded-children-secret-is-long-enough").unwrap();
     let auth_file = files.path().join("codex-auth.json");

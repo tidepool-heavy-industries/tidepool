@@ -1889,14 +1889,20 @@ pub(super) async fn next_hosted_script_round(
     select_hosted_script_round(requests, pending, HostedScriptSelection::Actor(actor)).await
 }
 
+/// Use the bundle supplied by the native runner, including its verified manifest.
+/// A synthetic index page cannot satisfy the production browser asset contract.
+pub(super) fn hosted_browser_assets() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var_os("EXOMONAD_EMBEDDED_ASSET_ROOT")
+            .expect("hosted tests require the declared embedded browser bundle"),
+    )
+}
+
 pub(super) fn hosted_test_settings(
     files: &tempfile::TempDir,
     concurrent_jobs: usize,
 ) -> crate::exomonad::EmbeddedLaunchConfig {
-    let assets = std::path::PathBuf::from(
-        std::env::var_os("EXOMONAD_EMBEDDED_ASSET_ROOT")
-            .expect("hosted tests require the declared embedded browser bundle"),
-    );
+    let assets = hosted_browser_assets();
     let session_secret_file = files.path().join("session-secret");
     std::fs::write(&session_secret_file, "hosted-script-test-secret-32-bytes").unwrap();
     let credential_file = files.path().join("codex-auth.json");

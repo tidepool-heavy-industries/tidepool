@@ -277,9 +277,7 @@ async fn completed(host: &HostedTestRuntime, operation: &OperationId, expected: 
 #[tokio::test]
 async fn real_host_pins_typed_handler_across_reload_and_pending_compaction() {
     let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let assets = super::test_campaign::hosted_browser_assets();
     let secret = "request-reload-secret-is-long-enough";
     let secret_file = files.path().join("secret");
     std::fs::write(&secret_file, secret).unwrap();

@@ -88,9 +88,7 @@ fn tool_turn(response_id: &str) -> ResponsesTurn {
 
 fn embedded_settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchConfig) {
     let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let assets = super::test_campaign::hosted_browser_assets();
     let session_secret_file = files.path().join("session-secret");
     std::fs::write(
         &session_secret_file,

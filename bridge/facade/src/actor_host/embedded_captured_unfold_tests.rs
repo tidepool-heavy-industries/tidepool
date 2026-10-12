@@ -865,9 +865,7 @@ async fn root_tool_call(
 
 async fn captured_host_scenario(scenario: HostedScenario) {
     let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let assets = super::test_campaign::hosted_browser_assets();
     let secret_file = files.path().join("session-secret");
     std::fs::write(&secret_file, "embedded-children-secret-is-long-enough").unwrap();
     let auth_file = files.path().join("codex-auth.json");
@@ -2144,9 +2142,7 @@ impl PreflightTransport {
 #[tokio::test]
 async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let assets = super::test_campaign::hosted_browser_assets();
     let secret_file = files.path().join("session-secret");
     std::fs::write(&secret_file, "whole-cell-preflight-secret-is-long-enough").unwrap();
     let auth_file = files.path().join("codex-auth.json");

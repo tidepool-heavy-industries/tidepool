@@ -338,9 +338,7 @@ async fn engine_component_carries_raw_and_typed_pending_calls_through_compaction
                 installation.policy = Arc::new(endpoint);
 
                 let files = tempfile::tempdir().unwrap();
-                let assets = files.path().join("assets");
-                std::fs::create_dir_all(&assets).unwrap();
-                std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+                let assets = super::test_campaign::hosted_browser_assets();
                 let session_secret_file = files.path().join("session-secret");
                 std::fs::write(
                     &session_secret_file,
@@ -597,9 +595,7 @@ async fn engine_component_compaction_failure_continues_once_then_cleans_pending_
                 installation.policy = Arc::new(endpoint);
 
                 let files = tempfile::tempdir().unwrap();
-                let assets = files.path().join("assets");
-                std::fs::create_dir_all(&assets).unwrap();
-                std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+                let assets = super::test_campaign::hosted_browser_assets();
                 let session_secret_file = files.path().join("session-secret");
                 std::fs::write(
                     &session_secret_file,
@@ -726,9 +722,7 @@ async fn engine_component_compaction_failure_continues_once_then_cleans_pending_
 #[tokio::test]
 async fn attached_round_interrupt_preserves_host_and_accepts_later_input() {
     let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let assets = super::test_campaign::hosted_browser_assets();
     let secret = files.path().join("session-secret");
     std::fs::write(&secret, "interrupt-test-secret-is-long-enough").unwrap();
     let auth = files.path().join("codex-auth.json");

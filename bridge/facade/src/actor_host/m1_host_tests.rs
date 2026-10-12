@@ -269,9 +269,7 @@ async fn browser_snapshot_until(
 #[tokio::test]
 async fn production_host_retains_http_haskell_commands_and_reconnects_without_replay() {
     let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let assets = super::test_campaign::hosted_browser_assets();
     let secret_file = files.path().join("browser-secret");
     let secret = "offline-host-cell-test-secret-is-long-enough";
     std::fs::write(&secret_file, secret).unwrap();
@@ -553,9 +551,7 @@ async fn production_host_retains_http_haskell_commands_and_reconnects_without_re
 #[tokio::test]
 async fn host_cancellation_stops_a_real_running_haskell_cell() {
     let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let assets = super::test_campaign::hosted_browser_assets();
     let secret_file = files.path().join("browser-secret");
     std::fs::write(
         &secret_file,
@@ -731,9 +727,7 @@ async fn production_host_recovers_ancestor_tool_output_after_request_rejection()
 
 async fn rejected_request_host_case(authentication: bool, tool_before_rejection: bool) {
     let files = tempfile::tempdir().unwrap();
-    let assets = files.path().join("assets");
-    std::fs::create_dir_all(&assets).unwrap();
-    std::fs::write(assets.join("index.html"), "<!doctype html>").unwrap();
+    let assets = super::test_campaign::hosted_browser_assets();
     let secret = "offline-host-rejection-secret-is-long-enough";
     let secret_file = files.path().join("browser-secret");
     std::fs::write(&secret_file, secret).unwrap();
