@@ -4094,6 +4094,54 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         view: StatusView,
         changes_only: bool,
     ) -> String {
+        let candidates = self.environment.actors.lock().keys().copied().collect();
+        let (observable, descendants) =
+            Self::status_observations(kernel, actor, candidates, view).await;
+        self.status_text_observed(actor, view, changes_only, &observable, &descendants)
+    }
+
+    async fn status_observations(
+        kernel: &KernelContext,
+        actor: ActorRef,
+        candidates: Vec<ActorRef>,
+        view: StatusView,
+    ) -> (
+        Result<
+            std::collections::HashSet<ActorRef>,
+            crate::local_actor::run_control::DirectoryError,
+        >,
+        Result<
+            std::collections::HashSet<ActorRef>,
+            crate::local_actor::run_control::DirectoryError,
+        >,
+    ) {
+        let descendants = if view == StatusView::Expanded {
+            Self::creation_descendants(kernel, actor, candidates.clone()).await
+        } else {
+            Ok(std::collections::HashSet::new())
+        };
+        let observable = if view == StatusView::Watches {
+            Ok(std::collections::HashSet::new())
+        } else {
+            observable_actors(kernel, actor, candidates).await
+        };
+        (observable, descendants)
+    }
+
+    fn status_text_observed(
+        &self,
+        actor: ActorRef,
+        view: StatusView,
+        changes_only: bool,
+        observable: &Result<
+            std::collections::HashSet<ActorRef>,
+            crate::local_actor::run_control::DirectoryError,
+        >,
+        descendants: &Result<
+            std::collections::HashSet<ActorRef>,
+            crate::local_actor::run_control::DirectoryError,
+        >,
+    ) -> String {
         if view == StatusView::Watches {
             return self.watches_status_text(actor);
         }
@@ -4115,11 +4163,10 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let requests = self.environment.requests.status_for(actor);
         let records = self.environment.actors.lock().clone();
-        let observable =
-            match observable_actors(kernel, actor, records.keys().copied().collect()).await {
-                Ok(observed) => observed,
-                Err(error) => return format!("actor status unavailable: {error}"),
-            };
+        let observable = match observable {
+            Ok(observed) => observed,
+            Err(error) => return format!("actor status unavailable: {error}"),
+        };
         let hidden_terminal_actors = records
             .iter()
             .filter(|(identity, _)| observable.contains(*identity))
@@ -4420,7 +4467,16 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         };
         let revisions = match view {
             StatusView::Expanded => {
-                format!("\n{}", self.revisions_status_text(kernel, actor).await)
+                let revisions = descendants
+                    .as_ref()
+                    .map(|descendants| self.revision_identities_observed(actor, descendants));
+                format!(
+                    "\n{}",
+                    self.revisions_status_text_observed(
+                        actor,
+                        revisions.as_ref().map_err(|error| *error),
+                    )
+                )
             }
             _ => String::new(),
         };
@@ -4457,14 +4513,33 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         kernel: &KernelContext,
         actor: ActorRef,
     ) -> Result<RevisionIdentities, crate::local_actor::run_control::DirectoryError> {
-        let own = self.runtime_observation.snapshot();
-        let records = self.environment.actors.lock().clone();
+        let candidates = self.environment.actors.lock().keys().copied().collect();
+        let descendants = Self::creation_descendants(kernel, actor, candidates).await?;
+        Ok(self.revision_identities_observed(actor, &descendants))
+    }
+
+    async fn creation_descendants(
+        kernel: &KernelContext,
+        actor: ActorRef,
+        candidates: Vec<ActorRef>,
+    ) -> Result<std::collections::HashSet<ActorRef>, crate::local_actor::run_control::DirectoryError>
+    {
         let mut descendants = std::collections::HashSet::new();
-        for candidate in records.keys().copied() {
+        for candidate in candidates {
             if kernel.creation_descendant(actor, candidate).await? {
                 descendants.insert(candidate);
             }
         }
+        Ok(descendants)
+    }
+
+    fn revision_identities_observed(
+        &self,
+        actor: ActorRef,
+        descendants: &std::collections::HashSet<ActorRef>,
+    ) -> RevisionIdentities {
+        let own = self.runtime_observation.snapshot();
+        let records = self.environment.actors.lock().clone();
         let live = |identity: &ActorRef, record: &ResidentActorRecord| {
             record.terminal.is_none() && record.lifecycle.retained_terminal().get().is_none()
         };
@@ -4492,18 +4567,27 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .collect::<Vec<_>>();
         drop(records);
         children.sort_by(|left, right| left.0.cmp(&right.0));
-        Ok(RevisionIdentities {
+        RevisionIdentities {
             operator_checkout,
             checked: own.source_drift.checkout,
             assignment_base: self.assignment_base.clone(),
             children,
             layer: own.source_drift.layer,
-        })
+        }
     }
 
     /// The `status` tool's `revisions` view.
     async fn revisions_status_text(&self, kernel: &KernelContext, actor: ActorRef) -> String {
-        let revisions = match self.revision_identities(kernel, actor).await {
+        let revisions = self.revision_identities(kernel, actor).await;
+        self.revisions_status_text_observed(actor, revisions.as_ref())
+    }
+
+    fn revisions_status_text_observed(
+        &self,
+        actor: ActorRef,
+        revisions: Result<&RevisionIdentities, &crate::local_actor::run_control::DirectoryError>,
+    ) -> String {
+        let revisions = match revisions {
             Ok(revisions) => revisions,
             Err(error) => return format!("actor revisions unavailable: {error}"),
         };
@@ -4567,7 +4651,21 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             .iter()
             .flat_map(|job| std::iter::once(job.owner).chain(job.observers.iter().copied()))
             .collect();
-        let observable = match observable_actors(kernel, actor, candidates).await {
+        let observable = observable_actors(kernel, actor, candidates).await;
+        self.live_status_text_observed(actor, bindings, &observable)
+    }
+
+    fn live_status_text_observed(
+        &self,
+        actor: ActorRef,
+        bindings: &[tidepool_runtime::session::WorkbenchBinding],
+        observable: &Result<
+            std::collections::HashSet<ActorRef>,
+            crate::local_actor::run_control::DirectoryError,
+        >,
+    ) -> String {
+        let retained_jobs = self.environment.commands.snapshot();
+        let observable = match observable {
             Ok(observed) => observed,
             Err(error) => return format!("live actor status unavailable: {error}"),
         };

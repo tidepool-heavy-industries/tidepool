@@ -1189,61 +1189,96 @@ where
         use crate::status_tool::StatusView as View;
         use inspection_wait::{InspectionRequest, InspectionResult};
         let actor = owned.state.effects.context.actor;
-        enum Selection {
-            Native(InspectionRequest),
-            Rendered(String),
-        }
-        let selection = match view {
-            View::Recovery => Selection::Native(InspectionRequest::Recovery),
-            View::Bindings => Selection::Native(InspectionRequest::Bindings),
-            View::Live => Selection::Native(InspectionRequest::Live),
-            View::Changed => {
-                Selection::Rendered(self.status_text(kernel, actor, StatusView::Concise, true))
-            }
-            View::Summary => {
-                Selection::Rendered(self.status_text(kernel, actor, StatusView::Concise, false))
-            }
-            View::Revisions => Selection::Rendered(self.revisions_status_text(kernel, actor)),
-            View::Detailed => {
-                Selection::Rendered(self.status_text(kernel, actor, StatusView::Expanded, false))
-            }
-            View::Lineage => {
-                Selection::Rendered(self.status_text(kernel, actor, StatusView::Lineage, false))
-            }
-            View::Trace => {
-                Selection::Rendered(self.status_text(kernel, actor, StatusView::Trace, false))
-            }
-            View::Watches => {
-                Selection::Rendered(self.status_text(kernel, actor, StatusView::Watches, false))
-            }
+        let kernel = kernel.clone();
+        let status = match view {
+            View::Changed => Some((StatusView::Concise, true)),
+            View::Summary => Some((StatusView::Concise, false)),
+            View::Detailed => Some((StatusView::Expanded, false)),
+            View::Lineage => Some((StatusView::Lineage, false)),
+            View::Trace => Some((StatusView::Trace, false)),
+            View::Watches => Some((StatusView::Watches, false)),
+            _ => None,
+        };
+        let candidates = if view == View::Live {
+            self.environment
+                .commands
+                .snapshot()
+                .iter()
+                .flat_map(|job| std::iter::once(job.owner).chain(job.observers.iter().copied()))
+                .collect()
+        } else {
+            self.environment.actors.lock().keys().copied().collect()
         };
         Self::owned_step_task(
             owned,
             move |owned| {
                 Box::pin(async move {
-                    match selection {
-                        Selection::Native(request) => {
-                            inspection_wait::inspect(
-                                owned
-                                    .workbench
-                                    .as_ref()
-                                    .expect("inspection retains original workbench"),
-                                owned.state.effects.context.clone(),
-                                request,
-                            )
-                            .await
-                        }
-                        Selection::Rendered(output) => Ok(InspectionResult::Rendered(output)),
-                    }
+                    let (observable, descendants) = if let Some((status, _)) = status {
+                        Self::status_observations(&kernel, actor, candidates, status).await
+                    } else if view == View::Revisions {
+                        (
+                            Ok(std::collections::HashSet::new()),
+                            Self::creation_descendants(&kernel, actor, candidates).await,
+                        )
+                    } else if view == View::Live {
+                        (
+                            observable_actors(&kernel, actor, candidates).await,
+                            Ok(std::collections::HashSet::new()),
+                        )
+                    } else {
+                        (
+                            Ok(std::collections::HashSet::new()),
+                            Ok(std::collections::HashSet::new()),
+                        )
+                    };
+                    let request = match view {
+                        View::Recovery => Some(InspectionRequest::Recovery),
+                        View::Bindings => Some(InspectionRequest::Bindings),
+                        View::Live => Some(InspectionRequest::Live),
+                        _ => None,
+                    };
+                    let inspected = match request {
+                        Some(request) => inspection_wait::inspect(
+                            owned
+                                .workbench
+                                .as_ref()
+                                .expect("inspection retains original workbench"),
+                            owned.state.effects.context.clone(),
+                            request,
+                        )
+                        .await
+                        .map(Some),
+                        None => Ok(None),
+                    };
+                    (inspected, observable, descendants)
                 })
             },
-            |behavior, _kernel, owned, inspected| {
+            move |behavior, _kernel, owned, (inspected, observable, descendants)| {
                 let result = inspected
                     .map(|inspected| {
                         let output = match inspected {
-                            InspectionResult::Rendered(output) => output,
-                            InspectionResult::Live(bindings) => behavior
-                                .live_status_text(owned.state.effects.context.actor, &bindings),
+                            Some(InspectionResult::Rendered(output)) => output,
+                            Some(InspectionResult::Live(bindings)) => {
+                                behavior.live_status_text_observed(actor, &bindings, &observable)
+                            }
+                            None => match status {
+                                Some((view, changes_only)) => behavior.status_text_observed(
+                                    actor,
+                                    view,
+                                    changes_only,
+                                    &observable,
+                                    &descendants,
+                                ),
+                                None => {
+                                    let revisions = descendants.as_ref().map(|descendants| {
+                                        behavior.revision_identities_observed(actor, descendants)
+                                    });
+                                    behavior.revisions_status_text_observed(
+                                        actor,
+                                        revisions.as_ref().map_err(|error| *error),
+                                    )
+                                }
+                            },
                         };
                         KernelStep::Continue(workbench_response(
                             WorkbenchRunStatus::Committed,
