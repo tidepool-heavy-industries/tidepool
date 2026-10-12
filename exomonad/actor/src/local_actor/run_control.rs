@@ -104,6 +104,13 @@ pub enum DirectoryError {
     Unauthorized { actor: ActorRef },
     #[error("actor {actor:?} is already registered by another executor")]
     AlreadyRegistered { actor: ActorRef },
+    #[error("actor {actor:?} refused confirmed retirement: {cause}")]
+    RetirementRefused {
+        actor: ActorRef,
+        cause: crate::KernelCallFailure,
+    },
+    #[error("actor {actor:?} retirement did not settle before the deadline")]
+    RetirementDeadline { actor: ActorRef },
 }
 
 /// Registration and preparation share this phase, rather than separate gates.
@@ -2007,8 +2014,13 @@ impl RunControlClient {
                     let receipt =
                         tokio::time::timeout(SHUTDOWN_BUDGET, lifecycle.retire_for_successor())
                             .await
-                            .map_err(|_| DirectoryError::Unavailable)?
-                            .map_err(|_| DirectoryError::Unavailable)?;
+                            .map_err(|_| DirectoryError::RetirementDeadline {
+                                actor: lifecycle.identity(),
+                            })?
+                            .map_err(|cause| DirectoryError::RetirementRefused {
+                                actor: lifecycle.identity(),
+                                cause,
+                            })?;
                     if let Some(cell) = cell {
                         cell.wait(Some(SHUTDOWN_BUDGET))
                             .await
@@ -2025,8 +2037,13 @@ impl RunControlClient {
             if !lifecycle.run_finalized() {
                 tokio::time::timeout(SHUTDOWN_BUDGET, lifecycle.finish_run(grant))
                     .await
-                    .map_err(|_| DirectoryError::Unavailable)?
-                    .map_err(|_| DirectoryError::Unavailable)?;
+                    .map_err(|_| DirectoryError::RetirementDeadline {
+                        actor: lifecycle.identity(),
+                    })?
+                    .map_err(|cause| DirectoryError::RetirementRefused {
+                        actor: lifecycle.identity(),
+                        cause,
+                    })?;
             }
         }
         if let Some(supervisor) = self
