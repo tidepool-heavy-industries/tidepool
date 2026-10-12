@@ -219,6 +219,7 @@ pub(super) enum PreparationMessage {
     ReserveActor {
         identity: ActorRef,
         terminal: RetainedActorExit,
+        predecessor: Option<crate::kernel::LifecycleHandle>,
     },
     Start {
         id: u64,
@@ -327,8 +328,8 @@ impl Actor for PreparationSupervisor {
                     Err(error) => { let _ = state.control.send_message(RunControlMessage::RunResourceWorkerFailed { owner, detail: format!("resource retirement worker failed to start: {error}") }); }
                 }
             }
-            PreparationMessage::ReserveActor { identity, terminal } => {
-                let arguments = ReservationArguments { identity, terminal: terminal.clone(), supervisor: myself.clone() };
+            PreparationMessage::ReserveActor { identity, terminal, predecessor } => {
+                let arguments = ReservationArguments { identity, terminal: terminal.clone(), supervisor: myself.clone(), predecessor };
                 match Actor::spawn_linked(None, ReservationStarter, arguments, myself.get_cell()).await {
                     Ok((worker, task)) => {
                         state.workers.insert(worker.get_id(), TrackedWorker { cell: worker.get_cell(), kind: WorkerKind::Reserve { identity, terminal }, terminal: false, reported: false });
@@ -560,6 +561,7 @@ impl Actor for RootWorker {
 
 pub(super) struct ReservationStarter;
 pub(super) struct ReservationArguments {
+    pub(super) predecessor: Option<crate::kernel::LifecycleHandle>,
     pub(super) identity: ActorRef,
     pub(super) terminal: RetainedActorExit,
     pub(super) supervisor: RactorRef<PreparationMessage>,
@@ -581,13 +583,31 @@ impl Actor for ReservationStarter {
         _: (),
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let lifecycle = crate::kernel::LifecycleHandle::start_linked(
-            state.identity,
-            state.terminal.clone(),
-            state.supervisor.get_cell(),
-        )
-        .await
-        .map_err(|error| error.to_string());
+        let lifecycle = async {
+            if let Some(predecessor) = &state.predecessor {
+                let receipt =
+                    tokio::time::timeout(SHUTDOWN_BUDGET, predecessor.retire_for_successor())
+                        .await
+                        .map_err(|_| "predecessor retirement remains in flight".to_owned())?
+                        .map_err(|error| error.to_string())?;
+                if receipt.predecessor() != predecessor.identity()
+                    || !receipt.cleanup().is_confirmed()
+                {
+                    return Err("predecessor retirement is unconfirmed".to_owned());
+                }
+            }
+            if state.terminal.requested_shutdown().is_some() {
+                return Err("actor reservation was closed before lifecycle startup".to_owned());
+            }
+            crate::kernel::LifecycleHandle::start_linked(
+                state.identity,
+                state.terminal.clone(),
+                state.supervisor.get_cell(),
+            )
+            .await
+            .map_err(|error| error.to_string())
+        }
+        .await;
         let _ = state
             .supervisor
             .send_message(PreparationMessage::ReservationReady {

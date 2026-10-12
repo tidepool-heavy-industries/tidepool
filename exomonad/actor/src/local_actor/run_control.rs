@@ -255,6 +255,7 @@ enum ReservationPurpose {
 }
 enum ReservationPhase {
     Creating,
+    Abandoning,
     Ready,
     Registered,
     Abandoned,
@@ -263,6 +264,7 @@ struct ReservationRecord {
     phase: ReservationPhase,
     purpose: ReservationPurpose,
     startup: Option<crate::RootStartupIntent>,
+    previous_claim: Option<ActorRef>,
     terminal: RetainedActorExit,
     lifecycle: Option<crate::kernel::LifecycleHandle>,
     reply: Option<oneshot::Sender<Result<ActorReservation, DirectoryError>>>,
@@ -362,7 +364,15 @@ impl RunState {
         }
     }
     fn start_resource_retirement(&mut self) {
-        if !self.worker_transfers.is_empty() || !self.resource_transfers.is_empty() {
+        if !self.worker_transfers.is_empty()
+            || !self.resource_transfers.is_empty()
+            || self.reservations.values().any(|record| {
+                matches!(
+                    record.phase,
+                    ReservationPhase::Creating | ReservationPhase::Abandoning
+                )
+            })
+        {
             return;
         }
         if !matches!(self.resource_retirement, ResourceRetirement::Requested)
@@ -413,7 +423,15 @@ impl RunState {
         }
     }
     fn settle_preparation_waiters(&mut self) {
-        if !self.worker_transfers.is_empty() || !self.resource_transfers.is_empty() {
+        if !self.worker_transfers.is_empty()
+            || !self.resource_transfers.is_empty()
+            || self.reservations.values().any(|record| {
+                matches!(
+                    record.phase,
+                    ReservationPhase::Creating | ReservationPhase::Abandoning
+                )
+            })
+        {
             return;
         }
         if self
@@ -699,6 +717,15 @@ fn begin_reservation(
     purpose: ReservationPurpose,
     reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
 ) {
+    begin_reservation_after(state, actor, purpose, None, reply);
+}
+fn begin_reservation_after(
+    state: &mut RunState,
+    actor: ActorRef,
+    purpose: ReservationPurpose,
+    predecessor: Option<crate::kernel::LifecycleHandle>,
+    reply: oneshot::Sender<Result<ActorReservation, DirectoryError>>,
+) {
     let terminal = RetainedActorExit::new();
     state.reservations.insert(
         actor,
@@ -706,6 +733,9 @@ fn begin_reservation(
             phase: ReservationPhase::Creating,
             purpose,
             startup: None,
+            previous_claim: predecessor
+                .as_ref()
+                .map(crate::kernel::LifecycleHandle::identity),
             terminal: terminal.clone(),
             lifecycle: None,
             reply: Some(reply),
@@ -719,6 +749,7 @@ fn begin_reservation(
                 .send_message(PreparationMessage::ReserveActor {
                     identity: actor,
                     terminal,
+                    predecessor,
                 })
                 .is_err()
         })
@@ -1412,7 +1443,10 @@ impl Actor for RunControl {
                         Ok(lifecycle) => {
                             record.lifecycle = Some(lifecycle.clone());
                             if state.phase != RunPhase::Running
-                                || matches!(record.phase, ReservationPhase::Abandoned)
+                                || matches!(
+                                    record.phase,
+                                    ReservationPhase::Abandoned | ReservationPhase::Abandoning
+                                )
                             {
                                 lifecycle.close_abandoned();
                                 record.phase = ReservationPhase::Abandoned;
@@ -1434,6 +1468,15 @@ impl Actor for RunControl {
                             }
                         }
                         Err(_) => {
+                            // No affine reservation was issued and no executor can
+                            // have used this failed starter's identity.
+                            if state.identities.claimed.get(&actor.id) == Some(&actor) {
+                                if let Some(previous) = record.previous_claim {
+                                    state.identities.claimed.insert(actor.id, previous);
+                                } else {
+                                    state.identities.claimed.remove(&actor.id);
+                                }
+                            }
                             record.phase = ReservationPhase::Abandoned;
                             if let Some(reply) = record.reply.take() {
                                 let _ = reply.send(Err(DirectoryError::Unavailable));
@@ -1443,10 +1486,19 @@ impl Actor for RunControl {
                 } else if let Ok(lifecycle) = lifecycle {
                     lifecycle.close_abandoned();
                 }
+                state.settle_preparation_waiters();
+                state.start_resource_retirement();
             }
             RunControlMessage::AbandonReservation { actor } => {
                 if let Some(record) = state.reservations.get_mut(&actor) {
-                    record.phase = ReservationPhase::Abandoned;
+                    record.phase = if matches!(
+                        record.phase,
+                        ReservationPhase::Creating | ReservationPhase::Abandoning
+                    ) {
+                        ReservationPhase::Abandoning
+                    } else {
+                        ReservationPhase::Abandoned
+                    };
                     if let Some(lifecycle) = &record.lifecycle {
                         lifecycle.close_abandoned();
                     }
@@ -1478,17 +1530,29 @@ impl Actor for RunControl {
                     .is_some_and(|previous| {
                         actor.incarnation <= previous.incarnation
                             || state
-                                .entries
+                                .reservations
                                 .get(previous)
-                                .is_none_or(|entry| entry.actor.terminal().get().is_none())
+                                .is_none_or(|record| record.terminal.get().is_none())
                     })
                 {
                     let _ = reply.send(Err(DirectoryError::IdentityConflict { actor: actor.id }));
                 } else {
+                    let predecessor = state
+                        .identities
+                        .claimed
+                        .get(&actor.id)
+                        .and_then(|previous| state.reservations.get(previous))
+                        .and_then(|record| record.lifecycle.clone());
                     advance_actor_ids_past(actor.id);
                     state.identities.fenced.remove(&actor.id);
                     state.identities.claimed.insert(actor.id, actor);
-                    begin_reservation(state, actor, ReservationPurpose::Root, reply);
+                    begin_reservation_after(
+                        state,
+                        actor,
+                        ReservationPurpose::Root,
+                        predecessor,
+                        reply,
+                    );
                 }
             }
             RunControlMessage::Fence { actors, reply } => {
@@ -1634,7 +1698,14 @@ impl Actor for RunControl {
                             if let Some(lifecycle) = &record.lifecycle {
                                 lifecycle.close_abandoned();
                             }
-                            record.phase = ReservationPhase::Abandoned;
+                            record.phase = if matches!(
+                                record.phase,
+                                ReservationPhase::Creating | ReservationPhase::Abandoning
+                            ) {
+                                ReservationPhase::Abandoning
+                            } else {
+                                ReservationPhase::Abandoned
+                            };
                             if let Some(reply) = record.reply.take() {
                                 let _ = reply.send(Err(DirectoryError::Closed));
                             }
@@ -1694,6 +1765,9 @@ pub struct RunControlClient {
     owner: RactorRef<RunControlMessage>,
 }
 impl RunControlClient {
+    pub(crate) fn same_owner(&self, other: &Self) -> bool {
+        self.owner.get_id() == other.owner.get_id()
+    }
     #[cfg(test)]
     pub(crate) async fn stop_owner_for_test(&self) {
         self.owner.stop(None);
