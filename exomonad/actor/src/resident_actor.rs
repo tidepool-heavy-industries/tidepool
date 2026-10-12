@@ -499,6 +499,34 @@ struct ResidentEnvironment<H, O> {
     recovery: Option<Arc<crate::ActorRecoveryJournal>>,
 }
 
+impl<H, O> ResidentEnvironment<H, O> {
+    fn new(
+        runner: ResidentActorRunner<H, O>,
+        deployments: mpsc::Sender<LocalResidentDeployment>,
+        fork_workspaces: Option<crate::fork_workspace::SharedWorkspaceAdmission>,
+    ) -> Self {
+        Self {
+            commands: Default::default(),
+            runner,
+            deployments,
+            retired: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            requests: Arc::new(RequestRegistry::default()),
+            actor_admissions: crate::ActorAdmissionRegistry::new(),
+            actors: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            fork_workspaces,
+            source_layers: None,
+            jev: Arc::new(crate::jev::UnconfiguredJev),
+            cell_model_factory: None,
+            form_host: None,
+            form_registry: Arc::new(Mutex::new(Default::default())),
+            release_tracked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            conversation_reader: None,
+            usage_pointers: crate::UsagePointerTable::default(),
+            recovery: None,
+        }
+    }
+}
+
 fn retain_retired_metadata<H, O>(
     environment: &ResidentEnvironment<H, O>,
     actor: ActorRef,
@@ -13555,25 +13583,7 @@ where
         machines.insert_idle(session, Box::new(machine));
         let runner = ResidentActorRunner::new(machines, source);
         let (deployments, receiver) = mpsc::channel(DEPLOYMENT_CHANNEL_CAPACITY);
-        let environment = ResidentEnvironment {
-            commands: Default::default(),
-            runner,
-            deployments,
-            retired: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            requests: Arc::new(RequestRegistry::default()),
-            actor_admissions: crate::ActorAdmissionRegistry::new(),
-            actors: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            fork_workspaces,
-            source_layers: None,
-            jev: Arc::new(crate::jev::UnconfiguredJev),
-            cell_model_factory: None,
-            form_host: None,
-            form_registry: Arc::new(Mutex::new(Default::default())),
-            release_tracked: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            conversation_reader: None,
-            usage_pointers: crate::UsagePointerTable::default(),
-            recovery: None,
-        };
+        let environment = ResidentEnvironment::new(runner, deployments, fork_workspaces);
         Ok((
             Self {
                 environment,

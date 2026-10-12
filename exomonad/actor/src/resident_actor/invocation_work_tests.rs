@@ -866,28 +866,11 @@ impl Fixture {
         .unwrap();
         let kernel = receive.await.unwrap();
         let (deployments, receiver) = mpsc::channel(DEPLOYMENT_CHANNEL_CAPACITY);
-        let environment = ResidentEnvironment {
-            runner: ResidentActorRunner::new(
-                Arc::new(ActorMachineRegistry::new()),
-                ActorWorkbenchSource::new("", Vec::new()),
-            ),
-            deployments,
-            retired: Default::default(),
-            requests: Default::default(),
-            commands: Default::default(),
-            actors: Default::default(),
-            fork_workspaces: None,
-            actor_admissions: crate::ActorAdmissionRegistry::new(),
-            source_layers: None,
-            jev: Arc::new(crate::jev::UnconfiguredJev),
-            cell_model_factory: None,
-            form_host: None,
-            form_registry: Default::default(),
-            release_tracked: Default::default(),
-            conversation_reader: None,
-            usage_pointers: Default::default(),
-            recovery: None,
-        };
+        let runner = ResidentActorRunner::new(
+            Arc::new(ActorMachineRegistry::new()),
+            ActorWorkbenchSource::new("", Vec::new()),
+        );
+        let environment = ResidentEnvironment::new(runner, deployments, None);
         Self {
             actor,
             task,
