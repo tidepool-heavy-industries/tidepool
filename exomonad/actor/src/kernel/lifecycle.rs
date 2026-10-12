@@ -160,7 +160,7 @@ pub(super) enum LifecycleCommand {
     FinishProvider {
         sequence: u64,
         outcome: ProviderOutcome,
-        reply: Option<RpcReplyPort<()>>,
+        reply: Option<RpcReplyPort<Result<(), NativeProviderSettlementError>>>,
     },
     NativeBegun {
         sequence: u64,
@@ -201,7 +201,10 @@ impl AdmittedKernelEnvelope {
         self,
         expected: ActorRef,
     ) -> Result<(KernelMessage, AdmittedKernelLease), KernelCallFailure> {
-        if self.identity != expected || self.sequence != self.lease.sequence {
+        if self.identity != expected
+            || self.identity != self.lease.identity
+            || self.sequence != self.lease.sequence
+        {
             return Err(KernelCallFailure::TargetUnavailable(expected));
         }
         Ok((*self.message, self.lease))
@@ -271,32 +274,46 @@ pub struct NativeProviderTurnLease {
     sequence: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NativeProviderSettlementError {
+    #[error("provider lifecycle settlement owner is unavailable")]
+    Unavailable,
+    #[error("provider settlement does not name the active admitted turn")]
+    StaleTurn,
+}
+
 impl NativeProviderTurnLease {
-    pub async fn succeed(mut self) {
-        self.finish(ProviderOutcome::Succeeded).await;
+    pub async fn succeed(mut self) -> Result<(), NativeProviderSettlementError> {
+        self.finish(ProviderOutcome::Succeeded).await
     }
-    pub async fn fail(mut self, failure: exomonad_model::ProviderFailure) {
-        self.finish(ProviderOutcome::Failed(failure)).await;
+    pub async fn fail(
+        mut self,
+        failure: exomonad_model::ProviderFailure,
+    ) -> Result<(), NativeProviderSettlementError> {
+        self.finish(ProviderOutcome::Failed(failure)).await
     }
-    pub async fn interrupt(mut self) {
-        self.finish(ProviderOutcome::Interrupted).await;
+    pub async fn interrupt(mut self) -> Result<(), NativeProviderSettlementError> {
+        self.finish(ProviderOutcome::Interrupted).await
     }
-    async fn finish(&mut self, outcome: ProviderOutcome) {
-        let Some(sequence) = self.sequence.take() else {
-            return;
-        };
+    async fn finish(
+        &mut self,
+        outcome: ProviderOutcome,
+    ) -> Result<(), NativeProviderSettlementError> {
+        let sequence = self
+            .sequence
+            .take()
+            .ok_or(NativeProviderSettlementError::StaleTurn)?;
         let (send, receive) = tokio::sync::oneshot::channel();
-        if self
-            .owner
+        self.owner
             .cast(LifecycleCommand::FinishProvider {
                 sequence,
                 outcome,
                 reply: Some(send.into()),
             })
-            .is_ok()
-        {
-            let _ = receive.await;
-        }
+            .map_err(|_| NativeProviderSettlementError::Unavailable)?;
+        receive
+            .await
+            .map_err(|_| NativeProviderSettlementError::Unavailable)?
     }
 }
 
@@ -881,6 +898,7 @@ impl Actor for LifecycleCoordinator {
                 outcome,
                 reply,
             } => {
+                let mut result = Err(NativeProviderSettlementError::StaleTurn);
                 if let Some(provider) = state.provider.as_mut() {
                     if provider.sequence == Some(sequence) {
                         if let Some(turn) = provider.turn.take() {
@@ -900,10 +918,11 @@ impl Actor for LifecycleCoordinator {
                             };
                         }
                         provider.sequence = None;
+                        result = Ok(());
                     }
                 }
                 if let Some(reply) = reply {
-                    let _ = reply.send(());
+                    let _ = reply.send(result);
                 }
             }
             LifecycleCommand::NativeBegun { sequence, outcome } => {
