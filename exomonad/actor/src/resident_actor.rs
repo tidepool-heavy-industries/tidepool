@@ -13554,27 +13554,45 @@ where
         {
             return Ok(None);
         }
-        Ok(self.actor_graph(Some(requester)))
+        self.actor_graph(Some(requester)).await
     }
 
     /// Host-owned observation of this forest, including surviving children and
     /// terminal actors after its original root has stopped.
-    pub fn inspect_host_graph(&self) -> Vec<ActorGraphNode> {
-        self.actor_graph(None).unwrap_or_default()
+    pub async fn inspect_host_graph(&self) -> Result<Vec<ActorGraphNode>, crate::DirectoryError> {
+        Ok(self.actor_graph(None).await?.unwrap_or_default())
     }
 
-    fn actor_graph(&self, requester: Option<ActorRef>) -> Option<Vec<ActorGraphNode>> {
+    async fn actor_graph(
+        &self,
+        requester: Option<ActorRef>,
+    ) -> Result<Option<Vec<ActorGraphNode>>, crate::DirectoryError> {
         // Request publication may hold request state while updating actor metadata.
         // Observation retains a snapshot before consulting that request owner.
         let records = self.environment.actors.lock().clone();
         if requester.is_some_and(|requester| !records.contains_key(&requester)) {
-            return None;
+            return Ok(None);
+        }
+        let mut visible = std::collections::HashSet::new();
+        let mut lifecycles = std::collections::HashMap::new();
+        for actor in records.keys() {
+            if let Some(requester) = requester {
+                if !self.directory.authorize_observe(requester, *actor).await? {
+                    continue;
+                }
+            }
+            visible.insert(*actor);
+            lifecycles.insert(
+                *actor,
+                self.directory
+                    .resolve(*actor)
+                    .await?
+                    .map(|actor| actor.terminal().lifecycle()),
+            );
         }
         let mut nodes = records
             .iter()
-            .filter(|(actor, _)| {
-                requester.is_none_or(|requester| actor_can_observe(requester, **actor, &records))
-            })
+            .filter(|(actor, _)| visible.contains(actor))
             .map(|(actor, record)| {
                 let runtime = record.runtime_observation.snapshot();
                 let (active_requests, queued_requests) =
@@ -13590,11 +13608,7 @@ where
                         .terminal
                         .clone()
                         .map(crate::ActorLifecycle::Exited)
-                        .or_else(|| {
-                            self.directory
-                                .resolve(*actor)
-                                .map(|a| a.terminal().lifecycle())
-                        }),
+                        .or_else(|| lifecycles.get(actor).cloned().flatten()),
                     workbench: runtime.workbench_posture,
                     form_waits: runtime.form_waits,
                     provider_thread: runtime.provider_thread,
@@ -13607,7 +13621,7 @@ where
             })
             .collect::<Vec<_>>();
         nodes.sort_by_key(|node| (node.actor.id, node.actor.incarnation));
-        Some(nodes)
+        Ok(Some(nodes))
     }
 
     pub async fn new_program_root(
