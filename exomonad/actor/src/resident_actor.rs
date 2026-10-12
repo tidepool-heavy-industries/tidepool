@@ -5596,11 +5596,11 @@ where
                 target,
                 definition,
             } => {
-                let installed = self.installed_tools.clone();
-                let installation_context = self.context(context.actor);
-                let allowed = descriptor.capabilities().effect_keys().to_vec();
                 return Box::pin(async move {
                     let authorized = kernel.authorize_control(target).await;
+                    let installed = self.installed_tools.clone();
+                    let installation_context = self.context(context.actor);
+                    let allowed = descriptor.capabilities().effect_keys().to_vec();
                     let operation: futures_util::future::BoxFuture<
                         'static,
                         Result<ResidentOutcome, ResidentActorWorkbenchError>,
