@@ -4,6 +4,8 @@ use tokio::sync::oneshot;
 #[cfg(test)]
 mod cluster_tests;
 mod preparation;
+#[cfg(test)]
+mod cluster_tests;
 mod transfers;
 use preparation::{PreparationMessage, PreparationSupervisor, RootDelivery};
 pub(crate) use preparation::{
