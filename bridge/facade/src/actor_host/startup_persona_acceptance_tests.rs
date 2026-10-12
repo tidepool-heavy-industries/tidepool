@@ -363,6 +363,7 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
                 .unwrap(),
             retained
         );
+        let refusal_operation = refreshed.operation("persona-native-refusal");
         refreshed.sync_call_named(
             "persona-native-refusal",
             "haskell",
@@ -390,8 +391,23 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
         ));
         refused.finish();
         settled_head(&host).await;
+        for completed in [&operation, &refusal_operation] {
+            assert!(
+                matches!(
+                    host.runtime.scheduler().output(completed).await.unwrap(),
+                    Some(harness::turn::JobOutput::Completed(Ok(_)))
+                ),
+                "completed scheduler jobs remain inspectable before physical shutdown"
+            );
+        }
     }
+    let forest = Arc::downgrade(&host.context.forest);
     host.stop().await.unwrap();
+    assert_eq!(
+        forest.strong_count(),
+        0,
+        "retained completed cancellation records do not keep the forest alive"
+    );
 
     let startup_before =
         std::fs::read(workspace.join(".exomonad/state/notes/startup-preparation.md")).unwrap();

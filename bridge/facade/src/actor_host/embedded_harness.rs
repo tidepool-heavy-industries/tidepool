@@ -933,7 +933,11 @@ impl HostActor for EmbeddedHostActor {
     }
 }
 
-#[derive(Clone)]
+struct EmbeddedCancellationOwner {
+    identity: HostIdentity,
+    snapshot: Arc<EmbeddedPolicySnapshot>,
+}
+
 struct EmbeddedDispatcher {
     attachment: super::provider_attachment::ProviderAttachment,
     context_models: Arc<OnceLock<ModelResolver>>,
@@ -1104,15 +1108,22 @@ impl HostedCheckpointCapture for EmbeddedCheckpointCapture {
     }
 }
 
+fn embedded_invocation_context(
+    identity: &HostIdentity,
+    operation: &OperationId,
+) -> Result<ToolInvocationContext, ProviderError> {
+    let original = original_operation(identity, operation)
+        .map_err(|error| ProviderError::Tool(error.into()))?;
+    Ok(ToolInvocationContext {
+        origin: exomonad_tool::ToolInvocationOrigin::Model(original),
+        call_id: operation.call.0.clone(),
+        namespace: None,
+    })
+}
+
 impl EmbeddedDispatcher {
     fn context(&self, operation: &OperationId) -> Result<ToolInvocationContext, ProviderError> {
-        let original = original_operation(&self.identity, operation)
-            .map_err(|error| ProviderError::Tool(error.into()))?;
-        Ok(ToolInvocationContext {
-            origin: exomonad_tool::ToolInvocationOrigin::Model(original),
-            call_id: operation.call.0.clone(),
-            namespace: None,
-        })
+        embedded_invocation_context(&self.identity, operation)
     }
 
     async fn dispatch(
@@ -1546,7 +1557,10 @@ impl Provider for EmbeddedDispatcher {
     }
 
     fn cancellation_owner(&self) -> Option<Arc<dyn CancellationOwner>> {
-        Some(Arc::new(self.clone()))
+        Some(Arc::new(EmbeddedCancellationOwner {
+            identity: self.identity.clone(),
+            snapshot: Arc::clone(&self.snapshot),
+        }))
     }
 
     async fn complete_call(
@@ -1755,7 +1769,7 @@ impl InvocationCompletionSource for UneditedInvocationCompletion {
 }
 
 #[async_trait::async_trait]
-impl CancellationOwner for EmbeddedDispatcher {
+impl CancellationOwner for EmbeddedCancellationOwner {
     fn cancellation_wait(&self) -> harness::provider::CancellationWait {
         // The exact native operation retains its execution and cleanup owner.
         // Cancellation joins that terminal; actor loss settles the observation
@@ -1768,7 +1782,7 @@ impl CancellationOwner for EmbeddedDispatcher {
         operation: &OperationId,
         _handle: &JobHandle,
     ) -> CancellationAcknowledgment {
-        let context = match self.context(operation) {
+        let context = match embedded_invocation_context(&self.identity, operation) {
             Ok(context) => context,
             Err(error) => return CancellationAcknowledgment::Unconfirmed(error.to_string()),
         };

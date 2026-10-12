@@ -28,7 +28,7 @@ impl Provider for HeldDispatch {
     }
 
     fn cancellation_owner(&self) -> Option<Arc<dyn CancellationOwner>> {
-        Some(self.dispatcher.clone())
+        self.dispatcher.cancellation_owner()
     }
 
     async fn call(&self, _: &str, _: Value) -> Result<Value, ProviderError> {
