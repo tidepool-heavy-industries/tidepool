@@ -2129,13 +2129,6 @@ impl<H, O> Clone for ResidentEnvironment<H, O> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RootStartupState {
-    Pending,
-    Released,
-    Activated,
-}
-
 /// Original, process-local release authority for a registered pending root.
 /// Keeping this receipt permits acknowledgment retries without rebuilding boot.
 pub struct RootStartupRelease {
@@ -2732,6 +2725,7 @@ pub struct ResidentKernelBehavior<H, O> {
     spawn_helper_branch: Option<String>,
     spawn_admission: Option<crate::SpawnAdmission>,
     root_startup: Option<crate::RootStartupIntent>,
+    root_startup_admission: Option<crate::local_actor::run_control::RootStartupAdmission>,
     lifecycle: Option<crate::LifecycleHandle>,
     standing: ResidentStanding,
     shutdown_hook: Option<RootCustody>,
@@ -3619,6 +3613,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             spawn_helper_branch: None,
             spawn_admission: None,
             root_startup: None,
+            root_startup_admission: None,
             lifecycle: None,
             standing: ResidentStanding::Boot,
             shutdown_hook: None,
@@ -11132,6 +11127,7 @@ where
                         &self.descriptor,
                         &self.launch_worktrees,
                         self.root_startup.clone(),
+                        self.root_startup_admission.as_ref(),
                     )
                     .await
                     .map_err(|error| Self::failure(error.to_string()))?;
@@ -13989,14 +13985,13 @@ where
     where
         F: FnOnce(ActorRef) -> crate::RootStartupIntent + Send,
     {
-        let admission = self.environment.root_admission_closed.read().await;
         let refuse =
             |detail: &str| ractor::SpawnErr::StartupFailed(std::io::Error::other(detail).into());
-        if *admission || self.environment.recovery.is_none() {
-            return Err(refuse(
-                "pending root requires an open forest and durable recovery journal",
-            ));
-        }
+        let journal = self
+            .environment
+            .recovery
+            .clone()
+            .ok_or_else(|| refuse("pending root requires durable recovery journal"))?;
         if descriptor.placement().session != self.session
             || descriptor.persistence_policy() != crate::ActorPersistencePolicy::Durable
             || descriptor.actor_path().is_none()
@@ -14009,77 +14004,85 @@ where
                 "pending root requires its exact independent durable placement",
             ));
         }
+        let reservation = match identity {
+            Some(identity) => self.directory.claim_exact(identity).await,
+            None => self.directory.reserve(self.incarnation).await,
+        }
+        .map_err(|error| refuse(&error.to_string()))?;
+        // The borrowed intent callback ends before owned work enters supervision.
+        let intent = intent(reservation.identity());
+        let permit = self
+            .directory
+            .authorize_root_startup(&reservation, intent.clone(), journal, None)
+            .await
+            .map_err(|error| refuse(&error.to_string()))?;
         let placement = descriptor.placement();
-        let latch = Arc::new(Mutex::new(RootStartupState::Pending));
-        let mut original_intent = None;
-        let build = |identity| {
-            let intent = intent(identity);
-            original_intent = Some(intent.clone());
-            let mut behavior = ResidentKernelBehavior::with_boot(
-                descriptor,
-                self.environment.clone(),
-                ResidentBoot::Startup(entry),
-                Vec::new(),
-            );
-            behavior.root_startup = Some((intent, Arc::clone(&latch)));
-            behavior
-        };
-        let (actor, task) = match identity {
-            Some(identity) => {
-                crate::local_actor::spawn_local_actor_in_directory_with_identity(
+        let environment = self.environment.clone();
+        let directory = self.directory.clone();
+        let operation: crate::local_actor::run_control::RootOperation = Box::new(move |ticket| {
+            Box::pin(async move {
+                ticket.placement_prepared(placement);
+                let mut behavior = ResidentKernelBehavior::with_boot(
+                    descriptor,
+                    environment,
+                    ResidentBoot::Startup(entry),
+                    Vec::new(),
+                );
+                behavior.root_startup = Some(intent.clone());
+                behavior.root_startup_admission = Some(permit);
+                let result = crate::local_actor::spawn_reserved_local_actor(
                     None,
-                    build(identity),
-                    identity,
-                    self.directory.clone(),
+                    behavior,
+                    reservation,
+                    directory,
                 )
-                .await?
-            }
-            None => {
-                crate::local_actor::spawn_local_actor_in_directory_with_factory(
-                    None,
-                    self.incarnation,
-                    self.directory.clone(),
-                    build,
-                )
-                .await?
-            }
-        };
-        let identity = actor.identity();
-        Ok((
-            actor,
-            task,
-            RootStartupRelease {
-                actor: identity,
-                placement,
-                latch,
-                intent: original_intent
-                    .expect("reserved actor admission constructed startup intent"),
-            },
-        ))
+                .await
+                .map(|(actor, task)| {
+                    let release = RootStartupRelease {
+                        actor: actor.identity(),
+                        placement,
+                        lifecycle: actor.lifecycle().clone(),
+                        intent,
+                    };
+                    crate::local_actor::run_control::RootAdmissionOutcome::Pending(
+                        actor, task, release,
+                    )
+                })
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
+                (result, crate::CleanupComponentOutcome::Confirmed)
+            })
+        });
+        match self
+            .directory
+            .prepare_root(operation)
+            .await
+            .map_err(|error| refuse(&error.to_string()))?
+        {
+            Ok(crate::local_actor::run_control::RootAdmissionOutcome::Pending(
+                actor,
+                task,
+                release,
+            )) => Ok((actor, task, release)),
+            Err(error) => Err(error
+                .downcast::<ractor::SpawnErr>()
+                .map(|error| *error)
+                .unwrap_or_else(ractor::SpawnErr::StartupFailed)),
+            _ => Err(refuse(
+                "pending root producer returned an incompatible result",
+            )),
+        }
     }
 
-    /// Release only the original registered boot after durable manifest and
-    /// exact backend binding. Repeated acknowledgments never rerun initialization.
-    pub fn release_root_startup(
+    /// Release only the original boot after exact durable application binding.
+    pub async fn release_root_startup(
         &self,
         release: &RootStartupRelease,
     ) -> Result<(), ResidentActorWorkbenchError> {
         let refuse = |detail: &str| ResidentActorWorkbenchError::ActorProtocol(detail.into());
-        let placement = self.root_recovery_placement(release.actor)?;
+        let placement = self.root_recovery_placement(release.actor).await?;
         if placement.placement() != release.placement {
             return Err(refuse("root startup placement changed"));
         }
-        let records = self.environment.actors.lock();
-        if records.get(&release.actor).is_none_or(|record| {
-            record.public_owner.ready().is_none()
-                || record
-                    .root_startup
-                    .as_ref()
-                    .is_none_or(|latch| !Arc::ptr_eq(latch, &release.latch))
-        }) {
-            return Err(refuse("root startup manifest durability is unconfirmed"));
-        }
-        drop(records);
         let journal = self
             .environment
             .recovery
@@ -14087,6 +14090,7 @@ where
             .ok_or_else(|| refuse("root startup journal is absent"))?;
         let durable = journal
             .validated_records()
+            .await
             .map_err(|error| refuse(&error.to_string()))?;
         let record = durable
             .iter()
@@ -14104,22 +14108,18 @@ where
                 "root startup requires its exact durable ApplicationBound",
             ));
         }
-        let actor = self
-            .directory
-            .resolve(release.actor)
-            .ok_or_else(|| refuse("root startup actor is unavailable"))?;
-        let mut state = release.latch.lock();
-        if *state == RootStartupState::Pending {
-            *state = RootStartupState::Released;
-        }
-        if *state != RootStartupState::Activated {
-            actor
-                .address()
-                .send_message(crate::KernelMessage::Resume {
-                    kind: crate::kernel::KernelResume::ReleaseRootStartup,
-                })
-                .map_err(|error| refuse(&error.to_string()))?;
-        }
+        release
+            .lifecycle
+            .release_startup(release.intent.clone())
+            .await
+            .map_err(|error| refuse(&error.to_string()))?;
+        release
+            .lifecycle
+            .control(crate::KernelMessage::Resume {
+                kind: crate::kernel::KernelResume::ReleaseRootStartup,
+            })
+            .await
+            .map_err(|error| refuse(&error.to_string()))?;
         Ok(())
     }
 
