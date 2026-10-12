@@ -420,14 +420,13 @@ async fn production_engine_advances_queued_notifications_and_reconciles_inclusio
             .unwrap(),
         Some(harness::embedding::InputObservation::Included(ref included)) if included == &second_included_head
     ));
-    let mut notifications = JoinSet::new();
-    schedule_embedded_notification_drain(actor, binding.clone(), &mut notifications);
-    let (_, result) = tokio::time::timeout(Duration::from_secs(5), notifications.join_next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    result.unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        deliver_embedded_notifications(actor, binding.clone()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     for sequence in [first.sequence, second.sequence] {
         assert!(matches!(
             binding.inbox.observe_receipt(sequence).unwrap(),
