@@ -381,18 +381,10 @@ where
         let checkpoint_lease = checkpoint_admission
             .as_ref()
             .map(|(lease, _)| lease.clone());
-        let root_admission = environment.root_admission_closed.clone();
-        let _root_admission = if descriptor.supervisor_parent().is_none() {
-            let admission = root_admission.read().await;
-            if *admission {
-                return Err(ResidentActorWorkbenchError::ActorProtocol(
-                    "swarm root admission is closed".into(),
-                ));
-            }
-            Some(admission)
-        } else {
-            None
-        };
+        let actor_reservation = kernel
+            .reserve_worker_creation(lifetime)
+            .await
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         if !launch_worktrees.is_empty() {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "raw workspace identities cannot authorize actor startup".into(),
@@ -572,10 +564,20 @@ where
         let child_result = match startup_admission {
             Some(admission) => {
                 kernel
-                    .spawn_worker_scoped(None, behavior, lifetime, admission)
+                    .spawn_reserved_worker_scoped(
+                        None,
+                        behavior,
+                        lifetime,
+                        admission,
+                        actor_reservation,
+                    )
                     .await
             }
-            None => kernel.spawn_worker(None, behavior, lifetime).await,
+            None => {
+                kernel
+                    .spawn_reserved_worker(None, behavior, lifetime, actor_reservation)
+                    .await
+            }
         };
         let child = match child_result {
             Ok(child) => child,

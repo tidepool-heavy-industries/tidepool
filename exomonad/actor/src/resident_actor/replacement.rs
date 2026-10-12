@@ -77,36 +77,24 @@ where
         kernel: &KernelContext,
         definition: crate::ActorReplacementDefinition,
     ) -> Result<LocalActorRef, ResidentActorWorkbenchError> {
+        let reservation = kernel
+            .reserve_successor_creation()
+            .await
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
         let staged = self
             .stage_replacement(kernel.identity(), definition)
             .await?;
-        self.admit_staged_successor(kernel, staged).await
+        self.admit_staged_successor(kernel, staged, reservation)
+            .await
     }
 
     async fn admit_staged_successor(
         &mut self,
         kernel: &KernelContext,
         mut staged: StagedHandler,
+        reservation: crate::local_actor::run_control::ActorReservation,
     ) -> Result<LocalActorRef, ResidentActorWorkbenchError> {
         let placement_custody = staged.placement_custody.clone();
-        let root_admission = self
-            .environment
-            .root_admission_closed
-            .clone()
-            .read_owned()
-            .await;
-        if *root_admission {
-            drop(staged);
-            placement_custody
-                .cleanup(
-                    &self.environment.runner,
-                    self.descriptor.placement().session,
-                )
-                .await?;
-            return Err(ResidentActorWorkbenchError::ActorProtocol(
-                "swarm admission is closed".into(),
-            ));
-        }
         let session_startup_custody = staged.session_startup.clone();
         let descriptor = staged.descriptor.clone().with_supervisor_parent(
             kernel
@@ -126,7 +114,10 @@ where
         behavior.child_session_startup = session_startup;
         behavior.child_placement_custody = Some(placement_custody.clone());
         behavior.exit_destination = exit_destination;
-        let successor = match kernel.spawn_successor(behavior).await {
+        let successor = match kernel
+            .spawn_reserved_successor(None, behavior, reservation)
+            .await
+        {
             Ok(successor) => successor,
             Err(error) => {
                 if let Some(cleanup) = crate::local_actor::startup_cleanup(&error) {
@@ -151,7 +142,6 @@ where
         };
         // Directory insertion committed this successor's membership. Admission
         // guards protect preparation, not the later custody transfer.
-        drop(root_admission);
         drop(session_startup_custody);
         if let Err(error) = self.transfer_worktree(successor.identity()).await {
             successor
