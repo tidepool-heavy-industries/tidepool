@@ -659,7 +659,7 @@ impl LifecycleHandle {
         self.address.stop(Some("test lifecycle owner loss".into()));
         self.address
             .get_cell()
-            .wait(None)
+            .wait(Some(std::time::Duration::from_secs(30)))
             .await
             .expect("lifecycle stop completes");
         assert_eq!(self.address.get_status(), ractor::ActorStatus::Stopped);
