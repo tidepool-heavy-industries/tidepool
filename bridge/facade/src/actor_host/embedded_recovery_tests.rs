@@ -407,7 +407,23 @@ async fn ready(root: &Path, phase: &str, process: &mut Process) -> serde_json::V
                 }
             }
             if let Ok(bytes) = std::fs::read(root.join(format!("{phase}.ready"))) {
-                if let Ok(value) = serde_json::from_slice(&bytes) {
+                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                    assert_eq!(value["pid"].as_u64(), Some(u64::from(process.0.id())));
+                    let ready_actor: ActorRef =
+                        serde_json::from_value(value["actor"].clone()).unwrap();
+                    assert_ne!(
+                        Some(ready_actor),
+                        process.1,
+                        "readiness cannot revive the predecessor"
+                    );
+                    let current =
+                        observed_root(root).expect("readiness has its admitted journal owner");
+                    assert_eq!(current.admission.actor, ready_actor);
+                    assert!(
+                        current.terminal.is_none(),
+                        "production {phase} actor {ready_actor} retired before readiness: {:?}",
+                        current.terminal
+                    );
                     return value;
                 }
             }
