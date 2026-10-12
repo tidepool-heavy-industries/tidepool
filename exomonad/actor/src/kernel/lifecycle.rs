@@ -49,6 +49,7 @@ pub enum NativeSettlement {
 
 #[derive(Clone)]
 pub struct LifecycleSnapshot {
+    executor: Option<RactorRef<KernelMessage>>,
     pub owner_available: bool,
     source_forward: Option<LifecycleHandle>,
     pub native_settlement: NativeSettlement,
@@ -433,6 +434,7 @@ impl LifecycleHandle {
         supervisor: Option<ractor::ActorCell>,
     ) -> Result<Self, ractor::SpawnErr> {
         let (observations, observe) = watch::channel(LifecycleSnapshot {
+            executor: None,
             owner_available: true,
             source_forward: None,
             native_settlement: NativeSettlement::Confirmed,
@@ -629,6 +631,16 @@ impl LifecycleHandle {
         grant: crate::local_actor::run_control::RunRetirementGrant,
     ) -> Result<(), KernelCallFailure> {
         let (send, receive) = tokio::sync::oneshot::channel();
+        // A retirement completion can precede the executor's physical stop.
+        // This cell observation grants no execution; the owner rechecks below.
+        let executor = self.observations.borrow().executor.clone();
+        if let Some(executor) = executor {
+            executor
+                .get_cell()
+                .wait(None)
+                .await
+                .map_err(|_| KernelCallFailure::TargetUnavailable(self.identity))?;
+        }
         self.send(LifecycleCommand::FinishRun {
             grant,
             reply: send.into(),
@@ -844,6 +856,7 @@ impl LifecycleState {
 
     pub(super) fn publish(&self) {
         self.observations.send_replace(LifecycleSnapshot {
+            executor: self.executor.clone(),
             owner_available: self.owner_available,
             source_forward: self.source_forward.clone(),
             native_settlement: self.native_settlement.clone(),
@@ -1031,6 +1044,9 @@ impl Actor for LifecycleCoordinator {
                     && matches!(state.native_settlement, NativeSettlement::Confirmed)
                     && state.transfer.unconfirmed.is_none();
                 let retired = state.phase == LifecyclePhase::Retired
+                    && state.executor.as_ref().is_some_and(|executor| {
+                        executor.get_status() == ractor::ActorStatus::Stopped
+                    })
                     && state.terminal.get().is_some()
                     && state
                         .resident
@@ -1074,7 +1090,8 @@ impl Actor for LifecycleCoordinator {
             LifecycleCommand::ExecutorRetired => {
                 state.retirement_requested = true;
                 state.phase = LifecyclePhase::Closing;
-                state.executor = None;
+                // Retain the exact cell for finalization, including forgotten membership.
+                // Closing/Retired phases already prohibit new executor ingress.
                 if let Some(provider) = state.provider.as_mut() {
                     provider.turn.take();
                     provider.phase = ProviderPhase::NeedsAttention;
