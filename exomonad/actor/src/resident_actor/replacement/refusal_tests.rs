@@ -142,11 +142,14 @@ impl Fixture {
         let actor = owner.actor.identity();
         let context = behavior.context(actor);
         let entry = retain(&behavior.environment.runner, id, "predecessorEntry").await;
+        let initial =
+            Arc::new(retain(&behavior.environment.runner, id, "replacementCheckpoint").await);
         let outcome = owner
             .kernel
-            .compiler_lifecycle_scope(behavior.environment.runner.run_rooted_entry(
+            .compiler_lifecycle_scope(behavior.environment.runner.run_rooted_application(
                 context.clone(),
                 entry,
+                initial,
                 context.placement.resource_scope,
             ))
             .await
