@@ -359,8 +359,8 @@ impl Drop for NativeProviderTurnLease {
     }
 }
 
-/// The lifecycle owner issues this only after exact executor cleanup and
-/// configured resident retirement have both settled successfully.
+/// Logical executor retirement and resident retirement have distinct obligations.
+/// An unsupported nonresident realm never certifies resident or journal cleanup.
 #[derive(Debug, Clone)]
 enum RetirementDomain {
     NonResident,
