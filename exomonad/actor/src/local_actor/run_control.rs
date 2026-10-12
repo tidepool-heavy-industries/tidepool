@@ -16,6 +16,83 @@ pub(crate) use preparation::{
 use transfers::{ResourceTransfer, WorkerTransfer};
 pub(crate) use transfers::{ResourceTransferReservation, WorkerTransferReservation};
 
+pub(super) struct ActorAuthority {
+    descriptor: crate::ActorDescriptor,
+    forest_control: bool,
+    observation_roots: HashSet<ActorRef>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ObservationShareOutcome {
+    RecipientUnavailable,
+    ScopeUnavailable,
+    Unauthorized,
+    Shared,
+}
+fn in_authority_tree(
+    entries: &HashMap<ActorRef, DirectoryEntry>,
+    owner: ActorRef,
+    candidate: ActorRef,
+    creation: bool,
+) -> bool {
+    let mut cursor = candidate;
+    for _ in 0..=entries.len() {
+        if cursor == owner {
+            return true;
+        }
+        let Some(authority) = entries
+            .get(&cursor)
+            .and_then(|entry| entry.authority.as_ref())
+        else {
+            return false;
+        };
+        let parent = if creation {
+            authority
+                .descriptor
+                .creator()
+                .or(authority.descriptor.supervisor_parent())
+        } else {
+            authority
+                .descriptor
+                .supervisor_parent()
+                .or(authority.descriptor.creator())
+        };
+        let Some(parent) = parent else {
+            return false;
+        };
+        cursor = parent;
+    }
+    false
+}
+fn can_control(
+    entries: &HashMap<ActorRef, DirectoryEntry>,
+    owner: ActorRef,
+    target: ActorRef,
+) -> bool {
+    entries.get(&owner).is_some_and(|entry| {
+        entry.actor.terminal().get().is_none()
+            && entry
+                .authority
+                .as_ref()
+                .is_some_and(|authority| authority.forest_control)
+    }) || in_authority_tree(entries, owner, target, false)
+}
+fn can_observe(
+    entries: &HashMap<ActorRef, DirectoryEntry>,
+    owner: ActorRef,
+    target: ActorRef,
+) -> bool {
+    can_control(entries, owner, target)
+        || entries
+            .get(&owner)
+            .and_then(|entry| entry.authority.as_ref())
+            .is_some_and(|authority| {
+                authority
+                    .observation_roots
+                    .iter()
+                    .any(|root| in_authority_tree(entries, *root, target, true))
+            })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DirectoryError {
     #[error("run control is unavailable")]
@@ -357,6 +434,24 @@ impl RunState {
 }
 
 pub(super) enum RunControlMessage {
+    RegisterAuthority {
+        actor: ActorRef,
+        descriptor: crate::ActorDescriptor,
+        forest_control: bool,
+        reply: oneshot::Sender<Result<(), DirectoryError>>,
+    },
+    AuthorizeRelation {
+        owner: ActorRef,
+        target: ActorRef,
+        observe: bool,
+        reply: oneshot::Sender<bool>,
+    },
+    ShareObservation {
+        owner: ActorRef,
+        recipient: ActorRef,
+        scope: ActorRef,
+        reply: oneshot::Sender<ObservationShareOutcome>,
+    },
     SelectStartup {
         actor: ActorRef,
         intent: crate::RootStartupIntent,
@@ -631,6 +726,72 @@ impl Actor for RunControl {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            RunControlMessage::RegisterAuthority {
+                actor,
+                descriptor,
+                forest_control,
+                reply,
+            } => {
+                let result = if let Some(entry) = state.entries.get_mut(&actor) {
+                    if entry.authority.is_some() {
+                        Err(DirectoryError::AlreadyRegistered { actor })
+                    } else {
+                        entry.authority = Some(ActorAuthority {
+                            descriptor,
+                            forest_control,
+                            observation_roots: HashSet::new(),
+                        });
+                        Ok(())
+                    }
+                } else {
+                    Err(DirectoryError::Unauthorized { actor })
+                };
+                let _ = reply.send(result);
+            }
+            RunControlMessage::AuthorizeRelation {
+                owner,
+                target,
+                observe,
+                reply,
+            } => {
+                let _ = reply.send(if observe {
+                    can_observe(&state.entries, owner, target)
+                } else {
+                    can_control(&state.entries, owner, target)
+                });
+            }
+            RunControlMessage::ShareObservation {
+                owner,
+                recipient,
+                scope,
+                reply,
+            } => {
+                let outcome = if state.entries.get(&recipient).is_none_or(|entry| {
+                    entry.actor.terminal().get().is_some() || entry.authority.is_none()
+                }) {
+                    ObservationShareOutcome::RecipientUnavailable
+                } else if state
+                    .entries
+                    .get(&scope)
+                    .is_none_or(|entry| entry.authority.is_none())
+                {
+                    ObservationShareOutcome::ScopeUnavailable
+                } else if !can_observe(&state.entries, owner, scope) {
+                    ObservationShareOutcome::Unauthorized
+                } else {
+                    state
+                        .entries
+                        .get_mut(&recipient)
+                        .expect("validated recipient")
+                        .authority
+                        .as_mut()
+                        .expect("validated authority")
+                        .observation_roots
+                        .insert(scope);
+                    ObservationShareOutcome::Shared
+                };
+                let _ = reply.send(outcome);
+            }
             RunControlMessage::SelectStartup {
                 actor,
                 intent,
@@ -1325,6 +1486,7 @@ impl Actor for RunControl {
                             actor,
                             context,
                             spawn_ownership: ownership,
+                            authority: None,
                         },
                     );
                     Ok(())
@@ -1490,6 +1652,60 @@ impl RunControlClient {
             .send_message(message(reply))
             .map_err(|_| DirectoryError::Unavailable)?;
         receiver.await.map_err(|_| DirectoryError::Unavailable)
+    }
+    pub(crate) async fn register_authority(
+        &self,
+        actor: ActorRef,
+        descriptor: crate::ActorDescriptor,
+        forest_control: bool,
+    ) -> Result<(), DirectoryError> {
+        self.ask(|reply| RunControlMessage::RegisterAuthority {
+            actor,
+            descriptor,
+            forest_control,
+            reply,
+        })
+        .await?
+    }
+    pub(crate) async fn authorize_control(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+    ) -> Result<bool, DirectoryError> {
+        self.ask(|reply| RunControlMessage::AuthorizeRelation {
+            owner,
+            target,
+            observe: false,
+            reply,
+        })
+        .await
+    }
+    pub(crate) async fn authorize_observe(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+    ) -> Result<bool, DirectoryError> {
+        self.ask(|reply| RunControlMessage::AuthorizeRelation {
+            owner,
+            target,
+            observe: true,
+            reply,
+        })
+        .await
+    }
+    pub(crate) async fn share_observation(
+        &self,
+        owner: ActorRef,
+        recipient: ActorRef,
+        scope: ActorRef,
+    ) -> Result<ObservationShareOutcome, DirectoryError> {
+        self.ask(|reply| RunControlMessage::ShareObservation {
+            owner,
+            recipient,
+            scope,
+            reply,
+        })
+        .await
     }
     pub(crate) async fn authorize_root_startup(
         &self,

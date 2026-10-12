@@ -263,6 +263,7 @@ struct DirectoryIdentities {
 
 struct DirectoryEntry {
     actor: LocalActorRef,
+    authority: Option<run_control::ActorAuthority>,
     spawn_ownership: SpawnOwnership,
     // Retaining an exit must not keep its execution context (and thus this
     // directory) alive. Ractor's actor state owns the strong context reference.
