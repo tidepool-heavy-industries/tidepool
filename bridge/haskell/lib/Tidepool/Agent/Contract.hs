@@ -1037,6 +1037,9 @@ data AgentSpec tools effects = AgentSpec
     afterTool :: Maybe (ToolCall -> ToolResult -> Eff effects Annotation)
   , -- | Run once for a fresh conversation, before first inference. Checking
     -- and reloading a spec install the code without executing this slot.
+    -- Ordinary effect membership still requires runtime grants. Startup
+    -- refuses forms, helper launch and actor request/receive continuations
+    -- that require an already active conversation; it has no first input.
     initialContext :: Maybe (StartupInput -> Eff effects ContextSeed)
   }
 

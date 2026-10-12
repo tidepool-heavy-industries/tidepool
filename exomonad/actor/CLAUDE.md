@@ -42,9 +42,18 @@ host waiter cannot discard a completed seed. A recovered interrupted preparation
 requires reconciliation, never implicit effect replay. Fresh initialization is
 distinct from captured context, resume and spec reload. The host must preserve
 caller seed independently and keep all activating input outside the conversation
-until publication completes. Startup currently refuses form and helper admission
-at their typed continuation boundaries; qualifying other startup effects needs
-execution evidence through their actual services.
+until publication completes. Startup currently refuses forms, helper launch,
+actor attachment and actor request/receive/await continuations at their typed
+continuation boundaries. Filesystem operations use the actual granted handlers;
+the current fresh-child composer shares its state-rooted filesystem handler with
+root and does not establish workspace isolation. Jev uses the existing service
+while the supervisor continues. Qualifying other startup effects needs execution
+evidence through their actual services; effect membership alone is no support
+claim. Root has no caller seed; only fresh child admission issues one, so legacy
+absent-hook caller publication has no root successor to repeat it.
+These startup events use actor-journal version 9. Version 8 runs remain on their
+existing binaries; the new reader refuses them without mutation. This change
+does not supply a migration or authorize restarting a live run.
 
 Child capture resolves original nominal identities against local declarations
 first, then acquired certified interfaces from the actor's source owner. Narrow
