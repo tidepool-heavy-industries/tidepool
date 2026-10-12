@@ -30,6 +30,7 @@ pub enum LifecyclePhase {
     IdleCheck,
     Closing,
     Retired,
+    Finalized,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +139,10 @@ enum PendingOperation {
 
 pub(super) enum LifecycleCommand {
     AttachExecutor {
+        executor: RactorRef<KernelMessage>,
+        reply: RpcReplyPort<Result<(), KernelCallFailure>>,
+    },
+    AttachCleanupExecutor {
         executor: RactorRef<KernelMessage>,
         reply: RpcReplyPort<Result<(), KernelCallFailure>>,
     },
@@ -365,7 +370,7 @@ impl Drop for NativeProviderTurnLease {
 }
 
 /// Logical executor retirement and resident retirement have distinct obligations.
-/// An unsupported nonresident realm never certifies resident or journal cleanup.
+/// Confirmed or unsupported nonresident realms never certify resident journal cleanup.
 #[derive(Debug, Clone)]
 enum RetirementDomain {
     NonResident,
@@ -393,7 +398,8 @@ impl SuccessorDrainReceipt {
                     crate::CleanupComponentOutcome::Confirmed
                 ) && matches!(
                     self.cleanup.realm(),
-                    crate::CleanupComponentOutcome::Unsupported
+                    crate::CleanupComponentOutcome::Confirmed
+                        | crate::CleanupComponentOutcome::Unsupported
                 )
             }
         }
@@ -548,6 +554,19 @@ impl LifecycleHandle {
         self.receive(receive).await?
     }
 
+    /// Retain physical cleanup custody without opening executor admission.
+    pub(crate) async fn attach_cleanup_executor(
+        &self,
+        executor: RactorRef<KernelMessage>,
+    ) -> Result<(), KernelCallFailure> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.send(LifecycleCommand::AttachCleanupExecutor {
+            executor,
+            reply: send.into(),
+        })?;
+        self.receive(receive).await?
+    }
+
     pub async fn executor_started(&self) -> Result<(), KernelCallFailure> {
         let (send, receive) = tokio::sync::oneshot::channel();
         self.send(LifecycleCommand::ExecutorStarted(send.into()))?;
@@ -653,8 +672,20 @@ impl LifecycleHandle {
             .map_err(|_| KernelCallFailure::TargetUnavailable(self.identity))
     }
 
+    #[cfg(test)]
+    pub(crate) async fn stop_owner_for_test(&self) {
+        self.address.stop(Some("test lifecycle owner loss".into()));
+        self.address
+            .get_cell()
+            .wait(Some(std::time::Duration::from_secs(30)))
+            .await
+            .expect("lifecycle stop completes");
+        assert_eq!(self.address.get_status(), ractor::ActorStatus::Stopped);
+    }
+
     pub(crate) fn run_finalized(&self) -> bool {
-        self.address.get_status() == ractor::ActorStatus::Stopped
+        self.observations.borrow().phase == LifecyclePhase::Finalized
+            && self.address.get_status() == ractor::ActorStatus::Stopped
     }
 
     pub async fn close(&self) -> Result<(), KernelCallFailure> {
@@ -845,7 +876,7 @@ impl LifecycleState {
     pub(super) fn is_closed(&self) -> bool {
         matches!(
             self.phase,
-            LifecyclePhase::Closing | LifecyclePhase::Retired
+            LifecyclePhase::Closing | LifecyclePhase::Retired | LifecyclePhase::Finalized
         )
     }
 
@@ -914,6 +945,7 @@ impl LifecycleState {
             LifecyclePhase::Starting => Some(KernelCallFailure::TargetUnavailable(self.identity)),
             LifecyclePhase::Closing => Some(KernelCallFailure::MailboxClosed(self.identity)),
             LifecyclePhase::Retired => Some(KernelCallFailure::TargetExited(self.identity)),
+            LifecyclePhase::Finalized => Some(KernelCallFailure::TargetUnavailable(self.identity)),
         }
     }
 
@@ -928,7 +960,10 @@ impl LifecycleState {
                 return Err(refusal);
             }
         }
-        if self.phase == LifecyclePhase::Retired {
+        if matches!(
+            self.phase,
+            LifecyclePhase::Retired | LifecyclePhase::Finalized
+        ) {
             return Err(KernelCallFailure::TargetExited(self.identity));
         }
         let executor = self
@@ -1026,6 +1061,24 @@ impl Actor for LifecycleCoordinator {
                 };
                 let _ = reply.send(result);
             }
+            LifecycleCommand::AttachCleanupExecutor { executor, reply } => {
+                let permitted_phase = matches!(
+                    state.phase,
+                    LifecyclePhase::Starting | LifecyclePhase::Closing
+                );
+                let exact = state
+                    .executor
+                    .as_ref()
+                    .is_none_or(|retained| retained.get_id() == executor.get_id());
+                let result = if permitted_phase && exact {
+                    state.executor = Some(executor);
+                    Ok(())
+                } else {
+                    Err(KernelCallFailure::TargetUnavailable(state.identity))
+                };
+                // Retaining a cell does not change lifecycle phase or admit work.
+                let _ = reply.send(result);
+            }
             LifecycleCommand::ExecutorStarted(reply) => {
                 let result = if state.phase == LifecyclePhase::Starting && state.executor.is_some()
                 {
@@ -1064,7 +1117,8 @@ impl Actor for LifecycleCoordinator {
                                     )
                                     && matches!(
                                         cleanup.realm(),
-                                        crate::CleanupComponentOutcome::Unsupported
+                                        crate::CleanupComponentOutcome::Confirmed
+                                            | crate::CleanupComponentOutcome::Unsupported
                                     )
                             }
                     });
@@ -1080,6 +1134,7 @@ impl Actor for LifecycleCoordinator {
                         retired
                     }
                 {
+                    state.phase = LifecyclePhase::Finalized;
                     // The owned effect survives a dropped finalization observer.
                     let _ = reply.send(Ok(()));
                     myself.stop(Some("confirmed run finalization".into()));
@@ -1119,7 +1174,8 @@ impl Actor for LifecycleCoordinator {
                                     )
                                     && matches!(
                                         cleanup.realm(),
-                                        crate::CleanupComponentOutcome::Unsupported
+                                        crate::CleanupComponentOutcome::Confirmed
+                                            | crate::CleanupComponentOutcome::Unsupported
                                     )
                             } =>
                     {
@@ -1208,7 +1264,10 @@ impl Actor for LifecycleCoordinator {
                 if let Some(terminal) = terminal {
                     state.terminal.request_shutdown(terminal);
                 }
-                if state.phase != LifecyclePhase::Retired {
+                if !matches!(
+                    state.phase,
+                    LifecyclePhase::Retired | LifecyclePhase::Finalized
+                ) {
                     state.phase = LifecyclePhase::Closing;
                 }
                 let result = match fence {
@@ -1484,7 +1543,10 @@ impl Actor for LifecycleCoordinator {
             LifecycleCommand::Resident(command) => resident::handle(state, &myself, *command),
             LifecycleCommand::Transfer(command) => transfer::handle(state, &myself, *command),
         }
-        if state.retirement_requested && !state.has_pending() {
+        if state.retirement_requested
+            && !state.has_pending()
+            && state.phase != LifecyclePhase::Finalized
+        {
             state.phase = LifecyclePhase::Retired;
         }
         state.publish();
@@ -1507,7 +1569,9 @@ impl Actor for LifecycleCoordinator {
         _myself: RactorRef<Self::Msg>,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        state.phase = LifecyclePhase::Retired;
+        if state.phase != LifecyclePhase::Finalized {
+            state.phase = LifecyclePhase::Retired;
+        }
         state.owner_available = false;
         for task in state.tasks.values() {
             task.abort();

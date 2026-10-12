@@ -136,6 +136,15 @@ async fn interrupt_during_preview(
         .public_owner(None, false)
         .await
         .unwrap();
+    // Durable owner initialization publishes its own epoch before activation.
+    // Verify that transition separately, then fence the activation against it.
+    let initialized_public = registered_public_visibility(&machines, &context);
+    assert_visibility_payload_unchanged(&initialized_public, &original_public);
+    assert_eq!(
+        initialized_public.epoch,
+        original_public.epoch + u64::from(durable)
+    );
+    let original_public = initialized_public;
     let original_manifest = durable_owner
         .as_ref()
         .map(|owner| recovery.as_ref().unwrap().public_owner(owner));
@@ -400,11 +409,11 @@ async fn interrupt_during_preview(
         .unwrap()
         .into_parts();
     resident.value_handle_count();
-    assert_eq!(
-        resident
+    assert_visibility_unchanged(
+        &resident
             .public_visibility_snapshot_in(context.placement.lexical_scope)
             .unwrap(),
-        original_public
+        &original_public,
     );
     if let Some(original) = original_manifest {
         assert_eq!(
@@ -666,6 +675,15 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         .public_owner(None, false)
         .await
         .unwrap();
+    // Durable owner initialization publishes its own epoch before activation.
+    // Verify that transition separately, then fence the activation against it.
+    let initialized_public = registered_public_visibility(&machines, &context);
+    assert_visibility_payload_unchanged(&initialized_public, &original_public);
+    assert_eq!(
+        initialized_public.epoch,
+        original_public.epoch + u64::from(durable)
+    );
+    let original_public = initialized_public;
     let original_manifest = durable_owner
         .as_ref()
         .map(|owner| recovery.as_ref().unwrap().public_owner(owner));
@@ -944,7 +962,7 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
     if visible {
         assert_ne!(current, original_public);
     } else {
-        assert_eq!(current, original_public);
+        assert_visibility_unchanged(&current, &original_public);
     }
     if let Some(original) = original_manifest {
         if visible {
@@ -977,4 +995,78 @@ async fn native_operation_sequence(durable: bool, failure: NativeFailure, drop_w
         .collect();
     machines.settle_suspended(receipt, resident, holes);
     fixture.finish().await;
+}
+
+fn registered_public_visibility(
+    machines: &ActorMachineRegistry<frunk::HNil, tidepool_mcp::CapturedOutput>,
+    context: &ActorSessionContext,
+) -> tidepool_runtime::session::PublicVisibilitySnapshot {
+    let (resident, receipt) = machines
+        .checkout_run(context.placement.session)
+        .unwrap()
+        .into_parts();
+    let snapshot = resident
+        .public_visibility_snapshot_in(context.placement.lexical_scope)
+        .unwrap();
+    let holes = resident
+        .parked_holes()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    machines.settle_suspended(receipt, resident, holes);
+    snapshot
+}
+
+// Compare every exact field while keeping failure output independent of graph size.
+fn assert_visibility_payload_unchanged(
+    actual: &tidepool_runtime::session::PublicVisibilitySnapshot,
+    expected: &tidepool_runtime::session::PublicVisibilitySnapshot,
+) {
+    // This exhaustive shape makes added visibility facts require an explicit oracle.
+    let tidepool_runtime::session::PublicVisibilitySnapshot {
+        scope: _,
+        epoch: _,
+        declaration_tip: _,
+        machine_incarnation: _,
+        bindings: _,
+        source_instances: _,
+        source_selection: _,
+    } = actual;
+    assert_eq!(actual.scope, expected.scope, "public scope changed");
+    assert_eq!(
+        actual.declaration_tip, expected.declaration_tip,
+        "public declaration tip changed"
+    );
+    assert_eq!(
+        actual.machine_incarnation, expected.machine_incarnation,
+        "public machine changed"
+    );
+    assert!(
+        actual.bindings == expected.bindings,
+        "public bindings changed (actual {}, expected {})",
+        actual.bindings.len(),
+        expected.bindings.len()
+    );
+    assert!(
+        actual.source_instances == expected.source_instances,
+        "public source instances changed (actual {}, expected {})",
+        actual.source_instances.len(),
+        expected.source_instances.len()
+    );
+    assert!(
+        actual.source_selection == expected.source_selection,
+        "exact public source selection changed"
+    );
+}
+
+fn assert_visibility_unchanged(
+    actual: &tidepool_runtime::session::PublicVisibilitySnapshot,
+    expected: &tidepool_runtime::session::PublicVisibilitySnapshot,
+) {
+    assert_eq!(
+        actual.epoch, expected.epoch,
+        "public visibility epoch changed"
+    );
+    assert_visibility_payload_unchanged(actual, expected);
+    assert!(actual == expected, "exact public visibility changed");
 }

@@ -814,6 +814,8 @@ pub(crate) enum StartupFailureCause {
     Reservation(String),
     #[error("worker admission refused: {0}")]
     WorkerAdmission(String),
+    #[error("executor lifecycle attachment refused: {0}")]
+    Lifecycle(crate::KernelCallFailure),
     #[error(transparent)]
     Behavior(KernelBehaviorError),
 }
@@ -2090,7 +2092,7 @@ where
             directory: arguments.directory,
         });
         let startup_admission = arguments.startup_admission;
-        let startup_refusal = arguments.startup_refusal;
+        let mut startup_refusal = arguments.startup_refusal;
         let mut state = Box::new(LocalActorState {
             replacement: None,
             drain: DrainState::Open,
@@ -2105,6 +2107,22 @@ where
             deferred_mailbox: VecDeque::new(),
             mailbox_drain_scheduled: false,
         });
+        // Refused startup retains its actual cell without reopening a closing
+        // coordinator. Ordinary startup still requires Starting admission.
+        let attachment = if startup_refusal.is_some() {
+            state
+                .lifecycle
+                .attach_cleanup_executor(state.context.myself.clone())
+                .await
+        } else {
+            state
+                .lifecycle
+                .attach_executor(state.context.myself.clone())
+                .await
+        };
+        if let Err(error) = attachment {
+            startup_refusal = Some(StartupFailureCause::Lifecycle(error));
+        }
         if let Some(cause) = startup_refusal {
             finish_actor(
                 &state.context.myself.clone(),
@@ -2127,10 +2145,6 @@ where
             state.context.identity,
             state.lifecycle.clone(),
         );
-        state
-            .lifecycle
-            .attach_executor(state.context.myself.clone())
-            .await?;
         if let Err(detail) = state
             .context
             .directory
@@ -3261,7 +3275,45 @@ pub(crate) async fn spawn_local_actor_in_directory<B>(
 where
     B: KernelBehavior,
 {
-    spawn_local_actor_in_directory_with_factory(name, incarnation, directory, |_| behavior).await
+    let producer_directory = directory.clone();
+    let operation: run_control::RootOperation = Box::new(move |_ticket| {
+        Box::pin(async move {
+            let result = async {
+                let reservation = producer_directory
+                    .reserve_existing_input(incarnation)
+                    .await
+                    .map_err(|error| ractor::SpawnErr::StartupFailed(error.into()))?;
+                spawn_reserved_local_actor(name, behavior, reservation, producer_directory).await
+            }
+            .await;
+            let settlement = match &result {
+                Ok(_) => crate::CleanupComponentOutcome::Confirmed,
+                Err(error)
+                    if startup_cleanup(error).is_some_and(|cleanup| cleanup.is_confirmed()) =>
+                {
+                    crate::CleanupComponentOutcome::Confirmed
+                }
+                Err(error) => crate::CleanupComponentOutcome::Unconfirmed(format!(
+                    "prepared actor startup cleanup: {error}"
+                )),
+            };
+            (
+                result
+                    .map(|(actor, task)| run_control::RootAdmissionOutcome::Actor(actor, task))
+                    .map_err(|error| Box::new(error) as Box<dyn std::error::Error + Send + Sync>),
+                settlement,
+            )
+        })
+    });
+    match directory
+        .prepare_existing_input(operation)
+        .await
+        .map_err(|error| ractor::SpawnErr::StartupFailed(error.into()))?
+    {
+        Ok(run_control::RootAdmissionOutcome::Actor(actor, task)) => Ok((actor, task)),
+        Err(error) => Err(KernelContext::preparation_spawn_failure(error)),
+        _ => unreachable!("existing actor producer returns only actor outcomes"),
+    }
 }
 
 /// Build admission state from the original identity issued by this directory.
@@ -3309,6 +3361,9 @@ where
     B: KernelBehavior,
 {
     let identity = reservation.identity();
+    let startup_refusal = reservation
+        .cleanup_only()
+        .then_some(StartupFailureCause::MembershipClosed);
     let terminal = reservation.terminal().clone();
     let lifecycle = reservation.lifecycle().clone();
     let (address, task) = Actor::spawn(
@@ -3316,7 +3371,7 @@ where
         LocalActor::<B>(PhantomData),
         LocalActorArguments {
             spawn_ownership: SpawnOwnership::Independent,
-            startup_refusal: None,
+            startup_refusal,
             behavior: Box::new(behavior),
             startup_admission: None,
             terminal: terminal.clone(),

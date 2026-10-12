@@ -4,47 +4,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tidepool_runtime::session::{ModuleEnv, SessionLib};
 
-type Forest = ResidentForest<frunk::HNil, tidepool_mcp::CapturedOutput>;
+use super::test_forest::{Forest, TestForest as Fixture};
+
 type Behavior = ResidentKernelBehavior<frunk::HNil, tidepool_mcp::CapturedOutput>;
 
-struct Fixture {
-    forest: Arc<Forest>,
-    _deployments: mpsc::Receiver<LocalResidentDeployment>,
-    _session_root: tempfile::TempDir,
-}
-
 impl Fixture {
-    async fn new() -> Self {
-        let session_root = tempfile::tempdir().unwrap();
-        let session_id = tidepool_runtime::session::fresh_session_id();
-        let lib = SessionLib::open(
-            session_id,
-            session_root.path(),
-            ModuleEnv::standalone_default(),
-        )
-        .unwrap();
-        let session = ResidentSession::unbootstrapped(
-            frunk::HNil,
-            tidepool_mcp::CapturedOutput::new(),
-            tidepool_runtime::DEFAULT_NURSERY_SIZE,
-            Some(lib),
-        );
-        let (forest, deployments) = Forest::new(
-            ActorWorkbenchSource::new("", Vec::new()),
-            session_id,
-            session,
-            None,
-            crate::Incarnation::FIRST,
-        )
-        .await
-        .unwrap();
-        Self {
-            forest: Arc::new(forest),
-            _deployments: deployments,
-            _session_root: session_root,
-        }
-    }
-
     fn behavior(&self, descriptor: ActorDescriptor) -> Behavior {
         Behavior::with_boot(
             descriptor,
@@ -380,7 +344,10 @@ async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
         .await
         .unwrap()
         .unwrap();
-    assert!(outcomes.iter().all(crate::ForestRootShutdown::is_confirmed));
+    assert!(
+        outcomes.iter().all(crate::ForestRootShutdown::is_confirmed),
+        "actual forest shutdown: {outcomes:#?}"
+    );
     let roots = outcomes
         .into_iter()
         .filter_map(|outcome| match outcome {
@@ -392,12 +359,15 @@ async fn forest_cancels_run_owned_and_supervised_members_before_cleanup() {
     assert_eq!(roots, [parent.identity(), run_owned.identity()].into());
     assert!(child.terminal().cleanup().unwrap().is_confirmed());
     assert_eq!(cleanups.load(Ordering::Relaxed), 3);
-    let spawned_run_owned = tokio::time::timeout(Duration::from_secs(2), spawning_run_owned)
+    let refused_run_owned = tokio::time::timeout(Duration::from_secs(2), spawning_run_owned)
         .await
         .unwrap()
         .unwrap()
-        .unwrap();
-    assert_eq!(spawned_run_owned.identity(), run_owned.identity());
+        .expect_err("seal refuses startup before the behavior opens ingress");
+    let startup_cleanup = crate::local_actor::startup_cleanup(&refused_run_owned)
+        .expect("the admitted producer retains its actual startup cleanup");
+    assert_eq!(startup_cleanup.actor(), run_owned.identity());
+    assert!(startup_cleanup.is_confirmed());
     tokio::time::timeout(Duration::from_secs(2), parent_task)
         .await
         .unwrap()
@@ -439,7 +409,7 @@ async fn sealed_forest_returns_typed_actual_owner_startup_cleanup() {
         Err(error) => error,
     };
     let cleanup = crate::local_actor::startup_cleanup(&error)
-        .expect("startup refusal retains cleanup from the placement owner");
+        .unwrap_or_else(|| panic!("startup refusal retains cleanup from the placement owner; actual refusal: {error:?}; placement still live: {}", fixture.scope_is_live(placement)));
     assert!(cleanup.is_confirmed());
     assert!(forest
         .directory
@@ -457,20 +427,251 @@ async fn sealed_forest_returns_typed_actual_owner_startup_cleanup() {
         Ok(_) => panic!("sealed forest admitted a late workbench"),
         Err(error) => error,
     };
-    let error = error
-        .downcast_ref::<ractor::SpawnErr>()
-        .expect("preserve the typed startup refusal");
-    assert!(crate::local_actor::startup_cleanup(error)
-        .expect("the actual startup owner cleaned its placement")
-        .is_confirmed());
+    assert!(
+        matches!(
+            error.downcast_ref::<crate::local_actor::DirectoryError>(),
+            Some(crate::local_actor::DirectoryError::Closed)
+        ),
+        "late workbench is refused at reservation before native preparation: {error:?}"
+    );
+    assert!(forest.environment.actors.lock().is_empty());
+    assert!(!fixture.scope_is_live(placement));
     let outcomes = forest.shutdown().await;
-    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "sealed prepared shutdown outcomes: {outcomes:?}"
+    );
     assert!(matches!(
         outcomes.as_slice(),
         [crate::ForestRootShutdown::RunResources(
             crate::CleanupComponentOutcome::Confirmed
         )]
     ));
+}
+
+#[tokio::test]
+async fn stopped_lifecycle_owner_still_cleans_prepared_native_input_without_confirming_run() {
+    let fixture = Fixture::new().await;
+    let forest = &fixture.forest;
+    let placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    assert!(fixture.scope_is_live(placement));
+    assert!(forest
+        .directory
+        .seal()
+        .await
+        .unwrap()
+        .cancel_all(ActorTerminal::new(
+            ActorExitKind::Cancelled,
+            "owner-loss fault control"
+        ))
+        .await
+        .into_roots()
+        .is_empty());
+    let reservation = forest
+        .directory
+        .reserve_existing_input(forest.incarnation)
+        .await
+        .unwrap();
+    assert!(reservation.cleanup_only());
+    let identity = reservation.identity();
+    reservation.lifecycle().stop_owner_for_test().await;
+    let error = match crate::local_actor::spawn_reserved_local_actor(
+        None,
+        fixture.behavior(ActorDescriptor::new("lost-lifecycle", placement)),
+        reservation,
+        forest.directory.clone(),
+    )
+    .await
+    {
+        Ok(_) => panic!("stopped lifecycle owner admitted prepared input"),
+        Err(error) => error,
+    };
+    let cause = match &error {
+        ractor::SpawnErr::StartupFailed(error) => error
+            .source()
+            .and_then(|source| source.downcast_ref::<crate::local_actor::StartupFailureCause>()),
+        _ => None,
+    };
+    assert!(
+        matches!(
+            cause,
+            Some(crate::local_actor::StartupFailureCause::Lifecycle(_))
+        ),
+        "actual lifecycle refusal is retained: {error:?}"
+    );
+    let cleanup = crate::local_actor::startup_cleanup(&error)
+        .expect("actual prepared placement cleanup survives lifecycle owner loss");
+    assert_eq!(cleanup.actor(), identity);
+    assert!(matches!(
+        cleanup.hook(),
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    assert!(matches!(
+        cleanup.realm(),
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    assert!(matches!(
+        cleanup.children(),
+        crate::CleanupComponentOutcome::Unconfirmed(_)
+    ));
+    assert!(!cleanup.is_confirmed());
+    assert!(!fixture.scope_is_live(placement));
+    assert!(forest.directory.resolve(identity).await.unwrap().is_none());
+    assert!(matches!(
+        forest
+            .directory
+            .settle_preparations(Duration::from_secs(2))
+            .await,
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    assert!(matches!(
+        forest.directory.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    assert!(
+        forest.directory.finish_run().await.is_err(),
+        "physical coordinator stop alone cannot certify run finalization"
+    );
+}
+
+#[tokio::test]
+async fn refused_invocation_child_retains_physical_cleanup_before_run_finalization() {
+    let fixture = Fixture::new().await;
+    let forest = &fixture.forest;
+    let parent = forest
+        .new_workbench(
+            "invocation-parent".into(),
+            crate::ActorCapabilities::default(),
+        )
+        .await
+        .unwrap();
+    let kernel = forest
+        .directory
+        .context(parent.identity())
+        .await
+        .unwrap()
+        .unwrap();
+    let work =
+        invocation_work::InvocationWork::new(parent.identity(), RequestReservationOwner::Scope(0));
+    assert!(work
+        .cleanup(&forest.environment, &kernel)
+        .await
+        .uncertainty()
+        .is_none());
+    let placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    assert!(fixture.scope_is_live(placement));
+    let error = match kernel
+        .spawn_worker_scoped(
+            None,
+            fixture.behavior(ActorDescriptor::new("closed-invocation-child", placement)),
+            crate::WorkerLifetime::RunOwned,
+            work,
+        )
+        .await
+    {
+        Ok(_) => panic!("closed actual invocation ledger admitted a child"),
+        Err(error) => error,
+    };
+    let cause = match &error {
+        ractor::SpawnErr::StartupFailed(error) => error
+            .source()
+            .and_then(|source| source.downcast_ref::<crate::local_actor::StartupFailureCause>()),
+        _ => None,
+    };
+    assert!(
+        matches!(
+            cause,
+            Some(crate::local_actor::StartupFailureCause::Reservation(_))
+        ),
+        "production invocation owner refusal retained: {error:?}"
+    );
+    let cleanup =
+        crate::local_actor::startup_cleanup(&error).expect("actual child startup cleanup retained");
+    assert!(cleanup.is_confirmed());
+    assert!(!fixture.scope_is_live(placement));
+    assert!(forest
+        .directory
+        .resolve(cleanup.actor())
+        .await
+        .unwrap()
+        .is_none());
+    let outcomes = forest.shutdown().await;
+    assert!(
+        outcomes.iter().all(crate::ForestRootShutdown::is_confirmed),
+        "actual refused child finalization outcomes: {outcomes:?}"
+    );
+}
+
+#[tokio::test]
+async fn seal_overtaking_issued_worker_still_retains_actual_cleanup_executor() {
+    let fixture = Fixture::new().await;
+    let forest = &fixture.forest;
+    let parent = forest
+        .new_workbench("seal-parent".into(), crate::ActorCapabilities::default())
+        .await
+        .unwrap();
+    let kernel = forest
+        .directory
+        .context(parent.identity())
+        .await
+        .unwrap()
+        .unwrap();
+    let reservation = kernel
+        .reserve_worker_creation(crate::WorkerLifetime::RunOwned)
+        .await
+        .unwrap();
+    let identity = reservation.identity();
+    let placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    assert!(fixture.scope_is_live(placement));
+    forest.directory.seal().await.unwrap();
+    let error = match crate::local_actor::spawn_reserved_local_actor(
+        None,
+        fixture.behavior(ActorDescriptor::new("issued-before-seal", placement)),
+        reservation,
+        forest.directory.clone(),
+    )
+    .await
+    {
+        Ok(_) => panic!("sealed run published an issued worker"),
+        Err(error) => error,
+    };
+    let cause = match &error {
+        ractor::SpawnErr::StartupFailed(error) => error
+            .source()
+            .and_then(|source| source.downcast_ref::<crate::local_actor::StartupFailureCause>()),
+        _ => None,
+    };
+    assert!(
+        matches!(cause, Some(crate::local_actor::StartupFailureCause::Lifecycle(crate::KernelCallFailure::MailboxClosed(actor))) if *actor == identity),
+        "actual closed lifecycle attachment refused: {error:?}"
+    );
+    let cleanup = crate::local_actor::startup_cleanup(&error)
+        .expect("actual prepared worker cleanup retained");
+    assert_eq!(cleanup.actor(), identity);
+    assert!(cleanup.is_confirmed());
+    assert!(!fixture.scope_is_live(placement));
+    assert!(forest.directory.resolve(identity).await.unwrap().is_none());
+    let outcomes = forest.shutdown().await;
+    assert!(
+        outcomes.iter().all(crate::ForestRootShutdown::is_confirmed),
+        "issued worker cleanup/finalization: {outcomes:?}"
+    );
 }
 
 #[tokio::test]
