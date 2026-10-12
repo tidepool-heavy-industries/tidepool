@@ -302,20 +302,9 @@ impl exomonad_actor::RootBindingAdapter for EmbeddedRootBinding {
                     None
                 }
                 EmbeddedBindingOrigin::Successor(admission) => {
-                    let predecessor = claim.predecessor_owner().map_err(|e| e.to_string())?;
-                    if admission.operation() != claim.operation()
-                        || admission.successor().actor() != actor
-                        || admission.successor().placement() != claim.successor_placement()
-                        || admission.successor().owner() != claim.successor_owner()
-                        || !admission
-                            .validate_successor(
-                                &self.run_root,
-                                predecessor,
-                                claim.successor_owner(),
-                                claim.successor_placement().session,
-                                claim.successor_placement().lexical_scope,
-                            )
-                            .map_err(|e| e.to_string())?
+                    if !admission
+                        .validate_binding_claim(&self.run_root, claim)
+                        .map_err(|e| e.to_string())?
                     {
                         return Err(
                             "successor binding differs from certified native placement".into()

@@ -98,7 +98,50 @@ impl DurableRootSuccessorAdmission {
                  ApplicationConversation::Embedded {run: new_run, agent_path: new_path, ..})
                  if old_run == new_run && old_path == new_path))
     }
+    /// Match immutable certification to the still-owned binding operation.
+    /// Native transfer has already consumed the predecessor manifest owner;
+    /// lifecycle settlement separately checks committed successor readiness.
+    pub fn validate_binding_claim(
+        &self,
+        run_root: &Path,
+        claim: &crate::RootBindingOperationClaim,
+    ) -> std::io::Result<bool> {
+        let Ok(predecessor) = claim.predecessor_owner() else {
+            return Ok(false);
+        };
+        if self.operation != claim.operation()
+            || self.successor.actor() != claim.successor_actor()
+            || self.successor.placement() != claim.successor_placement()
+        {
+            return Ok(false);
+        }
+        self.validate_successor_identity(
+            run_root,
+            predecessor,
+            claim.successor_owner(),
+            claim.successor_placement().session,
+            claim.successor_placement().lexical_scope,
+        )
+    }
+
     pub fn validate_successor(
+        &self,
+        run_root: &Path,
+        predecessor: &tidepool_runtime::session::RecoveryPublicOwner,
+        successor: &tidepool_runtime::session::RecoveryPublicOwner,
+        session: tidepool_repr::SessionId,
+        target: tidepool_codegen::scope::ScopeId,
+    ) -> std::io::Result<bool> {
+        if !self.validate_successor_identity(run_root, predecessor, successor, session, target)? {
+            return Ok(false);
+        }
+        let manifest = self.manifest.as_ref().ok_or_else(|| {
+            std::io::Error::other("successor startup has no exact manifest revision pin")
+        })?;
+        manifest.validate(&run_root.canonicalize()?)
+    }
+
+    fn validate_successor_identity(
         &self,
         run_root: &Path,
         predecessor: &tidepool_runtime::session::RecoveryPublicOwner,
@@ -124,12 +167,6 @@ impl DurableRootSuccessorAdmission {
                         .ok_or_else(|| std::io::Error::other("journal has no file name"))?,
                 )
         {
-            return Ok(false);
-        }
-        let manifest = self.manifest.as_ref().ok_or_else(|| {
-            std::io::Error::other("successor startup has no exact manifest revision pin")
-        })?;
-        if !manifest.validate(&run_root)? {
             return Ok(false);
         }
         Ok(&self.predecessor_owner == predecessor)
@@ -3202,6 +3239,16 @@ mod tests {
                 ScopeId(1)
             )
             .unwrap());
+        assert!(
+            proof.validate_binding_claim(run.path(), &claim).unwrap(),
+            "binding uses issued identity after the manifest advances"
+        );
+        assert!(
+            !proof
+                .validate_binding_claim(tempfile::tempdir().unwrap().path(), &claim)
+                .unwrap(),
+            "binding still rejects another run"
+        );
         claim.refuse().await.unwrap();
         kernel_task.abort();
         let _ = kernel_task.await;
