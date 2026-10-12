@@ -286,7 +286,7 @@ impl Drop for ActorReservation {
     }
 }
 enum ReservationPurpose {
-    CleanupOnly,
+    ExistingInput,
     Root,
     Worker { parent: ActorRef },
     Replacement { predecessor: ActorRef },
@@ -1668,7 +1668,7 @@ impl Actor for RunControl {
                         Ok(lifecycle) => {
                             record.lifecycle = Some(lifecycle.clone());
                             if (state.phase != RunPhase::Running
-                                && !matches!(record.purpose, ReservationPurpose::CleanupOnly))
+                                && !matches!(record.purpose, ReservationPurpose::ExistingInput))
                                 || matches!(
                                     record.phase,
                                     ReservationPhase::Abandoned | ReservationPhase::Abandoning
@@ -1683,10 +1683,11 @@ impl Actor for RunControl {
                                 record.phase = ReservationPhase::Ready;
                                 if let Some(reply) = record.reply.take() {
                                     let _ = reply.send(Ok(ActorReservation {
-                                        cleanup_only: matches!(
-                                            record.purpose,
-                                            ReservationPurpose::CleanupOnly
-                                        ),
+                                        cleanup_only: state.phase != RunPhase::Running
+                                            && matches!(
+                                                record.purpose,
+                                                ReservationPurpose::ExistingInput
+                                            ),
                                         parent_admission: None,
                                         identity: actor,
                                         terminal: record.terminal.clone(),
@@ -1750,11 +1751,7 @@ impl Actor for RunControl {
                         }
                     };
                     state.identities.claimed.insert(actor.id, actor);
-                    let purpose = if state.phase == RunPhase::Running {
-                        ReservationPurpose::Root
-                    } else {
-                        ReservationPurpose::CleanupOnly
-                    };
+                    let purpose = ReservationPurpose::ExistingInput;
                     begin_reservation(state, actor, purpose, reply);
                 }
             }
