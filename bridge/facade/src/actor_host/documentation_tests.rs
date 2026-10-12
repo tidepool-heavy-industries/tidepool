@@ -1422,9 +1422,18 @@ async fn persona_and_helper_lookup_deliver_pinned_skills_with_state_files_confin
                         );
                         assert_eq!(
                             actual[1].as_str(),
-                            Some(canonical.chars().take(256).collect::<String>().as_str()),
+                            Some(canonical.chars().take(32).collect::<String>().as_str()),
                             "helper={helper}"
                         );
+                        let suffix: String = canonical
+                            .chars()
+                            .rev()
+                            .take(32)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        assert_eq!(actual[2].as_str(), Some(suffix.as_str()), "helper={helper}");
                     }
                     assert!(docs[expected.len()..]
                         .iter()
