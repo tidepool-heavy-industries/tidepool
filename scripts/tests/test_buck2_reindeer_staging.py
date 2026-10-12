@@ -34,7 +34,7 @@ pathlib.Path(__file__).resolve().parents[1].joinpath('received-feature-args').wr
 if os.environ.get('FAIL_GENERATOR'):
     raise SystemExit(17)
 (out / 'Cargo.toml').write_text('staged manifest' + chr(10))
-(out / 'Cargo.lock').write_text('staged lock' + chr(10))
+(out / 'Cargo.lock').write_text(pathlib.Path(__file__).resolve().parents[1].joinpath('Cargo.lock').read_text() if os.environ.get('MATCHED_HARNESS') else 'staged lock' + chr(10))
 """
         )
         rust = self.root / "third-party/rust"
@@ -65,6 +65,7 @@ elif os.environ.get('MATCHED_HARNESS'):
              ')\\n'
              'cargo.rust_library(\\n'
              '    name = "harness-0.1",\\n'
+             '    env = {"CARGO_PKG_NAME": "harness", "CARGO_PKG_VERSION": "0.1.0"},\\n'
              '    srcs = [":harness-source.git"],\\n'
              '    crate_root = "harness-source/crates/harness/src/lib.rs",\\n'
              ')\\n')
@@ -331,6 +332,118 @@ else:
         self.assertIn('srcs = [":harness-source"]', web_group)
         self.assertNotIn('srcs = [":harness-source.git"]', web_group)
         self.assertIn('source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=0123456789abcdef0123456789abcdef01234567#0123456789abcdef0123456789abcdef01234567"', (self.root / "Cargo.lock").read_text())
+
+    def shared_harness_leaves(self):
+        (self.root / ".buckconfig.local").write_text(f"[nix]\nmatched_harness_source = {self.expected_source}\n")
+        revision = "0123456789abcdef0123456789abcdef01234567"
+        lock = self.root / "Cargo.lock"
+        for name in ("harness-schema", "harness-presentation"):
+            with lock.open("a") as stream:
+                stream.write(f'[[package]]\nname = "{name}"\nversion = "0.1.0"\nsource = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev={revision}#{revision}"\n')
+        fake = self.root / "bin/reindeer"
+        text = fake.read_text()
+        text = text.replace("Path('BUCK').write_text(value)", """for package in ('harness-schema', 'harness-presentation'):
+    value += ('cargo.rust_library(\\n'
+              f'    name = "{package}-0.1",\\n'
+              f'    env = {{"CARGO_PKG_NAME": "{package}", "CARGO_PKG_VERSION": "0.1.0"}},\\n'
+              '    srcs = [":harness-source.git"],\\n'
+              f'    crate_root = "harness-source/crates/{package}/src/lib.rs",\\n'
+              ')\\n')
+Path('BUCK').write_text(value)""")
+        fake.write_text(text)
+
+    def test_shared_locked_leaf_consumers_use_one_checked_source(self):
+        self.shared_harness_leaves()
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck = (self.root / "third-party/rust/BUCK").read_text()
+        self.assertEqual(buck.count('checked_harness_source('), 1)
+        self.assertEqual(buck.count('srcs = [":harness-source"]'), 4)
+        self.assertNotIn('srcs = [":harness-source.git"]', buck)
+
+    def test_shared_locked_leaf_consumers_default_git_mode(self):
+        self.shared_harness_leaves()
+        result = self.run_script(MATCHED_HARNESS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck = (self.root / "third-party/rust/BUCK").read_text()
+        self.assertEqual(buck.count('git_fetch('), 1)
+        self.assertEqual(buck.count('checked_harness_source('), 1)
+        self.assertEqual(buck.count('srcs = [":harness-source"]'), 4)
+        self.assertNotIn('srcs = [":harness-source.git"]', buck)
+
+    def test_missing_locked_leaf_consumer_refuses_before_publication(self):
+        self.shared_harness_leaves()
+        fake = self.root / "bin/reindeer"
+        fake.write_text(fake.read_text().replace("('harness-schema', 'harness-presentation')", "('harness-schema',)"))
+        before = self.contents()
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("generated consumers differ from locked Harness packages", result.stderr)
+        self.assertEqual(self.contents(), before)
+
+    def test_unlocked_consumer_refuses_before_publication(self):
+        self.shared_harness_leaves()
+        fake = self.root / "bin/reindeer"
+        fake.write_text(fake.read_text().replace("('harness-schema', 'harness-presentation')", "('harness-schema', 'harness-presentation', 'unknown')"))
+        before = self.contents()
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("generated consumers differ from locked Harness packages", result.stderr)
+        self.assertEqual(self.contents(), before)
+
+    def test_shared_consumer_path_cannot_escape_checked_source(self):
+        self.shared_harness_leaves()
+        fake = self.root / "bin/reindeer"
+        fake.write_text(fake.read_text().replace('harness-source/crates/{package}', 'harness-source/../crates/{package}'))
+        before = self.contents()
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("generated consumer lacks locked package or source layout", result.stderr)
+        self.assertEqual(self.contents(), before)
+
+    def test_source_consumers_follow_selected_lock_after_dependency_pruning(self):
+        self.shared_harness_leaves()
+        fake = self.root / "bin/reindeer"
+        fake.write_text(fake.read_text().replace("('harness-schema', 'harness-presentation')", "()"))
+        generator = self.root / "scripts/buck2-dependencies.py"
+        generator.write_text(generator.read_text() + "\np = out / 'Cargo.lock'\np.write_text(p.read_text().split('[[package]]')[0] + '[[package]]' + p.read_text().split('[[package]]')[1])\n")
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        buck = (self.root / "third-party/rust/BUCK").read_text()
+        self.assertEqual(buck.count('srcs = [":harness-source"]'), 2)
+
+    def test_duplicate_shared_consumer_identity_refuses(self):
+        self.shared_harness_leaves()
+        fake = self.root / "bin/reindeer"
+        fake.write_text(fake.read_text().replace("('harness-schema', 'harness-presentation')", "('harness-schema', 'harness-presentation', 'harness-schema')"))
+        before = self.contents()
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("generated consumers differ", result.stderr)
+        self.assertEqual(self.contents(), before)
+
+    def test_shared_consumer_version_mismatch_refuses(self):
+        self.shared_harness_leaves()
+        fake = self.root / "bin/reindeer"
+        fake.write_text(fake.read_text().replace('"CARGO_PKG_VERSION": "0.1.0"', '"CARGO_PKG_VERSION": "0.2.0"'))
+        before = self.contents()
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("generated consumers differ", result.stderr)
+        self.assertEqual(self.contents(), before)
+
+    def test_shared_consumers_with_different_source_revisions_refuse(self):
+        self.shared_harness_leaves()
+        lock = self.root / "Cargo.lock"
+        text = lock.read_text()
+        original = "0123456789abcdef0123456789abcdef01234567"
+        index = text.index('name = "harness-schema"')
+        lock.write_text(text[:index] + text[index:].replace(original, "9" * 40))
+        before = self.contents()
+        result = self.run_script("--local-harness-source", MATCHED_HARNESS="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Harness packages disagree on the locked source", result.stderr)
+        self.assertEqual(self.contents(), before)
 
     def test_default_mode_retains_standard_git_fetch(self):
         result = self.run_script(MATCHED_HARNESS="1")

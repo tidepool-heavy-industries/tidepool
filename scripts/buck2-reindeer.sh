@@ -53,7 +53,7 @@ if [[ -n $harness_source_override && $local_harness_source != 1 ]]; then
   exit 2
 fi
 python3 - "$checking" "$local_harness_source" "$harness_source_override" "${dependency_args[@]}" <<'PY'
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import configparser
 import json
 import os
@@ -167,7 +167,7 @@ def add_import(buck, statement):
         raise SystemExit('Generated Buck rules lack their configured imports')
     return buck[:first.start()] + statement + '\n' + buck[first.start():]
 
-def guard_harness_source(buck):
+def guard_harness_source(buck, selected_lock):
     rev, nar_hash = parse_harness_lock()
     expected_source_path = None
     if local_harness_source:
@@ -229,9 +229,31 @@ def guard_harness_source(buck):
     else:
         buck += '\n' + rendered + '\n'
     source_reference = f'srcs = [":{fetch_name}"]'
-    if buck.count(source_reference) != 1:
-        raise SystemExit('Cannot select matched harness source: expected one harness crate source reference')
-    buck = buck.replace(source_reference, f'srcs = [":{directory_name}"]', 1)
+    canonical_source = f'git+{HARNESS_REPO}?rev={rev}#{rev}'
+    locked_packages = [package for package in tomllib.loads(selected_lock.read_text())['package']
+                       if package.get('source', '').startswith('git+' + HARNESS_REPO + '?')]
+    if any(package['source'] != canonical_source for package in locked_packages):
+        raise SystemExit('Cannot select matched harness source: Harness packages disagree on the locked source')
+    expected = {(package['name'], package['version']) for package in locked_packages}
+    consumers = [body for body in re.findall(r'(?:tidepool_cargo_rust_library|cargo\.rust_library)\(\n(.*?)\n\)', buck, re.DOTALL)
+                 if source_reference in body]
+    observed = []
+    target_names = []
+    for body in consumers:
+        package = re.search(r'"CARGO_PKG_NAME": "([^\"]+)"', body)
+        version = re.search(r'"CARGO_PKG_VERSION": "([^\"]+)"', body)
+        crate_root = re.search(r'crate_root = "([^\"]+)"', body)
+        target = re.search(r'name = "([^\"]+)"', body)
+        path = PurePosixPath(crate_root.group(1)) if crate_root else None
+        if not package or not version or not target or path == None or path.as_posix() != crate_root.group(1) or '..' in path.parts or '\\' in crate_root.group(1) or not crate_root.group(1).startswith(directory_name + '/'):
+            raise SystemExit('Cannot select matched harness source: generated consumer lacks locked package or source layout')
+        if package.group(1) == 'harness' and crate_root.group(1) != directory_name + '/crates/harness/src/lib.rs':
+            raise SystemExit('Cannot select matched harness source: generated harness consumer root layout changed')
+        observed.append((package.group(1), version.group(1)))
+        target_names.append(target.group(1))
+    if set(observed) != expected or len(observed) != len(expected) or len(set(target_names)) != len(target_names) or buck.count(source_reference) != len(expected):
+        raise SystemExit('Cannot select matched harness source: generated consumers differ from locked Harness packages')
+    buck = buck.replace(source_reference, f'srcs = [":{directory_name}"]')
     buck = add_import(buck, 'load("@toolchains//:tidepool.bzl", "checked_harness_source")')
     return buck, directory_name
 with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
@@ -252,7 +274,7 @@ with tempfile.TemporaryDirectory(prefix='tidepool-buck-deps-') as temporary:
     buck = (stage / 'BUCK').read_text()
     harness_fetch = None
     if local_harness_source or any(f'repo = "{HARNESS_REPO}"' in stanza for stanza in re.findall(r'git_fetch\(\n(.*?)\n\)', buck, re.DOTALL)):
-        buck, harness_fetch = guard_harness_source(buck)
+        buck, harness_fetch = guard_harness_source(buck, stage / 'Cargo.lock')
     harness_web_source = harness_fetch
     if harness_fetch:
         if 'load("@prelude//:rules.bzl", "alias", "filegroup")' not in buck:
