@@ -48,3 +48,13 @@ thread holds that existing run lease through bootstrap, queued writes and exit,
 including when the opening waiter disappears. Standalone test journals retain
 their temporary-directory owner. This keepalive does not issue authority and
 adds no lock or registry; facade callers supply their existing lifetime owner.
+
+Boot recovery consumes a trusted host adapter before exposing the writer. The
+writer validates the actual exclusive run authority, freezes only initial actor
+membership, and issues a non-cloneable issuer-bound JournalBootRegistration.
+RunControl consumes it once before reservations; later current-host appends never
+enter that membership. Actor and host incarnation numbers are independent.
+
+Actor lineage tests establish journal facts and authenticated admission. Complete
+native owner transfer, actual Store binding, final claim settlement and admission
+of the next successor require facade acceptance through its real bind adapter.
