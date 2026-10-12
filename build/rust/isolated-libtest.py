@@ -1438,6 +1438,14 @@ def main(argv=None):
                 print(f'libtest runner interrupted by signal {INTERRUPT_SIGNAL}', file=sys.stderr)
                 return 128 + INTERRUPT_SIGNAL
             print(f'libtest selection failed: {error}', file=sys.stderr)
+            if isinstance(error, subprocess.TimeoutExpired):
+                for label, output in (('stdout', error.output), ('stderr', error.stderr)):
+                    if output:
+                        data = output if isinstance(output, bytes) else output[:OUTPUT_LIMIT + 1].encode()
+                        print(f'Discovery {label}:\n' + data[:OUTPUT_LIMIT].decode(errors='replace'),
+                              file=sys.stderr)
+                        if len(data) > OUTPUT_LIMIT:
+                            print(f'Discovery {label} truncated to {OUTPUT_LIMIT} bytes', file=sys.stderr)
             return 1
         if INTERRUPT_SIGNAL is not None:
             print(f'libtest runner interrupted by signal {INTERRUPT_SIGNAL}', file=sys.stderr)

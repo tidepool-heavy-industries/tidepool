@@ -2865,6 +2865,48 @@ class IsolatedLibtestTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn('libtest selection failed', errors)
 
+    def test_discovery_timeout_reports_original_diagnostics_and_reaps_child(self):
+        pid_file = Path(self.tmp.name) / 'discovery.pid'
+        self.binary.write_text('#!' + sys.executable + '\n' +
+            'import os, pathlib, sys, time\n' +
+            f'pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n' +
+            'print("listing started", flush=True)\n' +
+            'print("required runtime input unavailable", file=sys.stderr, flush=True)\n' +
+            'time.sleep(60)\n')
+        self.binary.chmod(0o700)
+        errors = io.StringIO()
+        with patch.object(runner, 'DISCOVERY_TIMEOUT', 0.5), \
+             contextlib.redirect_stderr(errors):
+            result = runner.main([str(self.binary)])
+        self.assertEqual(result, 1)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), 0)
+        self.assertFalse(runner.ACTIVE_PROCESSES)
+        diagnostic = errors.getvalue()
+        self.assertIn('libtest selection failed', diagnostic)
+        self.assertIn(str(self.binary), diagnostic)
+        self.assertIn('0.5 seconds', diagnostic)
+        self.assertIn('listing started', diagnostic)
+        self.assertIn('required runtime input unavailable', diagnostic)
+
+    def test_discovery_timeout_bounds_and_decodes_partial_streams(self):
+        for binary_streams in (True, False):
+            with self.subTest(binary_streams=binary_streams):
+                output = b'listing\xff\n'
+                stderr = b'root cause\xff\n' + b'x' * 64 + b'outside limit'
+                if not binary_streams:
+                    output, stderr = (value.decode(errors='replace') for value in (output, stderr))
+                def timeout(argv, timeout):
+                    raise subprocess.TimeoutExpired(argv, timeout, output=output, stderr=stderr)
+
+                with patch.object(runner, 'OUTPUT_LIMIT', 32):
+                    result, _, errors = self.invoke([], timeout)
+                self.assertEqual(result, 1)
+                self.assertIn('listing\ufffd', errors)
+                self.assertIn('root cause\ufffd', errors)
+                self.assertIn('stderr truncated to 32 bytes', errors)
+                self.assertNotIn('outside limit', errors)
+
     def test_discovery_and_ignored_inventory_are_validated(self):
         def malformed(argv, timeout):
             if '--ignored' in argv:
