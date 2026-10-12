@@ -729,6 +729,7 @@ impl Actor for RunControl {
                     Err(DirectoryError::Closed)
                 } else if !state.entries.contains_key(&predecessor)
                     || !state.entries.contains_key(&successor)
+                    || !state.reservations.get(&successor).is_some_and(|record| matches!(record.purpose, ReservationPurpose::Replacement { predecessor: issued } if issued == predecessor))
                 {
                     Err(DirectoryError::Unauthorized { actor: successor })
                 } else if let Some(record) = state.reservations.get(&successor) {
@@ -1366,6 +1367,25 @@ impl Actor for RunControl {
                     .is_some_and(|entry| entry.actor.terminal().get().is_some());
                 if terminal {
                     if let Some(entry) = state.entries.remove(&actor) {
+                        if let SpawnOwnership::Supervised(parent) = entry.spawn_ownership {
+                            let outcome = match entry.actor.terminal().cleanup() {
+                                Some(cleanup)
+                                    if cleanup.actor == actor && cleanup.is_confirmed() =>
+                                {
+                                    crate::CleanupComponentOutcome::Confirmed
+                                }
+                                cleanup => crate::CleanupComponentOutcome::Unconfirmed(format!(
+                                    "forgotten child {actor} cleanup: {cleanup:?}"
+                                )),
+                            };
+                            let prior = state
+                                .child_cleanup
+                                .remove(&parent)
+                                .unwrap_or(crate::CleanupComponentOutcome::Confirmed);
+                            state
+                                .child_cleanup
+                                .insert(parent, combine_cleanup(prior, outcome));
+                        }
                         state
                             .identities
                             .runtime
