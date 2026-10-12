@@ -2533,3 +2533,72 @@ async fn borrowed_worker_transfer_refuses_before_membership_callback() {
     other.finish().await;
     fixture.finish().await;
 }
+
+#[tokio::test]
+async fn abandoned_command_transfer_reservation_preserves_actor_cleanup() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let work = InvocationWork::new(owner, reservation());
+    let (job, backend) = fixture.pending_command().await;
+    work.register_command_with_jobs(jobs, &job).unwrap();
+    let transfer = jobs
+        .reserve_cleanup_owner_transfer(
+            &fixture.kernel,
+            owner,
+            &job,
+            &work.resource_cleanup_owner(),
+            ResourceCleanupOwner::Run,
+        )
+        .await
+        .unwrap();
+    drop(transfer);
+    assert_eq!(
+        jobs.cleanup_owner(owner, &job).unwrap(),
+        work.resource_cleanup_owner()
+    );
+    fixture.cleanup(&work).await;
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    fixture.finish().await;
+}
+
+#[tokio::test]
+async fn submitted_command_transfer_survives_unpolled_completion_drop() {
+    let fixture = Fixture::start().await;
+    let owner = fixture.actor.identity();
+    let jobs = &fixture.environment.commands;
+    let (job, backend) = fixture.pending_command().await;
+    let transfer = jobs
+        .reserve_cleanup_owner_transfer(
+            &fixture.kernel,
+            owner,
+            &job,
+            &ResourceCleanupOwner::Actor,
+            ResourceCleanupOwner::Run,
+        )
+        .await
+        .unwrap();
+    let ((), completion) = transfer.publish(|_| ()).unwrap();
+    drop(completion);
+    assert_eq!(
+        jobs.cleanup_owner(owner, &job).unwrap(),
+        ResourceCleanupOwner::Run
+    );
+    let retired = fixture
+        .actor
+        .shutdown_with_cleanup(ActorTerminal {
+            kind: ActorExitKind::Cancelled,
+            summary: "command transfer observer dropped".into(),
+            diagnostic: None,
+        })
+        .await
+        .unwrap();
+    assert!(retired.cleanup.is_confirmed());
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
+    assert_eq!(
+        fixture.directory.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Confirmed
+    );
+    assert_eq!(backend.cancellations.load(Ordering::Relaxed), 1);
+    fixture.finish().await;
+}
