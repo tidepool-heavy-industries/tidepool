@@ -415,6 +415,11 @@ impl ActorRecoveryJournal {
                         }
                         match command {
                             #[cfg(test)]
+                            Command::Pause { entered, resume } => {
+                                let _ = entered.send(());
+                                let _ = resume.recv();
+                            }
+                            #[cfg(test)]
                             Command::Crash { reply: _reply } => {
                                 panic!("injected journal owner crash")
                             }
@@ -759,6 +764,11 @@ impl ActorRecoveryJournal {
 }
 
 enum Command {
+    #[cfg(test)]
+    Pause {
+        entered: tokio::sync::oneshot::Sender<()>,
+        resume: std::sync::mpsc::Receiver<()>,
+    },
     #[cfg(test)]
     Crash {
         reply: tokio::sync::oneshot::Sender<()>,
@@ -2718,6 +2728,16 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl").unwrap();
+        let (entered_tx, entered) = tokio::sync::oneshot::channel();
+        let (resume, paused) = std::sync::mpsc::channel();
+        journal
+            .commands
+            .send(Command::Pause {
+                entered: entered_tx,
+                resume: paused,
+            })
+            .unwrap();
+        entered.await.unwrap();
         let actor = ActorRef::first(ActorId(51));
         let admission = DurableActorAdmission::capture(actor, &descriptor("owner"), &[]);
         let (reply, abandoned) = tokio::sync::oneshot::channel();
@@ -2730,6 +2750,10 @@ mod tests {
             })
             .unwrap();
         drop(abandoned);
+        // The admitted write is still queued behind a controlled overlap.
+        // A current-thread async caller continues while the blocking owner waits.
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        resume.send(()).unwrap();
         assert_eq!(journal.records().await.unwrap()[0].admission.actor, actor);
         let mut status = journal.owner_status();
         drop(journal);
