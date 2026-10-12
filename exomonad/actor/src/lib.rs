@@ -32,9 +32,14 @@ pub use forms::{FormHost, FormPublication};
 mod generated;
 mod hosted_lifecycle;
 mod identity;
-mod interactive_session;
 mod initial_context;
-pub use initial_context::{ContextSection, InitialContextIdentity, InitialContextObservation, InitialContextPublication, InitialContextState, RetainedContextSeed};
+#[cfg(test)]
+mod initial_context_properties;
+mod interactive_session;
+pub use initial_context::{
+    ContextSection, InitialContextIdentity, InitialContextObservation, InitialContextPublication,
+    InitialContextState, RetainedContextSeed,
+};
 mod jev;
 pub use jev::{
     failed_jev_client_setup, unconfigured_jev, JevBackend, JevBackendHandle, JevCallFailure,
@@ -47,10 +52,10 @@ pub(crate) mod lookup_tool;
 mod mailbox;
 mod mount;
 mod notification;
+mod owned_result;
 mod prompt_catalog;
 pub(crate) mod reload_helpers_tool;
 pub(crate) mod reload_spec_tool;
-mod owned_result;
 mod request;
 pub use request::sources::SourceDelivery;
 mod recovery;

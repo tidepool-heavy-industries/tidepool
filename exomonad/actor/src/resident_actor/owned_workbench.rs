@@ -349,7 +349,10 @@ pub(super) struct WorkbenchUnitStart {
 }
 
 pub(super) enum WorkbenchUnitStartRequest {
-    InitialContext { dispatch: Arc<RootCustody>, input: serde_json::Value },
+    InitialContext {
+        dispatch: Arc<RootCustody>,
+        input: serde_json::Value,
+    },
     Tool {
         dispatch: Arc<RootCustody>,
         name: String,
@@ -373,7 +376,9 @@ where
     async {
         match start.request {
             WorkbenchUnitStartRequest::InitialContext { dispatch, input } => {
-                workbench.begin_initial_context(context, dispatch, input).await
+                workbench
+                    .begin_initial_context(context, dispatch, input)
+                    .await
             }
             WorkbenchUnitStartRequest::Tool {
                 dispatch,
@@ -2540,6 +2545,30 @@ where
                 })
             },
             |behavior, _kernel, mut owned, result| {
+                if owned.state.effects.initial_context {
+                    if let Err(error) = behavior.retain_initial_context_execution(
+                        owned.state.effects.context.actor,
+                        &result.result,
+                    ) {
+                        return Err(KernelInvocationFailure::CleanupUnconfirmed {
+                            actor: owned.state.effects.context.actor,
+                            detail: format!(
+                                "initial context result retention remains uncertain: {error}"
+                            ),
+                            publication: None,
+                            receipts: result.result.as_ref().map_or_else(
+                                |failure| failure.receipts().to_vec(),
+                                |step| match step {
+                                    KernelStep::Continue(response)
+                                    | KernelStep::ContinueLater(response)
+                                    | KernelStep::Stop {
+                                        output: response, ..
+                                    } => response.items.clone(),
+                                },
+                            ),
+                        });
+                    }
+                }
                 let (result, notifications) =
                     behavior.complete_workbench_finalization(&mut owned.state, result);
                 if !notifications.is_empty()

@@ -160,13 +160,13 @@ fn validate_row(
         }
         match key {
             ToolEffectKey::ContextReadWrite if scheduling == ToolScheduling::Async => {
-                return Err(ToolContractError::AsyncContext(name.into()))
+                return Err(ToolContractError::AsyncContext(name.into()));
             }
             ToolEffectKey::Actor(effect) if !granted.contains(&effect) => {
                 return Err(ToolContractError::Ungranted {
                     tool: name.into(),
                     effect,
-                })
+                });
             }
             _ => {}
         }

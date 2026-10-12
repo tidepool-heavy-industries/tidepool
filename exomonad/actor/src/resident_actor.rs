@@ -30,9 +30,9 @@ mod green_notebook;
 #[cfg(test)]
 mod green_runtime_tests;
 mod green_tool;
+mod initial_context;
 mod inspection_wait;
 mod invocation_effects;
-mod initial_context;
 pub(crate) mod invocation_work;
 #[cfg(test)]
 mod jev_form_runtime_tests;
@@ -3740,10 +3740,20 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             None => self.installed_tools.current(),
         };
         if invocation.initial_context {
-            let tools = installed_tools.as_ref().and_then(crate::InstalledToolLease::tools)
-                .filter(|tools| tools.slots.iter().any(|slot| slot == crate::initial_context::INITIAL_CONTEXT_SLOT))
+            let tools = installed_tools
+                .as_ref()
+                .and_then(crate::InstalledToolLease::tools)
+                .filter(|tools| {
+                    tools
+                        .slots
+                        .iter()
+                        .any(|slot| slot == crate::initial_context::INITIAL_CONTEXT_SLOT)
+                })
                 .ok_or_else(|| KernelInvocationFailure::Rejected {
-                    receipts: Vec::new(), actor, detail: "actor has no installed initial-context slot".into(), diagnostic: None,
+                    receipts: Vec::new(),
+                    actor,
+                    detail: "actor has no installed initial-context slot".into(),
+                    diagnostic: None,
                 })?;
             context.haskell_effects_alias = tools.dispatcher_effects.clone();
         }
@@ -8680,18 +8690,21 @@ where
                 }
                 owned_workbench::WorkbenchFragmentAdvance::Captured { fragment, boundary } => {
                     current.fragment = Some(fragment);
-                    if execution_state.initial_context && matches!(&boundary,
-                        ResidentActorBoundary::Form { .. }
-                        | ResidentActorBoundary::Start(_)
-                        | ResidentActorBoundary::Replace { .. }
-                        | ResidentActorBoundary::Outbound(_)
-                        | ResidentActorBoundary::RequestReservation(_)
-                        | ResidentActorBoundary::RequestSubmission(_)
-                        | ResidentActorBoundary::AgentSession(_)
-                        | ResidentActorBoundary::AgentAttachment(_)
-                        | ResidentActorBoundary::Receive(_)
-                        | ResidentActorBoundary::ToolAwait(_)
-                    ) {
+                    if execution_state.initial_context
+                        && matches!(
+                            &boundary,
+                            ResidentActorBoundary::Form { .. }
+                                | ResidentActorBoundary::Start(_)
+                                | ResidentActorBoundary::Replace { .. }
+                                | ResidentActorBoundary::Outbound(_)
+                                | ResidentActorBoundary::RequestReservation(_)
+                                | ResidentActorBoundary::RequestSubmission(_)
+                                | ResidentActorBoundary::AgentSession(_)
+                                | ResidentActorBoundary::AgentAttachment(_)
+                                | ResidentActorBoundary::Receive(_)
+                                | ResidentActorBoundary::ToolAwait(_)
+                        )
+                    {
                         return Err(ResidentActorWorkbenchError::ActorProtocol(format!(
                             "initial-context startup does not admit {}: its continuation is not qualified in this launch phase",
                             boundary.operation(),
@@ -9673,8 +9686,13 @@ where
                 .cloned();
             if !cursor.dispatch_initialized {
                 cursor.tool_dispatch = if effects.initial_context {
-                    Some(Arc::clone(&installed_tools.as_ref().and_then(crate::InstalledToolLease::tools)
-                        .expect("startup admission retains installed dispatcher").dispatch))
+                    Some(Arc::clone(
+                        &installed_tools
+                            .as_ref()
+                            .and_then(crate::InstalledToolLease::tools)
+                            .expect("startup admission retains installed dispatcher")
+                            .dispatch,
+                    ))
                 } else if let Some(call) = request.tool_call().filter(|call| {
                     call.name != crate::status_tool::STATUS_TOOL
                         && call.name != crate::reload_spec_tool::RELOAD_SPEC_TOOL
@@ -10005,7 +10023,9 @@ where
                             );
                             let request_start = if effects.initial_context {
                                 owned_workbench::WorkbenchUnitStartRequest::InitialContext {
-                                    dispatch: Arc::clone(cursor.tool_dispatch.as_ref().expect("startup dispatcher")),
+                                    dispatch: Arc::clone(
+                                        cursor.tool_dispatch.as_ref().expect("startup dispatcher"),
+                                    ),
                                     input: request.input.clone().expect("startup input"),
                                 }
                             } else if let (Some(call), Some(dispatch)) =

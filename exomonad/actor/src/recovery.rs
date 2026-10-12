@@ -643,12 +643,17 @@ impl ActorRecoveryJournal {
 
     /// Find the original preparation through the exact admitted root chain.
     /// A successor never substitutes its own spec for retained startup output.
-    pub fn initial_context(&self, actor: ActorRef) -> std::io::Result<Option<crate::InitialContextObservation>> {
+    pub fn initial_context(
+        &self,
+        actor: ActorRef,
+    ) -> std::io::Result<Option<crate::InitialContextObservation>> {
         let state = self.state.lock();
         ensure_writable(&state)?;
         let mut next = Some(actor);
         while let Some(owner) = next {
-            let record = state.records.get(&owner).ok_or_else(|| std::io::Error::other("initial context actor has no durable admission"))?;
+            let record = state.records.get(&owner).ok_or_else(|| {
+                std::io::Error::other("initial context actor has no durable admission")
+            })?;
             if let Some(mut observation) = record.initial_context.clone() {
                 if owner != actor && observation.state == crate::InitialContextState::Preparing {
                     observation.state = crate::InitialContextState::RecoveryRequired {
@@ -657,7 +662,10 @@ impl ActorRecoveryJournal {
                 }
                 return Ok(Some(observation));
             }
-            next = record.startup.as_ref().and_then(|intent| intent.predecessor);
+            next = record
+                .startup
+                .as_ref()
+                .and_then(|intent| intent.predecessor);
         }
         Ok(None)
     }
@@ -669,14 +677,22 @@ impl ActorRecoveryJournal {
     ) -> std::io::Result<crate::InitialContextObservation> {
         let mut state = self.state.lock();
         ensure_writable(&state)?;
-        let record = state.records.get(&actor).ok_or_else(|| std::io::Error::other("initial context actor has no durable admission"))?;
+        let record = state.records.get(&actor).ok_or_else(|| {
+            std::io::Error::other("initial context actor has no durable admission")
+        })?;
         let mut next = record.initial_context.clone();
         crate::initial_context::apply_event(&mut next, change.clone())?;
         if next != record.initial_context {
             self.append(&mut state, EventKind::InitialContext { actor, change })?;
-            state.records.get_mut(&actor).expect("validated actor record").initial_context = next.clone();
+            state
+                .records
+                .get_mut(&actor)
+                .expect("validated actor record")
+                .initial_context = next.clone();
         }
-        next.ok_or_else(|| std::io::Error::other("initial context transition produced no observation"))
+        next.ok_or_else(|| {
+            std::io::Error::other("initial context transition produced no observation")
+        })
     }
 
     pub(crate) fn admit(
@@ -1296,7 +1312,9 @@ fn apply_event(
             }
         }
         EventKind::InitialContext { actor, change } => {
-            let record = records.get_mut(&actor).ok_or_else(|| std::io::Error::other("initial context event precedes actor admission"))?;
+            let record = records.get_mut(&actor).ok_or_else(|| {
+                std::io::Error::other("initial context event precedes actor admission")
+            })?;
             crate::initial_context::apply_event(&mut record.initial_context, change)?;
         }
     }
