@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn lost_settlement_reply_fences_the_real_native_owner() {
+fn accepted_settlement_survives_lost_observer_and_reobserves_exact_outcome() {
     let directory = tempfile::tempdir().unwrap();
     let store = RunRecoveryStore::create(&directory.path().join("run.sqlite")).unwrap();
     let ticket = store.begin_native_transition().unwrap();
@@ -10,13 +10,18 @@ fn lost_settlement_reply_fences_the_real_native_owner() {
     store.handle.sender.send(Command::Settle {
         id: ticket.id, reply: Reply::Blocking(reply),
     }).unwrap();
-    assert!(matches!(store.status(), NativeStoreStatus::Fenced(_)));
+    assert_eq!(store.status(), NativeStoreStatus::Ready);
+    let (reply, result) = mpsc::sync_channel(1);
+    store.handle.sender.send(Command::Settle {
+        id: ticket.id, reply: Reply::Blocking(reply),
+    }).unwrap();
+    result.recv().unwrap().unwrap();
     drop(ticket);
-    assert!(store.begin_native_transition().is_err());
+    assert_eq!(store.status(), NativeStoreStatus::Ready);
 }
 
 #[test]
-fn unobserved_buffered_settlement_ack_does_not_authorize_ticket_abandonment() {
+fn stale_abandonment_after_known_settlement_cannot_fence_new_operation() {
     let directory = tempfile::tempdir().unwrap();
     let store = RunRecoveryStore::create(&directory.path().join("run.sqlite")).unwrap();
     let ticket = store.begin_native_transition().unwrap();
@@ -24,11 +29,13 @@ fn unobserved_buffered_settlement_ack_does_not_authorize_ticket_abandonment() {
     store.handle.sender.send(Command::Settle {
         id: ticket.id, reply: Reply::Blocking(reply),
     }).unwrap();
-    // Status is an ordered owner round trip: the successful acknowledgement is
-    // buffered, but the affine ticket has not observed it.
+    // Completion submission certifies the local transition already happened.
+    // The observer's acknowledgement is buffered and does not issue that fact.
     assert_eq!(store.status(), NativeStoreStatus::Ready);
+    let successor = store.begin_native_transition().unwrap();
     drop(observer);
     drop(ticket);
-    assert!(matches!(store.status(), NativeStoreStatus::Fenced(_)));
-    assert!(store.begin_native_transition().is_err());
+    assert_eq!(store.status(), NativeStoreStatus::Pending);
+    successor.complete_blocking().unwrap();
+    assert_eq!(store.status(), NativeStoreStatus::Ready);
 }
