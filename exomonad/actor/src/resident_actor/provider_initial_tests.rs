@@ -135,9 +135,8 @@ impl NativeFixture {
             journal
                 .prepare_application(
                     actor.identity(),
-                    &root.path().join("application.binding"),
-                    Some("journal-data"),
-                    Some(publication.conversation.clone()),
+                    root.path().join("application.binding"),
+                    Some("journal-data".into()),
                 )
                 .await
                 .unwrap();
@@ -308,7 +307,7 @@ async fn provider_publication_drop_and_close_retain_real_journal_commit() {
         fixture
             .admission
             .lifecycle
-            .begin_fresh_binding_operation()
+            .begin_root_binding_operation()
             .await
             .is_err(),
         "binding cannot cross an admitted publication"
