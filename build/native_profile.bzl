@@ -27,7 +27,7 @@ def haskell_optimization_flags():
 
 def rust_optimization_flags(level, flags):
     for flag in flags:
-        if flag == "-O" or flag.startswith("-Copt-level") or flag.startswith("opt-level"):
+        if flag == "-O" or flag.startswith("-Copt-level") or flag.startswith("opt-level") or flag.startswith("--codegen=opt-level"):
             fail("optimization belongs to native profile policy, not rustc_flags")
     return ["-Copt-level=" + level] + list(flags)
 

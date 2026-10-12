@@ -128,7 +128,8 @@ class BuckProfileConfiguration(unittest.TestCase):
         namespace, calls = resolve("fast-dev")
         with self.assertRaisesRegex(ValueError, "unknown generated Rust policy"):
             namespace["tidepool_cargo_rust_library"](env={"TIDEPOOL_NATIVE_RUST_POLICY": "unknown"})
-        for flags in (["-O"], ["-Copt-level=2"], ["-C", "opt-level=2"]):
+        for flags in (["-O"], ["-Copt-level=2"], ["-C", "opt-level=2"],
+                      ["--codegen=opt-level=2"], ["--codegen", "opt-level=2"]):
             for wrapper in ("tidepool_rust_library", "tidepool_cargo_rust_library", "tidepool_cargo_rust_binary"):
                 with self.subTest(flags=flags, wrapper=wrapper), self.assertRaisesRegex(ValueError, "optimization belongs"):
                     args = {"rustc_flags": flags}
