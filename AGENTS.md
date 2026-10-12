@@ -324,6 +324,22 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   APIs, before describing a parcel as integration-ready. Formatting, metadata
   checks and source review do not replace compilation. Compile joined changes
   incrementally rather than deferring the first compile to release assembly.
+- Keep the ordinary feedback path cheap: use the selected fast-development
+  profile, with unoptimized first-party tests and optimized dependencies or
+  explicitly justified hot libraries. Optimization belongs to profile and
+  target policy, not unconditional compiler-toolchain flags. Preserve the
+  production profile for release and performance qualification. Check effective
+  compiler arguments across repository/cell boundaries; a profile name alone
+  does not prove which policy ran. A timed rustc action includes optimization
+  and code generation as well as linking; do not call it linker time without
+  separate evidence.
+- Give each retained test a distinct behavioral obligation. Consolidate repeated
+  setup and assertions, retire obsolete cases and their otherwise-unused escape
+  hatches, and move pure checks to their owning component. Keep independent
+  oracles and real boundary/recovery checks. Test counts are not a quality goal.
+  Declare test-only sources and resources only on consumers that need them, so
+  editing a fixture does not rebuild production libraries or browser assets.
+  Reuse immutable build products, never shared mutable test state.
 - Run a small representative history through the joined production path early,
   using its declared compiler and runtime resources. Component passes and a
   shrinking defect list do not establish release readiness. Final acceptance
