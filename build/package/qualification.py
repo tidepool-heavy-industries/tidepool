@@ -50,6 +50,11 @@ UNIFIED_REGRESSION_TESTS = [
     "actor_host::embedded_policy::operation_settlement_tests::acknowledged_schema_refusal_then_native_close_cancels_only_the_successor_request",
 ]
 M1_TESTS = ["actor_host::m1_host_tests::production_browser_executes_resident_haskell_retries_and_controls_root"]
+PERSONA_STARTUP_TESTS = [
+    "actor_host::startup_persona_acceptance_tests::shipped_persona_initializer_uses_actual_preparation_before_first_request",
+    "actor_host::startup_persona_acceptance_tests::actual_persona_prepares_saves_activates_and_retires_without_resurrection",
+    "actor_host::embedded_recovery_tests::production_persona_crash_preserves_edited_context_without_reinitialization",
+]
 HARNESS_PERFORMANCE_TESTS = [
     "actor_host::context_transaction_acceptance_tests::harness_usecase_performance::production_harness_notebook_usecase_phases",
 ]
@@ -198,6 +203,13 @@ def cohorts() -> dict:
                 "compiler_mode": "owned-resident", "max_jobs": 1,
                 "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
                 "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY", "TIDEPOOL_PREPARED_BUILTIN_ENTRIES"]},
+            "persona-startup": {
+                "tests": PERSONA_STARTUP_TESTS, "expected_count": len(PERSONA_STARTUP_TESTS),
+                "ignored": False, "timeout": 1800, "compiler_mode": "owned-resident",
+                "max_jobs": 1, "retain_artifacts": True,
+                "required_stdlib_mode": "catalog-backed", "required_startup_mode": "prepared",
+                "required_environment": ["TIDEPOOL_COMPILER_MODULES", "TIDEPOOL_PREPARED_ROOT_ENTRY",
+                                         "EXOMONAD_EMBEDDED_ASSET_ROOT", "TIDEPOOL_TEST_FIXTURE_ROOT"]},
             "harness-performance": {"tests": HARNESS_PERFORMANCE_TESTS, "expected_count": 1,
                                     "ignored": True, "timeout": 1800,
                                     "compiler_mode": "owned-resident", "max_jobs": 1,

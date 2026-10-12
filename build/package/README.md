@@ -480,6 +480,24 @@ assertion. That attempt did not execute the frozen bundle's owned-resident
 qualification contract, so it is retained as an unqualified diagnostic rather
 than evidence for the four-case cohort.
 
+The `persona-startup` cohort runs three ordinary production controls from the
+same frozen descriptor: the shipped initializer before its first request,
+graceful retirement with physical lease release and terminal-root recovery
+ineligibility, and genuine process-loss recovery of the edited Persona context.
+The crash history kills and waits for the actual subprocess, reopens the same
+source and run, and checks native binding transfer and retained context without
+initializer replay. It requires the bundle's browser assets, fixtures, catalog
+and root entry, retains artifacts, and runs serially with an owned compiler.
+All three exact cases must execute and pass. The crash case has no graceful
+hosted cleanup report; its retained `not_observed` status remains distinct from
+the test's actual process wait, physical lock and successor assertions.
+
+```sh
+python3 "$(dirname -- "$DESCRIPTOR")/qualification.py" run "$DESCRIPTOR" \
+  --cohort persona-startup --output "$PERSONA_STARTUP_EVIDENCE" --jobs 1 \
+  --delegated-service --service-slice "$ADMITTED_USER_SLICE"
+```
+
 The supplementary `harness-performance` cohort selects the one ignored
 eight-phase HTTP/Engine/Store/notebook workload. The separate
 `harness-performance-three-actor` cohort selects the scripted parent/two-child

@@ -977,6 +977,114 @@ class NativeQualificationTests(unittest.TestCase):
                         '--output', str(output), '--jobs', '1']), expected)
                 self.assertEqual(json.loads((output / 'report.json').read_text())['completed'], expected == 0)
 
+    def test_persona_startup_seals_exact_history_and_preserves_incomplete_receipts(self):
+        cohort = qualification.cohorts()['persona-startup']
+        self.assertEqual(cohort['tests'], [
+            'actor_host::startup_persona_acceptance_tests::shipped_persona_initializer_uses_actual_preparation_before_first_request',
+            'actor_host::startup_persona_acceptance_tests::actual_persona_prepares_saves_activates_and_retires_without_resurrection',
+            'actor_host::embedded_recovery_tests::production_persona_crash_preserves_edited_context_without_reinitialization'])
+        self.assertEqual(cohort['expected_count'], 3)
+        self.assertFalse(cohort['ignored'])
+        self.assertEqual(cohort['max_jobs'], 1)
+        self.assertEqual(cohort['compiler_mode'], 'owned-resident')
+        for mutation in ('control', 'missing', 'duplicate', 'zero', 'unknown', 'failed', 'nonzero_exit'):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                descriptor_path = root / 'qualification.json'
+                descriptor_path.write_text('frozen descriptor')
+                output = root / 'evidence'
+                resources = {name: '/frozen/' + name for name in cohort['required_environment']}
+                descriptor = {
+                    'programs': {'runner': '/frozen/runner', 'libtest': '/frozen/libtest'},
+                    'external_inputs': {'runtime_tools': {'path': '/frozen/runtime-tools'}},
+                    'cohorts': qualification.cohorts(), 'environment': resources,
+                    'source_oid': 'a' * 40, 'harness_revision': 'b' * 40,
+                    'profile': 'fast-dev', 'stdlib_mode': 'catalog-backed', 'startup_mode': 'prepared',
+                }
+
+                def execute(command, **kwargs):
+                    self.assertEqual(command[:3], ['/frozen/runtime-tools/bin/python3',
+                                                   '/frozen/runner', '/frozen/libtest'])
+                    self.assertEqual([command[i + 1] for i, word in enumerate(command)
+                                      if word == '--exact'], cohort['tests'])
+                    self.assertEqual(command[command.index('--expected-count') + 1], '3')
+                    self.assertIn('--retain-artifacts', command)
+                    self.assertNotIn('--ignored', command)
+                    for name, path in resources.items():
+                        self.assertEqual(kwargs['env'][name], path)
+                    self.assertIn('TIDEPOOL_TEST_FIXTURE_ROOT',
+                                  [command[i + 1] for i, word in enumerate(command)
+                                   if word == '--resource-env'])
+                    names = list(cohort['tests'])
+                    if mutation == 'missing':
+                        names.pop()
+                    elif mutation == 'duplicate':
+                        names[-1] = names[0]
+                    for index, name in enumerate(names):
+                        count = 0 if mutation == 'zero' else None if mutation == 'unknown' else 1
+                        qualification.write_json(output / f'tests/{index}.json', {
+                            'test': name, 'passed': mutation != 'failed',
+                            'execution': {'executed_test_count': count,
+                                          'exit_code': 101 if mutation == 'nonzero_exit' else 0,
+                                          'process_cleanup_status': 'confirmed',
+                                          'hosted_cleanup_status': 'not_observed' if index == 2 else 'confirmed',
+                                          'compiler_cleanup_status': 'confirmed'}})
+                    return subprocess.CompletedProcess(command, 0)
+
+                with patch.dict(os.environ, {'EXOMONAD_EMBEDDED_ASSET_ROOT': '/ambient/web'}), \
+                     patch.object(qualification, 'verify', return_value=descriptor), \
+                     patch.object(qualification.subprocess, 'run', side_effect=execute):
+                    code = qualification.main(['run', str(descriptor_path), '--cohort', 'persona-startup',
+                                               '--output', str(output), '--jobs', '1'])
+                report = json.loads((output / 'report.json').read_text())
+                self.assertEqual(code, int(mutation != 'control'))
+                self.assertEqual(report['completed'], mutation == 'control')
+                self.assertEqual(report['expected_count'], 3)
+                if mutation == 'control':
+                    crash = next(record for record in report['tests']
+                                 if record['test'] == cohort['tests'][2])
+                    self.assertEqual(crash['execution']['hosted_cleanup_status'], 'not_observed')
+
+    def test_persona_startup_refuses_unmatched_resources_and_parallel_execution(self):
+        cohort = qualification.cohorts()['persona-startup']
+        mutations = [('jobs', 2), ('stdlib_mode', 'source-backed'), ('startup_mode', 'unprepared')]
+        mutations.extend(('environment', name) for name in cohort['required_environment'])
+        for field, value in mutations:
+            with self.subTest(field=field, value=value), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                descriptor = {
+                    'cohorts': qualification.cohorts(),
+                    'external_inputs': {'runtime_tools': {'path': '/frozen/tools'}},
+                    'stdlib_mode': 'catalog-backed', 'startup_mode': 'prepared',
+                    'environment': {name: '/frozen/' + name for name in cohort['required_environment']}}
+                jobs = value if field == 'jobs' else 1
+                if field == 'environment':
+                    descriptor['environment'].pop(value)
+                elif field != 'jobs':
+                    descriptor[field] = value
+                output = root / 'evidence'
+                with patch.object(qualification, 'verify', return_value=descriptor), \
+                     patch.object(qualification.subprocess, 'run') as execute:
+                    self.assertEqual(qualification.main([
+                        'run', str(root / 'qualification.json'), '--cohort', 'persona-startup',
+                        '--output', str(output), '--jobs', str(jobs)]), 1)
+                execute.assert_not_called()
+                self.assertFalse(output.exists())
+
+    def test_persona_startup_cannot_be_removed_from_the_frozen_descriptor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / qualification.DESCRIPTOR
+            cohorts = qualification.cohorts()
+            cohorts.pop('persona-startup')
+            qualification.write_json(path, {
+                'schema': qualification.QUALIFICATION_SCHEMA, 'kind': 'native-runtime-qualification',
+                'bundle_root': str(root), 'stdlib_mode': 'catalog-backed',
+                'feature_profile': 'embedded-native', 'programs': qualification.programs(root),
+                'cohorts': cohorts})
+            with self.assertRaisesRegex(ValueError, 'mandatory test cohorts'):
+                qualification.verify(path)
+
     def test_harness_performance_seals_resources_and_keeps_behavior_separate_from_measurement(self):
         for label, count, diagnostics, retained, expected in (
                 ('complete', 1, True, True, 0),
