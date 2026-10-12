@@ -3286,4 +3286,74 @@ mod tests {
         let error = ActorRecoveryJournal::read_observed(&path).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
+    #[tokio::test]
+    async fn enclosing_lifetime_survives_last_sender_until_queued_write_drains() {
+        struct LifetimeProbe {
+            directory: Option<tempfile::TempDir>,
+            drained: Option<tokio::sync::oneshot::Sender<std::io::Result<Vec<u8>>>>,
+        }
+        impl Drop for LifetimeProbe {
+            fn drop(&mut self) {
+                let observed =
+                    std::fs::read(self.directory.as_ref().unwrap().path().join("actors.jsonl"));
+                drop(self.directory.take());
+                if let Some(reply) = self.drained.take() {
+                    let _ = reply.send(observed);
+                }
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_owned();
+        let anchor = DirectoryAnchor::open_existing(&path).unwrap();
+        let (drained_tx, drained) = tokio::sync::oneshot::channel();
+        let lifetime = Arc::new(LifetimeProbe {
+            directory: Some(directory),
+            drained: Some(drained_tx),
+        });
+        let weak = Arc::downgrade(&lifetime);
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", lifetime.clone())
+            .await
+            .unwrap();
+        let (entered_tx, entered) = tokio::sync::oneshot::channel();
+        let (resume, paused) = std::sync::mpsc::channel();
+        journal
+            .commands
+            .send(Command::Pause {
+                entered: entered_tx,
+                resume: paused,
+            })
+            .unwrap();
+        entered.await.unwrap();
+        let actor = ActorRef::first(ActorId(57));
+        let admission = DurableActorAdmission::capture(actor, &descriptor("owner"), &[]);
+        let (reply, abandoned) = tokio::sync::oneshot::channel();
+        journal
+            .commands
+            .send(Command::Admit {
+                admission,
+                startup: None,
+                reply,
+            })
+            .unwrap();
+        drop(abandoned);
+        drop(journal);
+        drop(lifetime);
+        assert!(weak.upgrade().is_some());
+        assert!(path.exists());
+        resume.send(()).unwrap();
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(5), drained)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        let row = parse_row(text.lines().nth(1).unwrap()).unwrap();
+        let EventKind::Admitted { admission, .. } = row.event else {
+            panic!("queued admission did not drain");
+        };
+        assert_eq!(admission.actor, actor);
+        assert!(weak.upgrade().is_none());
+        assert!(!path.exists());
+    }
 }
