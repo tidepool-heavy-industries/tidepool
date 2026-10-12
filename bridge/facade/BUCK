@@ -1046,6 +1046,9 @@ rust_filegroup(
         "src/actor_host/fixtures/startup_context_refresh_again.hs": "bridge/facade/src/actor_host/fixtures/startup_context_refresh_again.hs",
         "src/actor_host/fixtures/startup_context_refresh_failure.hs": "bridge/facade/src/actor_host/fixtures/startup_context_refresh_failure.hs",
         "src/actor_host/fixtures/startup_context_spec.hs": "bridge/facade/src/actor_host/fixtures/startup_context_spec.hs",
+        "src/actor_host/fixtures/startup_persona_refresh.hs": "bridge/facade/src/actor_host/fixtures/startup_persona_refresh.hs",
+        "src/actor_host/fixtures/startup_persona_refuse_native.hs": "bridge/facade/src/actor_host/fixtures/startup_persona_refuse_native.hs",
+        "src/actor_host/fixtures/startup_persona_spec.hs": "bridge/facade/src/actor_host/fixtures/startup_persona_spec.hs",
         "src/actor_host/fixtures/supplied_live_observe.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_observe.hs",
         "src/actor_host/fixtures/supplied_live_observe_again.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_observe_again.hs",
         "src/actor_host/fixtures/supplied_live_observe_immediate.hs": "bridge/facade/src/actor_host/fixtures/supplied_live_observe_immediate.hs",
@@ -1103,6 +1106,7 @@ rust_filegroup(
         "src/actor_host/scripted_three_actor_performance.rs": "bridge/facade/src/actor_host/scripted_three_actor_performance.rs",
         "src/actor_host/source_reload_tests.rs": "bridge/facade/src/actor_host/source_reload_tests.rs",
         "src/actor_host/startup_context_acceptance_tests.rs": "bridge/facade/src/actor_host/startup_context_acceptance_tests.rs",
+        "src/actor_host/startup_persona_acceptance_tests.rs": "bridge/facade/src/actor_host/startup_persona_acceptance_tests.rs",
         "src/actor_host/terminal_transfer_tests.rs": "bridge/facade/src/actor_host/terminal_transfer_tests.rs",
         "src/actor_host/test_campaign.rs": "bridge/facade/src/actor_host/test_campaign.rs",
         "src/actor_host/tests.rs": "bridge/facade/src/actor_host/tests.rs",
@@ -1218,6 +1222,7 @@ tidepool_rust_binary(
         "bridge/facade/src/actor_host/recipe_checks/prepared_contract_tests.rs",
         "bridge/facade/src/actor_host/scripted_recursive_acceptance.rs",
         "bridge/facade/src/actor_host/startup_context_acceptance_tests.rs",
+        "bridge/facade/src/actor_host/startup_persona_acceptance_tests.rs",
         "bridge/facade/src/actor_host/workspace_admission_tests.rs",
         "bridge/facade/src/exomonad/source/publication_fault_tests.rs",
         "bridge/facade/src/exomonad/workspace/source_capture_tests.rs",
@@ -1244,6 +1249,9 @@ tidepool_rust_binary(
         "bridge/facade/src/actor_host/fixtures/startup_context_refresh_again.hs",
         "bridge/facade/src/actor_host/fixtures/startup_context_refresh_failure.hs",
         "bridge/facade/src/actor_host/fixtures/startup_context_spec.hs",
+        "bridge/facade/src/actor_host/fixtures/startup_persona_refresh.hs",
+        "bridge/facade/src/actor_host/fixtures/startup_persona_refuse_native.hs",
+        "bridge/facade/src/actor_host/fixtures/startup_persona_spec.hs",
         "bridge/facade/src/actor_host/fixtures/unconstrained_spec_later_helper.hs",
         "bridge/facade/src/actor_host/fresh_callable_exit_read.hs",
         "bridge/facade/src/actor_host/fresh_callable_exit_setup.hs",
@@ -2764,6 +2772,9 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/startup_context_refresh_again.hs": "src/actor_host/fixtures/startup_context_refresh_again.hs",
         "bridge/facade/src/actor_host/fixtures/startup_context_refresh_failure.hs": "src/actor_host/fixtures/startup_context_refresh_failure.hs",
         "bridge/facade/src/actor_host/fixtures/startup_context_spec.hs": "src/actor_host/fixtures/startup_context_spec.hs",
+        "bridge/facade/src/actor_host/fixtures/startup_persona_refresh.hs": "src/actor_host/fixtures/startup_persona_refresh.hs",
+        "bridge/facade/src/actor_host/fixtures/startup_persona_refuse_native.hs": "src/actor_host/fixtures/startup_persona_refuse_native.hs",
+        "bridge/facade/src/actor_host/fixtures/startup_persona_spec.hs": "src/actor_host/fixtures/startup_persona_spec.hs",
         "bridge/facade/src/actor_host/fixtures/supplied_live_observe.hs": "src/actor_host/fixtures/supplied_live_observe.hs",
         "bridge/facade/src/actor_host/fixtures/supplied_live_observe_again.hs": "src/actor_host/fixtures/supplied_live_observe_again.hs",
         "bridge/facade/src/actor_host/fixtures/supplied_live_observe_immediate.hs": "src/actor_host/fixtures/supplied_live_observe_immediate.hs",
@@ -2821,6 +2832,7 @@ filegroup(
         "bridge/facade/src/actor_host/scripted_three_actor_performance.rs": "src/actor_host/scripted_three_actor_performance.rs",
         "bridge/facade/src/actor_host/source_reload_tests.rs": "src/actor_host/source_reload_tests.rs",
         "bridge/facade/src/actor_host/startup_context_acceptance_tests.rs": "src/actor_host/startup_context_acceptance_tests.rs",
+        "bridge/facade/src/actor_host/startup_persona_acceptance_tests.rs": "src/actor_host/startup_persona_acceptance_tests.rs",
         "bridge/facade/src/actor_host/terminal_transfer_tests.rs": "src/actor_host/terminal_transfer_tests.rs",
         "bridge/facade/src/actor_host/test_campaign.rs": "src/actor_host/test_campaign.rs",
         "bridge/facade/src/actor_host/tests.rs": "src/actor_host/tests.rs",
@@ -3842,6 +3854,27 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737461727475705f636f6e746578745f737065632e6873",
     src = "src/actor_host/fixtures/startup_context_spec.hs",
     out = "startup_context_spec.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737461727475705f706572736f6e615f726566726573682e6873",
+    src = "src/actor_host/fixtures/startup_persona_refresh.hs",
+    out = "startup_persona_refresh.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737461727475705f706572736f6e615f7265667573655f6e61746976652e6873",
+    src = "src/actor_host/fixtures/startup_persona_refuse_native.hs",
+    out = "startup_persona_refuse_native.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f737461727475705f706572736f6e615f737065632e6873",
+    src = "src/actor_host/fixtures/startup_persona_spec.hs",
+    out = "startup_persona_spec.hs",
     visibility = ["PUBLIC"],
 )
 
