@@ -580,6 +580,74 @@ async fn startup_refusal(cancel: bool) {
         requests.try_recv(),
         Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
     ));
+    let workspace = context.config.workspace.clone();
+    let run_directory = context.config.run_directory.clone();
+    let root_binding = context.config.root_binding_path.clone();
+    let witness_path = workspace.join(".exomonad/state/startup-witness.txt");
+    let witness = std::fs::read(&witness_path).unwrap();
+    drop(journal);
+    drop(context);
+    let (provider, mut requests) = hosted_script_provider();
+    let (entered, mut judgments) = mpsc::unbounded_channel();
+    let (assembly, mut assembled) = oneshot::channel();
+    let mut restarting = Box::pin(HostedTestRuntime::start_observing_initialization(
+        &settings,
+        &provider,
+        move |config| {
+            config.workspace = workspace;
+            config.run_directory = run_directory;
+            config.root_binding_path = root_binding;
+            config.workspace_inputs = Some(
+                crate::exomonad::workspace::FrozenWorkspace::load(
+                    &config.workspace,
+                    &config.run_directory.path(),
+                )
+                .unwrap(),
+            );
+            config.jev = Some(Arc::new(StartupJevGate(entered)));
+        },
+        assembly,
+    ));
+    let refusal = tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+        let mut observer_open = true;
+        loop {
+            tokio::select! {
+                result = &mut restarting => break result,
+                judgment = judgments.recv(), if observer_open => match judgment {
+                    Some(_) => panic!("successor silently replayed failed or cancelled startup effects"),
+                    None => observer_open = false,
+                },
+            }
+        }
+    }).await.unwrap();
+    match refusal {
+        Ok(host) => {
+            host.stop().await.unwrap();
+            panic!("retained refused startup became ready on resume");
+        }
+        Err(failure) => assert!(failure.cleanup_confirmed(), "{failure}"),
+    }
+    let successor = assembled
+        .try_recv()
+        .expect("resumed root was assembled by real admission");
+    assert_ne!(successor.actor.identity(), identity);
+    let restored = exomonad_actor::ActorRecoveryJournal::open_existing(
+        &successor.config.run_directory,
+        "actor-lifecycle.v2.jsonl",
+    )
+    .unwrap();
+    assert_eq!(
+        restored
+            .initial_context(successor.actor.identity())
+            .unwrap()
+            .unwrap(),
+        after
+    );
+    assert_eq!(std::fs::read(witness_path).unwrap(), witness);
+    assert!(matches!(
+        requests.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread")]
