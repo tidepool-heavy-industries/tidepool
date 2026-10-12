@@ -47,6 +47,8 @@ pub(crate) async fn before_publication_attempt() {
 }
 
 #[cfg(test)]
+mod provider_initial_tests;
+#[cfg(test)]
 mod provider_owner_tests;
 mod replacement;
 mod request_wait;
