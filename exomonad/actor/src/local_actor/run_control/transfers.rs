@@ -8,14 +8,22 @@ pub(crate) struct WorkerTransferReservation {
     pub(super) parent_lease: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
 }
 impl WorkerTransferReservation {
-    pub(crate) async fn commit(mut self) -> Result<(), DirectoryError> {
+    pub(crate) fn commit(
+        mut self,
+    ) -> futures_util::future::BoxFuture<'static, Result<(), DirectoryError>> {
         let (reply, receiver) = oneshot::channel();
-        self.owner
-            .send_message(RunControlMessage::CommitWorkerTransfer { id: self.id, reply })
-            .map_err(|_| DirectoryError::Unavailable)?;
-        receiver.await.map_err(|_| DirectoryError::Unavailable)??;
-        self.armed = false;
-        Ok(())
+        let sent = self
+            .owner
+            .send_message(RunControlMessage::CommitWorkerTransfer { id: self.id, reply });
+        if sent.is_ok() {
+            self.armed = false;
+        }
+        Box::pin(async move {
+            sent.map_err(|_| DirectoryError::Unavailable)?;
+            let result = receiver.await.map_err(|_| DirectoryError::Unavailable)?;
+            drop(self);
+            result
+        })
     }
 }
 impl Drop for WorkerTransferReservation {
@@ -34,14 +42,22 @@ pub(crate) struct ResourceTransferReservation {
     pub(super) parent_lease: Option<crate::kernel::lifecycle::ActorAdmissionLease>,
 }
 impl ResourceTransferReservation {
-    pub(crate) async fn commit(mut self) -> Result<(), DirectoryError> {
+    pub(crate) fn commit(
+        mut self,
+    ) -> futures_util::future::BoxFuture<'static, Result<(), DirectoryError>> {
         let (reply, receiver) = oneshot::channel();
-        self.owner
-            .send_message(RunControlMessage::CommitResourceTransfer { id: self.id, reply })
-            .map_err(|_| DirectoryError::Unavailable)?;
-        receiver.await.map_err(|_| DirectoryError::Unavailable)??;
-        self.armed = false;
-        Ok(())
+        let sent = self
+            .owner
+            .send_message(RunControlMessage::CommitResourceTransfer { id: self.id, reply });
+        if sent.is_ok() {
+            self.armed = false;
+        }
+        Box::pin(async move {
+            sent.map_err(|_| DirectoryError::Unavailable)?;
+            let result = receiver.await.map_err(|_| DirectoryError::Unavailable)?;
+            drop(self);
+            result
+        })
     }
 }
 impl Drop for ResourceTransferReservation {
