@@ -694,6 +694,8 @@ async fn closed_transaction_refusal_cannot_release_another_issued_provider_turn(
     use crate::kernel::lifecycle::{LifecyclePhase, ProviderPhase};
     let fixture = NativeFixture::start().await;
     let provider = admitted_provider_turn(&fixture).await;
+    // The start reply can precede its final projection; only T may satisfy pending below.
+    fixture.actor.lifecycle().wait_transactions().await.unwrap();
     let native = fixture.admission.native_readiness().unwrap();
     let native_blocker = native.begin_provider_transition().await.unwrap();
     let actor = fixture.actor.clone();
