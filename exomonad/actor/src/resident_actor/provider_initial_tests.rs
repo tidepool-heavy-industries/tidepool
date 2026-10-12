@@ -133,10 +133,11 @@ impl NativeFixture {
                 .unwrap();
             let publication = publication.as_ref().unwrap();
             journal
-                .prepare_application(
+                .prepare_application_with_intent(
                     actor.identity(),
                     root.path().join("application.binding"),
                     Some("journal-data".into()),
+                    Some(publication.conversation.clone()),
                 )
                 .await
                 .unwrap();
