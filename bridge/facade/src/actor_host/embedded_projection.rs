@@ -546,10 +546,10 @@ mod tests {
         assert_eq!(projected_child.lifecycle, HostActorLifecycle::Waiting);
         assert_eq!(conversations.len(), 2);
         assert!(conversations.iter().any(|conversation| {
-            conversation["id"] == "/root" && conversation["state"] == "cancelled"
+            conversation.id == "/root" && conversation.state == ConversationState::Cancelled
         }));
         assert!(conversations.iter().any(|conversation| {
-            conversation["id"] == "/root/1" && conversation["state"] == "idle"
+            conversation.id == "/root/1" && conversation.state == ConversationState::Idle
         }));
     }
 

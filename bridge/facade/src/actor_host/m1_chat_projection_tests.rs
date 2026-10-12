@@ -138,7 +138,7 @@ proptest! {
             prop_assert_eq!(page.cutover_sequence, 0);
             for entry in page.entries {
                 match entry {
-                    ChatEntry::Message { sequence, request_id, position, hash, item } => {
+                    ChatEntry::Message { sequence, request_id, position, hash, item, .. } => {
                         prop_assert!(sequence > after);
                         after = sequence;
                         projected.push((request_id, position, hash, item));

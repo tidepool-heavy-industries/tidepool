@@ -266,7 +266,7 @@ async fn production_dispatch_admits_input_only_to_the_exact_actor() {
             target: Some(actual),
             envelope_id,
             wake_error: None,
-        } if actual == target && !envelope_id.is_empty()
+        } if actual == target && envelope_id.get() > 0
     ));
     assert_eq!(fixture.hosts[&first].wakes.load(Ordering::Relaxed), 0);
     assert_eq!(fixture.hosts[&second].wakes.load(Ordering::Relaxed), 1);

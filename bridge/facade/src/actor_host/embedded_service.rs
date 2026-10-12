@@ -949,7 +949,7 @@ pub(super) async fn submit_browser_command(
                 command_id: command.command_id,
                 outcome: harness::server::CommandReceiptOutcome::Admitted {
                     target: None,
-                    envelope_id: receipt.envelope_id.to_string(),
+                    envelope_id: receipt.envelope_id.into(),
                     wake_error: receipt.wake_error.clone(),
                 },
             });
@@ -1174,6 +1174,20 @@ mod shutdown_tests {
 
     #[tokio::test]
     async fn embedded_provider_choice_routes_actor_and_cell_clients() {
+        struct NoCalls;
+        #[async_trait::async_trait]
+        impl harness::provider::Provider for NoCalls {
+            async fn call(
+                &self,
+                _: &str,
+                _: serde_json::Value,
+            ) -> Result<serde_json::Value, harness::provider::ProviderError> {
+                panic!("authentication must fail before tool dispatch")
+            }
+            fn tools(&self) -> Vec<serde_json::Value> {
+                Vec::new()
+            }
+        }
         let source = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nprovider = 'chatgpt_plan'\ncredential_file = '/tmp/exomonad-auth'\ncontext_capacity_tokens = 4096\n";
         let mut settings: EmbeddedLaunchConfig = toml::from_str(source).unwrap();
         let credentials = tempfile::tempdir().unwrap();
@@ -1197,18 +1211,43 @@ mod shutdown_tests {
             } else {
                 Vec::new()
             };
-            let result = client
-                .create(harness::transport::ResponsesRequest {
-                    input: Vec::new(),
+            let store = Arc::new(harness::store::Store::memory().unwrap());
+            let engine = harness::engine::Engine::<EmbeddedAuth, _>::with_transport(
+                client,
+                store.clone(),
+                Arc::new(harness::turn::JobScheduler::new(1).unwrap()),
+                Arc::new(NoCalls),
+                EngineConfig {
                     instructions: String::new(),
-                    tools: tools.into(),
-                    tools_allowed: None,
+                    tools,
                     model: "gpt-6.1-sol".into(),
-                    pinned_effort: Effort::Medium,
+                    effort: Effort::Medium,
                     session_id: "provider-constructor-test".into(),
-                })
+                    agent: AgentPath("/provider-constructor-test".into()),
+                },
+            );
+            let (_cancellation, cancellation) = watch::channel(false);
+            let (_input, incoming) = mpsc::unbounded_channel();
+            let result = engine
+                .run(
+                    None,
+                    vec![harness::item::Item(serde_json::json!({
+                        "type":"message", "role":"user", "content":"check selected provider route",
+                    }))],
+                    cancellation,
+                    incoming,
+                )
                 .await;
-            assert!(matches!(result, Err(TransportError::Authentication)));
+            let Err(EngineError::RequestRejected {
+                head_request,
+                error: TransportError::Authentication,
+            }) = result
+            else {
+                panic!(
+                    "selected transport must normalize then reject missing credentials: {result:?}"
+                );
+            };
+            assert!(store.request(&head_request).unwrap().is_some());
         }
     }
 
