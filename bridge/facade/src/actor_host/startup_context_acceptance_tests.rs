@@ -187,15 +187,20 @@ async fn exercise_durable_attachment(
         .begin_provider_transition()
         .await
         .unwrap();
-    assert!(attachment.initial_context_wire_observation().await.is_err());
-    assert!(attachment
-        .acknowledge_initial_context_publication(&identity.operation, publication.clone())
-        .await
-        .is_err());
+    let mut observed = Box::pin(attachment.initial_context_wire_observation());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut observed)
+            .await
+            .is_err()
+    );
     transition.complete().await.unwrap();
+    assert_eq!(observed.await.unwrap(), wire);
     assert_eq!(
-        attachment.initial_context_wire_observation().await.unwrap(),
-        wire
+        attachment
+            .acknowledge_initial_context_publication(&identity.operation, publication.clone())
+            .await
+            .unwrap(),
+        *retained
     );
 }
 
