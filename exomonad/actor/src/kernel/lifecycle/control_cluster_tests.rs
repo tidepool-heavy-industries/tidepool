@@ -35,7 +35,7 @@ async fn close_preserves_accepted_lease_and_refuses_new_admission() {
     let mut drained = Box::pin(owner.wait_transactions());
     assert!(futures_util::poll!(drained.as_mut()).is_pending());
     drop(admitted);
-    tokio::time::timeout(std::time::Duration::from_secs(5), drained).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), drained).await.unwrap().unwrap();
     assert_eq!(owner.observation().phase, LifecyclePhase::Closing);
     executor.stop(None);
     owner.address.stop(None);
@@ -48,7 +48,7 @@ async fn lost_admission_observer_releases_its_exact_lease_without_reopening() {
     owner.address.cast(LifecycleCommand::Transaction(reply.into())).unwrap();
     drop(observer);
     owner.close().await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), owner.wait_transactions()).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), owner.wait_transactions()).await.unwrap().unwrap();
     assert_eq!(owner.observation().transactions, 0);
     assert_eq!(owner.observation().phase, LifecyclePhase::Closing);
     assert!(matches!(owner.transaction().await, Err(KernelCallFailure::MailboxClosed(_))));
@@ -95,7 +95,7 @@ proptest::proptest! {
             }
             drop(held);
             owner.close().await.unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(5), owner.wait_transactions()).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), owner.wait_transactions()).await.unwrap().unwrap();
             executor.stop(None);
             owner.address.stop(None);
         });
