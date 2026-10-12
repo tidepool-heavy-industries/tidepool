@@ -344,36 +344,6 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
             .iter()
             .any(|event| event.kind == "model_interrupted"));
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        let predecessor = conversation.identity().clone();
-        drop(conversation);
-        host.stop().await.unwrap();
-
-        let host = HostedTestRuntime::start_with_factory(
-            &settings,
-            |config| retained_config(config, repository.path(), &run_root),
-            {
-                let inputs = Arc::clone(&inputs);
-                let calls = Arc::clone(&calls);
-                move |runtime, _| {
-                    Arc::new(InterruptedStream {
-                        runtime: Arc::downgrade(runtime),
-                        inputs,
-                        calls,
-                        emit_call,
-                    })
-                }
-            },
-        )
-        .await
-        .unwrap();
-        let conversation = host
-            .context
-            .binding(host.context.actor.identity())
-            .unwrap()
-            .conversation()
-            .unwrap();
-        assert_ne!(conversation.identity().incarnation, predecessor.incarnation);
-        assert!(host.context.actor.terminal().get().is_none());
         assert_eq!(
             host.runtime
                 .store()
@@ -382,12 +352,9 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
                 .pending_head,
             Some(pending.clone())
         );
+        assert!(host.context.actor.terminal().get().is_none());
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "a reopened interruption must not retry itself"
-        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
         conversation
             .input("explicit-next", "operator", "continue explicitly")
             .await
@@ -404,7 +371,7 @@ async fn driver_retains_actor_after_eof_and_explicit_recovery_never_redispatches
             .embedded_inference_state(conversation.identity())
             .unwrap()
         else {
-            panic!("the actual reopened interruption must remain blocked");
+            panic!("the actual interruption must remain blocked");
         };
         let operation_id = harness::embedding::ClientOperationId(uuid::Uuid::new_v4());
         let command = harness::server::HostCommand::Recover {

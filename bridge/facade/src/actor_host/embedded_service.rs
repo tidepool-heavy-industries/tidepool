@@ -1137,6 +1137,18 @@ mod shutdown_tests {
             std::fs::create_dir(&assets).unwrap();
             std::fs::write(assets.join("index.html"), "unsealed assets").unwrap();
             settings.asset_root = assets;
+            settings.validate().unwrap();
+            let identity =
+                harness::server::BrowserBundleIdentity::from_declared_source(include_bytes!(
+                    concat!(env!("OUT_DIR"), "/harness-browser-source-identity.json")
+                ))
+                .unwrap();
+            let expected = harness::server::verify_browser_bundle(&settings.asset_root, &identity)
+                .unwrap_err();
+            assert!(matches!(
+                expected,
+                harness::server::BrowserBundleError::Io(_)
+            ));
             let store_path = files.path().join("harness/store.sqlite");
             let before = if retained {
                 let store = super::super::display_output::open_run_store(files.path()).unwrap();
@@ -1156,9 +1168,11 @@ mod shutdown_tests {
             } else {
                 None
             };
-            assert!(EmbeddedService::prepare(files.path(), &settings)
-                .await
-                .is_err());
+            let actual = match EmbeddedService::prepare(files.path(), &settings).await {
+                Err(error) => error,
+                Ok(_) => panic!("unsealed assets must refuse startup"),
+            };
+            assert_eq!(actual, expected.to_string());
             match before {
                 Some(before) => assert_eq!(std::fs::read(&store_path).unwrap(), before),
                 None => assert!(!files.path().join("harness").exists()),
