@@ -434,6 +434,11 @@ impl RunState {
 }
 
 pub(super) enum RunControlMessage {
+    CreationDescendant {
+        owner: ActorRef,
+        target: ActorRef,
+        reply: oneshot::Sender<bool>,
+    },
     RegisterAuthority {
         actor: ActorRef,
         descriptor: crate::ActorDescriptor,
@@ -726,13 +731,22 @@ impl Actor for RunControl {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            RunControlMessage::CreationDescendant {
+                owner,
+                target,
+                reply,
+            } => {
+                let _ = reply.send(in_authority_tree(&state.entries, owner, target, true));
+            }
             RunControlMessage::RegisterAuthority {
                 actor,
                 descriptor,
                 forest_control,
                 reply,
             } => {
-                let result = if let Some(entry) = state.entries.get_mut(&actor) {
+                let result = if state.phase != RunPhase::Running {
+                    Err(DirectoryError::Closed)
+                } else if let Some(entry) = state.entries.get_mut(&actor) {
                     if entry.authority.is_some() {
                         Err(DirectoryError::AlreadyRegistered { actor })
                     } else {
@@ -1652,6 +1666,18 @@ impl RunControlClient {
             .send_message(message(reply))
             .map_err(|_| DirectoryError::Unavailable)?;
         receiver.await.map_err(|_| DirectoryError::Unavailable)
+    }
+    pub(crate) async fn creation_descendant(
+        &self,
+        owner: ActorRef,
+        target: ActorRef,
+    ) -> Result<bool, DirectoryError> {
+        self.ask(|reply| RunControlMessage::CreationDescendant {
+            owner,
+            target,
+            reply,
+        })
+        .await
     }
     pub(crate) async fn register_authority(
         &self,
