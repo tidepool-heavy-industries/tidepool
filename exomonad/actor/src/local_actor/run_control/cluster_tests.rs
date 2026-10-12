@@ -71,7 +71,9 @@ proptest::proptest! {
             let mut observers: [Option<tokio::task::JoinHandle<()>>; 3] = std::array::from_fn(|_| None);
             let mut releases = Vec::new();
             let mut dropped_observers = Vec::new();
-            for (operation, slot) in operations {
+            // Every generated history admits a real producer before varying
+            // cancellation, release and close ordering.
+            for (operation, slot) in std::iter::once((0, 0)).chain(operations) {
                 match operation {
                     0 => {
                         let (release, gate) = oneshot::channel();
