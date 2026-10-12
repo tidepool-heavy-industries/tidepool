@@ -50,6 +50,47 @@ struct InvocationWorkState {
     cleanup: Option<InvocationCleanup>,
 }
 
+enum CommandMembershipChange {
+    Detach,
+    Adopt,
+}
+
+impl InvocationWorkState {
+    fn publish_command_transfer(
+        &mut self,
+        transfer: crate::command_jobs::CommandCleanupTransfer,
+        id: &str,
+        change: CommandMembershipChange,
+    ) -> Result<futures_util::future::BoxFuture<'static, Result<(), CommandError>>, CommandError>
+    {
+        let commands = self.commands.clone();
+        let detached = self.detached_commands.clone();
+        let result = transfer.publish(|probe| match change {
+            CommandMembershipChange::Detach => {
+                self.commands
+                    .retain(|job| job != id && probe != Some(job.as_str()));
+                self.detached_commands.insert(id.into());
+                if let Some(probe) = probe {
+                    self.detached_commands.insert(probe.into());
+                }
+            }
+            CommandMembershipChange::Adopt => {
+                for job in std::iter::once(id).chain(probe) {
+                    if !self.commands.iter().any(|existing| existing == job) {
+                        self.commands.push(job.into());
+                    }
+                    self.detached_commands.remove(job);
+                }
+            }
+        });
+        if result.is_err() {
+            self.commands = commands;
+            self.detached_commands = detached;
+        }
+        result.map(|((), completion)| completion)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct InvocationCleanup {
     compilers: Vec<crate::termination::CompilerWorkReceipt>,
@@ -521,27 +562,12 @@ impl InvocationWork {
                 ResourceCleanupOwner::Run,
             )
             .await?;
-        let (_, completion) = self
+        let completion = self
             .with_admission_state(|state| {
                 if !state.commands.iter().any(|command| command == id) {
                     return Err(CommandError::CommandUnauthorized);
                 }
-                let commands = state.commands.clone();
-                let detached = state.detached_commands.clone();
-                let result = transfer.publish(|probe| {
-                    state
-                        .commands
-                        .retain(|job| job != id && probe != Some(job.as_str()));
-                    state.detached_commands.insert(id.into());
-                    if let Some(probe) = probe {
-                        state.detached_commands.insert(probe.into());
-                    }
-                });
-                if result.is_err() {
-                    state.commands = commands;
-                    state.detached_commands = detached;
-                }
-                result
+                state.publish_command_transfer(transfer, id, CommandMembershipChange::Detach)
             })
             .map_err(CommandError::CommandUnavailable)??;
         completion.await
@@ -566,29 +592,9 @@ impl InvocationWork {
                 self.resource_cleanup_owner(),
             )
             .await?;
-        let (_, completion) = self
+        let completion = self
             .with_admission_state(|state| {
-                let commands = state.commands.clone();
-                let detached = state.detached_commands.clone();
-                let result = transfer.publish(|probe| {
-                    if !state.commands.iter().any(|job| job == id) {
-                        state.commands.push(id.into());
-                    }
-                    if let Some(probe) = probe {
-                        if !state.commands.iter().any(|job| job == probe) {
-                            state.commands.push(probe.into());
-                        }
-                    }
-                    state.detached_commands.remove(id);
-                    if let Some(probe) = probe {
-                        state.detached_commands.remove(probe);
-                    }
-                });
-                if result.is_err() {
-                    state.commands = commands;
-                    state.detached_commands = detached;
-                }
-                result
+                state.publish_command_transfer(transfer, id, CommandMembershipChange::Adopt)
             })
             .map_err(CommandError::CommandUnavailable)??;
         completion.await

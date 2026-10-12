@@ -2608,25 +2608,42 @@ async fn command_transfer_send_refusal_preserves_source_cleanup_before_observer_
     let fixture = Fixture::start().await;
     let owner = fixture.actor.identity();
     let jobs = &fixture.environment.commands;
+    let work = InvocationWork::new(owner, reservation());
     let (job, backend) = fixture.pending_command().await;
+    work.register_command_with_jobs(jobs, &job).unwrap();
+    let original = {
+        let state = work.state.lock();
+        (state.commands.clone(), state.detached_commands.clone())
+    };
     let transfer = jobs
         .reserve_cleanup_owner_transfer(
             &fixture.kernel,
             owner,
             &job,
-            &ResourceCleanupOwner::Actor,
+            &work.resource_cleanup_owner(),
             ResourceCleanupOwner::Run,
         )
         .await
         .unwrap();
     fixture.directory.stop_owner_for_test().await;
-    let result = transfer.publish(|_| ());
+    let result = work
+        .with_admission_state(|state| {
+            state.publish_command_transfer(transfer, &job, CommandMembershipChange::Detach)
+        })
+        .unwrap();
     assert!(matches!(result, Err(CommandError::CommandUnavailable(_))));
     drop(result);
     assert_eq!(
         jobs.cleanup_owner(owner, &job).unwrap(),
-        ResourceCleanupOwner::Actor
+        work.resource_cleanup_owner()
     );
+    {
+        let state = work.state.lock();
+        assert_eq!(
+            (&state.commands, &state.detached_commands),
+            (&original.0, &original.1)
+        );
+    }
     assert_eq!(backend.cancellations.load(Ordering::Relaxed), 0);
     assert!(matches!(
         fixture.directory.shutdown_run_resources().await,
