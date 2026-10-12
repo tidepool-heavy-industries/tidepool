@@ -280,6 +280,21 @@ enum WorkerKind {
         custody: ProducedCustody,
     },
 }
+impl WorkerKind {
+    // Completion reporting does not release an uncertain cleanup capability.
+    // These records remain owned until confirmed run finalization stops us.
+    fn retains_cleanup_custody(&self) -> bool {
+        matches!(
+            self,
+            Self::Abandoned { .. }
+                | Self::Root {
+                    native: Some(_),
+                    ..
+                }
+        )
+    }
+}
+
 struct TrackedWorker {
     cell: ractor::ActorCell,
     kind: WorkerKind,
@@ -376,7 +391,10 @@ impl Actor for PreparationSupervisor {
                     let arguments = AbandonedCleanupArguments { id, custody: custody.clone(), supervisor: myself.clone(), prior: outcome.clone(), compiler };
                     match Actor::spawn_linked(None, AbandonedCleanupWorker, arguments, myself.get_cell()).await {
                         Ok((cleanup, task)) => { state.workers.insert(cleanup.get_id(), TrackedWorker { cell: cleanup.get_cell(), kind: WorkerKind::Abandoned { id, custody }, terminal: false, reported: false }); drop(task); let _ = cleanup.send_message(()); }
-                        Err(error) => { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome: crate::CleanupComponentOutcome::Unconfirmed(format!("native placement cleanup worker failed to start: {error}; original {outcome:?}")) }); }
+                        Err(error) => {
+                            for worker in state.workers.values_mut() { if let WorkerKind::Root { id: issued, native, .. } = &mut worker.kind { if *issued == id { *native = Some(custody.clone()); } } }
+                            let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome: crate::CleanupComponentOutcome::Unconfirmed(format!("native placement cleanup worker failed to start: {error}; original {outcome:?}")) });
+                        }
                     }
                 } else { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome }); }
             }
@@ -396,7 +414,10 @@ impl Actor for PreparationSupervisor {
             }
             PreparationMessage::VerifyTerminal { worker } => {
                 let Some(record) = state.workers.get_mut(&worker) else { return Ok(()); };
-                if record.reported { state.workers.remove(&worker); return Ok(()); }
+                if record.reported {
+                    if !record.kind.retains_cleanup_custody() { state.workers.remove(&worker); }
+                    return Ok(());
+                }
                 match &mut record.kind {
                     WorkerKind::Root { id, compiler, produced, native } => {
                         compiler.request_shutdown(ActorTerminal::new(ActorExitKind::Cancelled, "root preparation worker lost"));
@@ -405,7 +426,10 @@ impl Actor for PreparationSupervisor {
                             let arguments = AbandonedCleanupArguments { id, custody: custody.clone(), supervisor: myself.clone(), prior: crate::CleanupComponentOutcome::Unconfirmed("root producer exited before its completion receipt".into()), compiler: Some(compiler.clone()) };
                             match Actor::spawn_linked(None, AbandonedCleanupWorker, arguments, myself.get_cell()).await {
                                 Ok((cleanup, task)) => { state.workers.insert(cleanup.get_id(), TrackedWorker { cell: cleanup.get_cell(), kind: WorkerKind::Abandoned { id, custody }, terminal: false, reported: false }); drop(task); let _ = cleanup.send_message(()); }
-                                Err(error) => { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome: crate::CleanupComponentOutcome::Unconfirmed(format!("abandoned root cleanup worker failed to start: {error}")) }); }
+                                Err(error) => {
+                                    if let Some(record) = state.workers.get_mut(&worker) { if let WorkerKind::Root { native, .. } = &mut record.kind { *native = Some(custody); } }
+                                    let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome: crate::CleanupComponentOutcome::Unconfirmed(format!("abandoned root cleanup worker failed to start: {error}")) });
+                                }
                             }
                         } else { let _ = state.control.send_message(RunControlMessage::PreparationLost { id }); }
                     }
@@ -418,9 +442,9 @@ impl Actor for PreparationSupervisor {
                 }
             }
         }
-        state
-            .workers
-            .retain(|_, worker| !(worker.terminal && worker.reported));
+        state.workers.retain(|_, worker| {
+            !(worker.terminal && worker.reported) || worker.kind.retains_cleanup_custody()
+        });
         Ok(())
     }
     async fn handle_supervisor_evt(
