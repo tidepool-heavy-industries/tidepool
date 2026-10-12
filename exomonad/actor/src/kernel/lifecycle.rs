@@ -210,7 +210,20 @@ impl AdmittedKernelEnvelope {
 
 pub struct AdmittedKernelLease {
     owner: RactorRef<LifecycleCommand>,
+    identity: ActorRef,
     sequence: u64,
+}
+
+impl AdmittedKernelLease {
+    /// Retain this original admission while the executor defers its payload.
+    pub(crate) fn wrap(self, message: KernelMessage) -> KernelMessage {
+        KernelMessage::Admitted(AdmittedKernelEnvelope {
+            identity: self.identity,
+            sequence: self.sequence,
+            message: Box::new(message),
+            lease: self,
+        })
+    }
 }
 
 impl Drop for AdmittedKernelLease {
@@ -641,6 +654,7 @@ impl LifecycleState {
             message: Box::new(message),
             lease: AdmittedKernelLease {
                 owner: myself.clone(),
+                identity: self.identity,
                 sequence,
             },
         };
