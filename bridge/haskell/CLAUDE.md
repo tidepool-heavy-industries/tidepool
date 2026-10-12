@@ -34,10 +34,15 @@ only the versioned request protocol emitted by `tidepool-extract-cmd`, or
 carry matched frontend, worker, deployment, GHC and source resources. The
 production worker uses its production toolchain; host Tasty compilation uses
 `toolchains//:haskell_tests`. The Cabal package owns production components and
-26 Tasty suites. The pinned Cabal metadata producer finalizes their source,
+27 Tasty suites. The pinned Cabal metadata producer finalizes their source,
 package and compiler-option declarations; `scripts/buck2-haskell-components.py`
 projects them into the single `components.bzl` native graph. Listing a suite
 is discovery, not test execution.
+
+`tidepool-execution-schema` owns only the pure execution wire types and encoder.
+GHC projection, including `ExecutionIR`, stays in `tidepool-extract-internal`.
+Pure encoder tests depend on the former; candidate codec tests use the existing
+Rust fixture issuer for valid packets and corrupt those packets for refusals.
 
 ## Toolchain resolution and deployment
 

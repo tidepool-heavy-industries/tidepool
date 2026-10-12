@@ -105,15 +105,10 @@ impl From<BindingTerminal> for BindingState {
     }
 }
 
-/// One row of a worktree's lease history — a READ MODEL. Fields are private
-/// and construction is `pub(crate)`-only: this type is what
-/// [`BindingTable::open`] deserializes off disk and what [`BindingTable::bind`]
-/// appends, and nothing outside this crate may manufacture a row (an "active"
-/// binding with no acquisition provenance, for instance) that never went
-/// through the table's own rules. Reached from outside only by the accessors
-/// below, or (for durable-format golden tests, which must be able to pin the
-/// wire shape of every state a row COULD hold) via
-/// [`crate::testing::binding_row`].
+/// One row of a worktree's lease history, read through accessors or restored
+/// from its durable serde representation. [`BindingTable::bind`] issues live
+/// membership; a deserialized row records history without admitting an actor.
+/// Private fields prevent callers from mutating an observed row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binding {
     worktree: WorktreeId,

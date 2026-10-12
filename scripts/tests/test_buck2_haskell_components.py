@@ -218,6 +218,55 @@ class ComponentProjectionTests(unittest.TestCase):
         self.assertIn("TIDEPOOL_EXTRACT_WORKER:executable", rendered)
         self.assertIn('"//build/package:tidepool_extract_runtime_libraries"', rendered)
 
+    def test_candidate_codec_declares_issuer_without_widening_pure_encoder(self):
+        encoder = G.render(self.metadata(tests=[component("execution-schema-encode", "test-suite",
+                                                        "tests", ("test",), ())]))
+        codec = G.render(self.metadata(tests=[component("module-candidates-codec", "test-suite",
+                                                      "tests", ("test",), ())]))
+        self.assertNotIn("candidate_fixture_issuer", encoder)
+        self.assertIn('"TIDEPOOL_CANDIDATE_FIXTURE_ISSUER": "$(exe //tidepool/toolchain:candidate_fixture_issuer)"', codec)
+        self.assertIn("TIDEPOOL_CANDIDATE_FIXTURE_ISSUER:executable", codec)
+        self.assertNotIn("TIDEPOOL_COMPILER_DEPLOYMENT", codec)
+
+    def test_native_archives_follow_dependency_order_through_transitive_libraries(self):
+        package, roster = G.normalized_components(self.metadata([
+            component("a-pure"),
+            component("b-middle", dependencies=[dependency("example", "a-pure")]),
+            component("c-compiler", dependencies=[dependency("example", "b-middle")]),
+            component("consumer", "executable", roots=("app",), modules=(),
+                      dependencies=[dependency("example", "a-pure"),
+                                    dependency("example", "c-compiler")]),
+        ]))
+        self.assertEqual(G.fields_for(roster["consumer"], roster, package)[3],
+                         [":c_compiler", ":a_pure"])
+
+    def test_native_archive_diamond_and_compiler_profile_keep_dependency_order(self):
+        package, roster = G.normalized_components(self.metadata([
+            component("a-pure"),
+            component("b-left", dependencies=[dependency("example", "a-pure")]),
+            component("c-right", dependencies=[dependency("example", "a-pure")]),
+            component("z-root", dependencies=[dependency("example", "b-left"),
+                                               dependency("example", "c-right")]),
+        ]))
+        self.assertEqual(G.native_library_link_order(sorted(roster), roster, package),
+                         ["z-root", "b-left", "c-right", "a-pure"])
+        rendered = G.render(self.metadata([
+            component("a-pure"),
+            component("tidepool-extract-internal", dependencies=[dependency("example", "a-pure")]),
+            component("tidepool-extract-bin", "executable", roots=("app",), modules=(),
+                      dependencies=[dependency("example", "a-pure"),
+                                    dependency("example", "tidepool-extract-internal")]),
+        ]))
+        for call in ast.walk(ast.parse(rendered)):
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "haskell_binary":
+                fields = {keyword.arg: keyword.value for keyword in call.keywords}
+                if ast.literal_eval(fields["name"]) == "tidepool_extract_bin_profile":
+                    self.assertEqual(ast.literal_eval(fields["deps"]),
+                                     [":tidepool_extract_internal_profile", ":a_pure"])
+                    break
+        else:
+            self.fail("compiler profile target was not rendered")
+
     def test_generated_sources_and_workspace_sources_keep_owning_producers(self):
         self.assertEqual(G.source("Tidepool.Internal.ActorProfiles", ["generated/protocol"])[1],
                          "//bridge/protocol:generated[bridge_haskell_lib_Tidepool_Internal_ActorProfiles_hs]")

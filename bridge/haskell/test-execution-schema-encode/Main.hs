@@ -6,85 +6,27 @@ import Codec.CBOR.Read (deserialiseFromBytes)
 import Codec.CBOR.Encoding (encodeBytes, encodeListLen, encodeString, encodeWord64)
 import Codec.CBOR.Term (Term(..), decodeTerm)
 import Codec.CBOR.Write (toStrictByteString)
-import Control.Exception (bracket)
 import Control.Monad (forM_, unless)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.Text qualified as T
 import Data.IntMap.Strict qualified as IntMap
 import Data.Word (Word32)
-import System.Directory (getTemporaryDirectory, removeFile)
-import System.IO (openBinaryTempFile, hClose)
 import Tidepool.ExecutionEncode
   ( encodeWireProgram, encodeProjectedGroup, encodeModuleProducts
   , prepareModuleProductEncoding, moduleProductInput, moduleProductBytes
   , encodeModuleProductInventory )
 import Tidepool.ExecutionSchema
-import Tidepool.ModuleCandidates (readModuleCandidates)
 
 assert :: Bool -> String -> IO ()
 assert condition message = unless condition (ioError (userError message))
-
-candidateManifestChecks :: IO ()
-candidateManifestChecks = do
-  temp <- getTemporaryDirectory
-  bracket (openBinaryTempFile temp "tidepool-candidates.cbor")
-    (\(path, _) -> removeFile path)
-    (\(path, handle) -> do
-      hClose handle
-      let digest = T.pack (replicate 64 'a')
-          candidate sourcePath productPath = encodeListLen 16
-            <> encodeString "main" <> encodeString "Fixture"
-            <> encodeString sourcePath <> encodeString digest
-            <> encodeString "/tmp/Fixture.hi" <> encodeString digest
-            <> encodeString digest <> encodeString digest <> encodeString digest
-            <> encodeListLen 0 <> encodeListLen 0
-            <> encodeString "/tmp/Fixture.hi.packages" <> encodeString digest
-            <> encodeString productPath
-            <> encodeListLen 0
-            <> encodeListLen 5 <> encodeString "module"
-            <> encodeString "/tmp/Fixture.finalized.cbor" <> encodeString digest
-            <> encodeString "/tmp/Fixture.core" <> encodeString digest
-          manifest version items = toStrictByteString
-            (encodeListLen 8 <> encodeString "TPMCAN" <> encodeString version
-              <> encodeListLen 0 <> encodeListLen 0
-              <> encodeListLen (fromIntegral (length items)) <> mconcat items
-              <> encodeListLen 2 <> encodeListLen 0 <> encodeListLen 0 <> encodeString digest <> encodeListLen 1 <> encodeString "fresh-files")
-      -- Structural decoding does not authenticate or promote these descriptors.
-      let validCandidate = candidate "/tmp/Fixture.hs" "/tmp/Fixture.tpmod"
-      BS.writeFile path (manifest "11" [validCandidate])
-      valid <- readModuleCandidates path
-      assert (case valid of Right [_] -> True; _ -> False)
-        "bounded module candidate manifest did not decode"
-      forM_ ["6", "7", "8", "9", "10"] $ \version -> do
-        BS.writeFile path (manifest version [validCandidate])
-        old <- readModuleCandidates path
-        assert (case old of Left _ -> True; _ -> False)
-          "candidate manifest accepted an unsupported version"
-      BS.writeFile path (manifest "11" [candidate "/tmp/Fixture.hs" "relative.tpmod"])
-      relativeProduct <- readModuleCandidates path
-      assert (case relativeProduct of Left _ -> True; _ -> False)
-        "candidate manifest accepted a relative original product path"
-      BS.writeFile path (BS.snoc (manifest "11" [validCandidate]) 0)
-      trailing <- readModuleCandidates path
-      assert (case trailing of Left _ -> True; _ -> False)
-        "candidate manifest accepted trailing bytes"
-      BS.writeFile path (manifest "11" [validCandidate, validCandidate])
-      duplicate <- readModuleCandidates path
-      assert (case duplicate of Left _ -> True; _ -> False)
-        "candidate manifest accepted duplicate owners"
-      BS.writeFile path (manifest "11" [candidate "relative.hs" "/tmp/Fixture.tpmod"])
-      relative <- readModuleCandidates path
-      assert (case relative of Left _ -> True; _ -> False)
-        "candidate manifest accepted a relative source path")
 
 main :: IO ()
 main = runTests tests
 
 tests :: TestTree
 tests = testGroup "execution-schema-encode"
-  [ testCase "bounded candidate descriptor decoding" candidateManifestChecks
-  , testCase "module product encoding" moduleProductEncodingChecks
+  [ testCase "module product encoding" moduleProductEncodingChecks
   , testCase "prepared wire structure and identities" encodingChecks
   ]
 
