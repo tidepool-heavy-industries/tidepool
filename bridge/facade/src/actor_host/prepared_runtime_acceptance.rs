@@ -701,6 +701,8 @@ async fn prepared_children_execute_original_native_probe(
         .context
         .forest
         .actor_session(host.context.actor.identity())
+        .await
+        .unwrap()
         .expect("the root owns its issued machine session")
         .to_string();
     host.run_scenario(|host| Box::pin(async move {
@@ -778,7 +780,7 @@ async fn prepared_children_execute_original_native_probe(
             )).await.unwrap_or_else(|error| panic!("prepared parent child launch failed: {error}"));
             let origin = round.origin();
             assert_ne!(origin.actor(), &root, "parent waits for this actual child reply");
-            let nodes = host.context.forest.inspect_host_graph();
+            let nodes = host.context.forest.inspect_host_graph().await.unwrap();
             let matching = nodes.iter().filter(|node| node.label == label).collect::<Vec<_>>();
             assert_eq!(matching.len(), 1, "unique exact host graph child {label}");
             let child = matching[0];

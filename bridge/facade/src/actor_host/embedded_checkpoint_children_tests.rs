@@ -134,6 +134,8 @@ async fn published_embedded_checkpoint_survives_capture_cell_failure() {
                     .context
                     .forest
                     .inspect_host_graph()
+                    .await
+                    .unwrap()
                     .into_iter()
                     .find(|node| node.actor == *id)
                     .and_then(|node| node.provider_turn)

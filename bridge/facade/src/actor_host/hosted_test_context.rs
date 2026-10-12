@@ -948,8 +948,31 @@ impl HostedTestRuntime {
             }
             termination.into_result()
         };
+        let graph_report = std::cell::RefCell::new(None);
         let (scenario, cleanup, report_errors) = settle_scenario(
-            async { scenario(&self).await },
+            async {
+                match std::panic::AssertUnwindSafe(scenario(&self))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(()) => (),
+                    Err(payload) => {
+                        if let Some(diagnostics) = &diagnostics {
+                            let report = match self.context.forest.inspect_host_graph().await {
+                                Ok(graph) => HostedTestDiagnostics::report_host_graph(
+                                    &diagnostics.root,
+                                    &graph,
+                                ),
+                                Err(error) => {
+                                    Err(format!("host graph observation failed: {error}"))
+                                }
+                            };
+                            graph_report.replace(Some(report));
+                        }
+                        std::panic::resume_unwind(payload)
+                    }
+                }
+            },
             cleanup,
             |scenario, cleanup| {
                 let Some(diagnostics) = &diagnostics else {
@@ -969,10 +992,9 @@ impl HostedTestRuntime {
                     }
                 ) && matches!(cleanup, CleanupOutcome::Unknown)
                 {
-                    HostedTestDiagnostics::report_host_graph(
-                        &diagnostics.root,
-                        &self.context.forest.inspect_host_graph(),
-                    )?;
+                    if let Some(report) = graph_report.borrow_mut().take() {
+                        report?;
+                    }
                 }
                 Ok(())
             },

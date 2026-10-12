@@ -627,7 +627,7 @@ async fn successful_rounds(
 ) {
     tokio::time::timeout(Duration::from_secs(120), async {
         loop {
-            let graph = context.forest.inspect_host_graph();
+            let graph = context.forest.inspect_host_graph().await.unwrap();
             if actors.iter().all(|actor| {
                 graph.iter().any(|node| {
                     node.actor == *actor
@@ -1024,7 +1024,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
             let parked_baseline = if scenario
                 == HostedScenario::Captured(CapturedScenario::CancelWhileParked)
             {
-                let graph = campaign.forest.inspect_host_graph();
+                let graph = campaign.forest.inspect_host_graph().await.unwrap();
                 assert_eq!(
                     graph.len(),
                     3,
@@ -1036,8 +1036,8 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     assert!(record.terminal().is_none());
                     assert_eq!(record.creator, Some(actor));
                     assert_eq!(
-                        campaign.forest.actor_session(record.actor),
-                        campaign.forest.actor_session(actor)
+                        campaign.forest.actor_session(record.actor).await.unwrap(),
+                        campaign.forest.actor_session(actor).await.unwrap()
                     );
                 }
                 // These persistent receive loops share the root machine and survive
@@ -1087,7 +1087,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                             .expect("local actor reads return their original state");
                     assert_committed_haskell_value(&result, "True");
                     received_output(&transport, &operation).await;
-                    let graph = campaign.forest.inspect_host_graph();
+                    let graph = campaign.forest.inspect_host_graph().await.unwrap();
                     for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-agents"] {
                         let local = graph
                             .iter()
@@ -1224,7 +1224,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         observations.tick().await;
                     }
                 }).await.expect("the other exact native call parks before host teardown");
-                let graph = campaign.forest.inspect_host_graph();
+                let graph = campaign.forest.inspect_host_graph().await.unwrap();
                 let gate = graph.iter().find(|node| node.label == "embedded-shutdown-park-gate")
                     .expect("the real owned gate actor is installed");
                 assert!(gate.terminal().is_none(), "gate must remain live before host teardown: {gate:?}");
@@ -1353,12 +1353,12 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     .map(|installation| installation.actor)
                     .collect::<Vec<_>>();
                 assert_eq!(known_children.len(), 2);
-                let graph = campaign.forest.inspect_host_graph();
+                let graph = campaign.forest.inspect_host_graph().await.unwrap();
                 let mut child_requests = std::collections::HashSet::new();
                 for child in &known_children {
                     assert_eq!(
-                        campaign.forest.actor_session(child.identity()),
-                        campaign.forest.actor_session(actor),
+                        campaign.forest.actor_session(child.identity()).await.unwrap(),
+                        campaign.forest.actor_session(actor).await.unwrap(),
                         "captured child uses the original shared machine"
                     );
                     let node = graph
@@ -1455,7 +1455,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     Some(baseline),
                     "interrupt consumes the invocation continuations and preserves persistent receive loops"
                 );
-                let graph = campaign.forest.inspect_host_graph();
+                let graph = campaign.forest.inspect_host_graph().await.unwrap();
                 for child in &known_children {
                     let node = graph
                         .iter()
@@ -1796,7 +1796,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 for actor in &actors {
                     let node = campaign
                         .forest
-                        .inspect_host_graph()
+                        .inspect_host_graph().await.unwrap()
                         .into_iter()
                         .find(|node| node.actor == *actor)
                         .unwrap();
@@ -1926,7 +1926,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 Some(exomonad_actor::ResourceRelease::Released),
             );
         }
-        let graph = forest_after_shutdown.inspect_host_graph();
+        let graph = forest_after_shutdown.inspect_host_graph().await.unwrap();
         assert_eq!(
             graph
                 .iter()

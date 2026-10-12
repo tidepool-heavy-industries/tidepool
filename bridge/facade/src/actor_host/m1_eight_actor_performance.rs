@@ -340,7 +340,7 @@ async fn production_engine_store_eight_actors_sequential_cells() {
         }
         // All children are held at their actual provider display boundary.
         // Snapshot gauges belong to the exact machine owner, never a global delta.
-        let nodes = fixture.context.forest.inspect_host_graph();
+        let nodes = fixture.context.forest.inspect_host_graph().await.unwrap();
         let target = browser_target(&fixture.context);
         let conversations = HashMap::from([(fixture.context.actor.identity(), target.clone())]);
         let mut releases = Vec::new();
@@ -372,11 +372,15 @@ async fn production_engine_store_eight_actors_sequential_cells() {
                 .context
                 .forest
                 .actor_session(actor)
+                .await
+                .unwrap()
                 .expect("exact child session placement");
             let machine = fixture
                 .context
                 .forest
                 .measurement_snapshot_for(actor)
+                .await
+                .unwrap()
                 .expect("paused measured actor has an idle native owner snapshot");
             if observed.cell.sequence > 0 {
                 let correlations = clients.requests(operation);

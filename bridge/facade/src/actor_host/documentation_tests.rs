@@ -1096,7 +1096,7 @@ async fn production_form_wait_and_pending_index_share_exact_execution_and_settle
                 result = &mut call => panic!("form must suspend before submission: {result}"),
                 () = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
             }
-            let node = campaign.forest.inspect_host_graph().into_iter()
+            let node = campaign.forest.inspect_host_graph().await.unwrap().into_iter()
                 .find(|node| node.actor == actor).unwrap();
             if let Some(wait) = node.form_waits.first() { break wait.clone(); }
         };
@@ -1116,11 +1116,11 @@ async fn production_form_wait_and_pending_index_share_exact_execution_and_settle
         store.submit_actor_form(&origin, &wait.mount_id, "attempt", &serde_json::json!({id:"Ada"})).unwrap();
         let submitted = store.pending_actor_forms(&origin, 0, 64).unwrap();
         assert_eq!(submitted.forms[0].state, harness::store::forms::PendingActorFormState::Submitted);
-        assert_eq!(campaign.forest.inspect_host_graph().into_iter()
+        assert_eq!(campaign.forest.inspect_host_graph().await.unwrap().into_iter()
             .find(|node| node.actor == actor).unwrap().form_waits[0], wait);
         let result = call.await;
         assert_eq!(result["status"], "committed", "{result}");
-        assert!(campaign.forest.inspect_host_graph().into_iter()
+        assert!(campaign.forest.inspect_host_graph().await.unwrap().into_iter()
             .find(|node| node.actor == actor).unwrap().form_waits.is_empty());
         assert!(store.pending_actor_forms(&origin, 0, 64).unwrap().forms.is_empty());
         assert_eq!(store.actor_form(&origin, &wait.mount_id).unwrap().state,
@@ -1337,7 +1337,6 @@ async fn published_lookup_and_reflect_examples_preserve_boundary_results() {
         })
         .await;
 }
-
 
 struct NoPersonaDocJudgment;
 
@@ -1732,6 +1731,8 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
                 let before = campaign
                     .forest
                     .inspect_graph(campaign.actor.identity())
+                    .await
+                    .unwrap()
                     .unwrap()
                     .len();
                 let spawned = committed(
@@ -1761,6 +1762,8 @@ async fn quiet_observation_retains_exact_results_without_repeating_effects() {
                     campaign
                         .forest
                         .inspect_graph(campaign.actor.identity())
+                        .await
+                        .unwrap()
                         .unwrap()
                         .len(),
                     before + 1
@@ -2474,7 +2477,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     assert_eq!(
         campaign
             .forest
-            .inspect_graph(observer.actor.identity())
+            .inspect_graph(observer.actor.identity()).await.unwrap()
             .unwrap()
             .len(),
         1
@@ -2507,7 +2510,7 @@ async fn independent_workers_retain_peer_requests_after_creator_retirement() {
     assert_eq!(
         campaign
             .forest
-            .inspect_graph(observer.actor.identity())
+            .inspect_graph(observer.actor.identity()).await.unwrap()
             .unwrap()
             .len(),
         2

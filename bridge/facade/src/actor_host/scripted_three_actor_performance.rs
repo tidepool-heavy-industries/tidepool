@@ -566,7 +566,7 @@ async fn three_actor_capture(concurrent: bool) {
             ).await.unwrap_or_else(|error| panic!("{error}"));
             assert_ne!(child_round.origin().actor(), &AgentPath("/root".into()));
             assert_capture(&child_round, &prefix, effort);
-            let graph = host.context.forest.inspect_host_graph();
+            let graph = host.context.forest.inspect_host_graph().await.unwrap();
             let child_identity = child_round.host_identity();
             let node = graph.iter().find(|node| host.context.binding(node.actor)
                 .and_then(|binding| binding.conversation())
@@ -581,7 +581,7 @@ async fn three_actor_capture(concurrent: bool) {
             children.push((node.label.clone(), node.actor, child_round));
         }
         children.sort_by(|a, b| a.0.cmp(&b.0));
-        let graph = host.context.forest.inspect_host_graph();
+        let graph = host.context.forest.inspect_host_graph().await.unwrap();
         assert_eq!(graph.len(), 3, "one root and exactly two model workers");
         assert!(graph.iter().all(|node| node.model_actor));
         assert_ne!(graph.iter().find(|node| node.actor == children[0].1).unwrap().bound_worktree,

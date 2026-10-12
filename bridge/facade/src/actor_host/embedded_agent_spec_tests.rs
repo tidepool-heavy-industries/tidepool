@@ -77,6 +77,8 @@ async fn supplied_children(context: &HostedActorContext) -> Vec<ObservedInstalla
             let node = context
                 .forest
                 .inspect_host_graph()
+                .await
+                .unwrap()
                 .into_iter()
                 .find(|node| node.label == label)
                 .expect("committed spawn has an exact actor record");
@@ -97,7 +99,7 @@ async fn supplied_children(context: &HostedActorContext) -> Vec<ObservedInstalla
             children.push(installation);
         }
         assert_ne!(children[0].actor.identity(), children[1].actor.identity());
-        let graph = context.forest.inspect_host_graph();
+        let graph = context.forest.inspect_host_graph().await.unwrap();
         let workspace = |actor| {
             graph
                 .iter()
@@ -412,6 +414,8 @@ async fn supplied_spec_request_queued_in_spawn_cell_reaches_installed_receiver()
                 .context
                 .forest
                 .inspect_host_graph()
+                .await
+                .unwrap()
                 .into_iter()
                 .find(|node| node.label == "supplied-live-immediate")
                 .expect("same-cell spawn commits its supplied child");
@@ -495,7 +499,7 @@ async fn accepted_reply_resumes_after_parked_notebook_and_provider_completion() 
             let child_node = host
                 .context
                 .forest
-                .inspect_host_graph()
+                .inspect_host_graph().await.unwrap()
                 .into_iter()
                 .find(|node| node.label == "deferred-reply-child")
                 .unwrap();
@@ -523,7 +527,7 @@ async fn accepted_reply_resumes_after_parked_notebook_and_provider_completion() 
             );
             host.while_operation_succeeds(&parent_await, tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
                 loop {
-                    let parent = host.context.forest.inspect_host_graph().into_iter()
+                    let parent = host.context.forest.inspect_host_graph().await.unwrap().into_iter()
                         .find(|node| node.actor == host.context.actor.identity()).unwrap();
                     if matches!(parent.workbench, exomonad_actor::ActorWorkbenchPosture::AwaitingEffect { ref effect, .. }
                         if effect == "awaitWatch") {
@@ -554,7 +558,7 @@ async fn accepted_reply_resumes_after_parked_notebook_and_provider_completion() 
                 reply["items"][0]["terminalTransfer"], "replyAccepted",
                 "{reply}"
             );
-            let node = host.context.forest.inspect_host_graph().into_iter()
+            let node = host.context.forest.inspect_host_graph().await.unwrap().into_iter()
                 .find(|node| node.actor == child_node.actor).unwrap();
             assert!(!node.active_requests.is_empty(), "accepted reply still owns its continuation");
             // A second reply is a later invocation, not replacement authority
@@ -596,7 +600,7 @@ async fn accepted_reply_resumes_after_parked_notebook_and_provider_completion() 
                     let node = host
                         .context
                         .forest
-                        .inspect_host_graph()
+                        .inspect_host_graph().await.unwrap()
                         .into_iter()
                         .find(|node| node.actor == child_node.actor)
                         .unwrap();
@@ -740,7 +744,7 @@ async fn unknown_child_model_alias_retains_failure_and_parent_can_request_valid_
             let failed = host
                 .context
                 .forest
-                .inspect_host_graph()
+                .inspect_host_graph().await.unwrap()
                 .into_iter()
                 .find(|node| node.label == "unknown-alias-child")
                 .expect("typed failure retains its exact admitted child");
@@ -817,7 +821,7 @@ async fn unknown_child_model_alias_retains_failure_and_parent_can_request_valid_
             let valid = host
                 .context
                 .forest
-                .inspect_host_graph()
+                .inspect_host_graph().await.unwrap()
                 .into_iter()
                 .find(|node| node.label == "valid-after-alias-child")
                 .expect("subsequent child is admitted and attached");

@@ -39,6 +39,8 @@ async fn wait_for_succeeded_provider_turn(host: &HostedTestRuntime, actor: Actor
                 .context
                 .forest
                 .inspect_host_graph()
+                .await
+                .unwrap()
                 .into_iter()
                 .find(|node| node.actor == actor)
                 .and_then(|node| node.provider_turn)

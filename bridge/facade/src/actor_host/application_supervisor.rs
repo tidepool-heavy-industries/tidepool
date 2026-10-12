@@ -164,13 +164,16 @@ pub(super) async fn run_interactive_applications(
     let mut health = tokio::time::interval(Duration::from_secs(1));
     {
         let service = &embedded_service;
+        let graph = (host_graph)()
+            .await
+            .map_err(|error| format!("embedded actor graph observation failed: {error}"))?;
         let live_actors = embedded_live_actors(&application_owners);
         embedded_projection
             .publish(
                 &service.control,
                 &readiness,
                 &embedded_run,
-                &(host_graph)(),
+                &graph,
                 &embedded_projection::LifecycleState::default(),
                 |_| None,
                 |identity| {
@@ -217,11 +220,15 @@ pub(super) async fn run_interactive_applications(
                         if let Err(error) = service.control.refresh_completed_model_requests(&service.runtime.store()) {
                             break Some(format!("embedded request projection failed: {error}"));
                         }
+                        let graph = match (host_graph)().await {
+                            Ok(graph) => graph,
+                            Err(error) => break Some(format!("embedded actor graph observation failed: {error}")),
+                        };
                         if let Err(error) = embedded_projection.publish(
                             &service.control,
                             &readiness,
                             &embedded_run,
-                            &(host_graph)(),
+                            &graph,
                             &states,
                             |actor| conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
                             |identity| service.runtime.store().embedded_round_frontier(identity).map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0)),
@@ -260,9 +267,13 @@ pub(super) async fn run_interactive_applications(
                     }
                     let live_actors = embedded_live_actors(&application_owners);
                     let conversations = embedded_bindings(&application_owners);
+                    let graph = match (host_graph)().await {
+                        Ok(graph) => graph,
+                        Err(error) => break Some(format!("embedded actor graph observation failed: {error}")),
+                    };
                     if let Err(error) = drain_embedded_browser_commands(
                         &service.runtime.store(), &service.control, &embedded_run,
-                        &(host_graph)(), &live_actors, &embedded_projection,
+                        &graph, &live_actors, &embedded_projection,
                         &conversations, &embedded_lifecycle_tx,
                         &mut browser_commands,
                     ) {
@@ -272,7 +283,7 @@ pub(super) async fn run_interactive_applications(
                         &service.control,
                         &readiness,
                         &embedded_run,
-                        &(host_graph)(),
+                        &graph,
                         &(*embedded_lifecycle_rx.borrow()).clone(),
                         |actor| conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
                         |identity| service.runtime.store().embedded_round_frontier(identity).map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0)),
@@ -320,8 +331,12 @@ pub(super) async fn run_interactive_applications(
                 }
                 let live_actors = embedded_live_actors(&application_owners);
                 let conversations = embedded_bindings(&application_owners);
+                let graph = match (host_graph)().await {
+                    Ok(graph) => graph,
+                    Err(error) => break Some(format!("embedded actor graph observation failed: {error}")),
+                };
                 if let Err(error) = drain_embedded_browser_commands(
-                    &store, &service.control, &embedded_run, &(host_graph)(),
+                    &store, &service.control, &embedded_run, &graph,
                     &live_actors, &embedded_projection, &conversations,
                     &embedded_lifecycle_tx,
                     &mut browser_commands,
@@ -540,8 +555,12 @@ pub(super) async fn run_interactive_applications(
                                 .or_insert_with(InteractiveApplicationOwner::embedded);
                             let selected_parent = if actor != root_identity && installation.checkpoint.is_none() && installation.context_parent.is_none() && installation.checkpoint_attachment.is_none() {
                                 let identities = embedded_bindings(&application_owners).iter().map(|(actor, conversation)| (*actor, conversation.identity().clone())).collect();
+                                let graph = match (host_graph)().await {
+                                    Ok(graph) => graph,
+                                    Err(error) => break Some(format!("embedded actor graph observation failed: {error}")),
+                                };
                                 match embedded_context::selected_provider_parent(
-                                    &embedded_run, installation.creator.or(installation.supervisor_parent), &(host_graph)(), &identities,
+                                    &embedded_run, installation.creator.or(installation.supervisor_parent), &graph, &identities,
                                 ) {
                                     Ok(parent) => Some(parent),
                                     Err(error) => {

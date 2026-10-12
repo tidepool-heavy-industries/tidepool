@@ -570,9 +570,10 @@ impl TestCampaign {
                     Err(payload) => {
                         if let Ok(Some(root)) = &diagnostics {
                             graph_report.replace(
-                                super::hosted_test_context::HostedTestDiagnostics::report_host_graph(
-                                    root, &owner.forest.inspect_host_graph(),
-                                ),
+                                match owner.forest.inspect_host_graph().await {
+                                    Ok(graph) => super::hosted_test_context::HostedTestDiagnostics::report_host_graph(root, &graph),
+                                    Err(error) => Err(format!("host graph observation failed: {error}")),
+                                },
                             );
                         }
                         std::panic::resume_unwind(payload)

@@ -322,7 +322,7 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
                 assert_eq!(held.packet["memory"], "child-runtime-memory");
                 operations.push(held.packet["operation"].as_str().unwrap().to_owned());
                 let mut issuing_node = None;
-                for node in host.context.forest.inspect_host_graph() {
+                for node in host.context.forest.inspect_host_graph().await.unwrap() {
                     if host
                         .context
                         .forest
@@ -365,7 +365,7 @@ async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
                 judgments.try_recv(),
                 Err(mpsc::error::TryRecvError::Empty)
             ));
-            let graph = host.context.forest.inspect_host_graph();
+            let graph = host.context.forest.inspect_host_graph().await.unwrap();
             let child = |label: &str| graph.iter().find(|node| node.label == label).unwrap();
             for label in [
                 "startup-fresh",

@@ -62,7 +62,7 @@ impl Host {
                     })
                 })
             },
-            Arc::new(|_| Some(Vec::new())),
+            Arc::new(|_| Box::pin(async { Ok(Some(Vec::new())) })),
             Arc::new(|_, _| Box::pin(async { panic!("no artifact calls") })),
         )
         .await
@@ -468,7 +468,7 @@ async fn retained_provision_failure_is_not_retried() {
                 Box::pin(async { Err("compiler unavailable".into()) })
             })
         },
-        Arc::new(|_| None),
+        Arc::new(|_| Box::pin(async { Ok(None) })),
         Arc::new(|_, _| panic!("no artifacts")),
     )
     .await
@@ -571,7 +571,7 @@ async fn changed_service_with_same_actor_identity_cannot_address_old_session() {
                 Box::pin(async move { Ok(actor) })
             })
         },
-        Arc::new(|_| Some(Vec::new())),
+        Arc::new(|_| Box::pin(async { Ok(Some(Vec::new())) })),
         Arc::new(|_, _| panic!("no artifact calls")),
     )
     .await

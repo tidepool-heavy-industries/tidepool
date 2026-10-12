@@ -547,7 +547,7 @@ async fn pending_sleep_operation(
     }
 
     let actor = fixture.context.actor.identity();
-    let graph = fixture.context.forest.inspect_host_graph();
+    let graph = fixture.context.forest.inspect_host_graph().await.unwrap();
     let Some(node) = graph.into_iter().find(|node| node.actor == actor) else {
         return Ok(None);
     };

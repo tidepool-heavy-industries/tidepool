@@ -80,7 +80,7 @@ async fn next_descendant(
                             round = requests.recv() => break round,
                             _ = poll.tick() => {
                                 pending_claim(host, parent_operation);
-                                for node in host.context.forest.inspect_host_graph() {
+                                for node in host.context.forest.inspect_host_graph().await.unwrap() {
                                     if node.creator == Some(parent) && node.context_parent == context_parent {
                                         let installation = host.context.observer.installation(node.actor).await;
                                         if let Some(terminal) = installation.actor.terminal().get() {
@@ -100,7 +100,7 @@ async fn next_descendant(
             .expect("provider observer is live"),
     };
     let origin = identity(&round);
-    let graph = host.context.forest.inspect_host_graph();
+    let graph = host.context.forest.inspect_host_graph().await.unwrap();
     let node = graph
         .iter()
         .find(|node| {
@@ -502,7 +502,7 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             .await;
             captured(&grandchild, &child_prefix, CHILD_CALL);
             let grandchild_path = identity(&grandchild).actor;
-            let graph = host.context.forest.inspect_host_graph();
+            let graph = host.context.forest.inspect_host_graph().await.unwrap();
             assert_eq!(graph.len(), 3);
             assert!(graph.iter().all(|node| node.model_actor));
             let child_worktree = &graph
@@ -539,7 +539,15 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
                 &["AgentLaunch"],
             )
             .expect("leaf's narrow effect row refuses checkpoint before any launch");
-            assert_eq!(host.context.forest.inspect_host_graph().len(), 3);
+            assert_eq!(
+                host.context
+                    .forest
+                    .inspect_host_graph()
+                    .await
+                    .unwrap()
+                    .len(),
+                3
+            );
             pending_claim(host, &root_operation);
             pending_claim(host, &child_operation);
             grandchild.call("recursive-leaf-reply", GRANDCHILD_REPLY);
@@ -623,7 +631,7 @@ async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply()
             assert!(installation.tools.iter().any(|tool| tool.name() == name),
                 "the actual default workspace installs {name}");
         }
-        let graph = host.context.forest.inspect_host_graph();
+        let graph = host.context.forest.inspect_host_graph().await.unwrap();
         let child_node = graph.iter().find(|node| node.actor == child_actor).unwrap();
         assert!(child_node.bound_worktree.is_some());
         let worktree = worktree_registry(host).get(&exomonad_worktree::WorktreeId::from_raw(
@@ -723,7 +731,7 @@ async fn production_review_tool_retains_request_scope_and_fresh_consumer() {
         ));
         let root = next(host, &mut requests, &mut pending, &root_path).await;
         let first_id: i64 = explicit_display_text(&root.settled_output("review-setup")).parse().unwrap();
-        let graph = host.context.forest.inspect_host_graph();
+        let graph = host.context.forest.inspect_host_graph().await.unwrap();
         let reviewer = graph.iter().find(|node| node.creator == Some(root_actor) && node.model_actor).unwrap();
         let reviewer_actor = reviewer.actor;
         assert_eq!(reviewer.supervisor_parent, Some(root_actor));
@@ -795,7 +803,7 @@ async fn production_review_tool_retains_request_scope_and_fresh_consumer() {
             next_descendant(host, &mut requests, &mut pending, reviewer_actor, None, &operation),
         ).await.unwrap();
         let consumer_path = identity(&consumer).actor;
-        let graph = host.context.forest.inspect_host_graph();
+        let graph = host.context.forest.inspect_host_graph().await.unwrap();
         let node = graph.iter().find(|node| node.actor == consumer_actor).unwrap();
         assert_eq!(node.creator, Some(reviewer_actor));
         assert_eq!(node.supervisor_parent, Some(reviewer_actor));

@@ -384,7 +384,7 @@ pub(super) async fn inherited_response_scenario(
         assert_eq!(response["status"], "committed", "{response:?}");
     };
     campaign.run_scenario(|campaign| Box::pin(async move {
-    let root_session = campaign.forest.actor_session(campaign.actor.identity()).unwrap();
+    let root_session = campaign.forest.actor_session(campaign.actor.identity()).await.unwrap().unwrap();
     let root = campaign.root_installation.policy.clone();
     let producer_dispatch = tokio::spawn(async move {
         tests::dispatch_haskell_script(
@@ -405,7 +405,7 @@ pub(super) async fn inherited_response_scenario(
             },
         )
         .await;
-    let producer_session = campaign.forest.actor_session(producer.actor.identity()).unwrap();
+    let producer_session = campaign.forest.actor_session(producer.actor.identity()).await.unwrap().unwrap();
     assert_eq!(producer_session != root_session, dedicated, "actual producer placement");
     campaign.authority.install_grant(
         producer.actor.identity().into(),
@@ -447,7 +447,7 @@ pub(super) async fn inherited_response_scenario(
             },
         )
         .await;
-    let observer_session = campaign.forest.actor_session(observer.actor.identity()).unwrap();
+    let observer_session = campaign.forest.actor_session(observer.actor.identity()).await.unwrap().unwrap();
     assert_eq!(observer_session != root_session, dedicated, "actual observer placement");
     assert_eq!(observer_session != producer_session, dedicated, "actual sibling placement");
     campaign.authority.install_grant(

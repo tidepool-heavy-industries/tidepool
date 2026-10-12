@@ -1888,7 +1888,13 @@ struct InteractiveFleet {
     readiness: mpsc::UnboundedSender<ActorHostReadiness>,
     worktree_authority: ActorWorktreeAuthority,
 
-    host_graph: Arc<dyn Fn() -> Vec<exomonad_actor::ActorGraphNode> + Send + Sync>,
+    host_graph: Arc<
+        dyn Fn() -> futures_util::future::BoxFuture<
+                'static,
+                Result<Vec<exomonad_actor::ActorGraphNode>, exomonad_actor::DirectoryError>,
+            > + Send
+            + Sync,
+    >,
     #[cfg(test)]
     test_observer: Option<hosted_test_context::HostTestObserver>,
 }
@@ -2509,7 +2515,10 @@ async fn run_owned(
                 Ok(actor)
             })
         }),
-        Arc::new(move |requester| inspection_forest.inspect_graph(requester)),
+        Arc::new(move |requester| {
+            let forest = Arc::clone(&inspection_forest);
+            Box::pin(async move { forest.inspect_graph(requester).await })
+        }),
         Arc::new(move |actor: ActorRef, relative_path: PathBuf| {
             let owners = artifact_owners.clone();
             let run_id = artifact_run_id.clone();
@@ -2592,7 +2601,11 @@ async fn run_owned(
     let (_root_config, root_config_rx) = watch::channel(config.clone());
 
     let host_graph_forest = Arc::clone(&forest);
-    let host_graph = Arc::new(move || host_graph_forest.inspect_host_graph());
+    let host_graph = Arc::new(move || {
+        let forest = Arc::clone(&host_graph_forest);
+        Box::pin(async move { forest.inspect_host_graph().await })
+            as futures_util::future::BoxFuture<'static, _>
+    });
     tracing::info!(target: "tidepool::actor_host::startup", actor = %root_actor.identity(), "production assembly ready");
     #[cfg(test)]
     let test_observer = test_hooks.as_ref().map(|hooks| hooks.observer.clone());

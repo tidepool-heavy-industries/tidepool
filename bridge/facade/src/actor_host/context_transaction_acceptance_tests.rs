@@ -197,17 +197,17 @@ async fn next_round_with_state(
             tokio::select! {
                 biased;
                 outcome = fixture.host_outcome() => {
-                    panic!("embedded host stopped during child acceptance: {outcome:?}; graph={:?}", forest.inspect_host_graph());
+                    panic!("embedded host stopped during child acceptance: {outcome:?}; graph={:?}", forest.inspect_host_graph().await);
                 }
                 round = rounds.recv() => match round {
                     Some(round) => return round,
                     None => {
                         let host = tokio::time::timeout(Duration::from_secs(35), fixture.host_outcome()).await;
-                        panic!("scripted provider closed; host={host:?}; graph={:?}", forest.inspect_host_graph());
+                        panic!("scripted provider closed; host={host:?}; graph={:?}", forest.inspect_host_graph().await);
                     }
                 },
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    let graph = forest.inspect_host_graph();
+                    let graph = forest.inspect_host_graph().await.unwrap();
                     if let Some(child) = graph.iter().find(|node| {
                         node.actor != root
                             && node.terminal().is_some_and(|terminal| {
@@ -225,7 +225,7 @@ async fn next_round_with_state(
         .unwrap_or_else(|_| {
             panic!(
                 "native actor did not reach the next model request; graph={:?}",
-                forest.inspect_host_graph()
+                forest.inspect_host_graph().await.unwrap()
             )
         })
 }
@@ -287,7 +287,7 @@ async fn prove_child_survives(
     original_setup: &Item,
 ) {
     let root = fixture.context.actor.identity();
-    let graph = fixture.context.forest.inspect_host_graph();
+    let graph = fixture.context.forest.inspect_host_graph().await.unwrap();
     let children = graph
         .iter()
         .filter(|node| node.model_actor && node.creator == Some(root))
@@ -784,7 +784,7 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
     let output = successful_output(&installed.request, "fresh-idle-spawn");
     assert!(test_campaign::explicit_display_text(&output).contains("installed-idle"));
     let root = fixture.context.actor.identity();
-    let graph = fixture.context.forest.inspect_host_graph();
+    let graph = fixture.context.forest.inspect_host_graph().await.unwrap();
     let children = graph
         .iter()
         .filter(|node| node.model_actor && node.creator == Some(root))
@@ -1412,7 +1412,7 @@ async fn resident_sync_context_cancel_discards_staging_and_keeps_activated_child
                         "staged cell settled before its real Sleep wait; operation={:?}; \
                          terminal={settled:?}; graph={:?}",
                         claim.operation,
-                        fixture.context.forest.inspect_host_graph()
+                        fixture.context.forest.inspect_host_graph().await.unwrap()
                     );
                 }
                 if fixture
@@ -1443,7 +1443,7 @@ async fn resident_sync_context_cancel_discards_staging_and_keeps_activated_child
                          session={}; terminal={terminal:?}; settlement={}; graph={:?}",
                         round.request.session_id,
                         fixture.cell_settlement_diagnostic("context-cancel").await,
-                        fixture.context.forest.inspect_host_graph()
+                        fixture.context.forest.inspect_host_graph().await.unwrap()
                     );
                 }
                 _ = tokio::time::sleep(Duration::from_millis(10)) => {}
@@ -1460,7 +1460,7 @@ async fn resident_sync_context_cancel_discards_staging_and_keeps_activated_child
     .unwrap_or_else(|_| {
         panic!(
             "staged cell never reached its real Sleep wait; graph={:?}",
-            fixture.context.forest.inspect_host_graph()
+            fixture.context.forest.inspect_host_graph().await.unwrap()
         )
     })
     .expect("exact root exited before the staged cell reached its real Sleep wait");

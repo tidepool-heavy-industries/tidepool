@@ -12,20 +12,20 @@ async fn fresh_context_typed_exit_and_replacement_retain_callable_value() {
     campaign.run_scenario(|campaign| Box::pin(async move {
         let root = campaign.root_installation.policy.clone();
         let root_id = campaign.actor.identity();
-        let root_session = campaign.forest.actor_session(root_id).unwrap();
+        let root_session = campaign.forest.actor_session(root_id).await.unwrap().unwrap();
         let installed = dispatch_haskell_script(root.as_ref(),
             &tidepool_testing::fixture_source("bridge/facade/src/actor_host/fresh_callable_exit_setup.hs")).await;
         assert_eq!(installed["status"], "committed", "{installed}");
-        let predecessor = campaign.forest.inspect_host_graph().into_iter()
+        let predecessor = campaign.forest.inspect_host_graph().await.unwrap().into_iter()
             .find(|node| node.label == "fresh-callable-exit").unwrap();
-        let predecessor_session = campaign.forest.actor_session(predecessor.actor).unwrap();
+        let predecessor_session = campaign.forest.actor_session(predecessor.actor).await.unwrap().unwrap();
         assert_ne!(predecessor_session, root_session, "typed exit crosses actual machines");
         let replaced = dispatch_haskell_script(root.as_ref(),
             "callableExitSuccessor <- replaceActor callableExitActor callableExitDefinition").await;
         assert_eq!(replaced["status"], "committed", "{replaced}");
-        let successor = campaign.forest.inspect_host_graph().into_iter()
+        let successor = campaign.forest.inspect_host_graph().await.unwrap().into_iter()
             .find(|node| node.label == "fresh-callable-exit" && node.actor != predecessor.actor).unwrap();
-        let successor_session = campaign.forest.actor_session(successor.actor).unwrap();
+        let successor_session = campaign.forest.actor_session(successor.actor).await.unwrap().unwrap();
         assert_ne!(successor_session, root_session);
         assert_ne!(successor_session, predecessor_session, "replacement owns a fresh machine");
         let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
@@ -53,7 +53,7 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
     campaign.run_scenario(|campaign| Box::pin(async move {
         let root = campaign.root_installation.policy.clone();
         let root_id = campaign.actor.identity();
-        let root_session = campaign.forest.actor_session(root_id).unwrap();
+        let root_session = campaign.forest.actor_session(root_id).await.unwrap().unwrap();
         let (setup, producer) = campaign.dispatch_native_spawn_setup(
             "source producer setup and native acknowledgement",
             &tidepool_testing::fixture_source("bridge/facade/src/actor_host/source_setup.hs"),
@@ -62,7 +62,7 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
         assert_eq!(setup["status"], "committed", "{setup}");
         campaign.await_native_activation(producer.actor.identity(),
             "source producer typed activation", Duration::from_secs(120)).await;
-        assert_eq!(campaign.forest.actor_session(producer.actor.identity()), Some(root_session),
+        assert_eq!(campaign.forest.actor_session(producer.actor.identity()).await.unwrap(), Some(root_session),
             "captured-context producer retains its issuing machine");
         let first = dispatch_haskell_script_with_deadline(producer.policy.as_ref(),
             "reportProgress (ProgressNote 1 (+ sessionInput))", "source first progress", COLD_DEBUG_CELL_SETTLEMENT_BUDGET).await;
@@ -70,9 +70,9 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
         let installed = dispatch_haskell_script_with_deadline(root.as_ref(),
             &tidepool_testing::fixture_source("bridge/facade/src/actor_host/fresh_result_source_actor.hs"), "source collector installation", COLD_DEBUG_CELL_SETTLEMENT_BUDGET).await;
         assert_eq!(installed["status"], "committed", "{installed}");
-        let collector = campaign.forest.inspect_host_graph().into_iter()
+        let collector = campaign.forest.inspect_host_graph().await.unwrap().into_iter()
             .find(|node| node.label == "ordered-source-collector").unwrap();
-        let collector_session = campaign.forest.actor_session(collector.actor).unwrap();
+        let collector_session = campaign.forest.actor_session(collector.actor).await.unwrap().unwrap();
         assert_ne!(collector_session, root_session, "source observation crosses actual machines");
         let published = dispatch_haskell_script_with_deadline(producer.policy.as_ref(),
             "reportProgress (ProgressNote 2 (* sessionInput))\nreportProgress (ProgressNote 3 (subtract sessionInput))\nrespond (42 :: Int)", "source remaining progress and result", COLD_DEBUG_CELL_SETTLEMENT_BUDGET).await;
@@ -166,6 +166,8 @@ async fn callable_reply_scenario(reply_source: &'static str, expected: bool) {
                 let root_session = campaign
                     .forest
                     .actor_session(campaign.actor.identity())
+                    .await
+                    .unwrap()
                     .unwrap();
                 let (setup, child) = campaign
                     .dispatch_native_spawn_setup(
@@ -177,7 +179,12 @@ async fn callable_reply_scenario(reply_source: &'static str, expected: bool) {
                     )
                     .await;
                 let child_id = child.actor.identity();
-                let child_session = campaign.forest.actor_session(child_id).unwrap();
+                let child_session = campaign
+                    .forest
+                    .actor_session(child_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
                 assert_ne!(
                     child_session, root_session,
                     "callable response crosses actual machines"
@@ -346,7 +353,7 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
                     if let Some(child) = host
                         .context
                         .forest
-                        .inspect_host_graph()
+                        .inspect_host_graph().await.unwrap()
                         .into_iter()
                         .find(|node| node.label == "worker")
                     {
@@ -449,7 +456,7 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
     let root = campaign.root_installation.policy.clone();
     let root_session = campaign
         .forest
-        .actor_session(campaign.actor.identity())
+        .actor_session(campaign.actor.identity()).await.unwrap()
         .expect("root actor has a session");
 
     let parent = dispatch_haskell_script(
@@ -484,7 +491,7 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
         .await;
     let child_session = campaign
         .forest
-        .actor_session(installation.actor.identity())
+        .actor_session(installation.actor.identity()).await.unwrap()
         .expect("child actor has a session");
     assert_ne!(
         child_session, root_session,

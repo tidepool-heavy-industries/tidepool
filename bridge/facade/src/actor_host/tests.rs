@@ -2836,6 +2836,8 @@ async fn forest_operator_survives_model_root_recovery() {
                     campaign
                         .forest
                         .inspect_graph(campaign.actor.identity())
+                        .await
+                        .unwrap()
                         .unwrap()
                         .len(),
                     1,
@@ -2845,6 +2847,8 @@ async fn forest_operator_survives_model_root_recovery() {
                     campaign
                         .forest
                         .inspect_graph(operator.identity())
+                        .await
+                        .unwrap()
                         .unwrap()
                         .len(),
                     2
@@ -2911,6 +2915,8 @@ async fn forest_operator_survives_model_root_recovery() {
                     campaign
                         .forest
                         .inspect_graph(child.actor.identity())
+                        .await
+                        .unwrap()
                         .unwrap()
                         .len(),
                     1,
@@ -3003,6 +3009,8 @@ async fn forest_operator_survives_model_root_recovery() {
                     campaign
                         .forest
                         .inspect_graph(replacement.identity())
+                        .await
+                        .unwrap()
                         .unwrap()
                         .len(),
                     1
@@ -3010,6 +3018,8 @@ async fn forest_operator_survives_model_root_recovery() {
                 assert!(campaign
                     .forest
                     .inspect_graph(operator.identity())
+                    .await
+                    .unwrap()
                     .unwrap()
                     .iter()
                     .any(|node| node.actor == replacement.identity()));

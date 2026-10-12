@@ -76,8 +76,13 @@ fn client_for(socket: &Path) -> std::io::Result<(reqwest::Client, SocketAddress)
     Ok((client, address))
 }
 
-type InspectGraph =
-    dyn Fn(exomonad_actor::ActorRef) -> Option<Vec<exomonad_actor::ActorGraphNode>> + Send + Sync;
+type InspectGraph = dyn Fn(
+        exomonad_actor::ActorRef,
+    ) -> BoxFuture<
+        'static,
+        Result<Option<Vec<exomonad_actor::ActorGraphNode>>, exomonad_actor::DirectoryError>,
+    > + Send
+    + Sync;
 type InspectArtifact = dyn Fn(exomonad_actor::ActorRef, PathBuf) -> BoxFuture<'static, crate::run_map::ArtifactProvenance>
     + Send
     + Sync;
@@ -499,12 +504,24 @@ async fn graph(
             "Session no longer exists",
         );
     };
-    let Some(nodes) = (state.inspect_graph)(actor.identity()) else {
-        return error(
-            StatusCode::NOT_FOUND,
-            "session_not_found",
-            "Session no longer exists",
-        );
+    let actor = actor.identity();
+    drop(sessions);
+    let nodes = match (state.inspect_graph)(actor).await {
+        Ok(Some(nodes)) => nodes,
+        Ok(None) => {
+            return error(
+                StatusCode::NOT_FOUND,
+                "session_not_found",
+                "Session no longer exists",
+            )
+        }
+        Err(error_value) => {
+            return error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "inspection_unavailable",
+                error_value.to_string(),
+            )
+        }
     };
     let value = serde_json::json!({"protocol_version": PROTOCOL_VERSION, "session": session, "actors": nodes});
     let bytes = match serde_json::to_vec(&value) {
@@ -1027,7 +1044,7 @@ mod artifact_tests {
         let service = OperatorService::bind(
             socket.clone(),
             Arc::new(|| Box::pin(async { Err("provision must not run".into()) })),
-            Arc::new(|_| None),
+            Arc::new(|_| Box::pin(async { Ok(None) })),
             Arc::new(|_, _| panic!("artifact inspection must not run")),
         )
         .await
@@ -1069,7 +1086,7 @@ mod artifact_tests {
         let service = OperatorService::bind(
             socket.clone(),
             Arc::new(|| Box::pin(async { Err("provision must not run".into()) })),
-            Arc::new(|_| None),
+            Arc::new(|_| Box::pin(async { Ok(None) })),
             Arc::new(move |actor, relative_path| {
                 observed.fetch_add(1, Ordering::SeqCst);
                 Box::pin(async move {
@@ -1258,13 +1275,28 @@ mod lifecycle_tests {
         actor: LocalActorRef,
     ) -> (OperatorService, reqwest::Client, String) {
         let graph_actor = actor.identity();
+        service_for_actor_with_graph(
+            socket,
+            actor,
+            Arc::new(move |actor| {
+                Box::pin(async move { Ok((actor == graph_actor).then(Vec::new)) })
+            }),
+        )
+        .await
+    }
+
+    async fn service_for_actor_with_graph(
+        socket: PathBuf,
+        actor: LocalActorRef,
+        inspect_graph: Arc<InspectGraph>,
+    ) -> (OperatorService, reqwest::Client, String) {
         let service = OperatorService::bind(
             socket.clone(),
             Arc::new(move || {
                 let actor = actor.clone();
                 Box::pin(async move { Ok(actor) })
             }),
-            Arc::new(move |actor| (actor == graph_actor).then(Vec::new)),
+            inspect_graph,
             Arc::new(|_, _| Box::pin(async { panic!("unexpected artifact inspection") })),
         )
         .await
@@ -1311,6 +1343,52 @@ mod lifecycle_tests {
             release,
             calls,
         )
+    }
+
+    #[tokio::test]
+    async fn graph_inspection_distinguishes_absent_session_from_unavailable_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let (behavior, _, release, _) = behavior(true, false);
+        let (actor, actor_task) = exomonad_actor::spawn_local_actor(None, behavior)
+            .await
+            .unwrap();
+        let unavailable = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = Arc::clone(&unavailable);
+        let (service, client, session) = service_for_actor_with_graph(
+            directory.path().join("operator.sock"),
+            actor,
+            Arc::new(move |_| {
+                let observed = Arc::clone(&observed);
+                Box::pin(async move {
+                    if observed.load(Ordering::SeqCst) {
+                        Err(exomonad_actor::DirectoryError::Unavailable)
+                    } else {
+                        Ok(None)
+                    }
+                })
+            }),
+        )
+        .await;
+        let url = format!("http://localhost/v1/sessions/{session}/actors");
+        let missing = client.get(&url).send().await.unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        unavailable.store(true, Ordering::SeqCst);
+        let failed = client.get(&url).send().await.unwrap();
+        assert_eq!(failed.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            failed.json::<serde_json::Value>().await.unwrap()["code"],
+            "inspection_unavailable"
+        );
+
+        release.add_permits(1);
+        let stopped = client
+            .post(format!("http://localhost/host/operators/{session}/stop"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stopped.status(), StatusCode::OK);
+        actor_task.await.unwrap();
+        service.shutdown().await;
     }
 
     #[tokio::test]

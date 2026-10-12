@@ -264,7 +264,7 @@ async fn next_round(rounds: &mut mpsc::UnboundedReceiver<ScriptedRound>) -> Scri
 async fn idle(context: &HostedActorContext) {
     tokio::time::timeout(BOUNDARY_BUDGET, async {
         loop {
-            let graph = context.forest.inspect_host_graph();
+            let graph = context.forest.inspect_host_graph().await.unwrap();
             if graph.iter().any(|node| {
                 node.actor == context.actor.identity()
                     && !node.provider_observation_stale
