@@ -2640,7 +2640,11 @@ mod tests {
         let run = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
         let path = run.path().join("actors.jsonl");
-        let actor = ActorRef::first(ActorId(33));
+        let (control, _control_task) = crate::local_actor::run_control::RunControlClient::start()
+            .await
+            .unwrap();
+        let reservation = control.reserve(Incarnation::FIRST).await.unwrap();
+        let actor = reservation.identity();
         let root =
             descriptor("root").with_actor_path(tidepool_repr::ActorPath::parse("root").unwrap());
         let intent = startup_intent(
@@ -2654,8 +2658,12 @@ mod tests {
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", run.clone())
             .await
             .unwrap();
+        let permit = control
+            .authorize_root_startup(&reservation, intent.clone(), journal.clone(), None)
+            .await
+            .unwrap();
         journal
-            .admit_with_startup(actor, &root, &[], Some(intent.clone()))
+            .admit_with_startup(actor, &root, &[], Some(intent.clone()), Some(&permit))
             .await
             .unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 2);
