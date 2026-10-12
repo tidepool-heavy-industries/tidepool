@@ -381,3 +381,34 @@ fn uncertain_effects_reopen_with_receipts_and_refuse_implicit_restart() {
         actual.run(&step).unwrap();
     }
 }
+
+#[test]
+fn foreign_startup_issuer_is_refused_before_journal_mutation() {
+    let actual = History::new(None, true);
+    let before = std::fs::read(actual.directory.path().join("actors.jsonl")).unwrap();
+    for foreign in [
+        ActorRef::first(ActorId(8)),
+        ActorRef {
+            id: actual.actor.id,
+            incarnation: Incarnation(actual.actor.incarnation.0 + 1),
+        },
+    ] {
+        let mut identity = actual.identity.clone();
+        identity.actor = foreign;
+        assert!(actual
+            .journal
+            .record_initial_context(
+                actual.actor,
+                InitialContextEvent::Begin {
+                    identity,
+                    caller_seed: None,
+                },
+            )
+            .is_err());
+        assert_eq!(actual.journal.initial_context(actual.actor).unwrap(), None);
+        assert_eq!(
+            std::fs::read(actual.directory.path().join("actors.jsonl")).unwrap(),
+            before
+        );
+    }
+}
