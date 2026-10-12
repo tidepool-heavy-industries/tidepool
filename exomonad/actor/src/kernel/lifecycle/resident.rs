@@ -2,7 +2,7 @@
 
 use super::{LifecycleCommand, LifecycleHandle, LifecycleState};
 use crate::initial_context::InitialContextEvent;
-use crate::resident_actor::{ActorPublicOwnerPlane, RootStartupState, WorkbenchPublicOwner};
+use crate::resident_actor::{ActorPublicOwnerPlane, WorkbenchPublicOwner};
 use crate::{ActorDescriptor, ActorSessionContext, InitialContextObservation, RootStartupIntent};
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
@@ -12,6 +12,13 @@ use std::sync::Arc;
 use tidepool_runtime::session::{
     DurablePublicOwnerPublication, PublicManifestCommit, RecoveryPublicOwner,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RootStartupState {
+    Pending,
+    Released,
+    Activated,
+}
 
 /// Only the named public-surface operations cross into resident machine work.
 /// This service contains the runner, never the Forest or directory.
