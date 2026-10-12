@@ -71,6 +71,9 @@ impl RootDelivery {
 }
 
 pub(super) enum PreparationMessage {
+    RetireResources {
+        resources: Vec<(ractor::ActorId, ResourceChild)>,
+    },
     ReserveActor {
         identity: ActorRef,
         terminal: RetainedActorExit,
@@ -121,6 +124,33 @@ impl Actor for PreparationSupervisor {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            PreparationMessage::RetireResources { resources } => {
+                match Actor::spawn_linked(
+                    None,
+                    ResourceRetirementWorker,
+                    ResourceRetirementArguments {
+                        resources,
+                        control: state.control.clone(),
+                    },
+                    myself.get_cell(),
+                )
+                .await
+                {
+                    Ok((worker, task)) => {
+                        drop(task);
+                        let _ = worker.send_message(());
+                    }
+                    Err(error) => {
+                        let _ = state.control.send_message(
+                            RunControlMessage::RunResourceWorkerFailed {
+                                detail: format!(
+                                    "run resource retirement worker failed to start: {error}"
+                                ),
+                            },
+                        );
+                    }
+                }
+            }
             PreparationMessage::ReserveActor { identity, terminal } => {
                 let arguments = ReservationArguments {
                     identity,
@@ -380,6 +410,62 @@ impl Actor for ReservationStarter {
                 actor: state.identity,
                 lifecycle,
             });
+        myself.stop(None);
+        Ok(())
+    }
+}
+
+struct ResourceRetirementWorker;
+struct ResourceRetirementArguments {
+    resources: Vec<(ractor::ActorId, ResourceChild)>,
+    control: RactorRef<RunControlMessage>,
+}
+impl Actor for ResourceRetirementWorker {
+    type Msg = ();
+    type State = ResourceRetirementArguments;
+    type Arguments = ResourceRetirementArguments;
+    async fn pre_start(
+        &self,
+        _myself: RactorRef<Self::Msg>,
+        arguments: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(arguments)
+    }
+    async fn handle(
+        &self,
+        myself: RactorRef<Self::Msg>,
+        _: (),
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        for (_, resource) in &state.resources {
+            resource.cell.stop(None);
+        }
+        let mut pending = FuturesUnordered::new();
+        for (id, resource) in state.resources.drain(..) {
+            pending.push(async move {
+                let cleanup = tokio::time::timeout(SHUTDOWN_BUDGET, async {
+                    resource.cell.wait(Some(SHUTDOWN_BUDGET)).await?;
+                    Ok::<_, ractor::concurrency::Timeout>(
+                        (resource.cleanup)(ResourceCleanup::Retire).await,
+                    )
+                })
+                .await;
+                let outcome = match cleanup {
+                    Ok(Ok(outcome)) => outcome,
+                    _ => crate::CleanupComponentOutcome::Unconfirmed(
+                        "run resource retirement is unconfirmed".into(),
+                    ),
+                };
+                (id, outcome)
+            });
+        }
+        let mut outcomes = Vec::new();
+        while let Some(outcome) = pending.next().await {
+            outcomes.push(outcome);
+        }
+        let _ = state
+            .control
+            .send_message(RunControlMessage::RunResourcesSettled { outcomes });
         myself.stop(None);
         Ok(())
     }

@@ -1,6 +1,8 @@
 //! One run owns actor membership, identity claims and preparation admission.
 use super::*;
 use tokio::sync::oneshot;
+#[cfg(test)]
+mod cluster_tests;
 mod preparation;
 use preparation::{PreparationMessage, PreparationSupervisor, RootDelivery};
 pub(crate) use preparation::{
@@ -41,6 +43,8 @@ pub(super) struct RunState {
     next_preparation: u64,
     preparation_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
     reservations: HashMap<ActorRef, ReservationRecord>,
+    resource_retirement: ResourceRetirement,
+    resource_waiters: Vec<oneshot::Sender<crate::CleanupComponentOutcome>>,
 }
 impl Default for RunState {
     fn default() -> Self {
@@ -55,6 +59,8 @@ impl Default for RunState {
             next_preparation: 0,
             preparation_waiters: Vec::new(),
             reservations: HashMap::new(),
+            resource_retirement: ResourceRetirement::Available,
+            resource_waiters: Vec::new(),
         }
     }
 }
@@ -106,6 +112,12 @@ struct ReservationRecord {
     reply: Option<oneshot::Sender<Result<ActorReservation, DirectoryError>>>,
 }
 
+enum ResourceRetirement {
+    Available,
+    Requested,
+    Running,
+    Settled(crate::CleanupComponentOutcome),
+}
 enum PreparationPhase {
     Running,
     Accepted,
@@ -117,6 +129,43 @@ struct RootPreparationRecord {
     placement: Option<crate::ActorPlacement>,
 }
 impl RunState {
+    fn start_resource_retirement(&mut self) {
+        if !matches!(self.resource_retirement, ResourceRetirement::Requested)
+            || self
+                .preparations
+                .values()
+                .any(|record| !matches!(record.phase, PreparationPhase::Settled(_)))
+        {
+            return;
+        }
+        self.phase = RunPhase::RetiringResources;
+        self.resource_retirement = ResourceRetirement::Running;
+        let resources = self
+            .resources
+            .iter()
+            .map(|(id, resource)| (*id, resource.clone()))
+            .collect();
+        if self
+            .preparation_supervisor
+            .as_ref()
+            .is_none_or(|supervisor| {
+                supervisor
+                    .send_message(PreparationMessage::RetireResources { resources })
+                    .is_err()
+            })
+        {
+            self.finish_resource_retirement(crate::CleanupComponentOutcome::Unconfirmed(
+                "run resource supervisor unavailable".into(),
+            ));
+        }
+    }
+    fn finish_resource_retirement(&mut self, outcome: crate::CleanupComponentOutcome) {
+        self.resource_retirement = ResourceRetirement::Settled(outcome.clone());
+        self.phase = RunPhase::Retired;
+        for waiter in self.resource_waiters.drain(..) {
+            let _ = waiter.send(outcome.clone());
+        }
+    }
     fn settle_preparation_waiters(&mut self) {
         if self
             .preparations
@@ -151,6 +200,15 @@ impl RunState {
 }
 
 pub(super) enum RunControlMessage {
+    RetireRunResources {
+        reply: oneshot::Sender<crate::CleanupComponentOutcome>,
+    },
+    RunResourcesSettled {
+        outcomes: Vec<(ractor::ActorId, crate::CleanupComponentOutcome)>,
+    },
+    RunResourceWorkerFailed {
+        detail: String,
+    },
     ReservationReady {
         actor: ActorRef,
         lifecycle: Result<crate::kernel::LifecycleHandle, String>,
@@ -288,6 +346,33 @@ impl Actor for RunControl {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            RunControlMessage::RetireRunResources { reply } => match &state.resource_retirement {
+                ResourceRetirement::Settled(outcome) => {
+                    let _ = reply.send(outcome.clone());
+                }
+                _ => {
+                    state.resource_waiters.push(reply);
+                    if matches!(state.resource_retirement, ResourceRetirement::Available) {
+                        state.resource_retirement = ResourceRetirement::Requested;
+                    }
+                    state.start_resource_retirement();
+                }
+            },
+            RunControlMessage::RunResourcesSettled { outcomes } => {
+                let mut combined = crate::CleanupComponentOutcome::Confirmed;
+                for (id, outcome) in outcomes {
+                    if outcome == crate::CleanupComponentOutcome::Confirmed {
+                        state.resources.remove(&id);
+                    }
+                    combined = combine_cleanup(combined, outcome);
+                }
+                state.finish_resource_retirement(combined);
+            }
+            RunControlMessage::RunResourceWorkerFailed { detail } => {
+                state.finish_resource_retirement(crate::CleanupComponentOutcome::Unconfirmed(
+                    detail,
+                ));
+            }
             RunControlMessage::AttachPreparationSupervisor { supervisor, reply } => {
                 state.preparation_supervisor = Some(supervisor);
                 let _ = reply.send(());
@@ -371,6 +456,7 @@ impl Actor for RunControl {
                     record.phase = PreparationPhase::Settled(outcome);
                 }
                 state.settle_preparation_waiters();
+                state.start_resource_retirement();
             }
             RunControlMessage::ObservePreparations { reply } => {
                 state.preparation_waiters.push(reply);
@@ -665,6 +751,23 @@ impl RunControlClient {
             .send_message(message(reply))
             .map_err(|_| DirectoryError::Unavailable)?;
         receiver.await.map_err(|_| DirectoryError::Unavailable)
+    }
+    pub(crate) async fn close_run_admission(&self) -> Result<(), DirectoryError> {
+        self.seal().await.map(|_| ())
+    }
+    pub(crate) async fn shutdown_run_resources(&self) -> crate::CleanupComponentOutcome {
+        match tokio::time::timeout(
+            SHUTDOWN_BUDGET,
+            self.ask(|reply| RunControlMessage::RetireRunResources { reply }),
+        )
+        .await
+        {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(error)) => crate::CleanupComponentOutcome::Unconfirmed(error.to_string()),
+            Err(_) => crate::CleanupComponentOutcome::Unconfirmed(
+                "run resource retirement remains in flight".into(),
+            ),
+        }
     }
     pub(crate) async fn prepare_root(
         &self,
