@@ -4,8 +4,10 @@ use tokio::sync::oneshot;
 #[cfg(test)]
 mod cluster_tests;
 mod preparation;
-#[cfg(test)]
-mod cluster_tests;
+mod startup;
+pub(crate) use startup::{
+    RootStartupAdmission, RootStartupRecoveryAuthority, StartupPredecessorAuthority,
+};
 mod transfers;
 use preparation::{PreparationMessage, PreparationSupervisor, RootDelivery};
 pub(crate) use preparation::{
@@ -102,6 +104,7 @@ struct OwnedResource {
     owner: ResourceOwner,
 }
 
+#[derive(Clone)]
 pub(crate) struct ReplacementIngressGrant {
     predecessor: ActorRef,
     successor: ActorRef,
@@ -353,6 +356,9 @@ impl RunState {
 }
 
 pub(super) enum RunControlMessage {
+    PreparationLost {
+        id: u64,
+    },
     ReserveWorker {
         parent: ActorRef,
         incarnation: crate::Incarnation,
@@ -617,6 +623,17 @@ impl Actor for RunControl {
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
         match message {
+            RunControlMessage::PreparationLost { id } => {
+                if let Some(record) = state.preparations.get_mut(&id) {
+                    record.phase = PreparationPhase::Settled(
+                        crate::CleanupComponentOutcome::Unconfirmed(format!(
+                            "preparation worker lost before delivery; retained placement {:?}",
+                            record.placement
+                        )),
+                    );
+                }
+                state.settle_preparation_waiters();
+            }
             RunControlMessage::ReserveWorker {
                 parent,
                 incarnation,
@@ -1546,7 +1563,6 @@ impl RunControlClient {
         self.ask(|reply| RunControlMessage::ReserveResourceTransfer {
             parent,
             cells,
-            resources,
             source_run,
             destination_run,
             reply,
@@ -1606,14 +1622,14 @@ impl RunControlClient {
             ),
         }
     }
-    pub(super) async fn reserve(
+    pub(crate) async fn reserve(
         &self,
         incarnation: crate::Incarnation,
     ) -> Result<ActorReservation, DirectoryError> {
         self.ask(|reply| RunControlMessage::Reserve { incarnation, reply })
             .await?
     }
-    pub(super) async fn claim_exact(
+    pub(crate) async fn claim_exact(
         &self,
         actor: ActorRef,
     ) -> Result<ActorReservation, DirectoryError> {

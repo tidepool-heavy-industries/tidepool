@@ -9,12 +9,52 @@ pub(crate) enum RootAdmissionOutcome {
         ractor::concurrency::JoinHandle<()>,
         crate::RootStartupRelease,
     ),
+    NativeResource(ResourceChild),
 }
 impl RootAdmissionOutcome {
-    fn actor(&self) -> LocalActorRef {
+    fn custody(&self) -> ProducedCustody {
         match self {
             Self::Actor(actor, _) | Self::Workbench(actor) | Self::Pending(actor, _, _) => {
-                actor.clone()
+                ProducedCustody::Resident(actor.clone())
+            }
+            Self::NativeResource(resource) => ProducedCustody::NativeResource(resource.clone()),
+        }
+    }
+}
+#[derive(Clone)]
+enum ProducedCustody {
+    Resident(LocalActorRef),
+    NativeResource(ResourceChild),
+}
+impl ProducedCustody {
+    async fn retire(self) -> crate::CleanupComponentOutcome {
+        match self {
+            Self::Resident(actor) => {
+                let cleanup =
+                    crate::resident_actor::shutdown_forest_root(&actor, SHUTDOWN_BUDGET).await;
+                if cleanup.is_confirmed() {
+                    crate::CleanupComponentOutcome::Confirmed
+                } else {
+                    crate::CleanupComponentOutcome::Unconfirmed(format!(
+                        "abandoned root cleanup: {cleanup:?}"
+                    ))
+                }
+            }
+            Self::NativeResource(resource) => {
+                resource.cell.stop(None);
+                match tokio::time::timeout(SHUTDOWN_BUDGET, async {
+                    resource.cell.wait(Some(SHUTDOWN_BUDGET)).await?;
+                    Ok::<_, ractor::concurrency::Timeout>(
+                        (resource.cleanup)(ResourceCleanup::Retire).await,
+                    )
+                })
+                .await
+                {
+                    Ok(Ok(outcome)) => outcome,
+                    _ => crate::CleanupComponentOutcome::Unconfirmed(
+                        "abandoned native resource cleanup is unconfirmed".into(),
+                    ),
+                }
             }
         }
     }
@@ -85,7 +125,27 @@ pub(super) enum PreparationMessage {
         compiler: RetainedActorExit,
         reply: oneshot::Sender<RootDelivery>,
     },
+    Produced {
+        id: u64,
+        custody: ProducedCustody,
+        reply: oneshot::Sender<()>,
+    },
     WorkerSettled {
+        id: u64,
+        outcome: crate::CleanupComponentOutcome,
+    },
+    ReservationReady {
+        actor: ActorRef,
+        lifecycle: Result<crate::kernel::LifecycleHandle, String>,
+    },
+    ResourcesSettled {
+        owner: ResourceLifetime,
+        outcomes: Vec<(ractor::ActorId, crate::CleanupComponentOutcome)>,
+    },
+    VerifyTerminal {
+        worker: ractor::ActorId,
+    },
+    AbandonedCleanupSettled {
         id: u64,
         outcome: crate::CleanupComponentOutcome,
     },
@@ -96,13 +156,32 @@ pub(super) enum PreparationMessage {
 pub(super) struct PreparationSupervisor;
 pub(super) struct PreparationState {
     control: RactorRef<RunControlMessage>,
-    workers: HashMap<u64, PreparationWorker>,
+    workers: HashMap<ractor::ActorId, TrackedWorker>,
 }
-struct PreparationWorker {
+enum WorkerKind {
+    Root {
+        id: u64,
+        compiler: RetainedActorExit,
+        produced: Option<ProducedCustody>,
+    },
+    Reserve {
+        identity: ActorRef,
+        terminal: RetainedActorExit,
+    },
+    Retire {
+        owner: ResourceLifetime,
+        resources: Vec<(ractor::ActorId, ResourceChild)>,
+    },
+    Abandoned {
+        id: u64,
+        custody: ProducedCustody,
+    },
+}
+struct TrackedWorker {
     cell: ractor::ActorCell,
-    compiler: RetainedActorExit,
-    settled: Option<crate::CleanupComponentOutcome>,
+    kind: WorkerKind,
     terminal: bool,
+    reported: bool,
 }
 impl Actor for PreparationSupervisor {
     type Msg = PreparationMessage;
@@ -126,154 +205,110 @@ impl Actor for PreparationSupervisor {
     ) -> Result<(), ActorProcessingErr> {
         match message {
             PreparationMessage::RetireResources { owner, resources } => {
-                match Actor::spawn_linked(
-                    None,
-                    ResourceRetirementWorker,
-                    ResourceRetirementArguments {
-                        owner,
-                        resources,
-                        control: state.control.clone(),
-                    },
-                    myself.get_cell(),
-                )
-                .await
-                {
+                let arguments = ResourceRetirementArguments { owner, resources: resources.clone(), supervisor: myself.clone() };
+                match Actor::spawn_linked(None, ResourceRetirementWorker, arguments, myself.get_cell()).await {
                     Ok((worker, task)) => {
-                        drop(task);
-                        let _ = worker.send_message(());
+                        state.workers.insert(worker.get_id(), TrackedWorker { cell: worker.get_cell(), kind: WorkerKind::Retire { owner, resources }, terminal: false, reported: false });
+                        drop(task); let _ = worker.send_message(());
                     }
-                    Err(error) => {
-                        let _ = state.control.send_message(
-                            RunControlMessage::RunResourceWorkerFailed {
-                                detail: format!(
-                                    "run resource retirement worker failed to start: {error}"
-                                ),
-                            },
-                        );
-                    }
+                    Err(error) => { let _ = state.control.send_message(RunControlMessage::RunResourceWorkerFailed { owner, detail: format!("resource retirement worker failed to start: {error}") }); }
                 }
             }
             PreparationMessage::ReserveActor { identity, terminal } => {
-                let arguments = ReservationArguments {
-                    identity,
-                    terminal,
-                    control: state.control.clone(),
-                };
-                match Actor::spawn_linked(None, ReservationStarter, arguments, myself.get_cell())
-                    .await
-                {
+                let arguments = ReservationArguments { identity, terminal: terminal.clone(), supervisor: myself.clone() };
+                match Actor::spawn_linked(None, ReservationStarter, arguments, myself.get_cell()).await {
                     Ok((worker, task)) => {
-                        drop(task);
-                        let _ = worker.send_message(());
+                        state.workers.insert(worker.get_id(), TrackedWorker { cell: worker.get_cell(), kind: WorkerKind::Reserve { identity, terminal }, terminal: false, reported: false });
+                        drop(task); let _ = worker.send_message(());
                     }
-                    Err(error) => {
-                        let _ = state
-                            .control
-                            .send_message(RunControlMessage::ReservationReady {
-                                actor: identity,
-                                lifecycle: Err(error.to_string()),
-                            });
-                    }
+                    Err(error) => { let _ = state.control.send_message(RunControlMessage::ReservationReady { actor: identity, lifecycle: Err(error.to_string()) }); }
                 }
             }
-            PreparationMessage::Start {
-                id,
-                operation,
-                compiler,
-                reply,
-            } => {
-                // This worker's pre_start only constructs state. It never asks
-                // directory registration or starts native preparation there.
-                let arguments = RootWorkerArguments {
-                    id,
-                    operation: Some(operation),
-                    compiler: compiler.clone(),
-                    reply: Some(reply),
-                    control: state.control.clone(),
-                    supervisor: myself.clone(),
-                };
+            PreparationMessage::Start { id, operation, compiler, reply } => {
+                let arguments = RootWorkerArguments { id, operation: Some(operation), compiler: compiler.clone(), reply: Some(reply), control: state.control.clone(), supervisor: myself.clone() };
                 match Actor::spawn_linked(None, RootWorker, arguments, myself.get_cell()).await {
                     Ok((worker, task)) => {
-                        state.workers.insert(
-                            id,
-                            PreparationWorker {
-                                cell: worker.get_cell(),
-                                compiler,
-                                settled: None,
-                                terminal: false,
-                            },
-                        );
-                        drop(task);
-                        let _ = worker.send_message(RootWorkerMessage::Execute);
+                        state.workers.insert(worker.get_id(), TrackedWorker { cell: worker.get_cell(), kind: WorkerKind::Root { id, compiler, produced: None }, terminal: false, reported: false });
+                        drop(task); let _ = worker.send_message(RootWorkerMessage::Execute);
                     }
-                    Err(error) => {
-                        let _ = state
-                            .control
-                            .send_message(RunControlMessage::PreparationSettled {
-                                id,
-                                outcome: crate::CleanupComponentOutcome::Unconfirmed(format!(
-                                    "root preparation worker failed to start: {error}"
-                                )),
-                            });
-                    }
+                    Err(error) => { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome: crate::CleanupComponentOutcome::Unconfirmed(format!("root preparation worker failed to start: {error}")) }); }
+                }
+            }
+            PreparationMessage::Produced { id, custody, reply } => {
+                if let Some(worker) = state.workers.values_mut().find(|worker| matches!(&worker.kind, WorkerKind::Root { id: issued, .. } if *issued == id)) {
+                    if let WorkerKind::Root { produced, .. } = &mut worker.kind { *produced = Some(custody); }
+                    let _ = reply.send(());
                 }
             }
             PreparationMessage::Cancel { id } => {
-                if let Some(worker) = state.workers.get(&id) {
-                    worker.compiler.request_shutdown(ActorTerminal::new(
-                        ActorExitKind::Cancelled,
-                        "forest preparation shutdown",
-                    ));
-                }
+                for worker in state.workers.values() { if let WorkerKind::Root { id: issued, compiler, .. } = &worker.kind { if *issued == id { compiler.request_shutdown(ActorTerminal::new(ActorExitKind::Cancelled, "forest preparation shutdown")); } } }
             }
             PreparationMessage::WorkerSettled { id, outcome } => {
-                if let Some(worker) = state.workers.get_mut(&id) {
-                    worker.settled = Some(outcome.clone());
+                for worker in state.workers.values_mut() { if matches!(&worker.kind, WorkerKind::Root { id: issued, .. } if *issued == id) { worker.reported = true; } }
+                let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome });
+            }
+            PreparationMessage::ReservationReady { actor, lifecycle } => {
+                for worker in state.workers.values_mut() { if matches!(&worker.kind, WorkerKind::Reserve { identity, .. } if *identity == actor) { worker.reported = true; } }
+                if let Err(error) = state.control.send_message(RunControlMessage::ReservationReady { actor, lifecycle }) {
+                    if let ractor::MessagingErr::SendErr(RunControlMessage::ReservationReady { lifecycle: Ok(lifecycle), .. }) = error { lifecycle.close_abandoned(); }
                 }
-                let _ = state
-                    .control
-                    .send_message(RunControlMessage::PreparationSettled { id, outcome });
+            }
+            PreparationMessage::ResourcesSettled { owner, outcomes } => {
+                for worker in state.workers.values_mut() { if matches!(&worker.kind, WorkerKind::Retire { owner: issued, .. } if *issued == owner) { worker.reported = true; } }
+                let _ = state.control.send_message(RunControlMessage::RunResourcesSettled { owner, outcomes });
+            }
+            PreparationMessage::AbandonedCleanupSettled { id, outcome } => {
+                for worker in state.workers.values_mut() { if matches!(&worker.kind, WorkerKind::Abandoned { id: issued, .. } if *issued == id) { worker.reported = true; } }
+                let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome });
+            }
+            PreparationMessage::VerifyTerminal { worker } => {
+                let Some(record) = state.workers.get_mut(&worker) else { return Ok(()); };
+                if record.reported { state.workers.remove(&worker); return Ok(()); }
+                match &mut record.kind {
+                    WorkerKind::Root { id, compiler, produced } => {
+                        compiler.request_shutdown(ActorTerminal::new(ActorExitKind::Cancelled, "root preparation worker lost"));
+                        let id = *id;
+                        if let Some(custody) = produced.take() {
+                            let arguments = AbandonedCleanupArguments { id, custody: custody.clone(), supervisor: myself.clone() };
+                            match Actor::spawn_linked(None, AbandonedCleanupWorker, arguments, myself.get_cell()).await {
+                                Ok((cleanup, task)) => { state.workers.insert(cleanup.get_id(), TrackedWorker { cell: cleanup.get_cell(), kind: WorkerKind::Abandoned { id, custody }, terminal: false, reported: false }); drop(task); let _ = cleanup.send_message(()); }
+                                Err(error) => { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id, outcome: crate::CleanupComponentOutcome::Unconfirmed(format!("abandoned root cleanup worker failed to start: {error}")) }); }
+                            }
+                        } else { let _ = state.control.send_message(RunControlMessage::PreparationLost { id }); }
+                    }
+                    WorkerKind::Reserve { identity, terminal } => {
+                        terminal.request_shutdown(ActorTerminal::new(ActorExitKind::Cancelled, "actor reservation worker lost"));
+                        let _ = state.control.send_message(RunControlMessage::ReservationReady { actor: *identity, lifecycle: Err("actor reservation worker exited without settlement".into()) });
+                    }
+                    WorkerKind::Retire { owner, .. } => { let _ = state.control.send_message(RunControlMessage::RunResourceWorkerFailed { owner: *owner, detail: "resource retirement worker exited without settlement".into() }); }
+                    WorkerKind::Abandoned { id, .. } => { let _ = state.control.send_message(RunControlMessage::PreparationSettled { id: *id, outcome: crate::CleanupComponentOutcome::Unconfirmed("abandoned root cleanup worker exited without settlement".into()) }); }
+                }
             }
         }
+        state
+            .workers
+            .retain(|_, worker| !(worker.terminal && worker.reported));
         Ok(())
     }
     async fn handle_supervisor_evt(
         &self,
-        _myself: RactorRef<Self::Msg>,
+        myself: RactorRef<Self::Msg>,
         event: SupervisionEvent,
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let (cell, failed) = match event {
-            SupervisionEvent::ActorTerminated(cell, _, _) => (cell, false),
-            SupervisionEvent::ActorFailed(cell, _) => (cell, true),
+        let cell = match event {
+            SupervisionEvent::ActorTerminated(cell, _, _)
+            | SupervisionEvent::ActorFailed(cell, _) => cell,
             _ => return Ok(()),
         };
-        if let Some((id, worker)) = state
-            .workers
-            .iter_mut()
-            .find(|(_, worker)| worker.cell.get_id() == cell.get_id())
-        {
+        if let Some(worker) = state.workers.get_mut(&cell.get_id()) {
             worker.terminal = true;
-            if failed && worker.settled.is_none() {
-                worker.compiler.request_shutdown(ActorTerminal::new(
-                    ActorExitKind::Cancelled,
-                    "preparation worker failed",
-                ));
-                let _ = state
-                    .control
-                    .send_message(RunControlMessage::PreparationSettled {
-                        id: *id,
-                        outcome: crate::CleanupComponentOutcome::Unconfirmed(
-                            "preparation worker failed before cleanup settlement".into(),
-                        ),
-                    });
-            }
-            // A normal stop may overtake the queued settlement message.
+            // Ordinary payload publication precedes worker termination, but
+            // Ractor prioritizes this event. Verify behind queued payloads.
+            let _ = myself.send_message(PreparationMessage::VerifyTerminal {
+                worker: cell.get_id(),
+            });
         }
-        state.workers.retain(|_, worker| {
-            !(worker.terminal
-                && worker.settled.as_ref() == Some(&crate::CleanupComponentOutcome::Confirmed))
-        });
         Ok(())
     }
 }
@@ -331,7 +366,18 @@ impl Actor for RootWorker {
                 "root preparation panicked before cleanup settlement".into(),
             ),
             Ok((result, settled)) => {
-                let actor = result.as_ref().ok().map(RootAdmissionOutcome::actor);
+                let custody = result.as_ref().ok().map(RootAdmissionOutcome::custody);
+                if let Some(custody) = &custody {
+                    let (retained, receipt) = oneshot::channel();
+                    let published = state.supervisor.send_message(PreparationMessage::Produced {
+                        id: state.id,
+                        custody: custody.clone(),
+                        reply: retained,
+                    });
+                    if published.is_err() || receipt.await.is_err() {
+                        return Err("preparation supervisor lost produced custody".into());
+                    }
+                }
                 let (accepted, acceptance) = oneshot::channel();
                 let delivered = reply.send(RootDelivery {
                     id: state.id,
@@ -345,16 +391,8 @@ impl Actor for RootWorker {
                 };
                 if accepted {
                     settled
-                } else if let Some(actor) = actor {
-                    let cleanup =
-                        crate::resident_actor::shutdown_forest_root(&actor, SHUTDOWN_BUDGET).await;
-                    if cleanup.is_confirmed() {
-                        crate::CleanupComponentOutcome::Confirmed
-                    } else {
-                        crate::CleanupComponentOutcome::Unconfirmed(format!(
-                            "abandoned root cleanup: {cleanup:?}"
-                        ))
-                    }
+                } else if let Some(custody) = custody {
+                    custody.retire().await
                 } else {
                     settled
                 }
@@ -383,7 +421,7 @@ pub(super) struct ReservationStarter;
 pub(super) struct ReservationArguments {
     pub(super) identity: ActorRef,
     pub(super) terminal: RetainedActorExit,
-    pub(super) control: RactorRef<RunControlMessage>,
+    pub(super) supervisor: RactorRef<PreparationMessage>,
 }
 impl Actor for ReservationStarter {
     type Msg = ();
@@ -402,13 +440,16 @@ impl Actor for ReservationStarter {
         _: (),
         state: &mut Self::State,
     ) -> Result<(), ActorProcessingErr> {
-        let lifecycle =
-            crate::kernel::LifecycleHandle::start(state.identity, state.terminal.clone())
-                .await
-                .map_err(|error| error.to_string());
+        let lifecycle = crate::kernel::LifecycleHandle::start_linked(
+            state.identity,
+            state.terminal.clone(),
+            state.supervisor.get_cell(),
+        )
+        .await
+        .map_err(|error| error.to_string());
         let _ = state
-            .control
-            .send_message(RunControlMessage::ReservationReady {
+            .supervisor
+            .send_message(PreparationMessage::ReservationReady {
                 actor: state.identity,
                 lifecycle,
             });
@@ -421,7 +462,7 @@ struct ResourceRetirementWorker;
 struct ResourceRetirementArguments {
     owner: ResourceLifetime,
     resources: Vec<(ractor::ActorId, ResourceChild)>,
-    control: RactorRef<RunControlMessage>,
+    supervisor: RactorRef<PreparationMessage>,
 }
 impl Actor for ResourceRetirementWorker {
     type Msg = ();
@@ -467,10 +508,45 @@ impl Actor for ResourceRetirementWorker {
             outcomes.push(outcome);
         }
         let _ = state
-            .control
-            .send_message(RunControlMessage::RunResourcesSettled {
+            .supervisor
+            .send_message(PreparationMessage::ResourcesSettled {
                 owner: state.owner,
                 outcomes,
+            });
+        myself.stop(None);
+        Ok(())
+    }
+}
+
+struct AbandonedCleanupWorker;
+struct AbandonedCleanupArguments {
+    id: u64,
+    custody: ProducedCustody,
+    supervisor: RactorRef<PreparationMessage>,
+}
+impl Actor for AbandonedCleanupWorker {
+    type Msg = ();
+    type State = AbandonedCleanupArguments;
+    type Arguments = AbandonedCleanupArguments;
+    async fn pre_start(
+        &self,
+        _myself: RactorRef<Self::Msg>,
+        arguments: Self::Arguments,
+    ) -> Result<Self::State, ActorProcessingErr> {
+        Ok(arguments)
+    }
+    async fn handle(
+        &self,
+        myself: RactorRef<Self::Msg>,
+        _: (),
+        state: &mut Self::State,
+    ) -> Result<(), ActorProcessingErr> {
+        let outcome = state.custody.clone().retire().await;
+        let _ = state
+            .supervisor
+            .send_message(PreparationMessage::AbandonedCleanupSettled {
+                id: state.id,
+                outcome,
             });
         myself.stop(None);
         Ok(())
