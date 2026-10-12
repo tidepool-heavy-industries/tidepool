@@ -215,15 +215,20 @@ mod tests {
         assert!(authority.owns_run(runtime.path()).unwrap());
         assert!(HostIncarnationLease::claim(&anchor).is_err());
         drop(authority);
-        assert_eq!(HostIncarnationLease::claim(&anchor).unwrap().incarnation(), Incarnation(2));
+        assert_eq!(
+            HostIncarnationLease::claim(&anchor).unwrap().incarnation(),
+            Incarnation(2)
+        );
     }
 
     #[tokio::test]
     async fn boot_registration_refuses_another_run_before_creating_journal() {
         let owned = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
-        let owned_anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(owned.path()).unwrap();
-        let other_anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(other.path()).unwrap();
+        let owned_anchor =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(owned.path()).unwrap();
+        let other_anchor =
+            tidepool_atomic_write::DirectoryAnchor::open_existing(other.path()).unwrap();
         let (_lease, registration) = HostIncarnationLease::claim(&owned_anchor)
             .unwrap()
             .into_boot_registration();

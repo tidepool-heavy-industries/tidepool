@@ -155,7 +155,11 @@ pub(super) struct EmbeddedApplicationRecovery {
     pub(super) recovered_root: bool,
 }
 impl EmbeddedApplicationRecovery {
-    pub(super) async fn prepare(&self, actor: ActorRef, identity: &HostIdentity) -> Result<(), String> {
+    pub(super) async fn prepare(
+        &self,
+        actor: ActorRef,
+        identity: &HostIdentity,
+    ) -> Result<(), String> {
         if !self
             .lease
             .owns_run(&self.run_root)
