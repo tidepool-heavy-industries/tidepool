@@ -1104,6 +1104,22 @@ impl LocalActorRef {
         self.admit_mailbox(KernelMessage::Source(delivery)).await
     }
 
+    /// Submit a typed workbench request through the exact incarnation owner.
+    /// The owner retains admitted execution independently of its reply observer.
+    pub async fn submit_workbench(
+        &self,
+        invocation: ActorWorkbenchInvocation,
+        control: Option<std::sync::Arc<crate::WorkbenchExecutionControl>>,
+        reply: RpcReplyPort<KernelWorkbenchReply>,
+    ) -> Result<(), KernelCallFailure> {
+        self.admit_mailbox(KernelMessage::Workbench {
+            invocation,
+            control,
+            reply,
+        })
+        .await
+    }
+
     pub async fn call(
         &self,
         caller: ActorRef,
