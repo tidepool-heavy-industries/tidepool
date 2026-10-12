@@ -145,8 +145,8 @@ pub use prompt_catalog::hosted_prompt_fingerprint as exomonad_hosted_prompt_fing
 pub use recovery::{
     ActorRecoveryJournal, ApplicationConversation, DurableActorAdmission, DurableActorApplication,
     DurableActorRecord, DurableActorTerminal, DurableRootSuccessorAdmission,
-    JournalApplicationBindingAck, JournalOwnerStatus, RootRecoveryPlacement, RootStartupIntent,
-    RootStartupManifestPin,
+    JournalApplicationBindingAck, JournalOwnerStatus, JournalBootRegistration,
+    RecoveryBootRegistration, RootRecoveryPlacement, RootStartupIntent, RootStartupManifestPin,
 };
 pub use request::{
     AbandonResponseOutcome, ActorEventSequence, CancelRequestOutcome, CancellationReason,

@@ -2,44 +2,25 @@
 
 use super::DirectoryError;
 use crate::kernel::lifecycle::{LifecycleHandle, SuccessorDrainReceipt};
+use crate::recovery::JournalBootRegistration;
 use crate::{ActorRecoveryJournal, ActorRef, RootStartupIntent};
-use futures_util::future::BoxFuture;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tidepool_runtime::session::RecoveryRunAuthority;
 
-/// RunControl alone supplies this qualifier from its boot registration owner.
-/// A run lock or a missing local actor is not such a qualification.
-pub(super) trait ClosedHostPredecessorAuthority: Send + Sync {
-    fn verify<'a>(
-        &'a self,
-        predecessor: ActorRef,
-        journal: &'a ActorRecoveryJournal,
-    ) -> BoxFuture<'a, Result<(), DirectoryError>>;
-}
-
-/// Qualified host exclusion retained separately from journal replay evidence.
-/// There is no public constructor from an otherwise unqualified run lease.
+/// Qualified initial replay prefix issued while consuming the host boot lease.
 pub struct RootStartupRecoveryAuthority {
     journal: Arc<ActorRecoveryJournal>,
-    run_root: PathBuf,
-    run: Arc<dyn RecoveryRunAuthority>,
-    closed_host: Arc<dyn ClosedHostPredecessorAuthority>,
+    boot: JournalBootRegistration,
 }
 
 impl RootStartupRecoveryAuthority {
-    pub(super) fn from_closed_host(
+    pub(super) fn from_boot(
         journal: Arc<ActorRecoveryJournal>,
-        run_root: PathBuf,
-        run: Arc<dyn RecoveryRunAuthority>,
-        closed_host: Arc<dyn ClosedHostPredecessorAuthority>,
-    ) -> Self {
-        Self {
-            journal,
-            run_root,
-            run,
-            closed_host,
+        boot: JournalBootRegistration,
+    ) -> Result<Self, DirectoryError> {
+        if !boot.matches(&journal) {
+            return Err(DirectoryError::Unavailable);
         }
+        Ok(Self { journal, boot })
     }
 
     async fn verify(
@@ -47,12 +28,12 @@ impl RootStartupRecoveryAuthority {
         predecessor: ActorRef,
         journal: &ActorRecoveryJournal,
     ) -> Result<(), DirectoryError> {
-        if !self.journal.same_owner(journal) {
+        if !self.boot.qualifies(predecessor, journal) {
             return Err(DirectoryError::Unauthorized { actor: predecessor });
         }
-        let run = Arc::clone(&self.run);
-        let root = self.run_root.clone();
-        let owns = tokio::task::spawn_blocking(move || run.owns_run(Path::new(&root)))
+        let run = self.boot.run.clone();
+        let root = self.boot.run_root.clone();
+        let owns = tokio::task::spawn_blocking(move || run.owns_run(&root))
             .await
             .map_err(|_| DirectoryError::Unavailable)?
             .map_err(|error| {
@@ -63,7 +44,7 @@ impl RootStartupRecoveryAuthority {
         if !owns {
             return Err(DirectoryError::Unauthorized { actor: predecessor });
         }
-        self.closed_host.verify(predecessor, journal).await
+        Ok(())
     }
 }
 

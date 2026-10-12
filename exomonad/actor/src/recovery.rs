@@ -419,6 +419,28 @@ struct BootstrapPause {
     resume: std::sync::mpsc::Receiver<()>,
 }
 
+/// Trusted host adapter consumes its exclusive boot lease before sharing it.
+pub trait RecoveryBootRegistration: Send + Sync {
+    fn into_run(self: Box<Self>) -> Arc<dyn tidepool_runtime::session::RecoveryRunAuthority>;
+}
+
+/// Affine registration of the replay prefix preceding this host's first append.
+pub struct JournalBootRegistration {
+    issuer: Arc<()>,
+    actors: Vec<ActorRef>,
+    pub(crate) run_root: PathBuf,
+    pub(crate) run: Arc<dyn tidepool_runtime::session::RecoveryRunAuthority>,
+}
+
+impl JournalBootRegistration {
+    pub(crate) fn qualifies(&self, actor: ActorRef, journal: &ActorRecoveryJournal) -> bool {
+        Arc::ptr_eq(&self.issuer, &journal.identity) && self.actors.contains(&actor)
+    }
+    pub(crate) fn matches(&self, journal: &ActorRecoveryJournal) -> bool {
+        Arc::ptr_eq(&self.issuer, &journal.identity)
+    }
+}
+
 /// A channel handle to one dedicated, supervised blocking journal owner.
 pub struct ActorRecoveryJournal {
     identity: Arc<()>,
@@ -441,6 +463,27 @@ impl ActorRecoveryJournal {
         lifetime: Arc<dyn Send + Sync>,
         #[cfg(test)] bootstrap_pause: Option<BootstrapPause>,
     ) -> std::io::Result<Arc<Self>> {
+        Self::start_bootstrap(
+            anchor,
+            relative_file,
+            require_existing,
+            lifetime,
+            None,
+            #[cfg(test)]
+            bootstrap_pause,
+        )
+        .await
+        .map(|(journal, _)| journal)
+    }
+
+    async fn start_bootstrap(
+        anchor: DirectoryAnchor,
+        relative_file: PathBuf,
+        require_existing: bool,
+        lifetime: Arc<dyn Send + Sync>,
+        boot: Option<Arc<dyn tidepool_runtime::session::RecoveryRunAuthority>>,
+        #[cfg(test)] bootstrap_pause: Option<BootstrapPause>,
+    ) -> std::io::Result<(Arc<Self>, Vec<ActorRef>)> {
         let identity = Arc::new(());
         let owner_identity = Arc::clone(&identity);
         let (commands, incoming) = std::sync::mpsc::channel();
@@ -459,6 +502,22 @@ impl ActorRecoveryJournal {
                 }
                 let mut fenced = false;
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Some(run) = &boot {
+                        match run.owns_run(anchor.path()) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                let _ = initialized.send(Err(std::io::Error::new(
+                                    std::io::ErrorKind::PermissionDenied,
+                                    "boot lease does not own journal run",
+                                )));
+                                return false;
+                            }
+                            Err(error) => {
+                                let _ = initialized.send(Err(error));
+                                return false;
+                            }
+                        }
+                    }
                     let mut owner = match JournalOwner::initialize(
                         &anchor,
                         &relative_file,
@@ -466,7 +525,12 @@ impl ActorRecoveryJournal {
                         owner_identity,
                     ) {
                         Ok(owner) => {
-                            let _ = initialized.send(Ok(()));
+                            let prefix = if boot.is_some() {
+                                owner.state.records.keys().copied().collect()
+                            } else {
+                                Vec::new()
+                            };
+                            let _ = initialized.send(Ok(prefix));
                             owner
                         }
                         Err(error) => {
@@ -599,8 +663,10 @@ impl ActorRecoveryJournal {
                     }
                     true
                 }));
-                let release =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(_lifetime)));
+                let release = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    drop(boot);
+                    drop(_lifetime);
+                }));
                 status_tx.send_replace(JournalOwnerStatus::Stopped {
                     clean: matches!(outcome, Ok(true)) && release.is_ok(),
                     fenced,
@@ -614,10 +680,10 @@ impl ActorRecoveryJournal {
             commands,
             status,
         });
-        ready.await.map_err(|_| {
+        let prefix = ready.await.map_err(|_| {
             std::io::Error::other("actor journal owner terminated during initialization")
         })??;
-        Ok(journal)
+        Ok((journal, prefix))
     }
     /// Exact process-local writer endpoint identity, independent of file names.
     pub fn same_owner(&self, other: &Self) -> bool {
@@ -637,6 +703,34 @@ impl ActorRecoveryJournal {
         result.await.map_err(|_| {
             std::io::Error::other("actor journal owner terminated without completion")
         })?
+    }
+    /// Consumes the host's one-shot boot lease and freezes the initial replay prefix.
+    pub async fn open_for_boot(
+        anchor: &DirectoryAnchor,
+        relative_file: impl AsRef<Path>,
+        require_existing: bool,
+        registration: Box<dyn RecoveryBootRegistration>,
+    ) -> std::io::Result<(Arc<Self>, JournalBootRegistration)> {
+        let run = registration.into_run();
+        let run_root = anchor.path().to_owned();
+        let lifetime: Arc<dyn Send + Sync> = run.clone();
+        let (journal, actors) = Self::start_bootstrap(
+            anchor.clone(),
+            relative_file.as_ref().to_owned(),
+            require_existing,
+            lifetime,
+            Some(run.clone()),
+            #[cfg(test)]
+            None,
+        )
+        .await?;
+        let registration = JournalBootRegistration {
+            issuer: journal.identity.clone(),
+            actors,
+            run_root,
+            run,
+        };
+        Ok((journal, registration))
     }
     pub async fn open(
         anchor: &DirectoryAnchor,
