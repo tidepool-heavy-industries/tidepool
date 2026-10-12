@@ -276,3 +276,191 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
     })
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fresh_children_initialize_idle_and_captured_children_skip_the_hook() {
+    let files = tempfile::tempdir().unwrap();
+    let settings = hosted_test_settings(&files, 1);
+    let (provider, mut requests) = hosted_script_provider();
+    let (entered, mut judgments) = mpsc::unbounded_channel();
+    let host = HostedTestRuntime::start_configured(&settings, &provider, move |config| {
+        configure_startup(config, "absentSpec", "child-runtime-memory");
+        config.jev = Some(Arc::new(StartupJevGate(entered)));
+    })
+    .await
+    .unwrap();
+    host.run_scenario(|host| {
+        Box::pin(async move {
+            assert_eq!(observation(host).state, InitialContextState::AbsentHook);
+            host.input("install-startup-children").await.unwrap();
+            let root = harness::model::AgentPath("/root".into());
+            let mut pending = VecDeque::new();
+            let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            let operation = first.operation("startup-children-spawn");
+            first.sync_call(
+                "startup-children-spawn",
+                include_str!("fixtures/startup_children_spawn.hs"),
+            );
+            let mut operations = Vec::new();
+            for caller in ["fresh-caller-seed", ""] {
+                let held = host
+                    .while_operation_succeeds(
+                        &operation,
+                        tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, judgments.recv()),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(held.packet["caller_seed_present"], true);
+                assert_eq!(held.packet["caller_seed"], caller);
+                assert_eq!(held.packet["memory"], "child-runtime-memory");
+                operations.push(held.packet["operation"].as_str().unwrap().to_owned());
+                let node = host
+                    .context
+                    .forest
+                    .inspect_host_graph()
+                    .into_iter()
+                    .find(|node| {
+                        host.context
+                            .forest
+                            .initial_context_observation(node.actor)
+                            .ok()
+                            .and_then(|observation| observation.identity)
+                            .is_some_and(|identity| {
+                                identity.operation.as_str() == operations.last().unwrap()
+                            })
+                    })
+                    .expect("operation was issued by the fresh child owner");
+                assert_ne!(node.actor, host.context.actor.identity());
+                assert_eq!(node.creator, Some(host.context.actor.identity()));
+                assert!(host
+                    .context
+                    .binding(node.actor)
+                    .unwrap()
+                    .conversation()
+                    .is_none());
+                assert!(matches!(
+                    requests.try_recv(),
+                    Err(mpsc::error::TryRecvError::Empty)
+                ));
+                held.answer.send(true).unwrap();
+            }
+            assert_ne!(operations[0], operations[1]);
+            let installed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            installed.assert_value("startup-children-spawn", "True");
+            assert!(pending.is_empty(), "initialized children remain idle");
+            assert!(matches!(
+                requests.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                judgments.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            let graph = host.context.forest.inspect_host_graph();
+            let child = |label: &str| graph.iter().find(|node| node.label == label).unwrap();
+            for label in [
+                "startup-fresh",
+                "startup-empty-caller",
+                "startup-captured",
+                "startup-empty-result",
+                "startup-absent",
+            ] {
+                let node = child(label);
+                assert!(node.active_requests.is_empty());
+                assert!(node.queued_requests.is_empty());
+                assert!(node.terminal().is_none());
+                assert!(host
+                    .context
+                    .binding(node.actor)
+                    .unwrap()
+                    .conversation()
+                    .is_some());
+            }
+            let fresh = host
+                .context
+                .forest
+                .initial_context_observation(child("startup-fresh").actor)
+                .unwrap();
+            let empty_caller = host
+                .context
+                .forest
+                .initial_context_observation(child("startup-empty-caller").actor)
+                .unwrap();
+            assert_eq!(fresh.state, InitialContextState::Published);
+            assert_eq!(fresh.caller_seed.as_deref(), Some("fresh-caller-seed"));
+            assert_eq!(empty_caller.caller_seed.as_deref(), Some(""));
+            assert!(empty_caller
+                .publication
+                .as_ref()
+                .unwrap()
+                .caller_reference
+                .is_some());
+            assert_eq!(
+                host.context
+                    .forest
+                    .initial_context_observation(child("startup-captured").actor)
+                    .unwrap()
+                    .state,
+                InitialContextState::Captured
+            );
+            let empty = host
+                .context
+                .forest
+                .initial_context_observation(child("startup-empty-result").actor)
+                .unwrap();
+            assert_eq!(empty.state, InitialContextState::Published);
+            assert_eq!(empty.result.as_ref().unwrap().rendered, "");
+            assert!(empty
+                .publication
+                .as_ref()
+                .unwrap()
+                .authored_reference
+                .is_none());
+            assert!(empty
+                .publication
+                .as_ref()
+                .unwrap()
+                .caller_reference
+                .is_some());
+            assert_eq!(
+                host.context
+                    .forest
+                    .initial_context_observation(child("startup-absent").actor)
+                    .unwrap()
+                    .state,
+                InitialContextState::AbsentHook
+            );
+            let path = host
+                .context
+                .binding(child("startup-fresh").actor)
+                .unwrap()
+                .identity()
+                .actor
+                .clone();
+            installed.call(
+                "startup-child-activate",
+                include_str!("fixtures/startup_child_activate.hs"),
+            );
+            let parent = next_hosted_script_round(&mut requests, &mut pending, &root).await;
+            parent.assert_value("startup-child-activate", "True");
+            parent.finish();
+            let activated = next_hosted_script_round(&mut requests, &mut pending, &path).await;
+            let texts = user_texts(&activated.request);
+            assert_eq!(texts[0], "fresh-caller-seed");
+            assert_eq!(texts[1], fresh.result.as_ref().unwrap().rendered);
+            assert!(matches!(
+                judgments.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ));
+            activated.call(
+                "startup-child-reply",
+                include_str!("fixtures/startup_child_reply.hs"),
+            );
+            let replied = next_hosted_script_round(&mut requests, &mut pending, &path).await;
+            replied.finish();
+        })
+    })
+    .await;
+}
