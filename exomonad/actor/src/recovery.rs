@@ -599,11 +599,13 @@ impl ActorRecoveryJournal {
                     }
                     true
                 }));
+                let release =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(_lifetime)));
                 status_tx.send_replace(JournalOwnerStatus::Stopped {
-                    clean: matches!(outcome, Ok(true)),
+                    clean: matches!(outcome, Ok(true)) && release.is_ok(),
                     fenced,
                 });
-                if outcome.is_err() {
+                if outcome.is_err() || release.is_err() {
                     tracing::error!("actor journal owner terminated unexpectedly");
                 }
             })?;
@@ -1979,6 +1981,21 @@ mod tests {
     use tidepool_codegen::suspension::RealmId;
     use tidepool_repr::SessionId;
 
+    struct LifetimeProbe {
+        directory: Option<tempfile::TempDir>,
+        closed: Option<tokio::sync::oneshot::Sender<std::io::Result<Vec<u8>>>>,
+    }
+    impl Drop for LifetimeProbe {
+        fn drop(&mut self) {
+            let observed =
+                std::fs::read(self.directory.as_ref().unwrap().path().join("actors.jsonl"));
+            drop(self.directory.take());
+            if let Some(reply) = self.closed.take() {
+                let _ = reply.send(observed);
+            }
+        }
+    }
+
     #[tokio::test]
     async fn created_rows_refuse_surplus_fields_without_rewriting_recovery_bytes() {
         let directory = Arc::new(tempfile::tempdir().unwrap());
@@ -3304,27 +3321,13 @@ mod tests {
     }
     #[tokio::test]
     async fn enclosing_lifetime_survives_last_sender_until_queued_write_drains() {
-        struct LifetimeProbe {
-            directory: Option<tempfile::TempDir>,
-            drained: Option<tokio::sync::oneshot::Sender<std::io::Result<Vec<u8>>>>,
-        }
-        impl Drop for LifetimeProbe {
-            fn drop(&mut self) {
-                let observed =
-                    std::fs::read(self.directory.as_ref().unwrap().path().join("actors.jsonl"));
-                drop(self.directory.take());
-                if let Some(reply) = self.drained.take() {
-                    let _ = reply.send(observed);
-                }
-            }
-        }
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().to_owned();
         let anchor = DirectoryAnchor::open_existing(&path).unwrap();
         let (drained_tx, drained) = tokio::sync::oneshot::channel();
         let lifetime = Arc::new(LifetimeProbe {
             directory: Some(directory),
-            drained: Some(drained_tx),
+            closed: Some(drained_tx),
         });
         let weak = Arc::downgrade(&lifetime);
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", lifetime.clone())
@@ -3374,20 +3377,6 @@ mod tests {
     }
     #[tokio::test]
     async fn cancelled_open_retains_enclosing_lifetime_until_real_bootstrap_exits() {
-        struct LifetimeProbe {
-            directory: Option<tempfile::TempDir>,
-            closed: Option<tokio::sync::oneshot::Sender<std::io::Result<Vec<u8>>>>,
-        }
-        impl Drop for LifetimeProbe {
-            fn drop(&mut self) {
-                let observed =
-                    std::fs::read(self.directory.as_ref().unwrap().path().join("actors.jsonl"));
-                drop(self.directory.take());
-                if let Some(reply) = self.closed.take() {
-                    let _ = reply.send(observed);
-                }
-            }
-        }
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().to_owned();
         let anchor = DirectoryAnchor::open_existing(&path).unwrap();
