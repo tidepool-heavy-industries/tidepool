@@ -709,6 +709,7 @@ impl HostActor for EmbeddedHostActor {
         );
         let manifest = snapshot.manifest();
         let dispatcher: Arc<dyn Provider> = Arc::new(EmbeddedDispatcher {
+            attachment: self.attachment.clone(),
             identity: self.identity.clone(),
             issuer: self.actor.identity(),
             context_models: self.context_models.clone(),
@@ -764,6 +765,7 @@ impl HostActor for EmbeddedHostActor {
 
 #[derive(Clone)]
 struct EmbeddedDispatcher {
+    attachment: super::provider_attachment::ProviderAttachment,
     context_models: Arc<OnceLock<ModelResolver>>,
     identity: HostIdentity,
     issuer: ActorRef,
@@ -1416,7 +1418,18 @@ impl Provider for EmbeddedDispatcher {
                         Err("next-model selection requires admitted workspace policy".into())
                     })
                 });
-                let binding = Arc::new(EmbeddedContextBinding::new(invocation, snapshot, resolver));
+                let attachment = self.attachment.clone();
+                let initial_context = Arc::new(move || {
+                    attachment
+                        .initial_context_wire_observation()
+                        .map_err(|error| error.to_string())
+                });
+                let binding = Arc::new(EmbeddedContextBinding::new(
+                    invocation,
+                    snapshot,
+                    resolver,
+                    initial_context,
+                ));
                 if let Err(error) = context.completion.register(operation, binding.clone()) {
                     return unavailable_context_completion(JobOutput::Completed(Err(error
                         .to_string()
