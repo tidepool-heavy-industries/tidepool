@@ -76,12 +76,85 @@ fn user_texts(request: &ResponsesRequest) -> Vec<&str> {
         .collect()
 }
 
+pub(super) fn assert_request_user_texts(
+    host: &HostedTestRuntime,
+    actor: exomonad_actor::ActorRef,
+    request: &ResponsesRequest,
+    expected_bodies: &[&str],
+) {
+    let binding = host.context.binding(actor).unwrap();
+    let store = host.context.runtime.store();
+    let projected = store.embedded_conversation_history(binding.identity()).unwrap();
+    let head = projected.head.as_ref().unwrap();
+    let canonical = store.context_history(head).unwrap();
+    let user_bodies = |items: &[(harness::model::RequestId, harness::item::ItemHash, harness::item::Item)]| {
+        items.iter().filter(|(_, _, item)| item.0["type"] == "message" && item.0["role"] == "user")
+            .map(|(_, _, item)| item.0["content"].as_str().unwrap().to_owned()).collect::<Vec<_>>()
+    };
+    assert_eq!(user_bodies(&canonical), expected_bodies);
+    assert_eq!(user_texts(request), user_bodies(&projected.history));
+    let document = store.read_context(head).unwrap();
+    assert!(document.blocks.iter().any(|block| matches!(block,
+        harness::context::ContextBlock::Text { role: harness::context::ContextRole::User, text, .. }
+            if text == expected_bodies[0])));
+}
+
+
 async fn observation(host: &HostedTestRuntime) -> InitialContextObservation {
     host.context
         .forest
         .initial_context_observation(host.context.actor.identity())
         .await
         .unwrap()
+}
+
+fn exercise_durable_attachment(
+    attachment: &super::provider_attachment::ProviderAttachment,
+    retained: &InitialContextObservation,
+) {
+    let identity = retained.identity.as_ref().unwrap();
+    let publication = retained.publication.as_ref().unwrap();
+    let wire = attachment.initial_context_wire_observation().unwrap();
+    assert_eq!(
+        attachment
+            .acknowledge_initial_context_publication(&identity.operation, publication.clone())
+            .unwrap(),
+        *retained
+    );
+    assert_eq!(attachment.initial_context_wire_observation().unwrap(), wire);
+    let foreign_operation = tidepool_runtime::session::WorkbenchExecutionId::from_digest([0; 16]);
+    assert_ne!(foreign_operation, identity.operation);
+    assert!(attachment
+        .acknowledge_initial_context_publication(&foreign_operation, publication.clone())
+        .is_err());
+    assert_eq!(attachment.initial_context_wire_observation().unwrap(), wire);
+
+    // Exercise actual native admission contention, without holding a test
+    // mutex in the production callback or constructing another authority.
+    let (entered, held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let owner = attachment.clone();
+    let holder = std::thread::spawn(move || {
+        owner.with_admission(|| {
+            entered.send(()).unwrap();
+            released.recv().unwrap();
+        })
+    });
+    held.recv_timeout(Duration::from_secs(10)).unwrap();
+    let (started, starting) = std::sync::mpsc::channel();
+    let (completed, completion) = std::sync::mpsc::channel();
+    let reader = attachment.clone();
+    let observer = std::thread::spawn(move || {
+        started.send(()).unwrap();
+        completed.send(reader.initial_context_wire_observation()).unwrap();
+    });
+    starting.recv_timeout(Duration::from_secs(10)).unwrap();
+    let pending = completion.recv_timeout(Duration::from_millis(100));
+    release.send(()).unwrap();
+    assert!(matches!(pending, Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+    assert_eq!(completion.recv_timeout(Duration::from_secs(10)).unwrap().unwrap(), wire);
+    holder.join().unwrap().unwrap();
+    observer.join().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -169,10 +242,18 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
     ));
     held.answer.send(true).unwrap();
     let host = starting.await.unwrap();
+    let attachment = super::provider_attachment::ProviderAttachment::admit(
+        host.context.forest.clone(),
+        host.context.actor.identity(),
+    )
+    .unwrap();
+    let retained_after_startup = observation(&host);
+    let scenario_attachment = &attachment;
     host.run_scenario(|host| {
         Box::pin(async move {
             let retained = observation(host).await;
             assert_eq!(retained.state, InitialContextState::Published);
+            exercise_durable_attachment(scenario_attachment, &retained);
             let identity = retained.identity.as_ref().unwrap();
             assert_eq!(identity.actor, host.context.actor.identity());
             assert_eq!(held.packet["operation"], identity.operation.as_str());
@@ -200,10 +281,8 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
             let root = harness::model::AgentPath("/root".into());
             let mut pending = VecDeque::new();
             let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            assert_eq!(
-                user_texts(&first.request),
-                [result.rendered.as_str(), "startup-activation"]
-            );
+            assert_request_user_texts(host, host.context.actor.identity(), &first.request,
+                &[result.rendered.as_str(), "startup-activation"]);
             assert!(first
                 .request
                 .input
@@ -219,10 +298,8 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 committed_display_text(&refreshed.settled_output("startup-refresh")),
                 "True"
             );
-            assert_eq!(
-                user_texts(&refreshed.request),
-                ["startup-refreshed", "startup-activation"]
-            );
+            assert_request_user_texts(host, host.context.actor.identity(), &refreshed.request,
+                &["startup-refreshed", "startup-activation"]);
             assert_eq!(refreshed.request.instructions, instructions);
             assert_eq!(observation(host).await, retained);
             refreshed.call(
@@ -234,10 +311,8 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 committed_display_text(&repeated.settled_output("startup-refresh-again")),
                 "True"
             );
-            assert_eq!(
-                user_texts(&repeated.request),
-                ["startup-refreshed-again", "startup-activation"]
-            );
+            assert_request_user_texts(host, host.context.actor.identity(), &repeated.request,
+                &["startup-refreshed-again", "startup-activation"]);
             assert_eq!(repeated.request.instructions, instructions);
             let failed_operation = repeated.operation("startup-refresh-failure");
             repeated.call(
@@ -263,10 +338,8 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
                 tidepool_toolchain::failclass::Phase::Run.tag(),
                 "{failure}"
             );
-            assert_eq!(
-                user_texts(&failed.request),
-                ["startup-refreshed-again", "startup-activation"]
-            );
+            assert_request_user_texts(host, host.context.actor.identity(), &failed.request,
+                &["startup-refreshed-again", "startup-activation"]);
             assert_eq!(failed.request.instructions, instructions);
             assert_eq!(observation(host).await, retained);
             assert!(matches!(
@@ -277,6 +350,13 @@ async fn startup_gates_queued_input_and_refreshes_exact_reference() {
         })
     })
     .await;
+    assert!(attachment.initial_context_wire_observation().is_err());
+    assert!(attachment
+        .acknowledge_initial_context_publication(
+            &retained_after_startup.identity.as_ref().unwrap().operation,
+            retained_after_startup.publication.unwrap(),
+        )
+        .is_err());
 }
 
 #[tokio::test(flavor = "multi_thread")]

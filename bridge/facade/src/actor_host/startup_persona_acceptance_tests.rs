@@ -192,15 +192,6 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
     .unwrap();
 }
 
-fn user_texts(request: &harness::transport::ResponsesRequest) -> Vec<&str> {
-    request
-        .input
-        .iter()
-        .filter(|item| item.0["type"] == "message" && item.0["role"] == "user")
-        .map(|item| item.0["content"].as_str().unwrap())
-        .collect()
-}
-
 fn preparation(workspace: &Path, name: &str) -> Value {
     let text = std::fs::read_to_string(workspace.join(format!(".exomonad/state/notes/{name}.md")))
         .unwrap();
@@ -299,9 +290,9 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
         let root = harness::model::AgentPath("/root".into());
         let mut pending = VecDeque::new();
         let first = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-        assert_eq!(
-            user_texts(&first.request),
-            [result.rendered.as_str(), "persona-activation"]
+        super::startup_context_acceptance_tests::assert_request_user_texts(
+            &host, host.context.actor.identity(), &first.request,
+            &[result.rendered.as_str(), "persona-activation"],
         );
         let instructions = first.request.instructions.clone();
         let operation = first.operation("persona-refresh");
@@ -331,12 +322,9 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
             updated["retainedMemories"][0]["original"],
             "persona-memory-updated"
         );
-        assert_eq!(
-            user_texts(&refreshed.request),
-            [
-                updated["contextText"].as_str().unwrap(),
-                "persona-activation"
-            ]
+        super::startup_context_acceptance_tests::assert_request_user_texts(
+            &host, host.context.actor.identity(), &refreshed.request,
+            &[updated["contextText"].as_str().unwrap(), "persona-activation"],
         );
         assert_eq!(refreshed.request.instructions, instructions);
         assert_eq!(
@@ -357,12 +345,9 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
             committed_display_text(&refused.settled_output("persona-native-refusal")),
             "True"
         );
-        assert_eq!(
-            user_texts(&refused.request),
-            [
-                updated["contextText"].as_str().unwrap(),
-                "persona-activation"
-            ]
+        super::startup_context_acceptance_tests::assert_request_user_texts(
+            &host, host.context.actor.identity(), &refused.request,
+            &[updated["contextText"].as_str().unwrap(), "persona-activation"],
         );
         assert_eq!(refused.request.instructions, instructions);
         assert!(matches!(
@@ -409,13 +394,9 @@ async fn actual_persona_prepares_saves_activates_and_resumes_edited_startup_cont
         let root = harness::model::AgentPath("/root".into());
         let mut pending = VecDeque::new();
         let resumed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-        assert_eq!(
-            user_texts(&resumed.request),
-            [
-                updated["contextText"].as_str().unwrap(),
-                "persona-activation",
-                "persona-resume-activation"
-            ]
+        super::startup_context_acceptance_tests::assert_request_user_texts(
+            &host, host.context.actor.identity(), &resumed.request,
+            &[updated["contextText"].as_str().unwrap(), "persona-activation", "persona-resume-activation"],
         );
         assert!(matches!(
             judgments.try_recv(),
@@ -503,9 +484,9 @@ async fn shipped_persona_initializer_uses_actual_preparation_before_first_reques
                 &harness::model::AgentPath("/root".into()),
             )
             .await;
-            assert_eq!(
-                user_texts(&first.request),
-                [result.rendered.as_str(), "canonical-persona-activation"]
+            super::startup_context_acceptance_tests::assert_request_user_texts(
+                host, host.context.actor.identity(), &first.request,
+                &[result.rendered.as_str(), "canonical-persona-activation"],
             );
             assert!(matches!(
                 judgments.try_recv(),
