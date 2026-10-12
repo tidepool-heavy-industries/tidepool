@@ -1059,7 +1059,7 @@ impl Actor for LifecycleCoordinator {
                     && settled
                     && state.owner_available
                     && if grant.never_registered() {
-                        never_registered
+                        never_registered || retired
                     } else {
                         retired
                     }
