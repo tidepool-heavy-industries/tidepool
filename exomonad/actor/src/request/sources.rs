@@ -346,31 +346,119 @@ mod tests {
     use ractor::{Actor, ActorProcessingErr};
     use tokio::sync::mpsc;
 
-    struct Collector;
+    struct CollectorState {
+        lifecycle: crate::kernel::LifecycleHandle,
+        events: mpsc::UnboundedSender<SourceDelivery>,
+    }
 
+    struct Collector;
     impl Actor for Collector {
         type Msg = KernelMessage;
-        type State = mpsc::UnboundedSender<SourceDelivery>;
+        type State = CollectorState;
         type Arguments = Self::State;
-
         async fn pre_start(
             &self,
             _: ractor::ActorRef<Self::Msg>,
-            sender: Self::Arguments,
+            state: Self::Arguments,
         ) -> Result<Self::State, ActorProcessingErr> {
-            Ok(sender)
+            Ok(state)
         }
-
         async fn handle(
             &self,
             _: ractor::ActorRef<Self::Msg>,
             message: Self::Msg,
-            sender: &mut Self::State,
+            state: &mut Self::State,
         ) -> Result<(), ActorProcessingErr> {
+            let (message, lease) = match message {
+                KernelMessage::Admitted(envelope) => {
+                    let (message, lease) = envelope.into_parts(state.lifecycle.identity())?;
+                    (message, Some(lease))
+                }
+                message => (message, None),
+            };
             if let KernelMessage::Source(delivery) = message {
-                sender.send(delivery)?;
+                state.events.send(delivery)?;
             }
+            drop(lease);
             Ok(())
+        }
+        async fn post_stop(
+            &self,
+            _: ractor::ActorRef<Self::Msg>,
+            state: &mut Self::State,
+        ) -> Result<(), ActorProcessingErr> {
+            state.lifecycle.close().await?;
+            state.lifecycle.executor_retired();
+            Ok(())
+        }
+    }
+
+    struct DirectoryFixture {
+        directory: crate::LocalActorDirectory,
+        task: ractor::concurrency::JoinHandle<()>,
+    }
+    impl DirectoryFixture {
+        async fn start() -> Self {
+            let (directory, task) = crate::LocalActorDirectory::start().await.unwrap();
+            Self { directory, task }
+        }
+        async fn spawn(
+            &self,
+            events: mpsc::UnboundedSender<SourceDelivery>,
+            predecessor: Option<ActorRef>,
+        ) -> (
+            LocalActorRef,
+            ractor::ActorRef<KernelMessage>,
+            ractor::concurrency::JoinHandle<()>,
+        ) {
+            let reservation = match predecessor {
+                Some(predecessor) => self
+                    .directory
+                    .reserve_successor(predecessor, crate::Incarnation::FIRST)
+                    .await
+                    .unwrap(),
+                None => self
+                    .directory
+                    .reserve(crate::Incarnation::FIRST)
+                    .await
+                    .unwrap(),
+            };
+            let identity = reservation.identity();
+            let lifecycle = reservation.lifecycle().clone();
+            let terminal = reservation.terminal().clone();
+            let (address, task) = Collector::spawn(
+                None,
+                Collector,
+                CollectorState {
+                    lifecycle: lifecycle.clone(),
+                    events,
+                },
+            )
+            .await
+            .unwrap();
+            let actor = LocalActorRef::with_identity_admission(
+                address.clone(),
+                terminal,
+                identity,
+                lifecycle.clone(),
+            );
+            lifecycle.attach_executor(address.clone()).await.unwrap();
+            self.directory
+                .register_executor(
+                    reservation,
+                    actor.clone(),
+                    std::sync::Weak::new(),
+                    crate::local_actor::SpawnOwnership::Independent,
+                )
+                .await
+                .unwrap();
+            lifecycle.executor_started().await.unwrap();
+            (actor, address, task)
+        }
+    }
+    impl Drop for DirectoryFixture {
+        fn drop(&mut self) {
+            self.task.abort();
         }
     }
 
@@ -387,13 +475,13 @@ mod tests {
 
     #[tokio::test]
     async fn lifecycle_handoff_preserves_connection_without_recapturing_current_state() {
+        let fixture = DirectoryFixture::start().await;
         let registry = Arc::new(RequestRegistry::default());
         let (old_send, mut old_events) = mpsc::unbounded_channel();
-        let (old_address, old_task) = Collector::spawn(None, Collector, old_send).await.unwrap();
-        let old = LocalActorRef::new(old_address.clone(), crate::RetainedActorExit::new());
+        let (old, old_address, old_task) = fixture.spawn(old_send, None).await;
         let (new_send, mut new_events) = mpsc::unbounded_channel();
-        let (new_address, new_task) = Collector::spawn(None, Collector, new_send).await.unwrap();
-        let successor = LocalActorRef::new(new_address.clone(), crate::RetainedActorExit::new());
+        let (successor, new_address, new_task) =
+            fixture.spawn(new_send, Some(old.identity())).await;
         let mut sources = registry
             .attach_sources(actor(100), old.clone(), &[])
             .unwrap();
@@ -402,7 +490,16 @@ mod tests {
             receive(&mut old_events).await.event,
             SourceEvent::Lifecycle(crate::ActorLifecycle::Live)
         ));
-        sources.handoff(successor, |_| Ok::<_, ()>(())).unwrap();
+        let grant = fixture
+            .directory
+            .replacement_ingress_grant(old.identity(), successor.identity())
+            .await
+            .unwrap();
+        old.lifecycle()
+            .begin_replacement(grant.clone())
+            .await
+            .unwrap();
+        sources.handoff(grant).await.unwrap();
         old.terminal().publish_paused("failed".into());
         let paused = receive(&mut new_events).await;
         assert_eq!(paused.target, SourceTarget::Lifecycle(old.identity()));
@@ -427,10 +524,10 @@ mod tests {
 
     #[tokio::test]
     async fn sources_close_once_in_order_and_detach_without_discarding_sent_events() {
+        let fixture = DirectoryFixture::start().await;
         let registry = Arc::new(RequestRegistry::default());
         let (send, mut events) = mpsc::unbounded_channel();
-        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
-        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let (recipient, address, task) = fixture.spawn(send, None).await;
         let request = registry.reserve_native(actor(100), actor(101));
         registry
             .mark_queued(actor(100), actor(101), request)
@@ -439,7 +536,7 @@ mod tests {
         let sources = registry
             .attach_sources(
                 actor(100),
-                recipient,
+                recipient.clone(),
                 &[
                     (0, request, RequestSourceKind::Progress),
                     (1, request, RequestSourceKind::Settlement),
@@ -473,19 +570,19 @@ mod tests {
 
     #[tokio::test]
     async fn queued_source_read_after_release_reports_unavailable() {
+        let fixture = DirectoryFixture::start().await;
         let registry = Arc::new(RequestRegistry::default());
         let (send, mut events) = mpsc::unbounded_channel();
-        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
+        let (recipient, address, task) = fixture.spawn(send, None).await;
         let owner = actor(100);
         let target = actor(101);
-        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
         let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
         let _sources = registry
             .attach_sources(
                 owner,
-                recipient,
+                recipient.clone(),
                 &[
                     (0, request, RequestSourceKind::Progress),
                     (1, request, RequestSourceKind::Settlement),
@@ -523,12 +620,12 @@ mod tests {
 
     #[tokio::test]
     async fn abort_unsubmitted_wakes_open_sources_without_replaying_closed_settlements() {
+        let fixture = DirectoryFixture::start().await;
         let registry = Arc::new(RequestRegistry::default());
         let (send, mut events) = mpsc::unbounded_channel();
-        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
+        let (recipient, address, task) = fixture.spawn(send, None).await;
         let owner = actor(100);
         let target = actor(101);
-        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
         let operation = crate::request::RequestReservationOwner::Route(crate::WatchId(1));
         let abandoned = registry.reserve_for_operation(
             owner,
@@ -540,7 +637,7 @@ mod tests {
         let _sources = registry
             .attach_sources(
                 owner,
-                recipient,
+                recipient.clone(),
                 &[
                     (0, abandoned, RequestSourceKind::Progress),
                     (1, abandoned, RequestSourceKind::Settlement),
@@ -566,11 +663,10 @@ mod tests {
         let completed = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, completed).unwrap();
         registry.present(target, completed).unwrap();
-        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
         let _sources = registry
             .attach_sources(
                 owner,
-                recipient,
+                recipient.clone(),
                 &[(2, completed, RequestSourceKind::Settlement)],
             )
             .unwrap();
@@ -591,10 +687,10 @@ mod tests {
 
     #[tokio::test]
     async fn replacement_moves_request_and_watch_authority_without_changing_target() {
+        let fixture = DirectoryFixture::start().await;
         let registry = RequestRegistry::default();
         let (send, _) = mpsc::unbounded_channel();
-        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
-        let successor = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let (successor, address, task) = fixture.spawn(send, None).await;
         let predecessor = actor(100);
         let target = actor(101);
         let request = registry.reserve_native(predecessor, target);
@@ -634,13 +730,13 @@ mod tests {
 
     #[tokio::test]
     async fn source_handoff_preserves_connections_and_never_recaptures_settlements() {
+        let fixture = DirectoryFixture::start().await;
         let registry = Arc::new(RequestRegistry::default());
         let (old_send, mut old_events) = mpsc::unbounded_channel();
-        let (old_address, old_task) = Collector::spawn(None, Collector, old_send).await.unwrap();
-        let old = LocalActorRef::new(old_address.clone(), crate::RetainedActorExit::new());
+        let (old, old_address, old_task) = fixture.spawn(old_send, None).await;
         let (new_send, mut new_events) = mpsc::unbounded_channel();
-        let (new_address, new_task) = Collector::spawn(None, Collector, new_send).await.unwrap();
-        let successor = LocalActorRef::new(new_address.clone(), crate::RetainedActorExit::new());
+        let (successor, new_address, new_task) =
+            fixture.spawn(new_send, Some(old.identity())).await;
         let requests = (0..3)
             .map(|_| {
                 let request = registry.reserve_native(actor(100), actor(101));
@@ -669,23 +765,24 @@ mod tests {
         };
         settle(requests[0]);
         assert_eq!(receive(&mut old_events).await.slot, 0);
-        assert_eq!(
-            sources.handoff(successor.clone(), |_| Err("fence rejected")),
-            Err("fence rejected")
+        let grant = fixture
+            .directory
+            .replacement_ingress_grant(old.identity(), successor.identity())
+            .await
+            .unwrap();
+        assert!(
+            matches!(sources.handoff(grant.clone()).await, Err(crate::KernelCallFailure::TargetUnavailable(actor)) if actor == old.identity())
         );
         settle(requests[1]);
         assert_eq!(receive(&mut old_events).await.slot, 1);
-        let destination = sources.recipient.clone();
-        sources
-            .handoff(successor.clone(), |recipient| {
-                assert_eq!(recipient.identity(), old.identity());
-                assert!(destination.0.try_lock().is_none());
-                Ok::<_, ()>(())
-            })
+        old.lifecycle()
+            .begin_replacement(grant.clone())
+            .await
             .unwrap();
+        sources.handoff(grant).await.unwrap();
         settle(requests[2]);
         assert_eq!(receive(&mut new_events).await.slot, 2);
-        assert_eq!(old.identity().id.0, old_address.get_id().pid());
+        assert_ne!(old.identity(), successor.identity());
         {
             let state = registry.state.lock();
             for request in &requests {
@@ -711,10 +808,10 @@ mod tests {
 
     #[tokio::test]
     async fn source_attachment_validates_the_whole_list_before_capturing_anything() {
+        let fixture = DirectoryFixture::start().await;
         let registry = Arc::new(RequestRegistry::default());
         let (send, mut events) = mpsc::unbounded_channel();
-        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
-        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
+        let (recipient, address, task) = fixture.spawn(send, None).await;
         let own = registry.reserve_native(actor(100), actor(101));
         registry.mark_queued(actor(100), actor(101), own).unwrap();
         registry.present(actor(101), own).unwrap();
@@ -745,7 +842,7 @@ mod tests {
         let sources = registry
             .attach_sources(
                 actor(100),
-                recipient,
+                recipient.clone(),
                 &[(0, own, RequestSourceKind::Settlement)],
             )
             .unwrap();
@@ -761,12 +858,12 @@ mod tests {
 
     #[tokio::test]
     async fn dynamic_attachment_reports_partial_admission_and_keeps_retained_event_once() {
+        let fixture = DirectoryFixture::start().await;
         let registry = Arc::new(RequestRegistry::default());
         let (send, mut events) = mpsc::unbounded_channel();
-        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
+        let (recipient, address, task) = fixture.spawn(send, None).await;
         let owner = actor(100);
         let target = actor(101);
-        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
         let settled = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, settled).unwrap();
         registry.present(target, settled).unwrap();
@@ -776,7 +873,9 @@ mod tests {
             &mut reply_claim_settled,
             None,
         );
-        let mut sources = registry.attach_sources(owner, recipient, &[]).unwrap();
+        let mut sources = registry
+            .attach_sources(owner, recipient.clone(), &[])
+            .unwrap();
         sources
             .attach_request(0, settled, RequestSourceKind::Settlement, owner)
             .unwrap();
@@ -799,13 +898,13 @@ mod tests {
 
     #[tokio::test]
     async fn dynamic_request_source_refuses_a_different_owner_without_delivery() {
+        let fixture = DirectoryFixture::start().await;
         let registry = Arc::new(RequestRegistry::default());
         let (send, mut events) = mpsc::unbounded_channel();
-        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
+        let (recipient, address, task) = fixture.spawn(send, None).await;
         let owner = actor(100);
         let impostor = actor(102);
         let request = registry.reserve(owner, actor(101));
-        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
         let mut sources = registry.attach_sources(impostor, recipient, &[]).unwrap();
         assert!(matches!(
             sources.attach_request(0, request, RequestSourceKind::Settlement, impostor),
@@ -820,12 +919,12 @@ mod tests {
 
     #[tokio::test]
     async fn dynamic_request_connection_survives_pause_and_detaches_on_drop() {
+        let fixture = DirectoryFixture::start().await;
         let registry = Arc::new(RequestRegistry::default());
         let (send, mut events) = mpsc::unbounded_channel();
-        let (address, task) = Collector::spawn(None, Collector, send).await.unwrap();
+        let (recipient, address, task) = fixture.spawn(send, None).await;
         let owner = actor(100);
         let target = actor(101);
-        let recipient = LocalActorRef::new(address.clone(), crate::RetainedActorExit::new());
         let request = registry.reserve_native(owner, target);
         registry.mark_queued(owner, target, request).unwrap();
         registry.present(target, request).unwrap();
@@ -871,13 +970,13 @@ mod tests {
 
     #[tokio::test]
     async fn dynamic_connection_handoff_keeps_queued_event_without_replay() {
+        let fixture = DirectoryFixture::start().await;
         let registry = Arc::new(RequestRegistry::default());
         let (old_send, mut old_events) = mpsc::unbounded_channel();
-        let (old_address, old_task) = Collector::spawn(None, Collector, old_send).await.unwrap();
-        let old = LocalActorRef::new(old_address.clone(), crate::RetainedActorExit::new());
+        let (old, old_address, old_task) = fixture.spawn(old_send, None).await;
         let (new_send, mut new_events) = mpsc::unbounded_channel();
-        let (new_address, new_task) = Collector::spawn(None, Collector, new_send).await.unwrap();
-        let successor = LocalActorRef::new(new_address.clone(), crate::RetainedActorExit::new());
+        let (successor, new_address, new_task) =
+            fixture.spawn(new_send, Some(old.identity())).await;
         let owner = actor(100);
         let target = actor(101);
         let before = registry.reserve_native(owner, target);
@@ -886,7 +985,7 @@ mod tests {
             registry.mark_queued(owner, target, request).unwrap();
             registry.present(target, request).unwrap();
         }
-        let mut sources = registry.attach_sources(owner, old, &[]).unwrap();
+        let mut sources = registry.attach_sources(owner, old.clone(), &[]).unwrap();
         sources
             .attach_request(0, before, RequestSourceKind::Settlement, owner)
             .unwrap();
@@ -899,7 +998,16 @@ mod tests {
             &mut reply_claim_before,
             None,
         );
-        sources.handoff(successor, |_| Ok::<_, ()>(())).unwrap();
+        let grant = fixture
+            .directory
+            .replacement_ingress_grant(old.identity(), successor.identity())
+            .await
+            .unwrap();
+        old.lifecycle()
+            .begin_replacement(grant.clone())
+            .await
+            .unwrap();
+        sources.handoff(grant).await.unwrap();
         let queued = receive(&mut old_events).await;
         assert_eq!(queued.slot, 0);
         assert!(
@@ -919,6 +1027,36 @@ mod tests {
         assert!(old_events.try_recv().is_err());
         assert!(new_events.try_recv().is_err());
         drop(sources);
+        old_address.stop(None);
+        new_address.stop(None);
+        old_task.await.unwrap();
+        new_task.await.unwrap();
+    }
+    #[tokio::test]
+    async fn closed_predecessor_refuses_source_handoff_to_issued_successor() {
+        let fixture = DirectoryFixture::start().await;
+        let registry = Arc::new(RequestRegistry::default());
+        let (old_send, _) = mpsc::unbounded_channel();
+        let (old, old_address, old_task) = fixture.spawn(old_send, None).await;
+        let (new_send, _) = mpsc::unbounded_channel();
+        let (successor, new_address, new_task) =
+            fixture.spawn(new_send, Some(old.identity())).await;
+        let grant = fixture
+            .directory
+            .replacement_ingress_grant(old.identity(), successor.identity())
+            .await
+            .unwrap();
+        let mut sources = registry
+            .attach_sources(actor(100), old.clone(), &[])
+            .unwrap();
+        old.lifecycle().close().await.unwrap();
+        assert!(
+            matches!(old.lifecycle().begin_replacement(grant.clone()).await,
+            Err(crate::KernelCallFailure::MailboxClosed(actor)) if actor == old.identity())
+        );
+        assert!(matches!(sources.handoff(grant).await,
+            Err(crate::KernelCallFailure::TargetUnavailable(actor)) if actor == old.identity()));
+        assert_eq!(sources.recipient.identity(), old.identity());
         old_address.stop(None);
         new_address.stop(None);
         old_task.await.unwrap();

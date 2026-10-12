@@ -1760,7 +1760,7 @@ async fn interrupted_failed_admission_cleanup_retains_worker_for_retry() {
     let _worker_context = receive.await.unwrap();
     let child = worker.identity();
     let work = InvocationWork::new(fixture.actor.identity(), reservation());
-    work.retain_aborted_children(&fixture.kernel, &[child]);
+    work.retain_aborted_children(&fixture.kernel, &[child]).await;
     assert!(work.owns_worker(child));
 
     let mut first_cleanup = Box::pin(work.cleanup(&fixture.environment, &fixture.kernel));
@@ -1806,9 +1806,9 @@ async fn unresolved_failed_admission_worker_remains_uncertain_across_cleanup_ret
         id: crate::ActorId(fixture.actor.identity().id.0 + 1_000_000),
         incarnation: crate::Incarnation(2),
     };
-    assert!(fixture.kernel.resolve(missing).is_none());
+    assert!(fixture.kernel.resolve(missing).await.unwrap().is_none());
     let work = InvocationWork::new(fixture.actor.identity(), reservation());
-    work.retain_aborted_children(&fixture.kernel, &[missing]);
+    work.retain_aborted_children(&fixture.kernel, &[missing]).await;
     for _ in 0..2 {
         let cleanup = tokio::time::timeout(
             Duration::from_secs(1),
