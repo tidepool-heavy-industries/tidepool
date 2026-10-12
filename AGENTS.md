@@ -389,7 +389,7 @@ reports evidence; it does not merge, prune, move branches or block pushes.
   production worker retains its production package closure; Tasty dependencies
   belong to the separate host test toolchain. Tests must fail on missing or
   broken required compiler inputs, rather than return a passing skip.
-  `bridge/haskell/tidepool-extract.cabal` declares 26 Tasty suites. The pinned
+  `bridge/haskell/tidepool-extract.cabal` declares the Tasty suites. The pinned
   Cabal metadata producer and `scripts/buck2-haskell-components.py` own their
   native component projection; discovery owns case counts and execution owns
   passing evidence.
