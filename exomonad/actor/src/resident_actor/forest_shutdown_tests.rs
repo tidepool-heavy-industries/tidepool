@@ -451,6 +451,73 @@ async fn sealed_forest_returns_typed_actual_owner_startup_cleanup() {
 }
 
 #[tokio::test]
+async fn stopped_lifecycle_owner_still_cleans_prepared_native_input_without_confirming_run() {
+    let fixture = Fixture::new().await;
+    let forest = &fixture.forest;
+    let placement = forest
+        .environment
+        .runner
+        .provision_root_scope(forest.session)
+        .await
+        .unwrap();
+    assert!(fixture.scope_is_live(placement));
+    assert!(forest.directory.seal().await.unwrap().actors.is_empty());
+    let reservation = forest
+        .directory
+        .reserve_existing_input(forest.incarnation)
+        .await
+        .unwrap();
+    assert!(reservation.cleanup_only());
+    let identity = reservation.identity();
+    reservation.lifecycle().stop_owner_for_test().await;
+    let error = match crate::local_actor::spawn_reserved_local_actor(
+        None,
+        fixture.behavior(ActorDescriptor::new("lost-lifecycle", placement)),
+        reservation,
+        forest.directory.clone(),
+    )
+    .await
+    {
+        Ok(_) => panic!("stopped lifecycle owner admitted prepared input"),
+        Err(error) => error,
+    };
+    let cause = match &error {
+        ractor::SpawnErr::StartupFailed(error) => error
+            .source()
+            .and_then(|source| source.downcast_ref::<crate::local_actor::StartupFailureCause>()),
+        _ => None,
+    };
+    assert!(
+        matches!(
+            cause,
+            Some(crate::local_actor::StartupFailureCause::Lifecycle(_))
+        ),
+        "actual lifecycle refusal is retained: {error:?}"
+    );
+    let cleanup = crate::local_actor::startup_cleanup(&error)
+        .expect("actual prepared placement cleanup survives lifecycle owner loss");
+    assert_eq!(cleanup.actor(), identity);
+    assert!(cleanup.is_confirmed());
+    assert!(!fixture.scope_is_live(placement));
+    assert!(forest.directory.resolve(identity).await.unwrap().is_none());
+    assert!(matches!(
+        forest
+            .directory
+            .settle_preparations(Duration::from_secs(2))
+            .await,
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    assert!(matches!(
+        forest.directory.shutdown_run_resources().await,
+        crate::CleanupComponentOutcome::Confirmed
+    ));
+    assert!(
+        forest.directory.finish_run().await.is_err(),
+        "physical coordinator stop alone cannot certify run finalization"
+    );
+}
+
+#[tokio::test]
 async fn tool_abort_validates_original_owner_before_empty_settlement() {
     use tidepool_runtime::session::{
         ContextCheckpointBoundary, WorkbenchExecutionId, WorkbenchRequest,
