@@ -484,9 +484,10 @@ async fn shipped_persona_initializer_uses_actual_preparation_before_first_reques
                 Some("Persona.Orientation.startup; inspection: notes/initial-attention.md")
             );
             let saved = preparation(&host.context.config.workspace, "initial-attention");
-            assert!(saved["operation"]
-                .as_str()
-                .is_some_and(|value| !value.is_empty()));
+            assert_eq!(
+                saved["operation"].as_str(),
+                Some(retained.identity.as_ref().unwrap().operation.as_str())
+            );
             assert_eq!(
                 saved["attention"]["contextText"].as_str(),
                 Some(result.sections[0].body.as_str())
