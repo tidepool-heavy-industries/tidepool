@@ -18,7 +18,7 @@ use reqwest::header::{HeaderValue, AUTHORIZATION};
 /// transport.
 const MAX_BODY: usize = 2 * 1024 * 1024;
 
-/// Bytes of a non-2xx body kept for `JevFailure::Http`.
+/// Characters of a redacted non-2xx body kept for `JevFailure::Http`.
 const MAX_ERROR_BODY: usize = 2000;
 const DEFAULT_CIRCUIT_COOLDOWN: Duration = Duration::from_secs(30);
 const TRANSIENT_PROBE_DELAY: Duration = Duration::from_secs(5);
@@ -451,10 +451,11 @@ impl JevClient {
 
         if !status.is_success() {
             let text = String::from_utf8_lossy(&bytes);
-            let truncated: String = text.chars().take(MAX_ERROR_BODY).collect();
+            let redacted = redact(&text, Some(key));
+            let truncated: String = redacted.chars().take(MAX_ERROR_BODY).collect();
             return Err(JevFailure::Http {
                 status: status.as_u16(),
-                body: redact(&truncated, Some(key)),
+                body: truncated,
             });
         }
 
@@ -573,6 +574,40 @@ mod tests {
             JevFailure::Http {
                 status: 422,
                 body: "bad request".to_string()
+            }
+        );
+        task.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_error_redacts_key_crossing_retained_body_cutoff() {
+        let key = "synthetic-cutoff-key";
+        let prefix = "x".repeat(MAX_ERROR_BODY - 4);
+        let body = format!("{prefix}{key} trailing diagnostic");
+        let (url, task) = server("422 Unprocessable Entity", &body, Duration::ZERO);
+        let client = JevClient::with_key(config(url), Some(key.into())).unwrap();
+        let err = client.ask(serde_json::json!({})).await.unwrap_err();
+        assert_eq!(
+            err,
+            JevFailure::Http {
+                status: 422,
+                body: format!("{prefix}[red"),
+            }
+        );
+        task.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_error_retains_character_limit_after_redaction() {
+        let body = "é".repeat(MAX_ERROR_BODY + 7);
+        let (url, task) = server("422 Unprocessable Entity", &body, Duration::ZERO);
+        let client = JevClient::with_key(config(url), Some("synthetic-unused-key".into())).unwrap();
+        let err = client.ask(serde_json::json!({})).await.unwrap_err();
+        assert_eq!(
+            err,
+            JevFailure::Http {
+                status: 422,
+                body: "é".repeat(MAX_ERROR_BODY),
             }
         );
         task.join().unwrap();
