@@ -27,12 +27,21 @@ struct IncarnationState {
 pub(crate) struct HostIncarnationLease {
     incarnation: Incarnation,
     run_root: PathBuf,
-    _owner_lock: HostRunLock,
+    owner_lock: Option<HostRunLock>,
+    released: tokio::sync::watch::Sender<HostLeaseRelease>,
+}
+
+/// Observation of the physical guard's last-owner release, without retaining it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum HostLeaseRelease {
+    Pending,
+    Released,
+    Unconfirmed(String),
 }
 
 /// Shared host/maintenance exclusion; maintenance never allocates an incarnation.
 #[derive(Debug)]
-pub(super) struct HostRunLock(File);
+pub(super) struct HostRunLock(Option<File>);
 impl HostRunLock {
     pub(super) fn existing(run_root: &Path) -> io::Result<Self> {
         Self::claim(run_root, false)
@@ -45,7 +54,7 @@ impl HostRunLock {
             .write(true)
             .open(run_root.join("host-incarnation.owner.lock"))?;
         match file.try_lock() {
-            Ok(()) => Ok(Self(file)),
+            Ok(()) => Ok(Self(Some(file))),
             Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::other(format!(
                 "another Exomonad host or maintenance operation already owns {}",
                 run_root.display()
@@ -53,14 +62,42 @@ impl HostRunLock {
             Err(std::fs::TryLockError::Error(error)) => Err(error),
         }
     }
+
+    fn release(&mut self) -> io::Result<()> {
+        let Some(file) = self.0.take() else {
+            return Ok(());
+        };
+        // A fork can inherit this open description. Explicit unlock precedes
+        // closing our file, and both precede any release acknowledgment.
+        let result = file.unlock();
+        drop(file);
+        result
+    }
 }
 impl Drop for HostRunLock {
     fn drop(&mut self) {
         // Concurrent fork may temporarily inherit the open description.
         // Unlock ends ownership without waiting for that child to exec.
-        if let Err(error) = self.0.unlock() {
+        if let Err(error) = self.release() {
             tracing::warn!(%error, "Exomonad host owner unlock failed");
         }
+    }
+}
+
+impl Drop for HostIncarnationLease {
+    fn drop(&mut self) {
+        let outcome = match self.owner_lock.take() {
+            Some(mut lock) => {
+                let result = lock.release();
+                drop(lock);
+                match result {
+                    Ok(()) => HostLeaseRelease::Released,
+                    Err(error) => HostLeaseRelease::Unconfirmed(error.to_string()),
+                }
+            }
+            None => HostLeaseRelease::Unconfirmed("host owner guard was absent".into()),
+        };
+        self.released.send_replace(outcome);
     }
 }
 
@@ -110,8 +147,13 @@ impl HostIncarnationLease {
         Ok(Self {
             incarnation: Incarnation(next),
             run_root: fs::canonicalize(run_root)?,
-            _owner_lock: owner_lock,
+            owner_lock: Some(owner_lock),
+            released: tokio::sync::watch::channel(HostLeaseRelease::Pending).0,
         })
+    }
+
+    pub(crate) fn release_observation(&self) -> tokio::sync::watch::Receiver<HostLeaseRelease> {
+        self.released.subscribe()
     }
 
     pub(crate) const fn incarnation(&self) -> Incarnation {
@@ -156,6 +198,59 @@ fn invalid_state(path: &Path, detail: impl std::fmt::Display) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_receipt_waits_for_last_real_owner_and_closed_file() {
+        let runtime = tempfile::tempdir().unwrap();
+        let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(runtime.path()).unwrap();
+        let lease = HostIncarnationLease::claim(&anchor).unwrap();
+        let receipt = lease.release_observation();
+        let (lease, registration) = lease.into_boot_registration();
+        let retained = lease.clone();
+        let competing = OpenOptions::new()
+            .write(true)
+            .open(runtime.path().join("host-incarnation.owner.lock"))
+            .unwrap();
+        drop(lease);
+        drop(registration);
+        assert_eq!(*receipt.borrow(), HostLeaseRelease::Pending);
+        assert!(matches!(
+            competing.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(retained);
+        // A late observer sees release only after the actual guard has closed.
+        assert_eq!(*receipt.borrow(), HostLeaseRelease::Released);
+        competing.try_lock().unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_release_observer_does_not_release_real_custody() {
+        let runtime = tempfile::tempdir().unwrap();
+        let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(runtime.path()).unwrap();
+        let lease = Arc::new(HostIncarnationLease::claim(&anchor).unwrap());
+        let receipt = lease.release_observation();
+        let mut observing = receipt.clone();
+        // Poll the real observation pending, then cancel only that waiter.
+        tokio::select! {
+            biased;
+            result = observing.changed() => panic!("live guard unexpectedly settled: {result:?}"),
+            () = std::future::ready(()) => {}
+        }
+        drop(observing);
+        let competing = OpenOptions::new()
+            .write(true)
+            .open(runtime.path().join("host-incarnation.owner.lock"))
+            .unwrap();
+        assert_eq!(*receipt.borrow(), HostLeaseRelease::Pending);
+        assert!(matches!(
+            competing.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(lease);
+        assert_eq!(*receipt.borrow(), HostLeaseRelease::Released);
+        competing.try_lock().unwrap();
+    }
 
     #[test]
     fn claims_monotonically_increasing_incarnations() {
