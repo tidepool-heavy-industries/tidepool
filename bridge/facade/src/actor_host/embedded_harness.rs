@@ -1,7 +1,7 @@
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
 };
@@ -494,12 +494,29 @@ impl Drop for EmbeddedRoundLease {
 #[derive(Clone)]
 pub(super) struct EmbeddedActorBinding {
     identity: HostIdentity,
-    conversation: Arc<Mutex<Option<Arc<Conversation>>>>,
+    conversation: Arc<Mutex<BoundConversation>>,
     observer: Arc<Mutex<Option<Arc<harness::embedding::InputObserver>>>>,
     pub(super) inbox: Arc<super::ActorInbox>,
     pub(super) inbox_key: String,
     pub(super) delivery: Arc<tokio::sync::Mutex<()>>,
-    live: Arc<AtomicBool>,
+}
+
+enum BoundConversation {
+    Pending {
+        conversation: Option<Arc<Conversation>>,
+        activations: Vec<exomonad_actor::ResidentActivation>,
+    },
+    Ready(Arc<Conversation>),
+    Retired,
+}
+
+pub(super) enum ActivationAdmission {
+    Pending,
+    Ready {
+        conversation: Arc<Conversation>,
+        activation: exomonad_actor::ResidentActivation,
+    },
+    Retired,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -520,17 +537,28 @@ impl EmbeddedActorBinding {
             .map(|conversation| Arc::new(conversation.input_observer()));
         Self {
             identity,
-            conversation: Arc::new(Mutex::new(conversation)),
+            conversation: Arc::new(Mutex::new(match conversation {
+                Some(conversation) => BoundConversation::Ready(conversation),
+                None => BoundConversation::Pending {
+                    conversation: None,
+                    activations: Vec::new(),
+                },
+            })),
             observer: Arc::new(Mutex::new(observer)),
             inbox,
             inbox_key,
             delivery: Arc::new(tokio::sync::Mutex::new(())),
-            live: Arc::new(AtomicBool::new(true)),
         }
     }
 
     pub(super) fn is_live(&self) -> bool {
-        self.live.load(Ordering::Acquire)
+        !matches!(
+            *self
+                .conversation
+                .lock()
+                .expect("embedded conversation lock poisoned"),
+            BoundConversation::Retired
+        )
     }
 
     pub(super) fn mark_retired(&self) {
@@ -538,18 +566,71 @@ impl EmbeddedActorBinding {
             .conversation
             .lock()
             .expect("embedded conversation lock poisoned");
-        self.live.store(false, Ordering::Release);
-        conversation.take();
+        *conversation = BoundConversation::Retired;
     }
 
     pub(super) fn conversation(&self) -> Option<Arc<Conversation>> {
-        self.conversation
+        match &*self
+            .conversation
             .lock()
             .expect("embedded conversation lock poisoned")
-            .clone()
+        {
+            BoundConversation::Ready(conversation) => Some(conversation.clone()),
+            BoundConversation::Pending { .. } | BoundConversation::Retired => None,
+        }
     }
 
-    pub(super) fn set_conversation(
+    pub(super) fn is_pending(&self) -> bool {
+        matches!(
+            *self
+                .conversation
+                .lock()
+                .expect("embedded conversation lock poisoned"),
+            BoundConversation::Pending { .. }
+        )
+    }
+
+    pub(super) fn admit_activation(
+        &self,
+        activation: exomonad_actor::ResidentActivation,
+    ) -> ActivationAdmission {
+        match &mut *self
+            .conversation
+            .lock()
+            .expect("embedded conversation lock poisoned")
+        {
+            BoundConversation::Pending { activations, .. } => {
+                activations.push(activation);
+                ActivationAdmission::Pending
+            }
+            BoundConversation::Ready(conversation) => ActivationAdmission::Ready {
+                conversation: conversation.clone(),
+                activation,
+            },
+            BoundConversation::Retired => ActivationAdmission::Retired,
+        }
+    }
+
+    pub(super) fn release_initial_context(
+        &self,
+        ready: super::embedded_service::InitialContextReady,
+    ) -> Result<Vec<exomonad_actor::ResidentActivation>, ConversationAttachError> {
+        self.activate_conversation(ready.into_conversation())
+    }
+
+    pub(super) fn control_conversation(&self) -> Option<Arc<Conversation>> {
+        match &*self
+            .conversation
+            .lock()
+            .expect("embedded conversation lock poisoned")
+        {
+            BoundConversation::Pending { conversation, .. } => conversation.clone(),
+            BoundConversation::Ready(conversation) => Some(conversation.clone()),
+            BoundConversation::Retired => None,
+        }
+    }
+
+    pub(super) fn stage_conversation(
         &self,
         conversation: Arc<Conversation>,
     ) -> Result<(), ConversationAttachError> {
@@ -557,7 +638,45 @@ impl EmbeddedActorBinding {
             .conversation
             .lock()
             .expect("embedded conversation lock poisoned");
-        if !self.is_live() {
+        if matches!(*current, BoundConversation::Retired) {
+            return Err(ConversationAttachError::Retired);
+        }
+        if conversation.identity() != &self.identity {
+            return Err(ConversationAttachError::IdentityMismatch);
+        }
+        match &mut *current {
+            BoundConversation::Pending {
+                conversation: pending,
+                ..
+            } => *pending = Some(conversation.clone()),
+            BoundConversation::Ready(_) => return Err(ConversationAttachError::IdentityMismatch),
+            BoundConversation::Retired => unreachable!("checked under same gate"),
+        }
+        *self
+            .observer
+            .lock()
+            .expect("embedded observer lock poisoned") =
+            Some(Arc::new(conversation.input_observer()));
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_conversation(
+        &self,
+        conversation: Arc<Conversation>,
+    ) -> Result<(), ConversationAttachError> {
+        self.activate_conversation(conversation).map(|_| ())
+    }
+
+    fn activate_conversation(
+        &self,
+        conversation: Arc<Conversation>,
+    ) -> Result<Vec<exomonad_actor::ResidentActivation>, ConversationAttachError> {
+        let mut current = self
+            .conversation
+            .lock()
+            .expect("embedded conversation lock poisoned");
+        if matches!(*current, BoundConversation::Retired) {
             return Err(ConversationAttachError::Retired);
         }
         if conversation.identity() != &self.identity {
@@ -568,8 +687,12 @@ impl EmbeddedActorBinding {
             .lock()
             .expect("embedded observer lock poisoned") =
             Some(Arc::new(conversation.input_observer()));
-        *current = Some(conversation);
-        Ok(())
+        let previous = std::mem::replace(&mut *current, BoundConversation::Ready(conversation));
+        Ok(match previous {
+            BoundConversation::Pending { activations, .. } => activations,
+            BoundConversation::Ready(_) => Vec::new(),
+            BoundConversation::Retired => unreachable!("retirement checked under same gate"),
+        })
     }
 
     pub(super) fn input_observer(&self) -> Option<Arc<harness::embedding::InputObserver>> {

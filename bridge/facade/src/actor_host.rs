@@ -1360,6 +1360,20 @@ fn drain_embedded_browser_commands(
         .queued_embedded_commands(run)
         .map_err(|error| error.to_string())?
     {
+        if let Some(binding) = conversations
+            .values()
+            .find(|binding| binding.identity() == record.command.target())
+        {
+            if binding.is_pending()
+                && (matches!(
+                    record.command,
+                    harness::server::HostCommand::Input { .. }
+                        | harness::server::HostCommand::Recover { .. }
+                ) || binding.control_conversation().is_none())
+            {
+                continue;
+            }
+        }
         let dispatch = prepare_embedded_browser_command(
             record.operation_id,
             &record.command,
@@ -1372,7 +1386,11 @@ fn drain_embedded_browser_commands(
                 conversations
                     .get(&actor)
                     .filter(|binding| binding.is_live())
-                    .and_then(|binding| binding.conversation())
+                    .and_then(|binding| match record.command {
+                        harness::server::HostCommand::Input { .. }
+                        | harness::server::HostCommand::Recover { .. } => binding.conversation(),
+                        _ => binding.control_conversation(),
+                    })
             },
             lifecycle,
         )?;
@@ -1429,7 +1447,6 @@ struct EmbeddedApplicationState {
     cancellation: Option<watch::Sender<bool>>,
     live: bool,
     conversation: Option<embedded_harness::EmbeddedActorBinding>,
-    pending_activations: Option<Vec<exomonad_actor::ResidentActivation>>,
     cleanup_failure: Option<embedded_service::EmbeddedDriverError>,
 }
 
@@ -1440,7 +1457,6 @@ impl EmbeddedApplicationState {
             cancellation: None,
             live: false,
             conversation: None,
-            pending_activations: None,
             cleanup_failure: None,
         }
     }

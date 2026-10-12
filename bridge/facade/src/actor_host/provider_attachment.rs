@@ -44,4 +44,26 @@ impl ProviderAttachment {
     pub(super) fn validate(&self) -> Result<(), ResidentActorWorkbenchError> {
         self.forest.validate_provider_attachment(&self.admission)
     }
+
+    pub(super) async fn prepare_initial_context(
+        &self,
+    ) -> Result<exomonad_actor::InitialContextObservation, ResidentActorWorkbenchError> {
+        self.validate()?;
+        self.forest.prepare_initial_context(self.actor()).await
+    }
+
+    pub(super) fn acknowledge_initial_context_publication(
+        &self,
+        operation: &tidepool_runtime::session::WorkbenchExecutionId,
+        publication: exomonad_actor::InitialContextPublication,
+    ) -> Result<exomonad_actor::InitialContextObservation, ResidentActorWorkbenchError> {
+        self.with_admission(|| {
+            self.validate()?;
+            self.forest.acknowledge_initial_context_publication(
+                self.actor(),
+                operation,
+                publication,
+            )
+        })?
+    }
 }

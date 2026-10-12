@@ -14,9 +14,9 @@ use std::sync::Arc;
 use tidepool_atomic_write::DirectoryAnchor;
 use tidepool_repr::jsonl::{SyncPolicy, TailPolicy};
 
-// V8 pins run-database and machine-domain revisions instead of file digests.
+// V9 retains authored initial-context preparation and publication facts.
 // Earlier runs require their matching binaries.
-const VERSION: u32 = 8;
+const VERSION: u32 = 9;
 
 /// Issued by the Forest after checking its existing descriptor and directory.
 /// The process-local placement is deliberately absent from durable rows.
@@ -694,6 +694,50 @@ impl ActorRecoveryJournal {
         next.ok_or_else(|| {
             std::io::Error::other("initial context transition produced no observation")
         })
+    }
+
+    pub(crate) fn initial_context_publication_matches(
+        &self,
+        actor: ActorRef,
+        operation: &tidepool_runtime::session::WorkbenchExecutionId,
+        conversation: &ApplicationConversation,
+    ) -> std::io::Result<bool> {
+        let state = self.state.lock();
+        ensure_writable(&state)?;
+        let current = state
+            .records
+            .get(&actor)
+            .ok_or_else(|| std::io::Error::other("publication actor has no durable admission"))?;
+        let mut next = Some(actor);
+        while let Some(owner) = next {
+            let record = state.records.get(&owner).ok_or_else(|| {
+                std::io::Error::other("publication startup predecessor is absent")
+            })?;
+            if let Some(initial) = &record.initial_context {
+                if initial
+                    .identity
+                    .as_ref()
+                    .is_none_or(|identity| &identity.operation != operation)
+                {
+                    return Ok(false);
+                }
+                return Ok(current
+                    .application
+                    .as_ref()
+                    .and_then(|application| application.conversation.as_ref())
+                    == Some(conversation)
+                    || record
+                        .application
+                        .as_ref()
+                        .and_then(|application| application.conversation.as_ref())
+                        == Some(conversation));
+            }
+            next = record
+                .startup
+                .as_ref()
+                .and_then(|intent| intent.predecessor);
+        }
+        Ok(false)
     }
 
     pub(crate) fn admit(
@@ -1635,7 +1679,7 @@ mod tests {
     fn old_journal_versions_are_unsupported_and_remain_untouched() {
         let directory = tempfile::tempdir().unwrap();
         let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
-        for version in [1, 2, 3, 4, 5, 6, 7] {
+        for version in [1, 2, 3, 4, 5, 6, 7, 8] {
             let path = directory.path().join(format!("v{version}.jsonl"));
             let bytes = format!("{{\"version\":{version},\"sequence\":1,\"event\":\"created\"}}\n");
             std::fs::write(&path, &bytes).unwrap();

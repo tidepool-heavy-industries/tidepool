@@ -149,10 +149,140 @@ impl harness::engine::ResponsesTransport for TestResponsesTransport {
 }
 
 pub(super) struct EmbeddedActor {
+    pub(super) initial_context_ready: InitialContextReady,
     pub(super) conversation: Arc<harness::embedding::Conversation>,
     pub(super) driver: EmbeddedConversation,
     pub(super) cancellation: watch::Sender<bool>,
     pub(super) cancellation_rx: watch::Receiver<bool>,
+}
+
+/// Issued only after the preparation owner and publication owner have settled.
+/// Conversation inputs and provider driving consume this launch boundary.
+#[derive(Clone)]
+pub(super) struct InitialContextReady {
+    conversation: Arc<harness::embedding::Conversation>,
+}
+
+impl InitialContextReady {
+    pub(super) fn into_conversation(self) -> Arc<harness::embedding::Conversation> {
+        self.conversation
+    }
+}
+
+async fn initialize_context(
+    attachment: &super::provider_attachment::ProviderAttachment,
+    conversation: &Arc<harness::embedding::Conversation>,
+) -> Result<InitialContextReady, String> {
+    use exomonad_actor::InitialContextState;
+    let observed = attachment
+        .prepare_initial_context()
+        .await
+        .map_err(|error| error.to_string())?;
+    match observed.state {
+        InitialContextState::Captured => {}
+        InitialContextState::Published => {
+            let identity = observed
+                .identity
+                .ok_or("published startup has no operation identity")?;
+            let original = observed
+                .publication
+                .ok_or("published startup has no publication evidence")?;
+            let result = observed
+                .result
+                .ok_or("published startup has no retained result")?;
+            let issuer =
+                super::embedded_recovery::identity_from_conversation(&original.conversation)?;
+            let publication = conversation
+                .initial_context_publication(&issuer, identity.operation.as_str())
+                .map_err(|error| error.to_string())?
+                .ok_or("published startup has no exact Harness receipt")?;
+            if publication.request.0 != original.request
+                || publication
+                    .caller_reference
+                    .as_ref()
+                    .map(|reference| reference.as_str())
+                    != original.caller_reference.as_deref()
+                || publication
+                    .authored_reference
+                    .as_ref()
+                    .map(|reference| reference.as_str())
+                    != original.authored_reference.as_deref()
+                || publication.caller_seed.as_deref() != observed.caller_seed.as_deref()
+                || publication.authored_seed.as_deref()
+                    != (!result.rendered.is_empty()).then_some(result.rendered.as_str())
+            {
+                return Err(
+                    "published startup differs from its exact historical Harness receipt".into(),
+                );
+            }
+        }
+        InitialContextState::AbsentHook => {
+            if let Some(caller) = observed.caller_seed.as_deref() {
+                let actor = attachment.actor();
+                conversation
+                    .seed_context(
+                        &format!("spawn-context:{}:{}", actor.id.0, actor.incarnation.0),
+                        caller,
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        InitialContextState::ResultRetained => {
+            let identity = observed
+                .identity
+                .ok_or("initial context retained result has no operation identity")?;
+            let result = observed
+                .result
+                .ok_or("initial context retained result is absent")?;
+            let caller = observed.caller_seed.as_deref();
+            let authored = (!result.rendered.is_empty()).then_some(result.rendered.as_str());
+            let issuer = harness::embedding::HostIdentity {
+                run: conversation.identity().run.clone(),
+                actor: conversation.identity().actor.clone(),
+                incarnation: identity.actor.incarnation.0.to_string(),
+            };
+            let publication = match conversation
+                .initial_context_publication(&issuer, identity.operation.as_str())
+                .map_err(|error| error.to_string())?
+            {
+                Some(publication) => publication,
+                None => conversation
+                    .seed_initial_context(identity.operation.as_str(), caller, authored)
+                    .map_err(|error| error.to_string())?,
+            };
+            if publication.caller_seed.as_deref() != caller
+                || publication.authored_seed.as_deref() != authored
+            {
+                return Err(
+                    "initial context publication differs from its exact retained result".into(),
+                );
+            }
+            attachment
+                .acknowledge_initial_context_publication(
+                    &identity.operation,
+                    exomonad_actor::InitialContextPublication {
+                        conversation: super::embedded_recovery::conversation(&publication.issuer),
+                        request: publication.request.0,
+                        caller_reference: publication
+                            .caller_reference
+                            .map(|reference| reference.as_str().to_owned()),
+                        authored_reference: publication
+                            .authored_reference
+                            .map(|reference| reference.as_str().to_owned()),
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        state => {
+            return Err(format!(
+                "initial context is not ready for inference: {state:?}"
+            ))
+        }
+    }
+    attachment.validate().map_err(|error| error.to_string())?;
+    Ok(InitialContextReady {
+        conversation: Arc::clone(conversation),
+    })
 }
 
 impl EmbeddedService {
@@ -349,6 +479,29 @@ pub(super) async fn attach_actor(
     installation: LocalResidentInstallation,
     initial_input: Option<String>,
 ) -> Result<EmbeddedActor, String> {
+    attach_root_actor(
+        service.runtime.as_ref(),
+        attachment,
+        run_root,
+        path,
+        parent,
+        installation,
+        initial_input,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn attach_root_actor(
+    runtime: &EmbeddedHarnessRuntime,
+    attachment: super::provider_attachment::ProviderAttachment,
+    run_root: &Path,
+    path: AgentPath,
+    parent: Option<AgentPath>,
+    installation: LocalResidentInstallation,
+    initial_input: Option<String>,
+    binding: Option<&super::embedded_harness::EmbeddedActorBinding>,
+) -> Result<EmbeddedActor, String> {
     let actor = installation.actor.identity();
     let identity = harness::embedding::HostIdentity {
         run: super::runtime_namespace(run_root),
@@ -356,17 +509,22 @@ pub(super) async fn attach_actor(
         incarnation: actor.incarnation.0.to_string(),
     };
     let policy = Arc::new(EmbeddedPolicyInstallation::from_installation(&installation));
-    let embedded = service
-        .runtime
+    let embedded = runtime
         .attach(
-            attachment,
+            attachment.clone(),
             identity,
             installation.actor.clone(),
             policy,
             parent.as_ref(),
         )
         .map_err(|error| error.to_string())?;
-    if let Some(input) = initial_input.filter(|_| service.runtime.admit_initial_input(actor)) {
+    if let Some(binding) = binding {
+        binding
+            .stage_conversation(Arc::clone(&embedded.conversation))
+            .map_err(|error| format!("startup conversation staging refused: {error:?}"))?;
+    }
+    let initial_context_ready = initialize_context(&attachment, &embedded.conversation).await?;
+    if let Some(input) = initial_input.filter(|_| runtime.admit_initial_input(actor)) {
         embedded
             .conversation
             .input(
@@ -380,6 +538,7 @@ pub(super) async fn attach_actor(
     let conversation = Arc::clone(&embedded.conversation);
     let (cancel, cancellation) = watch::channel(false);
     Ok(EmbeddedActor {
+        initial_context_ready,
         conversation,
         driver: embedded,
         cancellation: cancel,
@@ -394,6 +553,7 @@ pub(super) async fn attach_checkpoint_actor(
     run_root: &Path,
     installation: LocalResidentInstallation,
     initial_input: Option<String>,
+    binding: &super::embedded_harness::EmbeddedActorBinding,
 ) -> Result<EmbeddedActor, String> {
     let actor = installation.actor.identity();
     installation
@@ -418,7 +578,7 @@ pub(super) async fn attach_checkpoint_actor(
     let policy = Arc::new(EmbeddedPolicyInstallation::from_installation(&installation));
     let embedded = runtime
         .attach_checkpoint(
-            attachment,
+            attachment.clone(),
             identity,
             &installation,
             policy,
@@ -426,6 +586,10 @@ pub(super) async fn attach_checkpoint_actor(
             &projection_target,
         )
         .map_err(|error| error.to_string())?;
+    binding
+        .stage_conversation(Arc::clone(&embedded.conversation))
+        .map_err(|error| format!("startup conversation staging refused: {error:?}"))?;
+    let initial_context_ready = initialize_context(&attachment, &embedded.conversation).await?;
     if let Some(input) = initial_input.filter(|_| runtime.admit_initial_input(actor)) {
         embedded
             .conversation
@@ -440,6 +604,7 @@ pub(super) async fn attach_checkpoint_actor(
     let conversation = Arc::clone(&embedded.conversation);
     let (cancel, cancellation) = watch::channel(false);
     Ok(EmbeddedActor {
+        initial_context_ready,
         conversation,
         driver: embedded,
         cancellation: cancel,
@@ -454,6 +619,7 @@ pub(super) async fn attach_selected_actor(
     parent: super::embedded_context::SelectedProviderParent,
     installation: LocalResidentInstallation,
     initial_input: Option<String>,
+    binding: &super::embedded_harness::EmbeddedActorBinding,
 ) -> Result<EmbeddedActor, String> {
     if installation.checkpoint.is_some() || installation.context_parent.is_some() {
         return Err("selected embedded child requires explicit fresh context".into());
@@ -478,22 +644,17 @@ pub(super) async fn attach_selected_actor(
     let policy = Arc::new(EmbeddedPolicyInstallation::from_installation(&installation));
     let embedded = runtime
         .attach(
-            attachment,
+            attachment.clone(),
             identity,
             installation.actor.clone(),
             policy,
             Some(&parent.identity().actor),
         )
         .map_err(|error| error.to_string())?;
-    if let Some(prompt) = installation.fresh_context_seed.as_deref() {
-        embedded
-            .conversation
-            .seed_context(
-                &format!("spawn-context:{}:{}", actor.id.0, actor.incarnation.0),
-                prompt,
-            )
-            .map_err(|error| error.to_string())?;
-    }
+    binding
+        .stage_conversation(Arc::clone(&embedded.conversation))
+        .map_err(|error| format!("startup conversation staging refused: {error:?}"))?;
+    let initial_context_ready = initialize_context(&attachment, &embedded.conversation).await?;
     if let Some(input) = initial_input.filter(|_| runtime.admit_initial_input(actor)) {
         embedded
             .conversation
@@ -508,6 +669,7 @@ pub(super) async fn attach_selected_actor(
     let conversation = Arc::clone(&embedded.conversation);
     let (cancel, cancellation_rx) = watch::channel(false);
     Ok(EmbeddedActor {
+        initial_context_ready,
         conversation,
         driver: embedded,
         cancellation: cancel,

@@ -282,27 +282,35 @@ where
                 *current = Some(restored.clone());
                 return Ok(restored);
             }
-            let lease = record
-                .installed_tools
-                .current()
-                .ok_or_else(|| failure("initial context has no installed source policy"))?;
-            let tools = lease
-                .tools()
-                .ok_or_else(|| failure("initial context has no installed dispatcher"))?;
+            if matches!(
+                record.installed_tools.observe(),
+                crate::resident_workbench::InstalledToolsObservation::SourceUnavailable(_)
+            ) {
+                return Err(failure("initial context installed source is unavailable"));
+            }
+            let lease = record.installed_tools.current();
+            let tools = lease.as_ref().and_then(crate::InstalledToolLease::tools);
             let captured = record.descriptor.context_parent().is_some();
-            let change = if captured || !tools.slots.iter().any(|slot| slot == INITIAL_CONTEXT_SLOT)
-            {
+            let change = if captured
+                || tools.is_none_or(|tools| {
+                    !tools.slots.iter().any(|slot| slot == INITIAL_CONTEXT_SLOT)
+                }) {
                 InitialContextEvent::Skip {
                     captured,
                     caller_seed: record.fresh_context_seed.clone(),
                 }
             } else {
+                let tools = tools.expect("installed startup slot");
                 let (_, operation) =
                     ensure_workbench_execution_id(WorkbenchRequest::for_retained_operation(
                         INITIAL_CONTEXT_SLOT,
                         serde_json::Value::Null,
                     ));
-                let source = lease.source().semantic_digest();
+                let source = lease
+                    .as_ref()
+                    .expect("installed startup source")
+                    .source()
+                    .semantic_digest();
                 InitialContextEvent::Begin {
                     identity: InitialContextIdentity {
                         operation,
@@ -334,8 +342,7 @@ where
             let request = WorkbenchRequest::for_retained_operation(INITIAL_CONTEXT_SLOT,
                 serde_json::json!({"operation": identity.operation.as_str(), "callerSeed": next.caller_seed}))
                 .with_execution_id(identity.operation);
-            let mut invocation =
-                crate::ActorWorkbenchInvocation::issued(request, Some(lease), None);
+            let mut invocation = crate::ActorWorkbenchInvocation::issued(request, lease, None);
             invocation.initial_context = true;
             invocation
         };
@@ -380,8 +387,9 @@ where
             ));
         }
         if let Some(journal) = &self.environment.recovery {
-            if journal.active_application_conversation(actor).as_ref()
-                != Some(&publication.conversation)
+            if !journal
+                .initial_context_publication_matches(actor, operation, &publication.conversation)
+                .map_err(failure)?
             {
                 return Err(failure(
                     "initial context publication has another conversation association",

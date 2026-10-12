@@ -109,7 +109,7 @@ pub(super) async fn run_interactive_applications(
     let (embedded_ready_tx, mut embedded_ready_rx) = mpsc::unbounded_channel::<(
         (ActorRef, provider_attachment::ProviderAttachment),
         LocalActorRef,
-        Arc<harness::embedding::Conversation>,
+        embedded_service::InitialContextReady,
         oneshot::Sender<()>,
     )>();
     let (embedded_lifecycle_tx, mut embedded_lifecycle_rx) =
@@ -410,7 +410,7 @@ pub(super) async fn run_interactive_applications(
                     schedule_embedded_notification_drain(actor, binding, &mut notifications);
                 }
             }
-            Some(((actor, provider_attachment), local_actor, conversation, ready_ack)) = embedded_ready_rx.recv() => {
+            Some(((actor, provider_attachment), local_actor, initial_context_ready, ready_ack)) = embedded_ready_rx.recv() => {
                 if let Err(error) = provider_attachment.validate() {
                     tracing::warn!(?actor, %error, "embedded provider attachment became unavailable");
                     if let Some(cancel) = with_embedded_state(&application_owners, actor, |state| state.cancellation.clone()).flatten() {
@@ -418,9 +418,6 @@ pub(super) async fn run_interactive_applications(
                     }
                     continue;
                 }
-                let Some(activations) = with_embedded_state(&application_owners, actor, |state| state.pending_activations.take()).flatten() else {
-                    continue;
-                };
                 if !embedded_is_live(&application_owners, actor)
                     || with_embedded_state(&application_owners, actor, |state| state.cancellation.is_some()) != Some(true)
                 {
@@ -437,10 +434,16 @@ pub(super) async fn run_interactive_applications(
                     tracing::warn!(?actor, "embedded child attachment identity is no longer admitted");
                     continue;
                 }
-                if let Err(error) = binding.set_conversation(Arc::clone(&conversation)) {
-                    tracing::warn!(?actor, ?error, "embedded child attachment was not accepted");
-                    continue;
-                }
+                let activations = match binding.release_initial_context(initial_context_ready) {
+                    Ok(activations) => activations,
+                    Err(error) => {
+                        tracing::warn!(?actor, ?error, "embedded attachment was not accepted");
+                        continue;
+                    }
+                };
+                let conversation = binding.conversation().expect("released initial-context gate");
+                embedded_projection.attached(actor, conversation.identity());
+                embedded_lifecycle_tx.publish(actor, harness::server::HostActorLifecycle::Waiting);
                 update_embedded_state(&application_owners, actor, |state| {
                     state.conversation = Some(binding.clone());
                 });
@@ -475,6 +478,9 @@ pub(super) async fn run_interactive_applications(
                         cancel.send_replace(true);
                     }
                     continue;
+                }
+                if actor == root_identity {
+                    readiness.send(ActorHostReadiness::EmbeddedReady { root: actor, address: embedded_service.address }).ok();
                 }
                 ready_ack.send(()).ok();
             }
@@ -648,7 +654,7 @@ pub(super) async fn run_interactive_applications(
                                 continue;
                             }
                             let initial_input = installation.initial_user_message.clone();
-                            if !is_root {
+                            {
                                 let queue_admission = match local_actor.admit_transaction() {
                                     Ok(admission) => admission,
                                     Err(error) => {
@@ -661,7 +667,7 @@ pub(super) async fn run_interactive_applications(
                                     }
                                 };
                                 let spawn_admission = installation.spawn_admission.clone();
-                                let projection_target = match service.projection_target(model.clone()) {
+                                let projection_target = if !is_root && selected_parent.is_none() { Some(match service.projection_target(model.clone()) {
                                     Ok(target) => target,
                                     Err(error) => {
                                         if let Err(error) = refuse_child_attachment(&installation, error, &recovery_store, &output_store).await {
@@ -669,7 +675,8 @@ pub(super) async fn run_interactive_applications(
                                         }
                                         continue;
                                     }
-                                };
+                                }) } else { None };
+                                let binding = embedded_binding(&application_owners, actor).expect("opened startup binding");
                                 let runtime = Arc::clone(&service.runtime);
                                 let run_root = launch_context.run_root.clone();
                                 let ready = embedded_ready_tx.clone();
@@ -679,7 +686,6 @@ pub(super) async fn run_interactive_applications(
                                 let (cancel, mut cancellation_rx) = watch::channel(false);
                                 update_embedded_state(&application_owners, actor, |state| {
                                     state.cancellation = Some(cancel.clone());
-                                    state.pending_activations = Some(Vec::new());
                                     state.live = true;
                                 });
                                 let task = embedded_tasks.spawn(async move {
@@ -689,9 +695,13 @@ pub(super) async fn run_interactive_applications(
                                         }
                                         provider_attachment.validate().map_err(|error| error.to_string())?;
                                         let attachment = async {
-                                            match selected_parent {
-                                                Some(parent) => embedded_service::attach_selected_actor(runtime.as_ref(), provider_attachment.clone(), &run_root, parent, *installation, initial_input).await,
-                                                None => embedded_service::attach_checkpoint_actor(runtime.as_ref(), projection_target, provider_attachment.clone(), &run_root, *installation, initial_input).await,
+                                            if is_root {
+                                                embedded_service::attach_root_actor(runtime.as_ref(), provider_attachment.clone(), &run_root, path, None, *installation, initial_input, Some(&binding)).await
+                                            } else {
+                                                match selected_parent {
+                                                    Some(parent) => embedded_service::attach_selected_actor(runtime.as_ref(), provider_attachment.clone(), &run_root, parent, *installation, initial_input, &binding).await,
+                                                    None => embedded_service::attach_checkpoint_actor(runtime.as_ref(), projection_target.expect("captured projection target"), provider_attachment.clone(), &run_root, *installation, initial_input, &binding).await,
+                                                }
                                             }
                                         };
                                         let mut embedded = tokio::select! {
@@ -708,7 +718,7 @@ pub(super) async fn run_interactive_applications(
                                         embedded.cancellation = cancel;
                                         embedded.cancellation_rx = cancellation_rx;
                                         let (ready_ack, acknowledged) = oneshot::channel();
-                                        ready.send(((actor, provider_attachment.clone()), local_actor.clone(), Arc::clone(&embedded.conversation), ready_ack))
+                                        ready.send(((actor, provider_attachment.clone()), local_actor.clone(), embedded.initial_context_ready.clone(), ready_ack))
                                             .map_err(|_| "embedded attachment owner stopped".to_owned())?;
                                         tokio::select! {
                                             accepted = acknowledged => {
@@ -758,195 +768,20 @@ pub(super) async fn run_interactive_applications(
                                 drop(queue_admission);
                                 continue;
                             }
-                            if let Err(error) = provider_attachment.validate() {
-                                break Some(format!("actor {actor:?} provider attachment became unavailable: {error}"));
-                            }
-                            let attachment = embedded_service::attach_actor(
-                                service,
-                                provider_attachment.clone(),
-                                &launch_context.run_root,
-                                harness::model::AgentPath("/root".into()),
-                                None,
-                                *installation,
-                                initial_input,
-                            ).await;
-                            let embedded = match attachment {
-                                Ok(embedded) => embedded,
-                                Err(error) => break Some(format!(
-                                    "embedded actor {actor:?} could not attach: {error}"
-                                )),
-                            };
-                            if let Err(error) = provider_attachment.validate() {
-                                embedded.cancellation.send_replace(true);
-                                break Some(format!("actor {actor:?} provider attachment became unavailable: {error}"));
-                            }
-                            let root_conversation = Arc::clone(&embedded.conversation);
-                            let Some(binding) = embedded_binding(&application_owners, actor) else {
-                                break Some(format!("embedded notification owner was not retained for {actor:?}"));
-                            };
-                            let Ok(attachment_admission) = local_actor.admit_transaction() else {
-                                binding.mark_retired();
-                                update_embedded_state(&application_owners, actor, |state| {
-                                    state.conversation = Some(binding.clone());
-                                });
-                                embedded.cancellation.send_replace(true);
-                                continue;
-                            };
-                            match binding.set_conversation(Arc::clone(&root_conversation)) {
-                                Ok(()) => {}
-                                Err(embedded_harness::ConversationAttachError::Retired) => {
-                                    embedded.cancellation.send_replace(true);
-                                    continue;
-                                }
-                                Err(embedded_harness::ConversationAttachError::IdentityMismatch) => {
-                                    break Some(format!(
-                                        "embedded conversation identity does not match actor {actor:?}"
-                                    ));
-                                }
-                            }
-                            update_embedded_state(&application_owners, actor, |state| {
-                                state.conversation = Some(binding.clone());
-                            });
-                            embedded_projection
-                                .attached(actor, root_conversation.identity());
-                            if let Some(binding) = embedded_binding(&application_owners, actor) {
-                                schedule_embedded_notification_drain(
-                                    actor,
-                                    binding,
-                                    &mut notifications,
-                                );
-                            }
-                            update_embedded_state(&application_owners, actor, |state| {
-                                state.cancellation = Some(embedded.cancellation.clone());
-                                state.live = true;
-                            });
-                            embedded_lifecycle_tx.publish(
-                                actor,
-                                harness::server::HostActorLifecycle::Waiting,
-                            );
-                            let lifecycle_states =
-                                (*embedded_lifecycle_rx.borrow()).clone();
-                            let conversations = embedded_bindings(&application_owners);
-                            let live_actors = embedded_live_actors(&application_owners);
-                            if let Err(error) = embedded_projection.publish(
-                                &service.control,
-                                &readiness,
-                                &embedded_run,
-                                &(host_graph)(),
-                                &lifecycle_states,
-                                |actor| conversations.get(&actor).and_then(|binding| binding.conversation()).and_then(|conversation| conversation.active_round()),
-                                |identity| service.runtime.store().embedded_round_frontier(identity).map(|frontier| frontier.pending_head.or(frontier.settled_head).map(|request| request.0)),
-                                |identity| service.runtime.store().embedded_inference_state(identity),
-                |actor| !live_actors.contains(&actor),
-                            ) {
-                                break Some(format!("embedded actor history projection failed: {error}"));
-                            }
-                            let runtime = Arc::clone(&service.runtime);
-                            #[cfg(test)]
-                            let test_transport = service.test_transport();
-                            let embedded_lifecycle = embedded_lifecycle_tx.clone();
-                            let embedded_actor = actor;
-                            let provider_owner = provider_attachment.clone();
-                            let task = embedded_tasks.spawn(async move {
-                                let _provider_attachment = provider_owner;
-                                #[cfg(test)]
-                                let result = if let Some(transport) = test_transport {
-                                    embedded_service::drive_conversation_with_transport::<
-                                        harness::transport::auth::CodexFileAuth,
-                                        _,
-                                    >(
-                                        embedded.driver,
-                                        runtime,
-                                        &settings,
-                                        model,
-                                        effort,
-                                        instructions,
-                                        embedded.cancellation_rx,
-                                        embedded_lifecycle,
-                                        embedded_actor,
-                                        transport,
-                                    )
-                                    .await
-                                } else {
-                                    embedded_service::drive_conversation(
-                                        embedded.driver,
-                                        runtime,
-                                        &settings,
-                                        model,
-                                        effort,
-                                        instructions,
-                                        embedded.cancellation_rx,
-                                        embedded_lifecycle,
-                                        embedded_actor,
-                                    )
-                                    .await
-                                };
-                                #[cfg(not(test))]
-                                let result = embedded_service::drive_conversation(
-                                    embedded.driver,
-                                    runtime,
-                                    &settings,
-                                    model,
-                                    effort,
-                                    instructions,
-                                    embedded.cancellation_rx,
-                                    embedded_lifecycle,
-                                    embedded_actor,
-                                )
-                                .await;
-                                (actor, local_actor, result)
-                            });
-                            update_embedded_state(&application_owners, actor, |state| {
-                                state.task_id = Some(task.id());
-                            });
-                            // The permanent root has an installed workbench but
-                            // no typed request activation. PolicyInstalled is its
-                            // actor-owned readiness boundary; SessionReady below
-                            // carries subsequent typed request input only.
-                            if is_root {
-                                if let Err(error) = provider_attachment.validate() {
-                                    break Some(format!("actor {actor:?} provider readiness is unavailable: {error}"));
-                                }
-                                tracing::info!(target: "tidepool::actor_host::startup", actor = %root_identity, "embedded root ready");
-                                readiness
-                                    .send(ActorHostReadiness::EmbeddedReady {
-                                        root: root_identity,
-                                        address: service.address,
-                                    })
-                                    .ok();
-                            }
-                            drop(attachment_admission);
-                            continue;
                         }
-
 
 
                     }
                     LocalResidentDeployment::SessionReady { activation } => {
                         let actor = activation.id.actor();
                         {
-                            if with_embedded_state(&application_owners, actor, |state| {
-                                state.pending_activations.is_some()
-                            }) == Some(true)
-                            {
-                                update_embedded_state(&application_owners, actor, |state| {
-                                    if let Some(pending) = state.pending_activations.as_mut() {
-                                        pending.push(activation);
-                                    }
-                                });
-                                continue;
-                            }
-                            let Some(conversation) = embedded_binding(&application_owners, actor)
-                                .filter(|binding| binding.is_live())
-                                .and_then(|binding| binding.conversation()) else {
-                                if actor != root_identity {
-                                    if let Some(cancel) = with_embedded_state(&application_owners, actor, |state| state.cancellation.clone()).flatten() {
-                                        cancel.send_replace(true);
-                                    }
-                                    tracing::warn!(?actor, "embedded child activation arrived without an attached conversation");
-                                    continue;
-                                }
-                                break Some(format!("embedded actor {actor:?} received an activation before conversation attachment"));
+                            let Some(binding) = embedded_binding(&application_owners, actor) else {
+                                break Some(format!("embedded actor {actor:?} received activation before its host owner existed"));
+                            };
+                            let (conversation, activation) = match binding.admit_activation(activation) {
+                                embedded_harness::ActivationAdmission::Pending => continue,
+                                embedded_harness::ActivationAdmission::Ready { conversation, activation } => (conversation, activation),
+                                embedded_harness::ActivationAdmission::Retired => continue,
                             };
                             let sequence = activation.id.sequence();
                             if let Err(error) = conversation
@@ -1281,7 +1116,6 @@ async fn retire_interactive_application(
         if let Some(cancel) = state.cancellation.take() {
             cancel.send_replace(true);
         }
-        state.pending_activations = None;
         if let Some(binding) = state.conversation.as_ref() {
             binding.mark_retired();
         }
@@ -1500,7 +1334,6 @@ pub(super) fn settle_embedded_completion(
             })?;
         state.task_id = None;
         state.live = false;
-        state.pending_activations = None;
         state.cancellation = None;
         if let Err(error) = outcome {
             if error.cleanup_failed() {
