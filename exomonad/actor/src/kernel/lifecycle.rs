@@ -63,6 +63,7 @@ pub struct LifecycleSnapshot {
 #[derive(Clone)]
 pub struct LifecycleHandle {
     identity: ActorRef,
+    terminal: RetainedActorExit,
     address: RactorRef<LifecycleCommand>,
     observations: watch::Receiver<LifecycleSnapshot>,
     hosted_cell: HostedCellSlot,
@@ -139,6 +140,7 @@ pub(super) enum LifecycleCommand {
     },
     ExecutorStarted(RpcReplyPort<Result<(), KernelCallFailure>>),
     ExecutorRetired,
+    SuccessorDrainReceipt(RpcReplyPort<Result<SuccessorDrainReceipt, KernelCallFailure>>),
     Enqueue {
         message: Box<KernelMessage>,
         control: bool,
@@ -343,6 +345,27 @@ impl Drop for NativeProviderTurnLease {
     }
 }
 
+/// The lifecycle owner issues this only after exact executor cleanup and
+/// configured resident retirement have both settled successfully.
+#[derive(Debug, Clone)]
+pub(crate) struct SuccessorDrainReceipt {
+    predecessor: ActorRef,
+    terminal: ActorTerminal,
+    cleanup: crate::ResidentCleanupOutcome,
+}
+
+impl SuccessorDrainReceipt {
+    pub(crate) fn predecessor(&self) -> ActorRef {
+        self.predecessor
+    }
+    pub(crate) fn terminal(&self) -> &ActorTerminal {
+        &self.terminal
+    }
+    pub(crate) fn cleanup(&self) -> &crate::ResidentCleanupOutcome {
+        &self.cleanup
+    }
+}
+
 impl LifecycleHandle {
     pub async fn start(
         identity: ActorRef,
@@ -376,7 +399,7 @@ impl LifecycleHandle {
         });
         let arguments = LifecycleArguments {
             identity,
-            terminal,
+            terminal: terminal.clone(),
             observations,
         };
         let (address, _task) = match supervisor {
@@ -387,10 +410,62 @@ impl LifecycleHandle {
         };
         Ok(Self {
             identity,
+            terminal,
             address,
             observations: observe,
             hosted_cell: Arc::new(HostedCellPublications::default()),
         })
+    }
+
+    pub(crate) async fn retire_for_successor(
+        &self,
+    ) -> Result<SuccessorDrainReceipt, KernelCallFailure> {
+        let terminal = self.terminal.requested_shutdown().unwrap_or_else(|| {
+            ActorTerminal::new(
+                crate::ActorExitKind::Cancelled,
+                "retired before admitting its selected successor",
+            )
+        });
+        self.close_with(None, Some(terminal.clone())).await?;
+        let (reply, _answer) = tokio::sync::oneshot::channel();
+        match self
+            .control(KernelMessage::Shutdown {
+                terminal,
+                reply: reply.into(),
+            })
+            .await
+        {
+            Ok(()) | Err(KernelCallFailure::TargetUnavailable(_)) => {}
+            Err(KernelCallFailure::TargetExited(_)) if self.terminal.get().is_some() => {}
+            Err(error) => return Err(error),
+        }
+        let mut observe = self.observations.clone();
+        loop {
+            let snapshot = observe.borrow_and_update().clone();
+            if !snapshot.owner_available
+                || snapshot.transfer_unconfirmed.is_some()
+                || matches!(
+                    snapshot.native_settlement,
+                    NativeSettlement::NeedsAttention(_)
+                )
+                || snapshot
+                    .resident
+                    .as_ref()
+                    .is_some_and(|resident| !resident.settlement.is_confirmed())
+            {
+                return Err(KernelCallFailure::TargetUnavailable(self.identity));
+            }
+            if snapshot.phase == LifecyclePhase::Retired {
+                break;
+            }
+            observe
+                .changed()
+                .await
+                .map_err(|_| KernelCallFailure::TargetUnavailable(self.identity))?;
+        }
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.send(LifecycleCommand::SuccessorDrainReceipt(reply.into()))?;
+        self.receive(answer).await?
     }
 
     pub fn identity(&self) -> ActorRef {
@@ -837,6 +912,30 @@ impl Actor for LifecycleCoordinator {
                     provider.turn.take();
                     provider.phase = ProviderPhase::NeedsAttention;
                 }
+            }
+            LifecycleCommand::SuccessorDrainReceipt(reply) => {
+                let resident_confirmed = state
+                    .resident
+                    .as_ref()
+                    .is_none_or(resident::retirement_confirmed);
+                let result = match (state.phase, state.terminal.get(), state.terminal.cleanup()) {
+                    (LifecyclePhase::Retired, Some(terminal), Some(cleanup))
+                        if state.owner_available
+                            && resident_confirmed
+                            && matches!(state.native_settlement, NativeSettlement::Confirmed)
+                            && state.transfer.unconfirmed.is_none()
+                            && cleanup.actor() == state.identity
+                            && cleanup.is_confirmed() =>
+                    {
+                        Ok(SuccessorDrainReceipt {
+                            predecessor: state.identity,
+                            terminal,
+                            cleanup,
+                        })
+                    }
+                    _ => Err(KernelCallFailure::TargetUnavailable(state.identity)),
+                };
+                let _ = reply.send(result);
             }
             LifecycleCommand::Enqueue {
                 message,
