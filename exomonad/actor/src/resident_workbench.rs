@@ -5500,7 +5500,8 @@ where
         name: String,
         arguments: serde_json::Value,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-        self.begin_installed_entry(context, dispatch, 0, name, arguments).await
+        self.begin_installed_entry(context, dispatch, 0, name, arguments)
+            .await
     }
 
     pub(crate) async fn begin_initial_context(
@@ -5509,8 +5510,14 @@ where
         dispatch: Arc<RootCustody>,
         input: serde_json::Value,
     ) -> Result<ResidentWorkbenchStep, ResidentActorWorkbenchError> {
-        self.begin_installed_entry(context, dispatch, crate::initial_context::INITIAL_CONTEXT_ENTRY,
-            crate::initial_context::INITIAL_CONTEXT_SLOT.to_owned(), input).await
+        self.begin_installed_entry(
+            context,
+            dispatch,
+            crate::initial_context::INITIAL_CONTEXT_ENTRY,
+            crate::initial_context::INITIAL_CONTEXT_SLOT.to_owned(),
+            input,
+        )
+        .await
     }
 
     /// Apply immutable installed code through the common invocation input and
