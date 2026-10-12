@@ -37,7 +37,18 @@ async fn observe_provider_round<F: std::future::Future>(
 #[tokio::test]
 async fn provider_fixture_failure_interrupts_pending_round_observation() {
     let (failure, observed) = oneshot::channel();
-    failure.send("original command refusal".into()).unwrap();
+    let provider = InterruptedStream {
+        runtime: std::sync::Weak::new(),
+        inputs: Arc::new(Mutex::new(Vec::new())),
+        calls: Arc::new(AtomicUsize::new(0)),
+        emit_call: false,
+        effect_path: None,
+        failure: Mutex::new(Some(failure)),
+    };
+    let error = provider.failed("original command refusal".into());
+    assert!(
+        matches!(error, TransportError::Stream(ref detail) if detail == "original command refusal")
+    );
     let result = tokio::time::timeout(
         Duration::from_secs(1),
         observe_provider_round(observed, std::future::pending::<()>()),
@@ -273,22 +284,25 @@ impl ResponsesTransport for InterruptedStream {
                     }})
                     .to_string(),
                 )
-                .unwrap()
-                .unwrap();
-            sink.send(event).await.unwrap();
+                .map_err(|error| self.failed(format!("fixture event: {error}")))?
+                .ok_or_else(|| self.failed("fixture event did not emit an item".into()))?;
+            sink.send(event)
+                .await
+                .map_err(|error| self.failed(format!("fixture event delivery: {error}")))?;
             let runtime = self
                 .runtime
                 .upgrade()
-                .expect("the production runtime owns this provider request");
+                .ok_or_else(|| self.failed("provider runtime owner was released".into()))?;
             tokio::time::timeout(Duration::from_secs(300), async {
                 loop {
                     let claims = runtime
                         .store()
                         .claims(&harness::model::CallId("effect-before-eof".into()))
-                        .unwrap();
+                        .map_err(|error| format!("retained call claims: {error}"))?;
                     if let [claim] = claims.as_slice() {
                         if let Some(output) =
-                            runtime.scheduler().output(&claim.operation).await.unwrap()
+                            runtime.scheduler().output(&claim.operation).await
+                                .map_err(|error| format!("operation settlement: {error}"))?
                         {
                             if !matches!(output, harness::turn::JobOutput::Completed(Ok(_))) {
                                 return Err(format!("admitted notebook failed: {output:?}"));
@@ -296,7 +310,7 @@ impl ResponsesTransport for InterruptedStream {
                             if runtime
                                 .store()
                                 .replay_output_operation(&claim.operation)
-                                .unwrap()
+                                .map_err(|error| format!("retained operation output: {error}"))?
                                 .is_some()
                             {
                                 let witness = std::fs::read(self.effect_path.as_ref().unwrap())
