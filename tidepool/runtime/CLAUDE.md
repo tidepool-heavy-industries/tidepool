@@ -61,6 +61,9 @@ Recovery publication reuses canonical interface references emitted by native
 product materialization only for the exact artifact identity in that same
 compiler context. The materialization owner preserves durable filenames and
 independent interfaces; callers do not supply unverified references to skip IO.
+Private authored and public joined recovery records retain full-body live-binding
+custody requirements independently of selected executable groups. An interface-only
+lexical projection does not discharge the retained original body's lifetime needs.
 
 Notebook compilation first admits physical targets and checked-item receipts,
 then prepares existing cumulative declaration projections under one compiler
