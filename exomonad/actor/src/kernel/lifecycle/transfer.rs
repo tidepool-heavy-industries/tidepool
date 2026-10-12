@@ -7,6 +7,8 @@ use std::collections::VecDeque;
 pub(crate) enum ReplacementIngressError {
     #[error("replacement ingress refused before adoption: {0}")]
     Refused(String),
+    #[error("replacement executor activation failed: {0}")]
+    ActivationFailed(crate::KernelBehaviorError),
     #[error("replacement ingress custody remains unconfirmed: {0}")]
     Unconfirmed(String),
 }
@@ -58,15 +60,17 @@ pub(super) struct TransferState {
     backlog: VecDeque<KernelMessage>,
     relationship: Option<(ActorRef, ActorRef)>,
     activated: bool,
+    activation_confirmed: bool,
+    activation_pending: Option<(u64, RpcReplyPort<Result<(), ReplacementIngressError>>)>,
     pub(super) unconfirmed: Option<String>,
     failure_origin: Option<FailureOrigin>,
 }
 impl TransferState {
     pub(super) fn has_pending(&self) -> bool {
-        !self.pending.is_empty() || !self.backlog.is_empty()
+        !self.pending.is_empty() || !self.backlog.is_empty() || self.activation_pending.is_some()
     }
     pub(super) fn pending_count(&self) -> usize {
-        self.pending.len()
+        self.pending.len() + usize::from(self.activation_pending.is_some())
     }
 }
 pub(super) enum TransferCommand {
@@ -90,6 +94,10 @@ pub(super) enum TransferCommand {
         sequence: u64,
         outcome: TransferOutcome,
     },
+    ActivationCompleted {
+        sequence: u64,
+        outcome: ActivationOutcome,
+    },
     TakeRefused(RpcReplyPort<Result<VecDeque<KernelMessage>, ReplacementIngressError>>),
     Activate {
         grant: ReplacementIngressGrant,
@@ -97,6 +105,11 @@ pub(super) enum TransferCommand {
         reply: RpcReplyPort<Result<(), ReplacementIngressError>>,
     },
 }
+pub(super) enum ActivationOutcome {
+    Acknowledged(Result<(), crate::KernelBehaviorError>),
+    Unconfirmed(String),
+}
+
 impl LifecycleHandle {
     pub(crate) async fn transfer_backlog(
         &self,
@@ -232,6 +245,39 @@ pub(super) fn handle(
                 }
             }
         }
+        TransferCommand::ActivationCompleted { sequence, outcome } => {
+            if state
+                .transfer
+                .activation_pending
+                .as_ref()
+                .is_none_or(|(issued, _)| *issued != sequence)
+            {
+                return;
+            }
+            let (_, reply) = state
+                .transfer
+                .activation_pending
+                .take()
+                .expect("matched activation");
+            state.tasks.remove(&sequence);
+            let result = match outcome {
+                ActivationOutcome::Acknowledged(Ok(())) => {
+                    state.transfer.activation_confirmed = true;
+                    Ok(())
+                }
+                ActivationOutcome::Acknowledged(Err(error)) => {
+                    state.transfer.unconfirmed = Some(error.to_string());
+                    state.transfer.failure_origin = Some(FailureOrigin::TargetActivation);
+                    Err(ReplacementIngressError::ActivationFailed(error))
+                }
+                ActivationOutcome::Unconfirmed(detail) => {
+                    state.transfer.unconfirmed = Some(detail.clone());
+                    state.transfer.failure_origin = Some(FailureOrigin::TargetActivation);
+                    Err(ReplacementIngressError::Unconfirmed(detail))
+                }
+            };
+            let _ = reply.send(result);
+        }
         TransferCommand::TakeRefused(reply) => {
             let result = take_refused(state);
             let _ = reply.send(result);
@@ -241,7 +287,7 @@ pub(super) fn handle(
             draining,
             reply,
         } => {
-            let _ = reply.send(activate(state, address, grant, draining));
+            activate(state, address, grant, draining, reply);
         }
     }
 }
@@ -449,7 +495,48 @@ fn activate(
     address: &RactorRef<LifecycleCommand>,
     grant: ReplacementIngressGrant,
     draining: bool,
-) -> Result<(), ReplacementIngressError> {
+    reply: RpcReplyPort<Result<(), ReplacementIngressError>>,
+) {
+    match prepare_activation(state, address, grant, draining) {
+        Ok(None) => {
+            let _ = reply.send(Ok(()));
+        }
+        Err(error) => {
+            let _ = reply.send(Err(error));
+        }
+        Ok(Some((sequence, answer))) => {
+            state.transfer.activation_pending = Some((sequence, reply));
+            let owner = address.clone();
+            state.tasks.insert(
+                sequence,
+                tokio::spawn(async move {
+                    let outcome = match answer.await {
+                        Ok(outcome) => ActivationOutcome::Acknowledged(outcome),
+                        Err(_) => ActivationOutcome::Unconfirmed(
+                            "replacement activation acknowledgment is unavailable".into(),
+                        ),
+                    };
+                    let _ = owner.cast(LifecycleCommand::Transfer(Box::new(
+                        TransferCommand::ActivationCompleted { sequence, outcome },
+                    )));
+                }),
+            );
+        }
+    }
+}
+
+fn prepare_activation(
+    state: &mut LifecycleState,
+    address: &RactorRef<LifecycleCommand>,
+    grant: ReplacementIngressGrant,
+    draining: bool,
+) -> Result<
+    Option<(
+        u64,
+        tokio::sync::oneshot::Receiver<Result<(), crate::KernelBehaviorError>>,
+    )>,
+    ReplacementIngressError,
+> {
     if grant.successor() != state.identity
         || state.transfer.relationship != Some((grant.predecessor(), state.identity))
     {
@@ -457,8 +544,13 @@ fn activate(
             "replacement activation has another staged relationship".into(),
         ));
     }
+    if state.transfer.activation_confirmed {
+        return Ok(None);
+    }
     if state.transfer.activated {
-        return Ok(());
+        return Err(ReplacementIngressError::Unconfirmed(
+            "replacement activation was already submitted without confirmed completion".into(),
+        ));
     }
     if state.is_closed() {
         return Err(ReplacementIngressError::Unconfirmed(
@@ -473,10 +565,15 @@ fn activate(
     let backlog = std::mem::take(&mut state.transfer.backlog);
     let sequence = state.next_operation();
     state.ingress.insert(sequence);
+    let (reply, answer) = tokio::sync::oneshot::channel();
     let envelope = AdmittedKernelEnvelope {
         identity: state.identity,
         sequence,
-        message: Box::new(KernelMessage::ActivateReplacement { backlog, draining }),
+        message: Box::new(KernelMessage::ActivateReplacement {
+            backlog,
+            draining,
+            reply: reply.into(),
+        }),
         lease: AdmittedKernelLease {
             owner: address.clone(),
             identity: state.identity,
@@ -486,7 +583,7 @@ fn activate(
     match executor.cast(KernelMessage::Admitted(envelope)) {
         Ok(()) => {
             state.transfer.activated = true;
-            Ok(())
+            Ok(Some((sequence, answer)))
         }
         Err(ractor::MessagingErr::SendErr(KernelMessage::Admitted(envelope))) => {
             let (message, lease) = envelope
