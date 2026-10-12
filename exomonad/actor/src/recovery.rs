@@ -382,8 +382,35 @@ struct State {
     uncertain: bool,
 }
 
+/// Exact evidence of a durably confirmed journal binding, not native binding
+/// authority. Only the verified enclosing bind operation may issue a final
+/// lifecycle settlement receipt.
+pub struct JournalApplicationBindingAck {
+    issuer: Arc<()>,
+    actor: ActorRef,
+    conversation: ApplicationConversation,
+    confirmed_sequence: u64,
+}
+impl JournalApplicationBindingAck {
+    pub fn actor(&self) -> ActorRef {
+        self.actor
+    }
+    pub fn conversation(&self) -> &ApplicationConversation {
+        &self.conversation
+    }
+    /// The committed prefix confirming the fact; an idempotent bind need not
+    /// append a new row.
+    pub fn confirmed_sequence(&self) -> u64 {
+        self.confirmed_sequence
+    }
+    pub fn belongs_to(&self, journal: &ActorRecoveryJournal) -> bool {
+        Arc::ptr_eq(&self.issuer, &journal.identity)
+    }
+}
+
 /// A channel handle to one dedicated, supervised blocking journal owner.
 pub struct ActorRecoveryJournal {
+    identity: Arc<()>,
     commands: std::sync::mpsc::Sender<Command>,
     status: tokio::sync::watch::Receiver<JournalOwnerStatus>,
 }
@@ -401,6 +428,8 @@ impl ActorRecoveryJournal {
         relative_file: PathBuf,
         require_existing: bool,
     ) -> std::io::Result<Arc<Self>> {
+        let identity = Arc::new(());
+        let owner_identity = Arc::clone(&identity);
         let (commands, incoming) = std::sync::mpsc::channel();
         let (initialized, ready) = tokio::sync::oneshot::channel();
         let (status_tx, status) = tokio::sync::watch::channel(JournalOwnerStatus::Running);
@@ -409,17 +438,21 @@ impl ActorRecoveryJournal {
             .spawn(move || {
                 let mut fenced = false;
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let mut owner =
-                        match JournalOwner::initialize(&anchor, &relative_file, require_existing) {
-                            Ok(owner) => {
-                                let _ = initialized.send(Ok(()));
-                                owner
-                            }
-                            Err(error) => {
-                                let _ = initialized.send(Err(error));
-                                return false;
-                            }
-                        };
+                    let mut owner = match JournalOwner::initialize(
+                        &anchor,
+                        &relative_file,
+                        require_existing,
+                        owner_identity,
+                    ) {
+                        Ok(owner) => {
+                            let _ = initialized.send(Ok(()));
+                            owner
+                        }
+                        Err(error) => {
+                            let _ = initialized.send(Err(error));
+                            return false;
+                        }
+                    };
                     while let Ok(command) = incoming.recv() {
                         macro_rules! complete {
                             ($reply:expr, $operation:expr) => {{
@@ -549,7 +582,11 @@ impl ActorRecoveryJournal {
                     tracing::error!("actor journal owner terminated unexpectedly");
                 }
             })?;
-        let journal = Arc::new(Self { commands, status });
+        let journal = Arc::new(Self {
+            identity,
+            commands,
+            status,
+        });
         ready.await.map_err(|_| {
             std::io::Error::other("actor journal owner terminated during initialization")
         })??;
@@ -670,7 +707,7 @@ impl ActorRecoveryJournal {
         &self,
         actor: ActorRef,
         conversation: ApplicationConversation,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<JournalApplicationBindingAck> {
         self.request(|reply| Command::Bind {
             actor,
             conversation,
@@ -731,7 +768,7 @@ impl ActorRecoveryJournal {
         &self,
         actor: ActorRef,
         thread_id: String,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<JournalApplicationBindingAck> {
         self.bind_application_conversation(actor, ApplicationConversation::Codex { thread_id })
             .await
     }
@@ -793,7 +830,7 @@ enum Command {
     Bind {
         actor: ActorRef,
         conversation: ApplicationConversation,
-        reply: tokio::sync::oneshot::Sender<std::io::Result<()>>,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<JournalApplicationBindingAck>>,
     },
     Certify {
         predecessor: ActorRef,
@@ -805,6 +842,7 @@ enum Command {
 }
 
 struct JournalOwner {
+    identity: Arc<()>,
     path: PathBuf,
     state: State,
 }
@@ -813,6 +851,7 @@ impl JournalOwner {
         anchor: &DirectoryAnchor,
         relative_file: &Path,
         require_existing: bool,
+        identity: Arc<()>,
     ) -> std::io::Result<Self> {
         let path = anchor
             .resolve(relative_file)
@@ -846,6 +885,7 @@ impl JournalOwner {
             ));
         }
         let mut owner = JournalOwner {
+            identity,
             path: path.clone(),
             state: State {
                 next_sequence: expected,
@@ -1192,7 +1232,7 @@ impl JournalOwner {
         &mut self,
         actor: ActorRef,
         conversation: ApplicationConversation,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<JournalApplicationBindingAck> {
         let state = &mut self.state;
         ensure_writable(&state)?;
         if state
@@ -1215,7 +1255,14 @@ impl JournalOwner {
             })?;
         validate_application_binding(application, &conversation)?;
         match &application.conversation {
-            Some(existing) if existing == &conversation => return Ok(()),
+            Some(existing) if existing == &conversation => {
+                return Ok(JournalApplicationBindingAck {
+                    issuer: Arc::clone(&self.identity),
+                    actor,
+                    conversation,
+                    confirmed_sequence: state.next_sequence - 1,
+                })
+            }
             Some(_) => {
                 return Err(std::io::Error::other(format!(
                     "actor {actor} published conflicting conversation identities"
@@ -1238,8 +1285,13 @@ impl JournalOwner {
             .ok_or_else(|| {
                 std::io::Error::other("application disappeared during binding publication")
             })?
-            .conversation = Some(conversation);
-        Ok(())
+            .conversation = Some(conversation.clone());
+        Ok(JournalApplicationBindingAck {
+            issuer: Arc::clone(&self.identity),
+            actor,
+            conversation,
+            confirmed_sequence: state.next_sequence - 1,
+        })
     }
     fn admit_with_startup(
         &mut self,
@@ -3049,5 +3101,50 @@ mod tests {
             .admit(ActorRef::first(ActorId(54)), &descriptor("owner"), &[])
             .await
             .is_err());
+    }
+    #[tokio::test]
+    async fn binding_ack_is_exact_issuer_evidence_and_duplicates_do_not_append() {
+        let directory = tempfile::tempdir().unwrap();
+        let anchor = DirectoryAnchor::open_existing(directory.path()).unwrap();
+        let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl")
+            .await
+            .unwrap();
+        let other = ActorRecoveryJournal::open(&anchor, "other.jsonl")
+            .await
+            .unwrap();
+        let actor = ActorRef::first(ActorId(55));
+        journal
+            .admit(actor, &descriptor("owner"), &[])
+            .await
+            .unwrap();
+        journal
+            .prepare_application(actor, directory.path().join("binding.json"), None)
+            .await
+            .unwrap();
+        let first = journal
+            .bind_application(actor, "conversation".into())
+            .await
+            .unwrap();
+        let duplicate = journal
+            .bind_application(actor, "conversation".into())
+            .await
+            .unwrap();
+        assert_eq!(first.actor(), actor);
+        assert_eq!(
+            first.conversation(),
+            &ApplicationConversation::Codex {
+                thread_id: "conversation".into()
+            }
+        );
+        assert!(first.belongs_to(&journal));
+        assert!(!first.belongs_to(&other));
+        assert_eq!(first.confirmed_sequence(), duplicate.confirmed_sequence());
+        assert_eq!(
+            std::fs::read_to_string(directory.path().join("actors.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            first.confirmed_sequence() as usize
+        );
     }
 }

@@ -9,7 +9,7 @@ inside the journal owner.
 
 Queries return only the selected immutable facts. An explicitly requested full
 records inventory copies the inventory once; ordinary reads and updates never
-clone the journal state. Durable successor certification captures only the exact owner,
+clone the journal state. Full inventory has explicit linear copying cost. Durable successor certification captures only the exact owner,
 backend conversation and manifest facts after actual durable readback. Its native
 metadata validators inspect those immutable facts without accessing live state.
 The lifecycle owner must retain an execution claim spanning certification and
@@ -29,3 +29,9 @@ No blocking forwarding compatibility API is retained.
 
 The serialized version and rows remain unchanged. Recovery requires reopening
 and replaying the real journal; no attempt resets a live uncertainty fence.
+
+Binding commands return a non-cloneable JournalApplicationBindingAck naming the
+exact actor, conversation, issuing journal and committed prefix. This ack only
+certifies journal evidence. The verified enclosing facade bind composition must
+confirm the native backend binding under the same lifecycle claim before issuing
+a distinct final settlement receipt; appending a journal row cannot issue it.
