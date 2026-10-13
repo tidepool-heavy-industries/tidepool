@@ -12126,20 +12126,14 @@ pub(super) mod tests {
         assert_eq!(engine.parked_count(), 1);
         assert_eq!(engine.persistent_roots_count(), roots);
         assert_eq!(engine.handle_count(), handles);
-        let (programs, machine) = (&engine.programs, &mut engine.machine);
-        let mut builder = machine.managed_builder().unwrap();
-        let valid = build_structural_node(
-            &old_reply,
-            &table,
-            ReplyTarget::Static(DataConId(990)),
-            TypeNodeId(1),
-            &programs[&first],
-            &mut builder,
-        )
-        .unwrap();
-        let valid = builder.finish(RealmId::ROOT, valid).unwrap();
-        assert!(engine.release(valid));
-        engine.abort_parked(parked).unwrap();
+        let resumed = engine
+            .resume_with_structural_answer(parked, &old_reply, &table)
+            .expect("the original A reply resumes after rejecting same-layout B");
+        let PreparedSettlement::Done { value } = resumed.settlement else {
+            panic!("valid A response settles the parked frame")
+        };
+        assert!(engine.release(value));
+        assert_eq!(engine.parked_count(), 0);
         // A conflicting declaration with A's identity and a new erased layout
         // must refuse before changing any of the installed evidence.
         let mut conflict = prepared_data::wire_from_prepared(&versioned_reply_program(1, 3));
