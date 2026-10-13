@@ -139,3 +139,38 @@ Host control is separate from the console contract:
 
 The graph endpoint requires an existing workbench; it grants no authority beyond
 that workbench's host-provisioned grant.
+
+## Local model input
+
+The host owner's protected operator socket accepts ordinary user input through
+exactly the same durable admission owner as the authenticated browser. This
+input starts or queues model inference according to the existing conversation
+state. A notification sent through a workbench has a different delivery contract.
+
+Retain an operation UUID before submitting a UTF-8 file:
+
+```sh
+exomonad operator --socket /path/to/operator.sock input \
+  --run RUN --actor /root --incarnation INCARNATION \
+  --operation UUID input.txt
+exomonad operator --socket /path/to/operator.sock input-status \
+  --run RUN --operation UUID
+```
+
+Use the exact run, actor path and incarnation from the live host projection.
+Submission returns a durable queue acknowledgement, not a model response or
+proof of inference. Status retains the command, admission state and available
+receipt. Input still queues while inference is blocked; this command grants no
+recovery authority.
+
+The client disables automatic retries. If acknowledgement is uncertain, query
+the same operation before submitting anything else. Reusing its UUID with the
+same target and text preserves the retained operation; different content is
+refused. A missing status result does not establish that an in-flight submission
+will never be admitted. The socket is local owner authority, protected by its
+existing directory and socket permissions.
+
+The native endpoints are `POST /host/input` with `{operation, target, text}`
+and `GET /host/input/status?run=RUN&operation=UUID`. The target includes `run`,
+`actor` and `incarnation`. These endpoints expose ordinary input and its status;
+other host controls remain on their existing interfaces.

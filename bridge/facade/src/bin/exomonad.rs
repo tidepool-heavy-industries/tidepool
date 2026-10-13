@@ -96,7 +96,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Provision, inspect, or retire operator workbenches in a running host.
+    /// Submit model input or manage operator workbenches in a running host.
     Operator {
         /// The running host's protected operator socket.
         #[arg(long)]
@@ -220,6 +220,26 @@ enum AuthCommand {
 
 #[derive(Debug, Subcommand)]
 enum OperatorCommand {
+    /// Queue ordinary user input for one exact model actor. Retain the operation UUID.
+    Input {
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        actor: String,
+        #[arg(long)]
+        incarnation: String,
+        #[arg(long)]
+        operation: uuid::Uuid,
+        /// UTF-8 input file.
+        file: PathBuf,
+    },
+    /// Inspect an exact input operation after an uncertain acknowledgement.
+    InputStatus {
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        operation: uuid::Uuid,
+    },
     New,
     List,
     Stop {
@@ -409,6 +429,26 @@ async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
         }
         Command::Operator { socket, action } => {
             let action = match action {
+                OperatorCommand::Input {
+                    run,
+                    actor,
+                    incarnation,
+                    operation,
+                    file,
+                } => tidepool::operator::OperatorAction::Input(tidepool::operator::InputRequest {
+                    operation,
+                    target: harness::server::HostActorIdentity {
+                        run,
+                        actor: harness::model::AgentPath(actor),
+                        incarnation,
+                    },
+                    text: std::fs::read_to_string(file)?,
+                }),
+                OperatorCommand::InputStatus { run, operation } => {
+                    tidepool::operator::OperatorAction::InputStatus(
+                        tidepool::operator::InputStatusRequest { run, operation },
+                    )
+                }
                 OperatorCommand::New => tidepool::operator::OperatorAction::New,
                 OperatorCommand::List => tidepool::operator::OperatorAction::List,
                 OperatorCommand::Stop { session } => {
@@ -576,6 +616,47 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn operator_input_requires_exact_identity_and_explicit_operation() {
+        let operation = uuid::Uuid::new_v4();
+        let parsed = Cli::try_parse_from([
+            "exomonad",
+            "operator",
+            "--socket",
+            "/private/operator.sock",
+            "input",
+            "--run",
+            "run",
+            "--actor",
+            "/root",
+            "--incarnation",
+            "incarnation",
+            "--operation",
+            &operation.to_string(),
+            "input.txt",
+        ])
+        .unwrap();
+        assert!(
+            matches!(parsed.command, Command::Operator { action: OperatorCommand::Input { run, actor, incarnation, operation: selected, file }, .. }
+            if run == "run" && actor == "/root" && incarnation == "incarnation" && selected == operation && file == PathBuf::from("input.txt"))
+        );
+        assert!(Cli::try_parse_from([
+            "exomonad",
+            "operator",
+            "--socket",
+            "/private/operator.sock",
+            "input",
+            "--run",
+            "run",
+            "--actor",
+            "/root",
+            "--incarnation",
+            "incarnation",
+            "input.txt"
+        ])
+        .is_err());
+    }
 
     #[test]
     fn operator_artifact_query_selects_exact_actor_and_build_relative_path() {

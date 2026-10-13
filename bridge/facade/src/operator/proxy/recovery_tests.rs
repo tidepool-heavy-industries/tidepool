@@ -32,6 +32,7 @@ impl Host {
         let tasks = Arc::new(Mutex::new(Vec::new()));
         let service = OperatorService::bind(
             socket.clone(),
+            None,
             {
                 let calls = calls.clone();
                 let entered = entered.clone();
@@ -461,6 +462,7 @@ async fn retained_provision_failure_is_not_retried() {
     let calls = Arc::new(AtomicUsize::new(0));
     let service = OperatorService::bind(
         directory.path().join("operator/operator.sock"),
+        None,
         {
             let calls = calls.clone();
             Arc::new(move || {
@@ -564,6 +566,7 @@ async fn changed_service_with_same_actor_identity_cannot_address_old_session() {
     let directory = tempfile::tempdir().unwrap();
     let service = OperatorService::bind(
         directory.path().join("operator.sock"),
+        None,
         {
             let actor = actor.clone();
             Arc::new(move || {

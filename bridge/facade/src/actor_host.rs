@@ -2521,6 +2521,7 @@ async fn run_owned(
     let artifact_run_id = runtime_namespace(&run_root);
     let operator = crate::operator::OperatorService::bind(
         operator_socket.clone(),
+        Some(embedded_service.control.input_bridge()),
         Arc::new(move || {
             let forest = provision_forest.clone();
             let role = operator_role.clone();

@@ -4,7 +4,7 @@ pub mod wire;
 
 use axum::{
     body::{to_bytes, Body},
-    extract::{Path as RoutePath, State},
+    extract::{Path as RoutePath, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -102,6 +102,7 @@ struct AttachmentState {
     provisions: Arc<Mutex<BTreeMap<Uuid, ProvisionCompletion>>>,
     open: Arc<std::sync::atomic::AtomicBool>,
     provision: Arc<Provision>,
+    input_bridge: Option<harness::server::HostInputBridge>,
     inspect_graph: Arc<InspectGraph>,
     inspect_artifact: Arc<InspectArtifact>,
     socket: PathBuf,
@@ -156,6 +157,7 @@ pub struct OperatorService {
 impl OperatorService {
     pub async fn bind(
         socket: PathBuf,
+        input_bridge: Option<harness::server::HostInputBridge>,
         provision: Arc<Provision>,
         inspect_graph: Arc<InspectGraph>,
         inspect_artifact: Arc<InspectArtifact>,
@@ -177,6 +179,7 @@ impl OperatorService {
             provisions: Arc::default(),
             open: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             provision,
+            input_bridge,
             inspect_graph,
             inspect_artifact,
             socket,
@@ -186,6 +189,8 @@ impl OperatorService {
             .route("/host/operators/service", get(service))
             .route("/host/operators/{session}/stop", post(stop))
             .route("/host/artifacts", post(artifact))
+            .route("/host/input", post(input))
+            .route("/host/input/status", get(input_status))
             .route("/v1/sessions/{session}", get(inspect))
             .route("/v1/sessions/{session}/submit", post(submit))
             .route(
@@ -822,7 +827,92 @@ fn bounded_response(mut result: SubmitResponse) -> Response {
         .into_response()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputRequest {
+    pub operation: Uuid,
+    pub target: harness::server::HostActorIdentity,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputStatusRequest {
+    pub run: String,
+    pub operation: Uuid,
+}
+
+fn input_refusal((code, reason): (harness::server::CommandRefusal, String)) -> Response {
+    use harness::server::CommandRefusal;
+    let status = match code {
+        CommandRefusal::InvalidCommand => StatusCode::BAD_REQUEST,
+        CommandRefusal::Conflict => StatusCode::CONFLICT,
+        CommandRefusal::WrongRun => StatusCode::FORBIDDEN,
+        CommandRefusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    (
+        status,
+        Json(serde_json::json!({"code": code, "reason": reason})),
+    )
+        .into_response()
+}
+
+async fn input(
+    State(state): State<AttachmentState>,
+    Json(request): Json<InputRequest>,
+) -> Response {
+    if !state.open.load(std::sync::atomic::Ordering::SeqCst) {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+            "Host is shutting down",
+        );
+    }
+    let Some(bridge) = state.input_bridge else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "input_unavailable",
+            "host model input is unavailable",
+        );
+    };
+    match bridge.submit_input(
+        harness::embedding::ClientOperationId(request.operation),
+        request.target,
+        request.text,
+    ) {
+        Ok(accepted) => (StatusCode::ACCEPTED, Json(accepted)).into_response(),
+        Err(error) => input_refusal(error),
+    }
+}
+
+async fn input_status(
+    State(state): State<AttachmentState>,
+    Query(request): Query<InputStatusRequest>,
+) -> Response {
+    let Some(bridge) = state.input_bridge else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "input_unavailable",
+            "host model input is unavailable",
+        );
+    };
+    match bridge.input_status(
+        &request.run,
+        harness::embedding::ClientOperationId(request.operation),
+    ) {
+        Ok(Some(record)) => Json(record).into_response(),
+        Ok(None) => error(
+            StatusCode::NOT_FOUND,
+            "input_not_found",
+            "input operation is not retained",
+        ),
+        Err(error) => input_refusal(error),
+    }
+}
+
 pub enum OperatorAction {
+    Input(InputRequest),
+    InputStatus(InputStatusRequest),
     New,
     List,
     Stop {
@@ -840,6 +930,8 @@ pub async fn command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (client, _address) = client_for(socket)?;
     let url = match &action {
+        OperatorAction::Input(_) => "http://localhost/host/input".to_owned(),
+        OperatorAction::InputStatus(_) => "http://localhost/host/input/status".to_owned(),
         OperatorAction::New | OperatorAction::List => "http://localhost/host/operators".to_owned(),
         OperatorAction::Artifact { .. } => "http://localhost/host/artifacts".to_owned(),
         OperatorAction::Stop { session } => {
@@ -852,7 +944,19 @@ pub async fn command(
             url.to_string()
         }
     };
+    let input_operation = match &action {
+        OperatorAction::Input(request) => Some((request.target.run.clone(), request.operation)),
+        _ => None,
+    };
+    let uncertain = |error: reqwest::Error| -> Box<dyn std::error::Error> {
+        match &input_operation {
+            Some((run, operation)) => format!("input acknowledgement is unknown: {error}; inspect input-status --run {run} --operation {operation} before any submission").into(),
+            None => Box::new(error),
+        }
+    };
     let response = match action {
+        OperatorAction::Input(request) => client.post(url).json(&request),
+        OperatorAction::InputStatus(request) => client.get(url).query(&request),
         OperatorAction::List => client.get(url),
         OperatorAction::Artifact {
             actor,
@@ -867,14 +971,232 @@ pub async fn command(
         OperatorAction::Stop { .. } => client.post(url),
     }
     .send()
-    .await?;
+    .await
+    .map_err(&uncertain)?;
     let status = response.status();
-    let body = response.text().await?;
+    let body = response.text().await.map_err(&uncertain)?;
     if !status.is_success() {
+        if status.is_server_error() {
+            if let Some((run, operation)) = input_operation {
+                return Err(format!("{status}: {body}; input acknowledgement is unknown; inspect input-status --run {run} --operation {operation} before any submission").into());
+            }
+        }
         return Err(format!("{status}: {body}").into());
     }
     println!("{body}");
     Ok(())
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    fn request() -> InputRequest {
+        InputRequest {
+            operation: Uuid::new_v4(),
+            target: harness::server::HostActorIdentity {
+                run: "exact-run".into(),
+                actor: harness::model::AgentPath("/root".into()),
+                incarnation: "exact-incarnation".into(),
+            },
+            text: "ordinary user input".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_input_preserves_shared_admission_and_exact_status() {
+        let store = Arc::new(harness::store::Store::memory().unwrap());
+        let (_, control, mut commands) = harness::server::server_with_config(
+            harness::server::ServerConfig::new(PathBuf::from(".")).with_history_store(store),
+        );
+        control.set_snapshot(harness::server::Snapshot {
+            host_run: Some("exact-run".into()),
+            ..harness::server::Snapshot::default()
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("operator/operator.sock");
+        let service = OperatorService::bind(
+            socket.clone(),
+            Some(control.input_bridge()),
+            Arc::new(|| panic!("input must not provision a workbench")),
+            Arc::new(|_| panic!("input must not inspect graph")),
+            Arc::new(|_, _| panic!("input must not inspect artifacts")),
+        )
+        .await
+        .unwrap();
+        let (client, _address) = client_for(&socket).unwrap();
+        let request = request();
+        // Discard the accepted response; status must retain the same command.
+        let accepted = client
+            .post("http://localhost/host/input")
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        drop(accepted);
+        let queued = commands.recv().await.unwrap();
+        assert!(
+            matches!(queued.command, harness::server::ClientCommand::Host { operation_id, command: harness::server::HostCommand::Input { target, text } }
+            if operation_id.0 == request.operation && target == request.target && text == request.text)
+        );
+        let query = InputStatusRequest {
+            run: request.target.run.clone(),
+            operation: request.operation,
+        };
+        let response = client
+            .get("http://localhost/host/input/status")
+            .query(&query)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let record: harness::store::EmbeddedCommandRecord = response.json().await.unwrap();
+        assert_eq!(record.operation_id.0, request.operation);
+        assert_eq!(
+            record.command,
+            harness::server::HostCommand::Input {
+                target: request.target.clone(),
+                text: request.text.clone()
+            }
+        );
+        assert_eq!(record.state, harness::store::EmbeddedCommandState::Queued);
+        assert!(record.receipt.is_none());
+        assert_eq!(
+            client
+                .post("http://localhost/host/input")
+                .json(&request)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        let malformed = serde_json::json!({
+            "operation": request.operation,
+            "target": request.target,
+            "text": request.text,
+            "command": "retire"
+        });
+        assert_eq!(
+            client
+                .post("http://localhost/host/input")
+                .json(&malformed)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        let mut conflicting = request.clone();
+        conflicting.text = "different".into();
+        assert_eq!(
+            client
+                .post("http://localhost/host/input")
+                .json(&conflicting)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::CONFLICT
+        );
+        let mut foreign = request;
+        foreign.operation = Uuid::new_v4();
+        foreign.target.run = "foreign-run".into();
+        assert_eq!(
+            client
+                .post("http://localhost/host/input")
+                .json(&foreign)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let response = client
+            .get("http://localhost/host/input/status")
+            .query(&query)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .json::<harness::store::EmbeddedCommandRecord>()
+                .await
+                .unwrap(),
+            record
+        );
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn workbench_only_service_refuses_model_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("operator/operator.sock");
+        let service = OperatorService::bind(
+            socket.clone(),
+            None,
+            Arc::new(|| panic!("input must not provision a workbench")),
+            Arc::new(|_| panic!("input must not inspect graph")),
+            Arc::new(|_, _| panic!("input must not inspect artifacts")),
+        )
+        .await
+        .unwrap();
+        let (client, _address) = client_for(&socket).unwrap();
+        let request = request();
+        assert_eq!(
+            client
+                .post("http://localhost/host/input")
+                .json(&request)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            client
+                .get("http://localhost/host/input/status")
+                .query(&InputStatusRequest {
+                    run: request.target.run,
+                    operation: request.operation
+                })
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn lost_input_transport_acknowledgement_requires_lookup_and_does_not_retry() {
+        use tokio::io::AsyncReadExt;
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("operator.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let request = request();
+        let operation = request.operation;
+        let client = tokio::spawn(async move {
+            command(&socket, OperatorAction::Input(request))
+                .await
+                .map_err(|error| error.to_string())
+        });
+        let (mut connection, _) = listener.accept().await.unwrap();
+        let mut bytes = [0; 4096];
+        assert!(connection.read(&mut bytes).await.unwrap() > 0);
+        drop(connection);
+        let error = client.await.unwrap().unwrap_err();
+        assert!(error.contains("acknowledgement is unknown"));
+        assert!(error.contains("input-status"));
+        assert!(error.contains(&operation.to_string()));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1042,6 +1364,7 @@ mod artifact_tests {
         assert!(socket.as_os_str().len() > 108);
         let service = OperatorService::bind(
             socket.clone(),
+            None,
             Arc::new(|| Box::pin(async { Err("provision must not run".into()) })),
             Arc::new(|_| Box::pin(async { Ok(None) })),
             Arc::new(|_, _| panic!("artifact inspection must not run")),
@@ -1084,6 +1407,7 @@ mod artifact_tests {
         let observed = calls.clone();
         let service = OperatorService::bind(
             socket.clone(),
+            None,
             Arc::new(|| Box::pin(async { Err("provision must not run".into()) })),
             Arc::new(|_| Box::pin(async { Ok(None) })),
             Arc::new(move |actor, relative_path| {
@@ -1291,6 +1615,7 @@ mod lifecycle_tests {
     ) -> (OperatorService, reqwest::Client, String) {
         let service = OperatorService::bind(
             socket.clone(),
+            None,
             Arc::new(move || {
                 let actor = actor.clone();
                 Box::pin(async move { Ok(actor) })
