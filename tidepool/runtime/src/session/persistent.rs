@@ -1310,8 +1310,8 @@ impl PersistentSession {
     }
 
     /// Union `table`'s constructors into the accumulated session table
-    /// (`extend_checked`; loud on a genuine `stableVarId` collision — gen-versioned
-    /// names make that a real bug, not churn).
+    /// A conflicting constructor identity or shape rejects the entire batch;
+    /// accepted prefixes never leak from a failed metadata admission.
     ///
     /// A turn's table is normally a SUBSET of what earlier turns already
     /// accumulated, so entries already present with identical metadata are
@@ -1327,7 +1327,9 @@ impl PersistentSession {
             .filter(|&dc| self.session_table.get(dc.id) != Some(dc))
             .cloned()
             .collect();
-        let advances_constructor_vocabulary = !incoming.is_empty();
+        if incoming.is_empty() {
+            return Ok(());
+        }
         log::debug!(
             target: "tidepool::session",
             "merge_table turn_cons={turn_cons} skipped={} applied={} session_cons_before={}",
@@ -1335,10 +1337,18 @@ impl PersistentSession {
             incoming.len(),
             self.session_table.len(),
         );
-        self.session_table
+        self.merge_constructor_batch(incoming)
+    }
+
+    fn merge_constructor_batch(
+        &mut self,
+        incoming: impl IntoIterator<Item = DataCon>,
+    ) -> Result<(), String> {
+        let mut candidate = self.session_table.clone();
+        candidate
             .extend_checked(incoming)
             .map_err(|e| format!("session DataConTable collision: {e}"))?;
-        let _ = advances_constructor_vocabulary;
+        self.session_table = candidate;
         Ok(())
     }
 
@@ -7516,5 +7526,79 @@ impl PersistentSession {
             }
         };
         Ok(super::durable_owner_disposition(outcome))
+    }
+}
+
+#[cfg(test)]
+mod constructor_admission_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use tidepool_repr::{execution_schema::SymbolIdentity, DataConId};
+
+    fn constructor(id: u64, occurrence: &str, arity: u32) -> DataCon {
+        DataCon {
+            id: DataConId(id),
+            identity: SymbolIdentity {
+                unit: "main".into(),
+                module: "Project.Work".into(),
+                namespace: "constructor".into(),
+                occurrence: occurrence.into(),
+                record_parent: None,
+            },
+            name: occurrence.into(),
+            tag: 1,
+            rep_arity: arity,
+            field_bangs: vec![],
+            qualified_name: Some(format!("Project.Work.{occurrence}")),
+            type_name: occurrence.into(),
+        }
+    }
+
+    #[test]
+    fn rejected_constructor_batch_keeps_a_exact_and_does_not_poison_corrected_c() {
+        let mut session = PersistentSession::new(None, 1024);
+        session
+            .merge_constructor_batch([constructor(2, "Stamp", 1)])
+            .unwrap();
+        let a = session.session_table().clone();
+        // Explicit order exercises a valid prefix before the failing row.
+        assert!(session
+            .merge_constructor_batch([constructor(1, "N", 2), constructor(2, "Stamp", 2)])
+            .is_err());
+        assert_eq!(session.session_table(), &a);
+        assert!(session.session_table().get(DataConId(1)).is_none());
+        let mut corrected = DataConTable::new();
+        corrected
+            .extend_checked([constructor(1, "N", 3), constructor(2, "Stamp", 1)])
+            .unwrap();
+        session.merge_table(&corrected).unwrap();
+        assert_eq!(
+            session.session_table().get(DataConId(1)).unwrap().rep_arity,
+            3
+        );
+        assert_eq!(
+            session.session_table().get(DataConId(2)),
+            a.get(DataConId(2))
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn constructor_batch_histories_match_atomic_independent_map(histories in prop::collection::vec(prop::collection::vec((0u8..8, 0u32..5), 0..8), 1..35)) {
+            let mut session = PersistentSession::new(None, 1024);
+            let mut accepted = BTreeMap::<u64,u32>::new();
+            for rows in histories {
+                let batch = rows.into_iter().map(|(id,arity)| (u64::from(id),arity)).collect::<BTreeMap<_,_>>();
+                let mut table = DataConTable::new();
+                for (&id,&arity) in &batch { table.insert_checked(constructor(id, &format!("C{id}"), arity)).unwrap(); }
+                let valid = batch.iter().all(|(id,arity)| accepted.get(id).is_none_or(|old| old == arity));
+                let before = session.session_table().clone();
+                prop_assert_eq!(session.merge_table(&table).is_ok(), valid);
+                if valid { accepted.extend(batch); } else { prop_assert_eq!(session.session_table(), &before); }
+                prop_assert_eq!(session.session_table().len(), accepted.len());
+                for (&id,&arity) in &accepted { prop_assert_eq!(session.session_table().get(DataConId(id)).unwrap().rep_arity, arity); }
+            }
+        }
     }
 }
