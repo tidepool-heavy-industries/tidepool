@@ -11922,6 +11922,8 @@ pub(super) mod tests {
     fn versioned_reply_program(revision: u8, image: u64) -> PreparedProgram {
         let mut wire = prepared_data::wire_from_prepared(&producer_program());
         let leaf = &mut wire.constructors[0];
+        leaf.identity.symbol.namespace = "constructor".into();
+        leaf.identity.family.symbol.namespace = "type".into();
         leaf.identity.family.version = TypeVersion::GhcAbi([revision; 16]);
         leaf.host_id = DataConId(980 + u64::from(revision) * 10);
         let mut sibling = leaf.clone();
