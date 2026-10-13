@@ -23,7 +23,7 @@ struct RequestedRound {
 
 impl RequestedRound {
     fn is_root(&self) -> bool {
-        self.request.session_id.contains(":/root:")
+        self.request.session_id.thread().contains(":/root:")
     }
 
     fn cell(self, call_id: &str, source: &str) {
@@ -125,7 +125,7 @@ impl ResponsesTransport for ScriptedProvider {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -380,6 +380,7 @@ fn raw_request_history(
     let run = runtime_namespace(&fixture.context.config.run_directory.path());
     let actor_and_incarnation = request
         .session_id
+        .thread()
         .strip_prefix(&format!("{run}:"))
         .expect("request belongs to this embedded run");
     let (actor, incarnation) = actor_and_incarnation
@@ -513,7 +514,7 @@ fn settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchConfig) {
             asset_root: assets,
             browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
             session_secret_file: Some(session_secret_file),
-            provider: crate::exomonad::EmbeddedModelProvider::Codex,
+            provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
             credential_file,
             context_capacity_tokens: 200_000,
             concurrent_jobs: 3,
@@ -830,6 +831,7 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
     assert!(activated
         .request
         .session_id
+        .thread()
         .contains(&format!(":{}:", child_path.0)));
     assert_eq!(user_text_occurrences(&activated.request, SEED), 1);
     assert!(!has_user_text(&activated.request, "parent-original"));
@@ -878,6 +880,7 @@ async fn resident_sync_native_trim_commits_atomically_and_children_reuse_capture
         .unwrap()
         .contains("native-trim-result-tail"));
     let before = root_context_state(&fixture);
+    let root_session = parent.request.session_id.clone();
     parent.cell_with_reasoning(
         "native-trim-parent",
         &tidepool_testing::fixture_source(
@@ -930,6 +933,8 @@ async fn resident_sync_native_trim_commits_atomically_and_children_reuse_capture
             root_committed = true;
             round.finish();
         } else if child_sessions.insert(round.request.session_id.clone()) {
+            assert_eq!(round.request.session_id.affinity(), root_session.thread());
+            assert_ne!(round.request.session_id.thread(), root_session.thread());
             assert!(child_sessions.len() <= 2, "launched an unexpected child");
             assert_before_call_prefix(&round.request, &raw, "native-trim-parent");
             assert!(raw.contains(&reasoning_item("native-trim-parent")));

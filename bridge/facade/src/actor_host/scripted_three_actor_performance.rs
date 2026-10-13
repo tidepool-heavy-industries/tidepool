@@ -271,7 +271,7 @@ async fn engine_yield_claim_waits_and_settles_without_native_dispatch() {
 
     struct Offline;
     impl Auth for Offline {
-        fn access(&self) -> Result<(String, String), TransportError> {
+        fn access(&self) -> Result<String, TransportError> {
             panic!("scripted yield requires no credentials")
         }
     }

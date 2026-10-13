@@ -47,7 +47,7 @@ impl HostActor for Host {
 }
 struct NoAuth;
 impl Auth for NoAuth {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         unreachable!("mock transport has no credentials")
     }
 }
@@ -86,7 +86,7 @@ impl ResponsesTransport for Stream {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }

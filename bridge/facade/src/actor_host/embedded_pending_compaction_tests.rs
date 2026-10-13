@@ -28,7 +28,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 struct Offline;
 
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("the scripted transport must not request credentials")
     }
 }
@@ -52,7 +52,7 @@ impl ResponsesTransport for InterruptibleRoundTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -167,7 +167,7 @@ impl ResponsesTransport for CompactionTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -345,7 +345,7 @@ async fn engine_component_carries_raw_and_typed_pending_calls_through_compaction
                     "embedded-compaction-secret-is-long-enough",
                 )
                 .unwrap();
-                let credential_file = files.path().join("codex-auth.json");
+                let credential_file = files.path().join("chatgpt-auth.json");
                 std::fs::write(&credential_file, "{}").unwrap();
                 let settings = crate::exomonad::EmbeddedLaunchConfig {
                     listen: "127.0.0.1:0".parse().unwrap(),
@@ -354,7 +354,7 @@ async fn engine_component_carries_raw_and_typed_pending_calls_through_compaction
                     asset_root: assets,
                     browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
                     session_secret_file: Some(session_secret_file),
-                    provider: crate::exomonad::EmbeddedModelProvider::Codex,
+                    provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
                     credential_file,
                     context_capacity_tokens: 200_000,
                     concurrent_jobs: 2,
@@ -523,7 +523,7 @@ impl ResponsesTransport for FailedCompactionTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -602,7 +602,7 @@ async fn engine_component_compaction_failure_continues_once_then_cleans_pending_
                     "embedded-compaction-secret-is-long-enough",
                 )
                 .unwrap();
-                let credential_file = files.path().join("codex-auth.json");
+                let credential_file = files.path().join("chatgpt-auth.json");
                 std::fs::write(&credential_file, "{}").unwrap();
                 let settings = crate::exomonad::EmbeddedLaunchConfig {
                     listen: "127.0.0.1:0".parse().unwrap(),
@@ -611,7 +611,7 @@ async fn engine_component_compaction_failure_continues_once_then_cleans_pending_
                     asset_root: assets,
                     browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
                     session_secret_file: Some(session_secret_file),
-                    provider: crate::exomonad::EmbeddedModelProvider::Codex,
+                    provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
                     credential_file,
                     context_capacity_tokens: 200_000,
                     concurrent_jobs: 2,
@@ -725,7 +725,7 @@ async fn attached_round_interrupt_preserves_host_and_accepts_later_input() {
     let assets = super::test_campaign::hosted_browser_assets();
     let secret = files.path().join("session-secret");
     std::fs::write(&secret, "interrupt-test-secret-is-long-enough").unwrap();
-    let auth = files.path().join("codex-auth.json");
+    let auth = files.path().join("chatgpt-auth.json");
     std::fs::write(&auth, "{}").unwrap();
     let settings = crate::exomonad::EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -734,7 +734,7 @@ async fn attached_round_interrupt_preserves_host_and_accepts_later_input() {
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret),
-        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
         credential_file: auth,
         context_capacity_tokens: 200_000,
         concurrent_jobs: 1,

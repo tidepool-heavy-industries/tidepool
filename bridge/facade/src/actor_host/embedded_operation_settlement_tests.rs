@@ -394,7 +394,7 @@ async fn sealed_and_retired_mailboxes_keep_no_admission_acknowledgement() {
 
 struct Offline;
 impl harness::transport::Auth for Offline {
-    fn access(&self) -> Result<(String, String), harness::transport::TransportError> {
+    fn access(&self) -> Result<String, harness::transport::TransportError> {
         panic!("the deterministic transport must not request credentials")
     }
 }
@@ -483,7 +483,7 @@ impl harness::engine::ResponsesTransport for SchemaRefusalTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }

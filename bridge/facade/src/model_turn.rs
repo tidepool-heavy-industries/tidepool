@@ -388,7 +388,7 @@ impl<A: Auth + 'static, C: ResponsesTransport + 'static> ModelService for CellMo
             tools,
             model,
             effort,
-            session_id: String::new(),
+            session_id: String::new().into(),
             agent: AgentPath(String::new()),
         };
         let initial = vec![Item(
@@ -566,7 +566,7 @@ mod tests {
     }
     struct TestAuth;
     impl Auth for TestAuth {
-        fn access(&self) -> Result<(String, String), TransportError> {
+        fn access(&self) -> Result<String, TransportError> {
             unreachable!()
         }
     }
@@ -583,7 +583,7 @@ mod tests {
             harness::transport::TransportError,
         > {
             Ok((
-                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesRoute::ChatGptPlan,
                 harness::transport::ResponsesProtocol::Standard,
             ))
         }

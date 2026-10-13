@@ -751,7 +751,7 @@ pub(super) async fn run_interactive_applications(
                                         #[cfg(test)]
                                         let result = if let Some(transport) = test_transport {
                                             embedded_service::drive_conversation_with_transport::<
-                                                harness::transport::auth::CodexFileAuth, _
+                                                harness::transport::auth::ChatGptPlanAuth, _
                                             >(
                                                 embedded.driver, runtime, &settings, model, effort,
                                                 instructions, embedded.cancellation_rx,

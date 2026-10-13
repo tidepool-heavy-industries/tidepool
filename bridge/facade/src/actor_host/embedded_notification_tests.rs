@@ -31,7 +31,7 @@ impl ResponsesTransport for HeldFirstRound {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -97,7 +97,7 @@ fn embedded_settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchCon
         "embedded-notification-test-secret-32-bytes",
     )
     .unwrap();
-    let credential_file = files.path().join("codex-auth.json");
+    let credential_file = files.path().join("chatgpt-auth.json");
     std::fs::write(&credential_file, "{}").unwrap();
     (
         files,
@@ -108,7 +108,7 @@ fn embedded_settings() -> (tempfile::TempDir, crate::exomonad::EmbeddedLaunchCon
             asset_root: assets,
             browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
             session_secret_file: Some(session_secret_file),
-            provider: crate::exomonad::EmbeddedModelProvider::Codex,
+            provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
             credential_file,
             context_capacity_tokens: 200_000,
             concurrent_jobs: 1,

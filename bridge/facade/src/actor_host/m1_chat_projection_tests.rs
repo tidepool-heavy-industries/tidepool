@@ -17,7 +17,7 @@ use std::{
 
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("scripted projection property requires no authentication")
     }
 }
@@ -57,7 +57,7 @@ impl ResponsesTransport for Script {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }

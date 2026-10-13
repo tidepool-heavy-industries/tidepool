@@ -198,7 +198,7 @@ impl EmbeddedHarnessRuntime {
         identity: HostIdentity,
         actor: LocalActorRef,
         installation: Arc<EmbeddedPolicyInstallation>,
-        parent: Option<&AgentPath>,
+        parent: Option<&HostIdentity>,
     ) -> Result<EmbeddedConversation, EmbeddedError> {
         self.store.ensure_ready()?;
         if identity.run != self.run {
@@ -206,6 +206,16 @@ impl EmbeddedHarnessRuntime {
                 "embedded host run does not match the owning run directory".into(),
             ));
         }
+        if parent.is_some_and(|parent| parent.run != identity.run) {
+            return Err(EmbeddedError::Binding(
+                "provider parent belongs to another run".into(),
+            ));
+        }
+        let session_identity = harness::transport::SessionIdentity::from_relationship(
+            provider_thread(&identity),
+            parent.map(provider_thread),
+            None,
+        );
         let actor_identity = actor.identity();
         let provider_actor = actor.clone();
         let observation = installation.observation();
@@ -226,8 +236,14 @@ impl EmbeddedHarnessRuntime {
         #[cfg(test)]
         let host = host.with_admission_test_hooks(self.admission_test_hooks.get().cloned());
         let host = Arc::new(host);
-        let conversation =
-            Arc::new(Conversation::attach(self.store.clone(), host.clone(), parent).await?);
+        let conversation = Arc::new(
+            Conversation::attach(
+                self.store.clone(),
+                host.clone(),
+                parent.map(|parent| &parent.actor),
+            )
+            .await?,
+        );
         self.bind_application(actor_identity, &conversation).await?;
         let provider_admission = attach_native_provider(
             &provider_actor,
@@ -242,6 +258,7 @@ impl EmbeddedHarnessRuntime {
         )
         .await?;
         Ok(EmbeddedConversation {
+            session_identity,
             provider_admission,
             conversation,
             incoming,
@@ -295,6 +312,18 @@ impl EmbeddedHarnessRuntime {
         };
         let actor = installation.actor.clone();
         let parent = checkpoint.origin().clone();
+        // Capture owns the original issuer incarnation even after that actor
+        // has retired or been replaced. Do not resolve it through the live tree.
+        let source_identity = HostIdentity {
+            run: self.run.clone(),
+            actor: parent.clone(),
+            incarnation: captured.issuer.incarnation.0.to_string(),
+        };
+        let session_identity = harness::transport::SessionIdentity::from_relationship(
+            provider_thread(&identity),
+            None,
+            Some(provider_thread(&source_identity)),
+        );
         let actor_identity = actor.identity();
         let provider_actor = actor.clone();
         self.prepare_application(actor_identity, &identity).await?;
@@ -342,6 +371,7 @@ impl EmbeddedHarnessRuntime {
         )
         .await?;
         Ok(EmbeddedConversation {
+            session_identity,
             provider_admission,
             conversation,
             incoming,
@@ -428,7 +458,15 @@ async fn attach_native_provider(
         .map_err(|error| EmbeddedError::Binding(error.into()))
 }
 
+pub(super) fn provider_thread(identity: &HostIdentity) -> String {
+    format!(
+        "{}:{}:{}",
+        identity.run, identity.actor.0, identity.incarnation
+    )
+}
+
 pub(super) struct EmbeddedConversation {
+    pub(super) session_identity: harness::transport::SessionIdentity,
     pub(super) provider_admission: exomonad_actor::NativeProviderAdmission,
     pub(super) conversation: Arc<Conversation>,
     pub(super) incoming: mpsc::UnboundedReceiver<DurableMailboxWake>,
@@ -2408,7 +2446,7 @@ mod tests {
             harness::transport::TransportError,
         > {
             Ok((
-                harness::transport::ResponsesRoute::Codex,
+                harness::transport::ResponsesRoute::ChatGptPlan,
                 harness::transport::ResponsesProtocol::Standard,
             ))
         }
@@ -2483,7 +2521,7 @@ mod tests {
         let secret = "embedded-browser-offline-test-secret-32-bytes";
         let secret_file = files.path().join("session-secret");
         std::fs::write(&secret_file, secret).unwrap();
-        let auth_file = files.path().join("codex-auth.json");
+        let auth_file = files.path().join("chatgpt-auth.json");
         std::fs::write(&auth_file, "{}").unwrap();
         let settings = crate::exomonad::EmbeddedLaunchConfig {
             listen: "127.0.0.1:0".parse().unwrap(),
@@ -2492,7 +2530,7 @@ mod tests {
             asset_root: assets,
             browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
             session_secret_file: Some(secret_file),
-            provider: crate::exomonad::EmbeddedModelProvider::Codex,
+            provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
             credential_file: auth_file,
             context_capacity_tokens: 200_000,
             concurrent_jobs: 1,

@@ -15,7 +15,7 @@ use tokio::sync::Notify;
 
 struct Offline;
 impl Auth for Offline {
-    fn access(&self) -> Result<(String, String), TransportError> {
+    fn access(&self) -> Result<String, TransportError> {
         panic!("offline fixture must not read credentials")
     }
 }
@@ -65,7 +65,7 @@ impl ResponsesTransport for Script {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }

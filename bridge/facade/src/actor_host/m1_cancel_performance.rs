@@ -54,7 +54,7 @@ impl CancelTransport {
                 self.issued.lock().insert(index),
                 "one authored Sleep per input"
             );
-            let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
+            let (prefix, incarnation) = request.session_id.thread().rsplit_once(':').unwrap();
             let (run, actor) = prefix.rsplit_once(':').unwrap();
             let call_id = format!("cancel-performance-cell-{index}");
             let operation = OperationId {
@@ -106,7 +106,7 @@ impl ResponsesTransport for CancelTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -288,7 +288,7 @@ async fn production_engine_store_active_cancellation_50() {
     let secret_file = files.path().join("browser-secret");
     let secret = "offline-actual-cancellation-performance-secret";
     std::fs::write(&secret_file, secret).unwrap();
-    let auth_file = files.path().join("codex-auth.json");
+    let auth_file = files.path().join("chatgpt-auth.json");
     std::fs::write(&auth_file, "{}").unwrap();
     let settings = EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -297,7 +297,7 @@ async fn production_engine_store_active_cancellation_50() {
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
-        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
         credential_file: auth_file,
         context_capacity_tokens: 2_000_000,
         concurrent_jobs: 1,

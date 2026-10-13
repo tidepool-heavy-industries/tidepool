@@ -156,7 +156,7 @@ impl ResponsesTransport for PendingCellTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -443,7 +443,7 @@ async fn real_host_retains_one_late_haskell_output_across_compaction() {
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
-        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
         credential_file: auth_file,
         context_capacity_tokens: 200_000,
         concurrent_jobs: 1,

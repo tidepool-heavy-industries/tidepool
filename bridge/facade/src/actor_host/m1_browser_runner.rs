@@ -307,7 +307,7 @@ impl ResponsesTransport for BrowserTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -746,7 +746,7 @@ pub(super) async fn production_browser_journey() {
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
-        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
         credential_file: auth_file,
         context_capacity_tokens: 2_000_000,
         concurrent_jobs: 1,

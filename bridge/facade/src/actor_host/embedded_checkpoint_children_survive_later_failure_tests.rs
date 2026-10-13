@@ -37,7 +37,7 @@ impl ResponsesTransport for ParentTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -113,7 +113,7 @@ impl ResponsesTransport for HostTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -123,7 +123,7 @@ impl ResponsesTransport for HostTransport {
         prepared: harness::transport::PreparedProviderRequest,
     ) -> Result<ResponsesTurn, TransportError> {
         let request = prepared.request().clone();
-        let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
+        let (prefix, incarnation) = request.session_id.thread().rsplit_once(':').unwrap();
         let (run, path) = prefix.rsplit_once(':').unwrap();
         if path == "/root" {
             return self.parent.create(prepared).await;
@@ -142,7 +142,7 @@ impl ResponsesTransport for HostTransport {
                 _ => "unexpected-child",
             };
             let child = children
-                .entry(request.session_id)
+                .entry(request.session_id.thread().to_owned())
                 .or_insert(ChildScript { label, round: 0 });
             child.round += 1;
             (child.label, child.round)
@@ -232,7 +232,7 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
     let assets = super::test_campaign::hosted_browser_assets();
     let secret_file = files.path().join("session-secret");
     std::fs::write(&secret_file, "embedded-children-secret-is-long-enough").unwrap();
-    let auth_file = files.path().join("codex-auth.json");
+    let auth_file = files.path().join("chatgpt-auth.json");
     std::fs::write(&auth_file, "{}").unwrap();
     let settings = crate::exomonad::EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -241,7 +241,7 @@ async fn embedded_checkpoint_children_survive_a_later_parent_cell_failure() {
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
-        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
         credential_file: auth_file,
         context_capacity_tokens: 200_000,
         concurrent_jobs: 3,

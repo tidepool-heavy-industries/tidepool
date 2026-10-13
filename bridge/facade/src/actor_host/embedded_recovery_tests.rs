@@ -52,7 +52,7 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -261,7 +261,7 @@ fn configuration(root: &Path) -> ActorHostConfig {
             asset_root: super::test_campaign::hosted_browser_assets(),
             browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
             session_secret_file: Some(root.join("secret")),
-            provider: crate::exomonad::EmbeddedModelProvider::Codex,
+            provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
             credential_file: root.join("auth.json"),
             context_capacity_tokens: 2_000_000,
             concurrent_jobs: 1,

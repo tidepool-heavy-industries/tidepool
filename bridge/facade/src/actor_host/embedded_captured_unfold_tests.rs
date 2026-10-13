@@ -105,7 +105,7 @@ impl FrozenProviderPrefix {
         assert!(
             transcript.starts_with(&self.transcript),
             "child {} changed its exact inherited provider transcript: first_difference={}, frozen_items={}, child_items={}, frozen_configuration_positions={:?}, frozen_item={}, child_item={}",
-            request.session_id,
+            request.session_id.thread(),
             difference,
             self.transcript.len(),
             transcript.len(),
@@ -121,12 +121,12 @@ impl FrozenProviderPrefix {
             inherited_effort,
             Some(self.inherited_effort),
             "child {} must retain the checkpoint's inherited effort pin",
-            request.session_id,
+            request.session_id.thread(),
         );
         assert_eq!(
             request.pinned_effort, self.inherited_effort,
             "child {} request effort must mirror its inherited positional pin",
-            request.session_id,
+            request.session_id.thread(),
         );
         let configuration_positions = request
             .input
@@ -136,7 +136,7 @@ impl FrozenProviderPrefix {
             .collect::<Vec<_>>();
         eprintln!(
             "[captured-engine] child {} preserves {} exact inherited provider items and {:?} effort; frozen configuration positions {:?}, child configuration positions {:?}",
-            request.session_id,
+            request.session_id.thread(),
             self.transcript.len(),
             self.inherited_effort,
             self.configuration_positions,
@@ -193,7 +193,7 @@ impl CapturedHostTransport {
         request_id: &RequestId,
         request: ResponsesRequest,
     ) -> Result<ResponsesTurn, TransportError> {
-        let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
+        let (prefix, incarnation) = request.session_id.thread().rsplit_once(':').unwrap();
         let (run, actor) = prefix.rsplit_once(':').unwrap();
         let origin = ConversationIdentity::Embedded {
             run: run.into(),
@@ -223,6 +223,7 @@ impl CapturedHostTransport {
         self.provider_changed.send_modify(|revision| *revision += 1);
         let (_, path) = request
             .session_id
+            .thread()
             .rsplit_once(':')
             .unwrap()
             .0
@@ -315,7 +316,7 @@ impl CapturedHostTransport {
                 let mut children = self.children.lock();
                 let ordinal = children.len();
                 let state = children
-                    .entry(request.session_id.clone())
+                    .entry(request.session_id.thread().to_owned())
                     .or_insert(ChildRounds { ordinal, round: 0 });
                 state.round += 1;
                 (state.ordinal, state.round)
@@ -407,7 +408,8 @@ impl CapturedHostTransport {
                     == HostedScenario::Captured(CapturedScenario::FailureAfterReplies)
                     && ordinal < 2 =>
                 {
-                    let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
+                    let (prefix, incarnation) =
+                        request.session_id.thread().rsplit_once(':').unwrap();
                     let (run, path) = prefix.rsplit_once(':').unwrap();
                     self.reads
                         .send((
@@ -488,7 +490,7 @@ impl ResponsesTransport for CapturedHostTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -868,7 +870,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
     let assets = super::test_campaign::hosted_browser_assets();
     let secret_file = files.path().join("session-secret");
     std::fs::write(&secret_file, "embedded-children-secret-is-long-enough").unwrap();
-    let auth_file = files.path().join("codex-auth.json");
+    let auth_file = files.path().join("chatgpt-auth.json");
     std::fs::write(&auth_file, "{}").unwrap();
     let settings = crate::exomonad::EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -877,7 +879,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
-        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
         credential_file: auth_file,
         context_capacity_tokens: 200_000,
         concurrent_jobs: 3,
@@ -1153,7 +1155,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                                     && claim.state == harness::store::ClaimState::Pending),
                             "original exact parent operation settled before both children were offered replies"
                         );
-                        let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
+                        let (prefix, incarnation) = request.session_id.thread().rsplit_once(':').unwrap();
                         let (run, actor) = prefix.rsplit_once(':').unwrap();
                         sessions.insert(ConversationIdentity::Embedded {
                             run: run.into(),
@@ -1740,7 +1742,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         .as_ref()
                         .expect("original request prefix survives parent failure")
                         .assert_inherited(&third_request);
-                    let (prefix, incarnation) = third_request.session_id.rsplit_once(':').unwrap();
+                    let (prefix, incarnation) = third_request.session_id.thread().rsplit_once(':').unwrap();
                     let (run, path) = prefix.rsplit_once(':').unwrap();
                     let origin = ConversationIdentity::Embedded {
                         run: run.into(),
@@ -2006,7 +2008,7 @@ impl ResponsesTransport for PreflightTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -2145,7 +2147,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
     let assets = super::test_campaign::hosted_browser_assets();
     let secret_file = files.path().join("session-secret");
     std::fs::write(&secret_file, "whole-cell-preflight-secret-is-long-enough").unwrap();
-    let auth_file = files.path().join("codex-auth.json");
+    let auth_file = files.path().join("chatgpt-auth.json");
     std::fs::write(&auth_file, "{}").unwrap();
     let settings = crate::exomonad::EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -2154,7 +2156,7 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
-        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
         credential_file: auth_file,
         context_capacity_tokens: 200_000,
         concurrent_jobs: 3,

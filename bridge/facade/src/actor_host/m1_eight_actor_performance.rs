@@ -47,7 +47,7 @@ fn final_item(text: &str) -> harness::item::Item {
 
 impl EightActorTransport {
     async fn turn(&self, request_id: &RequestId, request: ResponsesRequest) -> ResponsesTurn {
-        let (prefix, incarnation) = request.session_id.rsplit_once(':').unwrap();
+        let (prefix, incarnation) = request.session_id.thread().rsplit_once(':').unwrap();
         let (run, path) = prefix.rsplit_once(':').unwrap();
         let origin = ConversationIdentity::Embedded {
             run: run.into(),
@@ -197,7 +197,7 @@ impl ResponsesTransport for EightActorTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -285,7 +285,7 @@ async fn production_engine_store_eight_actors_sequential_cells() {
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(secret_file),
-        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
         credential_file: auth_file,
         context_capacity_tokens: 2_000_000,
         concurrent_jobs: ACTORS + 1,

@@ -1,16 +1,16 @@
 use std::{num::NonZeroU64, path::Path, sync::Arc};
 
 use exomonad_actor::LocalResidentInstallation;
-#[cfg(test)]
-use harness::server::ClientCommand;
 use harness::{
     engine::EngineConfig,
     model::{AgentPath, Effort},
     server::{QueuedCommand, ServerConfig, ServerControl, SessionSecret},
-    transport::{
-        auth::{ChatGptPlanAuth, CodexFileAuth},
-        Auth, AuthCredentials, ResponsesClient, ResponsesProtocol, ResponsesRoute, TransportError,
-    },
+    transport::{auth::ChatGptPlanAuth, ResponsesClient},
+};
+#[cfg(test)]
+use harness::{
+    server::ClientCommand,
+    transport::{ResponsesProtocol, ResponsesRoute, TransportError},
 };
 use tokio::{
     net::TcpListener,
@@ -23,7 +23,7 @@ use super::{
     embedded_policy::EmbeddedPolicyInstallation,
     embedded_projection::LifecyclePublisher,
 };
-use crate::exomonad::{EmbeddedBrowserAuth, EmbeddedLaunchConfig, EmbeddedModelProvider};
+use crate::exomonad::{EmbeddedBrowserAuth, EmbeddedLaunchConfig};
 
 struct TailscaleBrowserAuth(exomonad_node::network::TailscalePeerVerifier);
 
@@ -47,46 +47,10 @@ impl harness::server::BrowserPeerAuthenticator for TailscaleBrowserAuth {
     }
 }
 
-#[derive(Clone)]
-pub(super) enum EmbeddedAuth {
-    Codex(CodexFileAuth),
-    ChatGptPlan(ChatGptPlanAuth),
-}
-
-impl Auth for EmbeddedAuth {
-    fn access(&self) -> Result<(String, String), TransportError> {
-        match self {
-            Self::Codex(auth) => auth.access(),
-            Self::ChatGptPlan(auth) => auth.access(),
-        }
-    }
-    fn credentials(&self) -> Result<AuthCredentials, TransportError> {
-        match self {
-            Self::Codex(auth) => auth.credentials(),
-            Self::ChatGptPlan(auth) => auth.credentials(),
-        }
-    }
-    fn route(&self) -> ResponsesRoute {
-        match self {
-            Self::Codex(auth) => auth.route(),
-            Self::ChatGptPlan(auth) => auth.route(),
-        }
-    }
-}
-
-pub(super) fn responses_client(settings: &EmbeddedLaunchConfig) -> ResponsesClient<EmbeddedAuth> {
-    let auth_file = settings.credential_file.clone();
-    match settings.provider {
-        EmbeddedModelProvider::Codex => {
-            // Native async calls must remain pending across model requests.
-            // Responses Lite rejects async declarations and cannot carry them.
-            ResponsesClient::new(EmbeddedAuth::Codex(CodexFileAuth::new(auth_file)))
-                .with_protocol(ResponsesProtocol::Standard)
-        }
-        EmbeddedModelProvider::ChatGptPlan => {
-            ResponsesClient::new(EmbeddedAuth::ChatGptPlan(ChatGptPlanAuth::new(auth_file)))
-        }
-    }
+pub(super) fn responses_client(
+    settings: &EmbeddedLaunchConfig,
+) -> ResponsesClient<ChatGptPlanAuth> {
+    ResponsesClient::new(ChatGptPlanAuth::new(settings.credential_file.clone()))
 }
 
 pub(super) struct EmbeddedService {
@@ -481,7 +445,7 @@ pub(super) async fn attach_actor(
     attachment: super::provider_attachment::ProviderAttachment,
     run_root: &Path,
     path: AgentPath,
-    parent: Option<AgentPath>,
+    parent: Option<harness::embedding::HostIdentity>,
     installation: LocalResidentInstallation,
     initial_input: Option<String>,
 ) -> Result<EmbeddedActor, String> {
@@ -503,7 +467,7 @@ pub(super) async fn attach_root_actor(
     attachment: super::provider_attachment::ProviderAttachment,
     run_root: &Path,
     path: AgentPath,
-    parent: Option<AgentPath>,
+    parent: Option<harness::embedding::HostIdentity>,
     installation: LocalResidentInstallation,
     initial_input: Option<String>,
     binding: Option<&super::embedded_harness::EmbeddedActorBinding>,
@@ -656,7 +620,7 @@ pub(super) async fn attach_selected_actor(
             identity,
             installation.actor.clone(),
             policy,
-            Some(&parent.identity().actor),
+            Some(parent.identity()),
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -816,7 +780,7 @@ pub(super) async fn drive_conversation(
     lifecycle: impl LifecyclePublisher,
     actor_ref: exomonad_actor::ActorRef,
 ) -> Result<(), EmbeddedDriverError> {
-    drive_conversation_with_transport::<EmbeddedAuth, _>(
+    drive_conversation_with_transport::<ChatGptPlanAuth, _>(
         embedded,
         runtime,
         settings,
@@ -848,6 +812,7 @@ where
     C: harness::engine::ResponsesTransport,
 {
     let EmbeddedConversation {
+        session_identity,
         provider_admission,
         conversation,
         mut incoming,
@@ -855,12 +820,7 @@ where
         observation,
     } = embedded;
     let actor = conversation.identity().actor.clone();
-    let provider_thread = format!(
-        "{}:{}:{}",
-        conversation.identity().run,
-        actor.0,
-        conversation.identity().incarnation
-    );
+    let provider_thread = session_identity.thread().to_owned();
     // The supervisor starts the driver only after accepting its attachment.
     observation.publish_provider_binding(None, provider_thread.clone());
     let engine = conversation
@@ -872,7 +832,7 @@ where
                 tools: Vec::new(),
                 model,
                 effort,
-                session_id: provider_thread.clone(),
+                session_id: session_identity,
                 agent: actor.clone(),
             },
             NonZeroU64::new(settings.context_capacity_tokens).ok_or("zero context capacity")?,
@@ -1432,7 +1392,7 @@ mod shutdown_tests {
     }
 
     #[tokio::test]
-    async fn embedded_provider_choice_routes_actor_and_cell_clients() {
+    async fn embedded_actor_and_cell_clients_use_public_standard_responses() {
         struct NoCalls;
         #[async_trait::async_trait]
         impl harness::provider::Provider for NoCalls {
@@ -1450,28 +1410,26 @@ mod shutdown_tests {
         let source = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nprovider = 'chatgpt_plan'\ncredential_file = '/tmp/exomonad-auth'\ncontext_capacity_tokens = 4096\n";
         let mut settings: EmbeddedLaunchConfig = toml::from_str(source).unwrap();
         let credentials = tempfile::tempdir().unwrap();
-        settings.credential_file = credentials.path().join("absent.json");
-        for (provider, route) in [
-            (
-                EmbeddedModelProvider::ChatGptPlan,
-                ResponsesRoute::ChatGptPlan,
-            ),
-            (EmbeddedModelProvider::Codex, ResponsesRoute::Codex),
-        ] {
-            settings.provider = provider;
+        use std::os::unix::fs::PermissionsExt;
+        let legacy = credentials.path().join("legacy.json");
+        std::fs::write(
+            &legacy,
+            r#"{"tokens":{"access_token":"retired-private-token","account_id":"retired-account"}}"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for path in [credentials.path().join("absent.json"), legacy] {
+            settings.credential_file = path;
             let client = responses_client(&settings);
-            assert_eq!(client.auth.route(), route);
-            // Normalization happens before credential access. Lite rejects the
-            // plan route, and rejects this native tool on the Codex route.
-            // Authentication proves the selected Standard path normalized; the
-            // deliberately missing file prevents network traffic.
-            let tools = if route == ResponsesRoute::Codex {
-                vec![serde_json::json!({"type": "tool_search"})]
-            } else {
-                Vec::new()
-            };
+            assert_eq!(
+                harness::engine::ResponsesTransport::response_contract(&client).unwrap(),
+                (ResponsesRoute::ChatGptPlan, ResponsesProtocol::Standard),
+            );
+            // The deliberately missing file prevents model traffic while the real
+            // Engine path proves public Standard normalization and durable rejection.
+            let tools = vec![serde_json::json!({"type": "tool_search"})];
             let store = Arc::new(harness::store::Store::memory().unwrap());
-            let engine = harness::engine::Engine::<EmbeddedAuth, _>::with_transport(
+            let engine = harness::engine::Engine::<ChatGptPlanAuth, _>::with_transport(
                 client,
                 store.clone(),
                 Arc::new(harness::turn::JobScheduler::new(1).unwrap()),

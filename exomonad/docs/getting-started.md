@@ -9,10 +9,8 @@ prepared deployment.
 
 Linux, with Nix 2.27 or newer, systemd user services on cgroup v2, Bubblewrap and
 tmux. The embedded backend serves the root conversation in a browser and calls
-the selected provider through the harness. The default `codex` provider reads
-an existing Codex credential file; authenticate that account before model
-work. The `chatgpt_plan` provider has its own Exomonad credential setup, shown
-below.
+public Responses through the harness. Authenticate with `exomonad auth login`
+using the ChatGPT plan token-sharing setup below.
 
 Agents run shell commands as you. Read
 [what Exomonad does not protect you from](../README.md#what-it-does-not-protect-you-from)
@@ -259,9 +257,10 @@ use loopback or a local Tailscale address. File paths must be absolute;
 `asset_root` must contain the verified browser bundle, or be supplied by the
 frozen bundle entrypoint through `EXOMONAD_EMBEDDED_ASSET_ROOT`. The host checks
 source, schema, and asset identities before listening. Provider authentication is
-independent of browser access. `provider = "codex"` retains the read-only Codex
-credential bridge; the old `codex_auth_file` spelling remains an alias for
-`credential_file`. Omitting `provider` selects that existing bridge.
+independent of browser access. The default provider is `chatgpt_plan`; it may also be declared explicitly.
+The private Codex inference bridge, `provider = "codex"`, and `codex_auth_file`
+configuration have been retired. Migrate with `exomonad auth login` and
+`credential_file`; existing Codex credentials are not reinterpreted.
 For automatic browser access from your Tailscale devices, pin the browser URL
 and configure an explicit numeric Tailscale user allowlist:
 

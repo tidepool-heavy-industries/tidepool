@@ -1460,7 +1460,7 @@ impl HostedScriptRound {
     }
 
     pub fn host_identity(&self) -> harness::embedding::HostIdentity {
-        let (prefix, incarnation) = self.request.session_id.rsplit_once(':').unwrap();
+        let (prefix, incarnation) = self.request.session_id.thread().rsplit_once(':').unwrap();
         let (run, actor) = prefix.rsplit_once(':').unwrap();
         harness::embedding::HostIdentity {
             run: run.into(),
@@ -1750,7 +1750,7 @@ impl harness::engine::ResponsesTransport for HostedScriptProvider {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }
@@ -1905,7 +1905,7 @@ pub(super) fn hosted_test_settings(
     let assets = hosted_browser_assets();
     let session_secret_file = files.path().join("session-secret");
     std::fs::write(&session_secret_file, "hosted-script-test-secret-32-bytes").unwrap();
-    let credential_file = files.path().join("codex-auth.json");
+    let credential_file = files.path().join("chatgpt-auth.json");
     std::fs::write(&credential_file, "{}").unwrap();
     crate::exomonad::EmbeddedLaunchConfig {
         listen: "127.0.0.1:0".parse().unwrap(),
@@ -1914,7 +1914,7 @@ pub(super) fn hosted_test_settings(
         asset_root: assets,
         browser_auth: crate::exomonad::EmbeddedBrowserAuth::Secret,
         session_secret_file: Some(session_secret_file),
-        provider: crate::exomonad::EmbeddedModelProvider::Codex,
+        provider: crate::exomonad::EmbeddedModelProvider::ChatGptPlan,
         credential_file,
         context_capacity_tokens: 200_000,
         concurrent_jobs,
@@ -2614,7 +2614,7 @@ mod tests {
     ) {
         let (reply, response) = tokio::sync::oneshot::channel();
         let mut request = request();
-        request.session_id = format!("test-run:{}:1", actor.0);
+        request.session_id = format!("test-run:{}:1", actor.0).into();
         request.instructions = ordinal.to_string();
         (
             HostedScriptRound {
@@ -2968,7 +2968,7 @@ mod tests {
         };
         struct Offline;
         impl Auth for Offline {
-            fn access(&self) -> Result<(String, String), TransportError> {
+            fn access(&self) -> Result<String, TransportError> {
                 panic!("scripted provider must not use credentials")
             }
         }

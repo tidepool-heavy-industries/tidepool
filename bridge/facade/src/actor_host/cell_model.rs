@@ -2,8 +2,7 @@
 use std::{marker::PhantomData, sync::Arc};
 
 use exomonad_actor::{ActorDescriptor, CellModelBinding, CellModelFactory, ForkEffort, ModelReq};
-#[cfg(test)]
-use harness::transport::auth::CodexFileAuth;
+use harness::transport::auth::ChatGptPlanAuth;
 use harness::{
     engine::ResponsesTransport, invocation::Limits, model::Effort, store::Store, transport::Auth,
     turn::JobScheduler,
@@ -202,7 +201,7 @@ pub(super) fn admitted_factory(
     #[cfg(test)]
     if let Some(transport) = service.test_transport() {
         return Arc::new(
-            EmbeddedCellModelFactory::<CodexFileAuth, _>::new(
+            EmbeddedCellModelFactory::<ChatGptPlanAuth, _>::new(
                 service.runtime.store(),
                 service.runtime.scheduler(),
                 config.model.clone(),
@@ -227,7 +226,7 @@ pub(super) fn admitted_runtime_factory(
     };
     let settings = settings.clone();
     Arc::new(
-        EmbeddedCellModelFactory::<super::embedded_service::EmbeddedAuth, _>::new(
+        EmbeddedCellModelFactory::<ChatGptPlanAuth, _>::new(
             runtime.store(),
             runtime.scheduler(),
             config.model.clone(),
@@ -257,8 +256,8 @@ struct FixtureAuth;
 
 #[cfg(test)]
 impl Auth for FixtureAuth {
-    fn access(&self) -> Result<(String, String), harness::transport::TransportError> {
-        Ok(("fixture-token".into(), "https://fixture.invalid".into()))
+    fn access(&self) -> Result<String, harness::transport::TransportError> {
+        Ok("fixture-token".into())
     }
 }
 
@@ -278,7 +277,7 @@ impl ResponsesTransport for FixtureModelTransport {
         harness::transport::TransportError,
     > {
         Ok((
-            harness::transport::ResponsesRoute::Codex,
+            harness::transport::ResponsesRoute::ChatGptPlan,
             harness::transport::ResponsesProtocol::Standard,
         ))
     }

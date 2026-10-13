@@ -332,20 +332,28 @@ pub struct EmbeddedLaunchConfig {
     pub(crate) session_secret_file: Option<PathBuf>,
     #[serde(default)]
     pub(crate) provider: EmbeddedModelProvider,
-    #[serde(alias = "codex_auth_file")]
     pub(crate) credential_file: PathBuf,
     pub(crate) context_capacity_tokens: u64,
     #[serde(default = "default_embedded_concurrent_jobs")]
     pub(crate) concurrent_jobs: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub(crate) enum EmbeddedModelProvider {
     #[default]
-    Codex,
     #[serde(rename = "chatgpt_plan")]
     ChatGptPlan,
+}
+
+impl<'de> Deserialize<'de> for EmbeddedModelProvider {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "chatgpt_plan" => Ok(Self::ChatGptPlan),
+            _ => Err(serde::de::Error::custom(
+                "embedded inference requires provider = 'chatgpt_plan' and credentials from exomonad auth login; the private Codex credential bridge has been retired",
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -2756,14 +2764,28 @@ mod tests {
     }
 
     #[test]
-    fn embedded_provider_selection_is_explicit_and_preserves_credential_alias() {
-        let legacy = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\ncodex_auth_file = '/tmp/codex-auth'\ncontext_capacity_tokens = 4096\n";
-        let legacy: EmbeddedLaunchConfig = toml::from_str(legacy).unwrap();
-        assert_eq!(legacy.provider, EmbeddedModelProvider::Codex);
-        assert_eq!(legacy.credential_file, PathBuf::from("/tmp/codex-auth"));
-        let native = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nprovider = 'chatgpt_plan'\ncredential_file = '/tmp/exomonad-auth'\ncontext_capacity_tokens = 4096\n";
-        let native: EmbeddedLaunchConfig = toml::from_str(native).unwrap();
-        assert_eq!(native.provider, EmbeddedModelProvider::ChatGptPlan);
+    fn embedded_provider_defaults_public_and_refuses_legacy_config() {
+        let fields = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\ncredential_file = '/tmp/exomonad-auth'\ncontext_capacity_tokens = 4096\n";
+        let public: EmbeddedLaunchConfig =
+            toml::from_str(&format!("provider = 'chatgpt_plan'\n{fields}")).unwrap();
+        assert_eq!(public.provider, EmbeddedModelProvider::ChatGptPlan);
+        assert_eq!(public.credential_file, PathBuf::from("/tmp/exomonad-auth"));
+        let default: EmbeddedLaunchConfig = toml::from_str(fields).unwrap();
+        assert_eq!(default.provider, EmbeddedModelProvider::ChatGptPlan);
+        assert!(
+            toml::from_str::<EmbeddedLaunchConfig>(&format!("provider = 'codex'\n{fields}"))
+                .unwrap_err()
+                .to_string()
+                .contains("private Codex credential bridge has been retired")
+        );
+        let legacy = format!(
+            "provider = 'chatgpt_plan'\n{}",
+            fields.replace("credential_file", "codex_auth_file")
+        );
+        assert!(toml::from_str::<EmbeddedLaunchConfig>(&legacy)
+            .unwrap_err()
+            .to_string()
+            .contains("codex_auth_file"));
     }
 
     #[test]
@@ -2773,10 +2795,10 @@ mod tests {
         let packaged = "/nix/store/web-assets/share/exomonad/web";
         std::env::set_var(ASSET_ROOT, packaged);
         let omitted: Result<EmbeddedLaunchConfig, _> = toml::from_str(
-            "listen = '127.0.0.1:0'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n",
+            "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:0'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n",
         );
         let explicit: Result<EmbeddedLaunchConfig, _> = toml::from_str(
-            "listen = '127.0.0.1:0'\nasset_root = '/tmp/override'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n",
+            "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:0'\nasset_root = '/tmp/override'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n",
         );
         match previous {
             Some(value) => std::env::set_var(ASSET_ROOT, value),
@@ -2814,7 +2836,7 @@ mod tests {
     #[test]
     fn embedded_tailscale_auth_rejects_loopback_listener_before_files() {
         let config: EmbeddedLaunchConfig = toml::from_str(
-            "listen = '127.0.0.1:8080'\nasset_root = '/tmp/assets'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n[browser_auth]\nmode = 'tailscale'\nallowed_user_ids = [123]\n",
+            "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:8080'\nasset_root = '/tmp/assets'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n[browser_auth]\nmode = 'tailscale'\nallowed_user_ids = [123]\n",
         ).unwrap();
         assert!(config.session_secret_file.is_none());
         assert!(
@@ -2828,7 +2850,7 @@ mod tests {
 
     #[test]
     fn embedded_origin_scheme_preserves_https_and_accepts_explicit_http() {
-        let config = "listen = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n";
+        let config = "provider = 'chatgpt_plan'\nlisten = '127.0.0.1:0'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n";
         let existing: EmbeddedLaunchConfig = toml::from_str(config).unwrap();
         assert!(matches!(existing.browser_auth, EmbeddedBrowserAuth::Secret));
         assert_eq!(
@@ -2854,7 +2876,7 @@ mod tests {
     fn embedded_listener_rejects_wildcard_and_unassigned_addresses() {
         for listen in ["0.0.0.0:8080", "[::]:8080", "192.0.2.1:8080"] {
             let config: EmbeddedLaunchConfig = toml::from_str(&format!(
-                "listen = '{listen}'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n"
+                "provider = 'chatgpt_plan'\nlisten = '{listen}'\nasset_root = '/tmp/assets'\nsession_secret_file = '/tmp/secret'\ncredential_file = '/tmp/auth'\ncontext_capacity_tokens = 4096\n"
             ))
             .unwrap();
             assert!(

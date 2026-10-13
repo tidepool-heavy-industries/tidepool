@@ -14,6 +14,7 @@ SPEC.loader.exec_module(acceptance)
 CONFIG = '''[launch]
 systemd_slice = "original.slice"
 [launch.embedded]
+provider = "chatgpt_plan"
 listen = "127.0.0.1:0"
 session_secret_file = "/private/session-secret"
 credential_file = "/private/provider-credentials"
