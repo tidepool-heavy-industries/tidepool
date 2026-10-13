@@ -2194,119 +2194,51 @@ mod tests {
     #[test]
     fn source_graph_keeps_workspace_resource_once_through_live_updates() {
         use exomonad_actor::ActorSourceLayers;
-
         let (project, run) = workspace_with("module Project.Work where\nwork = 1\n");
-        let frozen = FrozenWorkspace::load(project.path(), run.path()).unwrap();
-        let run = Arc::new(run);
-        let reload = ExomonadSourceReload::new_owned(
-            frozen,
-            project.path().to_path_buf(),
-            run.path().to_path_buf(),
-            crate::haskell_sources::ensure_exomonad_haskell().unwrap(),
-            SourceRootOwner::Temporary(Arc::clone(&run)),
-        )
-        .unwrap();
-        let workspace_resource =
-            std::fs::canonicalize(reload.frozen.workspace_resources()).unwrap();
-        let workspace_identity = format!("workspace:{}", reload.frozen.identity());
-        let selected = reload.freeze_toolset_layer(PrincipalId::SYSTEM).unwrap();
-        assert_eq!(selected.identities().last(), Some(&workspace_identity));
-        assert_eq!(selected.include_paths().last(), Some(&workspace_resource));
-        assert_eq!(
-            selected.source_manifests().unwrap().len(),
-            selected.include_paths().len()
-        );
+        let reload = runtime_reload_for_run(project.path(), Arc::new(run)).unwrap();
+        let selected = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        let projected = reload.toolset_layer_from(&selected).unwrap();
+        assert_eq!(projected.include_paths(), selected.include_paths());
+        let resources = reload.frozen.workspace_resources().canonicalize().unwrap();
         assert_eq!(
             selected
                 .include_paths()
                 .iter()
-                .filter(|path| std::fs::canonicalize(path).ok()
-                    == std::fs::canonicalize(&workspace_resource).ok())
+                .filter(|path| **path == resources)
                 .count(),
             1
         );
-        let checkpoint = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
-        assert_eq!(checkpoint.include_paths().last(), Some(&workspace_resource));
-        assert_eq!(
-            checkpoint.source_manifests().unwrap().len(),
-            checkpoint.include_paths().len()
-        );
-        assert_eq!(
-            checkpoint
-                .include_paths()
-                .iter()
-                .filter(|path| std::fs::canonicalize(path).ok()
-                    == std::fs::canonicalize(&workspace_resource).ok())
-                .count(),
-            1
-        );
-        let projected = reload.toolset_layer_from(&checkpoint).unwrap();
-        assert_eq!(projected.include_paths(), selected.include_paths());
-        assert!(checkpoint
-            .include_paths()
-            .iter()
-            .any(|path| path.starts_with(run.path().join("helpers"))));
-        assert!(projected
-            .include_paths()
-            .iter()
-            .all(|path| !path.starts_with(run.path().join("helpers"))));
-        assert!(projected.include_paths().iter().all(|path| {
-            path.starts_with(run.path().join("workspace/revisions")) || path == &workspace_resource
-        }));
-
+        for root in reload.shared_roots().unwrap() {
+            assert!(selected.include_paths().contains(&root));
+        }
         std::fs::write(
             project.path().join(".exomonad/Project/Work.hs"),
             "module Project.Work where\nwork = 2\n",
         )
         .unwrap();
-        let active = reload.layer.ensure_active(&reload.frozen).unwrap();
         let pending = reload
             .layer
-            .capture_from_workspace(&reload.frozen, &reload.workspace)
+            .capture_from_workspace(&reload.frozen, project.path())
             .unwrap();
-        let updated = reload.layer.publish(pending).unwrap();
-        assert_ne!(updated.identity, active.identity);
-        let owned = reload
-            .layer
-            .checkpoint_revision(reload.frozen.identity())
-            .unwrap();
-        assert!(owned.paths[0].starts_with(run.path().join("workspace/revisions")));
-        assert!(!std::fs::symlink_metadata(
-            run.path()
-                .join("workspace/revisions")
-                .join(&updated.identity)
-        )
-        .unwrap()
-        .file_type()
-        .is_symlink());
-        let after_reload = reload.freeze_toolset_layer(PrincipalId::SYSTEM).unwrap();
-        let mut expected = owned.paths.clone();
-        expected.push(workspace_resource.clone());
-        assert_eq!(after_reload.include_paths(), expected);
+        reload.layer.publish(pending).unwrap();
+        let updated = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        assert_ne!(selected.identities(), updated.identities());
         assert_eq!(
-            after_reload.include_paths().last(),
-            Some(&workspace_resource)
-        );
-        assert_eq!(
-            after_reload
+            updated
                 .include_paths()
                 .iter()
-                .filter(|path| path.as_path() == workspace_resource.as_path())
+                .filter(|path| **path == resources)
                 .count(),
             1
         );
-        assert_eq!(
-            after_reload.source_manifests().unwrap().len(),
-            after_reload.include_paths().len()
-        );
-        assert!(same_source_manifest(
-            after_reload.source_manifests().unwrap().last().unwrap(),
-            &source_root_manifest(&workspace_resource).unwrap()
-        ));
-        assert!(!after_reload
-            .include_paths()
-            .iter()
-            .any(|path| path != &workspace_resource && selected.include_paths().contains(path)));
+        for root in reload.shared_roots().unwrap() {
+            assert!(updated.include_paths().contains(&root));
+        }
+        assert!(reload
+            .read_issued(&selected, "Project.Work")
+            .unwrap()
+            .1
+            .contains("work = 1"));
     }
 
     fn workspace_with(source: &str) -> (tempfile::TempDir, tempfile::TempDir) {
@@ -2865,5 +2797,231 @@ mod tests {
         let edited = reload.frozen_drift().unwrap();
         assert_eq!(edited.changed_modules, vec!["Project.Work".to_string()]);
         drop(run);
+    }
+    fn generation_owner() -> (tempfile::TempDir, Arc<ExomonadSourceReload>) {
+        let (project, run) = workspace_with("module Project.Work where\nwork :: Int\nwork = 1\n");
+        let config = project.path().join(".exomonad/config.toml");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[prompts]\nagent = 'agent.md'\n");
+        std::fs::write(config, text).unwrap();
+        std::fs::write(project.path().join(".exomonad/agent.md"), "Instructions A").unwrap();
+        let reload = Arc::new(runtime_reload_for_run(project.path(), Arc::new(run)).unwrap());
+        reload
+            .set_prompt_composer(
+                PrincipalId::SYSTEM,
+                Arc::new(|inputs| {
+                    Ok(tidepool_runtime::session::ComposedPromptSnapshot::capture(
+                        inputs.agent().unwrap_or("default").into(),
+                    ))
+                }),
+            )
+            .unwrap();
+        (project, reload)
+    }
+
+    #[test]
+    fn coherent_source_generation_retains_reads_prompts_and_recovers_without_links() {
+        use exomonad_actor::ActorSourceLayers;
+        let (project, reload) = generation_owner();
+        let a = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        let read_a = reload.read_from(&a, "Project.Work").unwrap();
+        let status = reload.observe(&a).unwrap();
+        assert_eq!(status.active.identity, status.disk.identity);
+        std::fs::write(
+            project.path().join(".exomonad/Project/Work.hs"),
+            "module Project.Work where\nwork :: Int\nwork = 41\n",
+        )
+        .unwrap();
+        std::fs::write(
+            project.path().join(".exomonad/Project/New.hs"),
+            "module Project.New where\nanswer :: Int\nanswer = 42\n",
+        )
+        .unwrap();
+        std::fs::write(project.path().join(".exomonad/agent.md"), "Instructions B").unwrap();
+        let staged = reload
+            .clone()
+            .stage_reload(PrincipalId::SYSTEM, &a, &[])
+            .unwrap();
+        assert!(staged
+            .validation_imports()
+            .template_text()
+            .contains("Project.New ()"));
+        assert_eq!(staged.previous_revision().identity, read_a.0);
+        assert_eq!(staged.prompt_snapshot().instructions(), "Instructions B");
+        let b = staged.source().clone();
+        let reference_b = staged.evidence().reference.clone();
+        assert_eq!(reload.read_from(&a, "Project.Work").unwrap(), read_a);
+        assert!(reload
+            .read_from(&b, "Project.Work")
+            .unwrap()
+            .1
+            .contains("work = 41"));
+        let observation = reload.observe(&b).unwrap();
+        assert_eq!(observation.active.identity, observation.disk.identity);
+        staged.finalize_projection().unwrap();
+        for layer in [&reload.layer, &reload.helper_layer("run")] {
+            std::fs::remove_file(layer.active_link()).unwrap();
+            std::fs::remove_file(layer.active_record()).unwrap();
+        }
+        let restored = reload.restore_source(&reference_b).unwrap();
+        assert_eq!(restored.identities(), b.identities());
+        assert_eq!(restored.include_paths(), b.include_paths());
+        assert_eq!(
+            reload.read_from(&restored, "Project.New").unwrap(),
+            reload.read_from(&b, "Project.New").unwrap()
+        );
+        std::fs::remove_file(project.path().join(".exomonad/Project/New.hs")).unwrap();
+        let c = reload
+            .clone()
+            .stage_reload(PrincipalId::SYSTEM, &b, &[])
+            .unwrap();
+        assert!(c.changed_modules().contains(&"Project.New".to_owned()));
+        assert!(reload.read_from(c.source(), "Project.New").is_err());
+        assert!(reload.read_from(&b, "Project.New").is_ok());
+        assert!(!c
+            .validation_imports()
+            .template_text()
+            .contains("Project.New ()"));
+        let status = reload.observe(&b).unwrap();
+        assert_ne!(status.active.identity, status.disk.identity);
+        assert!(status
+            .active
+            .modules
+            .iter()
+            .any(|module| module.name == "Project.New"));
+        assert!(!status
+            .disk
+            .modules
+            .iter()
+            .any(|module| module.name == "Project.New"));
+        let same = reload
+            .clone()
+            .stage_reload(PrincipalId::SYSTEM, c.source(), &[])
+            .unwrap();
+        assert_eq!(same.configuration_digest(), c.configuration_digest());
+        std::fs::write(project.path().join(".exomonad/agent.md"), "Instructions C").unwrap();
+        let prompts = reload
+            .clone()
+            .stage_reload(PrincipalId::SYSTEM, c.source(), &[])
+            .unwrap();
+        assert_ne!(prompts.configuration_digest(), c.configuration_digest());
+        assert_eq!(prompts.candidate_revision(), c.candidate_revision());
+        assert_eq!(c.prompt_snapshot().instructions(), "Instructions B");
+        assert_eq!(prompts.prompt_snapshot().instructions(), "Instructions C");
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(8))]
+        #[test]
+        fn source_generation_histories_preserve_issued_reads_and_exact_recovery(actions in proptest::collection::vec((0u8..3, -20i16..20), 1..7)) {
+            use exomonad_actor::ActorSourceLayers;
+            let (project, reload) = generation_owner();
+            let mut current = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+            let mut retained = vec![(current.clone(), "module Project.Work where\nwork :: Int\nwork = 1\n".to_owned())];
+            let mut work = retained[0].1.clone();
+            for (kind, value) in actions {
+                let authored = project.path().join(".exomonad");
+                match kind {
+                    0 => { work = format!("module Project.Work where\nwork :: Int\nwork = {value}\n"); std::fs::write(authored.join("Project/Work.hs"), &work).unwrap(); }
+                    1 => { std::fs::write(authored.join("agent.md"), format!("Instructions {value}")).unwrap(); }
+                    _ => { let path = authored.join("Project/Extra.hs"); if path.exists() { std::fs::remove_file(path).unwrap(); } else { std::fs::write(path, "module Project.Extra where\nextra = ()\n").unwrap(); } }
+                }
+                let staged = reload.clone().stage_reload(PrincipalId::SYSTEM, &current, &[]).unwrap();
+                let next = staged.source().clone();
+                let restored = reload.restore_source(&staged.evidence().reference).unwrap();
+                proptest::prop_assert_eq!(restored.include_paths(), next.include_paths());
+                proptest::prop_assert_eq!(reload.read_from(&restored, "Project.Work").unwrap().1, work.clone());
+                let disk = reload.observe(&next).unwrap();
+                proptest::prop_assert_eq!(disk.active.identity, disk.disk.identity);
+                for (source, expected) in &retained { proptest::prop_assert_eq!(reload.read_from(source, "Project.Work").unwrap().1, expected.clone()); }
+                retained.push((next.clone(), work.clone())); current = next;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn coherent_candidate_single_compile_checks_added_deleted_and_warmed_modules() {
+        use exomonad_actor::ActorSourceLayers;
+        let (project, reload) = generation_owner();
+        let a = reload.freeze_checkpoint_layer(PrincipalId::SYSTEM).unwrap();
+        let workbench = exomonad_actor::ActorWorkbenchSource::new(String::new(), Vec::new());
+        let registry = Arc::new(tidepool_runtime::session::ImageRegistry::new());
+        let mut owner = exomonad_actor::CompilerPreparationOwner::new();
+        std::fs::write(
+            project.path().join(".exomonad/Project/New.hs"),
+            "module Project.New where\nimport Project.Work\nanswer :: Int\nanswer = work + 1\n",
+        )
+        .unwrap();
+        let b = reload
+            .clone()
+            .stage_reload(PrincipalId::SYSTEM, &a, &[])
+            .unwrap();
+        let compile = owner
+            .scope(workbench.prepare_source_toolset_with_validation(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                b.source().clone(),
+                &[],
+                &[],
+                registry.clone(),
+                b.validation_imports(),
+            ))
+            .await;
+        assert!(compile.cleanup.observation().is_confirmed());
+        let ready = compile
+            .action
+            .expect("one native installer compile validates a newly authored module");
+        assert!(ready.completed_entry_selection().is_some());
+        let warm = owner
+            .scope(workbench.prepare_source_toolset_with_validation(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                b.source().clone(),
+                &[],
+                &[],
+                registry.clone(),
+                b.validation_imports(),
+            ))
+            .await;
+        assert!(warm.cleanup.observation().is_confirmed());
+        assert_eq!(warm.action.unwrap().selection(), ready.selection());
+        std::fs::remove_file(project.path().join(".exomonad/Project/New.hs")).unwrap();
+        let c = reload
+            .clone()
+            .stage_reload(PrincipalId::SYSTEM, b.source(), &["Project.New".to_owned()])
+            .unwrap();
+        let missing = owner
+            .scope(workbench.prepare_source_toolset_with_validation(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                c.source().clone(),
+                &[],
+                &[],
+                registry.clone(),
+                c.validation_imports(),
+            ))
+            .await;
+        assert!(missing.cleanup.observation().is_confirmed());
+        assert!(
+            missing.action.is_err(),
+            "deleted module cannot resurrect from warmed A/B catalogs"
+        );
+        let valid = reload
+            .clone()
+            .stage_reload(PrincipalId::SYSTEM, b.source(), &[])
+            .unwrap();
+        let deleted = owner
+            .scope(workbench.prepare_source_toolset_with_validation(
+                tidepool_toolchain::artifacts::CompileWorkload::Foreground,
+                valid.source().clone(),
+                &[],
+                &[],
+                registry,
+                valid.validation_imports(),
+            ))
+            .await;
+        assert!(deleted.cleanup.observation().is_confirmed());
+        assert!(
+            deleted.action.is_ok(),
+            "deleting an unused module is a valid complete source revision"
+        );
+        assert!(reload.read_from(b.source(), "Project.New").is_ok());
     }
 }

@@ -288,21 +288,75 @@ impl ExomonadSourceReload {
         self.restore_prompts(&graph.prompts)?;
         let mut include = Vec::new();
         let mut manifests = Vec::new();
-        let shared = self.shared_roots()?;
+        reference.validate()?;
+        let mut expected_paths = Vec::new();
+        let mut expected_identities = Vec::new();
+        if let Some(branch) = &graph.helper_branch {
+            if Path::new(branch).components().count() != 1
+                || !matches!(
+                    Path::new(branch).components().next(),
+                    Some(std::path::Component::Normal(_))
+                )
+            {
+                return Err("source reference carries an invalid helper branch".into());
+            }
+            let identity = graph
+                .identities
+                .first()
+                .and_then(|identity| identity.strip_prefix("helpers:"))
+                .ok_or("source reference lacks helper revision ownership")?;
+            let layer = self.helper_layer(branch);
+            let retained = inspect_retained_revision(
+                self.frozen.identity(),
+                identity,
+                &layer.revisions().join(identity),
+                1,
+            )?;
+            expected_identities.push(format!("helpers:{identity}"));
+            expected_paths.extend(retained.paths);
+        }
+        let run_index = usize::from(graph.helper_branch.is_some());
+        let identity = graph
+            .identities
+            .get(run_index)
+            .and_then(|identity| identity.strip_prefix("run:"))
+            .ok_or("source reference lacks run revision ownership")?;
+        let prepared = self.prepared_run_revision()?;
+        if let Some(prepared) = prepared.filter(|prepared| prepared.identity == identity) {
+            expected_paths.extend(prepared.paths);
+        } else {
+            expected_paths.extend(
+                inspect_retained_revision(
+                    self.frozen.identity(),
+                    identity,
+                    &self.layer.revisions().join(identity),
+                    self.frozen.captured_source_roots().len(),
+                )?
+                .paths,
+            );
+        }
+        expected_identities.push(format!("run:{identity}"));
+        expected_identities.push(format!("workspace:{}", self.frozen.identity()));
+        expected_paths.push(self.frozen.workspace_resources().canonicalize()?);
+        for root in self.shared_roots()? {
+            if !expected_paths.contains(&root) {
+                expected_paths.push(root);
+            }
+        }
+        if graph.identities != expected_identities
+            || graph
+                .roots
+                .iter()
+                .map(|root| &root.path)
+                .ne(expected_paths.iter())
+        {
+            return Err(
+                "source reference does not contain the owner's complete ordered graph".into(),
+            );
+        }
         for root in graph.roots {
-            let retained = root
-                .path
-                .starts_with(self.run_root.join("workspace/revisions"))
-                || root.path.starts_with(self.helper_root.join("layers"))
-                || self
-                    .frozen
-                    .prepared_deployment
-                    .as_ref()
-                    .is_some_and(|owner| root.path.starts_with(owner.path()))
-                || shared.contains(&root.path)
-                || root.path == self.frozen.workspace_resources().canonicalize()?;
-            if !retained || root.path.canonicalize()? != root.path {
-                return Err("source reference has an unowned or aliased root".into());
+            if root.path.canonicalize()? != root.path {
+                return Err("source reference carries an aliased root".into());
             }
             let actual = source_root_manifest(&root.path)?;
             let expected =
