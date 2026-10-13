@@ -1096,12 +1096,13 @@ mod tests {
         let mut edited_table = DataConTable::new();
         edited_table
             .insert_checked(tidepool_repr::DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Fixture".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "Edited".into(),
-                    record_parent: None,
+                identity: {
+                    let mut symbol =
+                        tidepool_repr::execution_schema::testing::identity("Fixture", "Edited");
+                    symbol.namespace = "constructor".into();
+                    let mut family = symbol.clone();
+                    family.namespace = "type".into();
+                    tidepool_repr::execution_schema::testing::constructor_identity(symbol, family)
                 },
                 id: tidepool_repr::DataConId(99),
                 name: "Edited".into(),

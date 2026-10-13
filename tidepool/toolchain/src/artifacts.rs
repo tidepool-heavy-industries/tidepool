@@ -8649,12 +8649,12 @@ mod constructor_identity_tests {
         DataCon {
             identity: decl.identity.clone(),
             id: decl.host_id,
-            name: decl.identity.occurrence.clone(),
+            name: decl.identity.symbol.occurrence.clone(),
             tag: decl.tag,
             rep_arity: decl.field_reps.len() as u32,
             field_bangs: vec![SrcBang::NoSrcBang; decl.field_reps.len()],
             qualified_name: None,
-            type_name: decl.family.occurrence.clone(),
+            type_name: decl.family().symbol.occurrence.clone(),
         }
     }
 
@@ -8753,7 +8753,7 @@ mod constructor_identity_tests {
 
         let table = table_with_one_entry_mutated(&artifact, &decl, |dc| {
             dc.name = format!("{}NotThis", dc.name);
-            dc.identity.occurrence = dc.name.clone();
+            dc.identity.symbol.occurrence = dc.name.clone();
         });
         let meta_bytes = write_metadata(&table, &MetaWarnings::default()).unwrap();
         let raw = vec![raw_target("entry", prepared_bytes)];
@@ -8796,7 +8796,7 @@ mod constructor_identity_tests {
             PreparedArtifact::parse(prepared_bytes.clone(), DecodeLimits::default()).unwrap();
         let declared = artifact.prepared().constructors().first().unwrap();
         let table = table_with_one_entry_mutated(&artifact, declared, |dc| {
-            dc.identity.unit.push_str("-other")
+            dc.identity.symbol.unit.push_str("-other")
         });
         let metadata = write_metadata(&table, &MetaWarnings::default()).unwrap();
         let raw = vec![raw_target("entry", prepared_bytes)];
