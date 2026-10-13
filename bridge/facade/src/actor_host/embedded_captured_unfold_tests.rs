@@ -1745,42 +1745,67 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         retained.insert(origin);
                     }
                     assert_eq!(retained.len(), 2);
-                    let reused = root_tool_call(
-                        &campaign,
-                        &transport,
-                        REUSE_CALL,
-                        &tidepool_testing::fixture_source("bridge/facade/src/actor_host/embedded_captured_unfold_reuse_after_failure.hs"),
-                    )
-                    .await
-                    .expect("the failed cell's transferred capture admits and joins a third child");
-                    let third_request = requests_rx
-                        .try_recv()
-                        .expect("third child provider request");
-                    transport
-                        .parent_prefix
-                        .lock()
-                        .as_ref()
-                        .expect("original request prefix survives parent failure")
-                        .assert_inherited(&third_request);
-                    let (prefix, incarnation) = third_request.session_id.thread().rsplit_once(':').unwrap();
-                    let (run, path) = prefix.rsplit_once(':').unwrap();
-                    let origin = ConversationIdentity::Embedded {
-                        run: run.into(),
-                        actor: AgentPath(path.into()),
-                        incarnation: incarnation.into(),
-                    };
-                    assert!(
-                        !sessions.contains(&origin),
-                        "reuse must admit an independent third child"
+                    let reuse_source = tidepool_testing::fixture_source(
+                        "bridge/facade/src/actor_host/embedded_captured_unfold_reuse_after_failure.hs",
                     );
-                    let third_operation = transport.operation(&origin, &format!("captured-child-{path}"));
-                    let reply = embedded_operation(
-                        &runtime,
-                        &third_operation,
-                        TYPED_CHILD_REPLY_SETTLEMENT_BUDGET,
+                    let child_reply =
+                        async {
+                            let third_request =
+                                tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, requests_rx.recv())
+                                    .await
+                                    .map_err(|error| format!("reused child provider admission: {error}"))?
+                                    .ok_or_else(|| "reused child provider observation closed".to_owned())?;
+                            transport
+                                .parent_prefix
+                                .lock()
+                                .as_ref()
+                                .expect("original request prefix survives parent failure")
+                                .assert_inherited(&third_request);
+                            let (prefix, incarnation) = third_request.session_id.thread().rsplit_once(':').unwrap();
+                            let (run, path) = prefix.rsplit_once(':').unwrap();
+                            let origin = ConversationIdentity::Embedded {
+                                run: run.into(),
+                                actor: AgentPath(path.into()),
+                                incarnation: incarnation.into(),
+                            };
+                            assert!(
+                                !sessions.contains(&origin),
+                                "reuse must admit an independent third child"
+                            );
+                            let key = (origin, format!("captured-child-{path}"));
+                            let third_operation =
+                                tokio::time::timeout(COLD_DEBUG_CELL_SETTLEMENT_BUDGET, async {
+                                    let mut admissions = tokio::time::interval(Duration::from_millis(10));
+                                    loop {
+                                        admissions.tick().await;
+                                        let issued = transport.operations.lock().get(&key).cloned();
+                                        if let Some(operation) = issued {
+                                            if runtime.store().claims(&operation.call).unwrap().iter().any(
+                                                |claim| {
+                                                    claim.operation == operation
+                                                        && claim.request == operation.request
+                                                },
+                                            ) {
+                                                break operation;
+                                            }
+                                        }
+                                    }
+                                })
+                                .await
+                                .map_err(|error| format!("reused child operation admission: {error}"))?;
+                            embedded_operation(
+                                &runtime,
+                                &third_operation,
+                                TYPED_CHILD_REPLY_SETTLEMENT_BUDGET,
+                            )
+                            .await
+                            .map_err(|error| format!("reused child operation {third_operation:?}: {error}"))
+                        };
+                    let (reused, reply) = tokio::try_join!(
+                        root_tool_call(&campaign, &transport, REUSE_CALL, &reuse_source),
+                        child_reply,
                     )
-                    .await
-                    .unwrap();
+                    .expect("the transferred capture's exact child and parent operations must both succeed");
                     assert_replied_cell(&reply, 3);
                     assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &reused, "True");
                     eprintln!(
