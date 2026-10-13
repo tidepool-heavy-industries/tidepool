@@ -167,7 +167,10 @@ fn build(families: &[Family]) -> Model {
         .enumerate()
         .map(|(i, family)| {
             model.node(TypeNode::Declaration {
-                identity: crate::execution_schema::testing::type_identity(tests::identity(&format!("Family{i}"), "type")),
+                identity: crate::execution_schema::testing::type_identity(tests::identity(
+                    &format!("Family{i}"),
+                    "type",
+                )),
                 parameters: family
                     .parameters
                     .iter()
@@ -206,7 +209,9 @@ fn build(families: &[Family]) -> Model {
                 &format!("Constructor{family_index}_{constructor_index}"),
                 "data",
             );
-            physical.identity.family = crate::execution_schema::testing::type_identity(tests::identity(&format!("Family{family_index}"), "type"));
+            physical.identity.family = crate::execution_schema::testing::type_identity(
+                tests::identity(&format!("Family{family_index}"), "type"),
+            );
             physical.tag = constructor_index as u32 + 1;
             physical.family_size = family.constructors.len() as u32;
             physical.host_id = crate::DataConId(model.inventory.len() as u64 + 1);

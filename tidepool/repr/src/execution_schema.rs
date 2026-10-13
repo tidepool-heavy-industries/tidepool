@@ -371,7 +371,9 @@ pub struct ConstructorDecl {
 }
 
 impl ConstructorDecl {
-    pub fn family(&self) -> &TypeIdentity { &self.identity.family }
+    pub fn family(&self) -> &TypeIdentity {
+        &self.identity.family
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

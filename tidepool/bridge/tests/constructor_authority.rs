@@ -8,13 +8,16 @@ use tidepool_repr::{DataCon, DataConId, DataConTable, Literal};
 fn insert(table: &mut DataConTable, id: u64, name: &str, arity: u32, qualified: &str) {
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: format!("Fixture{id}"),
-                namespace: "constructor".into(),
-                occurrence: name.to_owned(),
-                record_parent: None,
-            },
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: format!("Fixture{id}"),
+                    namespace: "constructor".into(),
+                    occurrence: name.to_owned(),
+                    record_parent: None,
+                },
+                "FixtureType",
+            ),
             id: DataConId(id),
             name: name.into(),
             tag: 1,

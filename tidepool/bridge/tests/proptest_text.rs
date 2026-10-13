@@ -12,13 +12,16 @@ fn get_table() -> &'static DataConTable {
         // Text
         table
             .insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Data.Text".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "Text".into(),
-                    record_parent: None,
-                },
+                identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                    tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Data.Text".into(),
+                        namespace: "constructor".into(),
+                        occurrence: "Text".into(),
+                        record_parent: None,
+                    },
+                    "FixtureType",
+                ),
                 id: DataConId(14),
                 name: "Text".to_string(),
                 tag: 1,
@@ -32,13 +35,16 @@ fn get_table() -> &'static DataConTable {
         // but current impl uses literals for off/len)
         table
             .insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "GHC.Types".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "I#".into(),
-                    record_parent: None,
-                },
+                identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                    tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "GHC.Types".into(),
+                        namespace: "constructor".into(),
+                        occurrence: "I#".into(),
+                        record_parent: None,
+                    },
+                    "FixtureType",
+                ),
                 id: DataConId(7),
                 name: "I#".to_string(),
                 tag: 1,

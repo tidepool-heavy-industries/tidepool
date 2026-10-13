@@ -1,8 +1,4 @@
-//! Regression tests for DataCon lookup by (name, arity) in `FromHaskell`/`ToHaskell` derives.
-//!
-//! Two GADTs from different Haskell modules can declare same-named constructors
-//! (e.g. `Pattern.Memory.Read` and `Pattern.File.Read`). The derive must
-//! disambiguate by arity so decoding doesn't fail with "Unknown DataCon name".
+//! Derive lookup refuses multiple nominal owners before checking shape.
 
 #![allow(
     clippy::unwrap_used,
@@ -36,13 +32,16 @@ fn ambiguous_table() -> (DataConTable, DataConId, DataConId) {
     let alpha_id = DataConId(100);
     let beta_id = DataConId(101);
     t.insert_checked(DataCon {
-        identity: tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "fixture".into(),
-            module: "Pattern.Memory".into(),
-            namespace: "constructor".into(),
-            occurrence: "Read".into(),
-            record_parent: None,
-        },
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Pattern.Memory".into(),
+                namespace: "constructor".into(),
+                occurrence: "Read".into(),
+                record_parent: None,
+            },
+            "FixtureType",
+        ),
         id: alpha_id,
         name: "Read".into(),
         tag: 1,
@@ -53,13 +52,16 @@ fn ambiguous_table() -> (DataConTable, DataConId, DataConId) {
     })
     .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-        identity: tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "fixture".into(),
-            module: "Pattern.File".into(),
-            namespace: "constructor".into(),
-            occurrence: "Read".into(),
-            record_parent: None,
-        },
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Pattern.File".into(),
+                namespace: "constructor".into(),
+                occurrence: "Read".into(),
+                record_parent: None,
+            },
+            "FixtureType",
+        ),
         id: beta_id,
         name: "Read".into(),
         tag: 1,
@@ -73,63 +75,58 @@ fn ambiguous_table() -> (DataConTable, DataConId, DataConId) {
 }
 
 #[test]
-fn arity_alpha_roundtrips_when_beta_shares_name() {
-    let (table, alpha_id, _) = ambiguous_table();
+fn differing_arities_do_not_select_nominal_authority() {
+    let (table, _, _) = ambiguous_table();
+    assert!(matches!(
+        Alpha::Read(17).to_value(&table),
+        Err(BridgeError::AmbiguousDataConNameArity { .. })
+    ));
+    assert!(matches!(
+        Beta::Read(3, 42).to_value(&table),
+        Err(BridgeError::AmbiguousDataConNameArity { .. })
+    ));
+}
+
+#[test]
+fn unique_owner_roundtrips_and_repeated_admission_is_idempotent() {
+    let (original_table, alpha_id, _) = ambiguous_table();
+    let row = original_table.get(alpha_id).unwrap().clone();
+    let mut table = standard_datacon_table();
+    table.extend_checked([row.clone(), row]).unwrap();
     let original = Alpha::Read(17);
-
-    let encoded = original
-        .to_value(&table)
-        .expect("Alpha encode must succeed");
-    match &encoded {
-        HaskellValue::Con(id, fields) => {
-            assert_eq!(*id, alpha_id, "must encode to the arity-1 Read id");
-            assert_eq!(fields.len(), 1, "Alpha encodes with 1 Haskell field");
-        }
-        other => panic!("expected Con, got {:?}", other),
-    }
-
-    let decoded = Alpha::from_value(&encoded, &table).expect("Alpha decode must succeed");
-    assert_eq!(original, decoded);
+    let encoded = original.to_value(&table).unwrap();
+    assert_eq!(Alpha::from_value(&encoded, &table).unwrap(), original);
 }
 
 #[test]
-fn beta_roundtrips_when_alpha_shares_name() {
+fn decoding_refuses_ambiguous_authority_before_shape() {
     let (table, _, beta_id) = ambiguous_table();
-    let original = Beta::Read(3, 42);
-
-    let encoded = original.to_value(&table).expect("Beta encode must succeed");
-    match &encoded {
-        HaskellValue::Con(id, fields) => {
-            assert_eq!(*id, beta_id, "must encode to the arity-2 Read id");
-            assert_eq!(fields.len(), 2, "Beta encodes with 2 Haskell fields");
-        }
-        other => panic!("expected Con, got {:?}", other),
-    }
-
-    let decoded = Beta::from_value(&encoded, &table).expect("Beta decode must succeed");
-    assert_eq!(original, decoded);
-}
-
-#[test]
-fn alpha_decode_rejects_beta_shaped_value() {
-    // Negative case: Alpha's decoder fed a Con tagged with the Beta id.
-    // The id lookup resolves to the arity-1 Read; the supplied id is the
-    // arity-2 Read; they differ, so decode must error (not silently succeed).
-    let (table, _alpha_id, beta_id) = ambiguous_table();
-
-    // Build a syntactically shaped Con with 2 dummy fields — Alpha's decoder
-    // should bail at the id check before touching the fields.
     let dummy = HaskellValue::Con(DataConId(0), vec![]);
     let beta_value = HaskellValue::Con(beta_id, vec![dummy.clone(), dummy]);
+    assert!(matches!(
+        Alpha::from_value(&beta_value, &table),
+        Err(BridgeError::UnknownDataCon(id)) if id == beta_id
+    ));
+}
 
-    let result = Alpha::from_value(&beta_value, &table);
-    match result {
-        Err(BridgeError::UnknownDataCon(id)) => {
-            assert_eq!(id, beta_id, "error should name the Beta id we supplied");
-        }
-        Err(other) => panic!("expected UnknownDataCon, got {:?}", other),
-        Ok(v) => panic!("expected error, got successful decode: {:?}", v),
-    }
+#[test]
+fn same_symbol_family_revisions_refuse_arity_selection() {
+    let (original_table, alpha_id, _) = ambiguous_table();
+    let first = original_table.get(alpha_id).unwrap().clone();
+    let mut next = first.clone();
+    next.id = DataConId(200);
+    next.rep_arity = 2;
+    next.identity.family.version = tidepool_repr::execution_schema::TypeVersion::GhcAbi([1; 16]);
+    let mut table = standard_datacon_table();
+    table.extend_checked([first, next]).unwrap();
+    assert!(matches!(
+        Alpha::Read(17).to_value(&table),
+        Err(BridgeError::AmbiguousDataConNameArity { .. })
+    ));
+    assert!(matches!(
+        Beta::Read(3, 42).to_value(&table),
+        Err(BridgeError::AmbiguousDataConNameArity { .. })
+    ));
 }
 
 /// Two DISTINCT constructors sharing both the requested name AND arity
@@ -142,16 +139,18 @@ fn alpha_decode_rejects_beta_shaped_value() {
 #[test]
 fn true_ambiguity_reports_both_candidates_instead_of_picking_last() {
     let mut t = standard_datacon_table();
-    // Two distinct arity-1 "Read" constructors — genuinely ambiguous, unlike
-    // `ambiguous_table()` above where arity itself disambiguates Alpha/Beta.
+    // Both constructor identities remain visible in the refusal.
     t.insert_checked(DataCon {
-        identity: tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "fixture".into(),
-            module: "Pattern.Memory".into(),
-            namespace: "constructor".into(),
-            occurrence: "Read".into(),
-            record_parent: None,
-        },
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Pattern.Memory".into(),
+                namespace: "constructor".into(),
+                occurrence: "Read".into(),
+                record_parent: None,
+            },
+            "FixtureType",
+        ),
         id: DataConId(300),
         name: "Read".into(),
         tag: 1,
@@ -162,13 +161,16 @@ fn true_ambiguity_reports_both_candidates_instead_of_picking_last() {
     })
     .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-        identity: tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "fixture".into(),
-            module: "Pattern.File".into(),
-            namespace: "constructor".into(),
-            occurrence: "Read".into(),
-            record_parent: None,
-        },
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Pattern.File".into(),
+                namespace: "constructor".into(),
+                occurrence: "Read".into(),
+                record_parent: None,
+            },
+            "FixtureType",
+        ),
         id: DataConId(301),
         name: "Read".into(),
         tag: 1,
@@ -193,12 +195,12 @@ fn true_ambiguity_reports_both_candidates_instead_of_picking_last() {
             assert_eq!(candidates.len(), 2);
             assert!(candidates
                 .iter()
-                .any(|candidate| candidate.module == "Pattern.Memory"
-                    && candidate.occurrence == "Read"));
+                .any(|candidate| candidate.symbol.module == "Pattern.Memory"
+                    && candidate.symbol.occurrence == "Read"));
             assert!(candidates
                 .iter()
-                .any(|candidate| candidate.module == "Pattern.File"
-                    && candidate.occurrence == "Read"));
+                .any(|candidate| candidate.symbol.module == "Pattern.File"
+                    && candidate.symbol.occurrence == "Read"));
         }
         other => panic!("expected AmbiguousDataConNameArity, got {other:?}"),
     }
@@ -210,13 +212,16 @@ fn unknown_name_reports_arity() {
     // get UnknownDataConNameArity identifying the name and the expected arity.
     let mut t = standard_datacon_table();
     t.insert_checked(DataCon {
-        identity: tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "fixture".into(),
-            module: "Fixture".into(),
-            namespace: "constructor".into(),
-            occurrence: "Read".into(),
-            record_parent: None,
-        },
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                namespace: "constructor".into(),
+                occurrence: "Read".into(),
+                record_parent: None,
+            },
+            "FixtureType",
+        ),
         id: DataConId(200),
         name: "Read".into(),
         tag: 1,

@@ -241,10 +241,13 @@ fn symbol(value: &SymbolIdentity) -> Value {
     ])
 }
 fn type_identity_value(value: &TypeIdentity) -> Value {
-    a([symbol(&value.symbol), match &value.version {
-        TypeVersion::WiredIn => a([n(0_u64)]),
-        TypeVersion::GhcAbi(bytes) => a([n(1_u64), Value::Bytes(bytes.to_vec())]),
-    }])
+    a([
+        symbol(&value.symbol),
+        match &value.version {
+            TypeVersion::WiredIn => a([n(0_u64)]),
+            TypeVersion::GhcAbi(bytes) => a([n(1_u64), Value::Bytes(bytes.to_vec())]),
+        },
+    ])
 }
 fn constructor_identity_value(value: &ConstructorIdentity) -> Value {
     a([symbol(&value.symbol), type_identity_value(&value.family)])
@@ -651,7 +654,10 @@ mod tests {
             required_generation: Some(19),
         }];
         wire.constructors.push(ConstructorDecl {
-            identity: tidepool_repr::execution_schema::testing::constructor_identity(name.clone(), identity("Owner", "Record")),
+            identity: tidepool_repr::execution_schema::testing::constructor_identity(
+                name.clone(),
+                identity("Owner", "Record"),
+            ),
             host_id: tidepool_repr::DataConId(100),
             result_rep: RuntimeRep::LiftedRef,
             field_reps: reps.clone(),

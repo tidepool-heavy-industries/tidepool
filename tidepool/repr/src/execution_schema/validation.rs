@@ -1997,7 +1997,8 @@ impl<'a> Validator<'a> {
         first: &ConstructorDecl,
         other: &ConstructorDecl,
     ) -> Result<(), ParseError> {
-        if first.identity.family != other.identity.family || first.family_size != other.family_size {
+        if first.identity.family != other.identity.family || first.family_size != other.family_size
+        {
             return Err(ParseError::Malformed(format!(
                 "JSON {role} constructors do not share declared nominal family evidence"
             )));
@@ -2603,7 +2604,10 @@ mod tests {
 
     fn empty_constructor(name: &str, tag: u32, family_size: u32) -> ConstructorDecl {
         ConstructorDecl {
-            identity: crate::execution_schema::testing::constructor_identity(symbol(name), symbol("Family")),
+            identity: crate::execution_schema::testing::constructor_identity(
+                symbol(name),
+                symbol("Family"),
+            ),
             host_id: crate::DataConId(u64::from(tag)),
             tag,
             family_size,
@@ -2646,7 +2650,10 @@ mod tests {
         let storage = StorageLayout::for_reps(&target(), &field_reps)
             .expect("JSON fixture constructor layout");
         ConstructorDecl {
-            identity: crate::execution_schema::testing::constructor_identity(json_symbol(constructor_module, "constructor", constructor_occurrence), json_symbol(family_module, "type", family_occurrence)),
+            identity: crate::execution_schema::testing::constructor_identity(
+                json_symbol(constructor_module, "constructor", constructor_occurrence),
+                json_symbol(family_module, "type", family_occurrence),
+            ),
             host_id: crate::DataConId(host_id),
             result_rep: RuntimeRep::LiftedRef,
             strict_fields: vec![false; field_reps.len()],
@@ -4096,7 +4103,10 @@ mod tests {
             }],
         );
         program.constructors.push(ConstructorDecl {
-            identity: crate::execution_schema::testing::constructor_identity(symbol("C"), symbol("Other")),
+            identity: crate::execution_schema::testing::constructor_identity(
+                symbol("C"),
+                symbol("Other"),
+            ),
             host_id: crate::DataConId(2),
             tag: 1,
             family_size: 1,
@@ -4621,7 +4631,10 @@ mod tests {
     fn rejects_unnaturally_aligned_managed_layout() {
         let mut program = valid_program();
         program.constructors.push(ConstructorDecl {
-            identity: crate::execution_schema::testing::constructor_identity(symbol("C"), symbol("T")),
+            identity: crate::execution_schema::testing::constructor_identity(
+                symbol("C"),
+                symbol("T"),
+            ),
             host_id: crate::DataConId(3),
             tag: 1,
             family_size: 1,
@@ -4654,7 +4667,10 @@ mod tests {
     fn rejects_noncanonical_padding_between_storage_fields() {
         let mut program = valid_program();
         program.constructors.push(ConstructorDecl {
-            identity: crate::execution_schema::testing::constructor_identity(symbol("Padded"), symbol("T")),
+            identity: crate::execution_schema::testing::constructor_identity(
+                symbol("Padded"),
+                symbol("T"),
+            ),
             host_id: crate::DataConId(4),
             tag: 1,
             family_size: 1,

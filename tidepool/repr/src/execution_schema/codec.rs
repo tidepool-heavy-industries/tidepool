@@ -11,11 +11,12 @@ use ciborium::value::Value;
 
 use super::{
     Alternative, AlternativePattern, Architecture, Atom, CaseKind, CheckedLayout, ConstructorDecl,
-    ConstructorId, ConstructorReply, DecodeLimits, Endianness, Expr, ExprFrame, FieldLayout,
-    GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId, OperationBudget,
-    OperationDecl, OperationId, ParseError, ProgramDefinitions, ProgramEnvelope, RuntimeRep,
-    ScalarLiteral, Signature, SignatureId, SiteDelivery, SiteRow, ConstructorIdentity, TypeIdentity, SymbolIdentity, TargetDescriptor,
-    TopBinding, TypeNode, TypeNodeId, UpdatePolicy, ValueId, ValueRef, WireProgram,
+    ConstructorId, ConstructorIdentity, ConstructorReply, DecodeLimits, Endianness, Expr,
+    ExprFrame, FieldLayout, GlobalDecl, GlobalId, Group, HeapBinding, HeapRhs, JoinBinding, JoinId,
+    OperationBudget, OperationDecl, OperationId, ParseError, ProgramDefinitions, ProgramEnvelope,
+    RuntimeRep, ScalarLiteral, Signature, SignatureId, SiteDelivery, SiteRow, SymbolIdentity,
+    TargetDescriptor, TopBinding, TypeIdentity, TypeNode, TypeNodeId, UpdatePolicy, ValueId,
+    ValueRef, WireProgram,
 };
 
 pub(super) fn type_graph_error(error: TypeGraphError) -> ParseError {
@@ -1796,7 +1797,7 @@ mod operation_budget_tests {
 
         // The second physical ID refuses before it could consume another copy.
         let duplicate = Value::Array(vec![
-            Value::Integer(1.into()),
+            Value::Integer(2.into()),
             Value::Array(vec![template.clone(), template]),
             Value::Array(vec![]),
         ]);

@@ -64,8 +64,9 @@ pub const HEADER_MAGIC: [u8; 4] = [0x54, 0x50, 0x4C, 0x52];
 /// only on a breaking shape change, in the same commit as the Haskell
 /// serializer and the regenerated fixture corpora.
 ///
-/// `5.0` requires complete compiler-issued constructor symbols. Older payloads
-/// lack nominal owners and must be regenerated rather than reconstructed.
+/// `6.0` requires complete compiler-issued constructor identities and their
+/// versioned family. Older payloads lack declaration revisions and must be
+/// regenerated rather than reconstructed.
 pub const VERSION_MAJOR: u16 = 6;
 /// Wire format minor version. An older minor within the same major is
 /// accepted (forward-compatible read); a newer minor than this build

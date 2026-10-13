@@ -50,13 +50,31 @@ impl OperationBudget {
         self.charge(bytes)
     }
 
-    pub(super) fn constructor_copy_work(identity: &ConstructorIdentity) -> Result<usize, ParseError> {
-        [&identity.symbol, &identity.family.symbol].into_iter().try_fold(17_usize, |bytes, symbol| {
-            [&symbol.unit, &symbol.module, &symbol.namespace, &symbol.occurrence].into_iter()
-                .chain(symbol.record_parent.iter()).try_fold(bytes, |bytes, text| bytes.checked_add(text.len()).ok_or(ParseError::LimitExceeded("work")))
-        })
+    pub(super) fn constructor_copy_work(
+        identity: &ConstructorIdentity,
+    ) -> Result<usize, ParseError> {
+        [&identity.symbol, &identity.family.symbol]
+            .into_iter()
+            .try_fold(17_usize, |bytes, symbol| {
+                [
+                    &symbol.unit,
+                    &symbol.module,
+                    &symbol.namespace,
+                    &symbol.occurrence,
+                ]
+                .into_iter()
+                .chain(symbol.record_parent.iter())
+                .try_fold(bytes, |bytes, text| {
+                    bytes
+                        .checked_add(text.len())
+                        .ok_or(ParseError::LimitExceeded("work"))
+                })
+            })
     }
-    pub(super) fn charge_constructor_copy(&mut self, identity: &ConstructorIdentity) -> Result<(), ParseError> {
+    pub(super) fn charge_constructor_copy(
+        &mut self,
+        identity: &ConstructorIdentity,
+    ) -> Result<(), ParseError> {
         self.charge(Self::constructor_copy_work(identity)?)
     }
 

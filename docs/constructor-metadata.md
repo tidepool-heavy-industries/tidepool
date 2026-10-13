@@ -1,25 +1,45 @@
 # Constructor metadata contract
 
-GHC issues a constructor's full `SymbolIdentity` from its actual `Name` owner:
-unit, module, namespace, occurrence and record parent. `DCMeta.dcmIdentity` and
-`DataCon.identity` carry that same representation. Diagnostic aliases remain
-optional render and lookup hints. A spelling is usable only when its nominal
-candidate is unique; module qualification alone cannot choose a unit.
+GHC issues complete nominal identities from the exact defining interface owner.
+General `SymbolIdentity` retains unit, module, namespace, occurrence and record
+parent. `TypeIdentity { symbol, version }` adds mandatory declaration evidence:
+compiler-known `WiredIn` or a 128-bit GHC declaration ABI fingerprint.
+`ConstructorIdentity { symbol, family: TypeIdentity }` carries the defining
+family revision. Constructor declarations derive their family from that identity;
+there is no second family field. Promoted type names preserve their own spelling
+and use the defining parent declaration ABI.
 
-The current `TPLR` header is version 5.0. Each metadata row has ten fields:
+`DCMeta.dcmIdentity` and `DataCon.identity` retain the same complete constructor
+identity. Diagnostic aliases and rendered type names remain lookup hints. A
+spelling with several complete identities is ambiguous even when their arities
+differ. Exact identity lookup selects authority; shape checks cannot choose a
+unit or type revision. Numeric ID and shape conflicts refuse before replacement.
+
+The canonical CBOR grammar uses definite arrays and shortest primitive encodings:
+`symbol = [unit, module, namespace, occurrence, [0] | [1, recordParent]]`,
+`version = [0] | [1, bytes16]`, `type = [symbol, version]`, and
+`constructor = [symbol, type]`. Fingerprints encode two big-endian Word64s as one
+16-byte string. Missing, extra, unknown and wrong-width evidence refuses; no
+rendered fingerprint, optional version or compatibility default exists.
+
+The current `TPLR` header is version 6.0. Each metadata row has ten fields:
 ID, occurrence, tag, representation arity, bangs, qualified alias, field labels,
-rendered parent type, rendered field types, and the existing five-field symbol
-grammar. Missing owners, invalid constructor namespaces, spelling disagreement,
-and obsolete ambiguous versions are rejected. Regenerate internal artifacts from
-an authorized producer; no unit reconstruction or compatibility adapter exists.
+rendered parent type, rendered field types, and complete constructor identity.
+Both standalone metadata decoding and table admission validate constructor and
+family symbols. Regenerate internal artifacts from an authorized producer.
 
-| Format | Migration | Reason |
+| Producer / consumer | Current format | Migration and admission |
 | --- | --- | --- |
-| TPLR constructor metadata | 4.0 to 5.0; old payloads rejected | Required complete symbol adds the tenth field |
-| TPSTG prepared schema and execution ABI | 16 and 9 unchanged | Existing complete symbols and execution grammar are unchanged |
-| TPGRP, module products, checked-cell and native receipts | Outer versions unchanged | Complete identity already exists or metadata bytes remain opaque; inner TPLR admission rejects obsolete metadata |
-| Compiler cache recipes | Container unchanged | Exact producer identity changes with the emitter; the inner reader independently rejects stale metadata |
-| Durable JSONL and independent protocols | Unchanged | No constructor metadata schema coupling |
+| Haskell `ExecutionEncode` / repr prepared codec | TPSTG 18, execution ABI 10 | Previously 17 / 9; constructor declaration is eight fields with complete identity, algebraic cases retain versioned types |
+| Haskell `CborEncode` / repr `serial::{read,write}` | TPLR 6.0 | Previously 5.0; tenth field now carries complete constructor identity; old headers refuse |
+| Haskell `ExecutionEncode` / repr projected-group codec | TPGRP 2 | Previously 1; embedded declaration and type grammar changes; old group headers refuse |
+| Haskell `ExecutionEncode` / repr finite type-graph codec | TypeGraph 2 | Previously 1; declaration identities retain versions; old graph headers refuse |
+| Haskell `ExecutionEncode` / repr module-product reader | TPMOD 1 | Outer grammar contains opaque group bytes; inner TPGRP 2 and TPSTG 18 admission rejects obsolete groups |
+| Repr type graph / enclosing commitment owners | Evidence/content domain v2 | Previously v1; explicit framing includes version tag, ABI bytes and constructor family identity |
+| `NativeOriginalCensus` / native original reader | TPHOMEOWNERS 5 unchanged | Binder/global identities are term-only SymbolIdentity; embedded prepared/metadata bytes retain strict inner admission |
+| Module candidates / candidate reader | TPMCAN 10 unchanged | Candidate binders/global identities are term-only; execution graph descriptors are opaque |
+| Compiler cache recipes | Exact producer identity | Producer changes with the emitter; readers independently reject obsolete inner payloads |
+| Durable JSONL and independent protocols | Unchanged | No direct constructor metadata grammar coupling |
 
 `ExecutionProjection.internConstructor` issues a declaration and retains its real
 GHC `DataCon` together. The production worker finalizes the requested target and
@@ -43,10 +63,15 @@ consumes the program while retaining borrowed metadata and certification; it
 does not clone unused site inventories. Ordinary multi-target installation
 revalidates its selected pair before machine admission.
 
-The host ID hash is unchanged. Different full identities at one ID refuse before
-replacement. One full identity cannot claim multiple IDs. Consequently this
-migration preserves identity and refusal; it does not enable installing real
-homonymous units that share an existing host ID.
+The compiler is the sole numeric constructor-ID issuer. For non-wired-in
+constructors it hashes `tidepool-constructor-id/v1\0` followed by canonical
+constructor-identity CBOR with SHA-256, takes the first seven digest bytes in
+big-endian order, and retains the reserved `0xFE` high-byte tag. Matched compiler
+wired-in constructors retain their existing host primitive ABI, based on actual
+GHC wired-in evidence. Reserved array, closure and oversize sentinels remain
+unchanged. Full typed identity remains authoritative despite truncation;
+collisions refuse before mutation. ABI fingerprints discriminate declarations;
+they do not replace original provenance or representation checks.
 
 Generated runtime fixtures are rebuilt from their owning sources and targets.
 Independent protocol and durable-format goldens keep their own contracts.

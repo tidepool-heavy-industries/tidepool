@@ -12,7 +12,8 @@ use petgraph::visit::{EdgeFiltered, EdgeRef};
 use petgraph::Directed;
 
 use crate::execution_schema::{
-    ConstructorDecl, ConstructorId, DecodeLimits, RuntimeRep, SymbolIdentity, TypeIdentity, TypeVersion, ConstructorIdentity,
+    ConstructorDecl, ConstructorId, ConstructorIdentity, DecodeLimits, RuntimeRep, SymbolIdentity,
+    TypeIdentity, TypeVersion,
 };
 
 mod cursor;
@@ -614,20 +615,37 @@ fn raw_symbol_work(name: &SymbolIdentity) -> usize {
 }
 
 trait IdentityWork: PartialEq {
-    fn symbols(&self) -> Vec<&SymbolIdentity>;
+    fn symbols(&self) -> [Option<&SymbolIdentity>; 2];
     fn version(&self) -> &TypeVersion;
 }
 impl IdentityWork for TypeIdentity {
-    fn symbols(&self) -> Vec<&SymbolIdentity> { vec![&self.symbol] }
-    fn version(&self) -> &TypeVersion { &self.version }
+    fn symbols(&self) -> [Option<&SymbolIdentity>; 2] {
+        [Some(&self.symbol), None]
+    }
+    fn version(&self) -> &TypeVersion {
+        &self.version
+    }
 }
 impl IdentityWork for ConstructorIdentity {
-    fn symbols(&self) -> Vec<&SymbolIdentity> { vec![&self.symbol, &self.family.symbol] }
-    fn version(&self) -> &TypeVersion { &self.family.version }
+    fn symbols(&self) -> [Option<&SymbolIdentity>; 2] {
+        [Some(&self.symbol), Some(&self.family.symbol)]
+    }
+    fn version(&self) -> &TypeVersion {
+        &self.family.version
+    }
 }
 fn symbol_work(identity: &impl IdentityWork) -> usize {
-    identity.symbols().into_iter().fold(1_usize, |work, symbol| work.saturating_add(raw_symbol_work(symbol)))
-        .saturating_add(match identity.version() { TypeVersion::WiredIn => 1, TypeVersion::GhcAbi(_) => 17 })
+    identity
+        .symbols()
+        .into_iter()
+        .flatten()
+        .fold(1_usize, |work, symbol| {
+            work.saturating_add(raw_symbol_work(symbol))
+        })
+        .saturating_add(match identity.version() {
+            TypeVersion::WiredIn => 1,
+            TypeVersion::GhcAbi(_) => 17,
+        })
 }
 
 impl TypeEdge {
@@ -678,16 +696,30 @@ impl Budget {
         self.work(bytes)
     }
     fn identity(&mut self, identity: &impl IdentityWork) -> Result<(), TypeGraphError> {
-        for symbol in identity.symbols() {
-            for text in [&symbol.unit, &symbol.module, &symbol.namespace, &symbol.occurrence] {
+        for symbol in identity.symbols().into_iter().flatten() {
+            for text in [
+                &symbol.unit,
+                &symbol.module,
+                &symbol.namespace,
+                &symbol.occurrence,
+            ] {
                 self.text(text.len())?;
             }
-            if let Some(parent) = &symbol.record_parent { self.text(parent.len())?; }
+            if let Some(parent) = &symbol.record_parent {
+                self.text(parent.len())?;
+            }
         }
-        let version_bytes = match identity.version() { TypeVersion::WiredIn => 1, TypeVersion::GhcAbi(_) => 17 };
+        let version_bytes = match identity.version() {
+            TypeVersion::WiredIn => 1,
+            TypeVersion::GhcAbi(_) => 17,
+        };
         self.text(version_bytes)
     }
-    fn identity_eq<T: IdentityWork>(&mut self, first: &T, second: &T) -> Result<bool, TypeGraphError> {
+    fn identity_eq<T: IdentityWork>(
+        &mut self,
+        first: &T,
+        second: &T,
+    ) -> Result<bool, TypeGraphError> {
         self.work(symbol_work(first).max(symbol_work(second)))?;
         Ok(first == second)
     }
@@ -727,7 +759,9 @@ fn family_counts<'a>(
     for constructor in constructors {
         budget.work(1)?;
         budget.work(symbol_work(&constructor.identity.family))?;
-        let count = families.entry(&constructor.identity.family).or_insert(0_usize);
+        let count = families
+            .entry(&constructor.identity.family)
+            .or_insert(0_usize);
         *count = count.checked_add(1).ok_or(TypeGraphError::Limit("work"))?;
     }
     Ok(families)
@@ -1003,7 +1037,10 @@ fn write_type(identity: &TypeIdentity, frame: &mut impl FnMut(&[u8])) {
     write_symbol(&identity.symbol, frame);
     match &identity.version {
         TypeVersion::WiredIn => frame(&[0]),
-        TypeVersion::GhcAbi(bytes) => { frame(&[1]); frame(bytes); }
+        TypeVersion::GhcAbi(bytes) => {
+            frame(&[1]);
+            frame(bytes);
+        }
     }
 }
 fn write_constructor(identity: &ConstructorIdentity, frame: &mut impl FnMut(&[u8])) {
@@ -1367,7 +1404,10 @@ mod tests {
         let target = crate::execution_schema::testing::target();
         let storage = StorageLayout::for_reps(&target, &fields).unwrap();
         ConstructorDecl {
-            identity: crate::execution_schema::testing::constructor_identity(identity("ReplyValue", "data"), identity("Reply", "type")),
+            identity: crate::execution_schema::testing::constructor_identity(
+                identity("ReplyValue", "data"),
+                identity("Reply", "type"),
+            ),
             host_id: crate::DataConId(77),
             result_rep: RuntimeRep::LiftedRef,
             strict_fields: vec![false; fields.len()],
@@ -1633,6 +1673,41 @@ mod tests {
     }
 
     #[test]
+    fn family_revision_changes_graph_evidence_and_cursor_identity() {
+        let first_inventory = vec![physical(vec![RuntimeRep::LiftedRef; 2])];
+        let (first, first_root, _) = recursive_graph(ConstructorId(0), &first_inventory, false);
+        let first = publish(first, &first_inventory);
+        let mut next_inventory = first_inventory.clone();
+        next_inventory[0].identity.family.version = TypeVersion::GhcAbi([1; 16]);
+        let (mut next, next_root, _) = recursive_graph(ConstructorId(0), &next_inventory, false);
+        for node in next.node_weights_mut() {
+            if let TypeNode::Declaration { identity, .. } = node {
+                if identity.symbol == next_inventory[0].identity.family.symbol {
+                    *identity = next_inventory[0].identity.family.clone();
+                }
+            }
+        }
+        let next = publish(next, &next_inventory);
+        assert!(!first.content_eq(&next));
+        assert!(!first.evidence_eq(&next));
+        assert!(!first
+            .rooted_identity_eq(
+                first_root,
+                &next,
+                next_root,
+                &mut TypeWorkBudget::new(1_000_000)
+            )
+            .unwrap());
+        let mut first_bytes = Vec::new();
+        let mut next_bytes = Vec::new();
+        first.write_evidence(|bytes| first_bytes.extend_from_slice(bytes));
+        next.write_evidence(|bytes| next_bytes.extend_from_slice(bytes));
+        assert_ne!(first_bytes, next_bytes);
+        assert!(first.check_constructor_pairing(&next_inventory).is_err());
+        assert!(next.check_constructor_pairing(&first_inventory).is_err());
+    }
+
+    #[test]
     fn physical_pairing_and_nominal_declaration_collisions_refuse() {
         let inventory = vec![physical(vec![RuntimeRep::LiftedRef; 2])];
         let (graph, _, _) = recursive_graph(ConstructorId(0), &inventory, false);
@@ -1645,7 +1720,8 @@ mod tests {
             Err(TypeGraphError::InvalidConstructor(_))
         ));
         let mut changed = inventory.clone();
-        changed[0].identity.family = crate::execution_schema::testing::type_identity(identity("Other", "type"));
+        changed[0].identity.family =
+            crate::execution_schema::testing::type_identity(identity("Other", "type"));
         assert!(matches!(
             graph.check_constructor_pairing(&changed),
             Err(TypeGraphError::InvalidConstructor(_))
@@ -1777,7 +1853,8 @@ mod tests {
         let (first, first_root, _) = recursive_graph(ConstructorId(0), &first_inventory, false);
         let mut unrelated = physical.clone();
         unrelated.identity.symbol = identity("Unrelated", "data");
-        unrelated.identity.family = crate::execution_schema::testing::type_identity(identity("UnrelatedFamily", "type"));
+        unrelated.identity.family =
+            crate::execution_schema::testing::type_identity(identity("UnrelatedFamily", "type"));
         unrelated.host_id = crate::DataConId(78);
         let second_inventory = vec![unrelated, physical];
         let (second, second_root, _) = recursive_graph(ConstructorId(1), &second_inventory, true);

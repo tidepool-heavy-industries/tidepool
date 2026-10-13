@@ -13,7 +13,7 @@ import Data.Text qualified as T
 import Data.IntMap.Strict qualified as IntMap
 import Data.Word (Word32)
 import Tidepool.ExecutionEncode
-  ( encodeWireProgram, encodeProjectedGroup, encodeModuleProducts
+  ( encodeConstructorIdentity, encodeWireProgram, encodeProjectedGroup, encodeModuleProducts
   , prepareModuleProductEncoding, moduleProductInput, moduleProductBytes
   , encodeModuleProductInventory )
 import Tidepool.ExecutionSchema
@@ -26,9 +26,26 @@ main = runTests tests
 
 tests :: TestTree
 tests = testGroup "execution-schema-encode"
-  [ testCase "module product encoding" moduleProductEncodingChecks
+  [ testCase "canonical constructor identity bytes" canonicalIdentityChecks
+  , testCase "module product encoding" moduleProductEncodingChecks
   , testCase "prepared wire structure and identities" encodingChecks
   ]
+
+canonicalIdentityChecks :: IO ()
+canonicalIdentityChecks = do
+  let symbol namespace occurrence = SymbolIdentity "u" "M" namespace occurrence Nothing
+      identity = ConstructorIdentity (symbol "constructor" "C")
+        (TypeIdentity (symbol "type" "T") (GhcAbi 0x0001020304050607 0x08090a0b0c0d0e0f))
+      -- Independently authored CBOR control, also asserted by Rust's schema test.
+      expected = BS.pack
+        [0x82,0x85,0x61,0x75,0x61,0x4d,0x6b,0x63,0x6f,0x6e,0x73,0x74,0x72,0x75,0x63,0x74,0x6f,0x72,
+         0x61,0x43,0x81,0,0x82,0x85,0x61,0x75,0x61,0x4d,0x64,0x74,0x79,0x70,0x65,0x61,0x54,0x81,0,
+         0x82,1,0x50] <> BS.pack [0 .. 15]
+  assert (toStrictByteString (encodeConstructorIdentity identity) == expected)
+    "constructor identity canonical bytes differ from the cross-language control"
+  assert (decode expected == TList [TList [TString "u", TString "M", TString "constructor", TString "C", TList [TInt 0]],
+      TList [TList [TString "u", TString "M", TString "type", TString "T", TList [TInt 0]], TList [TInt 1, TBytes (BS.pack [0 .. 15])]]])
+    "canonical constructor bytes lost complete symbol, family or fingerprint evidence"
 
 encodingChecks :: IO ()
 encodingChecks = do
@@ -40,9 +57,9 @@ encodingChecks = do
   assert (termNumber (termList (decode first) !! 1) == fromIntegral schemaVersion)
     "prepared execution schema version differs from the producer contract"
   let evidenceFields = termList (decode (encodeWireProgram evidenceRepresentative))
-      familyTerm = TList
+      familyTerm = TList [TList
         [ TString "m3-fixture", TString "Fixture", TString "type"
-        , TString "Recursive", TList [TInt 0] ]
+        , TString "Recursive", TList [TInt 0] ], TList [TInt 1, TBytes (BS.replicate 16 0)]]
   assert (length evidenceFields == 17) "prepared schema requires seventeen program fields"
   assert (evidenceFields !! 16 == TList [TInt 0])
     "absent program JSON layout must use the explicit Nothing tag"
@@ -54,7 +71,7 @@ encodingChecks = do
   let graphFields = termList (evidenceFields !! 13)
       graphNodes = termList (graphFields !! 1)
       graphEdges = termList (graphFields !! 2)
-  assert (head graphFields == TInt 1 && length graphFields == 3)
+  assert (head graphFields == TInt 2 && length graphFields == 3)
     "finite type graph must carry one versioned node/edge envelope"
   assert (take 3 graphNodes ==
       [ TList [TInt 0, TInt 0, TList [], TString "Recursive"]
@@ -89,7 +106,7 @@ encodingChecks = do
     "global wire fields must end with evaluated, tagged generation"
   let schema6Fields = termList (decode (encodeWireProgram schema6Representative))
       schema6Constructor = termList (schema6Fields !! 8) !! 0
-      schema6Parent = termList (termList schema6Constructor !! 0) !! 4
+      schema6Parent = termList (termList (termList schema6Constructor !! 0) !! 0) !! 4
       schema6Operation = termList (schema6Fields !! 9) !! 0
       schema6Identity = termList (termList schema6Operation !! 0)
   assert (schema6Parent == TList [TInt 1, TString "FixtureRecord"])
@@ -284,8 +301,8 @@ representativeWith body = WireProgram envelope signatures globals constructors o
   globals = [GlobalDecl (exact "Fixture.Dependency" "imported") LiftedRefRep
     (Just (SignatureId 0)) False (Just 7)]
   layout = CheckedLayout [FieldLayout (IntRep 64) 0] 8 8 [False]
-  constructors = [ConstructorDecl (exact "Fixture.Vertical" "Box")
-    (exact "Fixture.Vertical" "Box") LiftedRefRep [IntRep 64] [True] layout 1 1 0]
+  constructors = [ConstructorDecl (ConstructorIdentity (exact "Fixture.Vertical" "Box")
+    (TypeIdentity (exact "Fixture.Vertical" "Box") (GhcAbi 0 0))) LiftedRefRep [IntRep 64] [True] layout 1 1 0]
   operations = [OperationDecl (PrimOpIdentity "sub-int64") (SignatureId 0)]
   binding = HeapBinding (ValueId 0)
     (Thunk (SignatureId 1) Memoize [Global (GlobalId 0)] body)
@@ -295,8 +312,8 @@ schema6Representative :: WireProgram
 schema6Representative = representative
   { programConstructors =
       [ConstructorDecl
-        (SymbolIdentity "m3-fixture" "Fixture" "value" "RecordField" (Just "FixtureRecord"))
-        (exact "Fixture.Vertical" "Box") LiftedRefRep [IntRep 64] [True] layout 1 1 0]
+        (ConstructorIdentity (SymbolIdentity "m3-fixture" "Fixture" "value" "RecordField" (Just "FixtureRecord"))
+        (TypeIdentity (exact "Fixture.Vertical" "Box") (GhcAbi 0 0))) LiftedRefRep [IntRep 64] [True] layout 1 1 0]
   , programOperations =
       [ OperationDecl (IntrinsicIdentity "rintDouble" CCall) (SignatureId 3)
       , OperationDecl (PrimOpIdentity "raise#") (SignatureId 2) ]
@@ -322,8 +339,8 @@ evidenceRepresentative :: WireProgram
 evidenceRepresentative = representative
   { programConstructors =
       [ ConstructorDecl
-          (SymbolIdentity "m3-fixture" "Fixture" "value" "Recursive" Nothing)
-          family LiftedRefRep [LiftedRefRep, IntRep 64] [False, True]
+          (ConstructorIdentity (SymbolIdentity "m3-fixture" "Fixture" "value" "Recursive" Nothing)
+          family) LiftedRefRep [LiftedRefRep, IntRep 64] [False, True]
           (CheckedLayout [FieldLayout LiftedRefRep 0, FieldLayout (IntRep 64) 8]
             8 16 [True, False]) 1 1 0 ]
   , programTypes = TypeGraph (IntMap.fromAscList (zip [0 ..]
@@ -331,11 +348,11 @@ evidenceRepresentative = representative
       , TypeDeclaration family [] DataDeclaration UnrestrictedSyntax
       , TypeConstructorTemplate (ConstructorId 0)
       , TypeNominalApplication
-      , TypeDeclaration (family { symbolOccurrence = "Int#" }) [] (ScalarDeclaration (IntRep 64)) UnrestrictedSyntax
+      , TypeDeclaration (family { typeSymbol = (typeSymbol family) { symbolOccurrence = "Int#" } }) [] (ScalarDeclaration (IntRep 64)) UnrestrictedSyntax
       , TypeNominalApplication
-      , TypeDeclaration (family { symbolOccurrence = "Text" }) [] TextDeclaration UnrestrictedSyntax
-      , TypeDeclaration (family { symbolOccurrence = "Integer" }) [] IntegerDeclaration UnrestrictedSyntax
-      , TypeDeclaration (family { symbolOccurrence = "Natural" }) [] NaturalDeclaration UnrestrictedSyntax
+      , TypeDeclaration (family { typeSymbol = (typeSymbol family) { symbolOccurrence = "Text" } }) [] TextDeclaration UnrestrictedSyntax
+      , TypeDeclaration (family { typeSymbol = (typeSymbol family) { symbolOccurrence = "Integer" } }) [] IntegerDeclaration UnrestrictedSyntax
+      , TypeDeclaration (family { typeSymbol = (typeSymbol family) { symbolOccurrence = "Natural" } }) [] NaturalDeclaration UnrestrictedSyntax
       , TypeFunction TypeToType
       , TypeRoot ConstructorSchemeRoot [SourceSpecified] "Int -> Int"
       , TypeBound 0 ])) (IntMap.fromAscList
@@ -355,4 +372,4 @@ evidenceRepresentative = representative
   }
 
  where
-  family = SymbolIdentity "m3-fixture" "Fixture" "type" "Recursive" Nothing
+  family = TypeIdentity (SymbolIdentity "m3-fixture" "Fixture" "type" "Recursive" Nothing) (GhcAbi 0 0)

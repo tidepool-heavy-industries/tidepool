@@ -93,19 +93,22 @@ mod tests {
     fn prepared_resolution_ignores_user_names_and_refuses_package_ambiguity() {
         use crate::execution_schema::{CheckedLayout, ConstructorDecl, RuntimeRep, SymbolIdentity};
         let declaration = |unit: &str, module: &str, host| ConstructorDecl {
-            identity: crate::execution_schema::testing::constructor_identity(SymbolIdentity {
-                unit: unit.into(),
-                module: module.into(),
-                namespace: "constructor".into(),
-                occurrence: "E".into(),
-                record_parent: None,
-            }, SymbolIdentity {
-                unit: unit.into(),
-                module: module.into(),
-                namespace: "type".into(),
-                occurrence: "Eff".into(),
-                record_parent: None,
-            }),
+            identity: crate::execution_schema::testing::constructor_identity(
+                SymbolIdentity {
+                    unit: unit.into(),
+                    module: module.into(),
+                    namespace: "constructor".into(),
+                    occurrence: "E".into(),
+                    record_parent: None,
+                },
+                SymbolIdentity {
+                    unit: unit.into(),
+                    module: module.into(),
+                    namespace: "type".into(),
+                    occurrence: "Eff".into(),
+                    record_parent: None,
+                },
+            ),
             host_id: DataConId(host),
             result_rep: RuntimeRep::LiftedRef,
             field_reps: vec![],
@@ -142,13 +145,16 @@ mod tests {
         // collision, so only the qualified lookup can disambiguate.
         table
             .insert_checked(DataCon {
-                identity: crate::execution_schema::testing::metadata_identity(crate::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Data.Tree".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "Node".into(),
-                    record_parent: None,
-                }, "FixtureType"), 
+                identity: crate::execution_schema::testing::metadata_identity(
+                    crate::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Data.Tree".into(),
+                        namespace: "constructor".into(),
+                        occurrence: "Node".into(),
+                        record_parent: None,
+                    },
+                    "FixtureType",
+                ),
                 id: DataConId(1),
                 name: "Node".to_string(),
                 tag: 0,
@@ -160,13 +166,16 @@ mod tests {
             .expect("valid fixture metadata");
         table
             .insert_checked(DataCon {
-                identity: crate::execution_schema::testing::metadata_identity(crate::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Fixture".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "Node".into(),
-                    record_parent: None,
-                }, "FixtureType"), 
+                identity: crate::execution_schema::testing::metadata_identity(
+                    crate::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: "Node".into(),
+                        record_parent: None,
+                    },
+                    "FixtureType",
+                ),
                 id: DataConId(2),
                 name: "Node".to_string(),
                 tag: 1,
@@ -189,13 +198,16 @@ mod tests {
         let mut table = DataConTable::new();
         table
             .insert_checked(DataCon {
-                identity: crate::execution_schema::testing::metadata_identity(crate::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Fixture".into(),
-                    namespace: "constructor".into(),
-                    occurrence: "Leaf".into(),
-                    record_parent: None,
-                }, "FixtureType"), 
+                identity: crate::execution_schema::testing::metadata_identity(
+                    crate::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: "Leaf".into(),
+                        record_parent: None,
+                    },
+                    "FixtureType",
+                ),
                 id: DataConId(1),
                 name: "Leaf".to_string(),
                 tag: 0,

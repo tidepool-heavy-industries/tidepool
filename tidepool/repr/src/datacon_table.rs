@@ -1,7 +1,7 @@
 //! A lookup table for data constructor metadata.
 
 use crate::datacon::DataCon;
-use crate::execution_schema::{ConstructorDecl, JsonLayout, PreparedProgram, ConstructorIdentity};
+use crate::execution_schema::{ConstructorDecl, ConstructorIdentity, JsonLayout, PreparedProgram};
 use crate::types::DataConId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -135,23 +135,37 @@ impl DataConTable {
         Ok(())
     }
 
-    fn check_collision(&self, dc: &DataCon) -> Result<(), DataConCollision> {
-        let identity = &dc.identity;
+    pub(crate) fn check_identity(
+        identity: &ConstructorIdentity,
+        name: &str,
+    ) -> Result<(), DataConCollision> {
         if identity.symbol.unit.is_empty()
             || identity.symbol.module.is_empty()
             || identity.symbol.occurrence.is_empty()
             || identity.symbol.namespace != "constructor"
-            || identity.symbol.occurrence != dc.name
-            || identity.symbol
+            || identity.symbol.occurrence != name
+            || identity
+                .symbol
                 .record_parent
                 .as_ref()
                 .is_some_and(|parent| parent.is_empty())
+            || identity.family.symbol.unit.is_empty()
+            || identity.family.symbol.module.is_empty()
+            || identity.family.symbol.occurrence.is_empty()
+            || !matches!(identity.family.symbol.namespace.as_str(), "type" | "data")
+            || identity.family.symbol.record_parent.is_some()
         {
             return Err(DataConCollision::InvalidIdentity {
                 identity: identity.clone(),
-                detail: "expected a complete constructor symbol agreeing with its name",
+                detail: "expected complete constructor and type family symbols agreeing with the constructor name",
             });
         }
+        Ok(())
+    }
+
+    fn check_collision(&self, dc: &DataCon) -> Result<(), DataConCollision> {
+        let identity = &dc.identity;
+        Self::check_identity(identity, &dc.name)?;
         if let Some(existing) = self.metadata.by_id.get(&dc.id) {
             if existing.identity != dc.identity {
                 return Err(DataConCollision::Id {
@@ -423,7 +437,7 @@ impl DataConTable {
     ///
     /// Returns `None` when multiple constructors share the same unqualified name,
     /// since the result would be ambiguous. Use `get_by_qualified_name`,
-    /// or a checked arity lookup instead.
+    /// or an exact identity lookup instead.
     pub fn get_by_name(&self, name: &str) -> Option<DataConId> {
         self.metadata
             .by_name
@@ -449,25 +463,25 @@ impl DataConTable {
         let Some(ids) = ids else {
             return Ok(None);
         };
-        let candidates: Vec<&DataCon> = ids
-            .iter()
-            .filter_map(|id| self.get(*id))
-            .filter(|dc| dc.rep_arity == arity)
-            .collect();
-        match candidates.as_slice() {
-            [] => Ok(None),
-            [dc] => Ok(Some(dc.id)),
-            _ => {
-                let mut identities: Vec<_> =
-                    candidates.iter().map(|dc| dc.identity.clone()).collect();
-                identities.sort();
-                Err(AmbiguousDataCon {
-                    name: name.to_owned(),
-                    arity,
-                    candidates: identities,
-                })
-            }
+        let mut candidates = ids.iter().filter_map(|id| self.get(*id));
+        let Some(first) = candidates.next() else {
+            return Ok(None);
+        };
+        if candidates.any(|candidate| candidate.identity != first.identity) {
+            let mut identities: Vec<_> = ids
+                .iter()
+                .filter_map(|id| self.get(*id))
+                .map(|candidate| candidate.identity.clone())
+                .collect();
+            identities.sort();
+            identities.dedup();
+            return Err(AmbiguousDataCon {
+                name: name.to_owned(),
+                arity,
+                candidates: identities,
+            });
         }
+        Ok((first.rep_arity == arity).then_some(first.id))
     }
 
     /// Return all DataConIds sharing a given name (in insertion order).
@@ -609,13 +623,16 @@ mod tests {
 
     fn nominal_row(id: u64, unit: &str, module: &str, occurrence: &str, arity: u32) -> DataCon {
         DataCon {
-            identity: crate::execution_schema::testing::metadata_identity(crate::execution_schema::SymbolIdentity {
-                unit: unit.into(),
-                module: module.into(),
-                namespace: "constructor".into(),
-                occurrence: occurrence.into(),
-                record_parent: None,
-            }, "Ticket"), 
+            identity: crate::execution_schema::testing::metadata_identity(
+                crate::execution_schema::SymbolIdentity {
+                    unit: unit.into(),
+                    module: module.into(),
+                    namespace: "constructor".into(),
+                    occurrence: occurrence.into(),
+                    record_parent: None,
+                },
+                "Ticket",
+            ),
             id: DataConId(id),
             name: occurrence.into(),
             tag: 1,
@@ -656,6 +673,92 @@ mod tests {
             .get_by_qualified_name_checked("Shared.Ticket", 0)
             .is_err());
         assert!(table.get_by_name_arity_checked("Ticket", 0).is_err());
+    }
+
+    #[test]
+    fn malformed_family_identity_refuses_standalone_table_admission() {
+        for corrupt in 0..5 {
+            let mut row = nominal_row(1, "unit", "Module", "Ticket", 1);
+            match corrupt {
+                0 => row.identity.family.symbol.unit.clear(),
+                1 => row.identity.family.symbol.module.clear(),
+                2 => row.identity.family.symbol.occurrence.clear(),
+                3 => row.identity.family.symbol.namespace = "value".into(),
+                _ => row.identity.family.symbol.record_parent = Some("Parent".into()),
+            }
+            let mut table = DataConTable::new();
+            assert!(matches!(
+                table.insert_checked(row),
+                Err(DataConCollision::InvalidIdentity { .. })
+            ));
+            assert!(table.is_empty());
+        }
+    }
+
+    #[test]
+    fn family_versions_refuse_spelling_selection_even_when_arities_differ() {
+        let first = nominal_row(1, "unit", "Module", "Ticket", 1);
+        let mut second = first.clone();
+        second.id = DataConId(2);
+        second.rep_arity = 2;
+        second.identity.family.version = crate::execution_schema::TypeVersion::GhcAbi([1; 16]);
+        let mut table = DataConTable::new();
+        table
+            .extend_checked([first.clone(), second.clone(), first.clone()])
+            .unwrap();
+        for arity in [1, 2, 3] {
+            assert!(table.get_by_name_arity_checked("Ticket", arity).is_err());
+            assert!(table
+                .get_by_qualified_name_checked("Shared.Ticket", arity)
+                .is_err());
+        }
+        assert_eq!(table.get_by_identity(&first.identity), Some(first.id));
+        assert_eq!(table.get_by_identity(&second.identity), Some(second.id));
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(64))]
+        #[test]
+        fn versioned_metadata_histories_match_revision_oracle(
+            operations in proptest::collection::vec((0_u8..4, 0_u8..3), 1..40)
+        ) {
+            let mut table = DataConTable::new();
+            let mut model = std::collections::BTreeMap::new();
+            for (revision, operation) in operations {
+                let mut row = nominal_row(u64::from(revision) + 1, "unit", "Module", "Ticket", u32::from(revision) + 1);
+                row.identity.family.version = crate::execution_schema::TypeVersion::GhcAbi([revision; 16]);
+                let before = table.clone();
+                match operation {
+                    0 => {
+                        table.insert_checked(row.clone()).unwrap();
+                        model.insert(revision, row.clone());
+                    }
+                    1 if !model.is_empty() => {
+                        row.id = model.values().next().unwrap().id;
+                        if model.contains_key(&revision) && model[&revision].id == row.id {
+                            table.insert_checked(row).unwrap();
+                        } else {
+                            proptest::prop_assert!(table.insert_checked(row).is_err());
+                            proptest::prop_assert_eq!(&table, &before);
+                        }
+                    }
+                    2 if model.contains_key(&revision) => {
+                        row.rep_arity += 1;
+                        proptest::prop_assert!(table.insert_checked(row).is_err());
+                        proptest::prop_assert_eq!(&table, &before);
+                    }
+                    _ => {}
+                }
+                let restored = crate::serial::read_metadata(&crate::serial::write_metadata(&table, &crate::serial::MetaWarnings::default()).unwrap()).unwrap().0;
+                proptest::prop_assert_eq!(&restored, &table);
+                proptest::prop_assert_eq!(table.len(), model.len());
+                for expected in model.values() {
+                    proptest::prop_assert_eq!(table.get_by_identity(&expected.identity), Some(expected.id));
+                }
+                let spelling = table.get_by_name_arity_checked("Ticket", u32::from(revision) + 1);
+                proptest::prop_assert_eq!(spelling.is_err(), model.len() > 1);
+            }
+        }
     }
 
     #[test]

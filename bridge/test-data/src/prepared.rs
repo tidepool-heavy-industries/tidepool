@@ -62,7 +62,10 @@ pub fn constructor_program() -> WireProgram {
     };
     let mut wire = testing::wire_program();
     wire.constructors.push(ConstructorDecl {
-        identity: tidepool_repr::execution_schema::testing::constructor_identity(super::prepared::constructor_identity("Fixture", "Box"), super::prepared::type_identity("Fixture", "Box")),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            super::prepared::constructor_identity("Fixture", "Box"),
+            super::prepared::type_identity("Fixture", "Box"),
+        ),
         host_id: tidepool_repr::DataConId(901),
         result_rep: RuntimeRep::LiftedRef,
         field_reps: vec![RuntimeRep::Int(64)],

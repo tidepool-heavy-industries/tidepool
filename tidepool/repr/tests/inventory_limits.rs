@@ -175,8 +175,8 @@ fn many_real_rows_validate_and_duplicate_owners_or_group_ordinals_fail() {
             let mut wire = testing::wire_program();
             if let tidepool_repr::execution_schema::Group::NonRecursive(top) = &mut wire.bindings[0]
             {
-                top.identity.symbol.unit = "unit".into();
-                top.identity.symbol.module = module.clone();
+                top.identity.unit = "unit".into();
+                top.identity.module = module.clone();
             }
             let group = testing::projected_group(wire, index).unwrap();
             let group_bytes = tidepool_test_data::prepared_encode::encode_projected_group(&group);

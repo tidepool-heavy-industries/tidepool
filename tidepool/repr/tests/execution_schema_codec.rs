@@ -521,7 +521,10 @@ fn codec_decodes_type_graph_and_site_rows() {
     };
     let family = nominal("Phantom");
     program.constructors.push(ConstructorDecl {
-        identity: tidepool_repr::execution_schema::testing::constructor_identity(testing::identity("Types", "Recursive"), family.clone()),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("Types", "Recursive"),
+            family.clone(),
+        ),
         host_id: tidepool_repr::DataConId(9001),
         field_reps: vec![RuntimeRep::LiftedRef],
         strict_fields: vec![false],
@@ -548,14 +551,14 @@ fn codec_decodes_type_graph_and_site_rows() {
             root("Int#"),
             root("Phantom Int#"),
             TypeNode::Declaration {
-                identity: nominal("Int#"),
+                identity: tidepool_repr::execution_schema::testing::type_identity(nominal("Int#")),
                 parameters: vec![],
                 form: DeclarationForm::Scalar(RuntimeRep::Int(64)),
                 restriction: SyntaxRestriction::None,
             },
             TypeNode::NominalApplication,
             TypeNode::Declaration {
-                identity: family,
+                identity: tidepool_repr::execution_schema::testing::type_identity(family),
                 parameters: vec![ParameterFlag::NamedRequired],
                 form: DeclarationForm::Data,
                 restriction: SyntaxRestriction::None,
@@ -695,13 +698,16 @@ fn finite_graph_codec_covers_scoped_syntax_and_declaration_metadata() {
         ..testing::identity("Finite", name)
     };
     let declaration = |name: &str, form| TypeNode::Declaration {
-        identity: identity(name),
+        identity: tidepool_repr::execution_schema::testing::type_identity(identity(name)),
         parameters: vec![],
         form,
         restriction: SyntaxRestriction::None,
     };
     program.constructors.push(ConstructorDecl {
-        identity: tidepool_repr::execution_schema::testing::constructor_identity(testing::identity("Finite", "Container"), identity("Container")),
+        identity: tidepool_repr::execution_schema::testing::constructor_identity(
+            testing::identity("Finite", "Container"),
+            identity("Container"),
+        ),
         host_id: tidepool_repr::DataConId(9002),
         field_reps: vec![RuntimeRep::Int(64)],
         strict_fields: vec![false],
@@ -736,7 +742,7 @@ fn finite_graph_codec_covers_scoped_syntax_and_declaration_metadata() {
         TypeNode::Literal(TypeLiteral::Natural("1".into())),
         TypeNode::NominalApplication,
         TypeNode::Declaration {
-            identity: identity("Eff"),
+            identity: tidepool_repr::execution_schema::testing::type_identity(identity("Eff")),
             parameters: vec![],
             form: DeclarationForm::Opaque {
                 head_kind: NominalHeadKind::Constructor,
@@ -747,7 +753,7 @@ fn finite_graph_codec_covers_scoped_syntax_and_declaration_metadata() {
         TypeNode::Application,
         TypeNode::NominalApplication,
         TypeNode::Declaration {
-            identity: identity("EtaAlias"),
+            identity: tidepool_repr::execution_schema::testing::type_identity(identity("EtaAlias")),
             parameters: vec![
                 ParameterFlag::NamedRequired,
                 ParameterFlag::NamedSpecified,
@@ -902,8 +908,13 @@ fn codec_decodes_constructor_static_reply_without_sites() {
         ])
     };
     fields[8] = Cbor::Array(vec![Cbor::Array(vec![
-        symbol("Print"),
-        symbol("Console"),
+        Cbor::Array(vec![
+            symbol("Print"),
+            Cbor::Array(vec![
+                symbol("Console"),
+                Cbor::Array(vec![int(1), Cbor::Bytes(vec![0; 16])]),
+            ]),
+        ]),
         Cbor::Array(vec![]),
         Cbor::Array(vec![]),
         Cbor::Array(vec![
@@ -972,8 +983,13 @@ fn codec_admits_zero_at_site_with_valid_carrier_and_reply_graph() {
     };
     let carrier = Cbor::Array(vec![int(4), int(64)]);
     fields[8] = Cbor::Array(vec![Cbor::Array(vec![
-        symbol("Request"),
-        symbol("Effect"),
+        Cbor::Array(vec![
+            symbol("Request"),
+            Cbor::Array(vec![
+                symbol("Effect"),
+                Cbor::Array(vec![int(1), Cbor::Bytes(vec![0; 16])]),
+            ]),
+        ]),
         Cbor::Array(vec![carrier.clone()]),
         Cbor::Array(vec![Cbor::Bool(true)]),
         Cbor::Array(vec![
@@ -1086,8 +1102,13 @@ fn codec_keeps_closed_reply_and_independent_original_site_fields() {
     let carrier = Cbor::Array(vec![int(4), int(64)]);
     let managed = Cbor::Array(vec![int(1)]);
     fields[8] = Cbor::Array(vec![Cbor::Array(vec![
-        symbol("Request"),
-        symbol("Effect"),
+        Cbor::Array(vec![
+            symbol("Request"),
+            Cbor::Array(vec![
+                symbol("Effect"),
+                Cbor::Array(vec![int(1), Cbor::Bytes(vec![0; 16])]),
+            ]),
+        ]),
         Cbor::Array(vec![carrier.clone(), carrier.clone(), managed.clone()]),
         Cbor::Array(vec![Cbor::Bool(true), Cbor::Bool(true), Cbor::Bool(false)]),
         Cbor::Array(vec![

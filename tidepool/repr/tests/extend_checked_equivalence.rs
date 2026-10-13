@@ -13,13 +13,16 @@ struct LogicalRow {
 
 fn issued(row: &LogicalRow) -> DataCon {
     DataCon {
-        identity: tidepool_repr::execution_schema::testing::metadata_identity(SymbolIdentity {
-            unit: format!("unit-{}", row.unit),
-            module: "Homonymous".into(),
-            namespace: "constructor".into(),
-            occurrence: "Ticket".into(),
-            record_parent: None,
-        }, &("Ticket".into())), 
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            SymbolIdentity {
+                unit: format!("unit-{}", row.unit),
+                module: "Homonymous".into(),
+                namespace: "constructor".into(),
+                occurrence: "Ticket".into(),
+                record_parent: None,
+            },
+            "Ticket",
+        ),
         id: DataConId(row.id.into()),
         name: "Ticket".into(),
         tag: 1,
@@ -71,22 +74,18 @@ fn assert_model(table: &DataConTable, model: &[LogicalRow]) {
         assert_eq!(table.get_by_identity(&expected.identity), Some(expected.id));
     }
     for arity in 0..=2 {
-        let matches: Vec<_> = model
-            .iter()
-            .filter(|row| u32::from(row.shape) == arity)
-            .collect();
-        match matches.as_slice() {
-            [] => assert_eq!(
-                table.get_by_qualified_name_checked("Homonymous.Ticket", arity),
-                Ok(None)
-            ),
-            [one] => assert_eq!(
-                table.get_by_qualified_name_checked("Homonymous.Ticket", arity),
-                Ok(Some(DataConId(one.id.into())))
-            ),
-            _ => assert!(table
+        if model.len() > 1 {
+            assert!(table
                 .get_by_qualified_name_checked("Homonymous.Ticket", arity)
-                .is_err()),
+                .is_err());
+        } else {
+            assert_eq!(
+                table.get_by_qualified_name_checked("Homonymous.Ticket", arity),
+                Ok(model
+                    .first()
+                    .filter(|row| u32::from(row.shape) == arity)
+                    .map(|row| DataConId(row.id.into())))
+            );
         }
     }
     assert_eq!(

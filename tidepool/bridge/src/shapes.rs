@@ -510,13 +510,16 @@ mod tests {
                 _ => unreachable!("complete shape test constructor family"),
             };
             t.insert_checked(DataCon {
-                identity: tidepool_repr::execution_schema::SymbolIdentity {
-                    unit: "fixture".into(),
-                    module: "Fixture".into(),
-                    namespace: "constructor".into(),
-                    occurrence: name.to_owned(),
-                    record_parent: None,
-                },
+                identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                    tidepool_repr::execution_schema::SymbolIdentity {
+                        unit: "fixture".into(),
+                        module: "Fixture".into(),
+                        namespace: "constructor".into(),
+                        occurrence: name.to_owned(),
+                        record_parent: None,
+                    },
+                    "FixtureType",
+                ),
                 id: DataConId(id),
                 name: name.into(),
                 tag: id as u32,

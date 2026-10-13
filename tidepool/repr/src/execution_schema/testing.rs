@@ -4,20 +4,26 @@
 //! fields and still exercise the normal validation and decoding boundaries.
 
 use super::{
-    Architecture, Atom, DecodeLimits, Endianness, ExprFrame, Group, HeapBinding, HeapRhs,
-    ParseError, PreparedProgram, ProgramDefinitions, ProgramEnvelope, ProgramRequirements,
-    ProjectedGroup, ResultContract, RuntimeRep, ScalarLiteral, Signature, SignatureId,
-    SymbolIdentity, TypeIdentity, TypeVersion, ConstructorIdentity, TargetDescriptor, TopBinding, ValueId, WireProgram, EXECUTION_ABI_VERSION,
-    SCHEMA_VERSION,
+    Architecture, Atom, ConstructorIdentity, DecodeLimits, Endianness, ExprFrame, Group,
+    HeapBinding, HeapRhs, ParseError, PreparedProgram, ProgramDefinitions, ProgramEnvelope,
+    ProgramRequirements, ProjectedGroup, ResultContract, RuntimeRep, ScalarLiteral, Signature,
+    SignatureId, SymbolIdentity, TargetDescriptor, TopBinding, TypeIdentity, TypeVersion, ValueId,
+    WireProgram, EXECUTION_ABI_VERSION, SCHEMA_VERSION,
 };
 
 /// A stable identity for authored execution-schema fixtures.
 /// Explicit synthetic ABI evidence for representation fixtures, never production issuance.
 pub fn type_identity(symbol: SymbolIdentity) -> TypeIdentity {
-    TypeIdentity { symbol, version: TypeVersion::GhcAbi([0; 16]) }
+    TypeIdentity {
+        symbol,
+        version: TypeVersion::GhcAbi([0; 16]),
+    }
 }
 pub fn constructor_identity(symbol: SymbolIdentity, family: SymbolIdentity) -> ConstructorIdentity {
-    ConstructorIdentity { symbol, family: type_identity(family) }
+    ConstructorIdentity {
+        symbol,
+        family: type_identity(family),
+    }
 }
 
 pub fn metadata_identity(symbol: SymbolIdentity, family_occurrence: &str) -> ConstructorIdentity {

@@ -9,13 +9,16 @@ fn get_table() -> DataConTable {
     let mut table = tidepool_test_data::standard_datacon_table();
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "GHC.Tuple".into(),
-                namespace: "constructor".into(),
-                occurrence: "(,,)".into(),
-                record_parent: None,
-            },
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Tuple".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "(,,)".into(),
+                    record_parent: None,
+                },
+                "FixtureType",
+            ),
             id: DataConId(100),
             name: "(,,)".to_string(),
             tag: 1,

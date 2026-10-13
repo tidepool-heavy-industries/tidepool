@@ -1285,13 +1285,15 @@ mod tests {
         nest.identity.symbol = identity("Nest", "data");
         let mut pair = physical(vec![RuntimeRep::LiftedRef; 2]);
         pair.identity.symbol = identity("Pair", "data");
-        pair.identity.family = crate::execution_schema::testing::type_identity(identity("Pair", "type"));
+        pair.identity.family =
+            crate::execution_schema::testing::type_identity(identity("Pair", "type"));
         pair.host_id = crate::DataConId(78);
         let mut inventory = vec![nest, pair];
         let (nest_id, pair_id) = if extra {
             let mut unused = physical(vec![]);
             unused.identity.symbol = identity("Unused", "data");
-            unused.identity.family = crate::execution_schema::testing::type_identity(identity("Unused", "type"));
+            unused.identity.family =
+                crate::execution_schema::testing::type_identity(identity("Unused", "type"));
             unused.host_id = crate::DataConId(79);
             inventory.insert(0, unused);
             (ConstructorId(1), ConstructorId(2))

@@ -47,13 +47,16 @@ enum NullaryTuple {
 fn test_table() -> DataConTable {
     let mut t = standard_datacon_table();
     t.insert_checked(DataCon {
-        identity: tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "fixture".into(),
-            module: "Fixture".into(),
-            namespace: "constructor".into(),
-            occurrence: "()".into(),
-            record_parent: None,
-        },
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                namespace: "constructor".into(),
+                occurrence: "()".into(),
+                record_parent: None,
+            },
+            "FixtureType",
+        ),
         id: DataConId(20),
         name: "()".into(),
         tag: 1,
@@ -64,13 +67,16 @@ fn test_table() -> DataConTable {
     })
     .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-        identity: tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "fixture".into(),
-            module: "Fixture".into(),
-            namespace: "constructor".into(),
-            occurrence: "Triple".into(),
-            record_parent: None,
-        },
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                namespace: "constructor".into(),
+                occurrence: "Triple".into(),
+                record_parent: None,
+            },
+            "FixtureType",
+        ),
         id: DataConId(21),
         name: "Triple".into(),
         tag: 1,
@@ -81,13 +87,16 @@ fn test_table() -> DataConTable {
     })
     .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-        identity: tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "fixture".into(),
-            module: "Fixture".into(),
-            namespace: "constructor".into(),
-            occurrence: "GetBranch".into(),
-            record_parent: None,
-        },
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                namespace: "constructor".into(),
+                occurrence: "GetBranch".into(),
+                record_parent: None,
+            },
+            "FixtureType",
+        ),
         id: DataConId(22),
         name: "GetBranch".into(),
         tag: 1,
@@ -98,13 +107,16 @@ fn test_table() -> DataConTable {
     })
     .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-        identity: tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "fixture".into(),
-            module: "Fixture".into(),
-            namespace: "constructor".into(),
-            occurrence: "UnitStruct".into(),
-            record_parent: None,
-        },
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                namespace: "constructor".into(),
+                occurrence: "UnitStruct".into(),
+                record_parent: None,
+            },
+            "FixtureType",
+        ),
         id: DataConId(23),
         name: "UnitStruct".into(),
         tag: 1,
@@ -115,13 +127,16 @@ fn test_table() -> DataConTable {
     })
     .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-        identity: tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "fixture".into(),
-            module: "Fixture".into(),
-            namespace: "constructor".into(),
-            occurrence: "Pair".into(),
-            record_parent: None,
-        },
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                namespace: "constructor".into(),
+                occurrence: "Pair".into(),
+                record_parent: None,
+            },
+            "FixtureType",
+        ),
         id: DataConId(24),
         name: "Pair".into(),
         tag: 1,
@@ -132,13 +147,16 @@ fn test_table() -> DataConTable {
     })
     .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-        identity: tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "fixture".into(),
-            module: "Fixture".into(),
-            namespace: "constructor".into(),
-            occurrence: "Budget".into(),
-            record_parent: None,
-        },
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                namespace: "constructor".into(),
+                occurrence: "Budget".into(),
+                record_parent: None,
+            },
+            "FixtureType",
+        ),
         id: DataConId(25),
         name: "Budget".into(),
         tag: 1,
@@ -149,13 +167,16 @@ fn test_table() -> DataConTable {
     })
     .expect("valid fixture metadata");
     t.insert_checked(DataCon {
-        identity: tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "fixture".into(),
-            module: "Fixture".into(),
-            namespace: "constructor".into(),
-            occurrence: "NullaryDetail".into(),
-            record_parent: None,
-        },
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                namespace: "constructor".into(),
+                occurrence: "NullaryDetail".into(),
+                record_parent: None,
+            },
+            "FixtureType",
+        ),
         id: DataConId(26),
         name: "NullaryDetail".into(),
         tag: 1,
@@ -429,13 +450,16 @@ fn named_variant_round_trips_in_haskell_field_order() {
     let mut table = standard_datacon_table();
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "Fixture".into(),
-                namespace: "constructor".into(),
-                occurrence: "NamedFields".into(),
-                record_parent: None,
-            },
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Fixture".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "NamedFields".into(),
+                    record_parent: None,
+                },
+                "FixtureType",
+            ),
             id: DataConId(51),
             name: "NamedFields".into(),
             tag: 1,
@@ -461,13 +485,16 @@ fn named_variant_round_trips_in_haskell_field_order() {
 fn partial_two_variant_table() -> DataConTable {
     let mut t = standard_datacon_table();
     t.insert_checked(DataCon {
-        identity: tidepool_repr::execution_schema::SymbolIdentity {
-            unit: "fixture".into(),
-            module: "Fixture".into(),
-            namespace: "constructor".into(),
-            occurrence: "SecondVariant".into(),
-            record_parent: None,
-        },
+        identity: tidepool_repr::execution_schema::testing::metadata_identity(
+            tidepool_repr::execution_schema::SymbolIdentity {
+                unit: "fixture".into(),
+                module: "Fixture".into(),
+                namespace: "constructor".into(),
+                occurrence: "SecondVariant".into(),
+                record_parent: None,
+            },
+            "FixtureType",
+        ),
         id: DataConId(50),
         name: "SecondVariant".into(),
         tag: 1,

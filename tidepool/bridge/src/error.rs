@@ -37,8 +37,7 @@ pub enum BridgeError {
         name: String,
         /// The expected representation arity.
         arity: usize,
-        /// Module-qualified identity (falling back to unqualified name) of
-        /// every constructor that matched both the name and the arity.
+        /// Complete identities sharing the requested spelling, including family revisions.
         candidates: Vec<tidepool_repr::execution_schema::ConstructorIdentity>,
     },
     /// Lookup by module-qualified name failed. Emitted by derived

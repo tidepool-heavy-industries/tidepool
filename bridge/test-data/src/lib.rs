@@ -9,13 +9,16 @@ pub fn standard_datacon_table() -> DataConTable {
     // Maybe
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "GHC.Maybe".into(),
-                namespace: "constructor".into(),
-                occurrence: "Nothing".into(),
-                record_parent: None,
-            }, "Maybe"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Maybe".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Nothing".into(),
+                    record_parent: None,
+                },
+                "Maybe",
+            ),
             id: DataConId(0),
             name: "Nothing".to_string(),
             tag: 1,
@@ -27,13 +30,16 @@ pub fn standard_datacon_table() -> DataConTable {
         .expect("valid fixture metadata");
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "GHC.Maybe".into(),
-                namespace: "constructor".into(),
-                occurrence: "Just".into(),
-                record_parent: None,
-            }, "Maybe"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Maybe".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Just".into(),
+                    record_parent: None,
+                },
+                "Maybe",
+            ),
             id: DataConId(1),
             name: "Just".to_string(),
             tag: 2,
@@ -46,13 +52,16 @@ pub fn standard_datacon_table() -> DataConTable {
     // Bool
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "GHC.Types".into(),
-                namespace: "constructor".into(),
-                occurrence: "False".into(),
-                record_parent: None,
-            }, "Bool"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Types".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "False".into(),
+                    record_parent: None,
+                },
+                "Bool",
+            ),
             id: DataConId(2),
             name: "False".to_string(),
             tag: 1,
@@ -64,13 +73,16 @@ pub fn standard_datacon_table() -> DataConTable {
         .expect("valid fixture metadata");
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "GHC.Types".into(),
-                namespace: "constructor".into(),
-                occurrence: "True".into(),
-                record_parent: None,
-            }, "Bool"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Types".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "True".into(),
+                    record_parent: None,
+                },
+                "Bool",
+            ),
             id: DataConId(3),
             name: "True".to_string(),
             tag: 2,
@@ -83,13 +95,16 @@ pub fn standard_datacon_table() -> DataConTable {
     // Pair (,)
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "GHC.Tuple".into(),
-                namespace: "constructor".into(),
-                occurrence: "(,)".into(),
-                record_parent: None,
-            }, "(,)"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Tuple".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "(,)".into(),
+                    record_parent: None,
+                },
+                "(,)",
+            ),
             id: DataConId(4),
             name: "(,)".to_string(),
             tag: 1,
@@ -102,13 +117,16 @@ pub fn standard_datacon_table() -> DataConTable {
     // List [] and :
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "GHC.Types".into(),
-                namespace: "constructor".into(),
-                occurrence: "[]".into(),
-                record_parent: None,
-            }, "[]"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Types".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "[]".into(),
+                    record_parent: None,
+                },
+                "[]",
+            ),
             id: DataConId(5),
             name: "[]".to_string(),
             tag: 1,
@@ -120,13 +138,16 @@ pub fn standard_datacon_table() -> DataConTable {
         .expect("valid fixture metadata");
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "GHC.Types".into(),
-                namespace: "constructor".into(),
-                occurrence: ":".into(),
-                record_parent: None,
-            }, "[]"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Types".into(),
+                    namespace: "constructor".into(),
+                    occurrence: ":".into(),
+                    record_parent: None,
+                },
+                "[]",
+            ),
             id: DataConId(6),
             name: ":".to_string(),
             tag: 2,
@@ -139,13 +160,16 @@ pub fn standard_datacon_table() -> DataConTable {
     // Boxing
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "GHC.Types".into(),
-                namespace: "constructor".into(),
-                occurrence: "I#".into(),
-                record_parent: None,
-            }, "Int"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Types".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "I#".into(),
+                    record_parent: None,
+                },
+                "Int",
+            ),
             id: DataConId(7),
             name: "I#".to_string(),
             tag: 1,
@@ -157,13 +181,16 @@ pub fn standard_datacon_table() -> DataConTable {
         .expect("valid fixture metadata");
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "GHC.Types".into(),
-                namespace: "constructor".into(),
-                occurrence: "W#".into(),
-                record_parent: None,
-            }, "Word"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Types".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "W#".into(),
+                    record_parent: None,
+                },
+                "Word",
+            ),
             id: DataConId(8),
             name: "W#".to_string(),
             tag: 1,
@@ -175,13 +202,16 @@ pub fn standard_datacon_table() -> DataConTable {
         .expect("valid fixture metadata");
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "GHC.Types".into(),
-                namespace: "constructor".into(),
-                occurrence: "D#".into(),
-                record_parent: None,
-            }, "Double"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Types".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "D#".into(),
+                    record_parent: None,
+                },
+                "Double",
+            ),
             id: DataConId(9),
             name: "D#".to_string(),
             tag: 1,
@@ -193,13 +223,16 @@ pub fn standard_datacon_table() -> DataConTable {
         .expect("valid fixture metadata");
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "GHC.Types".into(),
-                namespace: "constructor".into(),
-                occurrence: "C#".into(),
-                record_parent: None,
-            }, "Char"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "GHC.Types".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "C#".into(),
+                    record_parent: None,
+                },
+                "Char",
+            ),
             id: DataConId(10),
             name: "C#".to_string(),
             tag: 1,
@@ -212,13 +245,16 @@ pub fn standard_datacon_table() -> DataConTable {
     // Text (the extractor normalizes Data.Text.Internal to Data.Text)
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "Data.Text".into(),
-                namespace: "constructor".into(),
-                occurrence: "Text".into(),
-                record_parent: None,
-            }, "Text"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Data.Text".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Text".into(),
+                    record_parent: None,
+                },
+                "Text",
+            ),
             id: DataConId(11),
             name: "Text".to_string(),
             tag: 1,
@@ -231,13 +267,16 @@ pub fn standard_datacon_table() -> DataConTable {
     // Either
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "Data.Either".into(),
-                namespace: "constructor".into(),
-                occurrence: "Left".into(),
-                record_parent: None,
-            }, "Either"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Data.Either".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Left".into(),
+                    record_parent: None,
+                },
+                "Either",
+            ),
             id: DataConId(12),
             name: "Left".to_string(),
             tag: 1,
@@ -249,13 +288,16 @@ pub fn standard_datacon_table() -> DataConTable {
         .expect("valid fixture metadata");
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "Data.Either".into(),
-                namespace: "constructor".into(),
-                occurrence: "Right".into(),
-                record_parent: None,
-            }, "Either"), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Data.Either".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Right".into(),
+                    record_parent: None,
+                },
+                "Either",
+            ),
             id: DataConId(13),
             name: "Right".to_string(),
             tag: 2,

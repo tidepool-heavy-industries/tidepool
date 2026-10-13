@@ -36,12 +36,21 @@ fn entry(dcid: u64, name: &str, qualified_name: Cbor, field_labels: Cbor) -> Cbo
 }
 
 fn symbol(name: &str) -> Cbor {
+    let sym = |namespace: &str| {
+        Cbor::Array(vec![
+            Cbor::Text("fixture".into()),
+            Cbor::Text("Fixture".into()),
+            Cbor::Text(namespace.into()),
+            Cbor::Text(name.into()),
+            Cbor::Array(vec![Cbor::Integer(0.into())]),
+        ])
+    };
     Cbor::Array(vec![
-        Cbor::Text("fixture".into()),
-        Cbor::Text("Fixture".into()),
-        Cbor::Text("constructor".into()),
-        Cbor::Text(name.into()),
-        Cbor::Array(vec![Cbor::Integer(0.into())]),
+        sym("constructor"),
+        Cbor::Array(vec![
+            sym("type"),
+            Cbor::Array(vec![Cbor::Integer(1.into()), Cbor::Bytes(vec![0; 16])]),
+        ]),
     ])
 }
 
@@ -287,13 +296,16 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
     // strictness must still accept.
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "Fixture".into(),
-                namespace: "constructor".into(),
-                occurrence: "Nothing".into(),
-                record_parent: None,
-            }, &("Maybe".to_string())), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Fixture".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Nothing".into(),
+                    record_parent: None,
+                },
+                &("Maybe".to_string()),
+            ),
             id: DataConId(1),
             name: "Nothing".to_string(),
             tag: 1,
@@ -306,13 +318,16 @@ fn writer_conforming_payload_round_trips_through_strict_reader() {
     // With a qualified name, field labels, and field types.
     table
         .insert_checked(DataCon {
-            identity: tidepool_repr::execution_schema::testing::metadata_identity(tidepool_repr::execution_schema::SymbolIdentity {
-                unit: "fixture".into(),
-                module: "Tidepool.Records".into(),
-                namespace: "constructor".into(),
-                occurrence: "Hit".into(),
-                record_parent: None,
-            }, &("Hit".to_string())), 
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: "Tidepool.Records".into(),
+                    namespace: "constructor".into(),
+                    occurrence: "Hit".into(),
+                    record_parent: None,
+                },
+                &("Hit".to_string()),
+            ),
             id: DataConId(2),
             name: "Hit".to_string(),
             tag: 1,
@@ -358,7 +373,10 @@ fn mandatory_constructor_symbol_rejects_missing_owner_and_spelling_mismatch() {
         let Cbor::Array(row) = &mut entry else {
             unreachable!()
         };
-        let Cbor::Array(identity) = &mut row[9] else {
+        let Cbor::Array(constructor) = &mut row[9] else {
+            unreachable!()
+        };
+        let Cbor::Array(identity) = &mut constructor[0] else {
             unreachable!()
         };
         identity[field] = Cbor::Text(malformed.into());
@@ -422,4 +440,46 @@ fn paired_admission_requires_complete_rows_and_full_nominal_agreement() {
             ConstructorMetadataMismatch::Identity { .. }
         ))
     ));
+}
+
+#[test]
+fn constructor_family_rejects_missing_owner_wrong_namespace_and_parent() {
+    for (field, malformed) in [(0, ""), (1, ""), (2, "value"), (3, "")] {
+        let mut entry = plain_entry(1, "Ticket");
+        let Cbor::Array(row) = &mut entry else {
+            unreachable!()
+        };
+        let Cbor::Array(constructor) = &mut row[9] else {
+            unreachable!()
+        };
+        let Cbor::Array(family) = &mut constructor[1] else {
+            unreachable!()
+        };
+        let Cbor::Array(symbol) = &mut family[0] else {
+            unreachable!()
+        };
+        symbol[field] = Cbor::Text(malformed.into());
+        assert_malformed(
+            read_metadata(&meta_bytes(vec![entry], vec![has_io_false()])),
+            "identity",
+        );
+    }
+    let mut entry = plain_entry(1, "Ticket");
+    let Cbor::Array(row) = &mut entry else {
+        unreachable!()
+    };
+    let Cbor::Array(constructor) = &mut row[9] else {
+        unreachable!()
+    };
+    let Cbor::Array(family) = &mut constructor[1] else {
+        unreachable!()
+    };
+    let Cbor::Array(symbol) = &mut family[0] else {
+        unreachable!()
+    };
+    symbol[4] = Cbor::Array(vec![Cbor::Integer(1.into()), Cbor::Text("Parent".into())]);
+    assert_malformed(
+        read_metadata(&meta_bytes(vec![entry], vec![has_io_false()])),
+        "identity",
+    );
 }
