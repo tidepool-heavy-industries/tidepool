@@ -49,6 +49,15 @@ const PERSONA_MEMORIES: [(&str, &str); 3] = [
     ("curiosities", "curiosity-memory-original"),
 ];
 
+const PERSONA_PROMPTS: [(&str, &str); 6] = [
+    ("base.md", include_str!("../../../../exomonad/examples/persona/.exomonad/prompts/base.md")),
+    ("agent.md", include_str!("../../../../exomonad/examples/persona/.exomonad/prompts/agent.md")),
+    ("api-guide.md", include_str!("../../../../exomonad/examples/persona/.exomonad/prompts/api-guide.md")),
+    ("references/companion-compositions.md", include_str!("../../../../exomonad/examples/persona/.exomonad/prompts/references/companion-compositions.md")),
+    ("references/typesafe-compositions.md", include_str!("../../../../exomonad/examples/persona/.exomonad/prompts/references/typesafe-compositions.md")),
+    ("typesafe-ai-LICENSE.md", include_str!("../../../../exomonad/examples/persona/.exomonad/prompts/typesafe-ai-LICENSE.md")),
+];
+
 fn retained_location(config: &mut super::ActorHostConfig, workspace: &Path, run: &Path) {
     config.workspace = workspace.to_owned();
     config.run_directory =
@@ -100,6 +109,11 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
     for (relative, source) in sources {
         std::fs::write(authored.join(relative), source).unwrap();
     }
+    for (relative, source) in PERSONA_PROMPTS {
+        let destination = authored.join("prompts").join(relative);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(destination, source).unwrap();
+    }
     let conventional_spec = entry == "AgentSpec.agentSpec";
     if conventional_spec {
         std::fs::write(
@@ -120,6 +134,9 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
     .unwrap();
     std::fs::write(config.workspace.join(".gitignore"), ".exomonad/state/\n").unwrap();
     crate::exomonad::write_fixture_project_config(&authored, "test-model", |project| {
+        project.prompts.base = Some("prompts/base.md".into());
+        project.prompts.agent = Some("prompts/agent.md".into());
+        project.prompts.api_guide = Some("prompts/api-guide.md".into());
         project.haskell.source_roots = vec![".".into()];
         project.haskell.modules = vec![
             "Persona.Memory".into(),
@@ -244,6 +261,27 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
             ],
         )
         .await;
+        let frozen = host.context.config.workspace_inputs.as_ref().unwrap();
+        for (key, relative) in [
+            ("base", "base.md"),
+            ("agent", "agent.md"),
+            ("api-guide", "api-guide.md"),
+        ] {
+            assert_eq!(
+                frozen.prompts[key],
+                PERSONA_PROMPTS
+                    .iter()
+                    .find(|(path, _)| *path == relative)
+                    .unwrap()
+                    .1
+            );
+        }
+        let authored_prefix = format!(
+            "{}\n\n{}\n\n{}",
+            PERSONA_PROMPTS[0].1, PERSONA_PROMPTS[2].1, PERSONA_PROMPTS[1].1
+        );
+        let provider_request = serde_json::to_value(&first.request).unwrap();
+        assert!(provider_request["instructions"].as_str().unwrap().starts_with(&authored_prefix), "first provider instructions must carry the frozen authored base, guide and companion profile");
         let instructions = first.request.instructions.clone();
         let operation = first.operation("persona-refresh");
         first.sync_call_named(

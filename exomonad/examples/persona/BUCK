@@ -7,6 +7,13 @@ load("@prelude//:rules.bzl", "export_file", "filegroup")
     visibility = ["PUBLIC"],
 ) for source in ["AgentSpec.hs", "Persona/Memory.hs", "Persona/Web.hs", "Persona/Spec.hs", "Persona/Context.hs", "Persona/Orientation.hs"]]
 
+[export_file(
+    name = "authored_prompt_" + source.replace("/", "_").replace(".", "_").replace("-", "_"),
+    src = ".exomonad/prompts/" + source,
+    out = source.split("/")[-1],
+    visibility = ["PUBLIC"],
+) for source in ["base.md", "agent.md", "api-guide.md", "references/companion-compositions.md", "references/typesafe-compositions.md", "typesafe-ai-LICENSE.md"]]
+
 filegroup(
     name = "seed",
     srcs = {source: source for source in glob([".exomonad/**/*.hs", ".exomonad/**/*.md", ".exomonad/config.toml", "*.md"])},
