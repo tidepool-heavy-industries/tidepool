@@ -268,6 +268,7 @@ Additional focused execution targets include:
 | Target | Execution boundary |
 | --- | --- |
 | `//tidepool/runtime:runtime_admission_tests` | Three counted admission tests; no compiler worker |
+| `//bridge/facade:facade_source_revision_tests` | Five counted source publication/recovery tests; no compiler or browser resources |
 | `//bridge/facade:facade_process_tests` | Six counted framing and process cleanup tests |
 | `//bridge/facade:facade_host_tests` | Three real host tests; compiler and browser assets |
 | `//bridge/facade:facade_late_output_test` | One retained-output/compaction test |

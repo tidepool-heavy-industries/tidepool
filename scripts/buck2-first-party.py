@@ -1275,6 +1275,13 @@ def facade_test_cases(binary):
                                + ["//bridge/atomic-write:directory_fault_shared"]))
     prefix = "actor_host::m1_host_tests::"
     groups = [
+        ("facade_source_revision_tests", [
+            "exomonad::source::tests::missing_active_record_is_reconciled_from_the_published_link",
+            "exomonad::source::tests::corrupt_published_root_indexes_remain_visibly_unavailable",
+            "exomonad::source::tests::stale_active_record_is_reconciled_without_republishing_source",
+            "exomonad::source::tests::publishing_a_revision_leaves_the_frozen_capture_verifiable",
+            "exomonad::source::tests::source_publication_histories_preserve_revisions_through_record_recovery",
+        ], {}, {}, [], False, False, 30),
         ("facade_source_fixture_tests", [
             "actor_host::tests::driver_sources_keep_policy_private_and_preserve_explicit_public_modules",
         ], {}, {

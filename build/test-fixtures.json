@@ -154,6 +154,7 @@
     "bridge/facade/src/actor_host/fixtures/selected_parent_spawn.hs",
     "bridge/facade/src/actor_host/fixtures/shell_agent_spec.hs",
     "bridge/facade/src/actor_host/fixtures/sleep_required_spec.hs",
+    "bridge/facade/src/actor_host/fixtures/source_reload_coding_child.hs",
     "bridge/facade/src/actor_host/fixtures/spec_reload_with_slot.hs",
     "bridge/facade/src/actor_host/fixtures/spec_reload_without_slot.hs",
     "bridge/facade/src/actor_host/fixtures/startup_authored_failure.hs",
