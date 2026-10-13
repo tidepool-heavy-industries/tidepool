@@ -2,19 +2,6 @@
 
 use super::*;
 
-#[derive(Clone, Copy)]
-enum ReloadKind {
-    Helpers,
-    Spec,
-}
-
-struct SourcePreparation {
-    outcome: &'static str,
-    receipt: Vec<String>,
-    source: Option<Result<crate::CheckpointSourceLayer, String>>,
-    failure: Option<String>,
-}
-
 impl<H, O> ResidentKernelBehavior<H, O>
 where
     H: DispatchEffect<O> + Send + 'static,
@@ -25,21 +12,9 @@ where
         owned: OwnedExecution<H, O>,
     ) -> OwnedWorkbenchTask<Self> {
         let call = owned.state.request.tool_call().expect("reload tool call");
-        let (kind, checked) = match call.name.as_str() {
-            crate::reload_helpers_tool::RELOAD_HELPERS_TOOL => (
-                ReloadKind::Helpers,
-                crate::reload_helpers_tool::parse(call.arguments.clone())
-                    .map(|arguments| arguments.also_check)
-                    .map_err(|error| error.to_string()),
-            ),
-            crate::reload_spec_tool::RELOAD_SPEC_TOOL => (
-                ReloadKind::Spec,
-                crate::reload_spec_tool::parse(call.arguments.clone())
-                    .map(|arguments| arguments.also_check)
-                    .map_err(|error| error.to_string()),
-            ),
-            _ => unreachable!("reload admission"),
-        };
+        let checked = crate::reload_tool::parse(call.arguments.clone())
+            .map(|arguments| arguments.also_check)
+            .map_err(|error| error.to_string());
         let mut checked = match checked {
             Ok(checked) => checked,
             Err(error) => {
@@ -56,7 +31,7 @@ where
         };
         let started = std::time::Instant::now();
         let mut receipt = Vec::new();
-        if matches!(kind, ReloadKind::Spec) {
+        {
             let Some(expected) = self
                 .installed_tools
                 .current()
@@ -87,113 +62,6 @@ where
             }
             return self.owned_stage_spec_reload_task(owned, expected, checked, started, receipt);
         }
-        let layers = self.environment.source_layers.clone();
-        let actor = owned.state.effects.context.actor;
-        Self::owned_step_task(
-            owned,
-            move |owned| {
-                Box::pin(async move {
-                    // The source owner combines checking and publication. Once it
-                    // starts, retain the task until its actual outcome is known.
-                    if owned
-                        .state
-                        .effects
-                        .control
-                        .as_ref()
-                        .is_some_and(|control| control.cancellation_requested())
-                    {
-                        return Ok(SourcePreparation {
-                            outcome: "cancelled",
-                            receipt: vec!["reload cancelled before source publication.".into()],
-                            source: None,
-                            failure: None,
-                        });
-                    }
-                    let publication = owned
-                        .state
-                        .effects
-                        .control
-                        .as_ref()
-                        .expect("reload cancellation owner")
-                        .publication_decision();
-                    owned
-                        .spawn_blocking(move || {
-                            prepare_helpers(layers, actor, checked, receipt, &publication)
-                        })
-                        .await
-                        .map_err(|error| {
-                            ResidentActorWorkbenchError::ActorProtocol(format!(
-                                "reload source owner failed: {error}"
-                            ))
-                        })
-                })
-            },
-            move |behavior, _kernel, owned, prepared| {
-                let prepared = match prepared {
-                    Ok(prepared) => prepared,
-                    Err(error) => {
-                        return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
-                            owned,
-                            Err(workbench_failure(&[], 0, 1, error)),
-                        )))
-                    }
-                };
-                let SourcePreparation {
-                    outcome,
-                    mut receipt,
-                    source,
-                    failure,
-                } = prepared;
-                match source {
-                    Some(Ok(source)) => behavior
-                        .installed_tools
-                        .publish_source(owned.state.effects.context.actor, source),
-                    Some(Err(error)) => {
-                        behavior.installed_tools.invalidate_source();
-                        receipt.push(format!("source: {error}"));
-                        let result = match failure {
-                            Some(failure) => Err(workbench_failure(
-                                &[],
-                                0,
-                                1,
-                                ResidentActorWorkbenchError::ActorProtocol(format!(
-                                    "{failure}; frozen source unavailable: {error}"
-                                )),
-                            )),
-                            None => reload_result(reload_receipt(
-                                "source unavailable",
-                                started,
-                                receipt,
-                            )),
-                        };
-                        return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
-                            owned, result,
-                        )));
-                    }
-                    None => {
-                        return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
-                            owned,
-                            reload_result(reload_receipt(outcome, started, receipt)),
-                        )))
-                    }
-                }
-                if let Some(failure) = failure {
-                    return Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
-                        owned,
-                        Err(workbench_failure(
-                            &[],
-                            0,
-                            1,
-                            ResidentActorWorkbenchError::ActorProtocol(failure),
-                        )),
-                    )));
-                }
-                Ok(WorkbenchAdvance::Park(Self::finish_owned_task(
-                    owned,
-                    reload_result(reload_receipt(outcome, started, receipt)),
-                )))
-            },
-        )
     }
 
     fn owned_stage_spec_reload_task(
@@ -400,95 +268,6 @@ where
                 )))
             },
         )
-    }
-}
-
-fn prepare_helpers(
-    layers: Option<crate::ActorSourceLayerResolver>,
-    actor: ActorRef,
-    checked: Vec<String>,
-    mut receipt: Vec<String>,
-    publication: &Arc<tidepool_runtime::session::PublicationDecision>,
-) -> SourcePreparation {
-    let label = "helpers";
-    let Some(layers) = layers else {
-        receipt.push(format!("{label}: this host installs no source layers."));
-        return SourcePreparation {
-            outcome: "unavailable",
-            receipt,
-            source: None,
-            failure: None,
-        };
-    };
-    let principal = tidepool_repr::PrincipalId::from(actor);
-    let reloaded = layers.reload_helpers_with_publication(principal, &checked, publication);
-    let outcome = match reloaded {
-        crate::SourceLayerReload::Cancelled => {
-            receipt.push(format!("{label}: cancelled before source publication."));
-            return SourcePreparation {
-                outcome: "cancelled",
-                receipt,
-                source: None,
-                failure: None,
-            };
-        }
-        crate::SourceLayerReload::PublicationUnconfirmed {
-            revision,
-            diagnostics,
-        } => {
-            return SourcePreparation { outcome: "publication unconfirmed", receipt,
-                source: Some(layers.freeze_checkpoint_layer(principal)),
-                failure: Some(format!("source revision {revision} is visible but durability is unconfirmed: {diagnostics}")),
-            };
-        }
-        crate::SourceLayerReload::Unavailable(detail) => {
-            receipt.push(format!("{label}: {detail}"));
-            return SourcePreparation {
-                outcome: "unavailable",
-                receipt,
-                source: None,
-                failure: None,
-            };
-        }
-        crate::SourceLayerReload::Rejected {
-            active,
-            rejected,
-            diagnostics,
-        } => {
-            receipt.push(format!("{label}: rejected {rejected}; {active} remains active. Edited files remain on disk.\n{diagnostics}"));
-            return SourcePreparation {
-                outcome: "rejected",
-                receipt,
-                source: None,
-                failure: None,
-            };
-        }
-        crate::SourceLayerReload::Unchanged { revision } => {
-            receipt.push(format!("{label}: unchanged at {revision}."));
-            "unchanged"
-        }
-        crate::SourceLayerReload::Published {
-            previous,
-            revision,
-            changed,
-        } => {
-            receipt.push(format!(
-                "{label}: published {revision} over {previous}; changed {}.",
-                if changed.is_empty() {
-                    "nothing".into()
-                } else {
-                    changed.join(", ")
-                }
-            ));
-            "published"
-        }
-    };
-    let source = layers.freeze_checkpoint_layer(principal);
-    SourcePreparation {
-        outcome,
-        receipt,
-        source: Some(source),
-        failure: None,
     }
 }
 

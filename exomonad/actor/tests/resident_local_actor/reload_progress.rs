@@ -157,7 +157,7 @@ async fn two_parked_cells_reload_and_control_progress_independently() {
     let reload = hosted_tool(
         &fixture,
         "reload-first",
-        "reload_helpers",
+        "reload",
         serde_json::json!({}),
     )
     .await;
@@ -170,7 +170,7 @@ async fn two_parked_cells_reload_and_control_progress_independently() {
     let next_reload = hosted_tool(
         &fixture,
         "reload-second",
-        "reload_helpers",
+        "reload",
         serde_json::json!({}),
     )
     .await;
@@ -262,7 +262,7 @@ async fn cancelled_and_rejected_reload_release_the_administrative_owner() {
     let cancelled = hosted_tool(
         &fixture,
         "reload-cancel",
-        "reload_helpers",
+        "reload",
         serde_json::json!({}),
     )
     .await;
@@ -293,7 +293,7 @@ async fn cancelled_and_rejected_reload_release_the_administrative_owner() {
     let rejected = hosted_tool(
         &fixture,
         "reload-refused",
-        "reload_helpers",
+        "reload",
         serde_json::json!({}),
     )
     .await;
@@ -370,7 +370,7 @@ async fn cancelled_and_rejected_reload_release_the_administrative_owner() {
     let valid = hosted_tool(
         &fixture,
         "reload-after-refusal",
-        "reload_helpers",
+        "reload",
         serde_json::json!({}),
     )
     .await;

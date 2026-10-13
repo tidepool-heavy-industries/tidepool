@@ -277,6 +277,38 @@ impl WorkbenchPublicOwner {
         }))
     }
 
+    /// A retained generation may use a different notebook scope while keeping
+    /// its admitted actor, machine and resource domain unchanged.
+    pub(crate) fn issue_generation(
+        context: &ActorSessionContext,
+        descriptor: &ActorDescriptor,
+        scope: &tidepool_runtime::session::RuntimeLexicalScopeLease,
+        readiness: Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
+    ) -> Result<Arc<Self>, ResidentActorWorkbenchError> {
+        let placement = descriptor.placement();
+        if context.placement.session != placement.session
+            || context.placement.resource_scope != placement.resource_scope
+            || context.placement.lexical_scope != scope.scope()
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol("notebook generation differs from actor/session/resource authority".into()));
+        }
+        match (descriptor.persistence_policy(), readiness.as_ref()) {
+            (crate::ActorPersistencePolicy::Ephemeral, None) => {},
+            (crate::ActorPersistencePolicy::Durable, Some(native)) => {
+                let expected = descriptor.actor_path().and_then(|path| tidepool_runtime::session::RecoveryPublicOwner::new(path, context.actor.incarnation.0));
+                if expected.as_ref().map(|owner| owner.actor_owner()) != Some(native.durable_owner().actor_owner())
+                    || native.session() != context.placement.session
+                    || native.scope() != scope.scope()
+                    || !native.is_current()
+                {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol("notebook generation has no exact native publication capability".into()));
+                }
+            },
+            _ => return Err(ResidentActorWorkbenchError::ActorProtocol("notebook generation persistence differs from actor".into())),
+        }
+        Ok(Arc::new(Self { actor:context.actor, placement:context.placement, readiness }))
+    }
+
     pub(crate) fn native_readiness(
         &self,
     ) -> Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>> {
@@ -905,6 +937,7 @@ where
             Err(error) => return terminal_task(Err(error)),
         };
         let WorkbenchAdmission {
+            generation,
             initial_context,
             context,
             request,
@@ -925,8 +958,7 @@ where
         let reload = request.tool_call().is_some_and(|call| {
             matches!(
                 call.name.as_str(),
-                crate::reload_spec_tool::RELOAD_SPEC_TOOL
-                    | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
+                crate::reload_tool::RELOAD_TOOL
             )
         });
         if inspection.is_none() && !reload && compilation_authority.is_none() {
@@ -1037,6 +1069,7 @@ where
             state: Box::new(WorkbenchExecutionState {
                 cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
+                    generation,
                     lifecycle: self.lifecycle.clone(),
                     initial_context,
                     display_receipt_owner,

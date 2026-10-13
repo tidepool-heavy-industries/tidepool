@@ -148,7 +148,7 @@ async fn visible_reload_uncertainty_and_failed_freeze_preserve_failure() {
         std::time::Duration::from_secs(600),
         fixture.policy.dispatch_json_boxed(ToolInvocation {
             context: Some(context.clone()),
-            name: "reload_helpers".into(),
+            name: "reload".into(),
             arguments: ToolArguments::Structured(serde_json::json!({})),
         }),
     )
@@ -249,7 +249,7 @@ async fn visible_reload_uncertainty_and_failed_freeze_preserve_failure() {
             Some("reload-recovery".into()),
             None,
         )),
-        name: "reload_helpers".into(),
+        name: "reload".into(),
         arguments: ToolArguments::Structured(serde_json::json!({})),
     }));
     tokio::time::timeout(

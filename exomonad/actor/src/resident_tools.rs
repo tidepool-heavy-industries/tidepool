@@ -833,6 +833,13 @@ pub trait ResidentToolEndpoint: Send + Sync {
 
     fn tools(&self) -> &[HostedTool];
     fn instructions(&self) -> Option<&str>;
+    /// Exact composed instructions retained by this issued model request.
+    fn request_instructions(&self) -> Option<&str> {
+        None
+    }
+    fn request_generation(&self) -> Option<tidepool_runtime::session::NotebookGenerationId> {
+        None
+    }
     fn dispatch_boxed(&self, invocation: ToolInvocation) -> ResidentToolDispatchFuture;
     /// Expand an actor-issued display without compiling Haskell source.
     fn expand_display_boxed(&self, _identity: (i64, i64, i64), _key: i64) -> ResidentToolFuture {
@@ -1444,7 +1451,7 @@ impl ResidentToolClient {
         &self,
         request: WorkbenchRequest,
         invocation: Option<ToolInvocationContext>,
-        installed_tools: Option<crate::InstalledToolLease>,
+        installed_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
         selected_tool: Option<HostedTool>,
@@ -1465,7 +1472,7 @@ impl ResidentToolClient {
         &self,
         mut request: WorkbenchRequest,
         issued: IssuedWorkbenchCall,
-        installed_tools: Option<crate::InstalledToolLease>,
+        installed_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
         selected_tool: Option<HostedTool>,
@@ -1530,7 +1537,7 @@ impl ResidentToolClient {
         request: WorkbenchRequest,
         control: Arc<WorkbenchExecutionControl>,
         publication: Option<&HostedCellPublication>,
-        installed_tools: Option<crate::InstalledToolLease>,
+        installed_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
         hosted_checkpoint_capture: Option<Arc<dyn HostedCheckpointCapture>>,
         context_binding: Option<Arc<dyn crate::HostedContextBinding>>,
         selected_tool: Option<HostedTool>,

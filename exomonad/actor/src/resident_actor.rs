@@ -2968,6 +2968,7 @@ where
 }
 
 struct WorkbenchEffectState {
+    generation: Option<Arc<crate::resident_workbench::ActorGeneration>>,
     lifecycle: Option<crate::LifecycleHandle>,
     initial_context: bool,
     display_receipt_owner: Option<Arc<DisplayExecutionSettlement>>,
@@ -3394,6 +3395,7 @@ fn prepare_execution_effect(
 }
 
 struct WorkbenchAdmission {
+    generation: Option<Arc<crate::resident_workbench::ActorGeneration>>,
     initial_context: bool,
     context: ActorSessionContext,
     request: WorkbenchRequest,
@@ -3669,18 +3671,21 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 },
             );
         }
-        let installed_tools = match invocation.installed_tools {
+        let issued = invocation.installed_tools.or_else(|| self.installed_tools.snapshot());
+        let issued_generation = issued.as_ref().and_then(|snapshot| snapshot.generation()).cloned();
+        let installed_tools = match issued.as_ref().map(|snapshot| snapshot.installation()) {
             Some(lease) if lease.actor() != context.actor => {
                 return Err(KernelInvocationFailure::Rejected {
-                    receipts: Vec::new(),
-                    actor: context.actor,
-                    detail: "issued tool installation belongs to another actor".into(),
-                    diagnostic: None,
+                    receipts: Vec::new(), actor: context.actor,
+                    detail: "issued actor generation belongs to another actor".into(), diagnostic: None,
                 });
             }
-            Some(lease) => Some(lease),
-            None => self.installed_tools.current(),
+            Some(lease) => Some(lease.clone()),
+            None => None,
         };
+        if let Some(generation) = &issued_generation {
+            context = generation.context.clone();
+        }
         if invocation.initial_context {
             let tools = installed_tools
                 .as_ref()
@@ -3703,8 +3708,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             matches!(
                 call.name.as_str(),
                 crate::status_tool::STATUS_TOOL
-                    | crate::reload_spec_tool::RELOAD_SPEC_TOOL
-                    | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
+                    | crate::reload_tool::RELOAD_TOOL
             )
         });
         if !self.policy_installed
@@ -3745,11 +3749,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     .tool_call()
                     .and_then(|call| match call.name.as_str() {
                         crate::status_tool::STATUS_TOOL => Some(crate::status_tool::declaration()),
-                        crate::reload_spec_tool::RELOAD_SPEC_TOOL => {
-                            Some(crate::reload_spec_tool::declaration())
-                        }
-                        crate::reload_helpers_tool::RELOAD_HELPERS_TOOL => {
-                            Some(crate::reload_helpers_tool::declaration())
+                        crate::reload_tool::RELOAD_TOOL => {
+                            Some(crate::reload_tool::declaration())
                         }
                         _ => None,
                     })
@@ -3879,6 +3880,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             context = selected;
             Some(authority)
         };
+        let public_owner = if let Some(generation) = &issued_generation {
+            generation.public_owner.clone()
+        } else {
         let snapshot = self
             .lifecycle
             .as_ref()
@@ -3889,7 +3893,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 detail: "admitted execution lost its immutable resident owner".into(),
                 diagnostic: None,
             })?;
-        let public_owner = snapshot
+        snapshot
             .public_owner
             .ready()
             .cloned()
@@ -3899,7 +3903,8 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 actor,
                 detail: "admitted execution has no exact committed public owner".into(),
                 diagnostic: None,
-            })?;
+            })?
+        };
         if let Some(binding) = &invocation.context_binding {
             let control = control
                 .as_ref()
@@ -3922,6 +3927,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             control.bind_context(binding.clone());
         }
         Ok(WorkbenchPreflight::Admitted(WorkbenchAdmission {
+            generation: issued_generation,
             initial_context: invocation.initial_context,
             context,
             public_owner,
@@ -8106,7 +8112,7 @@ where
         }
         if matches!(boot, ResidentBoot::Workbench) {
             let source = self.freeze_installed_source(context.actor)?;
-            self.installed_tools.publish_source(context.actor, source);
+            self.installed_tools.publish(crate::InstalledToolLease::new(context.actor, source, None));
             self.set_standing(context.actor, ResidentStanding::Workbench);
             self.policy_installed = true;
             return Ok(KernelStep::Continue(()));
@@ -9805,11 +9811,7 @@ where
                 .cloned();
             let reload_spec_call = request
                 .tool_call()
-                .filter(|call| call.name == crate::reload_spec_tool::RELOAD_SPEC_TOOL)
-                .cloned();
-            let reload_helpers_call = request
-                .tool_call()
-                .filter(|call| call.name == crate::reload_helpers_tool::RELOAD_HELPERS_TOOL)
+                .filter(|call| call.name == crate::reload_tool::RELOAD_TOOL)
                 .cloned();
             if !cursor.dispatch_initialized {
                 cursor.tool_dispatch = if effects.initial_context {
@@ -9822,8 +9824,7 @@ where
                     ))
                 } else if let Some(call) = request.tool_call().filter(|call| {
                     call.name != crate::status_tool::STATUS_TOOL
-                        && call.name != crate::reload_spec_tool::RELOAD_SPEC_TOOL
-                        && call.name != crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
+                        && call.name != crate::reload_tool::RELOAD_TOOL
                 }) {
                     let tools = installed_tools
                         .as_ref()
@@ -9868,7 +9869,7 @@ where
                 };
                 cursor.dispatch_initialized = true;
             }
-            if reload_helpers_call.is_some() || reload_spec_call.is_some() {
+            if reload_spec_call.is_some() {
                 return Err(workbench_failure(
                     &[],
                     0,
@@ -10321,7 +10322,7 @@ where
                         // own dispatcher; an authored Haskell cell reaches here
                         // too, under the `haskell` tool name and the same
                         // installed spec's dispatcher — `status` and
-                        // `reload_agent_spec` and `reload_helpers` are the only committed outcomes
+                        // `reload` and `reload_helpers` are the only committed outcomes
                         // that never acquire one, so a broken slot can never
                         // block its own repair.
                         let hosted_call = request
@@ -12020,8 +12021,7 @@ where
         request.tool_call().is_some_and(|call| {
             matches!(
                 call.name.as_str(),
-                crate::reload_spec_tool::RELOAD_SPEC_TOOL
-                    | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
+                crate::reload_tool::RELOAD_TOOL
             )
         })
     }
@@ -12120,6 +12120,7 @@ where
             }
             let admitted = self.preflight_workbench(kernel.identity(), invocation, control)?;
             let WorkbenchAdmission {
+                generation,
                 initial_context,
                 context,
                 request,
@@ -12204,6 +12205,7 @@ where
             let mut execution_state = WorkbenchExecutionState {
                 cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
+                    generation,
                     lifecycle: self.lifecycle.clone(),
                     initial_context,
                     display_receipt_owner,
