@@ -158,6 +158,25 @@ impl PublicationClaim {
         *phase = PublicationPhase::Published;
         cancellation_pending
     }
+
+    /// Complete a confirmed intermediate publication while keeping this
+    /// execution eligible to publish a later terminal result. Cancellation
+    /// admitted during the write remains authoritative for that next step.
+    pub fn published_continuing(self) -> bool {
+        let mut phase = self.decision.phase.lock();
+        let PublicationPhase::CommitClaimed {
+            cancellation_pending,
+        } = *phase
+        else {
+            unreachable!("only a claimed publication can become visible");
+        };
+        *phase = if cancellation_pending {
+            PublicationPhase::CancellationRequested
+        } else {
+            PublicationPhase::Running
+        };
+        cancellation_pending
+    }
 }
 
 #[cfg(test)]
@@ -199,6 +218,50 @@ mod tests {
         let claim = decision.claim_commit().expect("running execution claims");
         assert!(!claim.before_rename_failure());
         assert_eq!(decision.phase(), PublicationPhase::Terminated);
+    }
+
+    #[test]
+    fn confirmed_intermediate_publication_allows_a_terminal_publication() {
+        let decision = PublicationDecision::new();
+        let first = decision.claim_commit().expect("first claim is admitted");
+        assert!(!first.published_continuing());
+        assert_eq!(decision.phase(), PublicationPhase::Running);
+
+        let terminal = decision.claim_commit().expect("terminal claim is admitted");
+        assert!(!terminal.published());
+        assert_eq!(decision.phase(), PublicationPhase::Published);
+        assert!(decision.claim_commit().is_none());
+    }
+
+    #[test]
+    fn cancellation_during_intermediate_publication_blocks_the_next_claim() {
+        let decision = PublicationDecision::new();
+        let claim = decision
+            .claim_commit()
+            .expect("intermediate claim is admitted");
+        assert_eq!(
+            decision.request_cancellation(),
+            PublicationCancellation::PendingCommitOutcome
+        );
+        assert!(claim.published_continuing());
+        assert_eq!(decision.phase(), PublicationPhase::CancellationRequested);
+        assert!(decision.claim_commit().is_none());
+        assert!(decision.terminate());
+        assert_eq!(decision.phase(), PublicationPhase::Terminated);
+    }
+
+    #[test]
+    fn cancellation_after_intermediate_publication_blocks_the_next_claim() {
+        let decision = PublicationDecision::new();
+        assert!(!decision
+            .claim_commit()
+            .expect("intermediate claim is admitted")
+            .published_continuing());
+        assert_eq!(
+            decision.request_cancellation(),
+            PublicationCancellation::RequestedBeforeCommit
+        );
+        assert!(decision.claim_commit().is_none());
     }
 
     #[test]

@@ -704,14 +704,22 @@ pub(super) fn settled_manifest_attempt(attempt: PublicationAttempt) -> PublicMan
 /// The capability issued with a confirmed durable owner publication.
 pub enum DurablePublicOwnerPublication {
     Committed(Arc<RuntimeDurablePublicReadiness>),
-    Refused { error: Box<SessionError> },
-    RecoveryRequired { error: Box<SessionError> },
+    CommittedContinuing {
+        readiness: Arc<RuntimeDurablePublicReadiness>,
+        cancellation_pending: bool,
+    },
+    Refused {
+        error: Box<SessionError>,
+    },
+    RecoveryRequired {
+        error: Box<SessionError>,
+    },
 }
 
 impl DurablePublicOwnerPublication {
     fn into_manifest_commit(self) -> PublicManifestCommit {
         match self {
-            Self::Committed(_) => PublicManifestCommit::Durable,
+            Self::Committed(_) | Self::CommittedContinuing { .. } => PublicManifestCommit::Durable,
             Self::Refused { error } => PublicManifestCommit::Refused { error },
             Self::RecoveryRequired { error } => PublicManifestCommit::RecoveryRequired { error },
         }

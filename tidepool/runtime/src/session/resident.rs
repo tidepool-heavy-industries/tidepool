@@ -3560,6 +3560,15 @@ where
         self.state
             .commit_notebook_generation(prepared, publication, on_visible)
     }
+    pub fn commit_notebook_generation_continuing(
+        &mut self,
+        prepared: super::PreparedNotebookGeneration,
+        publication: &Arc<super::PublicationDecision>,
+        on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        self.state
+            .commit_notebook_generation_continuing(prepared, publication, on_visible)
+    }
     pub fn active_notebook_generation(
         &self,
         actor: &super::RecoveryPublicOwner,

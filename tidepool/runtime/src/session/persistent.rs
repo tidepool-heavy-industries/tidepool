@@ -6010,15 +6010,20 @@ mod checkpoint_scope_tests {
         let (mut session, a, owner) = bootstrap_session(root.path(), 960);
         let lease_a = session.prepared_lexical_scope_lease(a).unwrap();
         let ready_a = session.durable_public_readiness(&owner, a).unwrap();
+        let decision = PublicationDecision::new();
         let initial = session
             .prepare_notebook_generation(a, &owner, None, generation_refs(1))
             .unwrap();
         assert!(matches!(
             session
-                .commit_notebook_generation(initial, &PublicationDecision::new(), |_| {})
+                .commit_notebook_generation_continuing(initial, &decision, |_| {})
                 .unwrap(),
-            DurablePublicOwnerPublication::Committed(_)
+            DurablePublicOwnerPublication::CommittedContinuing {
+                cancellation_pending: false,
+                ..
+            }
         ));
+        assert_eq!(decision.phase(), crate::session::PublicationPhase::Running);
         let store = session.lib().durable_graph.as_ref().unwrap().store.clone();
         let head_a = store
             .active_notebook_generation(RecoveryDomainId::Root, &owner)
@@ -6042,7 +6047,7 @@ mod checkpoint_scope_tests {
         ));
         let mut visible = false;
         let result = session
-            .commit_notebook_generation(prepared, &PublicationDecision::new(), |readiness| {
+            .commit_notebook_generation(prepared, &decision, |readiness| {
                 visible = true;
                 assert_eq!(readiness.durable_owner(), &owner_b);
                 assert!(readiness.is_current());
@@ -6054,6 +6059,10 @@ mod checkpoint_scope_tests {
             result,
             DurablePublicOwnerPublication::Committed(_)
         ));
+        assert_eq!(
+            decision.phase(),
+            crate::session::PublicationPhase::Published
+        );
         assert!(ready_a.is_ready());
         session.validate_lexical_scope_lease(a, &lease_a).unwrap();
         assert!(session.begin_durable_private_execution(&owner, a).is_ok());
@@ -6131,6 +6140,114 @@ mod checkpoint_scope_tests {
                 .unwrap(),
             Some(head)
         );
+    }
+
+    #[test]
+    fn generation_commit_refusal_terminates_but_uncertainty_keeps_the_claim_fenced() {
+        use crate::session::recovery_store::StoreFault;
+
+        let root = tempfile::tempdir().unwrap();
+        let (mut session, a, owner) = bootstrap_session(root.path(), 966);
+        let initial = session
+            .prepare_notebook_generation(a, &owner, None, generation_refs(1))
+            .unwrap();
+        session
+            .commit_notebook_generation(initial, &PublicationDecision::new(), |_| {})
+            .unwrap();
+        let head_a = session.active_notebook_generation(&owner).unwrap().unwrap();
+        let store = session.lib().durable_graph.as_ref().unwrap().store.clone();
+        let b = session.mint_isolated_scope();
+        let refused = session
+            .prepare_notebook_generation(b, &owner, Some(head_a.clone()), generation_refs(2))
+            .unwrap();
+        store.inject_fault(StoreFault::BeforeCommit);
+        let refused_decision = PublicationDecision::new();
+        assert!(matches!(
+            session
+                .commit_notebook_generation_continuing(refused, &refused_decision, |_| {})
+                .unwrap(),
+            DurablePublicOwnerPublication::Refused { .. }
+        ));
+        assert_eq!(
+            refused_decision.phase(),
+            crate::session::PublicationPhase::Terminated
+        );
+        assert_eq!(
+            session.active_notebook_generation(&owner).unwrap(),
+            Some(head_a.clone())
+        );
+
+        let uncertain = session
+            .prepare_notebook_generation(b, &owner, Some(head_a), generation_refs(3))
+            .unwrap();
+        store.inject_fault(StoreFault::CommitError);
+        let uncertain_decision = PublicationDecision::new();
+        assert!(matches!(
+            session
+                .commit_notebook_generation_continuing(uncertain, &uncertain_decision, |_| {})
+                .unwrap(),
+            DurablePublicOwnerPublication::RecoveryRequired { .. }
+        ));
+        assert_eq!(
+            uncertain_decision.phase(),
+            crate::session::PublicationPhase::CommitClaimed {
+                cancellation_pending: false
+            }
+        );
+        assert!(uncertain_decision.claim_commit().is_none());
+    }
+
+    #[test]
+    fn cancellation_during_confirmed_generation_commit_is_returned_to_the_actor() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut session, a, owner) = bootstrap_session(root.path(), 965);
+        let initial = session
+            .prepare_notebook_generation(a, &owner, None, generation_refs(1))
+            .unwrap();
+        session
+            .commit_notebook_generation(initial, &PublicationDecision::new(), |_| {})
+            .unwrap();
+        let head_a = session.active_notebook_generation(&owner).unwrap().unwrap();
+        let b = session.mint_isolated_scope();
+        let prepared_b = session
+            .prepare_notebook_generation(b, &owner, Some(head_a), generation_refs(2))
+            .unwrap();
+        let decision = PublicationDecision::new();
+        let mut cancel_result = None;
+        let result = session
+            .commit_notebook_generation_continuing(prepared_b, &decision, |_| {
+                cancel_result = Some(decision.request_cancellation());
+            })
+            .unwrap();
+        assert_eq!(
+            cancel_result,
+            Some(crate::session::PublicationCancellation::PendingCommitOutcome)
+        );
+        assert!(matches!(
+            result,
+            DurablePublicOwnerPublication::CommittedContinuing {
+                cancellation_pending: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            decision.phase(),
+            crate::session::PublicationPhase::CancellationRequested
+        );
+
+        let head_b = session.active_notebook_generation(&owner).unwrap().unwrap();
+        let c = session.mint_isolated_scope();
+        let prepared_c = session
+            .prepare_notebook_generation(c, &owner, Some(head_b), generation_refs(3))
+            .unwrap();
+        assert!(matches!(
+            session
+                .commit_notebook_generation_continuing(prepared_c, &decision, |_| panic!(
+                    "cancelled execution published another generation"
+                ))
+                .unwrap(),
+            DurablePublicOwnerPublication::Refused { .. }
+        ));
     }
     #[test]
     fn recovered_b_transfers_exact_generation_references_before_successor_reload() {
@@ -7365,6 +7482,28 @@ impl PersistentSession {
         publication: &Arc<super::PublicationDecision>,
         on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
     ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        self.commit_notebook_generation_with_completion(prepared, publication, on_visible, false)
+    }
+
+    /// Commit an intermediate generation and keep the same execution decision
+    /// live for its eventual terminal publication. The claim is released only
+    /// after the storage owner confirms installation.
+    pub fn commit_notebook_generation_continuing(
+        &mut self,
+        prepared: super::PreparedNotebookGeneration,
+        publication: &Arc<super::PublicationDecision>,
+        on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        self.commit_notebook_generation_with_completion(prepared, publication, on_visible, true)
+    }
+
+    fn commit_notebook_generation_with_completion(
+        &mut self,
+        prepared: super::PreparedNotebookGeneration,
+        publication: &Arc<super::PublicationDecision>,
+        on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
+        continuing: bool,
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
         let super::PreparedNotebookGeneration {
             owner_stamp,
             domain: issued_domain,
@@ -7503,6 +7642,7 @@ impl PersistentSession {
                 outcome => break outcome,
             }
         };
+        let mut cancellation_pending = None;
         let outcome = match committed {
             super::StoreDisposition::Committed((graph, receipt)) => {
                 let lib = self.lib_mut();
@@ -7511,9 +7651,15 @@ impl PersistentSession {
                 lib.tips = tips;
                 self.public_visibility_epochs.insert(scope, epoch);
                 on_visible(readiness.clone());
-                claim.published();
                 match receipt.installed_blocking() {
-                    Ok(()) => super::StoreDisposition::Committed(readiness),
+                    Ok(()) => {
+                        if continuing {
+                            cancellation_pending = Some(claim.published_continuing());
+                        } else {
+                            claim.published();
+                        }
+                        super::StoreDisposition::Committed(readiness)
+                    }
                     Err(error) => super::StoreDisposition::RecoveryRequired(error),
                 }
             }
@@ -7525,7 +7671,21 @@ impl PersistentSession {
                 super::StoreDisposition::RecoveryRequired(error)
             }
         };
-        Ok(super::durable_owner_disposition(outcome))
+        Ok(match (outcome, cancellation_pending) {
+            (super::StoreDisposition::Committed(readiness), Some(cancellation_pending)) => {
+                super::DurablePublicOwnerPublication::CommittedContinuing {
+                    readiness,
+                    cancellation_pending,
+                }
+            }
+            (outcome, None) => super::durable_owner_disposition(outcome),
+            (
+                super::StoreDisposition::Refused(_) | super::StoreDisposition::RecoveryRequired(_),
+                Some(_),
+            ) => {
+                unreachable!("only a confirmed intermediate commit has a continuation outcome")
+            }
+        })
     }
 }
 
