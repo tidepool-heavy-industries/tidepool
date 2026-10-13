@@ -10489,6 +10489,85 @@ mod tests {
     }
 
     #[test]
+    fn compiler_namespace_extension_separates_selected_native_roots_from_custody() {
+        let native = Arc::new(issued_native_groups(
+            "Root",
+            vec![(7, vec![])],
+            &[],
+            &BTreeMap::new(),
+        ));
+        let inventory = ArtifactInventory::default();
+        let sources = ["Left", "Right"].map(|name| {
+            inventory
+                .admit_shared(
+                    &inventory.empty_view(),
+                    vec![native.clone(), Arc::new(entry(name, &[]))],
+                )
+                .unwrap()
+        });
+        let projections = sources
+            .each_ref()
+            .map(|source| CompilerInputProjection::from_issued_entries(&source.entries()).unwrap());
+        let expected = sources[0].capture_graph_selection().native_groups;
+        let historical = sources[1].capture_graph_selection().native_groups;
+        assert_ne!(expected, historical);
+        let unselected = sources[0].merge(&sources[1]).unwrap();
+        assert!(
+            matches!(unselected.merge_compiler_inputs(&projections[0], &inventory.empty_view(), &CompilerInputProjection::default()),
+            Err(CompileError::ArtifactInventory(error))
+                if matches!(error.failure, ArtifactInventoryFailure::BindingAmbiguity { .. })),
+            "a raw union must retain conflicting explicit native roots"
+        );
+        let (selected, projection) = sources[0]
+            .merge_compiler_inputs(&projections[0], &sources[1], &projections[1])
+            .unwrap();
+        let recovery = ArtifactInventory::default();
+        let restored = recovery
+            .recover_selection(
+                &recovery.empty_view(),
+                selected.entries(),
+                &selected.capture_graph_selection(),
+                &selected.binding_dependencies(),
+            )
+            .unwrap();
+        for view in [&selected, &restored] {
+            let requirements =
+                NativeOriginalRequirement::for_projection(&projection, view, &[]).unwrap();
+            let observed = requirements
+                .iter()
+                .flat_map(|requirement| requirement.selection.graph_selection().roots.iter())
+                .filter_map(|node| match node {
+                    ArtifactBindingNode::Group(group)
+                        if group.binding.artifact == native.descriptor.id =>
+                    {
+                        Some(*group)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(observed, expected);
+            let graph = view.capture_graph_selection();
+            for group in expected.iter().chain(&historical) {
+                assert!(
+                    graph.native_groups.contains(group),
+                    "independent historical closure stays in custody"
+                );
+            }
+            assert_eq!(
+                graph
+                    .namespace
+                    .iter()
+                    .find(|binding| binding.artifact == native.descriptor.id),
+                sources[0]
+                    .capture_graph_selection()
+                    .namespace
+                    .iter()
+                    .find(|binding| binding.artifact == native.descriptor.id)
+            );
+        }
+    }
+
+    #[test]
     fn compiler_support_extension_keeps_native_issuer_roots_and_historical_custody() {
         use crate::declaration_context::ExactDeclarationContext;
         let inventory = ArtifactInventory::default();

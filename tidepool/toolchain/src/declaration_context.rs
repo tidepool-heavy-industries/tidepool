@@ -4773,12 +4773,16 @@ impl ExactDeclarationContext {
             .collect::<BTreeSet<_>>();
         for certificate in authored {
             self.admit_producer(certificate.toolchain_identity_sha256())?;
-            self.inventory = self.inventory.merge(certificate.artifact_view())?;
-            self.compiler_projection = self.compiler_projection.merge(
-                &certificate
-                    .compiler_input_projection()
-                    .for_source_owners(&selected_sources),
+            let incoming = certificate
+                .compiler_input_projection()
+                .for_source_owners(&selected_sources);
+            let (inventory, projection) = self.inventory.merge_compiler_inputs(
+                &self.compiler_projection,
+                certificate.artifact_view(),
+                &incoming,
             )?;
+            self.inventory = inventory;
+            self.compiler_projection = projection;
         }
         for join in joins {
             self.admit_producer(join.toolchain_identity_sha256())?;
@@ -4805,14 +4809,18 @@ impl ExactDeclarationContext {
                     &[],
                 )?;
             let joined = joined.merge_selected(source, &namespace)?;
-            self.inventory = self.inventory.merge(&joined)?;
-            self.compiler_projection = self.compiler_projection.merge(
-                &join
-                    .context()
-                    .compiler_projection
-                    .for_source_owners(&selected_sources),
+            let incoming = join
+                .context()
+                .compiler_projection
+                .for_source_owners(&selected_sources)
+                .merge(&issued)?;
+            let (inventory, projection) = self.inventory.merge_compiler_inputs(
+                &self.compiler_projection,
+                &joined,
+                &incoming,
             )?;
-            self.compiler_projection = self.compiler_projection.merge(&issued)?;
+            self.inventory = inventory;
+            self.compiler_projection = projection;
         }
         self.lexical = self.lexical.replace(lexical)?;
         self.original_instance_environment = OriginalInstanceEnvironment::Unknown;
