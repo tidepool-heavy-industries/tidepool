@@ -113,7 +113,7 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
                     serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap();
                 assert_eq!(output["status"], "committed", "{output}");
                 assert_eq!(
-                    output["items"].as_array().unwrap().last().unwrap()["output"],
+                    super::test_campaign::committed_display_text(&output),
                     "True",
                     "{output}"
                 );
