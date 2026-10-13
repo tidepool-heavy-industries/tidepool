@@ -12167,7 +12167,7 @@ pub(super) mod tests {
         };
         assert!(matches!(
             engine.observe(resume_runner, value).unwrap(),
-            HaskellValue::Con(DataConId(992), fields)
+            HaskellValue::Con(DataConId(992), ref fields)
                 if matches!(fields.as_slice(), [HaskellValue::Con(DataConId(991), children)] if children.is_empty())
         ));
         assert!(engine.release(value));
