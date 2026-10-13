@@ -928,8 +928,77 @@ impl HostedTestRuntime {
         else {
             panic!("the shipped workspace must install its prepared workspace original");
         };
-        assert_eq!(completed.get(recipe), Some(original));
-        assert_eq!(selection, coverage[0].program);
+        // Startup freezes the root's private helper graph. Its uncovered
+        // specialization is issued by this run, separately from deployment coverage.
+        assert!(!completed.contains_key(recipe));
+        let run_root = self.context.config.run_directory.path();
+        let issuer: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(run_root.join("workspace/runtime-preparation.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(issuer["original"], original.to_string());
+        let actor = self.context.actor.identity();
+        let placement = self
+            .context
+            .forest
+            .root_recovery_placement(actor)
+            .await
+            .unwrap();
+        let head = tidepool_runtime::session::RunRecoveryStore::read_notebook_generation_at(
+            self.context.recovery_store.path(),
+            tidepool_runtime::session::RecoveryDomainId::Root,
+            placement.owner(),
+        )
+        .unwrap()
+        .expect("the actual installed root has a durable selected generation");
+        let retained = exomonad_actor::PersistedActorInstallation::decode(
+            &head.references.installation,
+            &head.references.source,
+        )
+        .unwrap();
+        assert_eq!(
+            Some(retained.acquisition()),
+            installation.acquisition.as_ref()
+        );
+        assert_eq!(retained.acquisition().selection(), Some(selection.clone()));
+        let source: serde_json::Value =
+            serde_json::from_slice(head.references.source.bytes()).unwrap();
+        assert_eq!(source["version"], 1);
+        assert_eq!(source["domain"], frozen.identity());
+        let roots = source["roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|root| std::path::PathBuf::from(root["path"].as_str().unwrap()))
+            .collect::<Vec<_>>();
+        let directory = run_root
+            .join("workspace/entries")
+            .join(recipe)
+            .join(original.to_string());
+        assert_eq!(std::fs::canonicalize(&directory).unwrap(), directory);
+        let wrapper = directory.join("Expr.hs");
+        let observed =
+            tidepool_toolchain::artifacts::FrozenEntrySources::capture(&roots, &wrapper).unwrap();
+        let tidepool_toolchain::toolchain::CompilerDeploymentConfiguration::Configured(authority) =
+            tidepool_toolchain::toolchain::CompilerDeploymentConfiguration::from_env().unwrap()
+        else {
+            panic!("the actual original requires configured compiler deployment");
+        };
+        let before = tidepool_extract_cmd::extract_spawn_count();
+        let original_output =
+            tidepool_toolchain::artifacts::load_selected_production_entry_with_catalog(
+                &directory.join("entry"),
+                &authority,
+                &tidepool_toolchain::artifacts::ProductionEntrySources::FrozenWorkspace(observed),
+                &frozen.catalog_selection,
+            )
+            .expect("the selected run issuer's exact completed original authenticates");
+        assert_eq!(original_output.source_path(), wrapper);
+        assert_eq!(
+            tidepool_extract_cmd::extract_spawn_count(),
+            before,
+            "checking selected original custody must not submit compilation"
+        );
     }
 
     /// A barrier requiring the existing production host must fail on its own
@@ -1838,8 +1907,21 @@ pub(super) async fn test_stop(hooks: &mut Option<HostTestHooks>) {
     }
 }
 
-/// Explicit display is an effect receipt, independent of the cell's return text.
+/// Inline presentation consumers require an explicit text field. Authored-value
+/// checks follow the canonical reference into Store instead.
 pub(super) fn committed_explicit_display_operation(
+    response: &serde_json::Value,
+) -> Result<&serde_json::Value, String> {
+    let operation = committed_explicit_display_reference(response)?;
+    if operation["display"]["text"].as_str().is_none() {
+        return Err("explicit display: missing inline presentation".into());
+    }
+    Ok(operation)
+}
+
+/// Validate the issued display reference and settled publication. A presentation
+/// pointer identifies feedback; only the retained Store row proves authored text.
+pub(super) fn committed_explicit_display_reference(
     response: &serde_json::Value,
 ) -> Result<&serde_json::Value, String> {
     let fail = |detail: &str| Err(format!("explicit display: {detail}"));
@@ -1895,7 +1977,6 @@ pub(super) fn committed_explicit_display_operation(
         || !display["output"]["sequence"]
             .as_i64()
             .is_some_and(|sequence| sequence > 0)
-        || display["text"].as_str().is_none()
         || !operation["id"]["execution"]
             .as_str()
             .is_some_and(|execution| !execution.is_empty())
@@ -1903,6 +1984,15 @@ pub(super) fn committed_explicit_display_operation(
         || operation["id"]["effectOrdinal"].as_u64().is_none()
     {
         return fail("invalid canonical reference or operation coordinate");
+    }
+    let presentation = match display.get("textSource") {
+        Some(pointer) => pointer
+            .as_str()
+            .and_then(|pointer| response.pointer(pointer)),
+        None => display.get("text"),
+    };
+    if presentation.and_then(serde_json::Value::as_str).is_none() {
+        return fail("display presentation is not an issued string");
     }
     Ok(operation)
 }

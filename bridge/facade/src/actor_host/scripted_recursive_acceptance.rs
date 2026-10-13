@@ -420,18 +420,6 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             let root_actor = host.context.actor.identity();
             let root_path = AgentPath("/root".into());
             let mut pending = VecDeque::new();
-            let frozen = host.context.config.workspace_inputs.as_ref().unwrap();
-            let coverage = frozen.prepared_toolset_coverage().unwrap();
-            assert_eq!(coverage.len(), 1);
-            let installation = host.context.observer.installation(root_actor).await;
-            assert_eq!(
-                installation
-                    .acquisition
-                    .as_ref()
-                    .and_then(exomonad_actor::ToolsetAcquisition::selection),
-                Some(coverage[0].program.clone()),
-                "root installs its exact prepared program"
-            );
             host.http_input("Run the recursive captured-helper scenario.")
                 .await
                 .unwrap();

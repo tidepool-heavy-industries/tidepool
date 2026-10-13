@@ -40,7 +40,7 @@ fn final_answer(text: &str) -> harness::item::Item {
     }))
 }
 
-fn real_cell_returned_42(item: &harness::item::Item) -> bool {
+fn real_cell_committed_display_reference(item: &harness::item::Item) -> bool {
     if item.0["type"] != "custom_tool_call_output" || item.0["call_id"] != "browser-real-cell" {
         return false;
     }
@@ -48,8 +48,8 @@ fn real_cell_returned_42(item: &harness::item::Item) -> bool {
         .as_str()
         .and_then(|output| serde_json::from_str::<Value>(output).ok())
         .is_some_and(|response| {
-            committed_explicit_display_operation(&response)
-                .is_ok_and(|operation| operation["display"]["text"].as_str() == Some("42"))
+            super::super::hosted_test_context::committed_explicit_display_reference(&response)
+                .is_ok()
         })
 }
 
@@ -81,7 +81,9 @@ fn validate_completed_replies(input: &[harness::item::Item]) -> Result<(), Strin
             continue;
         };
         let matches = match (item.0["type"].as_str(), call_id) {
-            (Some("custom_tool_call_output"), "browser-real-cell") => real_cell_returned_42(item),
+            (Some("custom_tool_call_output"), "browser-real-cell") => {
+                real_cell_committed_display_reference(item)
+            }
             (Some("function_call_output"), "browser-typed-first") => {
                 typed_result_matches(item, call_id, "42")
             }
@@ -180,7 +182,10 @@ impl BrowserTransport {
                 ));
             }
             let contains_input = |text| request.input.iter().any(|item| item.0["content"] == text);
-            let result_present = request.input.iter().any(real_cell_returned_42);
+            let result_present = request
+                .input
+                .iter()
+                .any(real_cell_committed_display_reference);
             let (phase, item) = if !state.raw_issued && contains_input(RAW_INPUT) {
                 state.raw_issued = true;
                 (
@@ -415,7 +420,8 @@ fn committed_browser_display(
     let response: Value =
         serde_json::from_str(reply.0["output"].as_str().ok_or("missing raw reply")?)
             .map_err(|error| error.to_string())?;
-    let receipt = committed_explicit_display_operation(&response)?;
+    let receipt =
+        super::super::hosted_test_context::committed_explicit_display_reference(&response)?;
     let target = browser_target(&fixture.context);
     let expected_conversation = harness::model::ConversationIdentity::Embedded {
         run: target.run.clone(),
@@ -478,13 +484,17 @@ fn committed_browser_display(
         || emission.execution != expected_execution
         || emission.conversation.as_ref() != Some(&expected_conversation)
         || emission.page.text != "42"
-        || display["text"] != emission.page.text
         || serde_json::to_value(&emission.page.expansions).unwrap() != display["expansions"]
         || display["unavailable"] != emission.page.unavailable
     {
         return Err(
             "canonical actor-output row differs from its original notebook publication".into(),
         );
+    }
+    if let Some(inline) = display.get("text") {
+        if inline.as_str() != Some(emission.page.text.as_str()) {
+            return Err("inline display differs from its retained authored page".into());
+        }
     }
     Ok(row.clone())
 }
@@ -869,7 +879,7 @@ pub(super) async fn production_browser_journey() {
 }
 
 #[test]
-fn completed_browser_replies_report_failures_and_wrong_results() {
+fn completed_browser_replies_report_bad_raw_receipts_and_wrong_typed_results() {
     for (kind, call_id) in [
         ("custom_tool_call_output", "browser-real-cell"),
         ("function_call_output", "browser-typed-first"),
@@ -878,7 +888,9 @@ fn completed_browser_replies_report_failures_and_wrong_results() {
         for output in [
             json!({"error":"native custody requires identical certified inputs", "failure":{"phase":"compile"}}).to_string(),
             if kind == "custom_tool_call_output" {
-                super::super::hosted_test_context::committed_display_response_fixture("41").to_string()
+                let mut receipt = super::super::hosted_test_context::committed_display_response_fixture("41");
+                receipt["items"][0]["operations"][0]["displayPublication"]["status"] = json!("notPublished");
+                receipt.to_string()
             } else {
                 json!({"status":"completed", "total":1, "nextIndex":1, "items":[{"status":"committed", "output":"41"}]}).to_string()
             },
@@ -921,5 +933,24 @@ fn browser_reply_observation_allows_pending_and_successful_calls() {
             },
         })));
         assert!(validate_completed_replies(&input).is_ok());
+    }
+    let mut response = super::super::hosted_test_context::committed_display_response_fixture("42");
+    response["items"][0]["output"] = json!("42\n[bound is feedback, not authored page content]");
+    response["items"][0]["operations"][0]["display"]
+        .as_object_mut()
+        .unwrap()
+        .remove("text");
+    response["items"][0]["operations"][0]["display"]["textSource"] = json!("/items/0/output");
+    let pointer = harness::item::Item(
+        json!({"type":"custom_tool_call_output", "call_id":"browser-real-cell", "output":response.to_string()}),
+    );
+    assert!(validate_completed_replies(&[pointer]).is_ok());
+    for path in ["/items/0/missing", "/items/0/operations"] {
+        let mut malformed = response.clone();
+        malformed["items"][0]["operations"][0]["display"]["textSource"] = json!(path);
+        let item = harness::item::Item(
+            json!({"type":"custom_tool_call_output", "call_id":"browser-real-cell", "output":malformed.to_string()}),
+        );
+        assert!(validate_completed_replies(&[item]).is_err());
     }
 }
