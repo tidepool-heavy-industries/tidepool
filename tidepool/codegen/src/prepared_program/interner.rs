@@ -17,7 +17,7 @@ use tidepool_repr::execution_schema::{
     ConstructorDecl, ConstructorIdentity, StorageLayout, TargetDescriptor,
 };
 
-use super::CompileError;
+use super::{CompileError, ExecutionError};
 use tidepool_repr::DataConId;
 
 #[derive(Debug)]
@@ -35,6 +35,27 @@ pub(super) enum AbsorbConflict {
         identity: Box<ConstructorIdentity>,
         existing: Box<ConstructorIdentity>,
     },
+}
+
+impl From<AbsorbConflict> for ExecutionError {
+    fn from(conflict: AbsorbConflict) -> Self {
+        match conflict {
+            AbsorbConflict::Identity { existing, incoming } => Self::DescriptorShape {
+                identity: Box::new(incoming.identity.clone()),
+                existing_field_reps: existing.field_reps.clone(),
+                incoming_field_reps: incoming.field_reps.clone(),
+            },
+            AbsorbConflict::HostId {
+                host_id,
+                identity,
+                existing,
+            } => Self::HostIdConflict {
+                host_id,
+                identity,
+                existing,
+            },
+        }
+    }
 }
 
 /// The one set of external wrapper descriptors for the whole process. A

@@ -259,7 +259,7 @@ pub struct PreparedMachine<'code> {
     /// program ([`super::DescriptorInterner`]): later programs compile
     /// against it through [`Self::compile_for_install`], so their `Case`,
     /// enter and observation recognise cells an earlier program built.
-    interner: super::DescriptorInterner,
+    pub(super) interner: super::DescriptorInterner,
     /// Union of every installed program's descriptor registry (constructor
     /// identity/field-representation metadata for non-forcing observation).
     pub(super) descriptor_registry: BTreeMap<usize, DescriptorMetadata>,
@@ -1223,24 +1223,7 @@ impl<'code> PreparedMachine<'code> {
         // after every fallible step, so a refused install leaves it as is.
         self.interner
             .check_absorb(&compiled.interned_constructors)
-            .map_err(|conflict| match conflict {
-                super::interner::AbsorbConflict::Identity { existing, incoming } => {
-                    ExecutionError::DescriptorShape {
-                        identity: Box::new(incoming.identity.clone()),
-                        existing_field_reps: existing.field_reps.clone(),
-                        incoming_field_reps: incoming.field_reps.clone(),
-                    }
-                }
-                super::interner::AbsorbConflict::HostId {
-                    host_id,
-                    identity,
-                    existing,
-                } => ExecutionError::HostIdConflict {
-                    host_id,
-                    identity,
-                    existing,
-                },
-            })?;
+            .map_err(ExecutionError::from)?;
 
         // Reserve (capacity/contiguity, above) then verify EVERY declared
         // import before any other install side effect -- no statics
@@ -4053,7 +4036,10 @@ mod tests {
         link_program(prepared, &MachineImports::default()).expect("base_program fixture links")
     }
 
-    fn versioned_family_program(revision: u8) -> tidepool_repr::execution_schema::LinkedProgram {
+    fn versioned_family_wire(
+        revision: u8,
+        host: u64,
+    ) -> tidepool_repr::execution_schema::WireProgram {
         let mut wire = testing::wire_program();
         wire.signatures[0].results = ResultContract::Returns(vec![RuntimeRep::LiftedRef]);
         let family = testing::identity("RetainedVersions", "Family");
@@ -4062,7 +4048,7 @@ mod tests {
                 testing::identity("RetainedVersions", "Sibling"),
                 family.clone(),
             ),
-            host_id: DataConId(62000 + u64::from(revision) * 2),
+            host_id: DataConId(host),
             result_rep: RuntimeRep::LiftedRef,
             tag: 1,
             family_size: 2,
@@ -4108,7 +4094,19 @@ mod tests {
             captures: vec![],
             body: 0,
         };
-        link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap()
+        wire
+    }
+
+    fn versioned_family_program(revision: u8) -> tidepool_repr::execution_schema::LinkedProgram {
+        link_program(
+            testing::prepare(versioned_family_wire(
+                revision,
+                62000 + u64::from(revision) * 2,
+            ))
+            .unwrap(),
+            &MachineImports::default(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -4166,13 +4164,219 @@ mod tests {
             .value;
         drop(source);
         assert!(
-            matches!(destination.observe_handle(destination_b, arrived, 100).unwrap(), HaskellValue::Con(DataConId(62000), fields) if fields.is_empty())
+            matches!(destination.observe_handle(destination_b, arrived, 100).unwrap(), HaskellValue::Con(DataConId(62000), ref fields) if fields.is_empty())
         );
         assert!(
             matches!(destination.run_entry(destination_b, ValueId(0), &[], call, RealmId::ROOT).unwrap().values.as_slice(), [HaskellValue::Con(DataConId(62002), fields)] if fields.is_empty())
         );
         assert!(destination.release(arrived));
         let _ = b_top;
+    }
+
+    #[test]
+    fn ownerless_parcel_constructor_collisions_refuse_before_mutation_and_remain_visible_to_install(
+    ) {
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: false,
+        };
+        let a = versioned_family_program(0);
+        let collision_b = link_program(
+            testing::prepare(versioned_family_wire(1, 62000)).unwrap(),
+            &MachineImports::default(),
+        )
+        .unwrap();
+        let (mut source, producer) = PreparedMachine::new(first(&a), options).unwrap();
+        let result = source
+            .run_entry_retained(producer, ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+        let [PreparedResult::Managed(value)] = result.values.as_slice() else {
+            panic!("A constructor")
+        };
+        let value = *value;
+        assert!(source
+            .collect_major(source.quiesce().unwrap())
+            .unwrap()
+            .programs
+            .contains(&producer));
+        let parcel = source.export_parcel(value).unwrap();
+        assert!(parcel.images().is_empty());
+        let (mut refusing, b) = PreparedMachine::new(first(&collision_b), options).unwrap();
+        let before = (
+            refusing.handle_count(),
+            refusing.descriptors.len(),
+            refusing.descriptor_registry.len(),
+            refusing.residency().programs,
+        );
+        let declaration = refusing
+            .interner
+            .by_host(DataConId(62000))
+            .unwrap()
+            .0
+            .clone();
+        assert!(matches!(
+            refusing.import_parcel(parcel, RealmId::ROOT),
+            Err(ExecutionError::HostIdConflict {
+                host_id: DataConId(62000),
+                ..
+            })
+        ));
+        assert_eq!(
+            before,
+            (
+                refusing.handle_count(),
+                refusing.descriptors.len(),
+                refusing.descriptor_registry.len(),
+                refusing.residency().programs
+            )
+        );
+        assert_eq!(
+            &refusing.interner.by_host(DataConId(62000)).unwrap().0,
+            &declaration
+        );
+        refusing
+            .run_entry(b, ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+
+        let (mut accepting, base) = machine();
+        let arrived = accepting
+            .import_parcel(source.export_parcel(value).unwrap(), RealmId::ROOT)
+            .unwrap()
+            .value;
+        assert_eq!(
+            accepting
+                .interner
+                .by_host(DataConId(62000))
+                .unwrap()
+                .0
+                .identity,
+            versioned_family_wire(0, 62000).constructors[0].identity
+        );
+        assert!(matches!(
+            accepting.install_program(first(&collision_b), ImportBindings::new()),
+            Err(ExecutionError::HostIdConflict {
+                host_id: DataConId(62000),
+                ..
+            })
+        ));
+        assert!(
+            matches!(accepting.observe_handle(base, arrived, 100).unwrap(), HaskellValue::Con(DataConId(62000), ref fields) if fields.is_empty())
+        );
+        let reexported = accepting.export_parcel(arrived).unwrap();
+        assert!(reexported.images().is_empty());
+        let (mut final_machine, final_base) = machine();
+        let final_value = final_machine
+            .import_parcel(reexported, RealmId::ROOT)
+            .unwrap()
+            .value;
+        assert!(
+            matches!(final_machine.observe_handle(final_base, final_value, 100).unwrap(), HaskellValue::Con(DataConId(62000), ref fields) if fields.is_empty())
+        );
+    }
+
+    #[test]
+    fn algebraic_named_case_refuses_an_old_same_layout_sibling_even_with_a_default() {
+        let mut wire = versioned_family_wire(1, 62002);
+        let family = wire.constructors[0].identity.family.clone();
+        wire.signatures[0] = Signature {
+            arguments: vec![RuntimeRep::LiftedRef],
+            results: ResultContract::Returns(vec![RuntimeRep::Int(64)]),
+        };
+        wire.expressions.nodes = vec![
+            ExprFrame::Return(vec![Atom::Ref(ValueRef::Local(ValueId(99)))]),
+            ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
+                bits: 64,
+                bytes: 42_i64.to_be_bytes().to_vec(),
+            })]),
+            ExprFrame::Return(vec![Atom::Scalar(ScalarLiteral::Int {
+                bits: 64,
+                bytes: 99_i64.to_be_bytes().to_vec(),
+            })]),
+            ExprFrame::Case {
+                scrutinee: 0,
+                binder: ValueId(100),
+                scrutinee_results: ResultContract::Returns(vec![RuntimeRep::LiftedRef]),
+                kind: CaseKind::Algebraic(family),
+                alternatives: vec![
+                    Alternative {
+                        pattern: AlternativePattern::Constructor(ConstructorId(0)),
+                        binders: vec![],
+                        body: 1,
+                    },
+                    Alternative {
+                        pattern: AlternativePattern::Default,
+                        binders: vec![],
+                        body: 2,
+                    },
+                ],
+            },
+        ];
+        let Group::NonRecursive(top) = &mut wire.bindings[0] else {
+            unreachable!()
+        };
+        top.binding.rhs = HeapRhs::Function {
+            signature: SignatureId(0),
+            parameters: vec![ValueId(99)],
+            captures: vec![],
+            body: 3,
+        };
+        let case =
+            link_program(testing::prepare(wire).unwrap(), &MachineImports::default()).unwrap();
+        let options = PreparedMachineOptions {
+            nursery_bytes: RunOptions::default().nursery_bytes,
+        };
+        let call = PreparedCallOptions {
+            observation_budget: 100,
+            collect_before_observation: false,
+        };
+        let (mut source, a) =
+            PreparedMachine::new(first(&versioned_family_program(0)), options).unwrap();
+        let b = install_linked(
+            &mut source,
+            &versioned_family_program(1),
+            ImportBindings::new(),
+        )
+        .unwrap();
+        let case = install_linked(&mut source, &case, ImportBindings::new()).unwrap();
+        let old = source
+            .run_entry_retained(a, ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+        let current = source
+            .run_entry_retained(b, ValueId(0), &[], call, RealmId::ROOT)
+            .unwrap();
+        let [PreparedResult::Managed(old)] = old.values.as_slice() else {
+            panic!("A")
+        };
+        let [PreparedResult::Managed(current)] = current.values.as_slice() else {
+            panic!("B")
+        };
+        assert!(matches!(
+            source.run_entry_retained(
+                case,
+                ValueId(0),
+                &[PreparedInput::Managed(*old)],
+                call,
+                RealmId::ROOT
+            ),
+            Err(ExecutionError::Runtime(_))
+        ));
+        assert!(matches!(
+            source
+                .run_entry_retained(
+                    case,
+                    ValueId(0),
+                    &[PreparedInput::Managed(*current)],
+                    call,
+                    RealmId::ROOT
+                )
+                .unwrap()
+                .values
+                .as_slice(),
+            [PreparedResult::Scalar(42)]
+        ));
     }
 
     fn empty_static_program(mut program: CompiledProgram) -> CompiledProgram {
@@ -6818,12 +7022,13 @@ mod tests {
             parcel
                 .constructors()
                 .iter()
-                .any(|constructor| constructor.identity == tidepool_repr::DataConId(7_802)),
+                .any(|constructor| constructor.declaration.host_id
+                    == tidepool_repr::DataConId(7_802)),
             "the parcel carries A's Second constructor descriptor: {:?}",
             parcel
                 .constructors()
                 .iter()
-                .map(|constructor| constructor.identity)
+                .map(|constructor| constructor.declaration.host_id)
                 .collect::<Vec<_>>()
         );
 
@@ -8909,7 +9114,11 @@ mod tests {
             link_program(prepared, &MachineImports::default()).expect("conflicting fixture links");
         match machine.compile_for_install(&linked) {
             Err(super::super::CompileError::DescriptorShape { identity, .. })
-                if *identity == testing::identity("S3Import", "Field") => {}
+                if *identity
+                    == testing::constructor_identity(
+                        testing::identity("S3Import", "Field"),
+                        testing::identity("S3Import", "Field"),
+                    ) => {}
             Err(other) => panic!("expected DescriptorShape, got {other:?}"),
             Ok(_) => panic!("a differently-declared Field must not compile against A's interner"),
         }

@@ -93,6 +93,14 @@ fn rep(rep: RuntimeRep) -> Vec<u8> {
     }
 }
 
+fn type_identity(name: &str) -> Vec<u8> {
+    array([symbol(name), array([uint(1), bytes(&[0; 16])])])
+}
+
+fn constructor_identity(name: &str, family: &str) -> Vec<u8> {
+    array([symbol(name), type_identity(family)])
+}
+
 fn signature(results: &[RuntimeRep]) -> Vec<u8> {
     signature_with(&[], results)
 }
@@ -189,7 +197,7 @@ fn enter_frame(callee: u8, signature: u8) -> Vec<u8> {
 
 fn case_kind(kind: u8) -> Vec<u8> {
     match kind {
-        0 => array([uint(0), symbol("BoxFamily")]),
+        0 => array([uint(0), type_identity("BoxFamily")]),
         1 => array([uint(1), rep(RuntimeRep::Int(64))]),
         2 => array([uint(2)]),
         3 => array([uint(3)]),
@@ -271,8 +279,7 @@ fn top_binding_named(id: u8, name: &str, rhs: Vec<u8>) -> Vec<u8> {
 
 fn constructor_decl() -> Vec<u8> {
     array([
-        symbol("Box"),
-        symbol("BoxFamily"),
+        constructor_identity("Box", "BoxFamily"),
         array([]),
         array([]),
         array([array([]), uint(1), uint(0), array([])]),
@@ -285,8 +292,7 @@ fn constructor_decl() -> Vec<u8> {
 
 fn lifted_constructor_decl() -> Vec<u8> {
     array([
-        symbol("Outer"),
-        symbol("OuterFamily"),
+        constructor_identity("Outer", "OuterFamily"),
         array([rep(RuntimeRep::LiftedRef)]),
         array([boolean(false)]),
         array([
@@ -334,9 +340,9 @@ fn wire_program_with_bindings(
         array(expressions),
         array(bindings),
         uint(u64::from(entry)),
-        // Canonical TypeGraph::default() encoding: version 1, no nodes or
+        // Canonical TypeGraph::default() encoding: version 2, no nodes or
         // edges. An empty array here omits the required graph record.
-        array([uint(1), array([]), array([])]),
+        array([uint(2), array([]), array([])]),
         array([]),
         // `constructor_replies`: none in this native fixture.
         array([]),
@@ -655,9 +661,9 @@ fn mixed_result_wire(binding_count: u8) -> Vec<u8> {
         array(expressions),
         array(bindings),
         uint(0),
-        // Canonical TypeGraph::default() encoding: version 1, no nodes or
+        // Canonical TypeGraph::default() encoding: version 2, no nodes or
         // edges. An empty array here omits the required graph record.
-        array([uint(1), array([]), array([])]),
+        array([uint(2), array([]), array([])]),
         array([]),
         // `constructor_replies`: none in this native fixture.
         array([]),

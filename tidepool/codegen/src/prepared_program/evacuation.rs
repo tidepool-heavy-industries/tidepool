@@ -31,8 +31,7 @@ use tidepool_heap::descriptor_region::DescriptorArena;
 use tidepool_heap::execution_descriptor::{DescriptorTraceError, ObjectDescriptor};
 use tidepool_heap::external_storage::ExternalStorageKind;
 use tidepool_heap::gc::evacuate::{export_reachable, MachineSpaces, NurseryView};
-use tidepool_repr::execution_schema::{RuntimeRep, SymbolIdentity};
-use tidepool_repr::DataConId;
+use tidepool_repr::execution_schema::{ConstructorDecl, RuntimeRep, SymbolIdentity};
 
 /// Admit static roots carried by a parcel until their owning
 /// instances install. A failed import must not leave ownerless regions in the
@@ -140,11 +139,10 @@ impl ParcelImage {
 /// A constructor descriptor the copied objects use. Interned constructors
 /// belong to no image (an image that declares one shares the process-wide
 /// descriptor, and retiring that image leaves it), so a parcel carries them
-/// itself, with the observation identity the importer registers.
+/// itself, with the complete declaration the importer admits.
 pub struct ParcelConstructor {
     pub descriptor: Arc<ObjectDescriptor>,
-    pub identity: DataConId,
-    pub fields: Vec<RuntimeRep>,
+    pub declaration: ConstructorDecl,
 }
 
 /// A previously issued declaring-row dependency bound to the parcel's exact
@@ -284,10 +282,17 @@ impl PreparedMachine<'_> {
                                     super::DescriptorMeaning::External => {}
                                     super::DescriptorMeaning::Constructor(observation) => {
                                         if constructor_headers.insert(header) {
+                                            let (declaration, descriptor) = self.interner.by_host(observation.identity).ok_or(
+                                                ExecutionError::Invariant("export_parcel: constructor has no admitted declaration"),
+                                            )?;
+                                            if !Arc::ptr_eq(descriptor, &entry.descriptor)
+                                                || declaration.field_reps != observation.fields
+                                            {
+                                                return Err(ExecutionError::Invariant("export_parcel: constructor declaration disagrees with its exact descriptor"));
+                                            }
                                             constructors.push(ParcelConstructor {
                                                 descriptor: Arc::clone(&entry.descriptor),
-                                                identity: observation.identity,
-                                                fields: observation.fields.clone(),
+                                                declaration: declaration.clone(),
                                             });
                                         }
                                     }
@@ -508,6 +513,21 @@ impl PreparedMachine<'_> {
             }
         }
         let missing = self.missing_parcel_images(&images);
+        // Check the complete admission, including ownerless constructors and
+        // conflicts between different incoming images, before any registration.
+        let carried_declarations = constructors
+            .iter()
+            .map(|entry| (entry.declaration.clone(), Arc::clone(&entry.descriptor)))
+            .collect::<Vec<_>>();
+        let mut declarations = carried_declarations.clone();
+        declarations.extend(
+            missing
+                .iter()
+                .flat_map(|entry| entry.image.interned_constructors.iter().cloned()),
+        );
+        self.interner
+            .check_absorb(&declarations)
+            .map_err(ExecutionError::from)?;
         let new_constructors: Vec<&ParcelConstructor> = constructors
             .iter()
             .filter(|entry| {
@@ -549,6 +569,7 @@ impl PreparedMachine<'_> {
         let mut provisional_headers = Vec::new();
         let mut gc_provisional_headers = Vec::new();
         let mut static_admission = None;
+        let previous_interner = self.interner.clone();
         let result = (|| {
             // Carried constructors join this machine's registry exactly as an
             // install's interned constructors do. Their provisional registrations
@@ -564,14 +585,14 @@ impl PreparedMachine<'_> {
                         descriptor: Arc::clone(&entry.descriptor),
                         meaning: super::DescriptorMeaning::Constructor(
                             super::ConstructorObservation {
-                                identity: entry.identity,
-                                fields: entry.fields.clone(),
+                                identity: entry.declaration.host_id,
+                                fields: entry.declaration.field_reps.clone(),
                             },
                         ),
                     },
                 );
                 self.machine
-                    .register_prepared_constructors([(header, entry.identity)]);
+                    .register_prepared_constructors([(header, entry.declaration.host_id)]);
             }
             let carried: Vec<Arc<ObjectDescriptor>> = new_constructors
                 .iter()
@@ -810,6 +831,7 @@ impl PreparedMachine<'_> {
         })();
         match result {
             Ok(imported) => {
+                self.interner.commit_absorb(&carried_declarations);
                 if let Some(admission) = &mut static_admission {
                     admission.committed();
                 }
@@ -846,6 +868,7 @@ impl PreparedMachine<'_> {
                     }
                     return Err(cleanup);
                 }
+                self.interner = previous_interner;
                 // Collection proved no copied object still names these
                 // provisional layouts. The copy's registrations need cleanup
                 // even when the first image never installed.
