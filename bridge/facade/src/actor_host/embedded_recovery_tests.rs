@@ -1202,6 +1202,39 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
     drop(bindings);
     drop(allocation);
     drop(lease);
+    let assert_configuration_preserved = || {
+        let records = exomonad_actor::ActorRecoveryJournal::read_observed(
+            &run.join("actor-lifecycle.v2.jsonl"),
+        )
+        .unwrap();
+        let startup = latest_durable_root_application(&records).unwrap().unwrap();
+        // Startup can commit an incarnation transfer before installer loading.
+        // Observe the two exact owners named by its durable startup intent.
+        let actors = std::iter::once(startup.admission.actor)
+            .chain(startup.startup.as_ref().unwrap().manifest_predecessor);
+        let heads = actors
+            .filter_map(|actor| {
+                let lookup =
+                    tidepool_runtime::session::RecoveryPublicOwner::new(&path, actor.incarnation.0)
+                        .unwrap();
+                tidepool_runtime::session::RunRecoveryStore::read_notebook_generation_at(
+                    &run.join("recovery.sqlite"),
+                    tidepool_runtime::session::RecoveryDomainId::Root,
+                    &lookup,
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            heads.len(),
+            1,
+            "startup retains one selected configuration owner"
+        );
+        assert_eq!(
+            heads[0].references, selected.references,
+            "installer refusal preserves exact B configuration through ownership transfer"
+        );
+    };
     std::fs::rename(&output, &retained_output).unwrap();
     let mut missing = start(root, "coherent-missing-installer");
     refused(
@@ -1211,6 +1244,7 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
         "selected completed installer is unavailable",
     )
     .await;
+    assert_configuration_preserved();
     std::fs::rename(&retained_output, &output).unwrap();
     std::fs::write(
         &wrapper,
@@ -1226,16 +1260,7 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
     )
     .await;
     std::fs::write(&wrapper, original_wrapper).unwrap();
-    assert_eq!(
-        tidepool_runtime::session::RunRecoveryStore::read_notebook_generation_at(
-            &run.join("recovery.sqlite"),
-            tidepool_runtime::session::RecoveryDomainId::Root,
-            &owner,
-        )
-        .unwrap(),
-        Some(selected),
-        "refusal does not select the draft or rewrite B"
-    );
+    assert_configuration_preserved();
     finish_fixture(retained_root);
 }
 
