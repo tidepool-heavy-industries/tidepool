@@ -8228,6 +8228,17 @@ where
         );
         let compiler_owner =
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(kernel.retained_exit());
+        if self.explicit_installer.is_some()
+            && matches!(
+                self.initial_configuration,
+                InitialActorConfiguration::Restored { .. }
+            )
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "a restored source-backed generation cannot substitute an explicit live installer"
+                    .into(),
+            ));
+        }
         let compiled_tools = match self.explicit_installer.as_ref() {
             Some(installer) => compiler_owner
                 .scope(application_workbench.prepare_explicit_application(
