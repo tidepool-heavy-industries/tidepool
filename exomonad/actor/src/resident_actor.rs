@@ -7935,7 +7935,14 @@ where
         &self,
         actor: ActorRef,
     ) -> Result<crate::CheckpointSourceLayer, ResidentActorWorkbenchError> {
-        if matches!(self.initial_configuration, InitialActorConfiguration::Unselected) { return Err(ResidentActorWorkbenchError::ActorProtocol("initial configuration has not been selected".into())); }
+        if matches!(
+            self.initial_configuration,
+            InitialActorConfiguration::Unselected
+        ) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "initial configuration has not been selected".into(),
+            ));
+        }
         if let InitialActorConfiguration::Restored { source, .. } = &self.initial_configuration {
             return Ok(source.clone());
         }
@@ -8229,15 +8236,28 @@ where
                     self.prepared_request_receiver = Some(receiver);
                     tools
                 }),
-            None if matches!(self.initial_configuration, InitialActorConfiguration::Restored { .. }) => {
-                let InitialActorConfiguration::Restored { head, .. } = &self.initial_configuration else { unreachable!() };
+            None if matches!(
+                self.initial_configuration,
+                InitialActorConfiguration::Restored { .. }
+            ) =>
+            {
+                let InitialActorConfiguration::Restored { head, .. } = &self.initial_configuration
+                else {
+                    unreachable!()
+                };
                 let recovered = crate::PersistedActorInstallation::decode(
-                    &head.references.installation, &head.references.source,
-                ).map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
-                compiler_owner.scope(application_workbench.prepare_recovered_tools(
-                    compile_context.clone(), self.spec_installs,
-                    self.descriptor.capabilities().effect_keys().to_vec(), &recovered,
-                )).await
+                    &head.references.installation,
+                    &head.references.source,
+                )
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+                compiler_owner
+                    .scope(application_workbench.prepare_recovered_tools(
+                        compile_context.clone(),
+                        self.spec_installs,
+                        self.descriptor.capabilities().effect_keys().to_vec(),
+                        &recovered,
+                    ))
+                    .await
             }
             None => {
                 compiler_owner
@@ -8277,6 +8297,10 @@ where
                 self.installed_tools.clone(),
             ));
 
+        self.descriptor
+            .prepare_prompt_reload(context.actor, policy.tools(), &self.runtime_observation)
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+
         let prompts = match &self.initial_configuration {
             InitialActorConfiguration::Restored { head, .. } => {
                 prepared_tools
@@ -8286,7 +8310,11 @@ where
                     })?;
                 Some(head.references.prompts.clone())
             }
-            InitialActorConfiguration::Unselected => return Err(ResidentActorWorkbenchError::ActorProtocol("prompt composition preceded initial configuration selection".into())),
+            InitialActorConfiguration::Unselected => {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "prompt composition preceded initial configuration selection".into(),
+                ))
+            }
             InitialActorConfiguration::Fresh => self
                 .descriptor
                 .compose_prompts(context.actor, policy.tools(), &self.runtime_observation)
