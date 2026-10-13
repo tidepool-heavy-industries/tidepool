@@ -149,12 +149,9 @@ impl EmbeddedPolicySnapshot {
             checkpoint_capture,
             context_binding,
         );
-        Box::pin(async move {
-            future
-                .await?
-                .into_json()
-                .map_err(ResidentToolError::Encoding)
-        })
+        Box::pin(
+            async move { project_model_result(future.await?).map_err(ResidentToolError::Encoding) },
+        )
     }
 
     pub(super) fn implementation(&self, name: &str) -> Option<exomonad_tool::ToolImplementation> {
@@ -215,6 +212,58 @@ impl EmbeddedPolicySnapshot {
     }
 }
 
+fn project_model_result(
+    response: exomonad_actor::ResidentToolResponse,
+) -> Result<Value, serde_json::Error> {
+    use tidepool_runtime::session::{
+        WorkbenchDisplayPublication, WorkbenchItemStatus, WorkbenchPublicationOutcome,
+        WorkbenchRunStatus,
+    };
+    let exomonad_actor::ResidentToolResponse::Workbench(response) = response else {
+        return response.into_json();
+    };
+    let successful = matches!(response.status, WorkbenchRunStatus::Committed)
+        && matches!(
+            response.publication,
+            Some(WorkbenchPublicationOutcome::Published { .. })
+        );
+    let mut projected = serde_json::to_value(&response)?;
+    if successful {
+        for (position, (item, encoded)) in response
+            .items
+            .iter()
+            .zip(projected["items"].as_array_mut().unwrap())
+            .enumerate()
+        {
+            if item.status != WorkbenchItemStatus::Committed {
+                continue;
+            }
+            for (operation, encoded) in item
+                .operations
+                .iter()
+                .zip(encoded["operations"].as_array_mut().into_iter().flatten())
+            {
+                if matches!(
+                    operation.display_publication,
+                    Some(WorkbenchDisplayPublication::Published { .. })
+                ) {
+                    // The display settlement owner also appends this page to item.output.
+                    // Retain page identity, expansion and publication facts here.
+                    if let Some(display) = encoded.get_mut("display").and_then(Value::as_object_mut)
+                    {
+                        display.remove("text");
+                        display.insert(
+                            "textSource".into(),
+                            json!(format!("/items/{position}/output")),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(projected)
+}
+
 fn project_tools(tools: &[HostedTool]) -> Result<EmbeddedToolProjection, String> {
     let mut projected = Vec::with_capacity(tools.len());
     let mut schemas = HashMap::new();
@@ -267,6 +316,141 @@ mod tests {
     use exomonad_actor::ResidentToolDispatchFuture;
     use exomonad_tool::{CustomToolDeclaration, ToolDeclaration, ToolKind};
     use std::future::ready;
+
+    fn display_response() -> tidepool_runtime::session::WorkbenchResponse {
+        use tidepool_runtime::session::*;
+        let page = WorkbenchDisplayPublicationIdentity {
+            display: (1, 2, 3),
+            page_ordinal: 1,
+        };
+        let output = ActorOutputReference {
+            run: "run".into(),
+            sequence: 42,
+        };
+        WorkbenchResponse {
+            status: WorkbenchRunStatus::Committed,
+            summary: None,
+            next_index: 1,
+            total: 1,
+            publication: Some(WorkbenchPublicationOutcome::Published {
+                bindings: vec!["observed".into()],
+            }),
+            items: vec![WorkbenchItemReceipt {
+                index: 0,
+                kind: None,
+                span: None,
+                source_items: vec![],
+                status: WorkbenchItemStatus::Committed,
+                output: "observed value\n[bound observed]".into(),
+                value: None,
+                diagnostics: vec![],
+                failure_layer: None,
+                warnings: vec!["warning".into()],
+                installed_bindings: vec!["observed".into()],
+                terminal_transfer: None,
+                operations: vec![WorkbenchOperationReceipt {
+                    id: WorkbenchOperationId {
+                        execution: WorkbenchExecutionId::from_digest([1; 16]),
+                        input_unit_index: 0,
+                        effect_ordinal: 0,
+                    },
+                    effect: "Console.DisplayWith".into(),
+                    disposition: WorkbenchOperationDisposition::Committed,
+                    display: Some(WorkbenchDisplayOutput {
+                        page: WorkbenchDisplayPage {
+                            identity: page.display,
+                            text: "observed value".into(),
+                            expansions: vec![(1, "detail".into())],
+                            unavailable: true,
+                        },
+                        output: output.clone(),
+                    }),
+                    display_publication: Some(WorkbenchDisplayPublication::Published {
+                        publication: page,
+                        output,
+                    }),
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn model_success_projects_display_content_once_and_preserves_receipt_facts() {
+        use tidepool_runtime::session::*;
+        let response = display_response();
+        let page = WorkbenchDisplayPublicationIdentity {
+            display: (1, 2, 3),
+            page_ordinal: 1,
+        };
+        let full = serde_json::to_value(&response).unwrap();
+        let projected = project_model_result(exomonad_actor::ResidentToolResponse::Workbench(
+            response.clone(),
+        ))
+        .unwrap();
+        let mut expected = full.clone();
+        expected["items"][0]["operations"][0]["display"]
+            .as_object_mut()
+            .unwrap()
+            .remove("text");
+        expected["items"][0]["operations"][0]["display"]["textSource"] = json!("/items/0/output");
+        assert_eq!(projected, expected);
+        assert_eq!(
+            full["items"][0]["operations"][0]["display"]["text"],
+            "observed value"
+        );
+
+        // Partial execution and uncertain publication retain the entire receipt.
+        for publication in [
+            WorkbenchPublicationOutcome::NotPublished {
+                reason: WorkbenchNotPublishedReason::Failed,
+            },
+            WorkbenchPublicationOutcome::RecoveryRequired {
+                detail: "publication uncertain".into(),
+            },
+        ] {
+            let mut partial = response.clone();
+            partial.publication = Some(publication);
+            assert_eq!(
+                project_model_result(exomonad_actor::ResidentToolResponse::Workbench(
+                    partial.clone()
+                ))
+                .unwrap(),
+                serde_json::to_value(partial).unwrap()
+            );
+        }
+        let mut uncertain = response;
+        uncertain.items[0].operations[0].display_publication =
+            Some(WorkbenchDisplayPublication::Unconfirmed {
+                publication: page,
+                detail: "store outcome unknown".into(),
+            });
+        assert_eq!(
+            project_model_result(exomonad_actor::ResidentToolResponse::Workbench(
+                uncertain.clone()
+            ))
+            .unwrap(),
+            serde_json::to_value(uncertain).unwrap()
+        );
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn model_projection_preserves_arbitrary_display_values(text in ".{0,2048}", published in proptest::bool::ANY) {
+            use tidepool_runtime::session::*;
+            let mut response = display_response();
+            response.items[0].output = text.clone();
+            response.items[0].operations[0].display.as_mut().unwrap().page.text = text;
+            if !published {
+                response.publication = Some(WorkbenchPublicationOutcome::RecoveryRequired { detail: "unknown".into() });
+            }
+            let mut expected = serde_json::to_value(&response).unwrap();
+            if published {
+                expected["items"][0]["operations"][0]["display"].as_object_mut().unwrap().remove("text");
+                expected["items"][0]["operations"][0]["display"]["textSource"] = json!("/items/0/output");
+            }
+            proptest::prop_assert_eq!(project_model_result(exomonad_actor::ResidentToolResponse::Workbench(response)).unwrap(), expected);
+        }
+    }
 
     struct ProbePolicy {
         tools: Vec<HostedTool>,
