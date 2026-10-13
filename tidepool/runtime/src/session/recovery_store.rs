@@ -569,12 +569,40 @@ impl NativeStorage {
                     transaction,
                     domain,
                     &PreparedPublicOwnerChange::Insert(RecoveryPublicOwnerState {
-                        owner: successor,
+                        owner: successor.clone(),
                         epoch: successor_epoch,
                         surface_root: retained.surface_root,
                     }),
                     &successor_key,
                 )?;
+                if let Some(active) = read_active_generation(transaction, domain, &previous.owner)
+                    .map_err(sql_refusal)?
+                {
+                    if active.owner != previous.owner {
+                        return Err(StoreRefusal::StaleEpoch);
+                    }
+                    let next = super::ActiveNotebookGeneration {
+                        owner: successor.clone(),
+                        references: active.references,
+                    };
+                    apply_generation_change(
+                        transaction,
+                        domain,
+                        &PreparedGenerationChange {
+                            expected: None,
+                            next,
+                        },
+                    )?;
+                    transaction
+                        .execute(
+                            "DELETE FROM active_notebook_generations WHERE domain=?1 AND actor=?2",
+                            params![
+                                domain.bytes().as_slice(),
+                                owner_bytes(&previous.owner.actor_owner())
+                            ],
+                        )
+                        .map_err(sql_refusal)?;
+                }
                 let revision = increment(expected)?;
                 let updated = transaction
                     .execute(

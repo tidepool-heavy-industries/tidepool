@@ -72,7 +72,8 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         // A stale/forged scope, absent declaration library, or stale staged
         // candidate at this admission point is a caller/session-state error,
         // not a user declaration or an environment failure.
-        SessionError::GenerationExhausted(_)
+        SessionError::NotebookGeneration(crate::session::NotebookGenerationError::Exhausted)
+        | SessionError::GenerationExhausted(_)
         | SessionError::DeadScope(_)
         | SessionError::MissingDeclarationLibrary
         | SessionError::MissingRetainedValueInterface(_)
@@ -88,7 +89,10 @@ pub fn classify_session(err: &SessionError) -> FailureEnvelope {
         }
         // The declaration source is valid; its durable recovery artifact is
         // missing, corrupt, or incompatible with this runtime.
-        SessionError::RecoveryManifest { .. }
+        SessionError::NotebookGeneration(
+            crate::session::NotebookGenerationError::DigestMismatch,
+        )
+        | SessionError::RecoveryManifest { .. }
         | SessionError::RecoveryFormatRefused { .. }
         | SessionError::RecoveryStore(_)
         | SessionError::RecoveryStoreRefused(_)

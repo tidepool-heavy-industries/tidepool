@@ -3548,6 +3548,33 @@ where
         self.state.bind_durable_public_scope(owner, scope)
     }
 
+    pub fn prepare_notebook_generation(
+        &mut self,
+        scope: ScopeId,
+        actor: &super::RecoveryPublicOwner,
+        expected: Option<super::ActiveNotebookGeneration>,
+        references: super::DurableGenerationReferences,
+    ) -> Result<super::PreparedNotebookGeneration, SessionError> {
+        self.settle_dropped_custody();
+        self.state
+            .prepare_notebook_generation(scope, actor, expected, references)
+    }
+    pub fn commit_notebook_generation(
+        &mut self,
+        prepared: super::PreparedNotebookGeneration,
+        publication: &Arc<super::PublicationDecision>,
+        on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        self.state
+            .commit_notebook_generation(prepared, publication, on_visible)
+    }
+    pub fn active_notebook_generation(
+        &self,
+        actor: &super::RecoveryPublicOwner,
+    ) -> Result<Option<super::ActiveNotebookGeneration>, SessionError> {
+        self.state.active_notebook_generation(actor)
+    }
+
     pub fn initialize_durable_public_scope(
         &mut self,
         owner: super::RecoveryPublicOwner,
