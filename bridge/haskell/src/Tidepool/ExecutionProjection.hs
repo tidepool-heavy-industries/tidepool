@@ -55,6 +55,7 @@ import Control.Concurrent.MVar (MVar, newMVar, readMVar, modifyMVar_)
 import Control.Monad (foldM, forM, forM_, unless, when)
 import Control.Monad.State.Strict
 import Data.Bits (shiftR)
+import Codec.CBOR.Write (toStrictByteString)
 import Data.ByteString qualified as BS
 import Data.IntMap.Strict qualified as IntMap
 import Data.Foldable (toList)
@@ -75,7 +76,7 @@ import GHC.Builtin.PrimOps (PrimOp(..), PrimCall(..), primOpOcc)
 import GHC.Builtin.Types (doubleDataCon, intDataCon, intTy, promotedConsDataCon, promotedNilDataCon)
 import GHC.Core (AltCon(..))
 import GHC.Core.DataCon
-  ( DataCon, dataConName, dataConTheta, dataConOrigArgTys, dataConRepArgTys, dataConRepArity, dataConWorkId
+  ( DataCon, dataConName, dataConTheta, dataConOrigArgTys, dataConRepArgTys, dataConRepArity
   , dataConTag, dataConTyCon, dataConOrigResTy, dataConImplBangs, HsImplBang(..)
   , isMarkedStrict, isUnboxedTupleDataCon )
 import GHC.Core.TyCo.Rep (Scaled(..), Type(..))
@@ -97,7 +98,7 @@ import GHC.Types.Literal (LitNumType(..), Literal(..), literalType)
 import GHC.Types.Id (idDmdSig, isDeadEndId, isDataConWorkId_maybe)
 import GHC.Types.ForeignCall qualified as Foreign
 import GHC.Types.Name (Name, isExternalName, nameModule_maybe, nameOccName)
-import GHC.Types.Name.Occurrence (isDataOcc, occNameString)
+import GHC.Types.Name.Occurrence (occNameString)
 import GHC.Types.RepType
   (typePrimRep_maybe, runtimeRepPrimRep_maybe, dataConRuntimeRepStrictness, unwrapType)
 import GHC.Types.Unique.Set (UniqSet, addListToUniqSet, addOneToUniqSet, elementOfUniqSet, emptyUniqSet, mkUniqSet, nonDetEltsUniqSet, unionUniqSets)
@@ -118,15 +119,16 @@ import GHC.Unit.Types (Module, Unit, UnitId, stringToUnit, toUnitId, unitString)
 import GHC.Utils.Outputable (ppr, showSDocUnsafe)
 import Tidepool.ExecutionIR (topBindingReferenceUniques, topBindingReferences)
 import Tidepool.ExecutionEncode
-  (ProjectedGroupEncoding, prepareProjectedGroupEncoding, projectedGroupEncodingBytes)
+  (ProjectedGroupEncoding, prepareProjectedGroupEncoding, projectedGroupEncodingBytes, encodeTypeIdentity)
 import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
-import Tidepool.Identity (nameSymbolIdentity, varId)
+import Tidepool.Identity (nameSymbolIdentity)
+import Tidepool.ConstructorIdentity (IdentityResolver, unionIdentityResolvers, resolveTypeIdentity, TypeIdentityFailure, IssuedConstructor, issuedDataCon, issuedConstructorIdentity, issuedConstructorHostId, issuedIdentityResolver, issueConstructorWithFamily)
 import Tidepool.FatIface (fatOriginalOwner)
 import Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..), pmModule, pmCoverage, pmBindings
-  , pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon, pmStableTopSpellings, pmOriginalTopNames
+  , pmIdentityResolver, pmTypeGraph, pmPreparedSites, pmSiteRejections, pmRequestSiteTyCon, pmStableTopSpellings, pmOriginalTopNames
   , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedExpectedEntry
   , PreparedComponents, preparedComponentModules, preparedComponentVersion )
 import Tidepool.PreparedSites (SiteRejection(..))
@@ -181,6 +183,7 @@ data ProjectionError
   -- | A typed site in a reachable top cannot carry concrete evidence. This
   -- is a source error, reported with the compiler's own guidance.
   | RejectedTypedSite Text
+  | ConstructorIdentityIssuanceFailure TypeIdentityFailure
   | TypeEvidenceIssuanceFailure TypePolicy.TypeGraphError
   deriving stock (Eq, Show)
 
@@ -202,8 +205,10 @@ data PState = PState
   , nextGlobal :: !Word32, nextConstructor :: !Word32
   , nextOperation :: !Word32, nextSignature :: !Word32
   , globals :: VarEnv GlobalId, globalDecls :: Seq GlobalDecl
-  , constructors :: Seq (DataCon, ConstructorId), constructorDecls :: Seq ConstructorDecl
-  , constructorIndex :: Map SymbolIdentity (ConstructorId, ConstructorDecl)
+  , identityResolver :: IdentityResolver
+  , typeIdentityCache :: Map Name TypeIdentity
+  , constructors :: Seq (IssuedConstructor, ConstructorId), constructorDecls :: Seq ConstructorDecl
+  , constructorIndex :: Map ConstructorIdentity (ConstructorId, ConstructorDecl)
   , operations :: Map (Schema.OperationIdentity, SignatureId) OperationId
   , operationDecls :: Seq OperationDecl
   , signatures :: Seq Signature
@@ -261,7 +266,7 @@ resolveTextPackageUnit hscEnv =
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
   (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty
-    0 0 0 0 emptyVarEnv Seq.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
+    0 0 0 0 emptyVarEnv Seq.empty (unionIdentityResolvers []) Map.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
     machine Map.empty Set.empty Nothing Nothing Nothing Nothing Set.empty ExecutableTarget FinalEntryContracts [])
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
@@ -294,7 +299,7 @@ data OriginalGroupOmission = OriginalGroupOmission
 -- caching nor dependency settlement can retain one without the other.
 data ProjectedGroupEvidence = ProjectedGroupEvidence
   { projectedGroupWire :: ProjectedGroup
-  , projectedGroupConstructors :: [DataCon]
+  , projectedGroupConstructors :: [IssuedConstructor]
   , projectedGroupYieldSites :: [Effect.YieldSite]
   }
 
@@ -457,9 +462,10 @@ forceRawModuleProducts raw = do
   -- releasing the lazy traversal of the completed projection state. DataCons
   -- themselves remain paired with their original compiler environment lifetime.
   forM_ selected $ \group -> do
-    forM_ (projectedGroupConstructors group) $ \con -> do
-      let identity = nameSymbol "constructor" (dataConName con)
-      _ <- evaluate (varId (dataConWorkId con))
+    forM_ (projectedGroupConstructors group) $ \issued -> do
+      let con = issuedDataCon issued
+          identity = constructorSymbol (issuedConstructorIdentity issued)
+      _ <- evaluate (issuedConstructorHostId issued)
       _ <- evaluate (dataConTag con)
       _ <- evaluate (Text.length (symbolUnit identity) + Text.length (symbolModule identity)
         + Text.length (symbolNamespace identity) + Text.length (symbolOccurrence identity)
@@ -579,7 +585,7 @@ preparedModuleProductOmissions (PreparedModuleProducts outcomes) =
 -- | Successful published groups retain the compiler constructors from their
 -- own lowering. Mismatched compiler evidence is an admission failure, including
 -- on a warm original-projection hit. Unavailable groups contribute no metadata.
-preparedModuleProductConstructors :: PreparedModuleProducts -> Either ProjectionError [DataCon]
+preparedModuleProductConstructors :: PreparedModuleProducts -> Either ProjectionError [IssuedConstructor]
 preparedModuleProductConstructors (PreparedModuleProducts outcomes) = do
   selected <- fmap concat $ forM outcomes $ \(_,outcome,_) -> case outcome of
     Left _ -> pure []
@@ -593,12 +599,12 @@ preparedModuleProductConstructors (PreparedModuleProducts outcomes) = do
   _ <- foldM admit Map.empty selected
   pure selected
  where
-  agrees declaration con = constructorIdentity declaration == nameSymbol "constructor" (dataConName con)
-    && constructorHostId declaration == varId (dataConWorkId con)
-    && constructorTag declaration == fromIntegral (dataConTag con)
-  admit known con =
-    let hostId = varId (dataConWorkId con)
-        identity = nameSymbol "constructor" (dataConName con)
+  agrees declaration issued = constructorIdentity declaration == issuedConstructorIdentity issued
+    && constructorHostId declaration == issuedConstructorHostId issued
+    && constructorTag declaration == fromIntegral (dataConTag (issuedDataCon issued))
+  admit known issued =
+    let hostId = issuedConstructorHostId issued
+        identity = issuedConstructorIdentity issued
     in case Map.lookup hostId known of
       Just previous | previous /= identity ->
         Left (InvalidPreparedIdentity "distinct original constructor identities share one runtime host id")
@@ -724,7 +730,7 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
         (lookupVarEnv identities binder)) (topBinders binding)
       let outside = allSymbols `Set.difference` Set.fromList binders
           initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv identities
-            Map.empty [] Map.empty 0 0 0 0 emptyVarEnv Seq.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
+            Map.empty [] Map.empty 0 0 0 0 emptyVarEnv Seq.empty (pmIdentityResolver prepared) Map.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
             (projectionTarget context) (projectionRetainedGenerations context)
             (if pmCoverage prepared == CompleteSourceModule
               then Set.singleton owner else Set.empty)
@@ -783,26 +789,26 @@ preparedTopIdentities modules = traverse identityOf
       Right (lookupVarEnv identities binder)
 
 projectPreparedWithTopSymbols :: ProjectionContext -> [PreparedModule]
-  -> VarEnv SymbolIdentity -> Either ProjectionError (WireProgram, [DataCon])
+  -> VarEnv SymbolIdentity -> Either ProjectionError (WireProgram, [IssuedConstructor])
 projectPreparedWithTopSymbols = projectPreparedWithHostBindings []
 
 -- Only the executable target retains bound host representations. Ordinary
 -- original module products keep their own executable constructor inventory.
 projectPreparedWithHostBindings :: [HostBindingRepresentation] -> ProjectionContext
   -> [PreparedModule] -> VarEnv SymbolIdentity
-  -> Either ProjectionError (WireProgram, [DataCon])
+  -> Either ProjectionError (WireProgram, [IssuedConstructor])
 projectPreparedWithHostBindings hostBindings context modules topIdentityMap =
   projectPreparedCandidateWithHostBindings hostBindings context modules topIdentityMap
     >>= finalizePreparedCandidate
 
 -- The candidate keeps its entry checks paired with the exact emitted program.
 -- Package recovery may inspect globals, but cannot publish an unchecked body.
-data PreparedCandidate = PreparedCandidate WireProgram [DataCon] [ProjectionError]
+data PreparedCandidate = PreparedCandidate WireProgram [IssuedConstructor] [ProjectionError]
 
 candidateGlobals :: PreparedCandidate -> [GlobalDecl]
 candidateGlobals (PreparedCandidate program _ _) = programGlobals program
 
-finalizePreparedCandidate :: PreparedCandidate -> Either ProjectionError (WireProgram, [DataCon])
+finalizePreparedCandidate :: PreparedCandidate -> Either ProjectionError (WireProgram, [IssuedConstructor])
 finalizePreparedCandidate (PreparedCandidate program constructors failures) = case failures of
   failure : _ -> Left failure
   [] -> Right (program, constructors)
@@ -813,7 +819,7 @@ projectPreparedCandidateWithHostBindings hostBindings context modules topIdentit
   boundJsonAuthority <- foldM admitJsonAuthority (projectionJsonAuthority context)
     (mapMaybe hostBindingRepresentationJsonAuthority hostBindings)
   let initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv topIdentityMap Map.empty [] Map.empty
-        0 0 0 0 emptyVarEnv Seq.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty (projectionTarget context)
+        0 0 0 0 emptyVarEnv Seq.empty (unionIdentityResolvers (map pmIdentityResolver modules)) Map.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty (projectionTarget context)
         (projectionRetainedGenerations context) (Set.fromList
           [ (Text.pack (unitString (moduleUnit (pmModule prepared))),
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
@@ -914,7 +920,7 @@ lowerJsonLayout modules = do
       let layout = jsonAuthorityLayout owner
           needsOperations = any (isJsonOperation . operationIdentity) emittedOperations
           needsConstructors = any
-            (isJust . jsonValueLayoutForType owner . dataConOrigResTy . fst)
+            (isJust . jsonValueLayoutForType owner . dataConOrigResTy . issuedDataCon . fst)
             admittedConstructors
           needsHostRoot = any (isValueResult owner)
             [ binder | prepared <- modules, (binding, _) <- pmBindings prepared
@@ -943,7 +949,7 @@ projectPreparedTarget context modules =
 -- projection, including site-only evidence and generated settlement values.
 -- Return them from the same transaction that produced the wire declarations.
 projectPreparedTargetWithConstructors :: ProjectionContext -> [PreparedModule]
-  -> Either ProjectionError (WireProgram, [DataCon])
+  -> Either ProjectionError (WireProgram, [IssuedConstructor])
 projectPreparedTargetWithConstructors context modules =
   prepareProjection context modules >>= projectSelected
 
@@ -1003,13 +1009,13 @@ finishProjection context modules identities selected =
        message : _ -> Left (RejectedTypedSite (Text.pack message))
        [] -> Right (PreparedProjection context selected identities)
 
-projectSelected :: PreparedProjection -> Either ProjectionError (WireProgram, [DataCon])
+projectSelected :: PreparedProjection -> Either ProjectionError (WireProgram, [IssuedConstructor])
 projectSelected = projectSelectedWithHostBindings []
 
 -- The opaque representations were admitted from the same stabilized binding
 -- types used to publish the session interface and host-authority tags.
 projectSelectedWithHostBindings :: [HostBindingRepresentation] -> PreparedProjection
-  -> Either ProjectionError (WireProgram, [DataCon])
+  -> Either ProjectionError (WireProgram, [IssuedConstructor])
 projectSelectedWithHostBindings bindings (PreparedProjection context selected identities) =
   projectPreparedWithHostBindings bindings context selected identities
 
@@ -1580,24 +1586,28 @@ preallocate modules = do
     allocateTop (StgTopLifted binding, _) = mapM_ allocateTopValue (bindingBinders binding) >> pure ()
 
 projectModule :: PreparedModule -> P [Group TopBinding]
-projectModule prepared = mapM (projectTop prepared . fst) (pmBindings prepared)
+projectModule prepared = withIdentityResolver (pmIdentityResolver prepared) $
+  mapM (projectTop prepared . fst) (pmBindings prepared)
 
 -- One module projection owns this immutable index. Its graph stays lazy so
 -- groups without typed sites do not force an otherwise unused full graph.
 data PreparedEvidenceIndex = PreparedEvidenceIndex
-  { evidenceGraph :: TypePolicy.TypeGraph
+  { evidenceIdentityResolver :: IdentityResolver
+  , evidenceGraph :: TypePolicy.TypeGraph
   , evidenceSitesByOwner :: Map Word64 [(Int, PreparedSite)]
   , evidenceRejectionsByOwner :: Map Word64 [(Int, SiteRejection)]
   }
 
 data SelectedPreparedEvidence = SelectedPreparedEvidence
-  { selectedEvidenceGraph :: TypePolicy.TypeGraph
+  { selectedIdentityResolver :: IdentityResolver
+  , selectedEvidenceGraph :: TypePolicy.TypeGraph
   , selectedEvidenceSites :: [PreparedSite]
   }
 
 indexPreparedEvidence :: PreparedModule -> PreparedEvidenceIndex
 indexPreparedEvidence prepared = PreparedEvidenceIndex
-  { evidenceGraph = pmTypeGraph prepared
+  { evidenceIdentityResolver = pmIdentityResolver prepared
+  , evidenceGraph = pmTypeGraph prepared
   , evidenceSitesByOwner = Map.fromListWith (<>)
       [ (owner, [(ordinal, site)])
       | (ordinal, site) <- zip [0 :: Int ..] (pmPreparedSites prepared)
@@ -1637,7 +1647,7 @@ selectPreparedEvidence index binders = do
   let sites = selectOwnedEvidence binders (evidenceSitesByOwner index)
       roots = concat [ psWireNode site : psInputNodes site | site <- sites ]
   graph <- selectTypeGraph (evidenceGraph index) roots
-  pure (SelectedPreparedEvidence graph sites)
+  pure (SelectedPreparedEvidence (evidenceIdentityResolver index) graph sites)
 
 -- Original ordinals recover module row order even for recursive groups whose
 -- binders are encountered in a different order.
@@ -1661,8 +1671,10 @@ lowerPreparedEvidence :: ProjectionContext -> [PreparedModule]
 lowerPreparedEvidence context modules evidence = do
   (moduleNodes, moduleSites) <- foldM lowerOne (emptyProjectedTypeGraph, []) evidence
   auxNodes <- lowerAuxiliaryRootEvidence context modules (graphNodeCount moduleNodes)
+  carriers <- fmap concat $ forM modules $ \prepared -> withIdentityResolver (pmIdentityResolver prepared) $
+    traverse resolveProjectedTypeIdentity (maybe [] pure (pmRequestSiteTyCon prepared))
   (verbNodes, verbSites) <-
-    lowerConstructorReplies (mapMaybe pmRequestSiteTyCon modules)
+    lowerConstructorReplies (Set.fromList carriers)
       (graphNodeCount moduleNodes + graphNodeCount auxNodes)
   let sites = moduleSites
       duplicates = Map.keys (Map.filter (> (1 :: Int))
@@ -1682,9 +1694,12 @@ lowerPreparedEvidence context modules evidence = do
         ReplyAtSite -> pure ReplyAtSite
         StaticReplyWithSite root field payload capture ->
           (\root' -> StaticReplyWithSite root' field payload capture) <$> lift (rebase root)) verbSites
-      pure (graph, sites', replies)
+      checkedReplies <- foldM (\known (constructor,reply) -> case Map.lookup constructor known of
+        Just prior | prior /= reply -> failShape "one constructor identity has conflicting reply graphs"
+        _ -> pure (Map.insert constructor reply known)) Map.empty replies
+      pure (graph, sites', Map.toAscList checkedReplies)
  where
-  lowerOne (priorNodes, priorSites) selectedEvidence = do
+  lowerOne (priorNodes, priorSites) selectedEvidence = withIdentityResolver (selectedIdentityResolver selectedEvidence) $ do
     let selected = selectedEvidenceSites selectedEvidence
     (lowered, rebase) <- lowerSelectedTypeGraph (graphNodeCount priorNodes)
       (selectedEvidenceGraph selectedEvidence)
@@ -1708,11 +1723,13 @@ lowerPreparedEvidence context modules evidence = do
 validatePreparedEvidence :: ProjectionContext -> [PreparedModule]
   -> [SelectedPreparedEvidence] -> [DataCon] -> P ()
 validatePreparedEvidence context modules evidence hostConstructors = do
-  let moduleEvidence = concatMap
-        (constructorsForSelectedTypeGraph . selectedEvidenceGraph) evidence
-  (auxiliaryNodes, auxiliaryRoots) <- auxiliaryRootTypeGraph context modules
-  auxiliaryEvidence <- lift (constructorsForTypeGraph auxiliaryNodes auxiliaryRoots)
-  validateConstructorEvidence (moduleEvidence <> auxiliaryEvidence <> hostConstructors)
+  forM_ evidence $ \selected -> withIdentityResolver (selectedIdentityResolver selected) $
+    validateConstructorEvidence (constructorsForSelectedTypeGraph (selectedEvidenceGraph selected))
+  forM_ modules $ \prepared -> withIdentityResolver (pmIdentityResolver prepared) $ do
+    (auxiliaryNodes, auxiliaryRoots) <- auxiliaryRootTypeGraph context [prepared]
+    auxiliaryEvidence <- lift (constructorsForTypeGraph auxiliaryNodes auxiliaryRoots)
+    validateConstructorEvidence auxiliaryEvidence
+  validateConstructorEvidence hostConstructors
 
 -- | Force-intern type evidence for every admitted auxiliary root's own
 -- answer type, the same way a declared site's answer type is interned
@@ -1737,10 +1754,12 @@ validatePreparedEvidence context modules evidence hostConstructors = do
 -- leaving the root's own evidence merely absent. Concrete auxiliary roots
 -- are unaffected by this filter.
 lowerAuxiliaryRootEvidence :: ProjectionContext -> [PreparedModule] -> Int -> P TypeGraph
-lowerAuxiliaryRootEvidence context modules base = do
-  (nodes, graphRoots) <- auxiliaryRootTypeGraph context modules
-  (lowered, _rebase) <- lowerTypeGraph base nodes graphRoots
-  pure lowered
+lowerAuxiliaryRootEvidence context modules base = foldM lowerOne emptyProjectedTypeGraph modules
+ where
+  lowerOne prior prepared = withIdentityResolver (pmIdentityResolver prepared) $ do
+    (nodes, graphRoots) <- auxiliaryRootTypeGraph context [prepared]
+    (lowered, _rebase) <- lowerTypeGraph (base + graphNodeCount prior) nodes graphRoots
+    pure (unionTypeGraphs prior lowered)
 
 auxiliaryRootTypeGraph :: ProjectionContext -> [PreparedModule]
   -> P (TypePolicy.TypeGraph, [TypePolicy.TypeNodeId])
@@ -1764,32 +1783,44 @@ auxiliaryRootTypeGraph context modules = do
 
 -- | A genuine saturated GHC constructor owns its result graph independently
 -- of effect rows. Only the exact compiler-issued carrier selects dynamic sites.
-lowerConstructorReplies :: [GHC.TyCon] -> Int -> P (TypeGraph, [(ConstructorId, ConstructorReply)])
+lowerConstructorReplies :: Set TypeIdentity -> Int -> P (TypeGraph, [(ConstructorId, ConstructorReply)])
 lowerConstructorReplies carriers base = do
   known <- gets (toList . constructors)
-  let candidates =
-        [ (constructor, identity, index, atSite constructor index)
-        | (constructor, identity) <- known
-        , Just index <- [requestReplyIndex constructor]
-        ]
-      static = [(constructor, identity, index)
-        | (constructor, identity, index, False) <- candidates]
-  (roots, builder) <- lift $ either (Left . TypeEvidenceIssuanceFailure) Right
-    (runStateT (traverse (\(constructor, _, reply) ->
-      TypePolicy.internConstructorType constructor reply) static) TypePolicy.emptyTypeGraphBuilder)
-  graph <- lift $ either (Left . TypeEvidenceIssuanceFailure) Right (TypePolicy.finishTypeGraph builder)
-  (lowered, rebase) <- lowerTypeGraph base graph roots
-  entries <- traverse (\((constructor, identity, _), root) -> do
-      node <- rebase root
-      pure (identity, case inputSite constructor of
-        Just (field, payload, capture) -> StaticReplyWithSite node field payload capture
-        Nothing -> StaticReply node)) (zip static roots)
-  let replies = Map.fromList (entries <> [(identity, ReplyAtSite) | (_, identity, _, True) <- candidates])
-  pure (lowered, [(identity, replies Map.! identity) | (_, identity, _, _) <- candidates])
+  foldM lowerOne (emptyProjectedTypeGraph, []) known
  where
+  lowerOne (prior, replies) (issued, identity) =
+    withIdentityResolver (issuedIdentityResolver issued) $ do
+      let constructor = issuedDataCon issued
+      case requestReplyIndex constructor of
+        Nothing -> pure (prior,replies)
+        Just index -> do
+          -- Nominal spelling locates candidates; the captured declaration ABI
+          -- decides whether a field is the exact site carrier.
+          matching <- fmap concat $ forM
+            [carrier | Scaled _ ty <- dataConOrigArgTys constructor
+              , Just (carrier, _) <- [splitTyConApp_maybe ty]] $ \carrier -> do
+                resolver <- gets identityResolver
+                case resolveTypeIdentity resolver carrier of
+                  Right family | family `Set.member` carriers -> pure [carrier]
+                  Right _ -> pure []
+                  Left failure -> lift (Left (ConstructorIdentityIssuanceFailure failure))
+          if atSite matching constructor index then
+            pure (prior, replies ++ [(identity, ReplyAtSite)])
+          else do
+            (roots,builder) <- lift $ either (Left . TypeEvidenceIssuanceFailure) Right
+              (runStateT (traverse (TypePolicy.internConstructorType constructor) [index])
+                TypePolicy.emptyTypeGraphBuilder)
+            graph <- lift $ either (Left . TypeEvidenceIssuanceFailure) Right (TypePolicy.finishTypeGraph builder)
+            (lowered,rebase) <- lowerTypeGraph (base + graphNodeCount prior) graph roots
+            entries <- forM roots $ \root -> do
+              node <- rebase root
+              pure (identity, case inputSite matching constructor of
+                Just (field,payload,capture) -> StaticReplyWithSite node field payload capture
+                Nothing -> StaticReply node)
+            pure (unionTypeGraphs prior lowered, replies ++ entries)
   -- Only the original nominal carrier authorizes an erased field. Closed
   -- replies remain independent of this site's input and eventual result.
-  inputSite constructor
+  inputSite selectedCarriers constructor
     | not (erasedConstraints constructor) = Nothing
     | Nothing <- constructorSourceFieldProjection constructor = Nothing
     | otherwise = case
@@ -1799,7 +1830,7 @@ lowerConstructorReplies carriers base = do
         | (ordinal, (original, representation)) <- zip [0 :: Int ..] (zip originals runtime)
         , ordinal > 0
         , Just (carrier, [inputs, _]) <- [splitTyConApp_maybe original]
-        , carrier `elem` carriers, eqType (unwrapType representation) intTy
+        , carrier `elem` selectedCarriers, eqType (unwrapType representation) intTy
         , let payload = if ordinal + 1 < length originals then ordinal + 1 else ordinal - 1
         , typePrimRep_maybe (runtime !! payload) == Just [GHC.BoxedRep (Just GHC.Lifted)] ] of
           [evidence] -> Just evidence
@@ -1817,12 +1848,12 @@ lowerConstructorReplies carriers base = do
             Just (nil, [_]) | nil == promotedNilDataCon -> Just (index, input)
             _ -> go (index + 1) rest
         _ -> Nothing
-  atSite constructor reply = case constructorSourceFieldProjection constructor of
+  atSite selectedCarriers constructor reply = case constructorSourceFieldProjection constructor of
     Just ((first, runtimeFirst) : _) ->
       case splitTyConApp_maybe first of
         Just (carrier, [_, carrierReply]) ->
           erasedConstraints constructor
-            && carrier `elem` carriers && eqType carrierReply reply
+            && carrier `elem` selectedCarriers && eqType carrierReply reply
             && eqType (unwrapType runtimeFirst) intTy
         _ -> False
     _ -> False
@@ -1943,9 +1974,8 @@ lowerSelectedTypeGraph base original = do
         NaturalDeclaration -> pure NaturalDeclaration
         ScalarDeclaration rep -> ScalarDeclaration <$> projectRep rep
         OpaqueDeclaration headKind reason -> pure (OpaqueDeclaration headKind reason)
-      let name = GHC.tyConName constructor
-          namespace = if isDataOcc (nameOccName name) then "data" else "type"
-      pure (TypeDeclaration (nameSymbol namespace name) flags converted restriction)
+      identity <- resolveProjectedTypeIdentity constructor
+      pure (TypeDeclaration identity flags converted restriction)
     TypeConstructorTemplate constructor -> TypeConstructorTemplate <$> internConstructor constructor
     TypeBound index -> pure (TypeBound index)
     TypeNominalApplication -> pure TypeNominalApplication
@@ -2017,7 +2047,7 @@ unionTypeGraphs first second = TypeGraph
 data TypeArena = TypeArena
   { arenaNodes :: !(IntMap.IntMap (Maybe TypeNode))
   , arenaEdges :: !(IntMap.IntMap [(TypeEdgeRoleF RuntimeRep, TypeNodeId)])
-  , arenaDeclarations :: !(Map SymbolIdentity TypeNodeId)
+  , arenaDeclarations :: !(Map TypeIdentity TypeNodeId)
   , arenaExpressions :: !(Map (TypeNode, [(TypeEdgeRoleF RuntimeRep, TypeNodeId)]) TypeNodeId)
   , arenaOriginals :: !(IntMap.IntMap TypeNodeId)
   , arenaNext :: !Word32
@@ -2134,7 +2164,7 @@ assembleTypeGraph original = do
   nodeTextBytes node = case node of
     TypeRoot _ flags rendered -> length flags + utf8Bytes rendered
     TypeDeclaration symbol flags form _ -> length flags
-      + sum (map utf8Bytes [symbolUnit symbol, symbolModule symbol, symbolNamespace symbol, symbolOccurrence symbol])
+      + BS.length (toStrictByteString (encodeTypeIdentity symbol))
       + case form of OpaqueDeclaration _ reason -> utf8Bytes reason; _ -> 0
     TypeLiteral (NaturalTypeLiteral value) -> utf8Bytes value
     TypeLiteral (SymbolTypeLiteral value) -> utf8Bytes value
@@ -2308,9 +2338,8 @@ jsonDecodeBody textDataCon textConstructor left right input = do
   rawBytes <- freshValue
   rawOffset <- freshValue
   rawLength <- freshValue
-  let textFamily = AlgebraicCase (nameSymbol "type"
-        (GHC.tyConName (dataConTyCon textDataCon)))
-      parsed = Operation parse
+  textFamily <- AlgebraicCase <$> resolveProjectedTypeIdentity (dataConTyCon textDataCon)
+  let parsed = Operation parse
         [Ref (Local rawBytes), Ref (Local rawOffset), Ref (Local rawLength)]
   pure (Case (Enter (Ref (Local input)) enter) inputCase (Returns [LiftedRefRep]) textFamily
     [Alternative (ConstructorPattern textConstructor) [rawBytes, rawOffset, rawLength] parsed])
@@ -2388,10 +2417,9 @@ timeBody spec textConstructor leftConstructor rightConstructor input = do
   errorLength <- freshValue
   errorText <- freshValue
   boxedMillis <- freshValue
-  let textFamily = AlgebraicCase (nameSymbol "type"
-        (GHC.tyConName (dataConTyCon (timeTextConstructor spec))))
-      intFamily = AlgebraicCase (nameSymbol "type" (GHC.tyConName (dataConTyCon intDataCon)))
-      failure = Case (Operation size [Ref (Local errorBytes)]) errorLengthCase
+  textFamily <- AlgebraicCase <$> resolveProjectedTypeIdentity (dataConTyCon (timeTextConstructor spec))
+  intFamily <- AlgebraicCase <$> resolveProjectedTypeIdentity (dataConTyCon intDataCon)
+  let failure = Case (Operation size [Ref (Local errorBytes)]) errorLengthCase
         (Returns [IntRep 64]) MultiValueCase
         [Alternative DefaultPattern [errorLength]
           (Case (Construct textConstructor
@@ -2427,9 +2455,8 @@ formattingBody spec textConstructor parameters = do
   doubleConstructor <- internConstructor doubleDataCon
   doubleCase <- freshValue
   rawDouble <- freshValue
+  doubleFamily <- AlgebraicCase <$> resolveProjectedTypeIdentity (dataConTyCon doubleDataCon)
   let doubleAtom = Ref (Local rawDouble)
-      doubleFamily = AlgebraicCase (nameSymbol "type"
-        (GHC.tyConName (dataConTyCon doubleDataCon)))
   rendered <- case formattingKind spec of
     RenderDouble -> renderText textConstructor RenderDouble [doubleAtom]
     RenderDoublePrec -> do
@@ -2446,9 +2473,8 @@ formattingBody spec textConstructor parameters = do
       rawInt <- freshValue
       negative <- renderText textConstructor RenderDoublePrec
         [Ref (Local rawInt), doubleAtom]
-      let intFamily = AlgebraicCase (nameSymbol "type"
-            (GHC.tyConName (dataConTyCon intDataCon)))
-          forcePrecedence = Case (Enter (Ref (Local precedence)) enter)
+      intFamily <- AlgebraicCase <$> resolveProjectedTypeIdentity (dataConTyCon intDataCon)
+      let forcePrecedence = Case (Enter (Ref (Local precedence)) enter)
             intCase (Returns [LiftedRefRep]) intFamily
             [Alternative (ConstructorPattern intConstructor) [rawInt] negative]
       pure (Case (Operation need [doubleAtom]) decision (Returns [IntRep 64])
@@ -2643,7 +2669,7 @@ projectCaseKind (AlgAlt tycon) = do
       Left (InvalidPreparedRepresentation _) -> pure ()
       Left (InvalidPreparedLayout _) -> pure ()
       Left failure -> lift (Left failure)
-  pure (AlgebraicCase (nameSymbol "type" (GHC.tyConName tycon)))
+  AlgebraicCase <$> resolveProjectedTypeIdentity tycon
 projectCaseKind (PrimAlt rep) = PrimitiveCase <$> projectRep rep
 projectCaseKind (MultiValAlt _) = pure MultiValueCase
 projectCaseKind PolyAlt = pure PolymorphicCase
@@ -3040,7 +3066,7 @@ constructorSourceFieldProjection constructor = do
     then Just (zip originals (map fst fields))
     else Nothing
 
-constructorDeclaration :: DataCon -> P ConstructorDecl
+constructorDeclaration :: DataCon -> P (IssuedConstructor, ConstructorDecl)
 constructorDeclaration con = do
   represented <- maybe (failRepresentation "runtime-polymorphic constructor field representation")
     pure (constructorFieldRepresentations con)
@@ -3061,11 +3087,13 @@ constructorDeclaration con = do
   layout <- layoutFor reps
   tag <- checkedWord32 "constructor tag" (dataConTag con)
   familySize <- checkedWord32 "constructor family size" (GHC.tyConFamilySize (dataConTyCon con))
-  pure (ConstructorDecl
-        (nameSymbol "constructor" (dataConName con))
-        (nameSymbol "type" (GHC.tyConName (dataConTyCon con)))
+  resolver <- gets identityResolver
+  family <- resolveProjectedTypeIdentity (dataConTyCon con)
+  issued <- lift (either (Left . ConstructorIdentityIssuanceFailure) Right (issueConstructorWithFamily resolver family con))
+  pure (issued, ConstructorDecl
+        (issuedConstructorIdentity issued)
         resultRep reps fieldStrictness layout tag familySize
-        (varId (dataConWorkId con)))
+        (issuedConstructorHostId issued))
  where
   isUnboxed LiftedRefRep = False
   isUnboxed UnliftedRefRep = False
@@ -3086,7 +3114,7 @@ internConstructor :: DataCon -> P ConstructorId
 internConstructor con = do
   -- Validate each incoming GHC declaration before nominal reuse: equal names
   -- and uniques do not prove equal physical declarations or layout authority.
-  declaration <- constructorDeclaration con
+  (issued, declaration) <- constructorDeclaration con
   known <- gets constructorIndex
   let nominal = constructorIdentity declaration
   case Map.lookup nominal known of
@@ -3095,7 +3123,7 @@ internConstructor con = do
       let identity = ConstructorId next
       modify' (\current -> current
         { nextConstructor = next + 1
-        , constructors = constructors current |> (con, identity)
+        , constructors = constructors current |> (issued, identity)
         , constructorDecls = constructorDecls current |> declaration
         , constructorIndex = Map.insert nominal (identity, declaration) (constructorIndex current) })
       pure identity
@@ -3107,7 +3135,7 @@ failConstructorConflict :: ConstructorDecl -> ConstructorDecl -> P a
 failConstructorConflict existing incoming =
   lift . Left . InvalidPreparedIdentity $
     "distinct GHC provenance for nominal constructor "
-      <> symbolText (constructorIdentity incoming)
+      <> symbolText (constructorSymbol (constructorIdentity incoming))
       <> " has conflicting physical declarations before publication; existing="
       <> Text.pack (show existing)
       <> ", incoming=" <> Text.pack (show incoming)
@@ -3529,3 +3557,23 @@ failRepresentation :: Text -> P a
 failRepresentation = lift . Left . InvalidPreparedRepresentation
 failLayout :: Text -> P a
 failLayout = lift . Left . InvalidPreparedLayout
+
+resolveProjectedTypeIdentity :: GHC.TyCon -> P TypeIdentity
+resolveProjectedTypeIdentity tc = do
+  known <- gets typeIdentityCache
+  case Map.lookup (GHC.tyConName tc) known of
+    Just identity -> pure identity
+    Nothing -> do
+      resolver <- gets identityResolver
+      identity <- lift (either (Left . ConstructorIdentityIssuanceFailure) Right (resolveTypeIdentity resolver tc))
+      modify' (\current -> current { typeIdentityCache = Map.insert (GHC.tyConName tc) identity (typeIdentityCache current) })
+      pure identity
+
+withIdentityResolver :: IdentityResolver -> P a -> P a
+withIdentityResolver resolver action = do
+  prior <- gets identityResolver
+  cache <- gets typeIdentityCache
+  modify' (\current -> current { identityResolver = resolver, typeIdentityCache = Map.empty })
+  result <- action
+  modify' (\current -> current { identityResolver = prior, typeIdentityCache = cache })
+  pure result

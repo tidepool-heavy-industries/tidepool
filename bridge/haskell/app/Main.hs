@@ -33,7 +33,7 @@ import GHC.Tc.Types (tcg_mod)
 import GHC.Unit.Module.ModIface (mi_module)
 import GHC.Unit.Types (unitString, stringToUnit)
 import GHC.Core (Bind(..), CoreBind)
-import GHC.Core.DataCon (DataCon)
+import Tidepool.ConstructorIdentity (IssuedConstructor)
 import GHC.Core.TyCon (TyCon)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Id (idName)
@@ -621,7 +621,7 @@ data PreparedArtifact = PreparedArtifact
   { paTarget :: String
   , paProgram :: WireProgram
   , paBytes :: BS.ByteString
-  , paConstructors :: [DataCon]
+  , paConstructors :: [IssuedConstructor]
   , paYieldSites :: [Tidepool.EffectSchema.YieldSite]
   }
 
@@ -838,7 +838,7 @@ writePreparedSidecars
   -> [PreparedArtifact] -> IO ()
 writePreparedSidecars delivery outDir binds tycons capturedType warnings artifacts = do
   let constructors = concatMap paConstructors artifacts
-  metadata <- either (ioError . userError . show) pure (metadataForConstructors tycons constructors)
+  metadata <- either (ioError . userError . show) pure (metadataForConstructors constructors)
   let hasIO = any (targetBindingHasIO binds . paTarget) artifacts
       metaBytes = encodeMetadata metadata hasIO capturedType warnings
   BS.writeFile (outDir </> "meta.cbor") metaBytes

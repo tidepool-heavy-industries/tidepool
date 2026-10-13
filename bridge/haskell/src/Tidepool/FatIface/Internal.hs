@@ -12,6 +12,7 @@ import GHC.Core.TyCon (TyCon)
 import GHC.Types.Name (Name)
 import GHC.Types.Var (Id)
 import GHC.Unit.Types (Module)
+import GHC.Unit.Module.ModIface (ModIface)
 import GHC.Unit.Module.Location (ModLocation)
 import GHC.Utils.Fingerprint (Fingerprint)
 
@@ -27,16 +28,17 @@ import qualified Data.Set as Set
 data OwnerInterfaceContext = OwnerInterfaceContext
   { ownerInterfaceIdentity :: !Unique
   , ownerInterfaceVersion :: !(Module, Fingerprint)
+  , ownerInterfaceModIface :: ModIface
   , ownerInterfaceLocation :: ModLocation
   , ownerInterfaceTyCons :: [TyCon]
   , ownerInterfaceEntries :: Map.Map Name Id
   }
 
-issueOwnerInterfaceContext :: Module -> Fingerprint -> ModLocation -> [TyCon]
+issueOwnerInterfaceContext :: Module -> Fingerprint -> ModIface -> ModLocation -> [TyCon]
   -> Map.Map Name Id -> IO OwnerInterfaceContext
-issueOwnerInterfaceContext owner fingerprint location tycons entries = do
+issueOwnerInterfaceContext owner fingerprint iface location tycons entries = do
   identity <- newUnique
-  pure (OwnerInterfaceContext identity (owner,fingerprint) location tycons entries)
+  pure (OwnerInterfaceContext identity (owner,fingerprint) iface location tycons entries)
 
 data Entry value = Cached value | Loading (MVar (Maybe value))
 data Selection value = UseCached value | AwaitLoad (MVar (Maybe value)) | StartLoad (MVar (Maybe value))

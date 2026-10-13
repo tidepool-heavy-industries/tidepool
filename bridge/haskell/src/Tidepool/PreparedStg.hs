@@ -5,7 +5,7 @@
 -- internal compiler adapter, not the future serialized program model.
 module Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..)
-  , pmModule, pmCoverage, pmBindings, pmOriginalTopNames, pmStableTopSpellings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon
+  , pmModule, pmIdentityResolver, pmCoverage, pmBindings, pmOriginalTopNames, pmStableTopSpellings, pmTagSigs, pmSitedSiblings, pmYieldSites, pmPreparedSites, pmTypeGraph, pmSiteRejections, pmRequestSiteTyCon
   , preparedBindingGroups, filterPreparedBindings, preparedRejectsIntrinsic, preparedUsesSiteAuthority, preparedExpectedEntry
   , prepareModule, PreparedModuleTask, acquirePreparedModule, runPreparedModuleTask
   , PreparedSiteEnvironment, resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent
@@ -93,7 +93,9 @@ import Tidepool.PreparedSites
   , resolvePreparedSiteEnvironment, elaboratePreparedSitesWithDependencies )
 import Tidepool.PreparedSites qualified as Sites
 import Tidepool.PreparedStg.Internal
-import Tidepool.FinalizedModule (FinalizedModule, finalizedTidyGuts)
+import Tidepool.FinalizedModule (FinalizedModule, finalizedTidyGuts, finalizedHomeModInfo)
+import Tidepool.ConstructorIdentity (IdentityResolver, captureIdentityResolver, unionIdentityResolvers)
+import GHC.Unit.Home.ModInfo (hm_iface)
 import Tidepool.ExactScope (ExactScope)
 import Tidepool.HomeProducts
   ( OriginalVersion, originalVersionOwner, originalVersionInRecoveryScope, AdmittedFinalizedOriginal
@@ -108,11 +110,14 @@ import Tidepool.FatIface
   , fatComponentOrdinals, fatComponentOrdinal, fatComponentBindings, fatComponentAllBinders
   , FatIfaceSelection, fatSelectionVersion, fatSelectionComponents
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
-  , OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries
+  , OwnerInterfaceContext, ownerInterfaceModIface, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries
   , sameOwnerInterfaceContext, ownerInterfaceMatchesOriginal, OwnerInterfaceCache, lookupOwnerInterface, cacheOwnerInterface )
 import Tidepool.FatIface.Internal qualified as Shared
 
 -- | Observe prepared output without replacing its compiler-owned evidence.
+pmIdentityResolver :: PreparedModule -> IdentityResolver
+pmIdentityResolver = preparedIdentityResolver
+
 pmModule :: PreparedModule -> Module
 pmModule = preparedModule
 
@@ -218,17 +223,25 @@ runPreparedModuleTask (PreparedModuleTask action) = action
 
 acquirePreparedModule :: HscEnv -> ModLocation -> Map String Id -> FinalizedModule
   -> IO PreparedModuleTask
-acquirePreparedModule env location siblings finalized =
+acquirePreparedModule env location siblings finalized = do
   let guts = finalizedTidyGuts finalized
-  in acquireTypedBindings CompleteSourceModule env (cg_module guts) location
+  task <- acquireTypedBindings CompleteSourceModule env (cg_module guts) location
        (cg_tycons guts) siblings (cg_binds guts)
+  retainDefiningInterface env (hm_iface (finalizedHomeModInfo finalized)) task
 
 acquirePreparedModuleWithSiteEnvironment :: PreparedSiteEnvironment -> HscEnv -> ModLocation
   -> Map String Id -> FinalizedModule -> IO PreparedModuleTask
-acquirePreparedModuleWithSiteEnvironment environment env location siblings finalized =
+acquirePreparedModuleWithSiteEnvironment environment env location siblings finalized = do
   let guts = finalizedTidyGuts finalized
-  in acquireTypedBindingsWithSiteEnvironment (Just environment) CompleteSourceModule env
+  task <- acquireTypedBindingsWithSiteEnvironment (Just environment) CompleteSourceModule env
        (cg_module guts) location (cg_tycons guts) siblings (cg_binds guts)
+  retainDefiningInterface env (hm_iface (finalizedHomeModInfo finalized)) task
+
+retainDefiningInterface :: HscEnv -> ModIface -> PreparedModuleTask -> IO PreparedModuleTask
+retainDefiningInterface env iface task = pure $ PreparedModuleTask $ do
+  output <- runPreparedModuleTask task
+  resolver <- captureIdentityResolver env (Just iface)
+  pure output { preparedIdentityResolver = resolver }
 
 -- | Exact optimized bindings retain their defining module and interface
 -- context. No fabricated ModSummary or cross-module Core grouping is needed:
@@ -796,7 +809,8 @@ assembleComponentSelection selection workers units = do
   timing <- readTimingEnabled
   emitCount timing "prepared_recover_assemblies" 1
   pure base
-    { preparedBindings = concatMap pmBindings prepared
+    { preparedIdentityResolver = unionIdentityResolvers (map pmIdentityResolver prepared)
+    , preparedBindings = concatMap pmBindings prepared
     , preparedOriginalTopNames = Set.unions (map pmOriginalTopNames prepared)
     , preparedTagSigs = foldl plusNameEnv emptyNameEnv (map pmTagSigs prepared)
     , preparedStableTopSpellings = Map.unions (map pmStableTopSpellings prepared)
@@ -938,7 +952,8 @@ acquireRecoveredWithWorkers workers environment hscEnv owner context bindings = 
       (RecoveredModuleInput owner (ownerInterfaceLocation context)
         (ownerInterfaceTyCons context) bindings (ownerInterfaceEntries context))
     pure (PreparedModuleTask $ do
-      output <- runPreparedModuleTask task
+      retained <- retainDefiningInterface hscEnv (ownerInterfaceModIface context) task
+      output <- runPreparedModuleTask retained
       pure output { preparedExpectedEntries = DeclaringEntries context })
   pure $ case prepared of
     Left reason -> Left (RecoveredModulePreparationFailure owner reason)
@@ -963,7 +978,7 @@ acquireRecoveredContext hscEnv ownerCache owner = do
             Left reason -> pure (Left (RecoveredModuleInterfaceFailure owner reason))
             Right (tycons, entries) -> do
               hit <- Shared.issueOwnerInterfaceContext owner (mi_iface_hash (mi_final_exts iface))
-                location tycons (Map.fromList [(varName identifier,identifier) | identifier <- entries])
+                iface location tycons (Map.fromList [(varName identifier,identifier) | identifier <- entries])
               cacheOwnerInterface ownerCache owner hit
               pure (Right hit)
   where
@@ -1030,8 +1045,10 @@ acquireBindingsWithScope workers timing subsetScope entries hscEnv thisModule lo
         (stgBindings, tagSigs) <-
           stg2stgWithExternalScope logger (externalScope ++ interactiveVars) externalScope
             stgOptions thisModule initialStg
+        resolver <- captureIdentityResolver hscEnv Nothing
         pure PreparedModule
-          { preparedModule = thisModule
+          { preparedIdentityResolver = resolver
+          , preparedModule = thisModule
           , preparedCoverage = coverage
           , preparedBindings = stgBindings
           , preparedOriginalTopNames = originalTopNames

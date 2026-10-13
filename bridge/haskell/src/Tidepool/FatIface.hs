@@ -16,7 +16,7 @@ module Tidepool.FatIface
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
   , FatIfaceComponentLookup(..), lookupFatIfaceComponents, privateOriginalDependencies
   , ExactInterfaceFailure(..), readExactInterface
-  , OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries
+  , OwnerInterfaceContext, ownerInterfaceModIface, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries
   , sameOwnerInterfaceContext, ownerInterfaceMatchesOriginal, OwnerInterfaceCache, newOwnerInterfaceCache
   , copyOwnerInterfaceCache, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, lookupOwnerInterface
   , cacheOwnerInterface, evictOwnerInterfaceMatching

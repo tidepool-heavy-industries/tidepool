@@ -104,6 +104,7 @@ library tidepool-extract-internal
     Tidepool.HomeProducts
     Tidepool.FamilyConsistency
     Tidepool.Identity
+    Tidepool.ConstructorIdentity
     Tidepool.Introspection
     Tidepool.Metadata
     Tidepool.ModuleCandidates

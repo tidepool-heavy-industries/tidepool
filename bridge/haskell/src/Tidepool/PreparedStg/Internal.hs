@@ -12,6 +12,7 @@ import GHC.Types.Name (Name)
 import GHC.Types.Var (Id)
 import GHC.Types.Var.Set (IdSet)
 import GHC.Unit.Types (Module)
+import Tidepool.ConstructorIdentity (IdentityResolver)
 import Tidepool.FatIface (OwnerInterfaceContext)
 import Tidepool.EffectSchema (YieldSite)
 import Tidepool.PreparedSites (PreparedSite, SiteRejection, PreparedSiteDependencies)
@@ -32,6 +33,7 @@ data PreparedEntryContext
 -- | Prepared output and projection evidence for one defining module.
 data PreparedModule = PreparedModule
   { preparedModule :: Module
+  , preparedIdentityResolver :: IdentityResolver
   , preparedCoverage :: PreparedCoverage
   , preparedBindings :: [(CgStgTopBinding, IdSet)]
   -- | Exact top Names before CorePrep can introduce floated bindings.

@@ -12,7 +12,7 @@ import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as T
 import Tidepool.Metadata (DCMeta(..))
-import Tidepool.ExecutionEncode (encodeSymbol)
+import Tidepool.ExecutionEncode (encodeConstructorIdentity)
 import Tidepool.Binders
   ( TurnOut(..), BoundBinder(..), ExportItem(..), ValueTier(..), HostBindingAuthority(..)
   , CellSourcePlan(..), CellAnalysisItem(..), CellAnalysisSourceItem(..)
@@ -23,16 +23,16 @@ import Tidepool.Binders
 import Tidepool.CheckedCell (encodeCheckedTypeWitness, encodeRequestTypeSignatures, encodeCellExpressionPlan)
 import Tidepool.EffectSchema (NominalHead(..), SiteType(..), YieldSite(..))
 
--- | 8-byte version header: magic 'TPLR' + version 5.0.
+-- | 8-byte version header: magic 'TPLR' + version 6.0.
 --
 -- Must be kept byte-identical to the Rust reader's own
 -- @VERSION_MAJOR@/@VERSION_MINOR@ (tidepool/repr/src/serial/mod.rs) — there
 -- is no shared formatter across the language boundary, so a version bump
 -- needs a matching change on both sides.
 --
--- 5.0 requires the complete compiler-issued constructor symbol identity.
+-- 6.0 requires the complete compiler-issued constructor symbol identity.
 tplrHeader :: ByteString
-tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x05, 0x00, 0x00]
+tplrHeader = BS.pack [0x54, 0x50, 0x4C, 0x52, 0x00, 0x06, 0x00, 0x00]
 
 -- | Encode the DataCon table + a warnings map: @[entries_array, warnings_map]@.
 -- The warnings map always carries @has_io@; when a captured type is present
@@ -90,7 +90,7 @@ encodeMetaEntry DCMeta{dcmIdentity, dcmId, dcmName, dcmTag, dcmArity, dcmBangs, 
   <> encodeString dcmTypeName
   <> encodeListLen (fromIntegral (length dcmFieldTypes))
   <> foldMap encodeString dcmFieldTypes
-  <> encodeSymbol dcmIdentity
+  <> encodeConstructorIdentity dcmIdentity
 
 --------------------------------------------------------------------------------
 -- Turn-mode rich result (--turn) — independent of the constructor-metadata
