@@ -799,14 +799,16 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
         "idle spawn inferred: {child:?}"
     );
     assert_eq!(child.context_parent, None);
-    let binding = fixture
-        .context
-        .binding(child.actor)
-        .expect("spawn has attached its provider");
-    let conversation = binding
-        .conversation()
-        .expect("spawn has installed its conversation");
-    let child_path = conversation.identity().actor.clone();
+    let child_path = {
+        let binding = fixture
+            .context
+            .binding(child.actor)
+            .expect("spawn has attached its provider");
+        let conversation = binding
+            .conversation()
+            .expect("spawn has installed its conversation");
+        conversation.identity().actor.clone()
+    };
     let installation = fixture.context.observer.installation(child.actor).await;
     assert!(installation
         .tools
