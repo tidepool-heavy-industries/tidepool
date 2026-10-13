@@ -136,6 +136,7 @@ pub(crate) fn workbench_doc(
         return Ok(Cow::Borrowed(body));
     }
     match topic {
+        "api-guide" => Ok(Cow::Borrowed(include_str!("../../prompts/api-guide.md"))),
         "tree" | "worktree" | "worktrees" => {
             Ok(Cow::Borrowed(include_str!("../../prompts/docs/tree.md")))
         }
@@ -170,7 +171,7 @@ pub(crate) fn workbench_doc(
         }
         "help" | "topics" => {
             let mut body = String::from(
-                "Exomonad topics: tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors, reflect. Use hosted `lookup` with `doc <topic>`.\n\
+                "Exomonad topics: api-guide, tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors, reflect. Use hosted `lookup` with `doc <topic>`.\n\
                  Use `doc <skill-name>` to read a bundled skill without filesystem access. Jev reference: `doc exomonad-jev/references/recent-changes.md`. Workspace skills: exomonad-workbench (Kleisli composition, optics and local languages), exomonad-define-actors (stateful interpreters for typed calls and events), exomonad-jev (semantic predicates, choices and continuations), exomonad-project-work (optional Git delivery workflow), exomonad-agent-work (typed agents, requests and waits), exomonad-agent-spec (model-facing tools and reloads), exomonad-command (commands as values and retained results), exomonad-review (exact-source review and repair), exomonad-cleanup (retiring actors and scoped resources).",
             );
             if !workspace_modules.is_empty() {
@@ -188,7 +189,7 @@ pub(crate) fn workbench_doc(
                 message.push_str(&format!("; use `doc {skill}` to read the bundled skill"));
             }
             message.push_str(
-                "; topics: tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors; `doc topics` lists the workspace skills"
+                "; topics: api-guide, tree (worktree), workbench, request, agents, watch, deadline, refinement, lineage, cleanup, recovery, jev, actors; `doc topics` lists the workspace skills"
             );
             if !workspace_modules.is_empty() {
                 message.push_str(&format!(
@@ -220,6 +221,7 @@ mod tests {
             .iter()
             .all(|artifact| artifact.body.chars().count() <= HOSTED_DESCRIPTION_LIMIT));
         for topic in [
+            "api-guide",
             "tree",
             "workbench",
             "request",

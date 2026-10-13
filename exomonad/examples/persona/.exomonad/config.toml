@@ -18,3 +18,4 @@ jev-dsl = ["core"]
 [prompts]
 base = "prompts/base.md"
 agent = "prompts/agent.md"
+api_guide = "prompts/api-guide.md"

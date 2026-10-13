@@ -64,6 +64,7 @@ impl<'de> Deserialize<'de> for HaskellConfig {
 pub(crate) struct PromptConfig {
     pub base: Option<PathBuf>,
     pub agent: Option<PathBuf>,
+    pub api_guide: Option<PathBuf>,
     pub files: BTreeMap<String, PathBuf>,
 }
 
@@ -588,6 +589,7 @@ impl FrozenWorkspace {
         for (name, path) in [
             ("base", config.prompts.base),
             ("agent", config.prompts.agent),
+            ("api-guide", config.prompts.api_guide),
         ] {
             if let Some(path) = path {
                 let text = std::fs::read_to_string(base.join(path))?;
@@ -598,7 +600,7 @@ impl FrozenWorkspace {
             }
         }
         for (name, path) in config.prompts.files {
-            if name.trim().is_empty() || matches!(name.as_str(), "base" | "agent") {
+            if name.trim().is_empty() || matches!(name.as_str(), "base" | "agent" | "api-guide") {
                 return Err(format!("project prompt name is empty or reserved: {name:?}").into());
             }
             let text = std::fs::read_to_string(base.join(path))?;
@@ -912,6 +914,7 @@ impl FrozenWorkspace {
         for (name, path) in [
             ("base", config.prompts.base),
             ("agent", config.prompts.agent),
+            ("api-guide", config.prompts.api_guide),
         ]
         .into_iter()
         .filter_map(|(name, path)| path.map(|path| (name.to_owned(), path)))
@@ -2438,7 +2441,7 @@ mod tests {
         let second = tempfile::tempdir().unwrap();
         let authored = project.path().join(".exomonad");
         std::fs::create_dir_all(authored.join("Project")).unwrap();
-        std::fs::write(authored.join("config.toml"), "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n[prompts]\nbase = 'base.md'\n").unwrap();
+        std::fs::write(authored.join("config.toml"), "[defaults]\nmodel = 'gpt-6-sol'\n[haskell]\nsource_roots = ['.']\nmodules = ['Project.Work']\n[prompts]\nbase = 'base.md'\napi_guide = 'guide.md'\n").unwrap();
         std::fs::write(
             authored.join("Project/Work.hs"),
             "module Project.Work where\nimport Project.Types\n",
@@ -2450,6 +2453,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(authored.join("base.md"), "Original guidance").unwrap();
+        std::fs::write(authored.join("guide.md"), "Original profile guide").unwrap();
         let frozen = FrozenWorkspace::load(project.path(), first.path()).unwrap();
         let identical_run = tempfile::tempdir().unwrap();
         let identical = FrozenWorkspace::load(project.path(), identical_run.path()).unwrap();
@@ -2460,6 +2464,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(authored.join("base.md"), "Revised guidance").unwrap();
+        std::fs::write(authored.join("guide.md"), "Revised profile guide").unwrap();
         let reused = FrozenWorkspace::load(project.path(), first.path()).unwrap();
         assert_eq!(reused.prompts, frozen.prompts);
         assert!(
@@ -2470,6 +2475,8 @@ mod tests {
         let next = FrozenWorkspace::load(project.path(), second.path()).unwrap();
         assert_ne!(next.identity, frozen.identity);
         assert_eq!(next.prompts["base"], "Revised guidance");
+        assert_eq!(frozen.prompts["api-guide"], "Original profile guide");
+        assert_eq!(next.prompts["api-guide"], "Revised profile guide");
         assert!(
             std::fs::read_to_string(next.include[0].join("Project/Types.hs"))
                 .unwrap()

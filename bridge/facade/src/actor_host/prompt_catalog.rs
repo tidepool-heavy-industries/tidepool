@@ -101,15 +101,16 @@ pub(super) struct FrozenBasePrompt {
 impl FrozenBasePrompt {
     #[cfg(test)]
     pub(super) fn materialize(run_root: &std::path::Path) -> std::io::Result<Self> {
-        Self::materialize_selected(run_root, None, JevSurface::Installed)
+        Self::materialize_selected(run_root, None, None, JevSurface::Installed)
     }
 
     pub(super) fn materialize_selected(
         run_root: &std::path::Path,
         core: Option<&str>,
+        guide: Option<&str>,
         jev: JevSurface,
     ) -> std::io::Result<Self> {
-        let body = Self::selected_body(core, jev);
+        let body = Self::selected_body(core, guide, jev);
         let directory = run_root.join("prompts");
         std::fs::create_dir_all(&directory)?;
         let directory = directory.canonicalize()?;
@@ -134,14 +135,16 @@ impl FrozenBasePrompt {
         })
     }
 
-    pub(super) fn selected_body(core: Option<&str>, jev: JevSurface) -> String {
-        let mut body = match core {
-            Some(core) => format!(
-                "{core}\n\n{}",
-                include_str!("../../../../exomonad/prompts/api-guide.md")
-            ),
-            None => PromptId::ExomonadBase.body().to_owned(),
-        };
+    pub(super) fn selected_body(
+        core: Option<&str>,
+        guide: Option<&str>,
+        jev: JevSurface,
+    ) -> String {
+        let mut body = format!(
+            "{}\n\n{}",
+            core.unwrap_or(include_str!("../../../../exomonad/prompts/base.md")),
+            guide.unwrap_or(include_str!("../../../../exomonad/prompts/api-guide.md"))
+        );
         if jev == JevSurface::Absent {
             body.push_str(JEV_ABSENT);
         }
@@ -183,17 +186,45 @@ mod tests {
     }
 
     #[test]
+    fn workspace_guide_is_frozen_with_the_selected_core() {
+        let root = tempfile::tempdir().unwrap();
+        let selected = FrozenBasePrompt::materialize_selected(
+            root.path(),
+            Some("custom core"),
+            Some("profile guide"),
+            JevSurface::Installed,
+        )
+        .unwrap();
+        assert_eq!(selected.body(), "custom core\n\nprofile guide");
+        assert_eq!(
+            std::fs::read_to_string(selected.file()).unwrap(),
+            selected.body()
+        );
+        let fallback = FrozenBasePrompt::materialize(root.path()).unwrap();
+        assert_eq!(fallback.body(), PromptId::ExomonadBase.body());
+        assert_ne!(selected.file(), fallback.file());
+        assert_eq!(
+            FrozenBasePrompt::selected_body(None, Some("profile guide"), JevSurface::Installed),
+            format!(
+                "{}\n\nprofile guide",
+                include_str!("../../../../exomonad/prompts/base.md")
+            )
+        );
+    }
+
+    #[test]
     fn jev_availability_selects_an_instruction_extension() {
-        let installed = FrozenBasePrompt::selected_body(None, JevSurface::Installed);
-        let absent = FrozenBasePrompt::selected_body(None, JevSurface::Absent);
+        let installed = FrozenBasePrompt::selected_body(None, None, JevSurface::Installed);
+        let absent = FrozenBasePrompt::selected_body(None, None, JevSurface::Absent);
         assert_eq!(installed, PromptId::ExomonadBase.body());
         assert!(absent.starts_with(&installed));
         assert!(absent.len() > installed.len());
-        let selected = FrozenBasePrompt::selected_body(Some("project core"), JevSurface::Absent);
+        let selected =
+            FrozenBasePrompt::selected_body(Some("project core"), None, JevSurface::Absent);
         assert!(selected.starts_with("project core"));
         assert_ne!(
             selected,
-            FrozenBasePrompt::selected_body(None, JevSurface::Absent)
+            FrozenBasePrompt::selected_body(None, None, JevSurface::Absent)
         );
     }
 

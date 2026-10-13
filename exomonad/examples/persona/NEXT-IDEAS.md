@@ -149,25 +149,3 @@ thinking or interacting survives use, can be revised, and leaves room for anothe
 direction. Treat unexpected behavior as information about both the seed and the
 affordances. Native correctness tests and an engaging companion answer different
 questions; neither substitutes for the other.
-
-
-## Composing a practiced way of seeing
-
-The seed now offers a reusable `Context.presentationAssessment`: inspect its
-prepared query, retain observations, compare settlement with expected-loss or
-cumulative-mass policies, and explicitly activate a chosen preparation through
-`Context.activateInitial`. The real startup uses this selector through
-`Orientation.startup`; it is not a separate demonstration implementation.
-
-`AttentionNotebook.repertoire` carries ordinary actor instructions. The same
-value feeds `framingMenu` for human choice or `suggestFrame` for semantic judgment.
-`payloads`, Functor, and Traversable let a revision replace or decorate one family
-of continuations without rebuilding wire identities. The compiled
-`Examples.JevComposedWorkflow` shows complementary profunctor, lens, distribution,
-and selective compositions.
-
-A useful distinction to live with: changing a policy can reuse an observation;
-changing local continuations can replay identical requests; changing what you see
-or ask requires a fresh observation. None of these operations publishes context
-or executes the chosen effects by itself. Let that separation make revision easy
-to inspect and playful to try, without making every thought a maintenance ritual.

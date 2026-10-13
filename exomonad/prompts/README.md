@@ -56,7 +56,10 @@ The host compiles `base.md` followed by `api-guide.md` into one frozen base
 artifact. Every actor receives this same content-addressed file. The host also
 uses one task-neutral `agent.md` developer instruction; the active typed request
 and runtime status supply the task and authority. Workspace core overrides are
-selected once at run startup, never by actor role or live bindings. Native
+selected once at run startup, never by actor role or live bindings.
+`[prompts].api_guide` selects an optional workspace-relative API guide (relative
+to `.exomonad`, like `base` and `agent`). Without it, the shared API guide remains
+the fallback. The shared guide is also available through lookup `doc api-guide`. Native
 multi-agent tooling remains disabled.
 
 The composed prompt fingerprint covers the frozen base, the agent instruction,

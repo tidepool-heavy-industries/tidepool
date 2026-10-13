@@ -88,6 +88,11 @@ pub(super) async fn run_interactive_applications(
             .as_ref()
             .and_then(|inputs| inputs.prompts.get("base"))
             .map(String::as_str),
+        config
+            .workspace_inputs
+            .as_ref()
+            .and_then(|inputs| inputs.prompts.get("api-guide"))
+            .map(String::as_str),
         config.jev_surface(),
     )
     .map_err(|error| format!("cannot prepare Exomonad base prompt: {error}"))?;
