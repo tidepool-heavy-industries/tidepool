@@ -132,7 +132,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "InitialContextIdentity",
             wire_rust: Some("InitialContextIdentity"),
-            haskell_module: None,
+            haskell_module: Some("Tidepool.Effects.Core"),
             shape: TypeShape::Record {
                 fields: vec![
                     field("initialContextOperation", "operation", HsType::Text),
@@ -151,7 +151,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "InitialContextPublicationReceipt",
             wire_rust: Some("InitialContextPublicationReceipt"),
-            haskell_module: None,
+            haskell_module: Some("Tidepool.Effects.Core"),
             shape: TypeShape::Record {
                 fields: vec![
                     field("initialContextRun", "run", HsType::Text),
@@ -169,7 +169,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "InitialContextObservation",
             wire_rust: Some("InitialContextObservation"),
-            haskell_module: None,
+            haskell_module: Some("Tidepool.Effects.Core"),
             shape: TypeShape::Sum {
                 variants: vec![
                     startup_variant("InitialContextAbsent", vec![]),
@@ -194,7 +194,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "ContextReference",
             wire_rust: Some("ContextReference"),
-            haskell_module: None,
+            haskell_module: Some("Tidepool.Effects.Core"),
             shape: TypeShape::Identity {
                 payload: IdentityPayload::Text,
                 hs_binder: "reference",
@@ -221,7 +221,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "ContextTextSelector",
             wire_rust: Some("ContextTextSelector"),
-            haskell_module: None,
+            haskell_module: Some("Tidepool.Effects.Core"),
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -248,7 +248,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "ContextVisibleText",
             wire_rust: Some("ContextVisibleText"),
-            haskell_module: None,
+            haskell_module: Some("Tidepool.Effects.Core"),
             shape: TypeShape::Record {
                 fields: vec![
                     field(
@@ -273,7 +273,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "ContextBlock",
             wire_rust: Some("ContextBlock"),
-            haskell_module: None,
+            haskell_module: Some("Tidepool.Effects.Core"),
             shape: TypeShape::Sum {
                 variants: vec![
                     SumVariant {
@@ -327,7 +327,7 @@ fn type_defs() -> Vec<TypeDef> {
         TypeDef {
             name: "ContextDocument",
             wire_rust: Some("ContextDocument"),
-            haskell_module: None,
+            haskell_module: Some("Tidepool.Effects.Core"),
             shape: TypeShape::Record {
                 fields: vec![field(
                     "blocks",
@@ -395,7 +395,7 @@ fn sum(
     TypeDef {
         name,
         wire_rust: Some(name),
-        haskell_module: None,
+        haskell_module: Some("Tidepool.Effects.Core"),
         shape: TypeShape::Sum {
             variants: constructors
                 .iter()

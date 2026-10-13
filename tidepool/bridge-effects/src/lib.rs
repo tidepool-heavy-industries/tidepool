@@ -199,3 +199,93 @@ pub fn bridged_records_module() -> String {
 
 #[cfg(test)]
 mod model_control_tests;
+
+#[cfg(test)]
+mod context_constructor_tests {
+    use super::{ContextBlock, ContextNativeKind, ContextRole};
+    use tidepool_bridge::{FromHaskell, HaskellValue, ToHaskell};
+    use tidepool_repr::{DataCon, DataConId, DataConTable};
+
+    fn row(id: u64, module: &str, name: &str, arity: u32) -> DataCon {
+        DataCon {
+            identity: tidepool_repr::execution_schema::testing::metadata_identity(
+                tidepool_repr::execution_schema::SymbolIdentity {
+                    unit: "fixture".into(),
+                    module: module.into(),
+                    namespace: "constructor".into(),
+                    occurrence: name.into(),
+                    record_parent: None,
+                },
+                "FixtureType",
+            ),
+            id: DataConId(id),
+            name: name.into(),
+            tag: 1,
+            rep_arity: arity,
+            field_bangs: vec![],
+            qualified_name: Some(format!("{module}.{name}")),
+            type_name: "FixtureType".into(),
+        }
+    }
+
+    #[test]
+    fn context_text_constructor_preserves_module_identity_with_internal_text_present() {
+        let mut table = DataConTable::new();
+        table
+            .extend_checked([
+                row(1, "Tidepool.Effects.Core", "Text", 4),
+                row(2, "Data.Text.Internal", "Text", 3),
+                row(3, "GHC.Maybe", "Nothing", 0),
+                row(4, "Tidepool.Effects.Core", "User", 0),
+                row(5, "GHC.Types", "[]", 0),
+                row(7, "GHC.Types", ":", 2),
+            ])
+            .unwrap();
+        // String encoding uses the public Text alias, while ContextBlock uses its defining module.
+        let mut internal = table.get(DataConId(2)).unwrap().clone();
+        internal.qualified_name = Some("Data.Text.Text".into());
+        table.insert_checked(internal).unwrap();
+        let block = ContextBlock::Text {
+            reference: None,
+            role: ContextRole::User,
+            text: "retained persona".into(),
+            sources: vec![],
+        };
+        let value = block.to_value(&table).unwrap();
+        let HaskellValue::Con(id, fields) = &value else {
+            panic!("expected context constructor")
+        };
+        assert_eq!(*id, DataConId(1));
+        assert!(matches!(&fields[2], HaskellValue::Con(id, _) if *id == DataConId(2)));
+        assert_eq!(ContextBlock::from_value(&value, &table).unwrap(), block);
+        // A second exact owner at the qualified spelling must still refuse selection.
+        let mut foreign = table.get(DataConId(1)).unwrap().clone();
+        foreign.id = DataConId(6);
+        foreign.identity.symbol.unit = "foreign-unit".into();
+        foreign.identity.family.symbol.unit = "foreign-unit".into();
+        table.insert_checked(foreign).unwrap();
+        assert!(matches!(
+            block.to_value(&table),
+            Err(tidepool_bridge::BridgeError::AmbiguousDataConNameArity { .. })
+        ));
+    }
+
+    #[test]
+    fn context_pending_constructor_preserves_module_identity_with_exit_cell_present() {
+        let mut table = DataConTable::new();
+        table
+            .extend_checked([
+                row(1, "Tidepool.Effects.Core", "Pending", 0),
+                row(2, "Tidepool.Internal.ExitCell", "Pending", 1),
+            ])
+            .unwrap();
+        let value = ContextNativeKind::Pending.to_value(&table).unwrap();
+        assert!(
+            matches!(&value, HaskellValue::Con(id, fields) if *id == DataConId(1) && fields.is_empty())
+        );
+        assert_eq!(
+            ContextNativeKind::from_value(&value, &table).unwrap(),
+            ContextNativeKind::Pending
+        );
+    }
+}

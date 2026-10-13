@@ -4,6 +4,7 @@ use tidepool_bridge_derive::{FromHaskell, ToHaskell};
 
 /// Owner-issued startup operation, actor, installed spec and exact source identity.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
 pub struct InitialContextIdentity {
     pub operation: String,
     pub actor: (i64, i64),
@@ -15,6 +16,7 @@ pub struct InitialContextIdentity {
 
 /// Historical publication association and independently preserved caller seed reference.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
 pub struct InitialContextPublicationReceipt {
     pub run: String,
     pub actor_path: String,
@@ -27,24 +29,34 @@ pub struct InitialContextPublicationReceipt {
 /// Published text is historical evidence; read current context before replacing its exact issued reference.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum InitialContextObservation {
+    #[haskell(module = "Tidepool.Effects.Core")]
     InitialContextAbsent,
+    #[haskell(module = "Tidepool.Effects.Core")]
     InitialContextCaptured,
+    #[haskell(module = "Tidepool.Effects.Core")]
     InitialContextPreparing(InitialContextIdentity),
+    #[haskell(module = "Tidepool.Effects.Core")]
     InitialContextRetained(InitialContextIdentity, String),
+    #[haskell(module = "Tidepool.Effects.Core")]
     InitialContextPublishedEmpty(InitialContextIdentity, InitialContextPublicationReceipt),
+    #[haskell(module = "Tidepool.Effects.Core")]
     InitialContextPublished(
         InitialContextIdentity,
         InitialContextPublicationReceipt,
         String,
         ContextReference,
     ),
+    #[haskell(module = "Tidepool.Effects.Core")]
     InitialContextFailed(InitialContextIdentity, String),
+    #[haskell(module = "Tidepool.Effects.Core")]
     InitialContextCancelled(InitialContextIdentity),
+    #[haskell(module = "Tidepool.Effects.Core")]
     InitialContextUncertain(InitialContextIdentity, String),
 }
 
 /// Opaque serialized reference to host-owned context evidence; the context host validates it.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
 pub struct ContextReference {
     pub raw: String,
 }
@@ -52,15 +64,20 @@ pub struct ContextReference {
 /// Editable roles; system and developer instructions remain host-owned.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum ContextRole {
+    #[haskell(module = "Tidepool.Effects.Core")]
     User,
+    #[haskell(module = "Tidepool.Effects.Core")]
     Assistant,
 }
 
 /// Host classification of native evidence; each visible text field carries its own editability.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum ContextNativeKind {
+    #[haskell(module = "Tidepool.Effects.Core")]
     CompletedExchange,
+    #[haskell(module = "Tidepool.Effects.Core")]
     Opaque,
+    #[haskell(module = "Tidepool.Effects.Core")]
     Pending,
 }
 
@@ -68,13 +85,16 @@ pub enum ContextNativeKind {
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum ContextTextSelector {
     /// A visible message body identified by its position in the exchange.
+    #[haskell(module = "Tidepool.Effects.Core")]
     MessageText { part: i64 },
     /// The visible text of a completed tool result.
+    #[haskell(module = "Tidepool.Effects.Core")]
     ToolResultText,
 }
 
 /// A full visible native text field with its exact selector and editability.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
 pub struct ContextVisibleText {
     pub reference: ContextReference,
     pub selector: ContextTextSelector,
@@ -86,6 +106,7 @@ pub struct ContextVisibleText {
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum ContextBlock {
     /// Editable text with its retained evidence references.
+    #[haskell(module = "Tidepool.Effects.Core")]
     Text {
         reference: Option<ContextReference>,
         role: ContextRole,
@@ -93,6 +114,7 @@ pub enum ContextBlock {
         sources: Vec<ContextReference>,
     },
     /// Host-owned native evidence with bounded preview and full visible text fields.
+    #[haskell(module = "Tidepool.Effects.Core")]
     Native {
         reference: ContextReference,
         kind: ContextNativeKind,
@@ -104,6 +126,7 @@ pub enum ContextBlock {
 
 /// The complete ordered context document for one admitted invocation.
 #[derive(ToHaskell, FromHaskell, Clone, Debug, PartialEq, Eq)]
+#[haskell(module = "Tidepool.Effects.Core")]
 pub struct ContextDocument {
     pub blocks: Vec<ContextBlock>,
 }
