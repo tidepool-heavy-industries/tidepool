@@ -1116,6 +1116,8 @@ mod tests {
     use super::*;
     use fvm_ipld_blockstore::MemoryBlockstore;
     use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
+    use std::collections::BTreeMap;
     use tidepool_toolchain::exact_context::{read_value, Materializer};
 
     fn blocks<T: Serialize>(value: &T) -> (Cid, Vec<(Cid, Arc<[u8]>)>) {
@@ -1792,70 +1794,216 @@ mod tests {
         }
     }
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(24))]
-        #[test]
-        fn notebook_generation_histories_preserve_late_owners_and_refuse_stale_heads(ops in prop::collection::vec((0u8..7, any::<u8>()), 1..35)) {
-            let (_directory, mut store) = store();
-            domain(&store, RecoveryDomainId::Root, 64);
-            let actor = owner("root/model", 1);
-            let mut head = None;
-            let other = owner("root/independent", 1);
-            let mut other_head = None;
-            let mut retained = Vec::<RecoveryPublicOwner>::new();
-            for (operation, marker) in ops {
-                match operation {
-                    0 | 1 => {
-                        let (write, next) = generation_write(&store, head.clone(), &actor, marker);
-                        if operation == 1 { store.inject_fault(StoreFault::BeforeCommit); }
-                        match store.commit_publication(write) {
-                            StoreDisposition::Committed(receipt) => { receipt.installed_blocking().unwrap(); retained.push(next.owner.clone()); head = Some(next); }
-                            StoreDisposition::Refused(_) => prop_assert_eq!(operation, 1),
-                            _ => panic!("unexpected generation transition"),
-                        }
-                    }
-                    2 => {
-                        // A declaration update changes only its qualified owner,
-                        // never whichever notebook generation is currently active.
-                        if let Some(old) = retained.first() {
-                            let state = store.read_domain(RecoveryDomainId::Root).unwrap().unwrap();
-                            let old_state = store.read_public_owner(RecoveryDomainId::Root, old).unwrap().unwrap();
-                            let StoreDisposition::Committed(_) = public_change(&store, RecoveryDomainId::Root, &state, old.clone(), Some(old_state.epoch), u64::from(marker)) else { panic!("late owner publication refused") };
-                        }
-                    }
-                    3 => {
-                        if head.is_some() {
-                            let (write, _) = generation_write(&store, None, &actor, marker);
-                            prop_assert!(matches!(store.commit_publication(write), StoreDisposition::Refused(_)));
-                        }
-                    }
-                    5 => {
-                        let (write, next) = generation_write(&store, other_head.clone(), &other, marker);
-                        let StoreDisposition::Committed(receipt) = store.commit_publication(write) else { panic!("other actor generation refused") };
-                        receipt.installed_blocking().unwrap();
-                        other_head = Some(next);
-                    }
-                    6 => {
-                        let (write, next) = generation_write(&store, head.clone(), &actor, marker);
-                        store.inject_fault(StoreFault::CommitError);
-                        prop_assert!(matches!(store.commit_publication(write), StoreDisposition::RecoveryRequired(_)));
-                        prop_assert!(store.ensure_ready().is_err());
-                        let path = store.path().to_owned();
-                        store = RunRecoveryStore::open(&path).unwrap();
-                        retained.push(next.owner.clone());
-                        head = Some(next);
-                    }
-                    _ => {
-                        let recovered = RunRecoveryStore::open(store.path()).unwrap();
-                        prop_assert_eq!(recovered.active_notebook_generation(RecoveryDomainId::Root, &actor).unwrap(), head.clone());
-                    }
-                }
-                prop_assert_eq!(store.active_notebook_generation(RecoveryDomainId::Root, &actor).unwrap(), head.clone());
-                prop_assert_eq!(store.active_notebook_generation(RecoveryDomainId::Root, &other).unwrap(), other_head.clone());
-                for old in &retained { prop_assert!(store.read_public_owner(RecoveryDomainId::Root, old).unwrap().is_some()); }
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+    enum HistoryActor {
+        Main,
+        Independent,
+    }
+    impl HistoryActor {
+        fn index(self) -> usize {
+            match self {
+                Self::Main => 0,
+                Self::Independent => 1,
             }
         }
     }
+    #[derive(Clone, Debug)]
+    enum GenerationOp {
+        Prepare { actor: HistoryActor, marker: u8 },
+        Publish,
+        LateA { actor: HistoryActor, content: u8 },
+        Cancel,
+        RefuseBeforeCommit,
+        CommitUncertain,
+        Recover,
+    }
+    fn generation_op() -> impl Strategy<Value = GenerationOp> {
+        let actor = prop_oneof![Just(HistoryActor::Main), Just(HistoryActor::Independent)];
+        prop_oneof![
+            (actor.clone(), any::<u8>())
+                .prop_map(|(actor, marker)| GenerationOp::Prepare { actor, marker }),
+            Just(GenerationOp::Publish),
+            (actor, any::<u8>())
+                .prop_map(|(actor, content)| GenerationOp::LateA { actor, content }),
+            Just(GenerationOp::Cancel),
+            Just(GenerationOp::RefuseBeforeCommit),
+            Just(GenerationOp::CommitUncertain),
+            Just(GenerationOp::Recover),
+        ]
+    }
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct ExpectedGeneration {
+        generation: u64,
+        marker: u8,
+    }
+    struct PendingGeneration {
+        actor: HistoryActor,
+        marker: u8,
+        revision: u64,
+        predecessor: Option<ExpectedGeneration>,
+    }
+    #[derive(Default)]
+    struct HistoryCoverage {
+        late_a: usize,
+        stale: usize,
+        cancelled: usize,
+        precommit: usize,
+        uncertain: usize,
+        recovered: usize,
+        independent: usize,
+        fenced: usize,
+    }
+    fn assert_expected_generation(
+        store: &RunRecoveryStore,
+        actor: &RecoveryPublicOwner,
+        expected: Option<ExpectedGeneration>,
+    ) -> Result<(), TestCaseError> {
+        let actual = RunRecoveryStore::read_notebook_generation_at(
+            store.path(),
+            RecoveryDomainId::Root,
+            actor,
+        )
+        .unwrap();
+        match expected {
+            None => prop_assert!(actual.is_none()),
+            Some(expected) => {
+                let actual = actual.unwrap();
+                prop_assert_eq!(actual.generation().get(), expected.generation);
+                prop_assert_eq!(actual.owner.actor_owner(), actor.actor_owner());
+                prop_assert_eq!(actual.references.source.bytes(), &[expected.marker, 1]);
+                prop_assert_eq!(
+                    actual.references.installation.bytes(),
+                    &[expected.marker, 2]
+                );
+                prop_assert_eq!(
+                    actual.references.prompts.instructions(),
+                    format!("prompt {}", expected.marker)
+                );
+            }
+        }
+        Ok(())
+    }
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+        #[test]
+        fn notebook_generation_histories_preserve_late_owners_and_refuse_stale_heads(tail in prop::collection::vec(generation_op(), 0..35)) {
+            use GenerationOp::*;
+            use HistoryActor::*;
+            // Every shrunk history still traverses these ownership/fault seams.
+            let mut operations = vec![
+                Prepare { actor: Main, marker: 1 }, Publish,
+                Prepare { actor: Main, marker: 2 }, LateA { actor: Main, content: 3 }, Publish,
+                Prepare { actor: Main, marker: 2 }, Cancel,
+                Prepare { actor: Main, marker: 2 }, RefuseBeforeCommit, Recover,
+                Prepare { actor: Independent, marker: 4 }, Publish,
+                Prepare { actor: Main, marker: 2 }, CommitUncertain,
+                Prepare { actor: Main, marker: 9 }, Recover,
+            ];
+            operations.extend(tail);
+            let (_directory, mut store) = store();
+            domain(&store, RecoveryDomainId::Root, 64);
+            let actors = [owner("root/model", 1), owner("root/independent", 1)];
+            let mut heads: [Option<ExpectedGeneration>;2] = [None,None];
+            let mut owners = BTreeMap::<(HistoryActor,u64),u64>::new();
+            let mut revision = 0u64;
+            let mut fenced = false;
+            let mut pending: Option<(PreparedRecoveryWrite,PendingGeneration,Arc<super::super::PublicationDecision>)> = None;
+            let mut coverage = HistoryCoverage::default();
+            for operation in operations {
+                if fenced && !matches!(&operation, Recover) {
+                    prop_assert!(store.ensure_ready().is_err());
+                    coverage.fenced += 1;
+                    continue;
+                }
+                match operation {
+                    Prepare { actor,marker } => {
+                        let index = actor.index();
+                        let predecessor = store.active_notebook_generation(RecoveryDomainId::Root, &actors[index]).unwrap();
+                        let (write, _) = generation_write(&store, predecessor, &actors[index], marker);
+                        pending = Some((write,PendingGeneration { actor,marker,revision,predecessor: heads[index] },super::super::PublicationDecision::new()));
+                    }
+                    Publish | RefuseBeforeCommit | CommitUncertain => {
+                        if let Some((write,planned,decision)) = pending.take() {
+                            let claim = decision.claim_commit().expect("uncancelled preparation can claim publication");
+                            let index = planned.actor.index();
+                            let stale = planned.revision != revision || planned.predecessor != heads[index];
+                            let precommit = matches!(&operation, RefuseBeforeCommit);
+                            let uncertain = matches!(&operation, CommitUncertain);
+                            if precommit { store.inject_fault(StoreFault::BeforeCommit); }
+                            if uncertain { store.inject_fault(StoreFault::CommitError); }
+                            let disposition = store.commit_publication(write);
+                            if stale {
+                                prop_assert!(matches!(disposition, StoreDisposition::Refused(StoreRefusal::StaleRevision)));
+                                claim.before_rename_failure();
+                                coverage.stale += 1;
+                            } else if precommit {
+                                prop_assert!(matches!(disposition, StoreDisposition::Refused(_)));
+                                claim.before_rename_failure();
+                                coverage.precommit += 1;
+                            } else {
+                                if uncertain {
+                                    prop_assert!(matches!(disposition, StoreDisposition::RecoveryRequired(_)));
+                                    coverage.uncertain += 1;
+                                    prop_assert!(matches!(decision.phase(),super::super::PublicationPhase::CommitClaimed {..}), "uncertain publication retains its claimed decision");
+                                    drop(claim);
+                                    fenced = true;
+                                } else {
+                                    let StoreDisposition::Committed(receipt) = disposition else { return Err(TestCaseError::fail("valid generation was not committed")); };
+                                    claim.published();
+                                    receipt.installed_blocking().unwrap();
+                                }
+                                // Independent arithmetic and literal expected payloads;
+                                // never copy the issuer's returned next-generation object.
+                                let generation = heads[index].map_or(1, |old| old.generation + 1);
+                                heads[index] = Some(ExpectedGeneration { generation, marker: planned.marker });
+                                owners.insert((planned.actor,generation),1);
+                                revision += 1;
+                                if planned.actor == Independent { coverage.independent += 1; }
+                            }
+                        }
+                    }
+                    LateA { actor,content } => {
+                        if let Some((&(_,generation), &epoch)) = owners.iter().find(|((side,_),_)| *side == actor) {
+                            let id: super::super::NotebookGenerationId = serde_json::from_str(&generation.to_string()).unwrap();
+                            let prior = actors[actor.index()].for_notebook_generation(id);
+                            let state = store.read_domain(RecoveryDomainId::Root).unwrap().unwrap();
+                            prop_assert_eq!(state.revision.0, revision);
+                            prop_assert!(matches!(public_change(&store, RecoveryDomainId::Root, &state, prior, Some(epoch), u64::from(content)), StoreDisposition::Committed(_)));
+                            owners.insert((actor,generation),epoch+1);
+                            revision += 1;
+                            coverage.late_a += 1;
+                        }
+                    }
+                    Cancel => {
+                        if let Some((_write,_planned,decision)) = pending.take() {
+                            prop_assert_eq!(decision.request_cancellation(),super::super::PublicationCancellation::RequestedBeforeCommit);
+                            prop_assert!(decision.claim_commit().is_none());
+                            coverage.cancelled += 1;
+                        }
+                    }
+                    Recover => {
+                        let path = store.path().to_owned();
+                        store = RunRecoveryStore::open(&path).unwrap();
+                        fenced = false;
+                        coverage.recovered += 1;
+                    }
+                }
+                for (index, actor) in actors.iter().enumerate() { assert_expected_generation(&store, actor, heads[index])?; }
+                if !fenced {
+                    prop_assert_eq!(store.read_domain(RecoveryDomainId::Root).unwrap().unwrap().revision.0, revision);
+                    for (&(side,generation), &epoch) in &owners {
+                        let id: super::super::NotebookGenerationId = serde_json::from_str(&generation.to_string()).unwrap();
+                        let qualified = actors[side.index()].for_notebook_generation(id);
+                        prop_assert_eq!(store.read_public_owner(RecoveryDomainId::Root, &qualified).unwrap().unwrap().epoch, epoch);
+                    }
+                }
+            }
+            prop_assert!(coverage.late_a >= 1 && coverage.stale >= 1 && coverage.cancelled >= 1);
+            prop_assert!(coverage.precommit >= 1 && coverage.uncertain >= 1 && coverage.recovered >= 2);
+            prop_assert!(coverage.independent >= 1 && coverage.fenced >= 1);
+        }
+    }
+
     #[test]
     fn read_only_generation_lookup_preserves_selection_and_missing_distinctions() {
         let (directory, store) = store();
