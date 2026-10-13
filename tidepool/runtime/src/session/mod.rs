@@ -381,6 +381,8 @@ pub enum DurablePublicAdmissionFailure {
 #[derive(thiserror::Error, Debug)]
 pub enum SessionError {
     #[error(transparent)]
+    NotebookGeneration(#[from] NotebookGenerationError),
+    #[error(transparent)]
     GenerationExhausted(#[from] GenerationExhausted),
     #[error(transparent)]
     InvalidBindingIdentity(#[from] tidepool_codegen::binding_table::BindingIdentityError),

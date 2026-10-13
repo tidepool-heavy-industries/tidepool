@@ -12,7 +12,7 @@ impl NotebookGenerationId {
     pub fn get(self) -> u64 {
         self.0.get()
     }
-    pub(crate) fn next(self) -> Result<Self, NotebookGenerationError> {
+    pub fn next(self) -> Result<Self, NotebookGenerationError> {
         self.get()
             .checked_add(1)
             .and_then(NonZeroU64::new)
@@ -118,10 +118,43 @@ pub struct PreparedNotebookGeneration {
     pub(crate) expected: Option<ActiveNotebookGeneration>,
 }
 impl PreparedNotebookGeneration {
+    pub fn selection(&self) -> ActiveNotebookGeneration {
+        self.next.clone()
+    }
     pub fn owner(&self) -> &RecoveryPublicOwner {
         &self.next.owner
     }
     pub fn generation(&self) -> NotebookGenerationId {
         self.next.generation()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn generation_ids_and_authenticated_artifacts_refuse_invalid_evidence() {
+        assert_eq!(NotebookGenerationId::INITIAL.get(), 1);
+        assert!(serde_json::from_str::<NotebookGenerationId>("0").is_err());
+        let last: NotebookGenerationId = serde_json::from_str(&u64::MAX.to_string()).unwrap();
+        assert_eq!(last.next(), Err(NotebookGenerationError::Exhausted));
+        let prompt = ComposedPromptSnapshot::capture("λ\nexact instructions".into());
+        let bytes = serde_json::to_vec(&prompt).unwrap();
+        let decoded: ComposedPromptSnapshot = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(decoded, prompt);
+        decoded.validate().unwrap();
+        let mut forged = serde_json::to_value(&prompt).unwrap();
+        forged["instructions"] = serde_json::json!("changed");
+        let forged: ComposedPromptSnapshot = serde_json::from_value(forged).unwrap();
+        assert_eq!(
+            forged.validate(),
+            Err(NotebookGenerationError::DigestMismatch)
+        );
+        let mut source = GenerationArtifactReference::capture(vec![0, 255, 7]);
+        source.bytes.push(8);
+        assert_eq!(
+            source.validate(),
+            Err(NotebookGenerationError::DigestMismatch)
+        );
     }
 }
