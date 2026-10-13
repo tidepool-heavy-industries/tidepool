@@ -15,7 +15,8 @@ rather than explaining it away as an intentional state-only view.
 `Files.listDirectory "."` lists the workspace after importing
 `Tidepool.Effects.Authored` qualified as `Files`.
 `Files.readFile ".exomonad/Persona/Spec.hs"` reads its editable draft.
-`readSourceModule "Persona.Spec"` inspects captured active bytes and revision;
+`readSourceModule "Persona.Spec"` inspects the issued generation’s captured bytes
+and revision, which may differ from the current active head;
 `sourceStatus` distinguishes pending drafts. These observations answer different
 questions even when the bytes agree.
 

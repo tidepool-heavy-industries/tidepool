@@ -167,7 +167,8 @@ shared workspace's `Project.Tools`.
 Use the argument object `{"queries": ["name", "Module.name"]}`.
 The tool preserves original lookup results and may add up to four related
 declarations selected by Jev. Programmatic `Introspection.info` and `typeOf`
-remain raw. Run `exomonad check` before calling `reload`.
+remain raw. Standalone `exomonad check` is optional for diagnosis; `reload`
+performs authoritative candidate validation before publication.
 
 ## `exomonad check`: typecheck the workspace without starting anything
 

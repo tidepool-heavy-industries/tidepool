@@ -25,8 +25,9 @@ Files resolve from the ordinary workspace root. `.exomonad/Persona/*.hs` and
 `.exomonad/helpers/SessionHelpers.hs` are editable files. Durable memory remains
 under `.exomonad/state`, excluded from source capture and drift.
 
-Read a draft with ordinary file access; compare active code through
-`readSourceModule` and `sourceStatus`. Write a revision, then call native `reload`
+Read a draft with ordinary file access; inspect the issued generation’s captured
+code through `readSourceModule` and draft drift through `sourceStatus`. The issued
+generation may differ from the current active head. Write a revision, then call native `reload`
 or Haskell `reloadSource`. Source, compatible tools and workspace prompts publish
 as one generation. Changed configuration starts a fresh notebook; unchanged
 configuration preserves bindings. Keep durable definitions in `.hs` files.
