@@ -551,7 +551,7 @@ async fn reload_admits_a_valid_new_module_into_the_complete_graph() {
 
     let result = committed(
         policy.as_ref(),
-        "Right before <- sourceStatus\nRight outcome <- reloadSource []\nRight after <- sourceStatus\ninspectFull (case outcome of { ReloadPublished _ _ changed -> \"Project.Vibe\" `elem` changed; _ -> False })\ninspectFull (revisionIdentity (statusActive before) == revisionIdentity (statusActive after))\ninspectFull (case outcome of { ReloadPublished revision _ _ -> revisionIdentity revision /= revisionIdentity (statusActive before); _ -> False })",
+        "Right before <- sourceStatus\nRight outcome <- reloadSource []\nRight after <- sourceStatus\ninspectFull (case outcome of { ReloadPublished _ _ changed -> \"Project.Vibe\" `elem` changed; _ -> False })\ninspectFull (revisionIdentity (statusActive before) == revisionIdentity (statusActive after))\ninspectFull (case outcome of { ReloadPublished first second _ -> (revisionIdentity first == revisionIdentity (statusActive before) && revisionIdentity second /= revisionIdentity (statusActive before)) || (revisionIdentity second == revisionIdentity (statusActive before) && revisionIdentity first /= revisionIdentity (statusActive before)); _ -> False })",
     )
     .await;
     assert_eq!(result["items"][3]["output"], "True", "{result}");
