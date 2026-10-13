@@ -325,7 +325,7 @@ namedConstructors wire name = filter ((== name) . symbolOccurrence . constructor
 replyFor :: WireProgram -> Text.Text -> Text.Text -> [ConstructorReply]
 replyFor wire owner name = [reply | (ConstructorId index, reply) <- programConstructorReplies wire,
   let identity = constructorSymbol (constructorIdentity (programConstructors wire !! fromIntegral index)),
-  symbolModule identity == owner, symbolOccurrence (typeSymbol identity) == name]
+  symbolModule identity == owner, symbolOccurrence identity == name]
 replyRoot :: WireProgram -> Text.Text -> Text.Text -> TypeNodeId
 replyRoot wire owner name = case replyFor wire owner name of [StaticReply root] -> root; other -> error (show other)
 replyBody :: WireProgram -> Text.Text -> Text.Text -> TypeNodeId

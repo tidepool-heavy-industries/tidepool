@@ -34,7 +34,6 @@ import GHC.Unit.Module.ModIface (mi_module)
 import GHC.Unit.Types (unitString, stringToUnit)
 import GHC.Core (Bind(..), CoreBind)
 import Tidepool.ConstructorIdentity (IssuedConstructor)
-import GHC.Core.TyCon (TyCon)
 import GHC.Types.Name (nameOccName)
 import GHC.Types.Id (idName)
 import GHC.Types.Name.Occurrence (occNameString)
@@ -67,7 +66,7 @@ import Tidepool.GhcPipeline
   ( PipelineSelection(..), PreparedPipelineResult, pprPipelineResult, pprModules, pprProductInterfaces
   , pprPackageImports, pprAcceptedCandidates, pprReuseContext, PreparedSegmentProductsResult(..), CheckedEnvironmentResult(..)
   , preparedFreshDependencies, preparedExactCompilation, preparedHomeRequirements, retainProgramSourceImports
-  , withProgramSourceImports, CompilePurpose(..), withSourceImportIntents, prBinds, prTyCons, prHscEnv
+  , withProgramSourceImports, CompilePurpose(..), withSourceImportIntents, prBinds, prHscEnv
   , prCapturedType, prWarnings, prTargetTcGblEnv, CompilerScope(..), CompilerRecoveryCaches(..)
   , withResidentCompilerScopes, withScopedExactInterfaceTransaction, checkCellInstances
   , cellGeneratedInstanceRecipe, cellExpressionEvidence, cellCheckedBinderSignatures
@@ -460,7 +459,7 @@ runActivationPreviewMode parserFlags compiler caches request args path = do
           <> encodeBytes (previewInputWitness admission))
       Right (artifacts, productContext) -> do
         unless (all (null . paYieldSites) artifacts) (fail "pure activation preview emitted suspension sites")
-        writePreparedSidecars InlineYieldSites outDir binds (prTyCons compiled)
+        writePreparedSidecars InlineYieldSites outDir binds
           (T.pack <$> prCapturedType compiled) (map T.pack (prWarnings compiled)) artifacts
         writePreparedArtifacts outDir artifacts
         void $ writeRequestProducts args originalInterfaces outDir prepared productContext artifacts
@@ -567,7 +566,6 @@ processFile compiler caches timing args path = do
     prepared <- compiler (PreparedProducts (requestModuleCandidates args)) (Map.keysSet (requestRetainedGenerations args)) purpose scope path (requestIncludes args) (requestBuildProductsDir args)
     let result = pprPipelineResult prepared
     let binds = prBinds result
-        tycons = prTyCons result
         hscEnv = prHscEnv result
         -- Inferred type of the eval's top expression (the @__user@ binding),
         -- threaded into meta.cbor for the Rust side. Nothing for non-eval
@@ -593,7 +591,7 @@ processFile compiler caches timing args path = do
       (standardAuxiliaryRoots binds) (requestRetainedGenerations args) []
     if null preparedArtifacts
       then ioError (userError "prepared extraction requires --target or --targets")
-      else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds tycons mCapturedTy warnTexts preparedArtifacts
+      else timePhase timing "prepared_sidecars" $ writePreparedSidecars SeparateYieldSites outDir binds mCapturedTy warnTexts preparedArtifacts
 
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     void $ timePhase timing "module_products" $
@@ -834,9 +832,9 @@ writePreparedArtifacts outDir artifacts = forM_ artifacts $ \artifact -> do
 data YieldSiteDelivery = SeparateYieldSites | InlineYieldSites
 
 writePreparedSidecars
-  :: YieldSiteDelivery -> FilePath -> [CoreBind] -> [TyCon] -> Maybe T.Text -> [T.Text]
+  :: YieldSiteDelivery -> FilePath -> [CoreBind] -> Maybe T.Text -> [T.Text]
   -> [PreparedArtifact] -> IO ()
-writePreparedSidecars delivery outDir binds tycons capturedType warnings artifacts = do
+writePreparedSidecars delivery outDir binds capturedType warnings artifacts = do
   let constructors = concatMap paConstructors artifacts
   metadata <- either (ioError . userError . show) pure (metadataForConstructors constructors)
   let hasIO = any (targetBindingHasIO binds . paTarget) artifacts
@@ -1145,7 +1143,7 @@ compileClassifiedTurnKeeping compiler caches args timing outDir turnSrc sb binde
       [preparedScaffoldTargetName] (standardAuxiliaryRoots binds)
       (requestRetainedGenerations args) (sessionBindingRepresentations sessionBindings)
     let asksSites = concatMap paYieldSites preparedArtifacts
-    timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds (prTyCons result) mCapturedTy warnTexts preparedArtifacts
+    timePhase timing "prepared_sidecars" $ writePreparedSidecars InlineYieldSites outDir binds mCapturedTy warnTexts preparedArtifacts
     timePhase timing "prepared_write" $ writePreparedArtifacts outDir preparedArtifacts
     originalProducts <- timePhase timing "module_products" $
       writeRequestProducts args originalInterfaces outDir prepared productContext preparedArtifacts
@@ -1551,7 +1549,7 @@ runCellProgramMode parserFlags compiler caches args cellPath exact planned = do
                   prefix (scopeValues scope) (checkedTemplateImports admission)
             createDirectoryIfMissing True itemDirectory
             writeFile (itemDirectory </> sourceOwner ++ ".hs") rendered
-            writePreparedSidecars InlineYieldSites itemDirectory binds (prTyCons result)
+            writePreparedSidecars InlineYieldSites itemDirectory binds
               Nothing (map T.pack (prWarnings result)) [outputArtifact]
             writePreparedArtifacts itemDirectory [outputArtifact]
             writeCertifiedSegmentItemProducts prepared sharedProducts itemDirectory (paProgram outputArtifact)
@@ -1716,7 +1714,7 @@ prepareOriginalCellDeclaration compiler caches args template outDir scope exact 
   originalInterfaces <- newPreparedOriginalInterfaceArtifacts prepared directory
   (artifacts, productContext) <- prepareArtifacts originalInterfaces directory caches prepared
     ["__result"] [] (requestRetainedGenerations args) []
-  writePreparedSidecars SeparateYieldSites directory binds (prTyCons result)
+  writePreparedSidecars SeparateYieldSites directory binds
     Nothing (map T.pack (prWarnings result)) artifacts
   writePreparedArtifacts directory artifacts
   certified <- writeRequestProducts args originalInterfaces directory prepared productContext artifacts

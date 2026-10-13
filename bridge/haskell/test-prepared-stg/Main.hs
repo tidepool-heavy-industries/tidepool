@@ -63,6 +63,7 @@ import Tidepool.PreparedStg
   , RecoveredModuleInput(..), prepareRecoveredModule, newPreparedBodyCache, newPreparedBodyPreparer
   , preparedUsesSiteAuthority, filterPreparedBindings, preparedRejectsIntrinsic
   , resolvePreparedSiteEnvironment, preparedSiteDependenciesMatch, preparedSiteDependenciesEquivalent )
+import Tidepool.ConstructorIdentity (issuedDataCon)
 import Tidepool.FinalizedModule (FinalizedModule(..))
 import Tidepool.ExactHydration (forkExactContext)
 import Tidepool.FatIface.Internal (issueOwnerInterfaceContext)
@@ -321,7 +322,7 @@ verifyJsonLayoutDemand authority result = do
   (textCarrier, textConstructors) <- require "bound Text representation"
     (Projection.projectSelectedWithHostBindings [textRepresentation] selected)
   let retains representation admitted = all
-        (\expected -> any ((== dataConName expected) . dataConName) admitted)
+        (\expected -> any ((== dataConName expected) . dataConName . issuedDataCon) admitted)
         (hostBindingRepresentationConstructors representation)
   assert (retains jsonRepresentation jsonConstructors
       && retains textRepresentation textConstructors
@@ -826,7 +827,7 @@ nominalSiteIdentity graph root = do
   body <- child root Schema.TypeBody
   declaration <- child body Schema.TypeHead
   case node declaration of
-    Just (Schema.TypeDeclaration identity _ _ _) -> Just identity
+    Just (Schema.TypeDeclaration identity _ _ _) -> Just (Schema.typeSymbol identity)
     _ -> Nothing
  where
   node (Schema.TypeNodeId raw) = IntMap.lookup (fromIntegral raw) (Schema.typeGraphNodes graph)
