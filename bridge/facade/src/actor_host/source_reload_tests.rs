@@ -271,18 +271,16 @@ async fn issued_source_identity_matches(
 async fn bind_current_source_identity(
     campaign: &mut TestCampaign,
     policy: &dyn exomonad_actor::ResidentToolEndpoint,
-) {
+) -> String {
     let result = displayed(
         campaign,
         policy,
-        "Right selectedSource <- sourceStatus\npublishedSourceBefore <- pure (revisionIdentity (statusActive selectedSource))\ndisplay True",
+        "Right selectedSource <- sourceStatus\npublishedSourceBefore <- pure (revisionIdentity (statusActive selectedSource))\ndisplay publishedSourceBefore",
     )
     .await;
-    assert_eq!(
-        super::test_campaign::committed_display_text(&result),
-        "True",
-        "{result}"
-    );
+    let identity = super::test_campaign::committed_display_text(&result).to_owned();
+    assert!(!identity.is_empty(), "{result}");
+    identity
 }
 
 /// Compare against the retained typed value without rendering the identity.
@@ -322,7 +320,7 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
-    bind_current_source_identity(campaign, root.as_ref()).await;
+    let parent_identity = bind_current_source_identity(campaign, root.as_ref()).await;
 
     let (launch, child) = campaign
         .dispatch_native_spawn_setup(
@@ -339,6 +337,7 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
             allocate: true,
         },
     );
+    assert!(issued_source_identity_matches(campaign, child.policy.as_ref(), &parent_identity).await);
 
     // The checkout carries a historical copy of the authored package.
     let checkout = campaign
@@ -365,27 +364,16 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     )
     .await;
     assert_eq!(super::test_campaign::committed_display_text(&refused), "refused", "{refused}");
+    assert!(issued_source_identity_matches(campaign, child.policy.as_ref(), &parent_identity).await);
     let child_after_refusal = displayed(campaign, child.policy.as_ref(), "display answer").await;
     assert_eq!(super::test_campaign::committed_display_text(&child_after_refusal), "1", "{child_after_refusal}");
     assert!(current_source_matches_bound_identity(campaign, root.as_ref()).await);
     let root_answer = displayed(campaign, root.as_ref(), "display answer").await;
     assert_eq!(super::test_campaign::committed_display_text(&root_answer), "1", "{root_answer}");
 
-    // Both source status views name the run's current revision.
-    let child_status = displayed(
-        campaign,
-        child.policy.as_ref(),
-        "Right now <- sourceStatus\ndisplay (revisionGeneration (statusActive now))",
-    )
-    .await;
-    assert_eq!(super::test_campaign::committed_display_text(&child_status), "1", "{child_status}");
-    let root_status = displayed(
-        campaign,
-        root.as_ref(),
-        "Right now <- sourceStatus\ndisplay (revisionGeneration (statusActive now))",
-    )
-    .await;
-    assert_eq!(super::test_campaign::committed_display_text(&root_status), "1", "{root_status}");
+    // Both source status views name the run's exact issued revision.
+    assert!(issued_source_identity_matches(campaign, child.policy.as_ref(), &parent_identity).await);
+    assert!(issued_source_identity_matches(campaign, root.as_ref(), &parent_identity).await);
 })).await;
 }
 
@@ -414,7 +402,7 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     .await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let root = campaign.root_installation.policy.clone();
-    bind_current_source_identity(campaign, root.as_ref()).await;
+    let parent_identity = bind_current_source_identity(campaign, root.as_ref()).await;
 
     let (launch, child) = campaign
         .dispatch_native_spawn_setup(
@@ -431,6 +419,7 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
             allocate: true,
         },
     );
+    assert!(issued_source_identity_matches(campaign, child.policy.as_ref(), &parent_identity).await);
 
     let checkout = campaign
         .worktrees
@@ -444,14 +433,8 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
         "this checkout carries no authored source"
     );
 
-    // It reads the layer it actually compiles against…
-    let status = displayed(
-        campaign,
-        child.policy.as_ref(),
-        "Right now <- sourceStatus\ndisplay (revisionGeneration (statusActive now))",
-    )
-    .await;
-    assert_eq!(super::test_campaign::committed_display_text(&status), "1", "{status}");
+    // It reads the exact layer the parent issued…
+    assert!(issued_source_identity_matches(campaign, child.policy.as_ref(), &parent_identity).await);
 
     // …and cannot publish into it. The edit the root made is still waiting for
     // the root, not for this child.
@@ -470,6 +453,7 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     )
     .await;
     assert_eq!(super::test_campaign::committed_display_text(&refused), "refused", "{refused}");
+    assert!(issued_source_identity_matches(campaign, child.policy.as_ref(), &parent_identity).await);
     let child_after_refusal = displayed(campaign, child.policy.as_ref(), "display answer").await;
     assert_eq!(super::test_campaign::committed_display_text(&child_after_refusal), "1", "{child_after_refusal}");
     assert!(current_source_matches_bound_identity(campaign, root.as_ref()).await);
