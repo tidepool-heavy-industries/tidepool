@@ -124,7 +124,7 @@ import Tidepool.ExecutionSchema
 import Tidepool.ExecutionSchema qualified as Schema
 import Tidepool.PreparedFacts (PreparedFacts(..), extractPreparedFacts)
 import Tidepool.Identity (nameSymbolIdentity)
-import Tidepool.ConstructorIdentity (IdentityResolver, unionIdentityResolvers, resolveTypeIdentity, TypeIdentityFailure, IssuedConstructor, issuedDataCon, issuedConstructorIdentity, issuedConstructorHostId, issuedIdentityResolver, issueConstructorWithFamily)
+import Tidepool.ConstructorIdentity (IdentityResolver, unionIdentityResolvers, resolveTypeIdentity, ResolvedTypeIdentity, resolvedTypeIdentity, resolveTypeIdentityEvidence, TypeIdentityFailure, IssuedConstructor, issuedDataCon, issuedConstructorIdentity, issuedConstructorHostId, issuedIdentityResolver, issueConstructorWithFamily)
 import Tidepool.FatIface (fatOriginalOwner)
 import Tidepool.PreparedStg
   ( PreparedModule, PreparedCoverage(..), pmModule, pmCoverage, pmBindings
@@ -206,8 +206,9 @@ data PState = PState
   , nextOperation :: !Word32, nextSignature :: !Word32
   , globals :: VarEnv GlobalId, globalDecls :: Seq GlobalDecl
   , identityResolver :: IdentityResolver
-  , typeIdentityCache :: Map Name TypeIdentity
+  , typeIdentityCache :: Map Name ResolvedTypeIdentity
   , constructors :: Seq (IssuedConstructor, ConstructorId), constructorDecls :: Seq ConstructorDecl
+  , constructorHostIndex :: Map Word64 ConstructorIdentity
   , constructorIndex :: Map ConstructorIdentity (ConstructorId, ConstructorDecl)
   , operations :: Map (Schema.OperationIdentity, SignatureId) OperationId
   , operationDecls :: Seq OperationDecl
@@ -266,7 +267,7 @@ resolveTextPackageUnit hscEnv =
 projectLiteralAtomForTest :: TargetDescriptor -> Literal -> Either ProjectionError Atom
 projectLiteralAtomForTest machine literal = evalStateT (projectLiteralAtom literal)
   (PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv emptyVarEnv Map.empty [] Map.empty
-    0 0 0 0 emptyVarEnv Seq.empty (unionIdentityResolvers []) Map.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
+    0 0 0 0 emptyVarEnv Seq.empty (unionIdentityResolvers []) Map.empty Seq.empty Seq.empty Map.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
     machine Map.empty Set.empty Nothing Nothing Nothing Nothing Set.empty ExecutableTarget FinalEntryContracts [])
 
 projectPrepared :: ProjectionContext -> [PreparedModule] -> Either ProjectionError WireProgram
@@ -730,7 +731,7 @@ projectPreparedModuleGroupResultsFor purpose context prepared selection =
         (lookupVarEnv identities binder)) (topBinders binding)
       let outside = allSymbols `Set.difference` Set.fromList binders
           initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv identities
-            Map.empty [] Map.empty 0 0 0 0 emptyVarEnv Seq.empty (pmIdentityResolver prepared) Map.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
+            Map.empty [] Map.empty 0 0 0 0 emptyVarEnv Seq.empty (pmIdentityResolver prepared) Map.empty Seq.empty Seq.empty Map.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty
             (projectionTarget context) (projectionRetainedGenerations context)
             (if pmCoverage prepared == CompleteSourceModule
               then Set.singleton owner else Set.empty)
@@ -819,7 +820,7 @@ projectPreparedCandidateWithHostBindings hostBindings context modules topIdentit
   boundJsonAuthority <- foldM admitJsonAuthority (projectionJsonAuthority context)
     (mapMaybe hostBindingRepresentationJsonAuthority hostBindings)
   let initial = PState 0 0 emptyVarEnv emptyVarEnv emptyVarEnv topIdentityMap Map.empty [] Map.empty
-        0 0 0 0 emptyVarEnv Seq.empty (unionIdentityResolvers (map pmIdentityResolver modules)) Map.empty Seq.empty Seq.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty (projectionTarget context)
+        0 0 0 0 emptyVarEnv Seq.empty (unionIdentityResolvers (map pmIdentityResolver modules)) Map.empty Seq.empty Seq.empty Map.empty Map.empty Map.empty Seq.empty Seq.empty Map.empty (projectionTarget context)
         (projectionRetainedGenerations context) (Set.fromList
           [ (Text.pack (unitString (moduleUnit (pmModule prepared))),
              Text.pack (moduleNameString (moduleName (pmModule prepared))))
@@ -3087,9 +3088,8 @@ constructorDeclaration con = do
   layout <- layoutFor reps
   tag <- checkedWord32 "constructor tag" (dataConTag con)
   familySize <- checkedWord32 "constructor family size" (GHC.tyConFamilySize (dataConTyCon con))
-  resolver <- gets identityResolver
-  family <- resolveProjectedTypeIdentity (dataConTyCon con)
-  issued <- lift (either (Left . ConstructorIdentityIssuanceFailure) Right (issueConstructorWithFamily resolver family con))
+  family <- resolveProjectedTypeEvidence (dataConTyCon con)
+  issued <- lift (either (Left . ConstructorIdentityIssuanceFailure) Right (issueConstructorWithFamily family con))
   pure (issued, ConstructorDecl
         (issuedConstructorIdentity issued)
         resultRep reps fieldStrictness layout tag familySize
@@ -3117,6 +3117,12 @@ internConstructor con = do
   (issued, declaration) <- constructorDeclaration con
   known <- gets constructorIndex
   let nominal = constructorIdentity declaration
+      hostId = constructorHostId declaration
+  hosts <- gets constructorHostIndex
+  case Map.lookup hostId hosts of
+    Just previous | previous /= nominal ->
+      failShape "distinct constructor identities share one runtime host id"
+    _ -> pure ()
   case Map.lookup nominal known of
     Nothing -> do
       next <- gets nextConstructor
@@ -3125,6 +3131,7 @@ internConstructor con = do
         { nextConstructor = next + 1
         , constructors = constructors current |> (issued, identity)
         , constructorDecls = constructorDecls current |> declaration
+        , constructorHostIndex = Map.insert hostId nominal (constructorHostIndex current)
         , constructorIndex = Map.insert nominal (identity, declaration) (constructorIndex current) })
       pure identity
     Just (identity, existing)
@@ -3559,13 +3566,16 @@ failLayout :: Text -> P a
 failLayout = lift . Left . InvalidPreparedLayout
 
 resolveProjectedTypeIdentity :: GHC.TyCon -> P TypeIdentity
-resolveProjectedTypeIdentity tc = do
+resolveProjectedTypeIdentity tc = resolvedTypeIdentity <$> resolveProjectedTypeEvidence tc
+
+resolveProjectedTypeEvidence :: GHC.TyCon -> P ResolvedTypeIdentity
+resolveProjectedTypeEvidence tc = do
   known <- gets typeIdentityCache
   case Map.lookup (GHC.tyConName tc) known of
     Just identity -> pure identity
     Nothing -> do
       resolver <- gets identityResolver
-      identity <- lift (either (Left . ConstructorIdentityIssuanceFailure) Right (resolveTypeIdentity resolver tc))
+      identity <- lift (either (Left . ConstructorIdentityIssuanceFailure) Right (resolveTypeIdentityEvidence resolver tc))
       modify' (\current -> current { typeIdentityCache = Map.insert (GHC.tyConName tc) identity (typeIdentityCache current) })
       pure identity
 

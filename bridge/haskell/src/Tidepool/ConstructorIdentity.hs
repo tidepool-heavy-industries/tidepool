@@ -2,6 +2,7 @@
 module Tidepool.ConstructorIdentity
   ( IdentityResolver, captureIdentityResolver, unionIdentityResolvers
   , TypeIdentityFailure(..), resolveTypeIdentity
+  , ResolvedTypeIdentity, resolveTypeIdentityEvidence, resolvedTypeIdentity
   , IssuedConstructor, issuedDataCon, issuedConstructorIdentity, issuedConstructorHostId
   , issuedIdentityResolver, issueConstructor, issueConstructorWithFamily, wiredInConstructor
   ) where
@@ -53,8 +54,18 @@ data TypeIdentityFailure
   deriving (Eq, Show)
 instance Exception TypeIdentityFailure
 
+-- Only this module issues the evidence pairing a type identity with its
+-- selected immutable interfaces and actual GHC parent declaration.
+data ResolvedTypeIdentity = ResolvedTypeIdentity IdentityResolver TyCon TypeIdentity
+
+resolvedTypeIdentity :: ResolvedTypeIdentity -> TypeIdentity
+resolvedTypeIdentity (ResolvedTypeIdentity _ _ identity) = identity
+
 resolveTypeIdentity :: IdentityResolver -> TyCon -> Either TypeIdentityFailure TypeIdentity
-resolveTypeIdentity (IdentityResolver interfaces) tc = do
+resolveTypeIdentity resolver tc = resolvedTypeIdentity <$> resolveTypeIdentityEvidence resolver tc
+
+resolveTypeIdentityEvidence :: IdentityResolver -> TyCon -> Either TypeIdentityFailure ResolvedTypeIdentity
+resolveTypeIdentityEvidence resolver@(IdentityResolver interfaces) tc = do
   let name = tyConName tc
       parent = maybe tc dataConTyCon (isPromotedDataCon_maybe tc)
       parentName = tyConName parent
@@ -69,7 +80,7 @@ resolveTypeIdentity (IdentityResolver interfaces) tc = do
     case Map.keys (Map.fromList [(candidate,()) | candidate <- versions]) of
       [selected] -> pure selected
       distinct -> Left (AmbiguousTypeDeclarationHash symbol distinct)
-  pure (TypeIdentity symbol version)
+  pure (ResolvedTypeIdentity resolver tc (TypeIdentity symbol version))
 
 -- The compiler declaration and its issued identity remain one evidence value
 -- through executable projection and metadata publication.
@@ -82,11 +93,11 @@ data IssuedConstructor = IssuedConstructor
 
 issueConstructor :: IdentityResolver -> DataCon -> Either TypeIdentityFailure IssuedConstructor
 issueConstructor resolver dc = do
-  family <- resolveTypeIdentity resolver (dataConTyCon dc)
-  issueConstructorWithFamily resolver family dc
+  family <- resolveTypeIdentityEvidence resolver (dataConTyCon dc)
+  issueConstructorWithFamily family dc
 
-issueConstructorWithFamily :: IdentityResolver -> TypeIdentity -> DataCon -> Either TypeIdentityFailure IssuedConstructor
-issueConstructorWithFamily resolver family dc = do
+issueConstructorWithFamily :: ResolvedTypeIdentity -> DataCon -> Either TypeIdentityFailure IssuedConstructor
+issueConstructorWithFamily (ResolvedTypeIdentity resolver parentTyCon family) dc = do
   symbol <- maybe (Left (MissingTypeOwner (qualifiedName (dataConName dc)))) Right
     (nameSymbolIdentity "constructor" (dataConName dc))
   let parent = typeSymbol family
@@ -94,7 +105,7 @@ issueConstructorWithFamily resolver family dc = do
     then Left (ConstructorParentOwnerMismatch symbol parent) else pure ()
   actualParent <- maybe (Left (MissingTypeOwner (qualifiedName (tyConName (dataConTyCon dc))))) Right
     (nameSymbolIdentity "type" (tyConName (dataConTyCon dc)))
-  if actualParent /= parent then Left (ConstructorParentIdentityMismatch family (TypeIdentity actualParent (typeVersion family)))
+  if actualParent /= parent || dataConTyCon dc /= parentTyCon then Left (ConstructorParentIdentityMismatch family (TypeIdentity actualParent (typeVersion family)))
     else pure ()
   let identity = ConstructorIdentity symbol family
       bytes = BS.pack (map (fromIntegral . fromEnum) "tidepool-constructor-id/v1\0")

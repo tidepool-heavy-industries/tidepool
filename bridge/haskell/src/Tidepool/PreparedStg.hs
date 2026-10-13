@@ -238,10 +238,11 @@ acquirePreparedModuleWithSiteEnvironment environment env location siblings final
   retainDefiningInterface env (hm_iface (finalizedHomeModInfo finalized)) task
 
 retainDefiningInterface :: HscEnv -> ModIface -> PreparedModuleTask -> IO PreparedModuleTask
-retainDefiningInterface env iface task = pure $ PreparedModuleTask $ do
-  output <- runPreparedModuleTask task
+retainDefiningInterface env iface task = do
   resolver <- captureIdentityResolver env (Just iface)
-  pure output { preparedIdentityResolver = resolver }
+  pure $ PreparedModuleTask $ do
+    output <- runPreparedModuleTask task
+    pure output { preparedIdentityResolver = resolver }
 
 -- | Exact optimized bindings retain their defining module and interface
 -- context. No fabricated ModSummary or cross-module Core grouping is needed:
@@ -951,8 +952,8 @@ acquireRecoveredWithWorkers workers environment hscEnv owner context bindings = 
     task <- acquireRecoveredModuleWithWorkers workers environment hscEnv
       (RecoveredModuleInput owner (ownerInterfaceLocation context)
         (ownerInterfaceTyCons context) bindings (ownerInterfaceEntries context))
+    retained <- retainDefiningInterface hscEnv (ownerInterfaceModIface context) task
     pure (PreparedModuleTask $ do
-      retained <- retainDefiningInterface hscEnv (ownerInterfaceModIface context) task
       output <- runPreparedModuleTask retained
       pure output { preparedExpectedEntries = DeclaringEntries context })
   pure $ case prepared of
@@ -1006,6 +1007,7 @@ acquireBindingsWithScope :: ConstructorWorkerPolicy -> Bool -> [Id] -> Map Name 
   -> [SiteRejection] -> Maybe TyCon -> Maybe PreparedSiteDependencies -> IntrinsicCensus -> IO PreparedModuleTask
 acquireBindingsWithScope workers timing subsetScope entries hscEnv thisModule location tycons optimizedCore coverage
     siblings yieldSites sites graph rejections carrierTyCon dependencies census = do
+  resolver <- captureIdentityResolver hscEnv Nothing
   let baseFlags = hsc_dflags hscEnv
       preparedFlags =
         gopt_set
@@ -1045,7 +1047,6 @@ acquireBindingsWithScope workers timing subsetScope entries hscEnv thisModule lo
         (stgBindings, tagSigs) <-
           stg2stgWithExternalScope logger (externalScope ++ interactiveVars) externalScope
             stgOptions thisModule initialStg
-        resolver <- captureIdentityResolver hscEnv Nothing
         pure PreparedModule
           { preparedIdentityResolver = resolver
           , preparedModule = thisModule
