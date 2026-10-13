@@ -1102,6 +1102,11 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
         .initial_context
         .clone()
         .unwrap();
+    let selected_b = exomonad_actor::RootStartupManifestPin::capture_for_actor(
+        &run.join("recovery.sqlite"),
+        &persisted_root_owner(&before, actor_a),
+    )
+    .unwrap();
     assert_eq!(
         std::fs::read_to_string(root.join("project/initializer-count.txt")).unwrap(),
         "x"
@@ -1132,6 +1137,18 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
     assert_eq!(actor_b.id, actor_a.id);
     assert_eq!(actor_b.incarnation.0, actor_a.incarnation.0 + 1);
     let identity_b = embedded_recovery::host_identity(&run, "/root", actor_b);
+    let transferred_records =
+        exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
+            .unwrap();
+    let transferred_b = exomonad_actor::RootStartupManifestPin::capture_for_actor(
+        &run.join("recovery.sqlite"),
+        &persisted_root_owner(&transferred_records, actor_b),
+    )
+    .unwrap();
+    assert_eq!(
+        transferred_b.public_owner.surface_root, selected_b.public_owner.surface_root,
+        "cold ownership transfer preserves B's exact declaration and binding-winner content"
+    );
     assert!(!root.join("coherent-recovered.calls").exists());
     assert_eq!(
         std::fs::read_to_string(root.join("project/initializer-count.txt")).unwrap(),
