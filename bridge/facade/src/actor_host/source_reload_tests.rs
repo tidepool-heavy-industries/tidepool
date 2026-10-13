@@ -209,7 +209,7 @@ fn ignore_workspace(workspace: &Path) {
     commit(workspace, "keep the authored package out of the repository");
 }
 
-/// Compare the issued source capsule's identity with an exact owner-issued receipt.
+/// Compare the source layer's current revision with its exact reload receipt.
 async fn issued_source_identity_matches(
     policy: &dyn exomonad_actor::ResidentToolEndpoint,
     expected: &str,
@@ -218,7 +218,7 @@ async fn issued_source_identity_matches(
         .snapshot_for_request()
         .expect("issued source generation");
     let source = format!(
-        "Right selectedSource <- sourceStatus\ninspectFull (revisionIdentity (statusActive selectedSource) == {expected:?})"
+        "Right selectedSource <- sourceStatus\ninspectFull (revisionIdentity (statusDisk selectedSource) == {expected:?})"
     );
     let result = committed(issued.as_ref(), &source).await;
     result["items"][1]["output"] == "True"
