@@ -1101,6 +1101,7 @@ where
             state: Box::new(WorkbenchExecutionState {
                 cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
+                    callback_scope: None,
                     issued_snapshot,
                     lifecycle: self.lifecycle.clone(),
                     initial_context,
@@ -1174,6 +1175,8 @@ where
                     );
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %owned.state.effects.context.actor, phase = "private_begin_completed", "workbench phase");
                     owned.resources.retain_private(private.admission.clone())?;
+                    owned.state.effects.callback_scope =
+                        Some(private.admission.retained_lexical_scope());
                     owned.state.effects.public_visibility = Some(private.admitted_public.clone());
                     owned.state.effects.context.placement.lexical_scope = private.private_scope;
                     let workbench = owned
@@ -1861,7 +1864,17 @@ where
                             let prepared = current
                                 .execution
                                 .native(&environment, &context)
-                                .prepare_display(boundary, allowance, operation, Some(receipt))
+                                .prepare_display(
+                                    boundary,
+                                    allowance,
+                                    operation,
+                                    Some(receipt),
+                                    crate::request::sources::CallbackExecution {
+                                        context: context.clone(),
+                                        snapshot: owned.state.effects.issued_snapshot.clone(),
+                                        scope: owned.state.effects.callback_scope.clone(),
+                                    },
+                                )
                                 .await;
                             if let Ok((_, Some(display))) = &prepared {
                                 let cursor = &mut owned.state.cursor;

@@ -440,7 +440,7 @@ mod tests {
             };
             let (request, answer) = displays
                 .lock()
-                .stage(actor, page, None, false, 8192, Some(id.clone()))
+                .stage(actor, page, None, false, 8192, Some(id.clone()), None)
                 .unwrap();
             settlement.admit(&request);
             let submission =
@@ -638,8 +638,7 @@ mod tests {
                     None,
                     false,
                     8192,
-                    Some(operation),
-                )
+                    Some(operation), None,)
                 .unwrap();
             settlement.admit(&request);
             let submission =
@@ -759,8 +758,7 @@ mod tests {
                         None,
                         false,
                         8192,
-                        Some(operation),
-                    )?;
+                        Some(operation), None,)?;
                     Ok(DisplayPublicationSubmission::new(
                         displays.clone(),
                         request,
@@ -822,8 +820,7 @@ mod tests {
                         None,
                         false,
                         8192,
-                        Some(operation),
-                    )?;
+                        Some(operation), None,)?;
                     let submission =
                         DisplayPublicationSubmission::new(displays, request.clone(), answer);
                     issued.send(request.clone()).unwrap();
@@ -940,8 +937,7 @@ mod tests {
                 None,
                 false,
                 8192,
-                Some(operation),
-            )?;
+                Some(operation), None,)?;
             Ok(DisplayPublicationSubmission::new(
                 displays.clone(),
                 request,
@@ -986,8 +982,7 @@ mod tests {
                 None,
                 false,
                 8192,
-                Some(operation),
-            )
+                Some(operation), None,)
             .unwrap();
         settlement.admit(&request);
         let submission =

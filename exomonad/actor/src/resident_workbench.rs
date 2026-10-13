@@ -1267,6 +1267,19 @@ impl InstalledToolHandler {
 }
 
 impl InstalledToolLease {
+    /// A transferred source callback may inspect its retained inputs, but it
+    /// carries no destination AgentSpec or notebook publication authority.
+    pub(crate) fn source_callback_custody(
+        actor: crate::ActorRef,
+        source: crate::CheckpointSourceLayer,
+    ) -> Self {
+        Self {
+            actor,
+            source,
+            tools: None,
+        }
+    }
+
     pub(crate) fn new(
         actor: crate::ActorRef,
         source: crate::CheckpointSourceLayer,
@@ -1407,20 +1420,21 @@ pub(crate) enum ActorGenerationCommit {
 #[derive(Clone)]
 pub(crate) enum ActorRequestSnapshot {
     Bootstrap(InstalledToolLease),
+    SourceCallback(InstalledToolLease),
     Generation(Arc<ActorGeneration>),
 }
 
 impl ActorRequestSnapshot {
     pub(crate) fn installation(&self) -> &InstalledToolLease {
         match self {
-            Self::Bootstrap(lease) => lease,
+            Self::Bootstrap(lease) | Self::SourceCallback(lease) => lease,
             Self::Generation(generation) => &generation.installation,
         }
     }
 
     pub(crate) fn generation(&self) -> Option<&Arc<ActorGeneration>> {
         match self {
-            Self::Bootstrap(_) => None,
+            Self::Bootstrap(_) | Self::SourceCallback(_) => None,
             Self::Generation(generation) => Some(generation),
         }
     }
@@ -8958,6 +8972,7 @@ where
                             source: crate::request::sources::SourceBinding {
                                 target,
                                 entry: Arc::new(entry),
+                                execution: crate::request::sources::CallbackExecution::from_context(context.clone()),
                             },
                         });
                     }
@@ -9687,7 +9702,7 @@ where
             ));
         };
         self.access
-            .with_machine(context, move |session, _, _| {
+            .with_machine(context, move |session, context, _| {
                 let request_kind = ResidentRequest::decode(&request, session.data_con_table())?;
                 use crate::request::sources::{SourceTarget, RequestSourceKind};
                 let source = match &request_kind {
@@ -9707,7 +9722,7 @@ where
                     let entry = session.live_payload_handle_owned_by(hole.cont_id(), actor_realm)?.ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("source has no live mapping closure".into()))?;
                     return Ok(ResidentActorStartupStep::InstallSource {
                         continuation: hole,
-                        source: crate::request::sources::SourceBinding { target, entry: Arc::new(entry) },
+                        source: crate::request::sources::SourceBinding { target, entry: Arc::new(entry), execution: crate::request::sources::CallbackExecution::from_context(context.clone()) },
                     });
                 }
                 match request_kind {

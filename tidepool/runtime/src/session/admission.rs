@@ -499,6 +499,11 @@ impl PendingHostValueWrite {
 }
 
 impl PrivateExecutionAdmission {
+    /// Share the exact admitted scope without minting a different selection.
+    pub fn retained_lexical_scope(&self) -> Arc<RuntimeLexicalScopeLease> {
+        self.scope_lease.clone()
+    }
+
     pub fn admitted_public(&self) -> &PublicVisibilitySnapshot {
         &self.admitted
     }

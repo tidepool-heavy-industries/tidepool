@@ -681,6 +681,7 @@ struct ActorDisplays {
 }
 
 struct DisplaySlot {
+    execution: Option<crate::request::sources::CallbackExecution>,
     callback: Option<Arc<RootCustody>>,
     keys: Vec<(i64, String)>,
     expanding: Option<u64>,
@@ -690,6 +691,7 @@ struct DisplaySlot {
 }
 
 struct StagedDisplayPublication {
+    execution: Option<crate::request::sources::CallbackExecution>,
     request: Arc<DisplayPublication>,
     callback: Option<Arc<RootCustody>>,
 }
@@ -732,10 +734,12 @@ impl ActorDisplays {
         self.retired = true;
         for slot in self.slots.values_mut() {
             slot.callback = None;
+            slot.execution = None;
             slot.keys.clear();
             slot.expanding = None;
             if let Some(pending) = &mut slot.pending {
                 pending.callback = None;
+                pending.execution = None;
             }
         }
         // Only accepted, unsettled emission metadata survives resource release.
@@ -763,6 +767,7 @@ impl ActorDisplays {
         update: bool,
         allowance: i64,
         operation: Option<WorkbenchOperationId>,
+        execution: Option<crate::request::sources::CallbackExecution>,
     ) -> Result<
         (
             Arc<DisplayPublication>,
@@ -835,6 +840,7 @@ impl ActorDisplays {
             self.slots.insert(
                 slot,
                 DisplaySlot {
+                    execution: None,
                     callback: None,
                     keys: Vec::new(),
                     expanding: None,
@@ -847,6 +853,7 @@ impl ActorDisplays {
         let owned = self.slots.get_mut(&slot).expect("issued display slot");
         let (request, answer) = DisplayPublication::channel(actor, ordinal, operation, output);
         owned.pending = Some(StagedDisplayPublication {
+            execution: if callback.is_some() { execution } else { None },
             request: request.clone(),
             callback,
         });
@@ -866,6 +873,7 @@ impl ActorDisplays {
             {
                 let pending = owned.pending.take().expect("acknowledged publication");
                 if !self.retired {
+                    owned.execution = pending.execution;
                     owned.callback = pending.callback;
                     owned.keys = pending.request.page.expansions.clone();
                 }
@@ -899,7 +907,14 @@ impl ActorDisplays {
         actor: ActorRef,
         identity: (i64, i64, i64),
         key: i64,
-    ) -> Result<(Arc<RootCustody>, u64), ResidentActorWorkbenchError> {
+    ) -> Result<
+        (
+            Arc<RootCustody>,
+            crate::request::sources::CallbackExecution,
+            u64,
+        ),
+        ResidentActorWorkbenchError,
+    > {
         if self.retired {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "display actor is retired".into(),
@@ -925,6 +940,11 @@ impl ActorDisplays {
                 "display expansion callback is unavailable".into(),
             )
         })?;
+        let execution = selected.execution.clone().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "display callback has no issued execution context".into(),
+            )
+        })?;
         let generation = selected.next_expansion.checked_add(1).ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
                 "display expansion generation exhausted".into(),
@@ -932,7 +952,7 @@ impl ActorDisplays {
         })?;
         selected.next_expansion = generation;
         selected.expanding = Some(generation);
-        Ok((callback, generation))
+        Ok((callback, execution, generation))
     }
 }
 
@@ -1091,7 +1111,7 @@ mod display_tests {
             let displays = Arc::new(Mutex::new(ActorDisplays::default()));
             let (request, answer) = displays
                 .lock()
-                .stage(actor, terminal_page(), None, false, 8192, None)
+                .stage(actor, terminal_page(), None, false, 8192, None, None)
                 .unwrap();
             let slot = request.page.identity.2;
             let entered = Arc::new(std::sync::Barrier::new(2));
@@ -1159,7 +1179,7 @@ mod display_tests {
             let displays = Arc::new(Mutex::new(ActorDisplays::default()));
             let (request, answer) = displays
                 .lock()
-                .stage(actor, terminal_page(), None, false, 8192, None)
+                .stage(actor, terminal_page(), None, false, 8192, None, None)
                 .unwrap();
             let slot = request.page.identity.2;
             let lease = DisplayPublicationLease {
@@ -1236,7 +1256,7 @@ mod display_tests {
         let displays = Arc::new(Mutex::new(ActorDisplays::default()));
         let (request, answer) = displays
             .lock()
-            .stage(actor, terminal_page(), None, false, 8192, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None)
             .unwrap();
         let slot = request.page.identity.2;
         assert_eq!(request.page_ordinal, 1);
@@ -1266,7 +1286,7 @@ mod display_tests {
         let displays = Arc::new(Mutex::new(ActorDisplays::default()));
         let (request, answer) = displays
             .lock()
-            .stage(actor, terminal_page(), None, false, 8192, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None)
             .unwrap();
         let slot = request.page.identity.2;
         let frozen = DisplayPublicationHostContext {
@@ -1326,7 +1346,7 @@ mod display_tests {
         let displays = Arc::new(Mutex::new(ActorDisplays::default()));
         let (request, answer) = displays
             .lock()
-            .stage(actor, terminal_page(), None, false, 8192, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None)
             .unwrap();
         drop(answer);
         let slot = request.page.identity.2;
@@ -1342,7 +1362,7 @@ mod display_tests {
         assert!(owner.slots[&slot].pending.is_none());
         assert_eq!(owner.slots[&slot].page_ordinal, 0);
         let (next, _) = owner
-            .stage(actor, terminal_page(), None, false, 8192, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None)
             .unwrap();
         assert_ne!(next.page.identity, request.page.identity);
     }
@@ -1353,7 +1373,7 @@ mod display_tests {
         let displays = Arc::new(Mutex::new(ActorDisplays::default()));
         let (request, answer) = displays
             .lock()
-            .stage(actor, terminal_page(), None, false, 8192, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None)
             .unwrap();
         let slot = request.page.identity.2;
         drop(answer);
@@ -1377,7 +1397,7 @@ mod display_tests {
         assert!(owner.slots[&slot].pending.is_none());
         assert!(owner.slots[&slot].callback.is_none());
         assert!(owner
-            .stage(actor, terminal_page(), None, false, 8192, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None)
             .is_err());
         assert!(owner.select(actor, request.page.identity, 1).is_err());
     }
@@ -1472,6 +1492,7 @@ mod display_tests {
 fn stage_actor_display<H, O>(
     environment: &ResidentEnvironment<H, O>,
     context: &ActorSessionContext,
+    execution: crate::request::sources::CallbackExecution,
     page: WorkbenchDisplayPage,
     callback: RootCustody,
     update: bool,
@@ -1493,6 +1514,7 @@ fn stage_actor_display<H, O>(
         update,
         allowance,
         operation,
+        Some(execution),
     )?;
     Ok(DisplayPublicationSubmission::new(displays, request, answer))
 }
@@ -1500,6 +1522,7 @@ fn stage_actor_display<H, O>(
 async fn publish_actor_display<H, O>(
     environment: &ResidentEnvironment<H, O>,
     context: &ActorSessionContext,
+    execution: crate::request::sources::CallbackExecution,
     page: WorkbenchDisplayPage,
     callback: RootCustody,
     update: bool,
@@ -1515,6 +1538,7 @@ where
         stage_actor_display(
             environment,
             context,
+            execution,
             page,
             callback,
             update,
@@ -1601,7 +1625,7 @@ where
             "display publication is still pending".into(),
         ));
     }
-    let (callback, generation) = displays.lock().select(context.actor, identity, key)?;
+    let (callback, execution, generation) = displays.lock().select(context.actor, identity, key)?;
     let lease = DisplayExpansionLease {
         displays,
         slot: identity.2,
@@ -1609,11 +1633,18 @@ where
     };
     let (page, callback) = environment
         .runner
-        .expand_display(context.clone(), callback, identity, key, allowance)
+        .expand_display(
+            execution.context.clone(),
+            callback,
+            identity,
+            key,
+            allowance,
+        )
         .await?;
     let output = publish_actor_display(
         environment,
-        context,
+        &execution.context.clone(),
+        execution,
         page,
         callback,
         true,
@@ -1629,6 +1660,7 @@ where
 async fn prepare_actor_display_boundary<H, O>(
     environment: &ResidentEnvironment<H, O>,
     context: &ActorSessionContext,
+    execution: crate::request::sources::CallbackExecution,
     boundary: ResidentActorBoundary,
     allowance: i64,
     operation: Option<WorkbenchOperationId>,
@@ -1654,6 +1686,7 @@ where
             let output = publish_actor_display(
                 environment,
                 context,
+                execution,
                 output,
                 callback,
                 false,
@@ -2730,6 +2763,7 @@ pub struct ResidentKernelBehavior<H, O> {
     worktree_custody: Option<Arc<dyn crate::WorkspaceCustody>>,
     policy_installed: bool,
     actor_program_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
+    actor_callback_execution: Option<crate::request::sources::CallbackExecution>,
     installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
     /// How many specs this incarnation has installed. `policy_installed` stays
     /// the first-install latch; a reload is a second, explicit path that
@@ -2972,6 +3006,7 @@ where
 }
 
 struct WorkbenchEffectState {
+    callback_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
     issued_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
     lifecycle: Option<crate::LifecycleHandle>,
     initial_context: bool,
@@ -3232,6 +3267,7 @@ enum CurrentEffectOwner<'a> {
         control: Arc<crate::WorkbenchExecutionControl>,
     },
     Actor {
+        callback_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
         issued_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
         ephemeral_work: Arc<InvocationWork>,
         publication: CheckpointPublication,
@@ -3241,6 +3277,15 @@ enum CurrentEffectOwner<'a> {
 }
 
 impl CurrentEffectOwner<'_> {
+    fn callback_scope(&self) -> Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>> {
+        match self {
+            Self::Scoped { base, .. } => base.callback_scope(),
+            Self::Workbench(execution) => execution.callback_scope.clone(),
+            Self::Actor { callback_scope, .. } => callback_scope.clone(),
+            Self::Tool { .. } => None,
+        }
+    }
+
     fn issued_snapshot(&self) -> Option<&crate::resident_workbench::ActorRequestSnapshot> {
         match self {
             Self::Scoped { base, .. } => base.issued_snapshot(),
@@ -3548,6 +3593,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     /// tracking, is visible without instrumenting each call site by hand.
     fn set_standing(&mut self, actor: ActorRef, next: ResidentStanding) -> ResidentStanding {
         let previous = std::mem::replace(&mut self.standing, next);
+        if matches!(
+            self.standing,
+            ResidentStanding::Receiving(_) | ResidentStanding::Terminal
+        ) {
+            self.actor_callback_execution = None;
+        }
         let (from, from_request) = previous.describe();
         let (to, to_request) = self.standing.describe();
         tracing::info!(
@@ -3634,6 +3685,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             worktree_custody: None,
             policy_installed: false,
             actor_program_snapshot: None,
+            actor_callback_execution: None,
             installed_tools: Arc::default(),
             spec_installs: 0,
             after_tool: crate::after_tool::AfterToolLog::default(),
@@ -3662,6 +3714,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
     }
     fn context(&self, actor: ActorRef) -> ActorSessionContext {
+        if let Some(callback) = &self.actor_callback_execution {
+            return callback.context.clone();
+        }
         self.actor_program_snapshot
             .as_ref()
             .and_then(|snapshot| snapshot.generation())
@@ -3978,7 +4033,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             None => self.workbench_executions.lock().actor_scope_root(actor),
         };
         CurrentEffectOwner::Actor {
-            issued_snapshot: self.actor_program_snapshot.clone(),
+            callback_scope: self
+                .actor_callback_execution
+                .as_ref()
+                .and_then(|callback| callback.scope.clone()),
+            issued_snapshot: self
+                .actor_callback_execution
+                .as_ref()
+                .and_then(|callback| callback.snapshot.clone())
+                .or_else(|| self.actor_program_snapshot.clone()),
             ephemeral_work,
             publication: self.checkpoint_publication.clone(),
             reservation_owner: control
@@ -4869,6 +4932,7 @@ where
         // Their RootCustody keeps the compiled handler live until the last
         // request releases its lease.
         self.actor_program_snapshot = None;
+        self.actor_callback_execution = None;
         self.installed_tools.clear();
     }
 
@@ -5724,8 +5788,10 @@ where
             ResidentActorBoundary::AttachSource {
                 continuation,
                 owner,
-                source,
+                mut source,
             } => {
+                source.execution.snapshot = effect_owner.issued_snapshot().cloned();
+                source.execution.scope = effect_owner.callback_scope();
                 return Box::pin(async move {
                     let result = self.attach_source(&kernel, &context, owner, source).await;
                     let operation: futures_util::future::BoxFuture<
@@ -5738,7 +5804,7 @@ where
                             .await
                     });
                     Ok(commands::CommandResolution::ordinary(operation))
-                })
+                });
             }
             ResidentActorBoundary::ActorContext(continuation) => Box::pin(async move {
                 environment
@@ -6139,6 +6205,7 @@ where
     async fn prepare_display_boundary(
         &self,
         context: &ActorSessionContext,
+        execution: crate::request::sources::CallbackExecution,
         boundary: ResidentActorBoundary,
         allowance: i64,
         operation: Option<WorkbenchOperationId>,
@@ -6148,6 +6215,7 @@ where
         prepare_actor_display_boundary(
             &self.environment,
             context,
+            execution,
             boundary,
             allowance,
             operation,
@@ -6181,6 +6249,11 @@ where
         let prepared = self
             .prepare_display_boundary(
                 context,
+                crate::request::sources::CallbackExecution {
+                    context: context.clone(),
+                    snapshot: effect_owner.issued_snapshot().cloned(),
+                    scope: effect_owner.callback_scope(),
+                },
                 boundary,
                 DEFAULT_DISPLAY_CHARACTER_ALLOWANCE,
                 None,
@@ -7917,6 +7990,7 @@ where
         self.publish_installation(installation);
         self.policy_installed = true;
         self.actor_program_snapshot = self.installed_tools.snapshot();
+        self.actor_callback_execution = None;
         if let Some(lifecycle) = &self.lifecycle {
             lifecycle.policy_installed(self.installed_tools.current());
         }
@@ -8322,8 +8396,9 @@ where
                     match startup_step {
                         ResidentActorStartupStep::InstallSource {
                             continuation,
-                            source,
+                            mut source,
                         } => {
+                            source.execution.snapshot = self.actor_program_snapshot.clone();
                             self.sources.push(source);
                             outcome = self
                                 .environment
@@ -9255,6 +9330,7 @@ where
                                     fragment: &mut *next_fragment,
                                     remaining: &mut *unit.display_remaining,
                                 }),
+                                crate::request::sources::CallbackExecution { context: context.clone(), snapshot: execution_state.issued_snapshot.clone(), scope: execution_state.callback_scope.clone() },
                             )
                             .await?;
                         current
@@ -11247,7 +11323,6 @@ where
         delivery: crate::SourceDelivery,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(kernel.compiler_lifecycle_scope(async move {
-            let context = self.context(kernel.identity());
             use crate::request::sources::{RequestSourceKind, SourceTarget};
             self.input_origin = match delivery.target {
                 SourceTarget::Request(request, RequestSourceKind::Progress) => {
@@ -11271,6 +11346,8 @@ where
                     detail: "source delivery does not match an installed connection".into(),
                     diagnostic: None,
                 })?;
+            let context = source.execution.context.clone();
+            self.actor_callback_execution = Some(source.execution.clone());
             let delivery = self.environment.requests.accept_source_delivery(delivery);
             if self.checkpoint.is_some() {
                 self.active_input = Some(RetainedActorInput::Source(delivery.clone()));
@@ -12367,6 +12444,7 @@ where
             let mut execution_state = WorkbenchExecutionState {
                 cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
+                    callback_scope: None,
                     issued_snapshot,
                     lifecycle: self.lifecycle.clone(),
                     initial_context,

@@ -467,7 +467,7 @@ where
         };
         let outcome = runner.resume_unit(context.clone(), continuation).await?;
         let ResidentActorBoundary::Receive(receiver) = runner
-            .capture_replacement_boundary(context, outcome, realm)
+            .capture_replacement_boundary(context.clone(), outcome, realm)
             .await?
         else {
             return Err(reject(
@@ -477,27 +477,42 @@ where
         if receiver.site != site {
             return Err(reject("replacement checkpoint and receiver sites differ"));
         }
-        let dynamic_sources =
-            if descriptor.placement().session == self.descriptor.placement().session {
-                self.sources[self.static_source_count..].to_vec()
+        let mut dynamic_sources = Vec::new();
+        for source in &self.sources[self.static_source_count..] {
+            let entry = if descriptor.placement().session == self.descriptor.placement().session {
+                source.entry.clone()
             } else {
-                let mut imported = Vec::new();
-                for source in &self.sources[self.static_source_count..] {
-                    let entry = runner
+                Arc::new(
+                    runner
                         .import_shared_custody(
-                            Arc::clone(&source.entry),
+                            source.entry.clone(),
                             self.descriptor.placement().session,
                             descriptor.placement().session,
                             descriptor.placement().resource_scope,
                         )
-                        .await?;
-                    imported.push(crate::request::sources::SourceBinding {
-                        target: source.target,
-                        entry: Arc::new(entry),
-                    });
-                }
-                imported
+                        .await?,
+                )
             };
+            let execution = source
+                .execution
+                .transferred(context.clone())
+                .map_err(|error| reject(&error.to_string()))?;
+            if let Some(snapshot) = &execution.snapshot {
+                let layers = self
+                    .environment
+                    .source_layers
+                    .as_ref()
+                    .ok_or_else(|| reject("transferred source callback has no source owner"))?;
+                layers
+                    .validate_source_authority(snapshot.installation().source())
+                    .map_err(|error| reject(&error))?;
+            }
+            dynamic_sources.push(crate::request::sources::SourceBinding {
+                target: source.target,
+                entry,
+                execution,
+            });
+        }
         Ok(StagedHandler {
             exit_destination,
             descriptor,

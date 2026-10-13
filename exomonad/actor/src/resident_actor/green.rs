@@ -401,12 +401,14 @@ where
         allowance: i64,
         operation: Option<WorkbenchOperationId>,
         receipt: Option<DisplayReceiptSubmission<'_>>,
+        execution: crate::request::sources::CallbackExecution,
     ) -> Result<(ResidentActorBoundary, Option<WorkbenchDisplayOutput>), ResidentActorWorkbenchError>
     {
         self.invocation
             .drive(prepare_actor_display_boundary(
                 self.environment,
                 &self.context,
+                execution,
                 boundary,
                 allowance,
                 operation,
