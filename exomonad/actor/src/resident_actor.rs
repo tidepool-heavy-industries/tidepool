@@ -7854,7 +7854,7 @@ where
         let references = tools
             .generation_references(evidence.reference.clone(), prompts.clone())
             .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-        let context = self.descriptor.session_context(context.actor);
+        let context = self.descriptor.session_context(context.actor).with_issued_source(tools.source())?;
         let workbench = self.environment.runner.application_workbench();
         let prepared = workbench
             .prepare_actor_generation(context.clone(), self.descriptor.clone(), None, references)
