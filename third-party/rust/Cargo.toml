@@ -30,7 +30,7 @@ path = "empty.rs"
 "fvm_ipld_hamt" = { package = "fvm_ipld_hamt", version = "=0.10.6", default-features = true, features = [] }
 "genai" = { package = "genai", version = "=0.6.5", default-features = true, features = [] }
 "glob" = { package = "glob", version = "=0.3.4", default-features = true, features = [] }
-"harness" = { package = "harness", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "25a7122ec3b76ef5616049bed392ba353075e069" }
+"harness" = { package = "harness", version = "=0.1.0", default-features = true, features = [], git = "https://github.com/tidepool-heavy-industries/exomonad-harness.git", rev = "ded86baa15f29b97ff4dc407d89cf89b05e20e3f" }
 "ignore" = { package = "ignore", version = "=0.4.33", default-features = true, features = [] }
 "imbl" = { package = "imbl", version = "=7.0.2", default-features = false, features = [] }
 "inventory" = { package = "inventory", version = "=0.3.24", default-features = true, features = [] }
