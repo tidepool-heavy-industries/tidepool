@@ -40,33 +40,38 @@ pub(super) fn install(
 ) -> ActorDescriptor {
     let files = CapturedPromptFiles::from_frozen(config.workspace_inputs.as_ref());
     let jev = config.jev_surface();
-    descriptor.with_prompt_composer(move |actor, capabilities, explicit, tools, observation| {
-        let observation = observation.snapshot();
-        if let Some(source) = &source {
-            let capabilities = capabilities.clone();
-            let explicit = explicit.map(str::to_owned);
-            let tools = tools.to_vec();
-            let observation = observation.clone();
-            source.set_prompt_composer(
-                actor.into(),
-                Arc::new(move |files| {
-                    Ok(compose(
-                        files,
-                        &capabilities,
-                        explicit.as_deref(),
-                        &tools,
-                        &observation,
-                        jev,
-                    ))
-                }),
-            )?;
-        }
+    let descriptor = descriptor.with_prompt_reload_preparer(
+        move |actor, capabilities, explicit, tools, observation| {
+            let observation = observation.snapshot();
+            if let Some(source) = &source {
+                let capabilities = capabilities.clone();
+                let explicit = explicit.map(str::to_owned);
+                let tools = tools.to_vec();
+                let observation = observation.clone();
+                source.set_prompt_composer(
+                    actor.into(),
+                    Arc::new(move |files| {
+                        Ok(compose(
+                            files,
+                            &capabilities,
+                            explicit.as_deref(),
+                            &tools,
+                            &observation,
+                            jev,
+                        ))
+                    }),
+                )?;
+            }
+            Ok(())
+        },
+    );
+    descriptor.with_prompt_composer(move |_, capabilities, explicit, tools, observation| {
         Ok(compose(
             &files,
             capabilities,
             explicit,
             tools,
-            &observation,
+            &observation.snapshot(),
             jev,
         ))
     })
