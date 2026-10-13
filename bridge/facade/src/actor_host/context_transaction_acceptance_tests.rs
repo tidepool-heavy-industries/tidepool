@@ -770,6 +770,7 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
     let (_files, mut fixture, mut rounds) = start().await;
     let initial = next_round(&mut rounds, &fixture.context).await;
     assert!(initial.is_root());
+    let parent_session = initial.request.session_id.clone();
     initial.cell(
         "fresh-idle-spawn",
         include_str!("fixtures/context_acceptance_idle_spawn.hs"),
@@ -833,6 +834,8 @@ async fn resident_fresh_spawn_installs_idle_without_inference_until_explicit_req
         .session_id
         .thread()
         .contains(&format!(":{}:", child_path.0)));
+    assert_eq!(activated.request.session_id.affinity(), parent_session.thread());
+    assert_ne!(activated.request.session_id.thread(), parent_session.thread());
     assert_eq!(user_text_occurrences(&activated.request, SEED), 1);
     assert!(!has_user_text(&activated.request, "parent-original"));
     let child_session = activated.request.session_id.clone();
