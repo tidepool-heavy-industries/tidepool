@@ -4369,7 +4369,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 }
                 if view == StatusView::Lineage {
                     return Some((key, format!(
-                        "  - {:?} ({}@{}) creator={:?} supervisor={:?} context_parent={:?}\n    haskell_scope={} provider_thread={:?} provider_parent_thread={:?} first_usage={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} bound_worktree={:?} {}",
+                        "  - {:?} ({}@{}) creator={:?} supervisor={:?} context_parent={:?}\n    initial_haskell_scope={} provider_thread={:?} provider_parent_thread={:?} first_usage={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} bound_worktree={:?} {}",
                         record.descriptor.display_label(), identity.id.0, identity.incarnation.0,
                         record.descriptor.creator(), record.descriptor.supervisor_parent(), record.descriptor.context_parent(),
                         record.descriptor.placement().lexical_scope.0,
@@ -4501,7 +4501,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             )
         } else {
             format!(
-                "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  available effects: {} descendants={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}\n  jobs: running={:?}{}{}",
+                "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?}\n  context: initial_haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  available effects: {} descendants={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}\n  jobs: running={:?}{}{}",
                 actor.id.0,
                 actor.incarnation.0,
                 self.descriptor.display_label(),
