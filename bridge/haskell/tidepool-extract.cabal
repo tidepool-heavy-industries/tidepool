@@ -802,16 +802,12 @@ test-suite model-turn-test
   hs-source-dirs:   test-model-turn examples/model-turns ../../exomonad/examples/persona/.exomonad ../../exomonad/examples/workspace/.exomonad generated/jev/core generated/effects generated/protocol lib
   other-modules:
     PersonaSeedTest
-    PersonaAttentionTest
-    PersonaNotebookTest
+    PersonaMemoryTest
     Persona.Memory
     Persona.Web
     Persona.Spec
-    Persona.Attention
-    Persona.Collection
     Persona.Context
     Persona.Orientation
-    Persona.AttentionNotebook
     Tidepool.Agent.Context
     JevPreparedTest
     Examples.JevPreparedWorkflow

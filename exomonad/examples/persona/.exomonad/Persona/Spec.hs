@@ -31,7 +31,7 @@ type HelperEffects =
 data PersonaTools mode = PersonaTools
   { haskell :: mode :- Sync (HaskellCell PersonaEffects) }
   deriving (Generic)
-agentSpec :: (Subset PersonaEffects (SyncEffects effects), Members '[FsRead, FsWrite, Jev] effects)
+agentSpec :: (Subset PersonaEffects (SyncEffects effects), Members '[FsRead, FsWrite] effects)
   => AgentSpec PersonaTools effects
 agentSpec = defaultSpec { specTools = PersonaTools
   { haskell = haskellTool "Author tools, actors, context transformations, perspective forks, web exploration and interactive forms in Haskell. Bind full evidence before displaying selections. Persistent memory lives under .exomonad/state; running source is read through readSourceModule." }

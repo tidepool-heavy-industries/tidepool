@@ -5,7 +5,7 @@ load("@prelude//:rules.bzl", "export_file", "filegroup")
     src = ".exomonad/" + source,
     out = source.split("/")[-1],
     visibility = ["PUBLIC"],
-) for source in ["AgentSpec.hs", "Persona/Memory.hs", "Persona/Web.hs", "Persona/Spec.hs", "Persona/Attention.hs", "Persona/Collection.hs", "Persona/Context.hs", "Persona/Orientation.hs", "Persona/AttentionNotebook.hs"]]
+) for source in ["AgentSpec.hs", "Persona/Memory.hs", "Persona/Web.hs", "Persona/Spec.hs", "Persona/Context.hs", "Persona/Orientation.hs"]]
 
 filegroup(
     name = "seed",

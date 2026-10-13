@@ -9,7 +9,7 @@ luna = "gpt-6-luna"
 
 [haskell]
 source_roots = [".", "workspace"]
-modules = ["Persona.Memory", "Persona.Web", "Persona.Attention", "Persona.Collection", "Persona.Context", "Persona.Orientation", "Persona.AttentionNotebook"]
+modules = ["Persona.Memory", "Persona.Web", "Persona.Context", "Persona.Orientation"]
 spec = "AgentSpec.agentSpec"
 
 [haskell.flake_sources]

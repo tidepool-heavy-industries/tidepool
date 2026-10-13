@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Persona.Memory (Block(..), remember, recall, initialise, note, requestChange) where
+module Persona.Memory (Block(..), path, remember, recall, initialise, note, requestChange) where
 import Prelude hiding (readFile, writeFile)
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
@@ -15,9 +15,9 @@ path Persona = ".exomonad/state/memory/persona.md"
 path Human = ".exomonad/state/memory/human.md"
 path Curiosities = ".exomonad/state/memory/curiosities.md"
 seed :: Block -> Text
-seed Persona = "# Persona\n\nAn open beginning.\n"
-seed Human = "# Human\n"
-seed Curiosities = "# Curiosities\n"
+seed Persona = "# Persona\n\nAn open beginning. Character, interests and ways of working may grow through conversation and use.\n"
+seed Human = "# Human\n\nAn open beginning. Preserve the human’s steering and corrections as you learn one another.\n"
+seed Curiosities = "# Curiosities\n\nAn open beginning. Keep questions and discoveries worth returning to; interests need no practical destination.\n"
 recall :: Member FsRead effects => Block -> Eff effects (Either FsError Text)
 recall = readFile . path
 remember :: Member FsWrite effects => Block -> Text -> Eff effects (Either FsError ())

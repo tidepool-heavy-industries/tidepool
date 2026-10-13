@@ -1,64 +1,35 @@
-{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
--- | The context policy used on arrival. This is authored persona code: change
--- the view, occasion or effects here as your way of remembering develops.
-module Persona.Orientation (Policy(..), arrival, prepare, inspection, startup) where
+module Persona.Orientation (renderMemory, startup) where
 
 import Prelude
-import Control.Monad.Freer (Eff, Members)
+import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
-import Tidepool.Agent.Contract (StartupInput(..), ContextSeed, contextSection)
-import Tidepool.Aeson (Value, object, (.=))
-import Tidepool.Aeson.Value (encodeValue)
-import Tidepool.Effects.Core (FsRead, FsWrite, Jev)
-import qualified Persona.Attention as A
-import qualified Persona.Collection as Collection
-import qualified Persona.Context as Context
+import qualified Data.Text as T
+import Tidepool.Agent.Contract (StartupInput, ContextSeed, contextSection)
+import Tidepool.Effects.Core (FsRead, FsWrite)
+import Tidepool.Records (FsError)
 import qualified Persona.Memory as Memory
 
-data Policy = Policy
-  { occasion :: Text
-  , limits :: A.Limits
-  , attentionView :: A.Collection -> A.View
-  }
+-- Full authored bodies are carried unchanged. Reading or refreshing never
+-- creates a missing memory; only startup initialises the seed files.
+renderMemory :: Member FsRead effects => Eff effects (Either FsError Text)
+renderMemory = do
+  let blocks = [Memory.Persona, Memory.Human, Memory.Curiosities]
+  observed <- traverse Memory.recall blocks
+  pure $ T.intercalate "\n\n" . zipWith section blocks <$> sequence observed
+  where
+    section block body = "[Memory file: " <> Memory.path block <> "]\n" <> body
 
--- No first human message is available at startup. Later notebook calls can
--- supply a situated occasion and compose a different view over the same sources.
-arrival :: Policy
-arrival = Policy
-  { occasion = "Prepare a general orientation for this fresh conversation from available memory."
-  , limits = A.Limits 1 16384
-  , attentionView = A.continuity
-  }
-
-prepare :: Members '[FsRead, FsWrite, Jev] effects
-  => Policy -> Eff effects (Either Context.PreparationError (Collection.Loaded, A.Prepared))
-prepare policy = Context.prepare (limits policy) (occasion policy) (attentionView policy)
-
--- | Inspect or save the same evidence before encoding it at the runtime boundary.
-inspection :: StartupInput -> Policy -> Collection.Loaded -> A.Prepared -> Value
-inspection input policy loaded prepared = object
-  [ "operation" .= startupOperation input
-  , "occasion" .= occasion policy
-  , "manifest" .= Collection.manifestObservation loaded
-  , "initialisation" .= show (Collection.initialisation loaded)
-  , "attention" .= A.snapshot prepared
-  ]
-
-startup :: Members '[FsRead, FsWrite, Jev] effects
+startup :: (Member FsRead effects, Member FsWrite effects)
   => StartupInput -> Eff effects ContextSeed
-startup input = do
-  result <- prepare arrival
-  case result of
+startup _ = do
+  created <- Memory.initialise
+  case sequence created of
     Left problem -> error (show problem)
-    Right (loaded, prepared) -> do
-      -- This note is the latest preparation, not an archive or a publication
-      -- receipt. The operation identifies it if later publication fails.
-      saved <- Memory.note "initial-attention" $ encodeValue $
-        inspection input arrival loaded prepared
-      case saved of
+    Right _ -> do
+      observed <- renderMemory
+      case observed of
         Left problem -> error (show problem)
-        Right () -> pure $ contextSection "persona attention"
-          (Just "Persona.Orientation.startup; inspection: notes/initial-attention.md")
-          (A.rendered prepared)
+        Right body -> pure $ contextSection "persona memory"
+          (Just "Persona.Orientation.startup; .exomonad/state/memory/{persona,human,curiosities}.md") body
