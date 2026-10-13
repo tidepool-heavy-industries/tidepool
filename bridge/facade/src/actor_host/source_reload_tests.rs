@@ -179,14 +179,24 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                     "{answer}"
                 );
 
-                let launch = {
-                    let root = root.clone();
-                    tokio::spawn(async move {
-                        dispatch_haskell_script(root.as_ref(), CODING_CHILD).await
-                    })
-                };
-                let child = next_child(campaign).await;
-                assert_eq!(launch.await.unwrap()["status"], "committed");
+                let (launch, child) = campaign
+                    .dispatch_native_spawn_setup(
+                        "source reload child admission",
+                        CODING_CHILD,
+                        Duration::from_secs(180),
+                    )
+                    .await;
+                assert_eq!(launch["status"], "committed", "{launch}");
+                campaign.authority.install_grant(
+                    child.actor.identity().into(),
+                    ActorWorktreeGrant::Bound {
+                        enumerate: false,
+                        allocate: true,
+                    },
+                );
+                assert!(
+                    issued_source_identity_matches(campaign, child.policy.as_ref(), second).await
+                );
                 committed(child.policy.as_ref(), "import SessionHelpers").await;
                 let child_answer =
                     displayed(campaign, child.policy.as_ref(), "display helperAnswer").await;
@@ -214,6 +224,9 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                     super::test_campaign::committed_display_text(&parent_answer),
                     "43",
                     "{parent_answer}"
+                );
+                assert!(
+                    issued_source_identity_matches(campaign, child.policy.as_ref(), second).await
                 );
                 let child_answer =
                     displayed(campaign, child.policy.as_ref(), "display helperAnswer").await;
@@ -286,42 +299,7 @@ async fn current_source_matches_bound_identity(
     super::test_campaign::committed_display_text(&result) == "True"
 }
 
-/// Admit the next child, grant it its worktree, and let it run.
-async fn next_child(campaign: &mut TestCampaign) -> exomonad_actor::LocalResidentInstallation {
-    let child = campaign
-        .next_deployment(
-            "child admission",
-            Duration::from_secs(180),
-            |event| match event {
-                LocalResidentDeployment::PolicyInstalled(child) => Ok(*child),
-                LocalResidentDeployment::Retired { actor, terminal } => {
-                    panic!("{actor:?} retired: {terminal:?}")
-                }
-                other => Err(other),
-            },
-        )
-        .await;
-    campaign.authority.install_grant(
-        child.actor.identity().into(),
-        ActorWorktreeGrant::Bound {
-            enumerate: false,
-            allocate: true,
-        },
-    );
-    campaign.acknowledge_native_spawn(&child);
-    child
-}
-
-const CODING_CHILD: &str = "import qualified Tidepool.Agent.Contract as A\n\
-     import Tidepool.Actors.Exomonad\n\
-     import Tidepool.Effects.Core (Commands, Lookup)\n\
-     import Tidepool.Effects.Core (Source)\n\
-     Right seed <- checkpoint \"source-reload child context\"\n\
-     Right child <- spawnSubagent (ForkCtx seed) (ForkWorktree projectHead)\n\
-       ((defaultSpawnOptions (A.defaultWorkbenchSpec @'[Replies, Commands, Lookup, BoundWorktree, Source]))\n\
-         { spawnLabel = Just \"editor\", spawnLifetime = ActorOwned\n\
-         , spawnInstructions = Just \"Use the configured workspace tools for this request and return the typed result.\" })\n\
-     Right worker <- request @Text child () (defaultRequestOptions { requestLabel = Just \"editor\" })\n";
+const CODING_CHILD: &str = include_str!("fixtures/source_reload_coding_child.hs");
 
 /// A historical checkout can carry stale or missing tooling. A child uses the
 /// run's current graph and cannot publish checkout edits into that graph.
@@ -346,12 +324,21 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     let root = campaign.root_installation.policy.clone();
     bind_current_source_identity(campaign, root.as_ref()).await;
 
-    let launch = {
-        let root = root.clone();
-        tokio::spawn(async move { dispatch_haskell_script(root.as_ref(), CODING_CHILD).await })
-    };
-    let child = next_child(campaign).await;
-    assert_eq!(launch.await.unwrap()["status"], "committed");
+    let (launch, child) = campaign
+        .dispatch_native_spawn_setup(
+            "source reload child admission",
+            CODING_CHILD,
+            Duration::from_secs(180),
+        )
+        .await;
+    assert_eq!(launch["status"], "committed", "{launch}");
+    campaign.authority.install_grant(
+        child.actor.identity().into(),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+        },
+    );
 
     // The checkout carries a historical copy of the authored package.
     let checkout = campaign
@@ -378,6 +365,8 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
     )
     .await;
     assert_eq!(super::test_campaign::committed_display_text(&refused), "refused", "{refused}");
+    let child_after_refusal = displayed(campaign, child.policy.as_ref(), "display answer").await;
+    assert_eq!(super::test_campaign::committed_display_text(&child_after_refusal), "1", "{child_after_refusal}");
     assert!(current_source_matches_bound_identity(campaign, root.as_ref()).await);
     let root_answer = displayed(campaign, root.as_ref(), "display answer").await;
     assert_eq!(super::test_campaign::committed_display_text(&root_answer), "1", "{root_answer}");
@@ -427,12 +416,21 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     let root = campaign.root_installation.policy.clone();
     bind_current_source_identity(campaign, root.as_ref()).await;
 
-    let launch = {
-        let root = root.clone();
-        tokio::spawn(async move { dispatch_haskell_script(root.as_ref(), CODING_CHILD).await })
-    };
-    let child = next_child(campaign).await;
-    assert_eq!(launch.await.unwrap()["status"], "committed");
+    let (launch, child) = campaign
+        .dispatch_native_spawn_setup(
+            "source reload child admission",
+            CODING_CHILD,
+            Duration::from_secs(180),
+        )
+        .await;
+    assert_eq!(launch["status"], "committed", "{launch}");
+    campaign.authority.install_grant(
+        child.actor.identity().into(),
+        ActorWorktreeGrant::Bound {
+            enumerate: false,
+            allocate: true,
+        },
+    );
 
     let checkout = campaign
         .worktrees
@@ -472,6 +470,8 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     )
     .await;
     assert_eq!(super::test_campaign::committed_display_text(&refused), "refused", "{refused}");
+    let child_after_refusal = displayed(campaign, child.policy.as_ref(), "display answer").await;
+    assert_eq!(super::test_campaign::committed_display_text(&child_after_refusal), "1", "{child_after_refusal}");
     assert!(current_source_matches_bound_identity(campaign, root.as_ref()).await);
     let root_answer = displayed(campaign, root.as_ref(), "display answer").await;
     assert_eq!(super::test_campaign::committed_display_text(&root_answer), "1", "{root_answer}");
@@ -593,7 +593,7 @@ async fn reload_admits_a_valid_new_module_into_the_complete_graph() {
     let result = displayed(
         campaign,
         policy.as_ref(),
-        "Right before <- sourceStatus\nRight outcome <- reloadSource []\nRight after <- sourceStatus\ndisplay ((case outcome of { ReloadPublished _ _ changed -> \"Project.Vibe\" `elem` changed; _ -> False }) && (revisionIdentity (statusActive before) == revisionIdentity (statusActive after)) && (case outcome of { ReloadPublished first second _ -> (revisionIdentity first == revisionIdentity (statusActive before) && revisionIdentity second /= revisionIdentity (statusActive before)) || (revisionIdentity second == revisionIdentity (statusActive before) && revisionIdentity first /= revisionIdentity (statusActive before)); _ -> False }))",
+        "Right before <- sourceStatus\nRight outcome <- reloadSource []\nRight after <- sourceStatus\ndisplay ((case outcome of { ReloadPublished _ _ changed -> \"Project.Vibe\" `elem` changed; _ -> False }) && (revisionIdentity (statusActive before) == revisionIdentity (statusActive after)) && (case outcome of { ReloadPublished previous current _ -> revisionIdentity previous == revisionIdentity (statusActive before) && revisionIdentity current /= revisionIdentity (statusActive before); _ -> False }))",
     )
     .await;
     assert_eq!(super::test_campaign::committed_display_text(&result), "True", "{result}");

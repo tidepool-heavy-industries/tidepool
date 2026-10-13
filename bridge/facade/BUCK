@@ -1035,6 +1035,7 @@ rust_filegroup(
         "src/actor_host/fixtures/child_attachment_alias_failure.hs": "bridge/facade/src/actor_host/fixtures/child_attachment_alias_failure.hs",
         "src/actor_host/fixtures/child_attachment_observe_reply.hs": "bridge/facade/src/actor_host/fixtures/child_attachment_observe_reply.hs",
         "src/actor_host/fixtures/child_attachment_valid_request.hs": "bridge/facade/src/actor_host/fixtures/child_attachment_valid_request.hs",
+        "src/actor_host/fixtures/source_reload_coding_child.hs": "bridge/facade/src/actor_host/fixtures/source_reload_coding_child.hs",
         "src/actor_host/fixtures/coherent_recovery_bind_b.hs": "bridge/facade/src/actor_host/fixtures/coherent_recovery_bind_b.hs",
         "src/actor_host/fixtures/coherent_recovery_extra_b.hs": "bridge/facade/src/actor_host/fixtures/coherent_recovery_extra_b.hs",
         "src/actor_host/fixtures/coherent_recovery_initializer.hs": "bridge/facade/src/actor_host/fixtures/coherent_recovery_initializer.hs",
