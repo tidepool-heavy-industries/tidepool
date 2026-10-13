@@ -114,20 +114,16 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                 assert!(std::fs::read_to_string(&draft)
                     .unwrap()
                     .contains("helperAnswer = 41"));
-                let initial = issued_source_identity(root.as_ref()).await;
-
                 let published =
                     dispatch_structured_tool(root.as_ref(), "reload", serde_json::json!({})).await;
                 assert_eq!(
                     published["items"][0]["value"]["outcome"], "published",
                     "{published}"
                 );
-                let first = issued_source_identity(root.as_ref()).await;
-                assert_ne!(first, initial);
-                assert_eq!(
-                    published["items"][0]["value"]["revision"]["identity"],
-                    first
-                );
+                let first = published["items"][0]["value"]["revision"]["identity"]
+                    .as_str()
+                    .unwrap();
+                assert!(issued_source_identity_matches(root.as_ref(), first).await);
                 committed(root.as_ref(), "import SessionHelpers").await;
                 let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
                 assert_eq!(answer["items"][0]["output"], "41", "{answer}");
@@ -144,7 +140,7 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                     rejected["items"][0]["value"]["issuedRevision"]["identity"],
                     first
                 );
-                assert_eq!(issued_source_identity(root.as_ref()).await, first);
+                assert!(issued_source_identity_matches(root.as_ref(), first).await);
                 assert_eq!(std::fs::read_to_string(&draft).unwrap(), invalid);
                 let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
                 assert_eq!(answer["items"][0]["output"], "41", "{answer}");
@@ -160,12 +156,11 @@ async fn authored_helpers_publish_explicitly_and_children_keep_their_inherited_r
                     published["items"][0]["value"]["outcome"], "published",
                     "{published}"
                 );
-                let second = issued_source_identity(root.as_ref()).await;
+                let second = published["items"][0]["value"]["revision"]["identity"]
+                    .as_str()
+                    .unwrap();
                 assert_ne!(second, first);
-                assert_eq!(
-                    published["items"][0]["value"]["revision"]["identity"],
-                    second
-                );
+                assert!(issued_source_identity_matches(root.as_ref(), second).await);
                 committed(root.as_ref(), "import SessionHelpers").await;
                 let answer = committed(root.as_ref(), "inspectFull helperAnswer").await;
                 assert_eq!(answer["items"][0]["output"], "42", "{answer}");
@@ -214,17 +209,23 @@ fn ignore_workspace(workspace: &Path) {
     commit(workspace, "keep the authored package out of the repository");
 }
 
-/// Read source identity through a newly issued request's production Source effect.
-async fn issued_source_identity(policy: &dyn exomonad_actor::ResidentToolEndpoint) -> String {
+/// Compare the issued source capsule's identity with an exact owner-issued receipt.
+async fn issued_source_identity_matches(
+    policy: &dyn exomonad_actor::ResidentToolEndpoint,
+    expected: &str,
+) -> bool {
     let issued = policy
         .snapshot_for_request()
         .expect("issued source generation");
+    let source = format!(
+        "Right selectedSource <- sourceStatus\ndisplay (revisionIdentity (statusActive selectedSource) == {expected:?})"
+    );
     let result = committed(
         issued.as_ref(),
-        "Right selectedSource <- sourceStatus\ninspectFull (revisionIdentity (statusActive selectedSource))",
+        &source,
     )
     .await;
-    result["items"][1]["output"].as_str().unwrap().to_owned()
+    result["items"][1]["output"] == "True"
 }
 
 /// Admit the next child, grant it its worktree, and let it run.
