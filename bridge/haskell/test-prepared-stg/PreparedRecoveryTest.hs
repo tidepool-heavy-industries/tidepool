@@ -191,11 +191,14 @@ declarationAbiIdentityRegression = bracket scratch removePathForcibly $ \directo
               _ -> error "imported Ordering control lacks a unique nominal head"
         orderingConstructors <- require (traverse (issueConstructor fresh) (tyConDataCons orderingTyCon))
         orderingRows <- either (fail . show) pure (metadataForConstructors orderingConstructors)
+        let orderingRowsOnly = filter
+              ((== orderingIdentity) . constructorType . dcmIdentity) orderingRows
         assert (symbolOccurrence (typeSymbol orderingIdentity) == "Ordering"
             && case typeVersion orderingIdentity of GhcAbi _ _ -> True; _ -> False)
           "actual demanded Ordering did not retain its package declaration ABI"
-        assert (length orderingRows == 3
-            && all ((== orderingIdentity) . constructorType . dcmIdentity) orderingRows)
+        assert (length orderingRowsOnly == 3
+            && Set.fromList (map dcmId orderingRowsOnly)
+                == Set.fromList (map issuedConstructorHostId orderingConstructors))
           "actual Ordering constructors did not preserve their issued family in metadata"
         let types = Map.fromList [(symbolOccurrence (typeSymbol identity),identity) | identity <- freshTypes]
             cons = Map.fromList [(symbolOccurrence (constructorSymbol (issuedConstructorIdentity con)),
