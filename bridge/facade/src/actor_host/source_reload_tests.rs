@@ -27,6 +27,17 @@ async fn committed(
     result
 }
 
+async fn displayed(
+    campaign: &mut TestCampaign,
+    policy: &dyn exomonad_actor::ResidentToolEndpoint,
+    source: &str,
+) -> serde_json::Value {
+    let store = super::display_output::open_run_store(campaign.session_root.path()).unwrap();
+    campaign
+        .drive_actor_output(&store, committed(policy, source))
+        .await
+}
+
 fn work_module(answer: u32) -> String {
     format!("module Project.Work (answer) where\n\nanswer :: Int\nanswer = {answer}\n")
 }
@@ -446,56 +457,55 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     let policy = policy.as_ref();
 
     // A value bound while the first revision is active.
-    let bound = committed(policy, "saved <- pure answer\ninspectFull saved").await;
-    assert_eq!(bound["items"][1]["output"], "1", "{bound}");
+    let bound = displayed(campaign, policy, "saved <- pure answer\ndisplay saved").await;
+    assert_eq!(super::test_campaign::committed_display_text(&bound), "1", "{bound}");
 
     // Nothing is waiting yet.
-    let status = committed(
-        policy,
-        "Right before <- sourceStatus\ninspectFull (revisionIdentity (statusActive before) == revisionIdentity (statusDisk before))",
+    let status = displayed(
+        campaign, policy,
+        "Right before <- sourceStatus\ndisplay (revisionIdentity (statusActive before) == revisionIdentity (statusDisk before))",
     )
     .await;
-    assert_eq!(status["items"][1]["output"], "True", "{status}");
+    assert_eq!(super::test_campaign::committed_display_text(&status), "True", "{status}");
 
     // Edit the module with ordinary file tools, then reload from a cell.
-    let edited = committed(policy, &format!(
-        "import qualified Tidepool.Effects.Authored as Files\nRight () <- Files.writeFile \".exomonad/Project/Work.hs\" {}\ninspectFull answer",
+    let edited = displayed(campaign, policy, &format!(
+        "import qualified Tidepool.Effects.Authored as Files\nRight () <- Files.writeFile \".exomonad/Project/Work.hs\" {}\ndisplay answer",
         serde_json::to_string(&work_module(41)).unwrap()
     )).await;
-    assert_eq!(edited["items"][1]["output"], "1", "draft edits preserve active code: {edited}");
-    let reloaded = committed(
-        policy,
-        "Right outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { ReloadPublished _ _ changed _ -> changed; _ -> [\"not published\"] })",
+    assert_eq!(super::test_campaign::committed_display_text(&edited), "1", "draft edits preserve active code: {edited}");
+    let reloaded = displayed(
+        campaign, policy,
+        "Right outcome <- reloadSource [] Nothing\ndisplay (case outcome of { ReloadPublished _ _ changed _ -> changed == [\"Project.Work\"]; _ -> False })",
     )
     .await;
     assert_eq!(
-        reloaded["items"][1]["output"], "[\"Project.Work\"]",
+        super::test_campaign::committed_display_text(&reloaded), "True",
         "{reloaded}"
     );
 
     // A LATER cell compiles against the published revision…
-    let later = committed(policy, "inspectFull answer").await;
-    assert_eq!(later["items"][0]["output"], "41", "{later}");
+    let later = displayed(campaign, policy, "display answer").await;
+    assert_eq!(super::test_campaign::committed_display_text(&later), "41", "{later}");
 
     // …and the binding made before the reload still holds the code it was
     // built from. No implicit rewriting of running work.
-    let kept = committed(policy, "inspectFull saved").await;
-    assert_eq!(kept["items"][0]["output"], "1", "{kept}");
+    let kept = displayed(campaign, policy, "display saved").await;
+    assert_eq!(super::test_campaign::committed_display_text(&kept), "1", "{kept}");
 
-    let memory = committed(policy,
-        "Right body <- Files.readFile \".exomonad/state/memory/persona.md\"\ninspectFull (body == \"retained memory\")"
+    let memory = displayed(campaign, policy,
+        "Right body <- Files.readFile \".exomonad/state/memory/persona.md\"\ndisplay (body == \"retained memory\")"
     ).await;
-    assert_eq!(memory["items"][1]["output"], "True", "reload preserves memory: {memory}");
+    assert_eq!(super::test_campaign::committed_display_text(&memory), "True", "reload preserves memory: {memory}");
 
     // Provenance is data: active now names the published revision, and the
     // module's digest moved with it.
-    let after = committed(
-        policy,
-        "Right now <- sourceStatus\ninspectFull (revisionGeneration (statusActive now))\ninspectFull (revisionIdentity (statusActive now) == revisionIdentity (statusDisk now))",
+    let after = displayed(
+        campaign, policy,
+        "Right now <- sourceStatus\ndisplay (revisionGeneration (statusActive now) == 2 && revisionIdentity (statusActive now) == revisionIdentity (statusDisk now))",
     )
     .await;
-    assert_eq!(after["items"][1]["output"], "2", "{after}");
-    assert_eq!(after["items"][2]["output"], "True", "{after}");
+    assert_eq!(super::test_campaign::committed_display_text(&after), "True", "{after}");
 })).await;
 }
 
@@ -578,23 +588,23 @@ async fn a_rejected_reload_is_a_value_and_leaves_the_notebook_running() {
         serde_json::to_string(broken).unwrap()
     )).await;
     assert!(!edited["items"].as_array().unwrap().is_empty(), "{edited}");
-    let rejected = committed(
-        policy,
-        "Right outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { ReloadRejected active failed _ -> revisionIdentity active /= revisionIdentity failed; _ -> False })\ninspectFull (case outcome of { ReloadRejected _ _ detail -> \"undefinedByThisReload\" `T.isInfixOf` detail; _ -> False })",
+    let rejected = displayed(
+        campaign, policy,
+        "Right outcome <- reloadSource [] Nothing\ndisplay ((case outcome of { ReloadRejected active failed _ -> revisionIdentity active /= revisionIdentity failed; _ -> False }) && (case outcome of { ReloadRejected _ _ detail -> \"undefinedByThisReload\" `T.isInfixOf` detail; _ -> False }))",
     )
     .await;
     assert_eq!(
-        rejected["items"][1]["output"], "True",
+        super::test_campaign::committed_display_text(&rejected), "True",
         "the receipt names the snapshot that failed: {rejected}"
     );
     assert_eq!(
-        rejected["items"][2]["output"], "True",
+        super::test_campaign::committed_display_text(&rejected), "True",
         "the receipt carries the diagnostics: {rejected}"
     );
 
     // The previously compiled graph is still what a later cell gets.
-    let later = committed(policy, "inspectFull answer").await;
-    assert_eq!(later["items"][0]["output"], "1", "{later}");
+    let later = displayed(campaign, policy, "display answer").await;
+    assert_eq!(super::test_campaign::committed_display_text(&later), "1", "{later}");
 
     // The edited source stays exactly as it was written.
     assert_eq!(

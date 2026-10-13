@@ -13,7 +13,7 @@ import Control.Monad.Freer.State (State, get, modify, runState)
 import Tidepool.Test.Runner (TestTree, testGroup, testCase)
 import Test.Tasty.HUnit (assertEqual, assertBool)
 import Tidepool.Aeson
-import Tidepool.Effects.Core (FsWrite(..), Jev(..), JevCallError(..), Reflect(..), ReflectError(..))
+import Tidepool.Effects.Core (FsWrite(..), Web(..), Jev(..), JevCallError(..), Reflect(..), ReflectError(..))
 import Tidepool.Internal.ActorProfiles (ActorEffects)
 import Tidepool.Form.Wire (prepareForm, decodeSubmission)
 import qualified Tidepool.Form as F
@@ -40,9 +40,20 @@ reflectionFour (ReflectWith count)
   | count == 4 = pure (Left ReflectUnbound)
   | otherwise = error "recent context requested a different turn count"
 
+searchHost :: Web a -> Eff '[] a
+searchHost (WebSearch query count includeDomains excludeDomains)
+  | query == "query" && count == 3 && null includeDomains && null excludeDomains =
+      pure (Right (toJSON [W.SearchHit "title" "https://example.org" "excerpt"]))
+  | otherwise = error "search arguments changed"
+searchHost _ = error "search invoked a different web operation"
+
 personaSeedTests :: TestTree
 personaSeedTests = testGroup "persona seed"
-  [ testCase "initialisation preserves an edited identity and unrelated notes" $ do
+  [ testCase "quickstart search preserves query and decodes result" $
+      assertEqual "typed search result"
+        (Right [W.SearchHit "title" "https://example.org" "excerpt"])
+        (run (interpret searchHost (W.search "query" 3 [] [])))
+  , testCase "initialisation preserves an edited identity and unrelated notes" $ do
       let action = do
             _ <- M.initialise
             _ <- M.remember M.Persona "I have discovered a fondness for tiny maps."
