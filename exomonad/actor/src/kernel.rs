@@ -314,7 +314,7 @@ pub struct ActorWorkbenchInvocation {
     pub(crate) initial_context: bool,
     pub(crate) display_expansion: Option<((i64, i64, i64), i64)>,
     pub request: WorkbenchRequest,
-    pub(crate) installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
+    pub(crate) installed_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
     pub(crate) hosted_checkpoint_capture:
         Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
     pub(crate) context_binding: Option<std::sync::Arc<dyn crate::HostedContextBinding>>,
@@ -344,7 +344,7 @@ impl ActorWorkbenchInvocation {
 
     pub(crate) fn issued(
         request: WorkbenchRequest,
-        installed_tools: Option<crate::resident_workbench::InstalledToolLease>,
+        installed_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
         hosted_checkpoint_capture: Option<std::sync::Arc<dyn crate::HostedCheckpointCapture>>,
     ) -> Self {
         Self {

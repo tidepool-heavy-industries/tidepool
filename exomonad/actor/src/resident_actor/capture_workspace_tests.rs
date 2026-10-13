@@ -690,9 +690,10 @@ impl crate::RetainedSourceLayer for EmptyRetainedSource {
 
 struct EmptySourceAuthority;
 impl crate::ActorSourceLayers for EmptySourceAuthority {
-    fn stage_spec_reload(
+    fn stage_reload(
         self: Arc<Self>,
         _: tidepool_repr::PrincipalId,
+        _: &crate::CheckpointSourceLayer,
         _: &[String],
     ) -> Result<Box<dyn crate::StagedActorSourceReload>, crate::SourceLayerReload> {
         Err(crate::SourceLayerReload::Unavailable(

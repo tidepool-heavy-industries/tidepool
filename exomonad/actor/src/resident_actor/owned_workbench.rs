@@ -151,6 +151,26 @@ pub(crate) struct WorkbenchPublicOwner {
     readiness: Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
 }
 
+/// Prevalidated actor identity and placement for a prepared generation.
+/// The runtime callback supplies the readiness of that same prepared scope.
+pub(crate) struct PreparedWorkbenchGenerationOwner {
+    actor: ActorRef,
+    placement: crate::ActorPlacement,
+}
+
+impl PreparedWorkbenchGenerationOwner {
+    pub(crate) fn bind(
+        self,
+        readiness: Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
+    ) -> Arc<WorkbenchPublicOwner> {
+        Arc::new(WorkbenchPublicOwner {
+            actor: self.actor,
+            placement: self.placement,
+            readiness,
+        })
+    }
+}
+
 /// Plain resource owners retained by the existing native continuation entry.
 /// No abort callback, session registry, or input-retirement callback belongs here.
 pub(crate) struct ExecutionResourceOwners {
@@ -277,6 +297,53 @@ impl WorkbenchPublicOwner {
         }))
     }
 
+    /// Validate actor/session/resource and the native owner before publication.
+    pub(crate) fn prepare_generation(
+        context: &ActorSessionContext,
+        descriptor: &ActorDescriptor,
+        scope: &tidepool_runtime::session::RuntimeLexicalScopeLease,
+        native_owner: Option<&tidepool_runtime::session::RecoveryPublicOwner>,
+    ) -> Result<PreparedWorkbenchGenerationOwner, ResidentActorWorkbenchError> {
+        let placement = descriptor.placement();
+        if context.placement.session != placement.session
+            || context.placement.resource_scope != placement.resource_scope
+            || context.placement.lexical_scope != scope.scope()
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "notebook generation differs from actor/session/resource authority".into(),
+            ));
+        }
+        match (descriptor.persistence_policy(), native_owner) {
+            (crate::ActorPersistencePolicy::Ephemeral, None) => {}
+            (crate::ActorPersistencePolicy::Durable, Some(owner)) => {
+                let expected = descriptor.actor_path().and_then(|path| {
+                    tidepool_runtime::session::RecoveryPublicOwner::new(
+                        path,
+                        context.actor.incarnation.0,
+                    )
+                });
+                if expected
+                    != Some(owner.for_notebook_generation(
+                        tidepool_runtime::session::NotebookGenerationId::INITIAL,
+                    ))
+                {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "prepared generation has a foreign native actor owner".into(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "notebook generation persistence differs from actor".into(),
+                ))
+            }
+        }
+        Ok(PreparedWorkbenchGenerationOwner {
+            actor: context.actor,
+            placement: context.placement,
+        })
+    }
+
     pub(crate) fn native_readiness(
         &self,
     ) -> Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>> {
@@ -306,7 +373,7 @@ impl WorkbenchPublicOwner {
     pub(crate) fn actor(&self) -> ActorRef {
         self.actor
     }
-    pub(super) fn placement(&self) -> crate::ActorPlacement {
+    pub(crate) fn placement(&self) -> crate::ActorPlacement {
         self.placement
     }
 }
@@ -905,6 +972,7 @@ where
             Err(error) => return terminal_task(Err(error)),
         };
         let WorkbenchAdmission {
+            issued_snapshot,
             initial_context,
             context,
             request,
@@ -922,13 +990,9 @@ where
             .tool_call()
             .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
             .map(|call| crate::status_tool::parse(call.arguments.clone()));
-        let reload = request.tool_call().is_some_and(|call| {
-            matches!(
-                call.name.as_str(),
-                crate::reload_spec_tool::RELOAD_SPEC_TOOL
-                    | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
-            )
-        });
+        let reload = request
+            .tool_call()
+            .is_some_and(|call| matches!(call.name.as_str(), crate::reload_tool::RELOAD_TOOL));
         if inspection.is_none() && !reload && compilation_authority.is_none() {
             return terminal_task(Err(KernelInvocationFailure::Rejected {
                 receipts: Vec::new(),
@@ -1037,6 +1101,8 @@ where
             state: Box::new(WorkbenchExecutionState {
                 cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
+                    callback_scope: None,
+                    issued_snapshot,
                     lifecycle: self.lifecycle.clone(),
                     initial_context,
                     display_receipt_owner,
@@ -1109,6 +1175,8 @@ where
                     );
                     tracing::info!(target: "exomonad_actor::workbench_phase", actor = %owned.state.effects.context.actor, phase = "private_begin_completed", "workbench phase");
                     owned.resources.retain_private(private.admission.clone())?;
+                    owned.state.effects.callback_scope =
+                        Some(private.admission.retained_lexical_scope());
                     owned.state.effects.public_visibility = Some(private.admitted_public.clone());
                     owned.state.effects.context.placement.lexical_scope = private.private_scope;
                     let workbench = owned
@@ -1796,7 +1864,17 @@ where
                             let prepared = current
                                 .execution
                                 .native(&environment, &context)
-                                .prepare_display(boundary, allowance, operation, Some(receipt))
+                                .prepare_display(
+                                    boundary,
+                                    allowance,
+                                    operation,
+                                    Some(receipt),
+                                    crate::request::sources::CallbackExecution {
+                                        context: context.clone(),
+                                        snapshot: owned.state.effects.issued_snapshot.clone(),
+                                        scope: owned.state.effects.callback_scope.clone(),
+                                    },
+                                )
                                 .await;
                             if let Ok((_, Some(display))) = &prepared {
                                 let cursor = &mut owned.state.cursor;
@@ -1846,7 +1924,9 @@ where
                                 ),
                             };
                             let pending = ParkedWorkbenchEffect {
-                                wait: OwnedWorkbenchWait::Prepared(operation),
+                                wait: OwnedWorkbenchWait::Prepared(
+                                    commands::CommandResolution::ordinary(operation),
+                                ),
                                 display,
                                 ..pending
                             };
@@ -1902,7 +1982,9 @@ where
                         ));
                         let pending = ParkedWorkbenchEffect {
                             display: pending.display,
-                            wait: OwnedWorkbenchWait::Prepared(operation),
+                            wait: OwnedWorkbenchWait::Prepared(
+                                commands::CommandResolution::ordinary(operation),
+                            ),
                             ordinal: pending.ordinal,
                             effect: pending.effect,
                             started: pending.started,
@@ -2819,7 +2901,7 @@ where
         OwnedWorkbenchWait::Launch(_) | OwnedWorkbenchWait::Display { .. } => {
             unreachable!("child launch requires fenced actor application")
         }
-        OwnedWorkbenchWait::Prepared(operation) => operation.await,
+        OwnedWorkbenchWait::Prepared(operation) => return operation.await,
         OwnedWorkbenchWait::RetainCommandBinding {
             continuation,
             operation,
@@ -2941,15 +3023,7 @@ where
             return result;
         }
     };
-    commands::CommandResolution {
-        disposition: match &result {
-            Ok(_) => WorkbenchOperationDisposition::Committed,
-            Err(error) => disposition_for_non_command_failure(error),
-        },
-        outcome: result,
-        started_job: None,
-        retained_job_binding: None,
-    }
+    commands::CommandResolution::from_outcome(result)
 }
 
 pub(super) async fn await_external<H, O>(
@@ -3083,9 +3157,10 @@ mod authority_tests {
     struct SourceService(crate::SourceLayerIssuer);
 
     impl crate::ActorSourceLayers for SourceService {
-        fn stage_spec_reload(
+        fn stage_reload(
             self: Arc<Self>,
             _: tidepool_repr::PrincipalId,
+            _: &crate::CheckpointSourceLayer,
             _: &[String],
         ) -> Result<Box<dyn crate::StagedActorSourceReload>, crate::SourceLayerReload> {
             Err(crate::SourceLayerReload::Unavailable(
@@ -3122,7 +3197,7 @@ mod authority_tests {
             live_payload: Default::default(),
             source_imports: Default::default(),
             haskell_effects_alias: String::new().into(),
-            source_layer: Arc::from([PathBuf::from("original-root")]),
+            source_layer: vec![PathBuf::from("original-root")].into(),
         }
     }
 
@@ -3131,7 +3206,7 @@ mod authority_tests {
         let source = crate::CheckpointSourceLayer::default();
         let mut async_context = context();
         async_context.haskell_effects_alias = "'[Replies]".into();
-        async_context.source_layer = Arc::from([]);
+        async_context.source_layer = Vec::new().into();
         let mut sync_context = async_context.clone();
         sync_context.haskell_effects_alias = "'[ContextReadWrite, Replies]".into();
         let (_, asynchronous) =
@@ -3149,7 +3224,7 @@ mod authority_tests {
     fn effect_type_imports_are_part_of_exact_compilation_authority() {
         let source = crate::CheckpointSourceLayer::default();
         let mut original = context();
-        original.source_layer = Arc::from([]);
+        original.source_layer = Vec::new().into();
         let digests = [
             None,
             Some("qualified Tidepool.Agent.Reply as Reply"),
@@ -3222,7 +3297,7 @@ mod authority_tests {
                 .is_err()
         );
         let mut empty = context();
-        empty.source_layer = Arc::from([]);
+        empty.source_layer = Vec::new().into();
         let tool = crate::InstalledToolLease::new(
             crate::ActorRef::first(crate::ActorId(9)),
             Default::default(),

@@ -401,12 +401,14 @@ where
         allowance: i64,
         operation: Option<WorkbenchOperationId>,
         receipt: Option<DisplayReceiptSubmission<'_>>,
+        execution: crate::request::sources::CallbackExecution,
     ) -> Result<(ResidentActorBoundary, Option<WorkbenchDisplayOutput>), ResidentActorWorkbenchError>
     {
         self.invocation
             .drive(prepare_actor_display_boundary(
                 self.environment,
                 &self.context,
+                execution,
                 boundary,
                 allowance,
                 operation,
@@ -421,9 +423,15 @@ where
         owner: CurrentEffectOwner<'_>,
         ancestry: &crate::CallAncestry,
         boundary: ResidentActorBoundary,
-    ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+    ) -> commands::CommandResolution {
         self.invocation
-            .drive(behavior.resolve_effect(kernel, &self.context, owner, ancestry, boundary))
+            .drive(behavior.resolve_effect_resolution(
+                kernel,
+                &self.context,
+                owner,
+                ancestry,
+                boundary,
+            ))
             .await
     }
 }

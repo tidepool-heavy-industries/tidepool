@@ -20,9 +20,58 @@ pub(crate) enum SourceTarget {
 }
 
 #[derive(Clone)]
+pub(crate) struct CallbackExecution {
+    pub context: crate::ActorSessionContext,
+    pub snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
+    pub scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+}
+
+impl CallbackExecution {
+    pub(crate) fn from_context(context: crate::ActorSessionContext) -> Self {
+        Self {
+            context,
+            snapshot: None,
+            scope: None,
+        }
+    }
+
+    /// Replacement transfers the captured code and source, never the original
+    /// actor's installation or notebook publication authority.
+    pub(crate) fn transferred(
+        &self,
+        context: crate::ActorSessionContext,
+    ) -> Result<Self, crate::mount::ActorCompileViewError> {
+        let snapshot = self.snapshot.as_ref().map(|snapshot| {
+            crate::resident_workbench::ActorRequestSnapshot::SourceCallback(
+                crate::resident_workbench::InstalledToolLease::source_callback_custody(
+                    context.actor,
+                    snapshot.installation().source().clone(),
+                ),
+            )
+        });
+        let context = match &snapshot {
+            Some(snapshot) => context.with_issued_source(snapshot.installation().source())?,
+            None => context,
+        };
+        let scope = self.scope.clone().or_else(|| {
+            self.snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.generation())
+                .map(|generation| generation.scope.clone())
+        });
+        Ok(Self {
+            context,
+            snapshot,
+            scope,
+        })
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct SourceBinding {
     pub target: SourceTarget,
     pub entry: Arc<tidepool_runtime::session::RootCustody>,
+    pub execution: CallbackExecution,
 }
 
 #[derive(Clone, Debug)]

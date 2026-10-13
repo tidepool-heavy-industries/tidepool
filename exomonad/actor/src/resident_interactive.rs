@@ -17,7 +17,7 @@ pub struct ResidentInteractivePolicy {
     tools: Arc<[HostedTool]>,
     client: ResidentToolClient,
     installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
-    issued_tools: Option<crate::InstalledToolLease>,
+    issued_tools: Option<crate::resident_workbench::ActorRequestSnapshot>,
 }
 
 impl ResidentInteractivePolicy {
@@ -54,15 +54,12 @@ impl ResidentInteractivePolicy {
         let custom = tools.into_iter().filter(|tool| {
             !matches!(
                 tool.name(),
-                crate::status_tool::STATUS_TOOL
-                    | crate::reload_spec_tool::RELOAD_SPEC_TOOL
-                    | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
+                crate::status_tool::STATUS_TOOL | crate::reload_tool::RELOAD_TOOL
             )
         });
         Self {
             tools: std::iter::once(crate::status_tool::declaration())
-                .chain(std::iter::once(crate::reload_spec_tool::declaration()))
-                .chain(std::iter::once(crate::reload_helpers_tool::declaration()))
+                .chain(std::iter::once(crate::reload_tool::declaration()))
                 .chain(custom)
                 .collect::<Vec<_>>()
                 .into(),
@@ -76,8 +73,7 @@ impl ResidentInteractivePolicy {
         Self {
             tools: vec![
                 crate::status_tool::declaration(),
-                crate::reload_spec_tool::declaration(),
-                crate::reload_helpers_tool::declaration(),
+                crate::reload_tool::declaration(),
             ]
             .into(),
             client,
@@ -93,8 +89,7 @@ pub(crate) fn project_tools(
     use exomonad_tool::ToolKind;
     let mut names = std::collections::HashSet::from([
         crate::status_tool::STATUS_TOOL.to_string(),
-        crate::reload_spec_tool::RELOAD_SPEC_TOOL.to_string(),
-        crate::reload_helpers_tool::RELOAD_HELPERS_TOOL.to_string(),
+        crate::reload_tool::RELOAD_TOOL.to_string(),
     ]);
     declarations
         .into_iter()
@@ -155,8 +150,7 @@ fn request_for_tool(
 // compiled AgentSpec. Only exact owned declarations use that admission path.
 fn selected_contract(declaration: &HostedTool) -> Option<HostedTool> {
     if declaration == &crate::status_tool::declaration()
-        || declaration == &crate::reload_spec_tool::declaration()
-        || declaration == &crate::reload_helpers_tool::declaration()
+        || declaration == &crate::reload_tool::declaration()
     {
         None
     } else {
@@ -178,7 +172,7 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
         let issued_tools = self
             .issued_tools
             .clone()
-            .or_else(|| self.installed_tools.current())
+            .or_else(|| self.installed_tools.snapshot())
             .ok_or_else(|| {
                 ResidentToolError::Unavailable("actor has no installed tool/source snapshot".into())
             })?;
@@ -209,6 +203,20 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
 
     fn instructions(&self) -> Option<&str> {
         Some(haskell_tool_instructions())
+    }
+
+    fn request_instructions(&self) -> Option<&str> {
+        self.issued_tools
+            .as_ref()?
+            .generation()
+            .map(|generation| generation.prompts.instructions())
+    }
+
+    fn request_generation(&self) -> Option<tidepool_runtime::session::NotebookGenerationId> {
+        self.issued_tools
+            .as_ref()?
+            .generation()
+            .map(|generation| generation.id)
     }
 
     fn retained_operation(
@@ -364,15 +372,7 @@ mod tests {
 
     #[test]
     fn project_tools_checks_names_and_supported_input_before_publication() {
-        for name in [
-            "",
-            "status",
-            "reload_agent_spec",
-            "reload_helpers",
-            "bad.name",
-            "λ",
-            &"a".repeat(65),
-        ] {
+        for name in ["", "status", "reload", "bad.name", "λ", &"a".repeat(65)] {
             assert!(project_tools(vec![raw(name)]).is_err(), "{name}");
         }
         assert!(project_tools(vec![raw("lookup")]).is_ok());
@@ -405,8 +405,7 @@ mod tests {
     fn builtin_dispatch_uses_owned_admission_without_a_spec_leaf() {
         for builtin in [
             crate::status_tool::declaration(),
-            crate::reload_spec_tool::declaration(),
-            crate::reload_helpers_tool::declaration(),
+            crate::reload_tool::declaration(),
         ] {
             let request =
                 request_for_tool(&builtin, ToolArguments::Structured(serde_json::json!({})))

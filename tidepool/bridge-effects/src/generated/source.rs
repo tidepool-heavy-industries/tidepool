@@ -25,7 +25,7 @@ pub struct SrRevision {
     pub modules: Vec<SrModule>,
 }
 
-/// What later cells are compiled against, and what the source roots say
+/// What this request was compiled against, and what the source roots say
 /// right now. Equal identities mean the notebook is running the code on
 /// disk; different ones mean an edit is waiting for a reload.
 #[derive(ToHaskell, Clone, Debug, PartialEq, Eq)]
@@ -35,38 +35,24 @@ pub struct SrStatus {
     pub disk: SrRevision,
 }
 
-/// The best-effort Git outcome for a successfully published source revision.
-#[derive(ToHaskell, Clone, Debug, PartialEq, Eq)]
-pub enum SrWorkspaceCommitOutcome {
-    /// No changed captured workspace files needed a commit.
-    WorkspaceUnchanged,
-    /// The workspace commit's object id and source paths that changed on
-    /// disk after capture. The commit contains the captured bytes.
-    WorkspaceCommitted(String, Vec<String>),
-    /// The reason publication to Git failed, an optional workspace commit
-    /// that was already created, and source paths changed on disk after
-    /// capture. Source publication still succeeded.
-    WorkspaceCommitFailed(String, Option<String>, Vec<String>),
-}
-
 /// What one reload did. Every case is an ordinary value to match on.
 #[derive(ToHaskell, Clone, Debug, PartialEq, Eq)]
 pub enum SrReloadOutcome {
-    /// The source roots still hold the active revision's content, so
-    /// nothing was rebuilt and nothing was republished.
+    /// The complete configuration is unchanged; notebook bindings are preserved.
     ReloadUnchanged(SrRevision),
     /// The revision that was active, the revision now active, and the
     /// modules whose source differs between them. Later cells compile
     /// against the new one.
-    ReloadPublished(
-        SrRevision,
-        SrRevision,
-        Vec<String>,
-        SrWorkspaceCommitOutcome,
-    ),
+    ReloadPublished(SrRevision, SrRevision, Vec<String>),
     /// The affected module graph did not typecheck. The first revision
     /// is the one still active — unchanged — the second names the
     /// snapshot that failed, and the text carries its diagnostics. The
     /// edited files are untouched on disk.
     ReloadRejected(SrRevision, SrRevision, String),
+    /// Cancellation won before publication; the issued revision remains active.
+    ReloadCancelled(SrRevision),
+    /// Publication committed; the receipt lists derived projections still needing repair. Do not replay the reload.
+    ReloadPublishedWithWarnings(SrRevision, SrRevision, Vec<String>, Vec<String>),
+    /// Publication acknowledgement is uncertain. New admission is blocked until reconciliation; do not replay.
+    ReloadPublicationUnconfirmed(SrRevision, String),
 }

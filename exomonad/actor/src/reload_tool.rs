@@ -1,4 +1,4 @@
-//! Model-facing contract for the actor-local `reload_agent_spec` tool.
+//! Model-facing contract for the actor-local `reload` tool.
 //!
 //! Reload is explicit and never happens on file save: an agent edits its spec
 //! with ordinary file tools and then asks for it. The ask is scoped to the
@@ -7,11 +7,11 @@
 use exomonad_tool::{HostedTool, ToolDeclaration, ToolKind};
 use serde::Deserialize;
 
-pub(crate) const RELOAD_SPEC_TOOL: &str = "reload_agent_spec";
+pub(crate) const RELOAD_TOOL: &str = "reload";
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ReloadSpecArguments {
+pub(crate) struct ReloadArguments {
     /// Modules to pull into the reload's checked closure beyond the configured
     /// list and the spec module itself. Widening is safe; narrowing is what
     /// produces surprising partial activation, so only widening is offered.
@@ -20,16 +20,18 @@ pub(crate) struct ReloadSpecArguments {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("reload_agent_spec arguments must be an object with an optional `also_check` list of module names: {0}")]
-pub(crate) struct ReloadSpecInputError(String);
+#[error(
+    "reload arguments must be an object with an optional `also_check` list of module names: {0}"
+)]
+pub(crate) struct ReloadInputError(String);
 
 pub(crate) fn declaration() -> HostedTool {
     HostedTool::Function(ToolDeclaration {
         schedule: Default::default(),
         implementation: Default::default(),
         effect_keys: Vec::new(),
-        name: RELOAD_SPEC_TOOL.into(),
-        description: "Activate edited AgentSpec handler implementations for later calls by this actor. Edit the active source, then call; saving alone does not reload. Optional also_check lists extra modules to typecheck. The source owner stages and checks an immutable candidate; the installer and registered surface are validated before source and handlers become visible together. A preparation failure, surface refusal, cancellation before commit or stale candidate keeps the previous source and handlers. A durability failure after visibility reports the new active pair and uncertainty; do not replay the installer. Read the receipt. Tool names, descriptions, schemas, kinds, scheduling, implementation kinds, effect profiles and order must match the registered surface; differences require a new actor incarnation. Draft files remain on disk after refusal. Accepted calls keep their original handlers; children are not upgraded. Use reload_helpers for helper-only edits.".into(),
+        name: RELOAD_TOOL.into(),
+        description: "Activate edited Haskell source, compatible AgentSpec handlers and workspace prompts together. Saving files alone does not reload. Optional also_check widens the validated module graph. A changed configuration starts an empty notebook; conversation, memory and owned resources persist. An unchanged configuration preserves notebook names. Invalid source, a changed registered tool surface or cancellation before commit preserves the active generation and draft files. Existing accepted requests and children keep their issued generation. Read the typed receipt; publication uncertainty blocks new admission and requires reconciliation.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -45,11 +47,9 @@ pub(crate) fn declaration() -> HostedTool {
     })
 }
 
-pub(crate) fn parse(
-    arguments: serde_json::Value,
-) -> Result<ReloadSpecArguments, ReloadSpecInputError> {
-    serde_json::from_value::<ReloadSpecArguments>(arguments)
-        .map_err(|error| ReloadSpecInputError(error.to_string()))
+pub(crate) fn parse(arguments: serde_json::Value) -> Result<ReloadArguments, ReloadInputError> {
+    serde_json::from_value::<ReloadArguments>(arguments)
+        .map_err(|error| ReloadInputError(error.to_string()))
 }
 
 #[cfg(test)]
@@ -76,15 +76,15 @@ mod tests {
     #[test]
     fn declaration_advertises_an_object_with_one_optional_widening_list() {
         let HostedTool::Function(tool) = declaration() else {
-            panic!("reload_agent_spec must be a function tool");
+            panic!("reload must be a function tool");
         };
-        assert_eq!(tool.name, RELOAD_SPEC_TOOL);
+        assert_eq!(tool.name, RELOAD_TOOL);
         assert_eq!(tool.input_schema["type"], "object");
         assert_eq!(tool.input_schema["additionalProperties"], false);
         assert!(tool.input_schema.get("required").is_none());
         assert_eq!(
             parse(serde_json::json!({})).unwrap(),
-            ReloadSpecArguments::default()
+            ReloadArguments::default()
         );
         assert_eq!(
             parse(serde_json::json!({"also_check": ["Project.Helper"]}))

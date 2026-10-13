@@ -43,6 +43,15 @@ pub(super) struct EmbeddedAdmissionTestHooks {
     pub(super) before_idle_probe: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
+fn request_surface_version(
+    identity: &HostIdentity,
+    generation: Option<tidepool_runtime::session::NotebookGenerationId>,
+    sequence: u64,
+) -> String {
+    let generation = generation.map_or_else(|| "control".to_owned(), |value| value.get().to_string());
+    format!("{}:{}:{}:{generation}:{sequence}", identity.run, identity.actor.0, identity.incarnation)
+}
+
 struct StoreAdmission {
     _lease: ActorAdmissionLease,
 }
@@ -913,10 +922,7 @@ impl HostActor for EmbeddedHostActor {
                 .map_err(|error| EmbeddedError::Surface(error.to_string()))?,
         );
         let sequence = self.next_surface.fetch_add(1, Ordering::Relaxed);
-        let version = format!(
-            "{}:{}:{}:{sequence}",
-            self.identity.run, self.identity.actor.0, self.identity.incarnation
-        );
+        let version = request_surface_version(&self.identity, snapshot.request_generation(), sequence);
         let manifest = snapshot.manifest();
         let dispatcher: Arc<dyn Provider> = Arc::new(EmbeddedDispatcher {
             attachment: self.attachment.clone(),
@@ -1586,6 +1592,10 @@ fn workbench_publication_context(
 
 #[async_trait::async_trait]
 impl Provider for EmbeddedDispatcher {
+    fn request_instructions(&self) -> Option<&str> {
+        self.snapshot.request_instructions()
+    }
+
     fn holds_job_capacity(&self) -> bool {
         // The actor owns execution admission. Parked cells may await independent
         // model invocations that need this same scheduler's provider slots.
@@ -2292,6 +2302,14 @@ mod round_control_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn surface_version_tracks_generation_even_when_sequence_and_actor_are_unchanged() {
+        let identity = harness::embedding::HostIdentity { run:"run".into(), actor:harness::model::AgentPath("/root".into()), incarnation:"one".into() };
+        let first = tidepool_runtime::session::NotebookGenerationId::INITIAL;
+        let second = serde_json::from_value(serde_json::json!(2)).unwrap();
+        assert_ne!(super::request_surface_version(&identity,Some(first),1),super::request_surface_version(&identity,Some(second),1));
+    }
+
     use super::*;
     use crate::actor_host::hosted_test_context::HostedTestRuntime;
     use crate::actor_host::test_campaign::TestCampaign;

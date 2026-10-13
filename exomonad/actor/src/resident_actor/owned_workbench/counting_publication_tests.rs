@@ -210,7 +210,7 @@ async fn counted_publication_history() {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: Default::default(),
             haskell_effects_alias: surface.row().into(),
-            source_layer: Arc::from([]),
+            source_layer: Vec::new().into(),
         };
         let path = tidepool_repr::ActorPath::parse(&format!("root/{name}")).unwrap();
         let durable = RecoveryPublicOwner::new(&path, context.actor.incarnation.0).unwrap();

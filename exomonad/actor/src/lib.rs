@@ -54,8 +54,7 @@ mod mount;
 mod notification;
 mod owned_result;
 mod prompt_catalog;
-pub(crate) mod reload_helpers_tool;
-pub(crate) mod reload_spec_tool;
+pub(crate) mod reload_tool;
 mod request;
 pub use request::sources::SourceDelivery;
 mod recovery;
@@ -134,9 +133,9 @@ pub use local_actor::{
 pub use mailbox::MailboxValue;
 pub use mount::{
     ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
-    ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers, CheckpointSourceLayer,
-    RetainedSourceLayer, SourceEntryStorage, SourceLayerIssuer, SourceLayerReload,
-    StagedActorSourceReload,
+    ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers, ActorSourceRoots,
+    CheckpointSourceLayer, RetainedSourceLayer, SourceEntryStorage, SourceGenerationEvidence,
+    SourceInspectionError, SourceLayerIssuer, SourceLayerReload, StagedActorSourceReload,
 };
 pub use notification::{
     NotificationError, NotificationPoll, NotificationReceipt, NotificationSend, NotificationState,
@@ -145,7 +144,7 @@ pub use prompt_catalog::hosted_prompt_fingerprint as exomonad_hosted_prompt_fing
 pub use recovery::{
     ActorRecoveryJournal, ApplicationConversation, DurableActorAdmission, DurableActorApplication,
     DurableActorRecord, DurableActorTerminal, DurableRootSuccessorAdmission,
-    JournalApplicationBindingAck, JournalOwnerStatus, JournalBootRegistration,
+    JournalApplicationBindingAck, JournalBootRegistration, JournalOwnerStatus,
     RecoveryBootRegistration, RootRecoveryPlacement, RootStartupIntent, RootStartupManifestPin,
 };
 pub use request::{
@@ -175,11 +174,11 @@ pub use resident_tools::{
     WorkbenchExecutionControl,
 };
 pub use resident_workbench::{
-    ActivationCompileStage, ActorMachineRegistry, ActorWorkbenchSource, ChildSessionFactory,
-    InstalledToolLease, PreparedSourceToolset, RequestWorkbenchScope, ResidentActorRunner,
-    ResidentActorWorkbench, ResidentActorWorkbenchError, ResidentMachineMeasurement,
-    SourceToolsetRecipe, SpecReplacementDefinition, SpecReplacementError, ToolDispatchError,
-    ToolDispatchReply,
+    ActivationCompileStage, ActorInstallationRecoveryError, ActorMachineRegistry,
+    ActorWorkbenchSource, ChildSessionFactory, InstalledToolLease, PersistedActorInstallation,
+    PreparedSourceToolset, RequestWorkbenchScope, ResidentActorRunner, ResidentActorWorkbench,
+    ResidentActorWorkbenchError, ResidentMachineMeasurement, SourceToolsetRecipe,
+    SpecReplacementDefinition, SpecReplacementError, ToolDispatchError, ToolDispatchReply,
 };
 pub use role::{render_child_budget, ActorCapabilities, ActorEffectKey, DescendantBudget};
 pub use runtime_observation::{

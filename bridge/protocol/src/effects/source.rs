@@ -1,22 +1,14 @@
-//! Reloading an actor's own Haskell source inside a live run.
+//! Source inspection and coherent configuration reload belong to the actor owner.
 //!
-//! A Exomonad run captures its declared source roots once and compiles every cell
-//! against that capture. `Source` lets a program re-read the roots IT works in,
-//! check the whole affected module graph, and publish it as the revision its
-//! own later cells compile against — without restarting the session, and
-//! without any cell losing the environment it was compiled in. Which roots
-//! those are is fixed when the actor is built: the run's, for the actor that
-//! owns the run; its own checkout's, for an actor working in one.
-//!
-//! The verbs are deliberately about *snapshots*, not files: a revision is
-//! named by the content of the roots that produced it, so "which code is this"
-//! is answerable as data rather than by reading a log line.
+//! A request reads its issued immutable generation. Reload prepares edited source,
+//! compatible handlers and workspace prompts together, then publishes a fresh
+//! notebook generation. Existing requests retain their original environment.
 
 use crate::hs::HsType;
 use crate::schema::{
     Arg, Effect, ErrorAdt, ErrorField, ErrorVariant, HandlingClass, Helper, HelperBody,
-    OuterEffect, Polymorphism, RecordField, RustBinding, SumVariant, TypeDef, TypeShape, Verb,
-    WireDerive, WireDerives,
+    Polymorphism, RecordField, RustBinding, SumVariant, TypeDef, TypeShape, Verb, WireDerive,
+    WireDerives,
 };
 use crate::types::JsonInstance;
 
@@ -39,25 +31,10 @@ pub fn source() -> Effect {
         req_enum: "SourceReq",
         decl_fn: "source_decl",
         description: &[
-            "Reload the Haskell source YOUR OWN cells compile against. Which source that ",
-            "is was decided when you were created and cannot be chosen per call: if you ",
-            "work in your own checkout, it is the `.exomonad` package in that checkout, and ",
-            "your reload is invisible to every other actor; if you own the run, it is the ",
-            "run's own package, which every actor without a checkout of its own compiles ",
-            "against. Write a module under a configured source root with ordinary file ",
-            "tools, then `reloadSource [] Nothing` re-reads every configured root, compiles the ",
-            "whole affected module graph, and — only if all of it typechecks — makes that ",
-            "snapshot the revision YOUR LATER cells compile against. It is a compilation ",
-            "boundary, not dynamic scope: the cell that asked for the reload was already ",
-            "compiled against the previous revision and keeps it for the rest of its own ",
-            "computation, and a value bound before the reload keeps the code it was built ",
-            "from. `ReloadRejected` is an ordinary result, not a catastrophe — the edited ",
-            "files are still on disk exactly as written, the previously compiled graph is ",
-            "still active, and the receipt names the snapshot that failed and carries its ",
-            "diagnostics. `sourceStatus` answers what is active and what is on disk, for ",
-            "your own source, as data — so a program can decide whether it is running the ",
-            "current code rather than parsing a status page. An actor with no source of ",
-            "its own can read that status and has nothing to reload.",
+            "Inspect source from the executing request's immutable generation. Edit ordinary Haskell and prompt files, then reloadSource [] to activate compatible source, tool implementations and workspace prompts together. ",
+            "Changed configuration starts a fresh notebook; unchanged configuration preserves bindings. Put reusable definitions in .hs files. Already-issued work and children keep their original generation. ",
+            "Reload preserves conversation, resources and published memory context; it does not rerun initialization, refresh memory or commit files to Git. Failed preparation leaves the active generation unchanged. ",
+            "Source roots and grants remain launch inputs. Captured-only actors can inspect their source but cannot publish editable configuration.",
         ],
         prompt_card: None,
         type_params: &[],
@@ -123,49 +100,10 @@ pub fn source() -> Effect {
                 derives: WIRE,
                 domain: None,
                 doc: &[
-                    "What later cells are compiled against, and what the source roots say",
+                    "What this request was compiled against, and what the source roots say",
                     "right now. Equal identities mean the notebook is running the code on",
                     "disk; different ones mean an edit is waiting for a reload.",
                 ],
-            },
-            TypeDef {
-                name: "WorkspaceCommitOutcome",
-                wire_rust: Some("SrWorkspaceCommitOutcome"),
-                haskell_module: None,
-                shape: TypeShape::Sum {
-                    variants: vec![
-                        SumVariant {
-                            ctor: "WorkspaceUnchanged",
-                            fields: positional_fields![],
-                            doc: &["No changed captured workspace files needed a commit."],
-                        },
-                        SumVariant {
-                            ctor: "WorkspaceCommitted",
-                            fields: positional_fields![HsType::Text, HsType::list(HsType::Text)],
-                            doc: &[
-                                "The workspace commit's object id and source paths that changed on",
-                                "disk after capture. The commit contains the captured bytes.",
-                            ],
-                        },
-                        SumVariant {
-                            ctor: "WorkspaceCommitFailed",
-                            fields: positional_fields![
-                                HsType::Text,
-                                HsType::maybe(HsType::Text),
-                                HsType::list(HsType::Text),
-                            ],
-                            doc: &[
-                                "The reason publication to Git failed, an optional workspace commit",
-                                "that was already created, and source paths changed on disk after",
-                                "capture. Source publication still succeeded.",
-                            ],
-                        },
-                    ],
-                },
-                json: JsonInstance::None,
-                derives: WIRE,
-                domain: None,
-                doc: &["The best-effort Git outcome for a successfully published source revision."],
             },
             TypeDef {
                 name: "ReloadOutcome",
@@ -177,8 +115,7 @@ pub fn source() -> Effect {
                             ctor: "ReloadUnchanged",
                             fields: positional_fields![HsType::Named("SourceRevision")],
                             doc: &[
-                                "The source roots still hold the active revision's content, so",
-                                "nothing was rebuilt and nothing was republished.",
+                                "The complete configuration is unchanged; notebook bindings are preserved.",
                             ],
                         },
                         SumVariant {
@@ -187,7 +124,6 @@ pub fn source() -> Effect {
                                 HsType::Named("SourceRevision"),
                                 HsType::Named("SourceRevision"),
                                 HsType::list(HsType::Text),
-                                HsType::Named("WorkspaceCommitOutcome"),
                             ],
                             doc: &[
                                 "The revision that was active, the revision now active, and the",
@@ -208,6 +144,26 @@ pub fn source() -> Effect {
                                 "snapshot that failed, and the text carries its diagnostics. The",
                                 "edited files are untouched on disk.",
                             ],
+                        },
+                        SumVariant {
+                            ctor: "ReloadCancelled",
+                            fields: positional_fields![HsType::Named("SourceRevision")],
+                            doc: &["Cancellation won before publication; the issued revision remains active."],
+                        },
+                        SumVariant {
+                            ctor: "ReloadPublishedWithWarnings",
+                            fields: positional_fields![
+                                HsType::Named("SourceRevision"),
+                                HsType::Named("SourceRevision"),
+                                HsType::list(HsType::Text),
+                                HsType::list(HsType::Text),
+                            ],
+                            doc: &["Publication committed; the receipt lists derived projections still needing repair. Do not replay the reload."],
+                        },
+                        SumVariant {
+                            ctor: "ReloadPublicationUnconfirmed",
+                            fields: positional_fields![HsType::Named("SourceRevision"), HsType::Text],
+                            doc: &["Publication acknowledgement is uncertain. New admission is blocked until reconciliation; do not replay."],
                         },
                     ],
                 },
@@ -246,7 +202,7 @@ pub fn source() -> Effect {
                 ctor: "SourceReadModule", method: "source_read_module",
                 args: vec![Arg { name: "name", ty: HsType::Text, rust: RustBinding::Derived }],
                 ret: HsType::Tuple(vec![HsType::Text, HsType::Text]),
-                errors: Some("SourceError"), handling: HandlingClass::OuterDispatch(OuterEffect::Source),
+                errors: Some("SourceError"), handling: HandlingClass::Actor,
             },
             Verb {
                 ctor: "SourceReloadWith",
@@ -257,15 +213,10 @@ pub fn source() -> Effect {
                         ty: HsType::list(HsType::Text),
                         rust: RustBinding::Derived,
                     },
-                    Arg {
-                        name: "intent",
-                        ty: HsType::maybe(HsType::Text),
-                        rust: RustBinding::Derived,
-                    },
                 ],
                 ret: HsType::Named("ReloadOutcome"),
                 errors: Some("SourceError"),
-                handling: HandlingClass::OuterDispatch(OuterEffect::Source),
+                handling: HandlingClass::Actor,
             },
             Verb {
                 ctor: "SourceStatusWith",
@@ -273,37 +224,30 @@ pub fn source() -> Effect {
                 args: Vec::new(),
                 ret: HsType::Named("SourceStatus"),
                 errors: Some("SourceError"),
-                handling: HandlingClass::OuterDispatch(OuterEffect::Source),
+                handling: HandlingClass::Actor,
             },
         ],
         helpers: vec![
             Helper { name: "readSourceModule", ctor: Some("SourceReadModule"), substrate: false,
-                doc: &["Read a named module from the active captured source. Returns (revision identity, source text), never pending workspace bytes."], body: HelperBody::Pointfree },
+                doc: &["Read a named module from this request's captured source generation. Returns (revision identity, source text), never pending workspace bytes."], body: HelperBody::Pointfree },
             Helper {
                 name: "reloadSource",
                 ctor: Some("SourceReloadWith"),
                 substrate: false,
                 doc: &[
-                    "Re-read every configured source root of the package YOU work in, check",
-                    "the affected module graph, and publish it as one transaction.",
-                    "`reloadSource [] Nothing` is that whole package; the list names ADDITIONAL",
-                    "modules to pull into the checked",
-                    "graph when a module you rely on is not reachable from the workspace's",
-                    "configured module list. Pass an optional one-line workspace commit intent; `Nothing`",
-                    "uses the changed module names. A rejected reload leaves Git untouched.",
-                    "Natural spelling: `Right outcome <- reloadSource [] Nothing`. The definitions",
-                    "become available to LATER cells — the cell that called this keeps the",
-                    "environment it was compiled in, so do not expect to call a newly loaded API",
-                    "from here.",
+                    "Capture and validate edited source and prompts, then publish one coherent generation.",
+                    "The list selects additional modules to check. Changed configuration starts a fresh",
+                    "notebook; unchanged configuration preserves it. This computation retains its issued",
+                    "generation for the rest of its execution. Memory refresh and Git commits are separate.",
                 ],
-                body: HelperBody::Applied(&["alsoCheck", "intent"]),
+                body: HelperBody::Applied(&["alsoCheck"]),
             },
             Helper {
                 name: "sourceStatus",
                 ctor: Some("SourceStatusWith"),
                 substrate: false,
                 doc: &[
-                    "The revision YOUR later cells compile against, and the revision your",
+                    "The revision this request captured, and the revision your",
                     "own source roots hold right now. Compare `revisionIdentity`s to tell whether an",
                     "edit is waiting, and look a module up in `revisionModules` to compare",
                     "one module across the two.",
@@ -312,12 +256,10 @@ pub fn source() -> Effect {
             },
         ],
         polymorphism: Polymorphism::None,
-        generated_handler: true,
-        handler_execution: crate::schema::HandlerExecution::BlockingPrepared,
-        // A reload acts on the CALLER's own source layer: the root's for the
-        // root, and an actor's own checkout layer for an actor that has one.
-        // The handler needs the kernel-issued principal to reach it.
-        caller_principal: true,
+        generated_handler: false,
+        handler_execution: crate::schema::HandlerExecution::Immediate,
+        // The actor owner supplies the issued generation and publication authority.
+        caller_principal: false,
     }
 }
 

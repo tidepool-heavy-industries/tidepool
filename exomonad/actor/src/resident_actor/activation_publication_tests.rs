@@ -272,6 +272,7 @@ async fn interrupt_during_preview(
                 bootstrap: bootstrap.take(),
                 installation: LocalResidentInstallation {
                     prepared_tools: None,
+                    prepared_prompts: None,
                     toolset_acquisition: None,
                     actor: fixture.actor.clone(),
                     label: descriptor.display_label().into_owned(),

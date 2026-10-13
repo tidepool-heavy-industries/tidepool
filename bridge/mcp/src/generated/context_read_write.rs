@@ -8,12 +8,16 @@ pub fn context_read_write_decl() -> crate::EffectDecl {
         description: "Transactional editing of the admitted synchronous tool's typed context document, next model and reasoning effort. Use `Tidepool.Agent.Context` to curate the next inference's evidence or select its model; `reflect` only reads recorded conversation data. Context edits stage together and commit on whole-cell success; external effects already issued are not rolled back on failure. Context references and native blocks retain host-owned evidence provenance, while system and developer instructions remain host-controlled. Saving a context value preserves data, not future edit authority; restoration must pass the current protected-structure checks. For curation followed by delegation, complete the synchronous context edit before capturing that context for `spawnSubagent`. Context and workspace are independent choices; see `exomonad-agent-work`. Only an explicitly admitted synchronous profile can carry this effect; see `doc workbench` for edit and restore rules.",
         prompt_card: None,
         constructors: &[
+            "GetInitialContextWith :: ContextReadWrite InitialContextObservation",
             "GetContextWith :: ContextReadWrite ContextDocument",
             "PutContextWith :: ContextDocument -> ContextReadWrite ()",
             "SetNextModelWith :: Text -> ContextReadWrite ()",
             "SetNextEffortWith :: ForkEffort -> ContextReadWrite ()",
         ],
         type_defs: &[
+            "data InitialContextIdentity = InitialContextIdentity { initialContextOperation :: Text, initialContextActor :: (Int, Int), initialContextSpecInstall :: Int, initialContextSpecRevision :: Maybe Text, initialContextSpecEntry :: Maybe Text, initialContextSpecSource :: Text } deriving (Show, Eq)",
+            "data InitialContextPublicationReceipt = InitialContextPublicationReceipt { initialContextRun :: Text, initialContextActorPath :: Text, initialContextConversationIncarnation :: Text, initialContextRequest :: Text, initialContextCallerReference :: Maybe ContextReference } deriving (Show, Eq)",
+            "data InitialContextObservation = InitialContextAbsent | InitialContextCaptured | InitialContextPreparing InitialContextIdentity | InitialContextRetained InitialContextIdentity Text | InitialContextPublishedEmpty InitialContextIdentity InitialContextPublicationReceipt | InitialContextPublished InitialContextIdentity InitialContextPublicationReceipt Text ContextReference | InitialContextFailed InitialContextIdentity Text | InitialContextCancelled InitialContextIdentity | InitialContextUncertain InitialContextIdentity Text deriving (Show, Eq)",
             "data ContextReference = ContextReference Text deriving (Show, Eq)",
             "data ContextRole = User | Assistant deriving (Show, Eq)",
             "data ContextNativeKind = CompletedExchange | Opaque | Pending deriving (Show, Eq)",
@@ -27,6 +31,7 @@ pub fn context_read_write_decl() -> crate::EffectDecl {
         ],
         extra_imports: &[],
         helpers: &[
+            "-- | Observe retained startup evidence without rerunning initialization or editing context.\ngetInitialContext :: forall effs. Member ContextReadWrite effs => Eff effs InitialContextObservation\ngetInitialContext = send GetInitialContextWith",
             "getContext :: forall effs. Member ContextReadWrite effs => Eff effs ContextDocument\ngetContext = send GetContextWith",
             "putContext :: forall effs. Member ContextReadWrite effs => ContextDocument -> Eff effs ()\nputContext = send . PutContextWith",
             "setNextModel :: forall effs. Member ContextReadWrite effs => Text -> Eff effs ()\nsetNextModel = send . SetNextModelWith",

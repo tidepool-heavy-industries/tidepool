@@ -4,7 +4,8 @@ use crate::generated::commands::CommandsReq;
 use crate::request::ResourceCleanupOwner;
 use tidepool_bridge_effects::CommandError;
 
-/// The owner settles the command operation before evaluating its Haskell continuation.
+/// Effects retain owner settlement separately from their Haskell continuation.
+/// Commands additionally carry job and binding facts issued by their owner.
 pub(super) struct CommandResolution {
     pub disposition: WorkbenchOperationDisposition,
     pub outcome: Result<ResidentOutcome, ResidentActorWorkbenchError>,
@@ -16,6 +17,41 @@ pub(super) struct CommandResolution {
     pub started_job: Option<String>,
     /// Binding installed by the host for this exact notebook item.
     pub retained_job_binding: Option<crate::resident_workbench::RetainedHostBinding>,
+}
+
+impl CommandResolution {
+    /// Ordinary effects classify response delivery through the existing native
+    /// error boundary. Owners with an independent settlement supply it directly.
+    pub(super) fn from_outcome(
+        outcome: Result<ResidentOutcome, ResidentActorWorkbenchError>,
+    ) -> Self {
+        let disposition = match &outcome {
+            Ok(_) => WorkbenchOperationDisposition::Committed,
+            Err(error) => disposition_for_non_command_failure(error),
+        };
+        Self::settled(disposition, outcome)
+    }
+
+    pub(super) fn settled(
+        disposition: WorkbenchOperationDisposition,
+        outcome: Result<ResidentOutcome, ResidentActorWorkbenchError>,
+    ) -> Self {
+        Self {
+            disposition,
+            outcome,
+            started_job: None,
+            retained_job_binding: None,
+        }
+    }
+
+    pub(super) fn ordinary(
+        operation: futures_util::future::BoxFuture<
+            'static,
+            Result<ResidentOutcome, ResidentActorWorkbenchError>,
+        >,
+    ) -> futures_util::future::BoxFuture<'static, Self> {
+        Box::pin(async move { Self::from_outcome(operation.await) })
+    }
 }
 
 pub(super) fn disposition<T>(result: &Result<T, CommandError>) -> WorkbenchOperationDisposition {

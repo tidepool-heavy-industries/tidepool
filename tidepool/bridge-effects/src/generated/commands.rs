@@ -190,6 +190,8 @@ pub enum CommandError {
     #[haskell(module = "Tidepool.Effects.Core")]
     CommandUnavailable(String),
     #[haskell(module = "Tidepool.Effects.Core")]
+    CommandJobNotFound,
+    #[haskell(module = "Tidepool.Effects.Core")]
     CommandInvalid(String),
     #[haskell(module = "Tidepool.Effects.Core")]
     CommandUnauthorized,

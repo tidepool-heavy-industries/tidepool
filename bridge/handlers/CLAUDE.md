@@ -40,9 +40,6 @@ One module per effect under `src/handlers/`:
 - `src/handlers/journal.rs`, `journal_version.rs` — the durable append-only
   run journal, one JSON line per `record`, and its wire-format version stamp on
   `tidepool_repr::version_ladder`
-- `src/handlers/source.rs` — reloading a run's own workspace Haskell source.
-  The capture, typecheck and publication live in `tidepool::exomonad::source`;
-  this module is the effect's request decoding and wire conversion
 - `src/handlers/jev.rs` — the Jev HTTP client behind the `Jev` effect
 - `src/handlers/agent.rs` — the agent effect's request handling
 - `src/handlers/entropy.rs` — process-local randomness for authored programs

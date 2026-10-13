@@ -63,6 +63,21 @@ impl PartialEq for ActorSourceImports {
 }
 impl Eq for ActorSourceImports {}
 
+/// Complete immutable facts required by a source-backed actor generation.
+#[derive(Clone)]
+pub struct SourceGenerationEvidence {
+    pub reference: tidepool_runtime::session::GenerationArtifactReference,
+    pub configuration_digest: [u8; 32],
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum SourceInspectionError {
+    #[error("source unavailable: {0}")]
+    Unavailable(String),
+    #[error("source unreadable: {0}")]
+    Unreadable(String),
+}
+
 /// A source graph retained by the configured host source owner.
 ///
 /// Implementations retain the actual run or capture guard. These observations
@@ -84,6 +99,10 @@ pub trait RetainedSourceLayer: Send + Sync {
     }
 
     fn prepared_entries(&self) -> Option<&SourceEntryStorage> {
+        None
+    }
+
+    fn generation_evidence(&self) -> Option<&SourceGenerationEvidence> {
         None
     }
 }
@@ -198,6 +217,11 @@ impl CheckpointSourceLayer {
     #[must_use]
     pub fn prepared_entries(&self) -> Option<&SourceEntryStorage> {
         self.retained.as_ref()?._owner.prepared_entries()
+    }
+
+    #[must_use]
+    pub fn generation_evidence(&self) -> Option<&SourceGenerationEvidence> {
+        self.retained.as_ref()?._owner.generation_evidence()
     }
 
     #[must_use]
@@ -467,43 +491,59 @@ pub trait ActorSourceLayers: Send + Sync {
 
     fn bind_for(&self, _actor: PrincipalId, _helper_source: &str) {}
 
-    /// Re-read and publish the source layer this principal may own, with
-    /// `also_check` naming modules to pull into the checked closure. Hosts
-    /// that install no layers answer
-    /// [`SourceLayerReload::Unavailable`], which is also the default.
-    fn reload(&self, actor: PrincipalId, also_check: &[String]) -> SourceLayerReload {
-        let _ = (actor, also_check);
-        SourceLayerReload::Unavailable("this host installs no source layers".into())
+    fn restore_source(
+        &self,
+        _reference: &tidepool_runtime::session::GenerationArtifactReference,
+    ) -> Result<CheckpointSourceLayer, String> {
+        Err("source recovery is unavailable".into())
     }
 
-    /// Re-read this actor's session helper draft and publish its last
-    /// typechecked revision. Helpers are branch-local source, not AgentSpec
-    /// tool declarations. Hosts without the helper surface report it as
-    /// unavailable.
-    fn reload_helpers(&self, actor: PrincipalId, also_check: &[String]) -> SourceLayerReload {
-        let _ = (actor, also_check);
-        SourceLayerReload::Unavailable("this host installs no session helpers".into())
+    fn restore_source_with_acquisition(
+        &self,
+        _reference: &tidepool_runtime::session::GenerationArtifactReference,
+        _acquisition: &crate::ToolsetAcquisition,
+    ) -> Result<CheckpointSourceLayer, SourceInspectionError> {
+        Err(SourceInspectionError::Unavailable(
+            "completed source recovery is unavailable".into(),
+        ))
     }
 
-    /// Retain a checked AgentSpec source candidate without publishing it.
-    /// The actor executes its installer and compares the registered surface
-    /// before consuming the returned source-owner token.
-    fn stage_spec_reload(
+    /// Inspect exactly the issued immutable graph, without selecting a live head.
+    fn read_from(
+        &self,
+        _source: &CheckpointSourceLayer,
+        _module: &str,
+    ) -> Result<(String, String), SourceInspectionError> {
+        Err(SourceInspectionError::Unavailable(
+            "issued source inspection is unavailable".into(),
+        ))
+    }
+
+    fn revision(
+        &self,
+        _source: &CheckpointSourceLayer,
+    ) -> Result<tidepool_bridge_effects::SrRevision, SourceInspectionError> {
+        Err(SourceInspectionError::Unavailable(
+            "issued source revision is unavailable".into(),
+        ))
+    }
+
+    fn observe(
+        &self,
+        _source: &CheckpointSourceLayer,
+    ) -> Result<tidepool_bridge_effects::SrStatus, SourceInspectionError> {
+        Err(SourceInspectionError::Unavailable(
+            "issued source status is unavailable".into(),
+        ))
+    }
+
+    /// Capture an immutable candidate relative to the actor-issued generation.
+    fn stage_reload(
         self: std::sync::Arc<Self>,
         actor: PrincipalId,
+        expected: &CheckpointSourceLayer,
         also_check: &[String],
     ) -> Result<Box<dyn StagedActorSourceReload>, SourceLayerReload>;
-
-    fn reload_helpers_with_publication(
-        &self,
-        _actor: PrincipalId,
-        _also_check: &[String],
-        _publication: &std::sync::Arc<tidepool_runtime::session::PublicationDecision>,
-    ) -> SourceLayerReload {
-        SourceLayerReload::Unavailable(
-            "source owner does not support cancellable helper reload".into(),
-        )
-    }
 }
 
 /// A source-owner candidate retaining its original expected active revision.
@@ -511,19 +551,20 @@ pub trait ActorSourceLayers: Send + Sync {
 /// ownership used by ordinary installer admission.
 pub trait StagedActorSourceReload: Send + Sync {
     fn source(&self) -> &CheckpointSourceLayer;
-
-    /// Called synchronously while the actor's installed-pointer fence is held.
-    /// The source owner takes its publication gate, rejects a changed active
-    /// revision, then arbitrates cancellation with the existing decision.
-    /// After the visibility rename it invokes `on_visible` exactly once before
-    /// confirming durability. The callback replaces the paired source/tools
-    /// lease infallibly and must not await or reenter either owner.
-    /// A before-visibility refusal drops the callback without invoking it.
-    fn commit(
-        self: Box<Self>,
-        publication: &std::sync::Arc<tidepool_runtime::session::PublicationDecision>,
-        on_visible: Box<dyn FnOnce() + '_>,
-    ) -> SourceLayerReload;
+    fn evidence(&self) -> &SourceGenerationEvidence;
+    fn previous_revision(&self) -> &tidepool_bridge_effects::SrRevision;
+    fn candidate_revision(&self) -> &tidepool_bridge_effects::SrRevision;
+    fn changed_modules(&self) -> &[String];
+    fn source_reference(&self) -> &tidepool_runtime::session::GenerationArtifactReference {
+        &self.evidence().reference
+    }
+    fn validation_imports(&self) -> &tidepool_runtime::session::SourceImports;
+    fn prompt_snapshot(&self) -> &tidepool_runtime::session::ComposedPromptSnapshot;
+    fn configuration_digest(&self) -> [u8; 32] {
+        self.evidence().configuration_digest
+    }
+    /// Repair derived filesystem projections after authoritative publication.
+    fn finalize_projection(&self) -> Result<(), String>;
 }
 
 /// What publishing one actor's own layer did, as the actor engine needs to
@@ -562,6 +603,46 @@ pub enum SourceLayerReload {
 /// The installed [`ActorSourceLayers`], shared by every actor in one forest.
 pub type ActorSourceLayerResolver = std::sync::Arc<dyn ActorSourceLayers>;
 
+/// Source roots selected by the issuing owner. Complete graphs never fall
+/// back to mutable deployment roots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActorSourceRoots {
+    Deployment(std::sync::Arc<[PathBuf]>),
+    Complete(CheckpointSourceLayer),
+}
+
+impl ActorSourceRoots {
+    pub fn paths(&self) -> &[PathBuf] {
+        match self {
+            Self::Deployment(paths) => paths,
+            Self::Complete(source) => source.include_paths(),
+        }
+    }
+    pub(crate) fn include_paths(&self, base: &[PathBuf]) -> Vec<PathBuf> {
+        let mut roots = self.paths().to_vec();
+        if matches!(self, Self::Deployment(_)) {
+            roots.extend_from_slice(base);
+        }
+        roots
+    }
+    pub fn is_empty(&self) -> bool {
+        self.paths().is_empty()
+    }
+    pub fn to_vec(&self) -> Vec<PathBuf> {
+        self.paths().to_vec()
+    }
+}
+impl AsRef<[PathBuf]> for ActorSourceRoots {
+    fn as_ref(&self) -> &[PathBuf] {
+        self.paths()
+    }
+}
+impl From<Vec<PathBuf>> for ActorSourceRoots {
+    fn from(paths: Vec<PathBuf>) -> Self {
+        Self::Deployment(paths.into())
+    }
+}
+
 /// An actor's exact, owned source-side compilation snapshot.
 ///
 /// Construction validates the session and lexical scope against the actor
@@ -572,7 +653,7 @@ pub type ActorSourceLayerResolver = std::sync::Arc<dyn ActorSourceLayers>;
 pub struct ActorCompileView {
     session: SessionCompileView,
     external: SourceImports,
-    source_layer: std::sync::Arc<[PathBuf]>,
+    source_layer: ActorSourceRoots,
     compile_inputs: RuntimeCompileInputs,
 }
 
@@ -621,12 +702,8 @@ impl ActorCompileView {
     /// tooling cannot shadow the run's graph.
     #[must_use]
     pub fn include_paths(&self, base: &[PathBuf]) -> Vec<PathBuf> {
-        if self.source_layer.is_empty() {
-            return self.session.include_paths(base);
-        }
-        let mut include = self.source_layer.to_vec();
-        include.extend(self.session.include_paths(base));
-        include
+        self.session
+            .include_paths(&self.source_layer.include_paths(base))
     }
 
     #[must_use]
@@ -735,7 +812,14 @@ impl ActorCompileView {
         {
             field(&mut hasher, module.module_name().as_bytes());
         }
-        for path in self.source_layer.iter() {
+        field(
+            &mut hasher,
+            match &self.source_layer {
+                ActorSourceRoots::Deployment(_) => b"deployment",
+                ActorSourceRoots::Complete(_) => b"complete",
+            },
+        );
+        for path in self.source_layer.paths().iter() {
             field(&mut hasher, path.as_os_str().as_encoded_bytes());
         }
         hasher.finalize().to_hex().to_string()
@@ -805,7 +889,7 @@ pub struct ActorSessionContext {
     /// shared root. Fixed
     /// when the actor is constructed; there is no setter, because an actor's
     /// search path must not move under a cell that is already compiling.
-    pub source_layer: std::sync::Arc<[PathBuf]>,
+    pub source_layer: ActorSourceRoots,
 }
 
 impl ActorSessionContext {
@@ -819,7 +903,11 @@ impl ActorSessionContext {
             return Err(ActorCompileViewError::UnownedSourceLayer);
         }
         if source.is_owned() {
-            self.source_layer = source.include_paths().to_vec().into();
+            self.source_layer = if source.generation_evidence().is_some() {
+                ActorSourceRoots::Complete(source.clone())
+            } else {
+                ActorSourceRoots::Deployment(source.include_paths().to_vec().into())
+            };
         }
         Ok(self)
     }
@@ -1015,9 +1103,13 @@ mod source_authority_tests {
         _tree: Arc<tempfile::TempDir>,
         identities: Vec<String>,
         paths: Vec<PathBuf>,
+        evidence: Option<SourceGenerationEvidence>,
     }
 
     impl RetainedSourceLayer for RetainedTree {
+        fn generation_evidence(&self) -> Option<&SourceGenerationEvidence> {
+            self.evidence.as_ref()
+        }
         fn catalog_selection(&self) -> tidepool_toolchain::toolchain::CatalogSelection {
             tidepool_toolchain::toolchain::CatalogSelection::Acquired(None)
         }
@@ -1062,6 +1154,7 @@ mod source_authority_tests {
         let tree = Arc::new(tempfile::tempdir().unwrap());
         let path = tree.path().to_path_buf();
         let owner: Arc<dyn RetainedSourceLayer> = Arc::new(RetainedTree {
+            evidence: None,
             _tree: Arc::clone(&tree),
             identities: vec!["revision:1".into()],
             paths: vec![path.clone()],
@@ -1074,7 +1167,7 @@ mod source_authority_tests {
         let selected = context(vec![PathBuf::from("ambient")])
             .with_issued_source(&source)
             .unwrap();
-        assert_eq!(&*selected.source_layer, &[path.clone()]);
+        assert_eq!(selected.source_layer.as_ref(), &[path.clone()]);
         assert_eq!(source.include_paths(), &[path.clone()]);
         drop(selected);
         drop(source);
@@ -1086,9 +1179,49 @@ mod source_authority_tests {
     }
 
     #[test]
+    fn complete_source_graph_excludes_deployment_fallback_and_keeps_exact_capsule() {
+        let tree = Arc::new(tempfile::tempdir().unwrap());
+        let path = tree.path().to_path_buf();
+        let reference = tidepool_runtime::session::GenerationArtifactReference::capture(
+            b"immutable graph".to_vec(),
+        );
+        let owner: Arc<dyn RetainedSourceLayer> = Arc::new(RetainedTree {
+            _tree: tree,
+            paths: vec![path.clone()],
+            identities: vec!["complete:A".into()],
+            evidence: Some(SourceGenerationEvidence {
+                reference,
+                configuration_digest: [7; 32],
+            }),
+        });
+        let source = SourceLayerIssuer::default().issue(owner);
+        let selected = context(vec![PathBuf::from("ambient")])
+            .with_issued_source(&source)
+            .unwrap();
+        let ActorSourceRoots::Complete(retained) = &selected.source_layer else {
+            panic!("complete authority was erased")
+        };
+        assert!(retained.same_revision(&source));
+        assert_eq!(
+            selected
+                .source_layer
+                .include_paths(&[PathBuf::from("mutable-deployment")]),
+            vec![path]
+        );
+        let ordinary = context(vec![PathBuf::from("helper")]);
+        assert_eq!(
+            ordinary
+                .source_layer
+                .include_paths(&[PathBuf::from("deployment")]),
+            vec![PathBuf::from("helper"), PathBuf::from("deployment")]
+        );
+    }
+
+    #[test]
     fn matching_descriptor_does_not_authorize_foreign_source_issuer() {
         let tree = Arc::new(tempfile::tempdir().unwrap());
         let owner: Arc<dyn RetainedSourceLayer> = Arc::new(RetainedTree {
+            evidence: None,
             paths: vec![tree.path().to_path_buf()],
             _tree: tree,
             identities: vec!["revision:1".into()],

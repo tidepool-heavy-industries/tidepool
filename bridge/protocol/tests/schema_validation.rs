@@ -278,3 +278,54 @@ fn green_completion_requires_integer_thread_identity_after_valid_control() {
         );
     }
 }
+
+#[test]
+fn source_effect_has_one_actor_owner_and_typed_publication_outcomes() {
+    use tidepool_protocol::schema::{HandlingClass, TypeShape};
+    let source = tidepool_protocol::effects::source::source();
+    source.validate().unwrap();
+    assert!(!source.generated_handler);
+    assert!(source
+        .verbs
+        .iter()
+        .all(|verb| verb.handling == HandlingClass::Actor));
+    assert_eq!(
+        source.constructor_signatures(),
+        [
+            "SourceReadModule :: Text -> Source (Either SourceError (Text, Text))",
+            "SourceReloadWith :: [Text] -> Source (Either SourceError ReloadOutcome)",
+            "SourceStatusWith :: Source (Either SourceError SourceStatus)",
+        ]
+    );
+    let outcome = source
+        .type_defs
+        .iter()
+        .find(|ty| ty.name == "ReloadOutcome")
+        .unwrap();
+    let TypeShape::Sum { variants } = &outcome.shape else {
+        panic!("reload outcomes must be distinct constructors")
+    };
+    assert_eq!(
+        variants
+            .iter()
+            .map(|variant| variant.ctor)
+            .collect::<Vec<_>>(),
+        [
+            "ReloadUnchanged",
+            "ReloadPublished",
+            "ReloadRejected",
+            "ReloadCancelled",
+            "ReloadPublishedWithWarnings",
+            "ReloadPublicationUnconfirmed",
+        ]
+    );
+    let generated = tidepool_protocol::actor_generated_files();
+    let decoder = generated
+        .iter()
+        .find(|file| file.path == "exomonad/actor/src/generated/source.rs")
+        .unwrap();
+    assert!(decoder.contents.contains("pub enum SourceError"));
+    assert!(!tidepool_protocol::generated_files()
+        .iter()
+        .any(|file| file.path == "bridge/handlers/src/generated/source.rs"));
+}

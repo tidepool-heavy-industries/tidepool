@@ -13,6 +13,54 @@ pub enum ActorPersistencePolicy {
     Durable,
 }
 
+type PromptComposition = dyn Fn(
+        ActorRef,
+        &ActorCapabilities,
+        Option<&str>,
+        &[exomonad_tool::HostedTool],
+        &crate::ActorRuntimeObservationHandle,
+    ) -> Result<tidepool_runtime::session::ComposedPromptSnapshot, String>
+    + Send
+    + Sync;
+
+#[derive(Clone)]
+struct PromptComposer(std::sync::Arc<PromptComposition>);
+impl std::fmt::Debug for PromptComposer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PromptComposer")
+    }
+}
+impl PartialEq for PromptComposer {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for PromptComposer {}
+
+type PromptReloadPreparation = dyn Fn(
+        ActorRef,
+        &ActorCapabilities,
+        Option<&str>,
+        &[exomonad_tool::HostedTool],
+        &crate::ActorRuntimeObservationHandle,
+    ) -> Result<(), String>
+    + Send
+    + Sync;
+
+#[derive(Clone)]
+struct PromptReloadPreparer(std::sync::Arc<PromptReloadPreparation>);
+impl std::fmt::Debug for PromptReloadPreparer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PromptReloadPreparer")
+    }
+}
+impl PartialEq for PromptReloadPreparer {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for PromptReloadPreparer {}
+
 /// Immutable execution attributes selected before an actor is spawned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActorDescriptor {
@@ -30,6 +78,9 @@ pub struct ActorDescriptor {
     fork_effort: Option<crate::ForkEffort>,
     model: Option<crate::Model>,
     instructions: Option<String>,
+    composed_prompts: Option<tidepool_runtime::session::ComposedPromptSnapshot>,
+    prompt_composer: Option<PromptComposer>,
+    prompt_reload_preparer: Option<PromptReloadPreparer>,
     fork_budget: Option<(i64, i64)>,
     checkpoint_boundary: Option<tidepool_runtime::session::ContextCheckpointBoundary>,
     checkpoint_token: Option<String>,
@@ -59,10 +110,106 @@ impl ActorDescriptor {
             fork_effort: None,
             model: None,
             instructions: None,
+            composed_prompts: None,
+            prompt_composer: None,
+            prompt_reload_preparer: None,
             fork_budget: None,
             checkpoint_boundary: None,
             checkpoint_token: None,
             source_layer: std::sync::Arc::from([]),
+        }
+    }
+
+    #[must_use]
+    pub fn with_composed_prompts(
+        mut self,
+        prompts: tidepool_runtime::session::ComposedPromptSnapshot,
+    ) -> Self {
+        self.composed_prompts = Some(prompts);
+        self.prompt_composer = None;
+        self
+    }
+
+    #[must_use]
+    pub fn composed_prompts(&self) -> Option<&tidepool_runtime::session::ComposedPromptSnapshot> {
+        self.composed_prompts.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_prompt_composer(
+        mut self,
+        compose: impl Fn(
+                ActorRef,
+                &ActorCapabilities,
+                Option<&str>,
+                &[exomonad_tool::HostedTool],
+                &crate::ActorRuntimeObservationHandle,
+            ) -> Result<tidepool_runtime::session::ComposedPromptSnapshot, String>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.composed_prompts = None;
+        self.prompt_composer = Some(PromptComposer(std::sync::Arc::new(compose)));
+        self
+    }
+
+    /// Install immutable host authority for future source-stage composition.
+    /// This callback registers preparation capability without rendering prompts.
+    #[must_use]
+    pub fn with_prompt_reload_preparer(
+        mut self,
+        prepare: impl Fn(
+                ActorRef,
+                &ActorCapabilities,
+                Option<&str>,
+                &[exomonad_tool::HostedTool],
+                &crate::ActorRuntimeObservationHandle,
+            ) -> Result<(), String>
+            + Send
+            + Sync
+            + 'static,
+    ) -> Self {
+        self.prompt_reload_preparer = Some(PromptReloadPreparer(std::sync::Arc::new(prepare)));
+        self
+    }
+
+    /// Both fresh startup and recovery prepare future reloads. Recovery selects
+    /// its persisted instructions separately and never invokes the composer.
+    pub fn prepare_prompt_reload(
+        &self,
+        actor: ActorRef,
+        tools: &[exomonad_tool::HostedTool],
+        observation: &crate::ActorRuntimeObservationHandle,
+    ) -> Result<(), String> {
+        match &self.prompt_reload_preparer {
+            Some(prepare) => (prepare.0)(
+                actor,
+                &self.capabilities,
+                self.instructions.as_deref(),
+                tools,
+                observation,
+            ),
+            None => Ok(()),
+        }
+    }
+
+    pub fn compose_prompts(
+        &self,
+        actor: ActorRef,
+        tools: &[exomonad_tool::HostedTool],
+        observation: &crate::ActorRuntimeObservationHandle,
+    ) -> Result<Option<tidepool_runtime::session::ComposedPromptSnapshot>, String> {
+        match &self.prompt_composer {
+            Some(compose) => (compose.0)(
+                actor,
+                &self.capabilities,
+                self.instructions.as_deref(),
+                tools,
+                observation,
+            )
+            .map(Some),
+            None => Ok(self.composed_prompts.clone()),
         }
     }
 
@@ -319,7 +466,7 @@ impl ActorDescriptor {
             live_payload: self.live_payload,
             source_imports: self.source_imports.clone(),
             haskell_effects_alias: self.capabilities.haskell_effects_type().into(),
-            source_layer: self.source_layer.clone(),
+            source_layer: crate::mount::ActorSourceRoots::Deployment(self.source_layer.clone()),
         }
     }
 }
@@ -337,6 +484,61 @@ mod tests {
                 resource_scope: tidepool_codegen::suspension::RealmId(1),
             },
         )
+    }
+
+    #[test]
+    fn reload_preparation_preserves_recovered_prompt_without_composition() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let preparations = Arc::new(AtomicUsize::new(0));
+        let composed = Arc::new(AtomicUsize::new(0));
+        let observed_preparations = preparations.clone();
+        let observed_composed = composed.clone();
+        let descriptor = descriptor()
+            .with_prompt_reload_preparer(move |_, _, _, _, _| {
+                observed_preparations.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .with_prompt_composer(move |_, _, _, _, _| {
+                observed_composed.fetch_add(1, Ordering::SeqCst);
+                Ok(tidepool_runtime::session::ComposedPromptSnapshot::capture(
+                    "new startup".into(),
+                ))
+            });
+        let actor = ActorRef::first(crate::ActorId(1));
+        let observation = crate::ActorRuntimeObservationHandle::default();
+        descriptor
+            .prepare_prompt_reload(actor, &[], &observation)
+            .unwrap();
+        assert_eq!(composed.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            descriptor
+                .compose_prompts(actor, &[], &observation)
+                .unwrap()
+                .unwrap()
+                .instructions(),
+            "new startup"
+        );
+        let recovered = descriptor.with_composed_prompts(
+            tidepool_runtime::session::ComposedPromptSnapshot::capture(
+                "persisted generation".into(),
+            ),
+        );
+        recovered
+            .prepare_prompt_reload(actor, &[], &observation)
+            .unwrap();
+        assert_eq!(
+            recovered
+                .compose_prompts(actor, &[], &observation)
+                .unwrap()
+                .unwrap()
+                .instructions(),
+            "persisted generation"
+        );
+        assert_eq!(preparations.load(Ordering::SeqCst), 2);
+        assert_eq!(composed.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -56,6 +56,7 @@ mod request_wait;
 #[cfg(test)]
 mod scope_runtime_tests;
 mod scopes;
+mod source_effect;
 mod status_rendering;
 #[cfg(test)]
 mod terminal_transfer_tests;
@@ -66,7 +67,8 @@ mod workbench_ledger;
 #[cfg(test)]
 pub(crate) use drain_wait::{wait_drain_event, DrainWaitEvent};
 pub(crate) use owned_workbench::{
-    ExecutionResourceOwners, WorkbenchCompilationAuthority, WorkbenchPublicOwner,
+    ExecutionResourceOwners, PreparedWorkbenchGenerationOwner, WorkbenchCompilationAuthority,
+    WorkbenchPublicOwner,
 };
 
 use display_settlement::{
@@ -163,6 +165,7 @@ impl<H, O> ResidentActorRoot<H, O> {
 pub struct LocalResidentInstallation {
     /// Newly prepared handler custody transfers only with application publication.
     pub(crate) prepared_tools: Option<crate::InstalledToolLease>,
+    pub(crate) prepared_prompts: Option<tidepool_runtime::session::ComposedPromptSnapshot>,
     /// Exact installation observation survives handler transfer without retaining its custody.
     toolset_acquisition: Option<crate::ToolsetAcquisition>,
     pub actor: LocalActorRef,
@@ -678,6 +681,7 @@ struct ActorDisplays {
 }
 
 struct DisplaySlot {
+    execution: Option<crate::request::sources::CallbackExecution>,
     callback: Option<Arc<RootCustody>>,
     keys: Vec<(i64, String)>,
     expanding: Option<u64>,
@@ -687,6 +691,7 @@ struct DisplaySlot {
 }
 
 struct StagedDisplayPublication {
+    execution: Option<crate::request::sources::CallbackExecution>,
     request: Arc<DisplayPublication>,
     callback: Option<Arc<RootCustody>>,
 }
@@ -729,10 +734,12 @@ impl ActorDisplays {
         self.retired = true;
         for slot in self.slots.values_mut() {
             slot.callback = None;
+            slot.execution = None;
             slot.keys.clear();
             slot.expanding = None;
             if let Some(pending) = &mut slot.pending {
                 pending.callback = None;
+                pending.execution = None;
             }
         }
         // Only accepted, unsettled emission metadata survives resource release.
@@ -760,6 +767,7 @@ impl ActorDisplays {
         update: bool,
         allowance: i64,
         operation: Option<WorkbenchOperationId>,
+        execution: Option<crate::request::sources::CallbackExecution>,
     ) -> Result<
         (
             Arc<DisplayPublication>,
@@ -832,6 +840,7 @@ impl ActorDisplays {
             self.slots.insert(
                 slot,
                 DisplaySlot {
+                    execution: None,
                     callback: None,
                     keys: Vec::new(),
                     expanding: None,
@@ -844,6 +853,7 @@ impl ActorDisplays {
         let owned = self.slots.get_mut(&slot).expect("issued display slot");
         let (request, answer) = DisplayPublication::channel(actor, ordinal, operation, output);
         owned.pending = Some(StagedDisplayPublication {
+            execution: if callback.is_some() { execution } else { None },
             request: request.clone(),
             callback,
         });
@@ -863,6 +873,7 @@ impl ActorDisplays {
             {
                 let pending = owned.pending.take().expect("acknowledged publication");
                 if !self.retired {
+                    owned.execution = pending.execution;
                     owned.callback = pending.callback;
                     owned.keys = pending.request.page.expansions.clone();
                 }
@@ -896,7 +907,14 @@ impl ActorDisplays {
         actor: ActorRef,
         identity: (i64, i64, i64),
         key: i64,
-    ) -> Result<(Arc<RootCustody>, u64), ResidentActorWorkbenchError> {
+    ) -> Result<
+        (
+            Arc<RootCustody>,
+            crate::request::sources::CallbackExecution,
+            u64,
+        ),
+        ResidentActorWorkbenchError,
+    > {
         if self.retired {
             return Err(ResidentActorWorkbenchError::ActorProtocol(
                 "display actor is retired".into(),
@@ -922,6 +940,11 @@ impl ActorDisplays {
                 "display expansion callback is unavailable".into(),
             )
         })?;
+        let execution = selected.execution.clone().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "display callback has no issued execution context".into(),
+            )
+        })?;
         let generation = selected.next_expansion.checked_add(1).ok_or_else(|| {
             ResidentActorWorkbenchError::ActorProtocol(
                 "display expansion generation exhausted".into(),
@@ -929,7 +952,7 @@ impl ActorDisplays {
         })?;
         selected.next_expansion = generation;
         selected.expanding = Some(generation);
-        Ok((callback, generation))
+        Ok((callback, execution, generation))
     }
 }
 
@@ -1088,7 +1111,7 @@ mod display_tests {
             let displays = Arc::new(Mutex::new(ActorDisplays::default()));
             let (request, answer) = displays
                 .lock()
-                .stage(actor, terminal_page(), None, false, 8192, None)
+                .stage(actor, terminal_page(), None, false, 8192, None, None)
                 .unwrap();
             let slot = request.page.identity.2;
             let entered = Arc::new(std::sync::Barrier::new(2));
@@ -1156,7 +1179,7 @@ mod display_tests {
             let displays = Arc::new(Mutex::new(ActorDisplays::default()));
             let (request, answer) = displays
                 .lock()
-                .stage(actor, terminal_page(), None, false, 8192, None)
+                .stage(actor, terminal_page(), None, false, 8192, None, None)
                 .unwrap();
             let slot = request.page.identity.2;
             let lease = DisplayPublicationLease {
@@ -1233,7 +1256,7 @@ mod display_tests {
         let displays = Arc::new(Mutex::new(ActorDisplays::default()));
         let (request, answer) = displays
             .lock()
-            .stage(actor, terminal_page(), None, false, 8192, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None)
             .unwrap();
         let slot = request.page.identity.2;
         assert_eq!(request.page_ordinal, 1);
@@ -1263,7 +1286,7 @@ mod display_tests {
         let displays = Arc::new(Mutex::new(ActorDisplays::default()));
         let (request, answer) = displays
             .lock()
-            .stage(actor, terminal_page(), None, false, 8192, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None)
             .unwrap();
         let slot = request.page.identity.2;
         let frozen = DisplayPublicationHostContext {
@@ -1323,7 +1346,7 @@ mod display_tests {
         let displays = Arc::new(Mutex::new(ActorDisplays::default()));
         let (request, answer) = displays
             .lock()
-            .stage(actor, terminal_page(), None, false, 8192, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None)
             .unwrap();
         drop(answer);
         let slot = request.page.identity.2;
@@ -1339,7 +1362,7 @@ mod display_tests {
         assert!(owner.slots[&slot].pending.is_none());
         assert_eq!(owner.slots[&slot].page_ordinal, 0);
         let (next, _) = owner
-            .stage(actor, terminal_page(), None, false, 8192, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None)
             .unwrap();
         assert_ne!(next.page.identity, request.page.identity);
     }
@@ -1350,7 +1373,7 @@ mod display_tests {
         let displays = Arc::new(Mutex::new(ActorDisplays::default()));
         let (request, answer) = displays
             .lock()
-            .stage(actor, terminal_page(), None, false, 8192, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None)
             .unwrap();
         let slot = request.page.identity.2;
         drop(answer);
@@ -1374,7 +1397,7 @@ mod display_tests {
         assert!(owner.slots[&slot].pending.is_none());
         assert!(owner.slots[&slot].callback.is_none());
         assert!(owner
-            .stage(actor, terminal_page(), None, false, 8192, None)
+            .stage(actor, terminal_page(), None, false, 8192, None, None)
             .is_err());
         assert!(owner.select(actor, request.page.identity, 1).is_err());
     }
@@ -1469,6 +1492,7 @@ mod display_tests {
 fn stage_actor_display<H, O>(
     environment: &ResidentEnvironment<H, O>,
     context: &ActorSessionContext,
+    execution: crate::request::sources::CallbackExecution,
     page: WorkbenchDisplayPage,
     callback: RootCustody,
     update: bool,
@@ -1490,6 +1514,7 @@ fn stage_actor_display<H, O>(
         update,
         allowance,
         operation,
+        Some(execution),
     )?;
     Ok(DisplayPublicationSubmission::new(displays, request, answer))
 }
@@ -1497,6 +1522,7 @@ fn stage_actor_display<H, O>(
 async fn publish_actor_display<H, O>(
     environment: &ResidentEnvironment<H, O>,
     context: &ActorSessionContext,
+    execution: crate::request::sources::CallbackExecution,
     page: WorkbenchDisplayPage,
     callback: RootCustody,
     update: bool,
@@ -1512,6 +1538,7 @@ where
         stage_actor_display(
             environment,
             context,
+            execution,
             page,
             callback,
             update,
@@ -1598,7 +1625,7 @@ where
             "display publication is still pending".into(),
         ));
     }
-    let (callback, generation) = displays.lock().select(context.actor, identity, key)?;
+    let (callback, execution, generation) = displays.lock().select(context.actor, identity, key)?;
     let lease = DisplayExpansionLease {
         displays,
         slot: identity.2,
@@ -1606,11 +1633,18 @@ where
     };
     let (page, callback) = environment
         .runner
-        .expand_display(context.clone(), callback, identity, key, allowance)
+        .expand_display(
+            execution.context.clone(),
+            callback,
+            identity,
+            key,
+            allowance,
+        )
         .await?;
     let output = publish_actor_display(
         environment,
-        context,
+        &execution.context.clone(),
+        execution,
         page,
         callback,
         true,
@@ -1626,6 +1660,7 @@ where
 async fn prepare_actor_display_boundary<H, O>(
     environment: &ResidentEnvironment<H, O>,
     context: &ActorSessionContext,
+    execution: crate::request::sources::CallbackExecution,
     boundary: ResidentActorBoundary,
     allowance: i64,
     operation: Option<WorkbenchOperationId>,
@@ -1651,6 +1686,7 @@ where
             let output = publish_actor_display(
                 environment,
                 context,
+                execution,
                 output,
                 callback,
                 false,
@@ -2154,6 +2190,15 @@ enum ResidentBoot {
 /// `Receiving` — the receive loop's own next-message wait does not by
 /// itself mean the earlier request was answered.
 #[derive(Clone)]
+enum InitialActorConfiguration {
+    Unselected,
+    Fresh,
+    Restored {
+        head: tidepool_runtime::session::ActiveNotebookGeneration,
+        source: crate::CheckpointSourceLayer,
+    },
+}
+
 struct OutstandingInteractive {
     response: crate::ResponseExpectation,
     request: crate::RequestId,
@@ -2726,6 +2771,9 @@ pub struct ResidentKernelBehavior<H, O> {
     prepared_workspace: Option<crate::PreparedWorkspaceAttachment>,
     worktree_custody: Option<Arc<dyn crate::WorkspaceCustody>>,
     policy_installed: bool,
+    actor_program_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
+    initial_configuration: InitialActorConfiguration,
+    actor_callback_execution: Option<crate::request::sources::CallbackExecution>,
     installed_tools: Arc<crate::resident_workbench::InstalledToolsState>,
     /// How many specs this incarnation has installed. `policy_installed` stays
     /// the first-install latch; a reload is a second, explicit path that
@@ -2968,6 +3016,8 @@ where
 }
 
 struct WorkbenchEffectState {
+    callback_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+    issued_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
     lifecycle: Option<crate::LifecycleHandle>,
     initial_context: bool,
     display_receipt_owner: Option<Arc<DisplayExecutionSettlement>>,
@@ -3104,12 +3154,7 @@ enum OwnedWorkbenchWait {
         operation: Option<WorkbenchOperationId>,
     },
     Launch(Box<child_launch::PreparedChildLaunch>),
-    Prepared(
-        futures_util::future::BoxFuture<
-            'static,
-            Result<ResidentOutcome, ResidentActorWorkbenchError>,
-        >,
-    ),
+    Prepared(futures_util::future::BoxFuture<'static, commands::CommandResolution>),
     RetainCommandBinding {
         continuation: ResidentHole,
         operation: futures_util::future::BoxFuture<
@@ -3226,11 +3271,14 @@ enum CurrentEffectOwner<'a> {
         wait_control: Option<Arc<crate::WorkbenchExecutionControl>>,
     },
     Tool {
+        issued_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
         work: Arc<InvocationWork>,
         publication: CheckpointPublication,
         control: Arc<crate::WorkbenchExecutionControl>,
     },
     Actor {
+        callback_scope: Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>>,
+        issued_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
         ephemeral_work: Arc<InvocationWork>,
         publication: CheckpointPublication,
         reservation_owner: Option<RequestReservationOwner>,
@@ -3239,6 +3287,28 @@ enum CurrentEffectOwner<'a> {
 }
 
 impl CurrentEffectOwner<'_> {
+    fn callback_scope(&self) -> Option<Arc<tidepool_runtime::session::RuntimeLexicalScopeLease>> {
+        match self {
+            Self::Scoped { base, .. } => base.callback_scope(),
+            Self::Workbench(execution) => execution.callback_scope.clone(),
+            Self::Actor { callback_scope, .. } => callback_scope.clone(),
+            Self::Tool { .. } => None,
+        }
+    }
+
+    fn issued_snapshot(&self) -> Option<&crate::resident_workbench::ActorRequestSnapshot> {
+        match self {
+            Self::Scoped { base, .. } => base.issued_snapshot(),
+            Self::Workbench(execution) => execution.issued_snapshot.as_ref(),
+            Self::Tool {
+                issued_snapshot, ..
+            }
+            | Self::Actor {
+                issued_snapshot, ..
+            } => issued_snapshot.as_ref(),
+        }
+    }
+
     fn context_binding(&self) -> Option<Arc<dyn crate::HostedContextBinding>> {
         match self {
             Self::Scoped { base, .. } => base.context_binding(),
@@ -3317,7 +3387,14 @@ impl CurrentEffectOwner<'_> {
             Self::Scoped { base, .. } => base.admitted_source(),
 
             Self::Workbench(execution) => Some(&execution.admitted_source),
-            Self::Actor { .. } | Self::Tool { .. } => None,
+            Self::Actor {
+                issued_snapshot, ..
+            }
+            | Self::Tool {
+                issued_snapshot, ..
+            } => issued_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.installation().source()),
         }
     }
 
@@ -3394,6 +3471,7 @@ fn prepare_execution_effect(
 }
 
 struct WorkbenchAdmission {
+    issued_snapshot: Option<crate::resident_workbench::ActorRequestSnapshot>,
     initial_context: bool,
     context: ActorSessionContext,
     request: WorkbenchRequest,
@@ -3532,6 +3610,12 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     /// tracking, is visible without instrumenting each call site by hand.
     fn set_standing(&mut self, actor: ActorRef, next: ResidentStanding) -> ResidentStanding {
         let previous = std::mem::replace(&mut self.standing, next);
+        if matches!(
+            self.standing,
+            ResidentStanding::Receiving(_) | ResidentStanding::Terminal
+        ) {
+            self.actor_callback_execution = None;
+        }
         let (from, from_request) = previous.describe();
         let (to, to_request) = self.standing.describe();
         tracing::info!(
@@ -3617,6 +3701,9 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             prepared_workspace: None,
             worktree_custody: None,
             policy_installed: false,
+            actor_program_snapshot: None,
+            initial_configuration: InitialActorConfiguration::Unselected,
+            actor_callback_execution: None,
             installed_tools: Arc::default(),
             spec_installs: 0,
             after_tool: crate::after_tool::AfterToolLog::default(),
@@ -3645,7 +3732,16 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
     }
     fn context(&self, actor: ActorRef) -> ActorSessionContext {
-        self.descriptor.session_context(actor)
+        if let Some(callback) = &self.actor_callback_execution {
+            return callback.context.clone();
+        }
+        self.actor_program_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.generation())
+            .map_or_else(
+                || self.descriptor.session_context(actor),
+                |generation| generation.context.clone(),
+            )
     }
 
     fn preflight_workbench(
@@ -3669,18 +3765,28 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 },
             );
         }
-        let installed_tools = match invocation.installed_tools {
+        let issued = invocation
+            .installed_tools
+            .or_else(|| self.installed_tools.snapshot());
+        let issued_generation = issued
+            .as_ref()
+            .and_then(|snapshot| snapshot.generation())
+            .cloned();
+        let installed_tools = match issued.as_ref().map(|snapshot| snapshot.installation()) {
             Some(lease) if lease.actor() != context.actor => {
                 return Err(KernelInvocationFailure::Rejected {
                     receipts: Vec::new(),
                     actor: context.actor,
-                    detail: "issued tool installation belongs to another actor".into(),
+                    detail: "issued actor generation belongs to another actor".into(),
                     diagnostic: None,
                 });
             }
-            Some(lease) => Some(lease),
-            None => self.installed_tools.current(),
+            Some(lease) => Some(lease.clone()),
+            None => None,
         };
+        if let Some(generation) = &issued_generation {
+            context = generation.context.clone();
+        }
         if invocation.initial_context {
             let tools = installed_tools
                 .as_ref()
@@ -3702,9 +3808,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let current_builtin = request.tool_call().is_some_and(|call| {
             matches!(
                 call.name.as_str(),
-                crate::status_tool::STATUS_TOOL
-                    | crate::reload_spec_tool::RELOAD_SPEC_TOOL
-                    | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
+                crate::status_tool::STATUS_TOOL | crate::reload_tool::RELOAD_TOOL
             )
         });
         if !self.policy_installed
@@ -3745,12 +3849,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     .tool_call()
                     .and_then(|call| match call.name.as_str() {
                         crate::status_tool::STATUS_TOOL => Some(crate::status_tool::declaration()),
-                        crate::reload_spec_tool::RELOAD_SPEC_TOOL => {
-                            Some(crate::reload_spec_tool::declaration())
-                        }
-                        crate::reload_helpers_tool::RELOAD_HELPERS_TOOL => {
-                            Some(crate::reload_helpers_tool::declaration())
-                        }
+                        crate::reload_tool::RELOAD_TOOL => Some(crate::reload_tool::declaration()),
                         _ => None,
                     })
             } else {
@@ -3879,27 +3978,31 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             context = selected;
             Some(authority)
         };
-        let snapshot = self
-            .lifecycle
-            .as_ref()
-            .and_then(|lifecycle| lifecycle.resident_snapshot())
-            .ok_or_else(|| KernelInvocationFailure::Rejected {
-                receipts: Vec::new(),
-                actor,
-                detail: "admitted execution lost its immutable resident owner".into(),
-                diagnostic: None,
-            })?;
-        let public_owner = snapshot
-            .public_owner
-            .ready()
-            .cloned()
-            .filter(|owner| owner.matches_context(&context))
-            .ok_or_else(|| KernelInvocationFailure::Rejected {
-                receipts: Vec::new(),
-                actor,
-                detail: "admitted execution has no exact committed public owner".into(),
-                diagnostic: None,
-            })?;
+        let public_owner = if let Some(generation) = &issued_generation {
+            generation.public_owner.clone()
+        } else {
+            let snapshot = self
+                .lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.resident_snapshot())
+                .ok_or_else(|| KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
+                    actor,
+                    detail: "admitted execution lost its immutable resident owner".into(),
+                    diagnostic: None,
+                })?;
+            snapshot
+                .public_owner
+                .ready()
+                .cloned()
+                .filter(|owner| owner.matches_context(&context))
+                .ok_or_else(|| KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
+                    actor,
+                    detail: "admitted execution has no exact committed public owner".into(),
+                    diagnostic: None,
+                })?
+        };
         if let Some(binding) = &invocation.context_binding {
             let control = control
                 .as_ref()
@@ -3922,6 +4025,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             control.bind_context(binding.clone());
         }
         Ok(WorkbenchPreflight::Admitted(WorkbenchAdmission {
+            issued_snapshot: issued,
             initial_context: invocation.initial_context,
             context,
             public_owner,
@@ -3947,6 +4051,15 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             None => self.workbench_executions.lock().actor_scope_root(actor),
         };
         CurrentEffectOwner::Actor {
+            callback_scope: self
+                .actor_callback_execution
+                .as_ref()
+                .and_then(|callback| callback.scope.clone()),
+            issued_snapshot: self
+                .actor_callback_execution
+                .as_ref()
+                .and_then(|callback| callback.snapshot.clone())
+                .or_else(|| self.actor_program_snapshot.clone()),
             ephemeral_work,
             publication: self.checkpoint_publication.clone(),
             reservation_owner: control
@@ -4204,7 +4317,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let hidden_terminal_actors = records
             .iter()
             .filter(|(identity, _)| observable.contains(*identity))
-            .filter(|(identity, record)| {
+            .filter(|(_identity, record)| {
                 record
                     .terminal
                     .clone()
@@ -4274,7 +4387,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 }
                 if view == StatusView::Lineage {
                     return Some((key, format!(
-                        "  - {:?} ({}@{}) creator={:?} supervisor={:?} context_parent={:?}\n    haskell_scope={} provider_thread={:?} provider_parent_thread={:?} first_usage={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} bound_worktree={:?} {}",
+                        "  - {:?} ({}@{}) creator={:?} supervisor={:?} context_parent={:?}\n    initial_haskell_scope={} provider_thread={:?} provider_parent_thread={:?} first_usage={:?} cache_boundary={:?} cached_input={:?} uncached_input={:?} bound_worktree={:?} {}",
                         record.descriptor.display_label(), identity.id.0, identity.incarnation.0,
                         record.descriptor.creator(), record.descriptor.supervisor_parent(), record.descriptor.context_parent(),
                         record.descriptor.placement().lexical_scope.0,
@@ -4406,7 +4519,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
             )
         } else {
             format!(
-                "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?}\n  context: haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  available effects: {} descendants={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}\n  jobs: running={:?}{}{}",
+                "actor {}@{} label={:?}\n  lineage: creator={:?} supervisor={:?} context_parent={:?}\n  context: initial_haskell_scope={} provider_thread={:?} provider_parent_thread={:?} cache_input={:?}/{:?} cache_boundary={:?}\n  activation: kind={:?} event_watermark={}\n  available effects: {} descendants={:?}{}\n  runtime: application={} program={standing} workbench={:?} current_request={current_request:?} bound_worktree={:?}\n  responses: pending={:?} ready={:?} unavailable={}\n  watches: pending={:?} ready={:?} unavailable={}\n  jobs: running={:?}{}{}",
                 actor.id.0,
                 actor.incarnation.0,
                 self.descriptor.display_label(),
@@ -4574,7 +4687,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     ) -> RevisionIdentities {
         let own = self.runtime_observation.snapshot();
         let records = self.environment.actors.lock().clone();
-        let live = |identity: &ActorRef, record: &ResidentActorRecord| {
+        let live = |_identity: &ActorRef, record: &ResidentActorRecord| {
             record.terminal.is_none() && record.lifecycle.retained_terminal().get().is_none()
         };
         let operator_checkout = if self.descriptor.is_root() {
@@ -4836,6 +4949,8 @@ where
         // Issued requests may retain their installation past actor retirement.
         // Their RootCustody keeps the compiled handler live until the last
         // request releases its lease.
+        self.actor_program_snapshot = None;
+        self.actor_callback_execution = None;
         self.installed_tools.clear();
     }
 
@@ -5501,10 +5616,7 @@ where
     ) -> futures_util::future::BoxFuture<
         'a,
         Result<
-            futures_util::future::BoxFuture<
-                'static,
-                Result<ResidentOutcome, ResidentActorWorkbenchError>,
-            >,
+            futures_util::future::BoxFuture<'static, commands::CommandResolution>,
             ResidentActorBoundary,
         >,
     > {
@@ -5525,6 +5637,19 @@ where
             'static,
             Result<ResidentOutcome, ResidentActorWorkbenchError>,
         > = match boundary {
+            ResidentActorBoundary::Source {
+                continuation,
+                request,
+            } => {
+                let operation = self.prepare_source_effect(
+                    context,
+                    effect_owner.issued_snapshot().cloned(),
+                    control,
+                    continuation,
+                    request,
+                );
+                return Box::pin(std::future::ready(Ok(operation)));
+            }
             ResidentActorBoundary::Form {
                 continuation,
                 operation,
@@ -5633,7 +5758,7 @@ where
                             .resume_spec_replacement(context, continuation, result)
                             .await
                     });
-                    Ok(operation)
+                    Ok(commands::CommandResolution::ordinary(operation))
                 });
             }
 
@@ -5681,8 +5806,10 @@ where
             ResidentActorBoundary::AttachSource {
                 continuation,
                 owner,
-                source,
+                mut source,
             } => {
+                source.execution.snapshot = effect_owner.issued_snapshot().cloned();
+                source.execution.scope = effect_owner.callback_scope();
                 return Box::pin(async move {
                     let result = self.attach_source(&kernel, &context, owner, source).await;
                     let operation: futures_util::future::BoxFuture<
@@ -5694,8 +5821,8 @@ where
                             .resume_value(context, continuation, result)
                             .await
                     });
-                    Ok(operation)
-                })
+                    Ok(commands::CommandResolution::ordinary(operation))
+                });
             }
             ResidentActorBoundary::ActorContext(continuation) => Box::pin(async move {
                 environment
@@ -6068,7 +6195,9 @@ where
             }),
             other => return Box::pin(std::future::ready(Err(other))),
         };
-        Box::pin(std::future::ready(Ok(operation)))
+        Box::pin(std::future::ready(Ok(
+            commands::CommandResolution::ordinary(operation),
+        )))
     }
 
     async fn expand_display(
@@ -6094,6 +6223,7 @@ where
     async fn prepare_display_boundary(
         &self,
         context: &ActorSessionContext,
+        execution: crate::request::sources::CallbackExecution,
         boundary: ResidentActorBoundary,
         allowance: i64,
         operation: Option<WorkbenchOperationId>,
@@ -6103,6 +6233,7 @@ where
         prepare_actor_display_boundary(
             &self.environment,
             context,
+            execution,
             boundary,
             allowance,
             operation,
@@ -6119,17 +6250,38 @@ where
         ancestry: &crate::CallAncestry,
         boundary: ResidentActorBoundary,
     ) -> Result<ResidentOutcome, ResidentActorWorkbenchError> {
+        self.resolve_effect_resolution(kernel, context, effect_owner, ancestry, boundary)
+            .await
+            .outcome
+    }
+
+    async fn resolve_effect_resolution(
+        &mut self,
+        kernel: &KernelContext,
+        context: &ActorSessionContext,
+        effect_owner: CurrentEffectOwner<'_>,
+        ancestry: &crate::CallAncestry,
+        boundary: ResidentActorBoundary,
+    ) -> commands::CommandResolution {
         let boundary = prepare_execution_effect(context, &effect_owner, boundary);
-        let (boundary, display) = self
+        let prepared = self
             .prepare_display_boundary(
                 context,
+                crate::request::sources::CallbackExecution {
+                    context: context.clone(),
+                    snapshot: effect_owner.issued_snapshot().cloned(),
+                    scope: effect_owner.callback_scope(),
+                },
                 boundary,
                 DEFAULT_DISPLAY_CHARACTER_ALLOWANCE,
                 None,
                 None,
             )
-            .await?;
-        let _ = display;
+            .await;
+        let (boundary, _) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => return commands::CommandResolution::from_outcome(Err(error)),
+        };
         let boundary = match self
             .prepare_independent_effect(kernel, context, &effect_owner, boundary)
             .await
@@ -6137,8 +6289,10 @@ where
             Ok(operation) => return operation.await,
             Err(boundary) => boundary,
         };
-        self.prepare_actor_effect(kernel, context, effect_owner, ancestry, boundary)
-            .await
+        commands::CommandResolution::from_outcome(
+            self.prepare_actor_effect(kernel, context, effect_owner, ancestry, boundary)
+                .await,
+        )
     }
 
     fn prepare_actor_effect<'a>(
@@ -7377,6 +7531,7 @@ where
                         let checkpoint_attachment = checkpoint_attachment;
                         let installation = LocalResidentInstallation {
                             prepared_tools: None,
+                            prepared_prompts: None,
                             toolset_acquisition: None,
                             actor,
                             label: self.descriptor.display_label().into_owned(),
@@ -7638,6 +7793,9 @@ where
                     ));
                 }
             };
+            if let Some(installation) = &installation {
+                self.bind_initial_generation(context, installation).await?;
+            }
             self.check_application_readiness(kernel, context).await?;
             let publication = completion.publish_if_current(|| {
                 kernel.retained_exit().claim_before_shutdown(|| {
@@ -7713,10 +7871,86 @@ where
         result
     }
 
+    async fn select_initial_configuration(
+        &mut self,
+        context: &ActorSessionContext,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        if !matches!(
+            self.initial_configuration,
+            InitialActorConfiguration::Unselected
+        ) {
+            return Ok(());
+        }
+        if self.descriptor.persistence_policy() != crate::ActorPersistencePolicy::Durable {
+            self.initial_configuration = InitialActorConfiguration::Fresh;
+            return Ok(());
+        }
+        let predecessor = self
+            .root_startup
+            .as_ref()
+            .and_then(|startup| startup.manifest_predecessor);
+        let head = self
+            .environment
+            .runner
+            .application_workbench()
+            .startup_generation(context.clone(), self.descriptor.clone(), predecessor)
+            .await?;
+        let Some(head) = head else {
+            if predecessor.is_some() && self.environment.source_layers.is_some() {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "source-backed recovery has no durable notebook generation; legacy source-backed runs require an explicit migration".into(),
+                ));
+            }
+            self.initial_configuration = InitialActorConfiguration::Fresh;
+            return Ok(());
+        };
+        head.references
+            .validate()
+            .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let installation = crate::PersistedActorInstallation::decode(
+            &head.references.installation,
+            &head.references.source,
+        )
+        .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        let layers = self.environment.source_layers.clone().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "restored generation has no source recovery owner".into(),
+            )
+        })?;
+        let reference = head.references.source.clone();
+        let source = tokio::task::spawn_blocking(move || {
+            layers.restore_source_with_acquisition(&reference, installation.acquisition())
+        })
+        .await
+        .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?
+        .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+        if source
+            .generation_evidence()
+            .is_none_or(|evidence| evidence.reference != head.references.source)
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "source recovery did not retain the selected artifact reference".into(),
+            ));
+        }
+        self.initial_configuration = InitialActorConfiguration::Restored { head, source };
+        Ok(())
+    }
+
     fn freeze_installed_source(
         &self,
         actor: ActorRef,
     ) -> Result<crate::CheckpointSourceLayer, ResidentActorWorkbenchError> {
+        if matches!(
+            self.initial_configuration,
+            InitialActorConfiguration::Unselected
+        ) {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "initial configuration has not been selected".into(),
+            ));
+        }
+        if let InitialActorConfiguration::Restored { source, .. } = &self.initial_configuration {
+            return Ok(source.clone());
+        }
         self.environment.source_layers.as_ref().map_or_else(
             || Ok(crate::CheckpointSourceLayer::default()),
             |layers| {
@@ -7731,6 +7965,25 @@ where
         &self,
         context: &ActorSessionContext,
     ) -> Result<Arc<WorkbenchPublicOwner>, ResidentActorWorkbenchError> {
+        let retained = self
+            .actor_program_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.generation())
+            .cloned()
+            .filter(|generation| generation.public_owner.matches_context(context))
+            .or_else(|| {
+                self.installed_tools
+                    .current_generation()
+                    .filter(|generation| generation.public_owner.matches_context(context))
+            });
+        if let Some(generation) = retained {
+            if !generation.public_owner.is_current() {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "retained generation native ownership is unavailable".into(),
+                ));
+            }
+            return Ok(generation.public_owner.clone());
+        }
         let lifecycle = self
             .lifecycle
             .as_ref()
@@ -7744,12 +7997,76 @@ where
             .map_err(ResidentActorWorkbenchError::ActorProtocol)
     }
 
+    async fn bind_initial_generation(
+        &self,
+        context: &ActorSessionContext,
+        installation: &LocalResidentInstallation,
+    ) -> Result<(), ResidentActorWorkbenchError> {
+        if self.installed_tools.current_generation().is_some() {
+            return Ok(());
+        }
+        let (Some(tools), Some(prompts)) =
+            (&installation.prepared_tools, &installation.prepared_prompts)
+        else {
+            return Ok(());
+        };
+        let Some(evidence) = tools.source().generation_evidence() else {
+            return Ok(());
+        };
+        let expected = self.installed_tools.snapshot().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "initial generation lost bootstrap source custody".into(),
+            )
+        })?;
+        let references = tools
+            .generation_references(evidence.reference.clone(), prompts.clone())
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+        let context = self
+            .descriptor
+            .session_context(context.actor)
+            .with_issued_source(tools.source())?;
+        let workbench = self.environment.runner.application_workbench();
+        let prepared = workbench
+            .prepare_actor_generation(context.clone(), self.descriptor.clone(), None, references)
+            .await?;
+        match workbench
+            .commit_actor_generation(
+                context,
+                self.descriptor.clone(),
+                self.installed_tools.clone(),
+                expected,
+                prepared,
+                tools.clone(),
+                prompts.clone(),
+                evidence.configuration_digest,
+                tidepool_runtime::session::PublicationDecision::new(),
+            )
+            .await?
+        {
+            crate::resident_workbench::ActorGenerationCommit::Published(generation) => {
+                if let Some(lifecycle) = &self.lifecycle {
+                    lifecycle.generation_published(
+                        generation.context.clone(),
+                        generation.public_owner.clone(),
+                        generation.installation.clone(),
+                    );
+                }
+                Ok(())
+            }
+            crate::resident_workbench::ActorGenerationCommit::Refused(detail)
+            | crate::resident_workbench::ActorGenerationCommit::Unconfirmed(detail) => {
+                Err(ResidentActorWorkbenchError::ActorProtocol(detail))
+            }
+        }
+    }
+
     async fn commit_interactive_installation(
         &mut self,
         kernel: &KernelContext,
         context: &ActorSessionContext,
         installation: LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
+        self.bind_initial_generation(context, &installation).await?;
         self.check_application_readiness(kernel, context).await?;
         kernel
             .retained_exit()
@@ -7763,10 +8080,14 @@ where
 
     fn publish_interactive_installation(&mut self, mut installation: LocalResidentInstallation) {
         if let Some(tools) = installation.prepared_tools.take() {
-            self.installed_tools.publish(tools);
+            if self.installed_tools.current_generation().is_none() {
+                self.installed_tools.publish(tools);
+            }
         }
         self.publish_installation(installation);
         self.policy_installed = true;
+        self.actor_program_snapshot = self.installed_tools.snapshot();
+        self.actor_callback_execution = None;
         if let Some(lifecycle) = &self.lifecycle {
             lifecycle.policy_installed(self.installed_tools.current());
         }
@@ -7858,6 +8179,7 @@ where
         context: &ActorSessionContext,
         initial_user_message: Option<String>,
     ) -> Result<LocalResidentInstallation, ResidentActorWorkbenchError> {
+        self.select_initial_configuration(context).await?;
         let source = self.freeze_installed_source(context.actor)?;
         self.prepare_interactive_policy_from_source(kernel, context, initial_user_message, source)
             .await
@@ -7906,6 +8228,17 @@ where
         );
         let compiler_owner =
             crate::resident_workbench::CompilerCloseOwner::ActorLifecycle(kernel.retained_exit());
+        if self.explicit_installer.is_some()
+            && matches!(
+                self.initial_configuration,
+                InitialActorConfiguration::Restored { .. }
+            )
+        {
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "a restored source-backed generation cannot substitute an explicit live installer"
+                    .into(),
+            ));
+        }
         let compiled_tools = match self.explicit_installer.as_ref() {
             Some(installer) => compiler_owner
                 .scope(application_workbench.prepare_explicit_application(
@@ -7919,6 +8252,29 @@ where
                     self.prepared_request_receiver = Some(receiver);
                     tools
                 }),
+            None if matches!(
+                self.initial_configuration,
+                InitialActorConfiguration::Restored { .. }
+            ) =>
+            {
+                let InitialActorConfiguration::Restored { head, .. } = &self.initial_configuration
+                else {
+                    unreachable!()
+                };
+                let recovered = crate::PersistedActorInstallation::decode(
+                    &head.references.installation,
+                    &head.references.source,
+                )
+                .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?;
+                compiler_owner
+                    .scope(application_workbench.prepare_recovered_tools(
+                        compile_context.clone(),
+                        self.spec_installs,
+                        self.descriptor.capabilities().effect_keys().to_vec(),
+                        &recovered,
+                    ))
+                    .await
+            }
             None => {
                 compiler_owner
                     .scope(application_workbench.prepare_tools(
@@ -7957,6 +8313,29 @@ where
                 self.installed_tools.clone(),
             ));
 
+        self.descriptor
+            .prepare_prompt_reload(context.actor, policy.tools(), &self.runtime_observation)
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+
+        let prompts = match &self.initial_configuration {
+            InitialActorConfiguration::Restored { head, .. } => {
+                prepared_tools
+                    .verify_recovered_generation(&head.references)
+                    .map_err(|error| {
+                        ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                    })?;
+                Some(head.references.prompts.clone())
+            }
+            InitialActorConfiguration::Unselected => {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "prompt composition preceded initial configuration selection".into(),
+                ))
+            }
+            InitialActorConfiguration::Fresh => self
+                .descriptor
+                .compose_prompts(context.actor, policy.tools(), &self.runtime_observation)
+                .map_err(ResidentActorWorkbenchError::ActorProtocol)?,
+        };
         let (checkpoint, checkpoint_attachment) = self
             .admitted_checkpoint
             .take()
@@ -7967,6 +8346,7 @@ where
         Ok(LocalResidentInstallation {
             toolset_acquisition: prepared_tools.toolset_acquisition().cloned(),
             prepared_tools: Some(prepared_tools),
+            prepared_prompts: prompts,
             actor,
             label: self.descriptor.display_label().into_owned(),
             policy,
@@ -7995,6 +8375,15 @@ where
         context: &ActorSessionContext,
         boot: ResidentBoot,
     ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
+        self.select_initial_configuration(context).await?;
+        if self.actor_program_snapshot.is_none() {
+            let source = self.freeze_installed_source(context.actor)?;
+            let bootstrap = crate::InstalledToolLease::new(context.actor, source, None);
+            self.installed_tools.publish(bootstrap.clone());
+            self.actor_program_snapshot = Some(
+                crate::resident_workbench::ActorRequestSnapshot::Bootstrap(bootstrap),
+            );
+        }
         let workbench = self.environment.runner.application_workbench();
         let guard = workbench
             .actor_initialization_cleanup(context.clone())
@@ -8106,7 +8495,11 @@ where
         }
         if matches!(boot, ResidentBoot::Workbench) {
             let source = self.freeze_installed_source(context.actor)?;
-            self.installed_tools.publish_source(context.actor, source);
+            self.installed_tools.publish(crate::InstalledToolLease::new(
+                context.actor,
+                source,
+                None,
+            ));
             self.set_standing(context.actor, ResidentStanding::Workbench);
             self.policy_installed = true;
             return Ok(KernelStep::Continue(()));
@@ -8155,8 +8548,9 @@ where
                     match startup_step {
                         ResidentActorStartupStep::InstallSource {
                             continuation,
-                            source,
+                            mut source,
                         } => {
+                            source.execution.snapshot = self.actor_program_snapshot.clone();
                             self.sources.push(source);
                             outcome = self
                                 .environment
@@ -9088,6 +9482,11 @@ where
                                     fragment: &mut *next_fragment,
                                     remaining: &mut *unit.display_remaining,
                                 }),
+                                crate::request::sources::CallbackExecution {
+                                    context: context.clone(),
+                                    snapshot: execution_state.issued_snapshot.clone(),
+                                    scope: execution_state.callback_scope.clone(),
+                                },
                             )
                             .await?;
                         current
@@ -9384,7 +9783,7 @@ where
                                         unit.recovered_bindings,
                                     )?;
                                 }
-                                let (resolved, command_disposition) = match boundary {
+                                let (resolved, effect_disposition) = match boundary {
                                     ResidentActorBoundary::Command {
                                         continuation,
                                         request,
@@ -9431,7 +9830,7 @@ where
                                                 boundary,
                                             )
                                             .await;
-                                        (outcome, None)
+                                        (outcome.outcome, Some(outcome.disposition))
                                     }
                                 };
                                 current.outcome = Some(match resolved {
@@ -9447,7 +9846,7 @@ where
                                             effect_started.elapsed(),
                                             scoped_operation_disposition(
                                                 success_disposition,
-                                                command_disposition.unwrap_or(
+                                                effect_disposition.unwrap_or(
                                                     WorkbenchOperationDisposition::Committed,
                                                 ),
                                             ),
@@ -9466,7 +9865,7 @@ where
                                             effect_started.elapsed(),
                                             scoped_operation_disposition(
                                                 success_disposition,
-                                                command_disposition.unwrap_or_else(|| {
+                                                effect_disposition.unwrap_or_else(|| {
                                                     disposition_for_non_command_failure(&error)
                                                 }),
                                             ),
@@ -9805,11 +10204,7 @@ where
                 .cloned();
             let reload_spec_call = request
                 .tool_call()
-                .filter(|call| call.name == crate::reload_spec_tool::RELOAD_SPEC_TOOL)
-                .cloned();
-            let reload_helpers_call = request
-                .tool_call()
-                .filter(|call| call.name == crate::reload_helpers_tool::RELOAD_HELPERS_TOOL)
+                .filter(|call| call.name == crate::reload_tool::RELOAD_TOOL)
                 .cloned();
             if !cursor.dispatch_initialized {
                 cursor.tool_dispatch = if effects.initial_context {
@@ -9822,8 +10217,7 @@ where
                     ))
                 } else if let Some(call) = request.tool_call().filter(|call| {
                     call.name != crate::status_tool::STATUS_TOOL
-                        && call.name != crate::reload_spec_tool::RELOAD_SPEC_TOOL
-                        && call.name != crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
+                        && call.name != crate::reload_tool::RELOAD_TOOL
                 }) {
                     let tools = installed_tools
                         .as_ref()
@@ -9868,7 +10262,7 @@ where
                 };
                 cursor.dispatch_initialized = true;
             }
-            if reload_helpers_call.is_some() || reload_spec_call.is_some() {
+            if reload_spec_call.is_some() {
                 return Err(workbench_failure(
                     &[],
                     0,
@@ -10321,7 +10715,7 @@ where
                         // own dispatcher; an authored Haskell cell reaches here
                         // too, under the `haskell` tool name and the same
                         // installed spec's dispatcher — `status` and
-                        // `reload_agent_spec` and `reload_helpers` are the only committed outcomes
+                        // `reload` and `reload_helpers` are the only committed outcomes
                         // that never acquire one, so a broken slot can never
                         // block its own repair.
                         let hosted_call = request
@@ -11085,7 +11479,6 @@ where
         delivery: crate::SourceDelivery,
     ) -> futures_util::future::BoxFuture<'a, Result<KernelStep<()>, KernelBehaviorError>> {
         Box::pin(kernel.compiler_lifecycle_scope(async move {
-            let context = self.context(kernel.identity());
             use crate::request::sources::{RequestSourceKind, SourceTarget};
             self.input_origin = match delivery.target {
                 SourceTarget::Request(request, RequestSourceKind::Progress) => {
@@ -11109,6 +11502,8 @@ where
                     detail: "source delivery does not match an installed connection".into(),
                     diagnostic: None,
                 })?;
+            let context = source.execution.context.clone();
+            self.actor_callback_execution = Some(source.execution.clone());
             let delivery = self.environment.requests.accept_source_delivery(delivery);
             if self.checkpoint.is_some() {
                 self.active_input = Some(RetainedActorInput::Source(delivery.clone()));
@@ -11880,8 +12275,12 @@ where
                         "tool execution lost its original resource owner",
                     )
                 })?;
-            let mut cursor =
-                green_tool::ToolCursor::new(work, control, self.checkpoint_publication.clone());
+            let mut cursor = green_tool::ToolCursor::new(
+                work,
+                control,
+                self.checkpoint_publication.clone(),
+                self.actor_program_snapshot.clone(),
+            );
             let mut outcome = cursor
                 .native(&self.environment, &context)
                 .resume_tool_invocation(awaiting.continuation, invocation.name, arguments)
@@ -12017,13 +12416,9 @@ where
     }
 
     fn serializes_workbench_publication(&self, request: &WorkbenchRequest) -> bool {
-        request.tool_call().is_some_and(|call| {
-            matches!(
-                call.name.as_str(),
-                crate::reload_spec_tool::RELOAD_SPEC_TOOL
-                    | crate::reload_helpers_tool::RELOAD_HELPERS_TOOL
-            )
-        })
+        request
+            .tool_call()
+            .is_some_and(|call| matches!(call.name.as_str(), crate::reload_tool::RELOAD_TOOL))
     }
 
     fn dispatch_workbench(
@@ -12120,6 +12515,7 @@ where
             }
             let admitted = self.preflight_workbench(kernel.identity(), invocation, control)?;
             let WorkbenchAdmission {
+                issued_snapshot,
                 initial_context,
                 context,
                 request,
@@ -12204,6 +12600,8 @@ where
             let mut execution_state = WorkbenchExecutionState {
                 cell_span: cell_execution_span(&context, &request),
                 effects: WorkbenchEffectState {
+                    callback_scope: None,
+                    issued_snapshot,
                     lifecycle: self.lifecycle.clone(),
                     initial_context,
                     display_receipt_owner,
