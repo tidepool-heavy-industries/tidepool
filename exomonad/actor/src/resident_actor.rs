@@ -3377,7 +3377,14 @@ impl CurrentEffectOwner<'_> {
             Self::Scoped { base, .. } => base.admitted_source(),
 
             Self::Workbench(execution) => Some(&execution.admitted_source),
-            Self::Actor { issued_snapshot, .. } | Self::Tool { issued_snapshot, .. } => issued_snapshot.as_ref().map(|snapshot| snapshot.installation().source()),
+            Self::Actor {
+                issued_snapshot, ..
+            }
+            | Self::Tool {
+                issued_snapshot, ..
+            } => issued_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.installation().source()),
         }
     }
 
@@ -7927,7 +7934,10 @@ where
         let references = tools
             .generation_references(evidence.reference.clone(), prompts.clone())
             .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
-        let context = self.descriptor.session_context(context.actor).with_issued_source(tools.source())?;
+        let context = self
+            .descriptor
+            .session_context(context.actor)
+            .with_issued_source(tools.source())?;
         let workbench = self.environment.runner.application_workbench();
         let prepared = workbench
             .prepare_actor_generation(context.clone(), self.descriptor.clone(), None, references)
@@ -9330,7 +9340,11 @@ where
                                     fragment: &mut *next_fragment,
                                     remaining: &mut *unit.display_remaining,
                                 }),
-                                crate::request::sources::CallbackExecution { context: context.clone(), snapshot: execution_state.issued_snapshot.clone(), scope: execution_state.callback_scope.clone() },
+                                crate::request::sources::CallbackExecution {
+                                    context: context.clone(),
+                                    snapshot: execution_state.issued_snapshot.clone(),
+                                    scope: execution_state.callback_scope.clone(),
+                                },
                             )
                             .await?;
                         current

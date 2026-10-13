@@ -638,7 +638,9 @@ mod tests {
                     None,
                     false,
                     8192,
-                    Some(operation), None,)
+                    Some(operation),
+                    None,
+                )
                 .unwrap();
             settlement.admit(&request);
             let submission =
@@ -758,7 +760,9 @@ mod tests {
                         None,
                         false,
                         8192,
-                        Some(operation), None,)?;
+                        Some(operation),
+                        None,
+                    )?;
                     Ok(DisplayPublicationSubmission::new(
                         displays.clone(),
                         request,
@@ -820,7 +824,9 @@ mod tests {
                         None,
                         false,
                         8192,
-                        Some(operation), None,)?;
+                        Some(operation),
+                        None,
+                    )?;
                     let submission =
                         DisplayPublicationSubmission::new(displays, request.clone(), answer);
                     issued.send(request.clone()).unwrap();
@@ -937,7 +943,9 @@ mod tests {
                 None,
                 false,
                 8192,
-                Some(operation), None,)?;
+                Some(operation),
+                None,
+            )?;
             Ok(DisplayPublicationSubmission::new(
                 displays.clone(),
                 request,
@@ -982,7 +990,9 @@ mod tests {
                 None,
                 false,
                 8192,
-                Some(operation), None,)
+                Some(operation),
+                None,
+            )
             .unwrap();
         settlement.admit(&request);
         let submission =
