@@ -9,8 +9,9 @@ foreign WIP. Supersedes the unqualified parser/namespace-overlay experiments.
 
 Ordinary files hold reusable Haskell definitions, workspace prompts, and memory.
 One explicit `reload` activates edited source, compatible AgentSpec handlers,
-workspace prompts, and a fresh notebook. Haskell `reloadSource` adapts to that
-same operation. Remove separate helper/spec publication implementations and
+workspace prompts, and a fresh notebook. Haskell `reloadSource [additionalModules]`
+adapts to that same operation. Reload does not commit files to Git; ordinary Git
+operations own version-control publication. Remove separate helper/spec publication implementations and
 migrate callers; compatibility shims are not required.
 
 Changed configuration resets notebook names; unchanged configuration does not.
@@ -42,7 +43,10 @@ generation selection. Reuse RunRecoveryStore/PreparedRecoveryWrite and its nativ
 installation acknowledgement; do not add a journal or independent head registry.
 Persist exact source, installation and prompt references, not display labels.
 The actor layer retains live leases; runtime serialization must not depend on the
-actor crate. Runtime/source/actor owners agree their concrete handoff before edits
+actor crate. On restart, the existing incarnation-transfer transaction transfers
+the actual active generation and its exact references, rather than assuming
+generation 1. This startup transfer is distinct from reload and keeps its existing
+incarnation invalidation semantics. Runtime/source/actor owners agree their concrete handoff before edits
 to shared signatures; report changes to the coordinator and dependent workers.
 
 Publication: durably prepare immutable inputs and isolated scope; fence expected
