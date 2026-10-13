@@ -381,7 +381,7 @@ mod tests {
         root.initialize_durable_public_scope(owner.clone(), public)
             .unwrap();
         let before =
-            exomonad_actor::RootStartupManifestPin::capture_for_owner(store.path(), &owner)
+            exomonad_actor::RootStartupManifestPin::capture_for_actor(store.path(), &owner)
                 .unwrap();
         let id = tidepool_runtime::session::fresh_session_id();
         let child_root = run
@@ -411,7 +411,7 @@ mod tests {
             .initialize_durable_public_scope(child_owner, child_public)
             .unwrap();
         assert_eq!(
-            exomonad_actor::RootStartupManifestPin::capture_for_owner(store.path(), &owner)
+            exomonad_actor::RootStartupManifestPin::capture_for_actor(store.path(), &owner)
                 .unwrap(),
             before
         );

@@ -65,6 +65,12 @@ These startup events use actor-journal version 9. Version 8 runs remain on their
 existing binaries; the new reader refuses them without mutation. This change
 does not supply a migration or authorize restarting a live run.
 
+Root startup pins the exact selected notebook public owner separately from
+canonical actor admission. Carry that pin through the lifecycle claim, journal
+certification and native transfer; retained earlier generations cannot substitute
+for the selected surface. Absence of an unpublished canonical actor permits
+following its recorded predecessor, while broken selected evidence refuses recovery.
+
 Child capture resolves original nominal identities against local declarations
 first, then acquired certified interfaces from the actor's source owner. Narrow
 inherited interfaces through their issuer; copied source and rendered names do

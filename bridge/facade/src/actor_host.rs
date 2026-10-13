@@ -126,6 +126,8 @@ mod call_timing_tests;
 #[cfg(test)]
 mod cell_compile_cost_tests;
 #[cfg(test)]
+mod coherent_reload_acceptance_tests;
+#[cfg(test)]
 pub(crate) mod command_jobs_tests;
 #[cfg(test)]
 mod custody_tests;
@@ -140,8 +142,6 @@ mod observation_budget_tests;
 #[cfg(test)]
 #[cfg(test)]
 mod source_reload_tests;
-#[cfg(test)]
-mod coherent_reload_acceptance_tests;
 #[cfg(test)]
 mod terminal_transfer_tests;
 #[cfg(test)]
@@ -2333,14 +2333,9 @@ async fn run_owned(
             .root_recovery_placement(root_actor.identity())
             .await
             .map_err(|error| runtime_error(error.to_string()))?;
-        let claim = if let Some(predecessor) = intent.manifest_predecessor {
-            let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
-                &root_declaration_recovery::root_path(),
-                predecessor.incarnation.0,
-            )
-            .ok_or_else(|| runtime_error("root manifest predecessor has no incarnation"))?;
+        let claim = if let Some(pin) = intent.manifest.as_ref() {
             forest
-                .begin_successor_operation(root_actor.identity(), &owner)
+                .begin_successor_operation(root_actor.identity(), &pin.public_owner.owner)
                 .await
                 .map_err(|error| runtime_error(error.to_string()))?
         } else {
@@ -2365,16 +2360,14 @@ async fn run_owned(
             None
         };
         let manifest = match (intent.manifest_predecessor, admission.as_ref()) {
-            (Some(predecessor), Some(admission)) => {
-                let owner = tidepool_runtime::session::RecoveryPublicOwner::new(
-                    &root_declaration_recovery::root_path(),
-                    predecessor.incarnation.0,
-                )
-                .ok_or_else(|| runtime_error("root manifest predecessor has no incarnation"))?;
+            (Some(_), Some(admission)) => {
+                let pin = intent.manifest.as_ref().ok_or_else(|| {
+                    runtime_error("root manifest predecessor has no exact selected owner pin")
+                })?;
                 forest
                     .transfer_recovered_root_public_owner(
                         root_actor.identity(),
-                        &owner,
+                        &pin.public_owner.owner,
                         root_declaration_recovery::successor_authority(
                             Arc::clone(&host_incarnation),
                             Arc::clone(admission),

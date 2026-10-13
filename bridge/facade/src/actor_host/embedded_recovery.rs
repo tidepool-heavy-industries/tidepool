@@ -117,11 +117,13 @@ impl ObservedStartupRecovery<'_> {
                 record.admission.actor.incarnation.0,
             )
             .ok_or("root startup owner has no incarnation")?;
-            if library.validate_recovered_public_owner(&owner)? {
-                self.startup.manifest = Some((
-                    record.admission.actor,
-                    exomonad_actor::RootStartupManifestPin::capture_for_owner(&path, &owner)?,
-                ));
+            let Some(pin) =
+                exomonad_actor::RootStartupManifestPin::observe_for_actor(&path, &owner)?
+            else {
+                continue;
+            };
+            if library.validate_recovered_public_owner(&pin.public_owner.owner)? {
+                self.startup.manifest = Some((record.admission.actor, pin));
                 return Ok(());
             }
         }

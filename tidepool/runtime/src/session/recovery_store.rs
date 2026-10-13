@@ -449,6 +449,42 @@ impl NativeStorage {
         Ok(snapshot)
     }
 
+    /// Observe the actor's selected public surface and domain in one read
+    /// transaction. Actors without notebook generations retain their canonical
+    /// surface; broken selected-generation evidence is an error.
+    pub fn read_selected_snapshot_at(
+        path: &Path,
+        domain: RecoveryDomainId,
+        actor: &RecoveryPublicOwner,
+    ) -> Result<Option<RecoverySnapshotIdentity>, StoreError> {
+        let mut connection = read_connection(path)?;
+        let identity = read_contract(path, &connection)?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| store_error(path, StoreErrorKind::Storage, error))?;
+        let canonical = actor.actor_owner();
+        let selected = read_active_generation(&transaction, domain, &canonical)
+            .map_err(|error| sql_store_error(path, error))?;
+        let owner = selected.as_ref().map_or(&canonical, |head| &head.owner);
+        let snapshot = read_snapshot(&transaction, identity, domain, Some(owner))
+            .map_err(|error| sql_store_error(path, error))?;
+        if selected.is_some()
+            && snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.public_owner.is_none())
+        {
+            return Err(store_error(
+                path,
+                StoreErrorKind::Integrity,
+                "selected notebook generation has no public surface",
+            ));
+        }
+        transaction
+            .rollback()
+            .map_err(|error| store_error(path, StoreErrorKind::Storage, error))?;
+        Ok(snapshot)
+    }
+
     /// Observe the exact selected generation without opening a writable run
     /// owner or constructing live source/installation authority.
     pub fn read_notebook_generation_at(
@@ -1753,6 +1789,63 @@ mod tests {
             }),
         };
         (write, next)
+    }
+
+    #[test]
+    fn selected_snapshot_preserves_b_and_refuses_missing_selected_surface() {
+        let (_directory, store) = store();
+        domain(&store, RecoveryDomainId::Root, 64);
+        let actor = owner("root/selected", 1);
+        let (a, head_a) = generation_write(&store, None, &actor, 1);
+        let StoreDisposition::Committed(receipt) = store.commit_publication(a) else {
+            panic!("publish A");
+        };
+        receipt.installed_blocking().unwrap();
+        let (b, head_b) = generation_write(&store, Some(head_a), &actor, 2);
+        let StoreDisposition::Committed(receipt) = store.commit_publication(b) else {
+            panic!("publish B");
+        };
+        receipt.installed_blocking().unwrap();
+        let snapshot = RunRecoveryStore::read_selected_snapshot_at(
+            store.path(),
+            RecoveryDomainId::Root,
+            &actor,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(snapshot.public_owner.unwrap().owner, head_b.owner);
+        assert!(
+            store
+                .read_public_owner(RecoveryDomainId::Root, &actor)
+                .unwrap()
+                .is_some(),
+            "A still exists but is not selected"
+        );
+        // Deliberately corrupt storage only after establishing the valid path.
+        let connection = Connection::open(store.path()).unwrap();
+        connection
+            .execute(
+                "DELETE FROM public_owners WHERE domain=?1 AND owner=?2",
+                params![
+                    RecoveryDomainId::Root.bytes().as_slice(),
+                    owner_bytes(&head_b.owner)
+                ],
+            )
+            .unwrap();
+        let error = RunRecoveryStore::read_selected_snapshot_at(
+            store.path(),
+            RecoveryDomainId::Root,
+            &actor,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, StoreErrorKind::Integrity);
+        assert!(
+            store
+                .read_public_owner(RecoveryDomainId::Root, &actor)
+                .unwrap()
+                .is_some(),
+            "missing B must not select available A"
+        );
     }
 
     #[test]

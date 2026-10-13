@@ -42,7 +42,8 @@ impl RecoveryPublicOwner {
             ..self.clone()
         }
     }
-    pub(crate) fn actor_owner(&self) -> Self {
+    /// Canonical actor identity, separate from its selected notebook generation.
+    pub fn actor_owner(&self) -> Self {
         self.for_notebook_generation(crate::session::NotebookGenerationId::INITIAL)
     }
     pub fn new(path: &tidepool_repr::ActorPath, incarnation: u64) -> Option<Self> {

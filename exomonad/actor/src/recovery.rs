@@ -262,18 +262,41 @@ pub struct RootStartupManifestPin {
 }
 
 impl RootStartupManifestPin {
-    pub fn capture_for_owner(
+    pub fn capture_for_actor(
         path: &Path,
-        owner: &tidepool_runtime::session::RecoveryPublicOwner,
+        actor: &tidepool_runtime::session::RecoveryPublicOwner,
     ) -> std::io::Result<Self> {
+        Self::observe_for_actor(path, actor)?
+            .ok_or_else(|| std::io::Error::other("root recovery public owner is absent"))
+    }
+
+    /// Absence is allowed only when an admitted actor has no published surface.
+    /// A selected generation with missing or unreadable evidence is refused.
+    pub fn observe_for_actor(
+        path: &Path,
+        actor: &tidepool_runtime::session::RecoveryPublicOwner,
+    ) -> std::io::Result<Option<Self>> {
         let path = path.canonicalize()?;
-        let snapshot = tidepool_runtime::session::RunRecoveryStore::read_snapshot_at(
-            &path,
-            tidepool_runtime::session::RecoveryDomainId::Root,
-            Some(owner),
-        )
-        .map_err(std::io::Error::other)?
-        .ok_or_else(|| std::io::Error::other("root recovery domain is absent"))?;
+        let Some(snapshot) =
+            tidepool_runtime::session::RunRecoveryStore::read_selected_snapshot_at(
+                &path,
+                tidepool_runtime::session::RecoveryDomainId::Root,
+                actor,
+            )
+            .map_err(std::io::Error::other)?
+        else {
+            return Ok(None);
+        };
+        if snapshot.public_owner.is_none() {
+            return Ok(None);
+        }
+        Self::from_snapshot(path, snapshot).map(Some)
+    }
+
+    fn from_snapshot(
+        path: PathBuf,
+        snapshot: tidepool_runtime::session::recovery_store::RecoverySnapshotIdentity,
+    ) -> std::io::Result<Self> {
         let public_owner = snapshot
             .public_owner
             .ok_or_else(|| std::io::Error::other("root recovery public owner is absent"))?;
@@ -303,7 +326,7 @@ impl RootStartupManifestPin {
         {
             return Ok(false);
         }
-        Ok(&Self::capture_for_owner(&self.path, &self.public_owner.owner)? == self)
+        Ok(&Self::capture_for_actor(&self.path, &self.public_owner.owner.actor_owner())? == self)
     }
 }
 
@@ -1147,24 +1170,27 @@ impl JournalOwner {
             .records
             .get(&predecessor)
             .expect("validated predecessor");
-        if owner_for_admission(&old.admission).as_ref() != Some(&claimed_predecessor) {
-            return Err(std::io::Error::other(
-                "journal predecessor differs from its exact lifecycle execution claim",
-            ));
-        }
         let new = self
             .state
             .records
             .get(&successor.actor)
             .expect("validated successor");
         let startup = new.startup.as_ref().expect("validated startup");
+        let selected = startup.manifest.as_ref().map(|pin| &pin.public_owner.owner);
+        if owner_for_admission(&old.admission).as_ref() != Some(&claimed_predecessor.actor_owner())
+            || selected != Some(&claimed_predecessor)
+        {
+            return Err(std::io::Error::other(
+                "journal predecessor differs from its exact lifecycle execution claim",
+            ));
+        }
         let application = new.application.as_ref().expect("validated application");
         Ok(Arc::new(DurableRootSuccessorAdmission {
             operation,
             path: self.path.clone(),
             predecessor,
             successor,
-            predecessor_owner: owner_for_admission(&old.admission).expect("validated root owner"),
+            predecessor_owner: claimed_predecessor,
             store_predecessor: startup.store_predecessor.clone(),
             intended_conversation: application.intended_conversation.clone(),
             manifest: startup.manifest.clone(),
@@ -1693,7 +1719,8 @@ fn validate_startup(
                 != startup
                     .manifest
                     .as_ref()
-                    .map(|manifest| &manifest.public_owner.owner)
+                    .map(|manifest| manifest.public_owner.owner.actor_owner())
+                    .as_ref()
             {
                 return Err(std::io::Error::other(
                     "startup manifest pin owner differs from admitted predecessor",
@@ -3022,6 +3049,15 @@ mod tests {
 
     #[tokio::test]
     async fn root_successor_receipt_requires_latest_prepared_journal_and_owned_placement() {
+        root_successor_receipt_history(false).await;
+    }
+
+    #[tokio::test]
+    async fn root_successor_receipt_retains_selected_generation_from_canonical_admission() {
+        root_successor_receipt_history(true).await;
+    }
+
+    async fn root_successor_receipt_history(publish_replacement: bool) {
         let run = Arc::new(tempfile::tempdir().unwrap());
         let anchor = DirectoryAnchor::open_existing(run.path()).unwrap();
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", run.clone())
@@ -3053,6 +3089,73 @@ mod tests {
             .unwrap();
         let old_owner = tidepool_runtime::session::RecoveryPublicOwner::new(&path, 1).unwrap();
         let (store, authority) = recovery_fixture(&manifest, &old_owner, 7);
+        let selected = if publish_replacement {
+            use tidepool_runtime::session::{
+                ComposedPromptSnapshot, DurableGenerationReferences, GenerationArtifactReference,
+                ModuleEnv, PersistentSession, PublicationDecision, RecoveryDomainId, SessionLib,
+            };
+            let artifact_root = run.path().join("generation-session");
+            let mut library = SessionLib::open(
+                SessionId(2),
+                &artifact_root,
+                ModuleEnv::standalone_default(),
+            )
+            .unwrap();
+            tidepool_testing::with_settlement(|settlement| {
+                library.attach_owned_recovery_domain(
+                    store.clone(),
+                    RecoveryDomainId::Root,
+                    artifact_root,
+                    authority.clone(),
+                    settlement,
+                )
+            })
+            .unwrap();
+            let mut session = PersistentSession::new(Some(library), 1024);
+            let original = session.recover_public_scope(&old_owner).unwrap();
+            let references = |marker| DurableGenerationReferences {
+                source: GenerationArtifactReference::capture(vec![marker, 1]),
+                installation: GenerationArtifactReference::capture(vec![marker, 2]),
+                prompts: ComposedPromptSnapshot::capture(format!("prompt {marker}")),
+            };
+            let a = session
+                .prepare_notebook_generation(original, &old_owner, None, references(1))
+                .unwrap();
+            session
+                .commit_notebook_generation(a, &PublicationDecision::new(), |_| {})
+                .unwrap();
+            let pin_a = RootStartupManifestPin::capture_for_actor(&manifest, &old_owner).unwrap();
+            let head_a = session
+                .active_notebook_generation(&old_owner)
+                .unwrap()
+                .unwrap();
+            let replacement = session.mint_isolated_scope();
+            let b = session
+                .prepare_notebook_generation(replacement, &old_owner, Some(head_a), references(2))
+                .unwrap();
+            session
+                .commit_notebook_generation(b, &PublicationDecision::new(), |_| {})
+                .unwrap();
+            assert!(
+                !pin_a.validate(run.path()).unwrap(),
+                "a genuine B publication makes the previously issued A pin stale"
+            );
+            Some(
+                session
+                    .active_notebook_generation(&old_owner)
+                    .unwrap()
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let pinned = RootStartupManifestPin::capture_for_actor(&manifest, &old_owner).unwrap();
+        let selected_owner = pinned.public_owner.owner.clone();
+        assert_eq!(selected_owner.actor_owner(), old_owner);
+        if publish_replacement {
+            assert_eq!(selected_owner.notebook_generation().get(), 2);
+            assert_ne!(selected_owner, old_owner);
+        }
         drop(permit);
         drop(previous);
         drop(previous_control);
@@ -3090,7 +3193,7 @@ mod tests {
             &binding,
             Some(old),
             Some(old),
-            Some(RootStartupManifestPin::capture_for_owner(&manifest, &old_owner).unwrap()),
+            Some(pinned),
             Some(initial.conversation.clone()),
         );
         let permit = control
@@ -3156,8 +3259,17 @@ mod tests {
         )
         .await
         .unwrap();
+        if publish_replacement {
+            assert!(
+                lifecycle
+                    .begin_successor_operation(old_owner.clone())
+                    .await
+                    .is_err(),
+                "canonical A cannot substitute for pinned B"
+            );
+        }
         let claim = lifecycle
-            .begin_successor_operation(old_owner.clone())
+            .begin_successor_operation(selected_owner.clone())
             .await
             .unwrap();
         let proof = journal
@@ -3167,7 +3279,7 @@ mod tests {
         assert!(proof
             .validate_successor(
                 run.path(),
-                &old_owner,
+                &selected_owner,
                 placement.owner(),
                 SessionId(1),
                 ScopeId(1)
@@ -3192,7 +3304,7 @@ mod tests {
         assert!(!proof
             .validate_successor(
                 run.path(),
-                &old_owner,
+                &selected_owner,
                 placement.owner(),
                 SessionId(9),
                 ScopeId(1)
@@ -3201,7 +3313,7 @@ mod tests {
         assert!(!proof
             .validate_successor(
                 tempfile::tempdir().unwrap().path(),
-                &old_owner,
+                &selected_owner,
                 placement.owner(),
                 SessionId(1),
                 ScopeId(1)
@@ -3217,6 +3329,104 @@ mod tests {
             )
             .await
             .is_err());
+        if let Some(selected) = selected {
+            assert!(!proof
+                .validate_successor(
+                    run.path(),
+                    &old_owner,
+                    placement.owner(),
+                    SessionId(1),
+                    ScopeId(1)
+                )
+                .unwrap());
+            struct CertifiedSuccessor(Arc<DurableRootSuccessorAdmission>);
+            impl tidepool_runtime::session::RecoverySuccessorAuthority for CertifiedSuccessor {
+                fn validate_successor(
+                    &self,
+                    run_root: &Path,
+                    predecessor: &tidepool_runtime::session::RecoveryPublicOwner,
+                    successor: &tidepool_runtime::session::RecoveryPublicOwner,
+                    session: SessionId,
+                    target: ScopeId,
+                ) -> std::io::Result<bool> {
+                    self.0
+                        .validate_successor(run_root, predecessor, successor, session, target)
+                }
+            }
+            assert!(matches!(
+                lifecycle
+                    .publish_public_owner(Some((
+                        selected_owner.clone(),
+                        Arc::new(CertifiedSuccessor(proof.clone()))
+                    )))
+                    .await
+                    .unwrap(),
+                tidepool_runtime::session::PublicManifestCommit::Durable
+            ));
+            let transferred = store
+                .active_notebook_generation(
+                    tidepool_runtime::session::RecoveryDomainId::Root,
+                    placement.owner(),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(transferred.references, selected.references);
+            assert_eq!(transferred.owner, *placement.owner());
+            assert!(store
+                .active_notebook_generation(
+                    tidepool_runtime::session::RecoveryDomainId::Root,
+                    &old_owner
+                )
+                .unwrap()
+                .is_none());
+            assert!(proof.validate_binding_claim(run.path(), &claim).unwrap());
+            struct JournalBinding {
+                journal: Arc<ActorRecoveryJournal>,
+                conversation: ApplicationConversation,
+            }
+            impl crate::RootBindingAdapter for JournalBinding {
+                fn bind<'a>(
+                    &'a self,
+                    claim: &'a crate::RootBindingOperationClaim,
+                ) -> futures_util::future::BoxFuture<'a, Result<JournalApplicationBindingAck, String>>
+                {
+                    Box::pin(async move {
+                        self.journal
+                            .bind_application_conversation(
+                                claim.successor_actor(),
+                                self.conversation.clone(),
+                            )
+                            .await
+                            .map_err(|error| error.to_string())
+                    })
+                }
+            }
+            let native = lifecycle
+                .resident_snapshot()
+                .unwrap()
+                .public_owner
+                .ready()
+                .unwrap()
+                .native_readiness()
+                .unwrap();
+            claim
+                .finish_binding(
+                    native,
+                    Arc::new(JournalBinding {
+                        journal: journal.clone(),
+                        conversation: ApplicationConversation::Embedded {
+                            run: "run".into(),
+                            agent_path: "/root".into(),
+                            incarnation: next.incarnation.0.to_string(),
+                        },
+                    }),
+                )
+                .await
+                .unwrap();
+            kernel_task.abort();
+            let _ = kernel_task.await;
+            return;
+        }
         let revision = store
             .read_domain(tidepool_runtime::session::RecoveryDomainId::Root)
             .unwrap()
@@ -3268,7 +3478,7 @@ mod tests {
         )
         .unwrap();
         let (_store, authority) = recovery_fixture(&manifest, &old_owner, 0);
-        let pin = RootStartupManifestPin::capture_for_owner(&manifest, &old_owner).unwrap();
+        let pin = RootStartupManifestPin::capture_for_actor(&manifest, &old_owner).unwrap();
         let journal = ActorRecoveryJournal::open(&anchor, "actors.jsonl", run.clone())
             .await
             .unwrap();

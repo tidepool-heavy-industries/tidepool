@@ -602,6 +602,13 @@ impl RunRecoveryStore {
     ) -> Result<Option<RecoverySnapshotIdentity>, StoreError> {
         NativeStorage::read_snapshot_at(path, domain, owner)
     }
+    pub fn read_selected_snapshot_at(
+        path: &Path,
+        domain: RecoveryDomainId,
+        actor: &RecoveryPublicOwner,
+    ) -> Result<Option<RecoverySnapshotIdentity>, StoreError> {
+        NativeStorage::read_selected_snapshot_at(path, domain, actor)
+    }
     /// Read-only observation of persisted generation references. Issuing
     /// owners must independently restore and validate the referenced inputs.
     pub fn read_notebook_generation_at(
