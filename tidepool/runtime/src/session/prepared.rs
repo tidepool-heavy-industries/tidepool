@@ -12125,7 +12125,10 @@ pub(super) mod tests {
         let handles = engine.handle_count();
         assert!(matches!(
             engine.resume_with_structural_answer(parked, &new_reply, &table),
-            Err(PreparedRuntimeError::AnswerShape { .. })
+            Err(PreparedRuntimeError::AnswerConstructor {
+                host_id: DataConId(1002),
+                ..
+            })
         ));
         assert_eq!(engine.parked_count(), 1);
         assert_eq!(engine.persistent_roots_count(), roots);
