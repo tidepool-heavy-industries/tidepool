@@ -81,6 +81,29 @@ fn assert_true_page(host: &HostedTestRuntime, result: &Value) {
     assert_eq!(row.emission().page.text, "True");
 }
 
+fn assert_reload_disposition(
+    result: &Value,
+    expected: tidepool_runtime::session::WorkbenchOperationDisposition,
+) {
+    let operations: Vec<_> = result["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["operations"].as_array().into_iter().flatten())
+        .filter(|operation| operation["effect"] == "reloadSource")
+        .collect();
+    assert_eq!(
+        operations.len(),
+        1,
+        "one authored reload must retain its own receipt: {result}"
+    );
+    assert_eq!(
+        operations[0]["disposition"],
+        serde_json::to_value(expected).unwrap(),
+        "{result}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_issued_work() {
     let files = tempfile::tempdir().unwrap();
@@ -163,6 +186,10 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
             let mut round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             let session = round.request.session_id.clone();
             let instructions_a = round.request.instructions.clone();
+            assert_eq!(
+                old_request.request_instructions(),
+                Some(instructions_a.as_str())
+            );
             let operation = round.operation("bind-a");
             round.sync_call_named(
                 "bind-a",
@@ -191,6 +218,15 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                 .await
                 .unwrap();
             assert_true_page(host, &round.settled_output("publish-b"));
+            assert_reload_disposition(
+                &round.settled_output("publish-b"),
+                tidepool_runtime::session::WorkbenchOperationDisposition::Committed,
+            );
+            assert_eq!(
+                old_request.request_instructions(),
+                Some(instructions_a.as_str()),
+                "issued A prompt bytes remain immutable after B"
+            );
             let instructions_b = serde_json::to_value(&round.request).unwrap()["instructions"]
                 .as_str()
                 .unwrap()
@@ -254,6 +290,17 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                     .await
                     .unwrap();
                 assert_true_page(host, &round.settled_output(id));
+                match id {
+                    "noop" => assert_reload_disposition(
+                        &round.settled_output(id),
+                        tidepool_runtime::session::WorkbenchOperationDisposition::Read,
+                    ),
+                    "reject" => assert_reload_disposition(
+                        &round.settled_output(id),
+                        tidepool_runtime::session::WorkbenchOperationDisposition::Rejected,
+                    ),
+                    _ => {}
+                }
             }
             assert_eq!(round.request.instructions, instructions_b);
             assert_eq!(
