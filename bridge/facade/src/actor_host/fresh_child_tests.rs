@@ -1,7 +1,7 @@
 use super::display_output;
 use super::test_campaign::{
-    committed_display_text, dispatch_haskell_script, dispatch_haskell_script_with_deadline,
-    TestCampaign, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    actor_output_origin, dispatch_haskell_script, dispatch_haskell_script_with_deadline,
+    retained_committed_display_text, TestCampaign, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
 };
 use exomonad_actor::{ActorExitKind, ActorTerminal, LocalResidentDeployment};
 use std::time::Duration;
@@ -31,7 +31,7 @@ async fn fresh_context_typed_exit_and_replacement_retain_callable_value() {
         let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
         let previous = campaign.drive_actor_output(&store, dispatch_haskell_script(root.as_ref(),
             "previousExit <- awaitExit callableExitActor\ndisplay (case previousExit of { Cancelled _ -> True; _ -> False })")).await;
-        assert_eq!(committed_display_text(&previous), "True", "{previous}");
+        assert_eq!(retained_committed_display_text(&store, &actor_output_origin(&super::runtime_namespace(campaign.session_root.path()), campaign.actor.identity()), &previous), "True", "{previous}");
         let drained = dispatch_haskell_script(root.as_ref(), "drainActor callableExitSuccessor").await;
         assert_eq!(drained["status"], "committed", "{drained}");
         campaign.next_deployment("callable successor retirement", Duration::from_secs(120),
@@ -43,7 +43,7 @@ async fn fresh_context_typed_exit_and_replacement_retain_callable_value() {
             tidepool_runtime::session::ResidentSessionState::Gone);
         let returned = campaign.drive_actor_output(&store, dispatch_haskell_script(root.as_ref(),
             &tidepool_testing::fixture_source("bridge/facade/src/actor_host/fresh_callable_exit_read.hs"))).await;
-        assert_eq!(committed_display_text(&returned), "True", "{returned}");
+        assert_eq!(retained_committed_display_text(&store, &actor_output_origin(&super::runtime_namespace(campaign.session_root.path()), campaign.actor.identity()), &returned), "True", "{returned}");
     })).await;
 }
 
@@ -100,7 +100,7 @@ async fn fresh_context_source_reads_actual_progress_and_result_before_typed_exit
         let store = display_output::open_run_store(campaign.session_root.path()).unwrap();
         let collected = campaign.drive_actor_output(&store, dispatch_haskell_script_with_deadline(root.as_ref(),
             "collected <- awaitExit collector\ndisplay (case collected of { Completed values -> reverse values == [13, 30, -7, -1, 42]; _ -> False })", "source callable values after collector Gone", COLD_DEBUG_CELL_SETTLEMENT_BUDGET)).await;
-        assert_eq!(committed_display_text(&collected), "True", "{collected}");
+        assert_eq!(retained_committed_display_text(&store, &actor_output_origin(&super::runtime_namespace(campaign.session_root.path()), campaign.actor.identity()), &collected), "True", "{collected}");
     })).await;
 }
 
@@ -259,7 +259,14 @@ async fn callable_reply_scenario(reply_source: &'static str, expected: bool) {
                     )
                     .await;
                 assert_eq!(
-                    committed_display_text(&read),
+                    retained_committed_display_text(
+                        &store,
+                        &actor_output_origin(
+                            &super::runtime_namespace(campaign.session_root.path()),
+                            campaign.actor.identity()
+                        ),
+                        &read
+                    ),
                     if expected { "True" } else { "False" },
                     "{read}"
                 );
@@ -275,7 +282,14 @@ async fn callable_reply_scenario(reply_source: &'static str, expected: bool) {
                     )
                     .await;
                 assert_eq!(
-                    committed_display_text(&released),
+                    retained_committed_display_text(
+                        &store,
+                        &actor_output_origin(
+                            &super::runtime_namespace(campaign.session_root.path()),
+                            campaign.actor.identity()
+                        ),
+                        &released
+                    ),
                     if expected { "True" } else { "False" },
                     "{released}"
                 );
@@ -436,7 +450,7 @@ async fn scaffolded_selected_coding_child_preserves_workspace_input_and_effect_r
                 &tidepool_testing::fixture_source("bridge/facade/src/actor_host/selected_workspace_child_result.hs"),
             );
             let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_done.assert_value("selected-original-result", "True");
+            root_done.assert_authored_value(&host.runtime.store(), &super::test_campaign::actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), "selected-original-result", "True");
             root_done.finish();
             eprintln!(
                 "selected-coding-scenario {}",
@@ -527,7 +541,7 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
         installation.policy.as_ref(),
         "data FreshChildNominal = FreshChildNominal FreshParentInput\nfreshChildValue <- pure (FreshChildNominal sessionInput)\ndisplay (case freshChildValue of FreshChildNominal (FreshParentInput n) -> n + 1)",
     )).await;
-    assert_eq!(committed_display_text(&reply), "42", "{reply}");
+    assert_eq!(retained_committed_display_text(&store, &actor_output_origin(&super::runtime_namespace(campaign.session_root.path()), installation.actor.identity()), &reply), "42", "{reply}");
     let child_root = campaign
         .session_root
         .path()
@@ -639,6 +653,6 @@ async fn fresh_context_child_owns_and_retires_its_machine() {
             ),
         )
         .await;
-    assert_eq!(committed_display_text(&result), "42", "{result}");
+    assert_eq!(retained_committed_display_text(&store, &actor_output_origin(&super::runtime_namespace(campaign.session_root.path()), campaign.actor.identity()), &result), "42", "{result}");
 })).await;
 }

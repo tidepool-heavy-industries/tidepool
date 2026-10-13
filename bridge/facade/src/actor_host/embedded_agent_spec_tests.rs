@@ -280,7 +280,15 @@ async fn supplied_spec_fresh_existing_workspace_is_idle_until_separate_typed_req
                 include_str!("fixtures/supplied_live_spawn.hs"),
             );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after.assert_value("supplied-idle-spawn", "True");
+            root_after.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "supplied-idle-spawn",
+                "True",
+            );
             let children = supplied_children(&host.context).await;
             assert!(
                 pending.is_empty(),
@@ -297,7 +305,15 @@ async fn supplied_spec_fresh_existing_workspace_is_idle_until_separate_typed_req
                 include_str!("fixtures/supplied_live_request.hs"),
             );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after.assert_value("supplied-first-request", "True");
+            root_after.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "supplied-first-request",
+                "True",
+            );
             let child_round = next_hosted_script_round(&mut requests, &mut pending, &child).await;
             let first_session = child_round.request.session_id.clone();
             assert!(child_round
@@ -336,13 +352,29 @@ async fn supplied_spec_fresh_existing_workspace_is_idle_until_separate_typed_req
                 include_str!("fixtures/supplied_live_observe.hs"),
             );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after.assert_value("supplied-observe-result", "True");
+            root_after.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "supplied-observe-result",
+                "True",
+            );
             root_after.call(
                 "supplied-second-request",
                 include_str!("fixtures/supplied_live_request_again.hs"),
             );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after.assert_value("supplied-second-request", "True");
+            root_after.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "supplied-second-request",
+                "True",
+            );
             let second_child_round =
                 next_hosted_script_round(&mut requests, &mut pending, &child).await;
             assert_eq!(second_child_round.request.session_id, first_session);
@@ -378,7 +410,15 @@ async fn supplied_spec_fresh_existing_workspace_is_idle_until_separate_typed_req
                 include_str!("fixtures/supplied_live_observe_again.hs"),
             );
             let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_done.assert_value("supplied-observe-second-result", "True");
+            root_done.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "supplied-observe-second-result",
+                "True",
+            );
             root_done.finish();
         })
     })
@@ -408,7 +448,15 @@ async fn supplied_spec_request_queued_in_spawn_cell_reaches_installed_receiver()
                 include_str!("fixtures/supplied_live_spawn_request_same_cell.hs"),
             );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after.assert_value("supplied-immediate-spawn-and-request", "True");
+            root_after.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "supplied-immediate-spawn-and-request",
+                "True",
+            );
 
             let child_node = host
                 .context
@@ -462,7 +510,15 @@ async fn supplied_spec_request_queued_in_spawn_cell_reaches_installed_receiver()
                 include_str!("fixtures/supplied_live_observe_immediate.hs"),
             );
             let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_done.assert_value("supplied-observe-immediate-result", "True");
+            root_done.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "supplied-observe-immediate-result",
+                "True",
+            );
             root_done.finish();
         })
     })
@@ -495,7 +551,7 @@ async fn accepted_reply_resumes_after_parked_notebook_and_provider_completion() 
                     include_str!("fixtures/deferred_reply_spawn.hs"),
                 );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after.assert_value("deferred-spawn", "True");
+            root_after.assert_authored_value(&host.runtime.store(), &super::test_campaign::actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), "deferred-spawn", "True");
             let child_node = host
                 .context
                 .forest
@@ -593,7 +649,7 @@ async fn accepted_reply_resumes_after_parked_notebook_and_provider_completion() 
             );
             late_outputs.finish();
             let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_done.assert_value("deferred-parent-await", "True");
+            root_done.assert_authored_value(&host.runtime.store(), &super::test_campaign::actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), "deferred-parent-await", "True");
             root_done.finish();
             tokio::time::timeout(Duration::from_secs(120), async {
                 loop {
@@ -646,7 +702,15 @@ async fn public_replace_spec_pins_admitted_handler_and_refuses_changed_surface()
                     include_str!("fixtures/supplied_live_spawn.hs"),
                 );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after.assert_value("replacement-idle-spawn", "True");
+            root_after.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "replacement-idle-spawn",
+                "True",
+            );
             let children = supplied_children(&host.context).await;
             let current = children[0].policy.clone();
             let admitted_endpoint = current.snapshot_for_request().unwrap();
@@ -663,7 +727,15 @@ async fn public_replace_spec_pins_admitted_handler_and_refuses_changed_surface()
                 include_str!("fixtures/supplied_live_replace.hs"),
             );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after.assert_value("same-surface-replace", "True");
+            root_after.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "same-surface-replace",
+                "True",
+            );
             assert!(
                 !old_call.is_finished(),
                 "replacement cannot settle the admitted old call"
@@ -692,7 +764,15 @@ async fn public_replace_spec_pins_admitted_handler_and_refuses_changed_surface()
                 include_str!("fixtures/supplied_live_refuse.hs"),
             );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after.assert_value("changed-surface-refusal", "True");
+            root_after.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "changed-surface-refusal",
+                "True",
+            );
             let after_refusal = tidepool_extract_cmd::extract_spawn_count();
             let unchanged_endpoint = current.snapshot_for_request().unwrap();
             assert_supplied_answer(
@@ -740,7 +820,7 @@ async fn unknown_child_model_alias_retains_failure_and_parent_can_request_valid_
                     include_str!("fixtures/child_attachment_alias_failure.hs"),
                 );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after.assert_value("unknown-child-model", "True");
+            root_after.assert_authored_value(&host.runtime.store(), &super::test_campaign::actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), "unknown-child-model", "True");
             let failed = host
                 .context
                 .forest
@@ -780,7 +860,7 @@ async fn unknown_child_model_alias_retains_failure_and_parent_can_request_valid_
             ));
             root_after.call("parent-after-child-refusal", "display (6 * 7 :: Int)");
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after.assert_value("parent-after-child-refusal", "42");
+            root_after.assert_authored_value(&host.runtime.store(), &super::test_campaign::actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), "parent-after-child-refusal", "42");
             root_after.call("retained-child-failure", "display (show attachmentFailure)");
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
             root_after.assert_committed("retained-child-failure");
@@ -811,13 +891,13 @@ async fn unknown_child_model_alias_retains_failure_and_parent_can_request_valid_
                 ),
             );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after.assert_value("exact-retained-child", "True");
+            root_after.assert_authored_value(&host.runtime.store(), &super::test_campaign::actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), "exact-retained-child", "True");
             root_after.call(
                 "valid-child-after-refusal",
                 include_str!("fixtures/child_attachment_valid_request.hs"),
             );
             let root_after = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after.assert_value("valid-child-after-refusal", "True");
+            root_after.assert_authored_value(&host.runtime.store(), &super::test_campaign::actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), "valid-child-after-refusal", "True");
             let valid = host
                 .context
                 .forest
@@ -848,7 +928,7 @@ async fn unknown_child_model_alias_retains_failure_and_parent_can_request_valid_
                 include_str!("fixtures/child_attachment_observe_reply.hs"),
             );
             let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_done.assert_value("observe-reply-after-alias-refusal", "True");
+            root_done.assert_authored_value(&host.runtime.store(), &super::test_campaign::actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), "observe-reply-after-alias-refusal", "True");
             assert!(host.context.actor.terminal().get().is_none());
             root_done.finish();
         })

@@ -1,5 +1,6 @@
 use super::test_campaign::{
-    explicit_display_text, haskell_call, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    actor_output_origin, haskell_call, retained_committed_display_text,
+    COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
 };
 use super::*;
 use async_trait::async_trait;
@@ -124,7 +125,8 @@ impl FrozenProviderPrefix {
             request.session_id.thread(),
         );
         assert_eq!(
-            request.pinned_effort, self.inherited_effort,
+            request.pinned_effort,
+            self.inherited_effort,
             "child {} request effort must mirror its inherited positional pin",
             request.session_id.thread(),
         );
@@ -528,7 +530,12 @@ impl ResponsesTransport for CapturedHostTransport {
     }
 }
 
-fn assert_committed_haskell_value(response: &Value, expected: &str) {
+fn assert_committed_haskell_value(
+    store: &harness::store::Store,
+    origin: &harness::store::actor_output::ActorOutputOrigin,
+    response: &Value,
+    expected: &str,
+) {
     let committed_run =
         serde_json::to_value(tidepool_runtime::session::WorkbenchRunStatus::Committed).unwrap();
     let committed_item =
@@ -544,7 +551,11 @@ fn assert_committed_haskell_value(response: &Value, expected: &str) {
         .last()
         .expect("Haskell operation must have a result item");
     assert_eq!(item["status"], committed_item, "{response}");
-    assert_eq!(explicit_display_text(response), expected, "{response}");
+    assert_eq!(
+        retained_committed_display_text(store, origin, response),
+        expected,
+        "{response}"
+    );
 }
 
 fn assert_replied_cell(receipt: &Value, expected_items: usize) {
@@ -1009,7 +1020,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 .await
                 .unwrap_or_else(|error| panic!("{error}"))
                 .expect("original scope setup operation did not settle within its cold budget");
-            assert_committed_haskell_value(&setup, "True");
+            assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &setup, "True");
             campaign
                 .while_root_live(
                     "provider turn after scope setup",
@@ -1085,7 +1096,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         embedded_operation(&runtime, &operation, COLD_DEBUG_CELL_SETTLEMENT_BUDGET)
                             .await
                             .expect("local actor reads return their original state");
-                    assert_committed_haskell_value(&result, "True");
+                    assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &result, "True");
                     received_output(&transport, &operation).await;
                     let graph = campaign.forest.inspect_host_graph().await.unwrap();
                     for label in ["embedded-checkpoint-seeds", "embedded-checkpoint-agents"] {
@@ -1513,7 +1524,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 );
                 let (woken, resumed) = tokio::join!(wake, resumed);
                 assert_eq!(woken.unwrap().status(), reqwest::StatusCode::ACCEPTED);
-                assert_committed_haskell_value(
+                assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()),
                     &resumed.expect("new root Haskell call succeeds after interrupt"),
                     "True",
                 );
@@ -1534,7 +1545,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 )
                 .await
                 .unwrap();
-                assert_committed_haskell_value(&cleaned, "True");
+                assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &cleaned, "True");
                 assert!(
                     campaign.actor.terminal().get().is_none(),
                     "resumed root remains live until ordinary shutdown"
@@ -1552,7 +1563,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 )
                 .await
                 .expect("same-root B publishes while A remains parked");
-                assert_committed_haskell_value(&published_b, "True");
+                assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &published_b, "True");
                 assert_eq!(
                     published_b["publication"]["status"], "published",
                     "{published_b}"
@@ -1607,7 +1618,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
             match scenario {
                 CapturedScenario::ShutdownAfterChildFailure | CapturedScenario::CoordinatorFailureAfterChildFailure => unreachable!("shutdown scenario returns before child replies"),
                 CapturedScenario::Success | CapturedScenario::CancelWhileParked => {
-                    assert_committed_haskell_value(&result.unwrap(), "True");
+                    assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &result.unwrap(), "True");
                     received_output(&transport, &transport.operation(&root_origin, PENDING_CALL)).await;
                     let public = root_tool_call(
                         &campaign,
@@ -1617,11 +1628,11 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     )
                     .await
                     .unwrap();
-                    assert_committed_haskell_value(&public, "True");
+                    assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &public, "True");
                 }
                 CapturedScenario::ConcurrentNominalJoin => {
                     let published_a = result.unwrap();
-                    assert_committed_haskell_value(&published_a, "True");
+                    assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &published_a, "True");
                     assert_eq!(
                         published_a["publication"]["status"], "published",
                         "{published_a}"
@@ -1634,7 +1645,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     )
                     .await
                     .expect("final provider tool reads both A and B public declarations");
-                    assert_committed_haskell_value(&joined, "True");
+                    assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &joined, "True");
                     received_output(&transport, &transport.operation(&root_origin, PENDING_CALL)).await;
                 }
                 CapturedScenario::FailureAfterReplies => {
@@ -1678,7 +1689,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     )
                     .await
                     .expect("earlier public names remain installed");
-                    assert_committed_haskell_value(&public_names, "(41,42)");
+                    assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &public_names, "(41,42)");
                     for (name, source) in [
                         ("capturedValue", "display (capturedValue :: Int)"),
                         ("capturedGetter", "display (capturedGetter :: Int)"),
@@ -1703,7 +1714,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         &transport, "captured-parent-rebind",
                         "capturedValue <- pure (99 :: Int)\nlet capturedGetter = capturedValue + 1\ndisplay (show (capturedValue, capturedGetter))",
                     ).await.expect("public rebinding succeeds after the failed cell");
-                    assert_committed_haskell_value(&rebound, "(99,100)");
+                    assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &rebound, "(99,100)");
                     transport.parent_failed.send_replace(true);
                     let mut retained = std::collections::HashSet::new();
                     for _ in 0..2 {
@@ -1721,7 +1732,16 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                         )
                         .await
                         .unwrap();
-                        assert_committed_haskell_value(&value, "(41,42)");
+                        let ConversationIdentity::Embedded { run, actor: actor_path, incarnation } = &origin else {
+                            panic!("hosted child output must have an embedded conversation origin");
+                        };
+                        let child = campaign.observer.installations().into_iter().find(|installation| {
+                            campaign.binding(installation.actor.identity()).is_some_and(|binding| {
+                                let identity = binding.identity();
+                                identity.run == *run && identity.actor == *actor_path && identity.incarnation == *incarnation
+                            })
+                        }).expect("child output origin belongs to an admitted native actor");
+                        assert_committed_haskell_value(&runtime.store(), &actor_output_origin(runtime.run_identity(), child.actor.identity()), &value, "(41,42)");
                         retained.insert(origin);
                     }
                     assert_eq!(retained.len(), 2);
@@ -1762,7 +1782,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                     .await
                     .unwrap();
                     assert_replied_cell(&reply, 3);
-                    assert_committed_haskell_value(&reused, "True");
+                    assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &reused, "True");
                     eprintln!(
                         "[captured-engine] retained children and independently reused capture succeeded"
                     );
@@ -1814,7 +1834,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
                 )
                 .await
                 .expect("explicit child retirement cancels active model turns");
-                assert_committed_haskell_value(&stopped, "True");
+                assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &stopped, "True");
             }
             let cleaned = root_tool_call(
                 &campaign,
@@ -1824,7 +1844,7 @@ async fn captured_host_scenario(scenario: HostedScenario) {
             )
             .await
             .expect("known children retire independently and repeated retirement is idempotent");
-            assert_committed_haskell_value(&cleaned, "True");
+            assert_committed_haskell_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()), &cleaned, "True");
             let known_children = campaign
                 .observer
                 .installations()
@@ -2256,7 +2276,12 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{error}"));
-            assert_committed_haskell_value(&control, "42");
+            assert_committed_haskell_value(
+                &host.runtime.store(),
+                &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()),
+                &control,
+                "42",
+            );
             assert_eq!(binding.inbox.watermark(), 1);
             assert!(
                 transport
@@ -2470,7 +2495,12 @@ async fn admitted_cell_late_type_error_has_no_effect_or_publication_on_retry() {
                 )
                 .await
                 .unwrap_or_else(|error| panic!("{error}"));
-            assert_committed_haskell_value(&valid, "42");
+            assert_committed_haskell_value(
+                &host.runtime.store(),
+                &actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()),
+                &valid,
+                "42",
+            );
             assert!(
                 valid["items"]
                     .as_array()

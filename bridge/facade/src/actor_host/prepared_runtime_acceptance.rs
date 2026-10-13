@@ -939,7 +939,11 @@ async fn prepared_children_execute_original_native_probe(
             next_hosted_script_round(&mut requests, &mut pending, &root)).await
             .unwrap_or_else(|error| panic!("prepared parent result failed: {error}"));
         completed.assert_committed("prepared-children");
-        completed.assert_value("prepared-children", "True");
+        completed.assert_authored_value(
+            &host.runtime.store(),
+            &super::test_campaign::actor_output_origin(host.runtime.run_identity(), host.context.actor.identity()),
+            "prepared-children", "True",
+        );
         progress.parent_result_verified = true;
         completed.finish();
         assert_eq!(children.len(), expected_children);

@@ -1234,6 +1234,18 @@ pub(super) fn explicit_display_text(response: &serde_json::Value) -> &str {
     text.as_str().expect("display text is a complete string")
 }
 
+/// Identify output ownership from the actual run and admitted native actor.
+pub(super) fn actor_output_origin(
+    run: &str,
+    actor: exomonad_actor::ActorRef,
+) -> harness::store::actor_output::ActorOutputOrigin {
+    harness::store::actor_output::ActorOutputOrigin {
+        run: run.to_owned(),
+        native_actor: actor.id.0,
+        incarnation: actor.incarnation.0,
+    }
+}
+
 /// Read the exact authored page from its committed Store owner, independently
 /// of the model-facing aggregate presentation.
 pub(super) fn retained_committed_display_text(
@@ -1245,6 +1257,33 @@ pub(super) fn retained_committed_display_text(
     for item in response["items"].as_array().expect("cell item receipts") {
         assert_eq!(item["status"], "committed", "{response}");
     }
+    retained_display_text(store, origin, response)
+}
+
+pub(super) fn retained_replied_display_text(
+    store: &harness::store::Store,
+    origin: &harness::store::actor_output::ActorOutputOrigin,
+    response: &serde_json::Value,
+) -> String {
+    assert_eq!(response["status"], "replied", "{response}");
+    assert_eq!(response["publication"]["status"], "published", "{response}");
+    let items = response["items"].as_array().expect("cell item receipts");
+    for item in items {
+        assert_eq!(item["status"], "committed", "{response}");
+    }
+    assert_eq!(
+        items.last().expect("reply item")["terminalTransfer"],
+        "replyAccepted",
+        "{response}",
+    );
+    retained_display_text(store, origin, response)
+}
+
+fn retained_display_text(
+    store: &harness::store::Store,
+    origin: &harness::store::actor_output::ActorOutputOrigin,
+    response: &serde_json::Value,
+) -> String {
     let operation = explicit_display_operation(response);
     let display = &operation["display"];
     let sequence = display["output"]["sequence"]
@@ -1722,6 +1761,24 @@ impl HostedScriptRound {
         assert!(value.to_string().contains(expected), "{value}");
     }
 
+    /// Compare authored content through the independently selected actor's Store page.
+    pub fn assert_authored_value(
+        &self,
+        store: &harness::store::Store,
+        origin: &harness::store::actor_output::ActorOutputOrigin,
+        call_id: &str,
+        expected: &str,
+    ) {
+        let response = self.settled_output(call_id);
+        assert_eq!(
+            retained_committed_display_text(store, origin, &response),
+            expected,
+            "{response}",
+        );
+    }
+
+    /// Compare the complete model-facing presentation, including binding feedback.
+    /// Authored page values require `assert_authored_value` and an independent Store origin.
     pub fn assert_value(&self, call_id: &str, expected: &str) {
         let output = self
             .request

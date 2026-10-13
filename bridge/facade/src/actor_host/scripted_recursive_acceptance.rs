@@ -2,9 +2,10 @@
 
 use super::hosted_test_context::HostedTestRuntime;
 use super::test_campaign::{
-    commit_workspace, explicit_display_text, hosted_script_provider_with_envelopes,
+    actor_output_origin, commit_workspace, hosted_script_provider_with_envelopes,
     hosted_test_settings, next_hosted_script_round, require_ghc_compile_rejection,
-    transcript_tool_operation, HostedScriptRound, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
+    retained_committed_display_text, retained_replied_display_text, transcript_tool_operation,
+    HostedScriptRound, COLD_DEBUG_CELL_SETTLEMENT_BUDGET,
 };
 use super::*;
 use harness::embedding::HostIdentity;
@@ -438,7 +439,12 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             assert_eq!(root.request.model, "gpt-6.1-sol");
             root.call("recursive-setup", SETUP);
             root = next(host, &mut requests, &mut pending, &root_path).await;
-            root.assert_value("recursive-setup", "True");
+            root.assert_authored_value(
+                &host.runtime.store(),
+                &actor_output_origin(host.runtime.run_identity(), root_actor),
+                "recursive-setup",
+                "True",
+            );
             let root_prefix = transcript(&root);
             let root_operation = operation(host, &root, ROOT_CALL);
             root.async_call(ROOT_CALL, ROOT);
@@ -554,7 +560,11 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
             grandchild = next(host, &mut requests, &mut pending, &grandchild_path).await;
             replied(&grandchild, "recursive-leaf-reply");
             assert_eq!(
-                explicit_display_text(&grandchild.settled_output("recursive-leaf-reply")),
+                retained_replied_display_text(
+                    &host.runtime.store(),
+                    &actor_output_origin(host.runtime.run_identity(), grandchild_actor),
+                    &grandchild.settled_output("recursive-leaf-reply")
+                ),
                 "True",
                 "the leaf forces both nominal request inputs and the captured native helper"
             );
@@ -565,13 +575,22 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
                 child.settled_output("recursive-child-yield"),
                 json!({"reason": "tool_result", "ready_results": [&child_operation]})
             );
-            child.assert_value(CHILD_CALL, "True");
+            child.assert_authored_value(
+                &host.runtime.store(),
+                &actor_output_origin(host.runtime.run_identity(), child_actor),
+                CHILD_CALL,
+                "True",
+            );
             pending_claim(host, &root_operation);
             child.call("recursive-child-reply", CHILD_REPLY);
             child = next(host, &mut requests, &mut pending, &child_path).await;
             replied(&child, "recursive-child-reply");
             assert_eq!(
-                explicit_display_text(&child.settled_output("recursive-child-reply")),
+                retained_replied_display_text(
+                    &host.runtime.store(),
+                    &actor_output_origin(host.runtime.run_identity(), child_actor),
+                    &child.settled_output("recursive-child-reply")
+                ),
                 "True"
             );
             stopped(host, grandchild_actor, child_actor).await;
@@ -582,11 +601,21 @@ async fn production_harness_recursive_captured_helper_and_typed_replies() {
                 root.settled_output("recursive-root-yield"),
                 json!({"reason": "tool_result", "ready_results": [&root_operation]})
             );
-            root.assert_value(ROOT_CALL, "True");
+            root.assert_authored_value(
+                &host.runtime.store(),
+                &actor_output_origin(host.runtime.run_identity(), root_actor),
+                ROOT_CALL,
+                "True",
+            );
             assert_eq!(root.request.model, "gpt-6.1-sol");
             root.call("recursive-cleanup", CLEANUP);
             root = next(host, &mut requests, &mut pending, &root_path).await;
-            root.assert_value("recursive-cleanup", "True");
+            root.assert_authored_value(
+                &host.runtime.store(),
+                &actor_output_origin(host.runtime.run_identity(), root_actor),
+                "recursive-cleanup",
+                "True",
+            );
             stopped(host, child_actor, root_actor).await;
             command_cleanup(host, child_actor).await;
             root.finish();
@@ -648,7 +677,7 @@ async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply()
             terminal = terminal.wait() => panic!("fresh default child retired while binding its request input: {:?}: {}", terminal.kind, terminal.summary),
             child = next(host, &mut requests, &mut pending, &child_path) => child,
         };
-        child.assert_value("fresh-default-input", "True");
+        child.assert_authored_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), child_actor), "fresh-default-input", "True");
         child.function("fresh-default-bash", "bash", json!({
             "cmd": "printf fresh-default-shell", "workdir": null, "environment": null,
             "memory_mib": null, "tty": null, "stdin": null, "yield_time_ms": 30000,
@@ -672,12 +701,12 @@ async fn production_harness_fresh_default_workspace_shell_and_typed_text_reply()
         replied(&child, "fresh-default-reply");
         child.finish();
         let root = next(host, &mut requests, &mut pending, &root_path).await;
-        root.assert_value("fresh-default-request", "True");
+        root.assert_authored_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), root_actor), "fresh-default-request", "True");
         assert_eq!(root.settled_output("fresh-default-yield"),
             json!({"reason": "tool_result", "ready_results": [&operation]}));
         root.call("fresh-default-cleanup", FRESH_CLEANUP);
         let root = next(host, &mut requests, &mut pending, &root_path).await;
-        root.assert_value("fresh-default-cleanup", "True");
+        root.assert_authored_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), root_actor), "fresh-default-cleanup", "True");
         let terminal = installation.actor.terminal();
         tokio::time::timeout(Duration::from_secs(30), terminal.wait()).await.unwrap();
         assert!(terminal.cleanup().unwrap().is_confirmed());
@@ -730,7 +759,7 @@ async fn production_review_tool_retains_request_scope_and_fresh_consumer() {
             include_str!("fixtures/review_named_setup.hs"),
         ));
         let root = next(host, &mut requests, &mut pending, &root_path).await;
-        let first_id: i64 = explicit_display_text(&root.settled_output("review-setup")).parse().unwrap();
+        let first_id: i64 = retained_committed_display_text(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), root_actor), &root.settled_output("review-setup")).parse().unwrap();
         let graph = host.context.forest.inspect_host_graph().await.unwrap();
         let reviewer = graph.iter().find(|node| node.creator == Some(root_actor) && node.model_actor).unwrap();
         let reviewer_actor = reviewer.actor;
@@ -748,10 +777,10 @@ async fn production_review_tool_retains_request_scope_and_fresh_consumer() {
         child.finish();
         root.call("review-first-proof", include_str!("fixtures/review_named_first_acceptance.hs"));
         let root = next(host, &mut requests, &mut pending, &root_path).await;
-        root.assert_value("review-first-proof", "True");
+        root.assert_authored_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), root_actor), "review-first-proof", "True");
         root.call("review-reuse", include_str!("fixtures/review_named_reuse.hs"));
         let mut root = next(host, &mut requests, &mut pending, &root_path).await;
-        let assigned_id: i64 = explicit_display_text(&root.settled_output("review-reuse")).parse().unwrap();
+        let assigned_id: i64 = retained_committed_display_text(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), root_actor), &root.settled_output("review-reuse")).parse().unwrap();
         assert_ne!(first_id, assigned_id);
         let mut child = next(host, &mut requests, &mut pending, &reviewer_path).await;
         for (call, request_id, candidate, refusal) in [
@@ -769,7 +798,7 @@ async fn production_review_tool_retains_request_scope_and_fresh_consumer() {
             let pending_call = format!("{call}-pending");
             root.call(&pending_call, "state <- pollResponse assignedReview\ndisplay (case state of { ResponsePending _ -> True; _ -> False })");
             root = next(host, &mut requests, &mut pending, &root_path).await;
-            root.assert_value(&pending_call, "True");
+            root.assert_authored_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), root_actor), &pending_call, "True");
         }
         child.function("review-advance", "bash", json!({
             "cmd": format!("git merge --ff-only {revised} && printf dirty > review-fixture.txt"),
@@ -787,7 +816,7 @@ async fn production_review_tool_retains_request_scope_and_fresh_consumer() {
         assert_eq!(child.settled_output("review-dirty")["items"][0]["value"], json!({"tag":"ReviewCheckoutDirty"}));
         root.call("review-dirty-pending", "state <- pollResponse assignedReview\ndisplay (case state of { ResponsePending _ -> True; _ -> False })");
         root = next(host, &mut requests, &mut pending, &root_path).await;
-        root.assert_value("review-dirty-pending", "True");
+        root.assert_authored_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), root_actor), "review-dirty-pending", "True");
         child.function("review-restore", "bash", json!({
             "cmd": "git restore -- review-fixture.txt", "workdir": null, "environment": null,
             "memory_mib": null, "tty": null, "stdin": null, "yield_time_ms": 30000,
@@ -820,15 +849,15 @@ async fn production_review_tool_retains_request_scope_and_fresh_consumer() {
         consumer.call("review-task-proof", &format!("let expectedSource = GitOid {base:?}\n{}", include_str!("fixtures/review_fresh_consumer_reply.hs")));
         let consumer = next(host, &mut requests, &mut pending, &consumer_path).await;
         replied(&consumer, "review-task-proof");
-        assert_eq!(explicit_display_text(&consumer.settled_output("review-task-proof")), "True");
+        assert_eq!(retained_replied_display_text(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), consumer_actor), &consumer.settled_output("review-task-proof")), "True");
         consumer.finish();
         let child = host.while_operation_succeeds(&operation,
             next(host, &mut requests, &mut pending, &reviewer_path),
         ).await.unwrap();
-        child.assert_value("review-fresh-consumer", "True");
+        child.assert_authored_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), reviewer_actor), "review-fresh-consumer", "True");
         child.call("review-consumer-cleanup", "stopped <- stopAgent consumer\ndisplay (case stopped of { StoppedNow -> True; AlreadyStopped -> True; _ -> False })");
         let child = next(host, &mut requests, &mut pending, &reviewer_path).await;
-        child.assert_value("review-consumer-cleanup", "True");
+        child.assert_authored_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), reviewer_actor), "review-consumer-cleanup", "True");
         let consumer_installation = host.context.observer.installation(consumer_actor).await;
         let terminal = consumer_installation.actor.terminal();
         tokio::time::timeout(Duration::from_secs(30), terminal.wait()).await.unwrap();
@@ -842,7 +871,7 @@ async fn production_review_tool_retains_request_scope_and_fresh_consumer() {
         child.finish();
         root.call("review-final-proof", include_str!("fixtures/review_named_final_acceptance.hs"));
         let root = next(host, &mut requests, &mut pending, &root_path).await;
-        root.assert_value("review-final-proof", "True");
+        root.assert_authored_value(&host.runtime.store(), &actor_output_origin(host.runtime.run_identity(), root_actor), "review-final-proof", "True");
         let reviewer_installation = host.context.observer.installation(reviewer_actor).await;
         let terminal = reviewer_installation.actor.terminal();
         tokio::time::timeout(Duration::from_secs(30), terminal.wait()).await.unwrap();

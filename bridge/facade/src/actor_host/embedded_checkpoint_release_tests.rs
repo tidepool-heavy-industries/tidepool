@@ -83,7 +83,15 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
                 );
             let after_scope_setup =
                 next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            after_scope_setup.assert_value("checkpoint-scope-setup", "True");
+            after_scope_setup.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "checkpoint-scope-setup",
+                "True",
+            );
             after_scope_setup.call(
                 "checkpoint-issuer-setup",
                 &tidepool_testing::fixture_source(
@@ -136,7 +144,15 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
             );
             let root_after_pending =
                 next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after_pending.assert_value("checkpoint-pending-cleanup-refusal", "True");
+            root_after_pending.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "checkpoint-pending-cleanup-refusal",
+                "True",
+            );
             assert!(issuer.actor.terminal().get().is_none());
             assert!(issuer.actor.terminal().cleanup().is_none());
             host.context
@@ -173,7 +189,15 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
             );
             let root_after_cleanup =
                 next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after_cleanup.assert_value("checkpoint-issuer-cleanup", "True");
+            root_after_cleanup.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "checkpoint-issuer-cleanup",
+                "True",
+            );
             let issuer_cleanup = issuer
                 .actor
                 .terminal()
@@ -231,7 +255,15 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
             );
             let root_after_release =
                 next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after_release.assert_value("checkpoint-release-twice", "True");
+            root_after_release.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "checkpoint-release-twice",
+                "True",
+            );
             root_after_release.call(
                 "checkpoint-released-refusal",
                 &tidepool_testing::fixture_source(
@@ -240,7 +272,15 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
             );
             let root_after_refusal =
                 next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_after_refusal.assert_value("checkpoint-released-refusal", "True");
+            root_after_refusal.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "checkpoint-released-refusal",
+                "True",
+            );
             assert_eq!(
                 host.context
                     .observer
@@ -257,7 +297,15 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
             );
             let observer_after_read =
                 next_hosted_script_round(&mut requests, &mut pending, &observer_path).await;
-            observer_after_read.assert_value("checkpoint-inherited-read", "True");
+            observer_after_read.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    observer_id,
+                ),
+                "checkpoint-inherited-read",
+                "True",
+            );
             observer_after_read.call(
                 "checkpoint-observer-reply",
                 "respond (\"inspected\" :: Text)",
@@ -280,7 +328,15 @@ async fn released_checkpoint_keeps_an_admitted_childs_hosted_context() {
                 ),
             );
             let root_done = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            root_done.assert_value("checkpoint-observer-cleanup", "True");
+            root_done.assert_authored_value(
+                &host.runtime.store(),
+                &super::test_campaign::actor_output_origin(
+                    host.runtime.run_identity(),
+                    host.context.actor.identity(),
+                ),
+                "checkpoint-observer-cleanup",
+                "True",
+            );
             let observer_cleanup = observer
                 .actor
                 .terminal()
