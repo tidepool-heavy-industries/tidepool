@@ -86,3 +86,12 @@ terminal. Abandoned, refused and cancelled reservations remain burned without
 rerunning private execution. Binding-only capture issues no join reservation.
 Recovery declarations remain an append-only causal DAG:
 parents and implementation references identify previously issued declarations.
+
+Notebook generations qualify public recovery ownership independently of actor
+incarnation and declaration allocation. Reload inserts a fresh public owner and
+atomically selects its complete source, installation and prompt references through
+the existing RunRecoveryStore transaction. It never transfers the prior owner or
+advances the machine admission epoch: issued requests may still publish into that
+prior generation. Startup incarnation transfer selects the actual active generation
+and carries those exact references through its existing transaction and epoch fence.
+Source links are derived projections, not another publication decision.

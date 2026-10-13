@@ -816,18 +816,20 @@ fn read_active_generation(
     domain: RecoveryDomainId,
     actor: &RecoveryPublicOwner,
 ) -> Result<Option<super::ActiveNotebookGeneration>, rusqlite::Error> {
-    let record: Option<Vec<u8>> = connection.query_row(
-        "SELECT g.record FROM active_notebook_generations a JOIN notebook_generations g ON a.domain=g.domain AND a.owner=g.owner WHERE a.domain=?1 AND a.actor=?2",
-        params![domain.bytes().as_slice(), owner_bytes(&actor.actor_owner())], |row| row.get(0)).optional()?;
+    let record: Option<(Vec<u8>, Vec<u8>)> = connection.query_row(
+        "SELECT g.record,g.owner FROM active_notebook_generations a JOIN notebook_generations g ON a.domain=g.domain AND a.owner=g.owner WHERE a.domain=?1 AND a.actor=?2",
+        params![domain.bytes().as_slice(), owner_bytes(&actor.actor_owner())], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
     record
-        .map(|bytes| {
+        .map(|(bytes, selected_owner)| {
             let value: super::ActiveNotebookGeneration =
                 fvm_ipld_encoding::from_slice(&bytes).map_err(|_| rusqlite::Error::InvalidQuery)?;
             value
                 .references
                 .validate()
                 .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            if value.owner.actor_owner() != actor.actor_owner() {
+            if value.owner.actor_owner() != actor.actor_owner()
+                || owner_bytes(&value.owner) != selected_owner
+            {
                 return Err(rusqlite::Error::InvalidQuery);
             }
             Ok(value)
@@ -1773,11 +1775,13 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(24))]
         #[test]
-        fn notebook_generation_histories_preserve_late_owners_and_refuse_stale_heads(ops in prop::collection::vec((0u8..5, any::<u8>()), 1..35)) {
-            let (_directory, store) = store();
+        fn notebook_generation_histories_preserve_late_owners_and_refuse_stale_heads(ops in prop::collection::vec((0u8..7, any::<u8>()), 1..35)) {
+            let (_directory, mut store) = store();
             domain(&store, RecoveryDomainId::Root, 64);
             let actor = owner("root/model", 1);
             let mut head = None;
+            let other = owner("root/independent", 1);
+            let mut other_head = None;
             let mut retained = Vec::<RecoveryPublicOwner>::new();
             for (operation, marker) in ops {
                 match operation {
@@ -1805,12 +1809,29 @@ mod tests {
                             prop_assert!(matches!(store.commit_publication(write), StoreDisposition::Refused(_)));
                         }
                     }
+                    5 => {
+                        let (write, next) = generation_write(&store, other_head.clone(), &other, marker);
+                        let StoreDisposition::Committed(receipt) = store.commit_publication(write) else { panic!("other actor generation refused") };
+                        receipt.installed_blocking().unwrap();
+                        other_head = Some(next);
+                    }
+                    6 => {
+                        let (write, next) = generation_write(&store, head.clone(), &actor, marker);
+                        store.inject_fault(StoreFault::CommitError);
+                        prop_assert!(matches!(store.commit_publication(write), StoreDisposition::RecoveryRequired(_)));
+                        prop_assert!(store.ensure_ready().is_err());
+                        let path = store.path().to_owned();
+                        store = RunRecoveryStore::open(&path).unwrap();
+                        retained.push(next.owner.clone());
+                        head = Some(next);
+                    }
                     _ => {
                         let recovered = RunRecoveryStore::open(store.path()).unwrap();
                         prop_assert_eq!(recovered.active_notebook_generation(RecoveryDomainId::Root, &actor).unwrap(), head.clone());
                     }
                 }
                 prop_assert_eq!(store.active_notebook_generation(RecoveryDomainId::Root, &actor).unwrap(), head.clone());
+                prop_assert_eq!(store.active_notebook_generation(RecoveryDomainId::Root, &other).unwrap(), other_head.clone());
                 for old in &retained { prop_assert!(store.read_public_owner(RecoveryDomainId::Root, old).unwrap().is_some()); }
             }
         }

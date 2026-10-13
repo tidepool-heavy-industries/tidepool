@@ -1,6 +1,7 @@
 //! Runtime-owned immutable compilation and private execution admission.
 
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -585,6 +586,8 @@ pub(super) struct RuntimeAdmissionOwner {
     identity: uuid::Uuid,
     epoch: std::sync::atomic::AtomicU64,
     retired: parking_lot::Mutex<Vec<ScopeId>>,
+    lexical_leases:
+        parking_lot::Mutex<BTreeMap<ScopeId, std::sync::Weak<RuntimeLexicalScopeLease>>>,
 }
 
 impl RuntimeAdmissionOwner {
@@ -599,6 +602,7 @@ impl RuntimeAdmissionOwner {
             identity: uuid::Uuid::new_v4(),
             epoch: std::sync::atomic::AtomicU64::new(0),
             retired: parking_lot::Mutex::new(Vec::new()),
+            lexical_leases: parking_lot::Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -1959,11 +1963,21 @@ impl PersistentSession {
         if !self.scope_tree().is_live(scope) {
             return Err(SessionError::DeadScope(scope));
         }
-        Ok(Arc::new(RuntimeLexicalScopeLease {
+        let mut leases = self.admission_owner().lexical_leases.lock();
+        if let Some(existing) = leases.get(&scope) {
+            let lease = existing.upgrade().ok_or(SessionError::DeadScope(scope))?;
+            if lease.owner_epoch != self.admission_owner().epoch() {
+                return Err(SessionError::WrongPublicManifestTicket);
+            }
+            return Ok(lease);
+        }
+        let lease = Arc::new(RuntimeLexicalScopeLease {
             owner: self.admission_owner().clone(),
             owner_epoch: self.admission_owner().epoch(),
             scope,
-        }))
+        });
+        leases.insert(scope, Arc::downgrade(&lease));
+        Ok(lease)
     }
     /// Validate a retained placement without minting another scope or changing
     /// its custody. Owner transfer invalidates an unconsumed placement grant.
@@ -2160,6 +2174,7 @@ impl PersistentSession {
         let retired = std::mem::take(&mut *self.admission_owner().retired.lock());
         for scope in retired {
             self.retire_scope(scope);
+            self.admission_owner().lexical_leases.lock().remove(&scope);
         }
     }
 
