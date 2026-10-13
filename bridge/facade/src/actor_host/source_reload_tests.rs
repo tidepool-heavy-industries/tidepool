@@ -220,7 +220,7 @@ async fn issued_source_identity_matches(
         .snapshot_for_request()
         .expect("issued source generation");
     let source = format!(
-        "import qualified Data.Text as T\nRight selectedSource <- sourceStatus\ninspectFull (revisionIdentity (statusActive selectedSource) == T.pack {expected:?})"
+        "Right selectedSource <- sourceStatus\ninspectFull (revisionIdentity (statusActive selectedSource) == Tidepool.Data.Text.pack {expected:?})"
     );
     let result = committed(issued.as_ref(), &source).await;
     result["items"][1]["output"] == "True"
