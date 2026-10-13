@@ -141,6 +141,8 @@ mod observation_budget_tests;
 #[cfg(test)]
 mod source_reload_tests;
 #[cfg(test)]
+mod coherent_reload_acceptance_tests;
+#[cfg(test)]
 mod terminal_transfer_tests;
 #[cfg(test)]
 mod test_campaign;

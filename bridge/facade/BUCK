@@ -990,6 +990,7 @@ rust_filegroup(
         "src/actor_host/cell_context.rs": "bridge/facade/src/actor_host/cell_context.rs",
         "src/actor_host/cell_model.rs": "bridge/facade/src/actor_host/cell_model.rs",
         "src/actor_host/cell_model/tests.rs": "bridge/facade/src/actor_host/cell_model/tests.rs",
+        "src/actor_host/coherent_reload_acceptance_tests.rs": "bridge/facade/src/actor_host/coherent_reload_acceptance_tests.rs",
         "src/actor_host/command_jobs_tests.rs": "bridge/facade/src/actor_host/command_jobs_tests.rs",
         "src/actor_host/command_test_support.rs": "bridge/facade/src/actor_host/command_test_support.rs",
         "src/actor_host/commands.rs": "bridge/facade/src/actor_host/commands.rs",
@@ -1034,6 +1035,17 @@ rust_filegroup(
         "src/actor_host/fixtures/child_attachment_alias_failure.hs": "bridge/facade/src/actor_host/fixtures/child_attachment_alias_failure.hs",
         "src/actor_host/fixtures/child_attachment_observe_reply.hs": "bridge/facade/src/actor_host/fixtures/child_attachment_observe_reply.hs",
         "src/actor_host/fixtures/child_attachment_valid_request.hs": "bridge/facade/src/actor_host/fixtures/child_attachment_valid_request.hs",
+        "src/actor_host/fixtures/coherent_reload_after_rejection.hs": "bridge/facade/src/actor_host/fixtures/coherent_reload_after_rejection.hs",
+        "src/actor_host/fixtures/coherent_reload_bind_a.hs": "bridge/facade/src/actor_host/fixtures/coherent_reload_bind_a.hs",
+        "src/actor_host/fixtures/coherent_reload_late_a.hs": "bridge/facade/src/actor_host/fixtures/coherent_reload_late_a.hs",
+        "src/actor_host/fixtures/coherent_reload_noop.hs": "bridge/facade/src/actor_host/fixtures/coherent_reload_noop.hs",
+        "src/actor_host/fixtures/coherent_reload_prompt_b.md": "bridge/facade/src/actor_host/fixtures/coherent_reload_prompt_b.md",
+        "src/actor_host/fixtures/coherent_reload_publish_b.hs": "bridge/facade/src/actor_host/fixtures/coherent_reload_publish_b.hs",
+        "src/actor_host/fixtures/coherent_reload_reject.hs": "bridge/facade/src/actor_host/fixtures/coherent_reload_reject.hs",
+        "src/actor_host/fixtures/coherent_reload_use_b.hs": "bridge/facade/src/actor_host/fixtures/coherent_reload_use_b.hs",
+        "src/actor_host/fixtures/coherent_reload_work_a.hs": "bridge/facade/src/actor_host/fixtures/coherent_reload_work_a.hs",
+        "src/actor_host/fixtures/coherent_reload_work_b.hs": "bridge/facade/src/actor_host/fixtures/coherent_reload_work_b.hs",
+        "src/actor_host/fixtures/coherent_reload_work_invalid.hs": "bridge/facade/src/actor_host/fixtures/coherent_reload_work_invalid.hs",
         "src/actor_host/fixtures/context_acceptance_idle_request.hs": "bridge/facade/src/actor_host/fixtures/context_acceptance_idle_request.hs",
         "src/actor_host/fixtures/context_acceptance_idle_spawn.hs": "bridge/facade/src/actor_host/fixtures/context_acceptance_idle_spawn.hs",
         "src/actor_host/fixtures/deferred_reply_await.hs": "bridge/facade/src/actor_host/fixtures/deferred_reply_await.hs",
@@ -1245,6 +1257,7 @@ tidepool_rust_binary(
         "harness": "//third-party/rust:harness",
     },
     required_test_modules = [
+        "bridge/facade/src/actor_host/coherent_reload_acceptance_tests.rs",
         "bridge/facade/src/actor_host/embedded_agent_spec_tests.rs",
         "bridge/facade/src/actor_host/embedded_failure_projection_tests.rs",
         "bridge/facade/src/actor_host/embedded_idle_retirement_tests.rs",
@@ -1272,6 +1285,17 @@ tidepool_rust_binary(
         "bridge/facade/src/actor_host/command_tool_facts_gate.hs",
         "bridge/facade/src/actor_host/embedded_captured_child_reuse_nominal.hs",
         "bridge/facade/src/actor_host/fixtures/browser_agent_spec.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_after_rejection.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_bind_a.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_late_a.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_noop.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_prompt_b.md",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_publish_b.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_reject.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_use_b.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_work_a.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_work_b.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_work_invalid.hs",
         "bridge/facade/src/actor_host/fixtures/m3_fresh_default_cleanup.hs",
         "bridge/facade/src/actor_host/fixtures/m3_fresh_default_request.hs",
         "bridge/facade/src/actor_host/fixtures/m3_recursive_child.hs",
@@ -2732,6 +2756,7 @@ filegroup(
         "bridge/facade/src/actor_host/cell_context.rs": "src/actor_host/cell_context.rs",
         "bridge/facade/src/actor_host/cell_model.rs": "src/actor_host/cell_model.rs",
         "bridge/facade/src/actor_host/cell_model/tests.rs": "src/actor_host/cell_model/tests.rs",
+        "bridge/facade/src/actor_host/coherent_reload_acceptance_tests.rs": "src/actor_host/coherent_reload_acceptance_tests.rs",
         "bridge/facade/src/actor_host/command_jobs_tests.rs": "src/actor_host/command_jobs_tests.rs",
         "bridge/facade/src/actor_host/command_test_support.rs": "src/actor_host/command_test_support.rs",
         "bridge/facade/src/actor_host/commands.rs": "src/actor_host/commands.rs",
@@ -2776,6 +2801,17 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/child_attachment_alias_failure.hs": "src/actor_host/fixtures/child_attachment_alias_failure.hs",
         "bridge/facade/src/actor_host/fixtures/child_attachment_observe_reply.hs": "src/actor_host/fixtures/child_attachment_observe_reply.hs",
         "bridge/facade/src/actor_host/fixtures/child_attachment_valid_request.hs": "src/actor_host/fixtures/child_attachment_valid_request.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_after_rejection.hs": "src/actor_host/fixtures/coherent_reload_after_rejection.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_bind_a.hs": "src/actor_host/fixtures/coherent_reload_bind_a.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_late_a.hs": "src/actor_host/fixtures/coherent_reload_late_a.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_noop.hs": "src/actor_host/fixtures/coherent_reload_noop.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_prompt_b.md": "src/actor_host/fixtures/coherent_reload_prompt_b.md",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_publish_b.hs": "src/actor_host/fixtures/coherent_reload_publish_b.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_reject.hs": "src/actor_host/fixtures/coherent_reload_reject.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_use_b.hs": "src/actor_host/fixtures/coherent_reload_use_b.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_work_a.hs": "src/actor_host/fixtures/coherent_reload_work_a.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_work_b.hs": "src/actor_host/fixtures/coherent_reload_work_b.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_reload_work_invalid.hs": "src/actor_host/fixtures/coherent_reload_work_invalid.hs",
         "bridge/facade/src/actor_host/fixtures/context_acceptance_idle_request.hs": "src/actor_host/fixtures/context_acceptance_idle_request.hs",
         "bridge/facade/src/actor_host/fixtures/context_acceptance_idle_spawn.hs": "src/actor_host/fixtures/context_acceptance_idle_spawn.hs",
         "bridge/facade/src/actor_host/fixtures/deferred_reply_await.hs": "src/actor_host/fixtures/deferred_reply_await.hs",
@@ -3420,6 +3456,76 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6368696c645f6174746163686d656e745f76616c69645f726571756573742e6873",
     src = "src/actor_host/fixtures/child_attachment_valid_request.hs",
     out = "child_attachment_valid_request.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f72656c6f61645f61667465725f72656a656374696f6e2e6873",
+    src = "src/actor_host/fixtures/coherent_reload_after_rejection.hs",
+    out = "coherent_reload_after_rejection.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f72656c6f61645f62696e645f612e6873",
+    src = "src/actor_host/fixtures/coherent_reload_bind_a.hs",
+    out = "coherent_reload_bind_a.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f72656c6f61645f6c6174655f612e6873",
+    src = "src/actor_host/fixtures/coherent_reload_late_a.hs",
+    out = "coherent_reload_late_a.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f72656c6f61645f6e6f6f702e6873",
+    src = "src/actor_host/fixtures/coherent_reload_noop.hs",
+    out = "coherent_reload_noop.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f72656c6f61645f7075626c6973685f622e6873",
+    src = "src/actor_host/fixtures/coherent_reload_publish_b.hs",
+    out = "coherent_reload_publish_b.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f72656c6f61645f72656a6563742e6873",
+    src = "src/actor_host/fixtures/coherent_reload_reject.hs",
+    out = "coherent_reload_reject.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f72656c6f61645f7573655f622e6873",
+    src = "src/actor_host/fixtures/coherent_reload_use_b.hs",
+    out = "coherent_reload_use_b.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f72656c6f61645f776f726b5f612e6873",
+    src = "src/actor_host/fixtures/coherent_reload_work_a.hs",
+    out = "coherent_reload_work_a.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f72656c6f61645f776f726b5f622e6873",
+    src = "src/actor_host/fixtures/coherent_reload_work_b.hs",
+    out = "coherent_reload_work_b.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f72656c6f61645f776f726b5f696e76616c69642e6873",
+    src = "src/actor_host/fixtures/coherent_reload_work_invalid.hs",
+    out = "coherent_reload_work_invalid.hs",
     visibility = ["PUBLIC"],
 )
 
