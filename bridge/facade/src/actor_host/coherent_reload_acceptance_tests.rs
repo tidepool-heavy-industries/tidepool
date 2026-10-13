@@ -104,6 +104,31 @@ fn assert_reload_disposition(
     );
 }
 
+fn assert_native_reload(
+    result: &Value,
+    outcome: &str,
+    disposition: tidepool_runtime::session::WorkbenchOperationDisposition,
+) {
+    let items = result["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "{result}");
+    assert_eq!(items[0]["value"]["outcome"], outcome, "{result}");
+    let status = match disposition {
+        tidepool_runtime::session::WorkbenchOperationDisposition::Read => "committed",
+        tidepool_runtime::session::WorkbenchOperationDisposition::Rejected => "rejected",
+        other => panic!("this native control expects Read or Rejected, got {other:?}"),
+    };
+    assert_eq!(result["status"], status, "{result}");
+    assert_eq!(items[0]["status"], status, "{result}");
+    let operations = items[0]["operations"].as_array().unwrap();
+    assert_eq!(operations.len(), 1, "{result}");
+    assert_eq!(operations[0]["effect"], "configuration reload");
+    assert_eq!(
+        operations[0]["disposition"],
+        serde_json::to_value(disposition).unwrap(),
+        "{result}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_issued_work() {
     let files = tempfile::tempdir().unwrap();
@@ -300,6 +325,26 @@ async fn coherent_reload_replaces_the_notebook_and_prompts_without_rewriting_iss
                         tidepool_runtime::session::WorkbenchOperationDisposition::Rejected,
                     ),
                     _ => {}
+                }
+                if matches!(id, "noop" | "reject") {
+                    let native = super::tests::dispatch_structured_tool(
+                        current.policy.as_ref(),
+                        "reload",
+                        serde_json::json!({"also_check": []}),
+                    )
+                    .await;
+                    let (outcome, disposition) = if id == "noop" {
+                        (
+                            "unchanged",
+                            tidepool_runtime::session::WorkbenchOperationDisposition::Read,
+                        )
+                    } else {
+                        (
+                            "rejected",
+                            tidepool_runtime::session::WorkbenchOperationDisposition::Rejected,
+                        )
+                    };
+                    assert_native_reload(&native, outcome, disposition);
                 }
             }
             assert_eq!(round.request.instructions, instructions_b);
