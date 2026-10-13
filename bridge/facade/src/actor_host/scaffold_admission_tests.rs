@@ -61,6 +61,10 @@ async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_original
                 .await
                 .unwrap();
             let root = harness::model::AgentPath("/root".into());
+            let output_origin = super::test_campaign::actor_output_origin(
+                host.runtime.run_identity(),
+                host.context.actor.identity(),
+            );
             let mut pending = VecDeque::new();
             next_hosted_script_round(&mut requests, &mut pending, &root)
                 .await
@@ -69,7 +73,12 @@ async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_original
                     "let trialSeed = 41 :: Int\ndisplay trialSeed",
                 );
             let round = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            round.assert_value("prepared-default-binding", "41");
+            round.assert_authored_value(
+                &host.runtime.store(),
+                &output_origin,
+                "prepared-default-binding",
+                "41",
+            );
             round.function(
                 "prepared-default-lookup",
                 "lookup",
@@ -144,7 +153,12 @@ async fn prepared_scaffolded_agent_spec_lookup_and_context_fork_execute_original
             );
             child_round.finish();
             let completed = next_hosted_script_round(&mut requests, &mut pending, &root).await;
-            completed.assert_value("prepared-default-child", "42");
+            completed.assert_authored_value(
+                &host.runtime.store(),
+                &output_origin,
+                "prepared-default-child",
+                "42",
+            );
             completed.finish();
         })
     })

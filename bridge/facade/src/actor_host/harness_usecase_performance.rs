@@ -266,14 +266,18 @@ async fn notebook_phases(history: NotebookHistory, phases: &[Phase]) {
         };
         let completed_ns = started.elapsed().as_nanos();
         let output = successful_output(&round.request, &call_id);
-        let displayed = test_campaign::explicit_display_text(&output);
+        let displayed = test_campaign::retained_committed_display_text(
+            &fixture.runtime.store(),
+            &test_campaign::actor_output_origin(fixture.runtime.run_identity(), actor),
+            &output,
+        );
         if phase.name == "lookup-retained" {
             assert!(
                 displayed.contains("perfSamples") && displayed.contains("perfAction"),
                 "{output}"
             );
         } else {
-            assert_eq!(displayed.trim(), phase.expected, "{output}");
+            assert_eq!(displayed, phase.expected, "{output}");
         }
         assert_eq!(round.request.session_id, session);
         assert_eq!(fixture.context.actor.identity(), actor);

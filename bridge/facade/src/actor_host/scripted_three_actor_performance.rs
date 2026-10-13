@@ -521,10 +521,14 @@ async fn three_actor_capture(concurrent: bool) {
     host.run_scenario(|host| Box::pin(async move {
         let root = host.context.actor.identity();
         let root_name = root.to_string();
+        let output_origin = super::test_campaign::actor_output_origin(host.runtime.run_identity(), root);
         let frozen = host.context.config.workspace_inputs.as_ref().unwrap();
         let coverage = frozen.prepared_toolset_coverage().unwrap();
         assert_eq!(coverage.len(), 1, "one prepared root toolset");
+        assert_eq!(coverage[0].requested_effects, exomonad_actor::ActorCapabilities::default().effect_keys());
         let installation = host.context.observer.installation(root).await;
+        assert!(matches!(installation.acquisition.as_ref(), Some(exomonad_actor::ToolsetAcquisition::BuiltinDeploymentProgram { .. })),
+            "the unauthored default root uses its packaged built-in installer");
         assert_eq!(installation.acquisition.as_ref().and_then(exomonad_actor::ToolsetAcquisition::selection),
             Some(coverage[0].program.clone()), "root installs its exact prepared program");
         host.http_input("Exercise the real three-actor capture workload.").await.unwrap();
@@ -542,7 +546,7 @@ async fn three_actor_capture(concurrent: bool) {
         let scripted_response_hold_ns = round.scripted_response_hold_ns();
         round.call("three-actor-setup", SETUP);
         round = next_root(host, &mut requests, &mut pending).await;
-        round.assert_value("three-actor-setup", "True");
+        round.assert_authored_value(&host.runtime.store(), &output_origin, "three-actor-setup", "True");
         phase.record(roster, &scenario_phases, 1, "root", &root_name, Some("three-actor-setup"), "native-tool", SETUP,
             Some(scripted_response_hold_ns), json!({"retained_value": 41, "cell_role": "first"}));
         let prefix = round.request.input.iter().filter(|item| !item.is_configuration_update())
@@ -694,7 +698,7 @@ async fn three_actor_capture(concurrent: bool) {
         let scripted_response_hold_ns = round.scripted_response_hold_ns();
         assert_eq!(round.request.session_id, root_session);
         assert_eq!(round.request.model, "gpt-6.1-sol");
-        round.assert_value(PARENT_CALL, "True");
+        round.assert_authored_value(&host.runtime.store(), &output_origin, PARENT_CALL, "True");
         let yielded = round.settled_output(YIELD_CALL);
         assert_eq!(yielded["reason"], "tool_result", "{yielded}");
         assert!(yielded["ready_results"].as_array().unwrap().iter().any(|result| result["call"] == PARENT_CALL), "{yielded}");
@@ -702,7 +706,7 @@ async fn three_actor_capture(concurrent: bool) {
             harness::store::ClaimState::Settled).await;
         round.call("three-actor-read", READ);
         round = next_root(host, &mut requests, &mut pending).await;
-        round.assert_value("three-actor-read", "True");
+        round.assert_authored_value(&host.runtime.store(), &output_origin, "three-actor-read", "True");
         phase.record(roster, &scenario_phases, if concurrent { 5 } else { 6 }, "root", &root_name, Some("three-actor-read"), "native-tool", READ,
             Some(scripted_response_hold_ns),
             json!({"parent_published": true, "retained_action_reused": true, "yield_parent_result_observed": true,
@@ -712,7 +716,7 @@ async fn three_actor_capture(concurrent: bool) {
         let scripted_response_hold_ns = round.scripted_response_hold_ns();
         round.call("three-actor-cleanup", CLEANUP);
         round = next_root(host, &mut requests, &mut pending).await;
-        round.assert_value("three-actor-cleanup", "True");
+        round.assert_authored_value(&host.runtime.store(), &output_origin, "three-actor-cleanup", "True");
         for actor in child_actors {
             let installed = host.context.observer.installation(actor).await;
             assert!(installed.checkpoint);
