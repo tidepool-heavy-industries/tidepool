@@ -75,6 +75,75 @@ impl harness::engine::ResponsesTransport for RecoveryTransport {
             )
             .unwrap();
         }
+        if self.phase.starts_with("coherent-") {
+            std::fs::write(
+                self.root
+                    .join(format!("{}.request-{count}.json", self.phase)),
+                serde_json::to_vec(&request).unwrap(),
+            )
+            .unwrap();
+            let sources: &[(&str, &str)] = if self.phase == "coherent-original" {
+                &[
+                    (
+                        "publish-b",
+                        include_str!("fixtures/coherent_recovery_publish_b.hs"),
+                    ),
+                    (
+                        "bind-b",
+                        include_str!("fixtures/coherent_recovery_bind_b.hs"),
+                    ),
+                ]
+            } else {
+                &[(
+                    "observe-b",
+                    include_str!("fixtures/coherent_recovery_observe_b.hs"),
+                )]
+            };
+            assert!(count <= sources.len() + 1);
+            if count > 1 {
+                let previous = sources[count - 2].0;
+                let item = request
+                    .input
+                    .iter()
+                    .find(|item| {
+                        item.0["type"] == "custom_tool_call_output" && item.0["call_id"] == previous
+                    })
+                    .unwrap();
+                let output: serde_json::Value =
+                    serde_json::from_str(item.0["output"].as_str().unwrap()).unwrap();
+                assert_eq!(output["status"], "committed", "{output}");
+                assert_eq!(
+                    output["items"].as_array().unwrap().last().unwrap()["output"],
+                    "True",
+                    "{output}"
+                );
+                std::fs::write(
+                    self.root.join(format!("{}.{previous}.json", self.phase)),
+                    serde_json::to_vec(&output).unwrap(),
+                )
+                .unwrap();
+            }
+            let items = if count <= sources.len() {
+                let (call, source) = sources[count - 1];
+                vec![super::test_campaign::scripted_tool_call(
+                    call,
+                    "haskell",
+                    harness::item::ToolInput::Custom(source.into()),
+                    harness::item::ToolExecution::Synchronous,
+                )]
+            } else {
+                std::fs::write(self.root.join(format!("{}.settled", self.phase)), "settled")
+                    .unwrap();
+                vec![harness::item::Item(
+                    json!({"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"retained coherent history"}]}),
+                )]
+            };
+            return Ok(ResponsesTurn {
+                response_id: format!("{}-{count}", self.phase),
+                items,
+                usage: Usage::default(),
+            });
+        }
         if self.phase == "persona-original" {
             let source = match count {
                 1 => Some((
@@ -290,6 +359,31 @@ fn production_recovery_process() {
         if matches!(phase.as_str(), "persona-original" | "persona-recovered") {
             if phase == "persona-original" {
                 super::startup_persona_acceptance_tests::configure_persona(&mut config, "Persona.Spec.agentSpec", |_, _| {});
+            } else {
+                config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, config.run_directory.path()).unwrap());
+            }
+            config.jev = Some(Arc::new(RecoveryPersonaJev { root: root.clone(), phase: phase.clone(), calls: AtomicUsize::new(0) }));
+        }
+        if phase.starts_with("coherent-") {
+            if phase == "coherent-original" {
+                super::startup_persona_acceptance_tests::configure_persona(&mut config, "Persona.Spec.agentSpec", |workspace, project| {
+                    let authored = workspace.join(".exomonad");
+                    std::fs::create_dir_all(authored.join("Project")).unwrap();
+                    std::fs::create_dir_all(authored.join("Recovery")).unwrap();
+                    std::fs::create_dir_all(workspace.join("reload-inputs")).unwrap();
+                    for (path, body) in [
+                        (".exomonad/Project/Work.hs", include_str!("fixtures/coherent_reload_work_a.hs")),
+                        (".exomonad/Recovery/Initializer.hs", include_str!("fixtures/coherent_recovery_initializer.hs")),
+                        ("reload-inputs/work-b.txt", include_str!("fixtures/coherent_reload_work_b.hs")),
+                        ("reload-inputs/prompt-b.txt", include_str!("fixtures/coherent_reload_prompt_b.md")),
+                        ("reload-inputs/extra-b.txt", include_str!("fixtures/coherent_recovery_extra_b.hs")),
+                        ("initializer-count.txt", ""),
+                    ] { std::fs::write(workspace.join(path), body).unwrap(); }
+                    let spec = std::fs::read_to_string(authored.join("Persona/Spec.hs")).unwrap()
+                        .replace("import qualified Persona.Orientation as Orientation", "import qualified Recovery.Initializer as Orientation");
+                    std::fs::write(authored.join("Persona/Spec.hs"), spec).unwrap();
+                    project.haskell.modules.extend(["Project.Work".into(), "Recovery.Initializer".into()]);
+                });
             } else {
                 config.workspace_inputs = Some(crate::exomonad::workspace::FrozenWorkspace::load(&config.workspace, config.run_directory.path()).unwrap());
             }
@@ -934,6 +1028,118 @@ async fn production_persona_crash_preserves_edited_context_without_reinitializat
             fenced: false
         }
     );
+    finish_fixture(retained_root);
+}
+
+#[tokio::test]
+async fn production_coherent_reload_recovers_published_configuration_without_recapturing_draft() {
+    use std::os::unix::process::ExitStatusExt;
+    tidepool_testing::eval_harness::require_extract();
+    let retained_root = fixture();
+    let root = retained_root.as_path();
+    let run = root.join("run");
+    let mut original = start(root, "coherent-original");
+    let first = ready(root, "coherent-original", &mut original).await;
+    let actor_a: ActorRef = serde_json::from_value(first["actor"].clone()).unwrap();
+    let identity_a = embedded_recovery::host_identity(&run, "/root", actor_a);
+    input(first["address"].as_str().unwrap(), &identity_a, None).await;
+    cell_settled(root, "coherent-original", &mut original).await;
+    settled_frontier(root, &identity_a).await;
+    let request_b: harness::transport::ResponsesRequest = serde_json::from_slice(
+        &std::fs::read(root.join("coherent-original.request-3.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(request_b
+        .instructions
+        .contains(include_str!("fixtures/coherent_reload_prompt_b.md")));
+    let before =
+        exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
+            .unwrap();
+    let startup = latest_durable_root_application(&before)
+        .unwrap()
+        .unwrap()
+        .initial_context
+        .clone()
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(root.join("project/initializer-count.txt")).unwrap(),
+        "x"
+    );
+    assert!(!root.join("coherent-original.jev-calls").exists());
+    original.0.kill().unwrap();
+    assert_eq!(original.0.wait().unwrap().signal(), Some(9));
+    for (path, body) in [
+        (
+            ".exomonad/Project/Work.hs",
+            include_str!("fixtures/coherent_reload_work_invalid.hs"),
+        ),
+        (
+            ".exomonad/Project/ExtraCheck.hs",
+            "module Project.ExtraCheck where\nextraCheck = missingFromDraftC\n",
+        ),
+        (
+            ".exomonad/prompts/agent.md",
+            "prompt-C must not be selected by recovery",
+        ),
+        (".exomonad/state/memory/human.md", "memory-C"),
+    ] {
+        std::fs::write(root.join("project").join(path), body).unwrap();
+    }
+    let mut recovered = start(root, "coherent-recovered");
+    let resumed = ready(root, "coherent-recovered", &mut recovered).await;
+    let actor_b: ActorRef = serde_json::from_value(resumed["actor"].clone()).unwrap();
+    assert_eq!(actor_b.id, actor_a.id);
+    assert_eq!(actor_b.incarnation.0, actor_a.incarnation.0 + 1);
+    let identity_b = embedded_recovery::host_identity(&run, "/root", actor_b);
+    assert!(!root.join("coherent-recovered.calls").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("project/initializer-count.txt")).unwrap(),
+        "x"
+    );
+    input(resumed["address"].as_str().unwrap(), &identity_b, None).await;
+    cell_settled(root, "coherent-recovered", &mut recovered).await;
+    settled_frontier(root, &identity_b).await;
+    let request_recovered: harness::transport::ResponsesRequest = serde_json::from_slice(
+        &std::fs::read(root.join("coherent-recovered.request-1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(request_recovered.instructions, request_b.instructions);
+    let user_texts = |request: &harness::transport::ResponsesRequest| {
+        request
+            .input
+            .iter()
+            .filter(|item| item.0["type"] == "message" && item.0["role"] == "user")
+            .map(|item| item.0["content"].clone())
+            .collect::<Vec<_>>()
+    };
+    let retained_users = user_texts(&request_b);
+    let resumed_users = user_texts(&request_recovered);
+    assert_eq!(
+        &resumed_users[..retained_users.len()],
+        retained_users.as_slice()
+    );
+    assert_eq!(resumed_users.len(), retained_users.len() + 1);
+    assert!(!serde_json::to_string(&resumed_users)
+        .unwrap()
+        .contains("memory-C"));
+    let after =
+        exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
+            .unwrap();
+    assert_eq!(
+        latest_durable_root_application(&after)
+            .unwrap()
+            .unwrap()
+            .initial_context
+            .as_ref(),
+        Some(&startup)
+    );
+    assert!(!root.join("coherent-recovered.jev-calls").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join("project/initializer-count.txt")).unwrap(),
+        "x"
+    );
+    recovered.0.kill().unwrap();
+    assert_eq!(recovered.0.wait().unwrap().signal(), Some(9));
     finish_fixture(retained_root);
 }
 

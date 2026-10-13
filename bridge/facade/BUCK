@@ -1035,6 +1035,11 @@ rust_filegroup(
         "src/actor_host/fixtures/child_attachment_alias_failure.hs": "bridge/facade/src/actor_host/fixtures/child_attachment_alias_failure.hs",
         "src/actor_host/fixtures/child_attachment_observe_reply.hs": "bridge/facade/src/actor_host/fixtures/child_attachment_observe_reply.hs",
         "src/actor_host/fixtures/child_attachment_valid_request.hs": "bridge/facade/src/actor_host/fixtures/child_attachment_valid_request.hs",
+        "src/actor_host/fixtures/coherent_recovery_bind_b.hs": "bridge/facade/src/actor_host/fixtures/coherent_recovery_bind_b.hs",
+        "src/actor_host/fixtures/coherent_recovery_extra_b.hs": "bridge/facade/src/actor_host/fixtures/coherent_recovery_extra_b.hs",
+        "src/actor_host/fixtures/coherent_recovery_initializer.hs": "bridge/facade/src/actor_host/fixtures/coherent_recovery_initializer.hs",
+        "src/actor_host/fixtures/coherent_recovery_observe_b.hs": "bridge/facade/src/actor_host/fixtures/coherent_recovery_observe_b.hs",
+        "src/actor_host/fixtures/coherent_recovery_publish_b.hs": "bridge/facade/src/actor_host/fixtures/coherent_recovery_publish_b.hs",
         "src/actor_host/fixtures/coherent_reload_after_rejection.hs": "bridge/facade/src/actor_host/fixtures/coherent_reload_after_rejection.hs",
         "src/actor_host/fixtures/coherent_reload_bind_a.hs": "bridge/facade/src/actor_host/fixtures/coherent_reload_bind_a.hs",
         "src/actor_host/fixtures/coherent_reload_late_a.hs": "bridge/facade/src/actor_host/fixtures/coherent_reload_late_a.hs",
@@ -2801,6 +2806,11 @@ filegroup(
         "bridge/facade/src/actor_host/fixtures/child_attachment_alias_failure.hs": "src/actor_host/fixtures/child_attachment_alias_failure.hs",
         "bridge/facade/src/actor_host/fixtures/child_attachment_observe_reply.hs": "src/actor_host/fixtures/child_attachment_observe_reply.hs",
         "bridge/facade/src/actor_host/fixtures/child_attachment_valid_request.hs": "src/actor_host/fixtures/child_attachment_valid_request.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_recovery_bind_b.hs": "src/actor_host/fixtures/coherent_recovery_bind_b.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_recovery_extra_b.hs": "src/actor_host/fixtures/coherent_recovery_extra_b.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_recovery_initializer.hs": "src/actor_host/fixtures/coherent_recovery_initializer.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_recovery_observe_b.hs": "src/actor_host/fixtures/coherent_recovery_observe_b.hs",
+        "bridge/facade/src/actor_host/fixtures/coherent_recovery_publish_b.hs": "src/actor_host/fixtures/coherent_recovery_publish_b.hs",
         "bridge/facade/src/actor_host/fixtures/coherent_reload_after_rejection.hs": "src/actor_host/fixtures/coherent_reload_after_rejection.hs",
         "bridge/facade/src/actor_host/fixtures/coherent_reload_bind_a.hs": "src/actor_host/fixtures/coherent_reload_bind_a.hs",
         "bridge/facade/src/actor_host/fixtures/coherent_reload_late_a.hs": "src/actor_host/fixtures/coherent_reload_late_a.hs",
@@ -3456,6 +3466,41 @@ export_file(
     name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f6368696c645f6174746163686d656e745f76616c69645f726571756573742e6873",
     src = "src/actor_host/fixtures/child_attachment_valid_request.hs",
     out = "child_attachment_valid_request.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f7265636f766572795f62696e645f622e6873",
+    src = "src/actor_host/fixtures/coherent_recovery_bind_b.hs",
+    out = "coherent_recovery_bind_b.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f7265636f766572795f65787472615f622e6873",
+    src = "src/actor_host/fixtures/coherent_recovery_extra_b.hs",
+    out = "coherent_recovery_extra_b.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f7265636f766572795f696e697469616c697a65722e6873",
+    src = "src/actor_host/fixtures/coherent_recovery_initializer.hs",
+    out = "coherent_recovery_initializer.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f7265636f766572795f6f6273657276655f622e6873",
+    src = "src/actor_host/fixtures/coherent_recovery_observe_b.hs",
+    out = "coherent_recovery_observe_b.hs",
+    visibility = ["PUBLIC"],
+)
+
+export_file(
+    name = "haskell_test_fixture_7372632f6163746f725f686f73742f66697874757265732f636f686572656e745f7265636f766572795f7075626c6973685f622e6873",
+    src = "src/actor_host/fixtures/coherent_recovery_publish_b.hs",
+    out = "coherent_recovery_publish_b.hs",
     visibility = ["PUBLIC"],
 )
 
