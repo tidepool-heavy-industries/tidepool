@@ -1599,7 +1599,7 @@ dependencies = [
 [[package]]
 name = "harness"
 version = "0.1.0"
-source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=91ab82f2e32314cb35391c0649fa133cd08e4f27#91ab82f2e32314cb35391c0649fa133cd08e4f27"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=25a7122ec3b76ef5616049bed392ba353075e069#25a7122ec3b76ef5616049bed392ba353075e069"
 dependencies = [
  "async-trait",
  "axum",
@@ -1629,7 +1629,7 @@ dependencies = [
 [[package]]
 name = "harness-presentation"
 version = "0.1.0"
-source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=91ab82f2e32314cb35391c0649fa133cd08e4f27#91ab82f2e32314cb35391c0649fa133cd08e4f27"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=25a7122ec3b76ef5616049bed392ba353075e069#25a7122ec3b76ef5616049bed392ba353075e069"
 dependencies = [
  "roxmltree",
  "schemars 1.2.2",
@@ -1640,7 +1640,7 @@ dependencies = [
 [[package]]
 name = "harness-schema"
 version = "0.1.0"
-source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=91ab82f2e32314cb35391c0649fa133cd08e4f27#91ab82f2e32314cb35391c0649fa133cd08e4f27"
+source = "git+https://github.com/tidepool-heavy-industries/exomonad-harness.git?rev=25a7122ec3b76ef5616049bed392ba353075e069#25a7122ec3b76ef5616049bed392ba353075e069"
 dependencies = [
  "serde_json",
  "thiserror",
