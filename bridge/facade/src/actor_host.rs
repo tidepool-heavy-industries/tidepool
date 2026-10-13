@@ -280,12 +280,16 @@ fn host_context_support() -> Vec<exomonad_tool::ToolEffectKey> {
 }
 
 fn with_host_interpreters(
-    forest: ResidentForest<ExomonadHandlerStack, CapturedOutput>,
+    mut forest: ResidentForest<ExomonadHandlerStack, CapturedOutput>,
+    source_layers: Option<exomonad_actor::ActorSourceLayerResolver>,
     config: &ActorHostConfig,
     runtime: &embedded_harness::EmbeddedHarnessRuntime,
     recovery: Arc<exomonad_actor::ActorRecoveryJournal>,
     models: Arc<dyn exomonad_actor::CellModelFactory>,
 ) -> Result<ResidentForest<ExomonadHandlerStack, CapturedOutput>, Box<dyn std::error::Error>> {
+    if let Some(layers) = source_layers {
+        forest.set_source_layers(layers);
+    }
     runtime
         .configure_context_models(config)
         .map_err(runtime_error)?;
@@ -2226,11 +2230,11 @@ async fn run_owned(
         forest = forest.with_child_bootstrap_program(Arc::clone(&program));
     }
     let _ = &program;
-    if let Some(layers) = &source_layers {
-        forest.set_source_layers(layers.clone());
-    }
     let forest = with_host_interpreters(
         forest,
+        source_layers
+            .clone()
+            .map(|layers| layers as exomonad_actor::ActorSourceLayerResolver),
         &config,
         &embedded_service.runtime,
         actor_recovery.clone(),
@@ -3994,7 +3998,7 @@ pub(crate) async fn prepare_workspace_toolsets(
         temporary.clone(),
     )
     .await?;
-    let (mut forest, _) = ResidentForest::new(
+    let (forest, _) = ResidentForest::new(
         workbench.clone(),
         tidepool_runtime::session::fresh_session_id(),
         machine,
@@ -4002,9 +4006,9 @@ pub(crate) async fn prepare_workspace_toolsets(
         exomonad_actor::Incarnation::FIRST,
     )
     .await?;
-    forest.set_source_layers(source.clone());
     let forest = with_host_interpreters(
         forest,
+        Some(source.clone()),
         &config,
         &runtime,
         recovery,
