@@ -817,7 +817,8 @@ def retain_catalog_sources(args) -> Path:
     verify_retained_catalog_sources(record, source, tools)
     return retained
 
-def verify_retained_catalog_sources(record: Path, snapshot: Path, tools: Path, *, record_origin: Path | None = None) -> Path:
+def verify_retained_catalog_sources(record: Path, snapshot: Path, tools: Path, *, record_origin: Path | None = None,
+                                    _registered_roots: _RegisteredGcRoots | None = None) -> Path:
     """Return the original compiler root only after current retention checks."""
     value = json.loads(record.read_text())
     if (not isinstance(value, dict)
@@ -828,9 +829,11 @@ def verify_retained_catalog_sources(record: Path, snapshot: Path, tools: Path, *
     if original != store_root(original):
         raise ValueError("retained catalog root moved or aliases another path")
     catalog_source_metadata(original)
-    expected = catalog_source_inventory(snapshot.resolve(strict=True))
+    snapshot = snapshot.resolve(strict=True)
+    expected = catalog_source_inventory(snapshot)
+    original_inventory = expected if snapshot == original else catalog_source_inventory(original)
     if (expected != value["inventory"] or digest_inventory(expected) != value["inventory_sha256"]
-            or catalog_source_inventory(original) != expected):
+            or original_inventory != expected):
         raise ValueError("retained catalog sources differ from the declared action snapshot")
     executable = str(tools / "bin/nix-store")
     subprocess.run([executable, "--verify-path", str(original)], check=True, capture_output=True, timeout=60)
@@ -841,11 +844,35 @@ def verify_retained_catalog_sources(record: Path, snapshot: Path, tools: Path, *
     if (len(pins) != 1 or pins[0]["path"] != str(expected_pin)
             or pins[0]["store_path"] != str(original) or expected_pin.resolve(strict=True) != original):
         raise ValueError("retained catalog source GC root is missing or changed")
-    verify_registered_gc_roots(tools, pins)
+    verify_registered_gc_roots(tools, pins, _registered_roots)
     return original
 
 
-def verify_registered_gc_roots(tools: Path, pins: list[dict]) -> None:
+class _RegisteredGcRoots:
+    """One current collector observation shared only within a verification."""
+
+    __slots__ = ("tools", "store_paths", "_pairs")
+
+    def __init__(self, tools: Path, store_paths: list[str]):
+        object.__setattr__(self, "tools", tools)
+        object.__setattr__(self, "store_paths", frozenset(store_paths))
+        object.__setattr__(self, "_pairs", None)
+
+    def __setattr__(self, name, value):
+        raise AttributeError("collector observations are immutable")
+
+    @property
+    def pairs(self) -> frozenset[tuple[str, ...]]:
+        if self._pairs is None:
+            registered = subprocess.check_output(
+                [str(self.tools / "bin/nix-store"), "--query", "--roots", *sorted(self.store_paths)],
+                text=True, timeout=60).splitlines()
+            object.__setattr__(self, "_pairs", frozenset(tuple(line.split(" -> ", 1)) for line in registered))
+        return self._pairs
+
+
+def verify_registered_gc_roots(tools: Path, pins: list[dict],
+                               _registered_roots: _RegisteredGcRoots | None = None) -> None:
     """A symlink alone does not establish registration with the Nix collector."""
     expected = set()
     for pinned in pins:
@@ -855,12 +882,12 @@ def verify_registered_gc_roots(tools: Path, pins: list[dict]) -> None:
         expected.add((str(target), pinned["store_path"]))
     if not expected:
         return
-    registered = subprocess.check_output(
-        [str(tools / "bin/nix-store"), "--query", "--roots",
-         *sorted({store_path for _, store_path in expected})],
-        text=True, timeout=60).splitlines()
-    pairs = {tuple(line.split(" -> ", 1)) for line in registered}
-    if not expected <= pairs:
+    store_paths = {store_path for _, store_path in expected}
+    observation = _registered_roots or _RegisteredGcRoots(tools, sorted(store_paths))
+    if (type(observation) is not _RegisteredGcRoots
+            or observation.tools != tools or not store_paths <= observation.store_paths):
+        raise ValueError("Nix GC root observation does not cover the selected tools and roots")
+    if not expected <= observation.pairs:
         raise ValueError("deployment Nix GC root is not registered")
 
 def native_catalog_selection(catalog: Path, original: Path) -> dict:
@@ -897,7 +924,7 @@ def native_catalog_products(root: Path, build_record: str = NATIVE_CATALOG_BUILD
     return entries
 
 
-def verify_native_catalog(root: Path, tools: Path) -> dict:
+def verify_native_catalog(root: Path, tools: Path, *, _registered_roots: _RegisteredGcRoots | None = None) -> dict:
     shared = root / "share/exomonad"
     contract = json.loads((shared / "native-build-contract.json").read_text())
     catalog = shared / "catalog/catalog.json"
@@ -917,7 +944,8 @@ def verify_native_catalog(root: Path, tools: Path) -> dict:
         origin = Path(receipt["retention_record_origin"])
     retained = json.loads(record.read_text())
     original = Path(retained["original_root"])
-    verify_retained_catalog_sources(record, original, tools, record_origin=origin)
+    verify_retained_catalog_sources(record, original, tools, record_origin=origin,
+                                    _registered_roots=_registered_roots)
     selection = native_catalog_selection(catalog, original)
     products = native_catalog_products(catalog.parent)
     products_digest = digest_inventory(products)
@@ -1461,9 +1489,10 @@ class _VerifiedNativeCatalog:
         raise AttributeError("verified native catalog capsules are immutable")
 
 
-def _verify_native_catalog_bundle(root: Path, tools: Path, contract: dict) -> _VerifiedNativeCatalog:
+def _verify_native_catalog_bundle(root: Path, tools: Path, contract: dict, *,
+                                  _registered_roots: _RegisteredGcRoots | None = None) -> _VerifiedNativeCatalog:
     root = root.resolve(strict=True)
-    catalog = verify_native_catalog(root, tools)
+    catalog = verify_native_catalog(root, tools, _registered_roots=_registered_roots)
     root_entry = verify_native_root_entry(root, contract["native_catalog"])
     builtin_entries = verify_native_builtin_entries(root, contract["native_catalog"])
     if catalog != contract["native_catalog"]:
@@ -1836,10 +1865,12 @@ def verify(path: Path) -> dict:
         if str(store_root(path)) != item["store_path"]:
             raise ValueError(f"declared Nix selection changed: {path}")
     tools = native_runtime_tools(Path(descriptor["external_inputs"]["runtime_tools"]["path"]))
+    registered_roots = _RegisteredGcRoots(tools, descriptor["nix_closure"]["roots"])
     expected_roots = {item["store_path"] for item in descriptor["external_inputs"].values()}
     verified_catalog = None
     if descriptor["stdlib_mode"] == "catalog-backed":
-        verified_catalog = _verify_native_catalog_bundle(root, tools, contract)
+        verified_catalog = _verify_native_catalog_bundle(
+            root, tools, contract, _registered_roots=registered_roots)
         expected_roots.add(verified_catalog.snapshot_root)
     for item in descriptor["elf_runtime"].values():
         if item["linkage"] == "dynamic":
@@ -1856,7 +1887,7 @@ def verify(path: Path) -> dict:
     for pinned in descriptor["gc_roots"]:
         if Path(pinned["path"]).resolve(strict=True) != Path(pinned["store_path"]):
             raise ValueError("deployment Nix GC root was removed or changed")
-    verify_registered_gc_roots(tools, descriptor["gc_roots"])
+    verify_registered_gc_roots(tools, descriptor["gc_roots"], registered_roots)
     expected_environment = _native_environment(root, verified_catalog, tools)
     expected_environment.update(
         TIDEPOOL_BROWSER_NODE=descriptor["external_inputs"]["TIDEPOOL_BROWSER_NODE"]["path"],

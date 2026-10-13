@@ -2303,6 +2303,48 @@ class CatalogSourceTests(unittest.TestCase):
                 qualification.verify_retained_catalog_sources(record, self.snapshot, tools)
         self.assertEqual(pin.resolve(), original)
 
+    def test_one_collector_observation_checks_all_expected_pairs_and_later_calls_refresh(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        other = self.root / 'other-store-root'
+        other.mkdir()
+        other_pin = self.root / 'other-pin'
+        other_pin.symlink_to(other)
+        first = {'path': str(pin), 'store_path': str(original)}
+        second = {'path': str(other_pin), 'store_path': str(other)}
+        with patch.object(qualification.subprocess, 'check_output', return_value=
+                          f'{pin} -> {original}\n{other_pin} -> {other}') as query:
+            observation = qualification._RegisteredGcRoots(tools, [str(original), str(other)])
+            qualification.verify_registered_gc_roots(tools, [first], observation)
+            qualification.verify_registered_gc_roots(tools, [first, second], observation)
+            query.assert_called_once()
+            self.assertEqual(query.call_args.args[0][3:], sorted([str(original), str(other)]))
+            with self.assertRaisesRegex(ValueError, 'selected tools and roots'):
+                qualification.verify_registered_gc_roots(other, [first], observation)
+            uncovered = qualification._RegisteredGcRoots(tools, [str(original)])
+            with self.assertRaisesRegex(ValueError, 'selected tools and roots'):
+                qualification.verify_registered_gc_roots(tools, [second], uncovered)
+            query.return_value = f'{pin} -> {original}'
+            with self.assertRaisesRegex(ValueError, 'not registered'):
+                qualification.verify_registered_gc_roots(tools, [first, second])
+            self.assertEqual(query.call_count, 2)
+            other_pin.unlink()
+            with self.assertRaises(FileNotFoundError):
+                qualification.verify_registered_gc_roots(tools, [second], observation)
+
+    def test_retention_inventories_each_distinct_tree_and_rechecks_on_later_calls(self):
+        original, tools, record, pin, nar = self.retained_fixture()
+        with self.nix_checks(nar, [pin]), patch.object(qualification.subprocess, 'run'), \
+             patch.object(qualification, 'catalog_source_inventory',
+                          wraps=qualification.catalog_source_inventory) as inventory:
+            self.assertEqual(qualification.verify_retained_catalog_sources(record, original, tools), original)
+            self.assertEqual([call.args[0] for call in inventory.call_args_list], [original])
+            inventory.reset_mock()
+            self.assertEqual(qualification.verify_retained_catalog_sources(record, self.snapshot, tools), original)
+            self.assertEqual([call.args[0] for call in inventory.call_args_list], [self.snapshot, original])
+            (original / 'lib/Library.hs').write_text('changed source')
+            with self.assertRaisesRegex(ValueError, 'declared action snapshot'):
+                qualification.verify_retained_catalog_sources(record, original, tools)
+
     def test_declared_record_copy_keeps_the_original_gc_evidence_location(self):
         original, tools, record, pin, nar = self.retained_fixture()
         declared = self.root / 'declared.json'
