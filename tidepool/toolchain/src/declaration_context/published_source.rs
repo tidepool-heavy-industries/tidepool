@@ -240,7 +240,6 @@ impl ExactDeclarationContext {
             })
             .map(|(root, original, revision)| {
                 let context = self.published_context_for_root(&root, original)?;
-                context.normalize()?;
                 Ok(Arc::new(PublishedSourceOriginalSelection {
                     context: Arc::new(context),
                     revision,
