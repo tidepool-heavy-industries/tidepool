@@ -166,7 +166,11 @@ pub(super) enum ResidentCommand {
         reply: RpcReplyPort<Result<(), String>>,
     },
     PolicyInstalled(Option<crate::InstalledToolLease>),
-    GenerationPublished { context:ActorSessionContext, owner:Arc<WorkbenchPublicOwner>, installation:crate::InstalledToolLease },
+    GenerationPublished {
+        context: ActorSessionContext,
+        owner: Arc<WorkbenchPublicOwner>,
+        installation: crate::InstalledToolLease,
+    },
     Request(Request),
     Completed {
         sequence: u64,
@@ -395,8 +399,19 @@ impl LifecycleHandle {
         )));
     }
 
-    pub(crate) fn generation_published(&self, context:ActorSessionContext, owner:Arc<WorkbenchPublicOwner>, installation:crate::InstalledToolLease) {
-        let _ = self.address.cast(LifecycleCommand::Resident(Box::new(ResidentCommand::GenerationPublished { context,owner,installation })));
+    pub(crate) fn generation_published(
+        &self,
+        context: ActorSessionContext,
+        owner: Arc<WorkbenchPublicOwner>,
+        installation: crate::InstalledToolLease,
+    ) {
+        let _ = self.address.cast(LifecycleCommand::Resident(Box::new(
+            ResidentCommand::GenerationPublished {
+                context,
+                owner,
+                installation,
+            },
+        )));
     }
 
     pub(crate) fn retire_resident(&self, terminal: crate::ActorTerminal) {
@@ -595,16 +610,25 @@ pub(super) fn handle(
                 }
             }
         }
-        ResidentCommand::GenerationPublished { context,owner,installation } => {
+        ResidentCommand::GenerationPublished {
+            context,
+            owner,
+            installation,
+        } => {
             if !state.is_closed() {
                 if let Some(resident) = &mut state.resident {
                     let original = resident.current.descriptor.placement();
                     if context.actor == resident.current.context.actor
                         && context.placement.session == original.session
                         && context.placement.resource_scope == original.resource_scope
-                        && owner.matches_context(&context) {
+                        && owner.matches_context(&context)
+                    {
                         resident.current.context = context;
-                        resident.current.public_owner = if owner.native_readiness().is_some() { ActorPublicOwnerPlane::DurableCommitted(owner) } else { ActorPublicOwnerPlane::Ephemeral(owner) };
+                        resident.current.public_owner = if owner.native_readiness().is_some() {
+                            ActorPublicOwnerPlane::DurableCommitted(owner)
+                        } else {
+                            ActorPublicOwnerPlane::Ephemeral(owner)
+                        };
                         resident.current.installed_policy = Some(installation);
                         state.publish();
                     }
@@ -959,7 +983,11 @@ fn complete(
                     .with_execution_id(identity.operation.clone());
                 let mut invocation = crate::ActorWorkbenchInvocation::issued(
                     request,
-                    resident.current.installed_policy.clone().map(crate::resident_workbench::ActorRequestSnapshot::Bootstrap),
+                    resident
+                        .current
+                        .installed_policy
+                        .clone()
+                        .map(crate::resident_workbench::ActorRequestSnapshot::Bootstrap),
                     None,
                 );
                 invocation.initial_context = true;
@@ -1127,7 +1155,7 @@ fn advance(state: &mut LifecycleState, address: &RactorRef<LifecycleCommand>) {
             } => {
                 // Provider attachment is stable actor authority. Issued owners
                 // may name an earlier notebook generation retained by live work.
-                let owner = expected.or_else(||current.public_owner.ready().cloned());
+                let owner = expected.or_else(|| current.public_owner.ready().cloned());
                 if closed
                     || owner.as_ref().is_none_or(|owner| {
                         let placement = owner.placement();

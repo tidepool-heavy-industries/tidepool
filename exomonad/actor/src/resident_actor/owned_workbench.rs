@@ -154,13 +154,20 @@ pub(crate) struct WorkbenchPublicOwner {
 /// Prevalidated actor identity and placement for a prepared generation.
 /// The runtime callback supplies the readiness of that same prepared scope.
 pub(crate) struct PreparedWorkbenchGenerationOwner {
-    actor:ActorRef,
-    placement:crate::ActorPlacement,
+    actor: ActorRef,
+    placement: crate::ActorPlacement,
 }
 
 impl PreparedWorkbenchGenerationOwner {
-    pub(crate) fn bind(self,readiness:Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>) -> Arc<WorkbenchPublicOwner> {
-        Arc::new(WorkbenchPublicOwner { actor:self.actor,placement:self.placement,readiness })
+    pub(crate) fn bind(
+        self,
+        readiness: Option<Arc<tidepool_runtime::session::RuntimeDurablePublicReadiness>>,
+    ) -> Arc<WorkbenchPublicOwner> {
+        Arc::new(WorkbenchPublicOwner {
+            actor: self.actor,
+            placement: self.placement,
+            readiness,
+        })
     }
 }
 
@@ -302,19 +309,39 @@ impl WorkbenchPublicOwner {
             || context.placement.resource_scope != placement.resource_scope
             || context.placement.lexical_scope != scope.scope()
         {
-            return Err(ResidentActorWorkbenchError::ActorProtocol("notebook generation differs from actor/session/resource authority".into()));
+            return Err(ResidentActorWorkbenchError::ActorProtocol(
+                "notebook generation differs from actor/session/resource authority".into(),
+            ));
         }
-        match (descriptor.persistence_policy(),native_owner) {
-            (crate::ActorPersistencePolicy::Ephemeral,None) => {},
-            (crate::ActorPersistencePolicy::Durable,Some(owner)) => {
-                let expected = descriptor.actor_path().and_then(|path| tidepool_runtime::session::RecoveryPublicOwner::new(path,context.actor.incarnation.0));
-                if expected != Some(owner.for_notebook_generation(tidepool_runtime::session::NotebookGenerationId::INITIAL)) {
-                    return Err(ResidentActorWorkbenchError::ActorProtocol("prepared generation has a foreign native actor owner".into()));
+        match (descriptor.persistence_policy(), native_owner) {
+            (crate::ActorPersistencePolicy::Ephemeral, None) => {}
+            (crate::ActorPersistencePolicy::Durable, Some(owner)) => {
+                let expected = descriptor.actor_path().and_then(|path| {
+                    tidepool_runtime::session::RecoveryPublicOwner::new(
+                        path,
+                        context.actor.incarnation.0,
+                    )
+                });
+                if expected
+                    != Some(owner.for_notebook_generation(
+                        tidepool_runtime::session::NotebookGenerationId::INITIAL,
+                    ))
+                {
+                    return Err(ResidentActorWorkbenchError::ActorProtocol(
+                        "prepared generation has a foreign native actor owner".into(),
+                    ));
                 }
-            },
-            _ => return Err(ResidentActorWorkbenchError::ActorProtocol("notebook generation persistence differs from actor".into())),
+            }
+            _ => {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "notebook generation persistence differs from actor".into(),
+                ))
+            }
         }
-        Ok(PreparedWorkbenchGenerationOwner { actor:context.actor,placement:context.placement })
+        Ok(PreparedWorkbenchGenerationOwner {
+            actor: context.actor,
+            placement: context.placement,
+        })
     }
 
     pub(crate) fn native_readiness(
@@ -963,12 +990,9 @@ where
             .tool_call()
             .filter(|call| call.name == crate::status_tool::STATUS_TOOL)
             .map(|call| crate::status_tool::parse(call.arguments.clone()));
-        let reload = request.tool_call().is_some_and(|call| {
-            matches!(
-                call.name.as_str(),
-                crate::reload_tool::RELOAD_TOOL
-            )
-        });
+        let reload = request
+            .tool_call()
+            .is_some_and(|call| matches!(call.name.as_str(), crate::reload_tool::RELOAD_TOOL));
         if inspection.is_none() && !reload && compilation_authority.is_none() {
             return terminal_task(Err(KernelInvocationFailure::Rejected {
                 receipts: Vec::new(),
@@ -3160,7 +3184,7 @@ mod authority_tests {
             live_payload: Default::default(),
             source_imports: Default::default(),
             haskell_effects_alias: String::new().into(),
-            source_layer: Arc::from([PathBuf::from("original-root")]),
+            source_layer: vec![PathBuf::from("original-root")].into(),
         }
     }
 
@@ -3169,7 +3193,7 @@ mod authority_tests {
         let source = crate::CheckpointSourceLayer::default();
         let mut async_context = context();
         async_context.haskell_effects_alias = "'[Replies]".into();
-        async_context.source_layer = Arc::from([]);
+        async_context.source_layer = Vec::new().into();
         let mut sync_context = async_context.clone();
         sync_context.haskell_effects_alias = "'[ContextReadWrite, Replies]".into();
         let (_, asynchronous) =
@@ -3187,7 +3211,7 @@ mod authority_tests {
     fn effect_type_imports_are_part_of_exact_compilation_authority() {
         let source = crate::CheckpointSourceLayer::default();
         let mut original = context();
-        original.source_layer = Arc::from([]);
+        original.source_layer = Vec::new().into();
         let digests = [
             None,
             Some("qualified Tidepool.Agent.Reply as Reply"),
@@ -3260,7 +3284,7 @@ mod authority_tests {
                 .is_err()
         );
         let mut empty = context();
-        empty.source_layer = Arc::from([]);
+        empty.source_layer = Vec::new().into();
         let tool = crate::InstalledToolLease::new(
             crate::ActorRef::first(crate::ActorId(9)),
             Default::default(),

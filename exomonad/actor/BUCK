@@ -792,9 +792,9 @@ tidepool_rust_test_cases(
     binary = ":actor_binary",
     exact_tests = [
         "resident_local_actor::completion_progress::parked_cell_does_not_block_another_calls_acknowledgement_or_control",
-        "resident_local_actor::reload_progress::cancelled_and_rejected_reload_release_the_administrative_owner",
-        "resident_local_actor::reload_progress::two_parked_cells_reload_and_control_progress_independently",
-        "resident_local_actor::reload_uncertainty::visible_reload_uncertainty_and_failed_freeze_preserve_failure",
+        "resident_local_actor::reload_progress::invalid_reload_arguments_release_the_administrative_owner",
+        "resident_local_actor::reload_progress::unavailable_reload_leaves_parked_cells_and_control_independent",
+        "resident_local_actor::reload_uncertainty::unavailable_generation_does_not_recapture_source_or_discard_bindings",
     ],
     expected_count = 4,
     jobs = 1,

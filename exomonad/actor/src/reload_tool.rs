@@ -20,7 +20,9 @@ pub(crate) struct ReloadArguments {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("reload arguments must be an object with an optional `also_check` list of module names: {0}")]
+#[error(
+    "reload arguments must be an object with an optional `also_check` list of module names: {0}"
+)]
 pub(crate) struct ReloadInputError(String);
 
 pub(crate) fn declaration() -> HostedTool {
@@ -45,9 +47,7 @@ pub(crate) fn declaration() -> HostedTool {
     })
 }
 
-pub(crate) fn parse(
-    arguments: serde_json::Value,
-) -> Result<ReloadArguments, ReloadInputError> {
+pub(crate) fn parse(arguments: serde_json::Value) -> Result<ReloadArguments, ReloadInputError> {
     serde_json::from_value::<ReloadArguments>(arguments)
         .map_err(|error| ReloadInputError(error.to_string()))
 }

@@ -54,8 +54,7 @@ impl ResidentInteractivePolicy {
         let custom = tools.into_iter().filter(|tool| {
             !matches!(
                 tool.name(),
-                crate::status_tool::STATUS_TOOL
-                    | crate::reload_tool::RELOAD_TOOL
+                crate::status_tool::STATUS_TOOL | crate::reload_tool::RELOAD_TOOL
             )
         });
         Self {
@@ -207,11 +206,17 @@ impl ResidentToolEndpoint for ResidentInteractivePolicy {
     }
 
     fn request_instructions(&self) -> Option<&str> {
-        self.issued_tools.as_ref()?.generation().map(|generation| generation.prompts.instructions())
+        self.issued_tools
+            .as_ref()?
+            .generation()
+            .map(|generation| generation.prompts.instructions())
     }
 
     fn request_generation(&self) -> Option<tidepool_runtime::session::NotebookGenerationId> {
-        self.issued_tools.as_ref()?.generation().map(|generation| generation.id)
+        self.issued_tools
+            .as_ref()?
+            .generation()
+            .map(|generation| generation.id)
     }
 
     fn retained_operation(
@@ -367,14 +372,7 @@ mod tests {
 
     #[test]
     fn project_tools_checks_names_and_supported_input_before_publication() {
-        for name in [
-            "",
-            "status",
-            "reload",
-            "bad.name",
-            "λ",
-            &"a".repeat(65),
-        ] {
+        for name in ["", "status", "reload", "bad.name", "λ", &"a".repeat(65)] {
             assert!(project_tools(vec![raw(name)]).is_err(), "{name}");
         }
         assert!(project_tools(vec![raw("lookup")]).is_ok());

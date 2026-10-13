@@ -1318,26 +1318,46 @@ impl InstalledToolLease {
         #[derive(serde::Serialize)]
         struct Installation<'a> {
             version: u32,
-            source_sha256: &'a [u8;32],
+            source_sha256: &'a [u8; 32],
             acquisition: &'a crate::ToolsetAcquisition,
             entry: Option<&'a str>,
             effects: &'a str,
             declarations: &'a [exomonad_tool::HostedTool],
             slots: &'a [String],
         }
-        let evidence = self.source().generation_evidence().ok_or("source-backed generation has no complete retained artifact evidence")?;
-        if evidence.reference != source { return Err("installation and generation select different source artifacts".into()); }
-        let tools = self.tools().ok_or("generation has no native installation")?;
-        let acquisition = self.toolset_acquisition().ok_or("generation has no compiler-issued installation acquisition")?;
-        if acquisition.selection().is_none() { return Err("generation installer has no retained original for recovery".into()); }
+        let evidence = self
+            .source()
+            .generation_evidence()
+            .ok_or("source-backed generation has no complete retained artifact evidence")?;
+        if evidence.reference != source {
+            return Err("installation and generation select different source artifacts".into());
+        }
+        let tools = self
+            .tools()
+            .ok_or("generation has no native installation")?;
+        let acquisition = self
+            .toolset_acquisition()
+            .ok_or("generation has no compiler-issued installation acquisition")?;
+        if acquisition.selection().is_none() {
+            return Err("generation installer has no retained original for recovery".into());
+        }
         let installation = Installation {
-            version:1,source_sha256:source.sha256(),acquisition,
-            entry:tools.origin.resolved().and_then(|resolved|resolved.entry.as_deref()),
-            effects:tools.dispatcher_effects.expression(),declarations:&tools.declarations,slots:&tools.slots,
+            version: 1,
+            source_sha256: source.sha256(),
+            acquisition,
+            entry: tools
+                .origin
+                .resolved()
+                .and_then(|resolved| resolved.entry.as_deref()),
+            effects: tools.dispatcher_effects.expression(),
+            declarations: &tools.declarations,
+            slots: &tools.slots,
         };
-        let bytes = serde_json::to_vec(&installation).map_err(|error|error.to_string())?;
+        let bytes = serde_json::to_vec(&installation).map_err(|error| error.to_string())?;
         Ok(tidepool_runtime::session::DurableGenerationReferences {
-            source, installation:tidepool_runtime::session::GenerationArtifactReference::capture(bytes), prompts,
+            source,
+            installation: tidepool_runtime::session::GenerationArtifactReference::capture(bytes),
+            prompts,
         })
     }
 
@@ -1447,8 +1467,12 @@ impl InstalledToolsState {
             InstalledToolsAvailability::Available(lease) => {
                 InstalledToolsObservation::Available(lease.tools_arc())
             }
-            InstalledToolsAvailability::Generation(generation) => InstalledToolsObservation::Available(generation.installation.tools_arc()),
-            InstalledToolsAvailability::GenerationUnavailable(generation) => InstalledToolsObservation::SourceUnavailable(generation.installation.tools_arc()),
+            InstalledToolsAvailability::Generation(generation) => {
+                InstalledToolsObservation::Available(generation.installation.tools_arc())
+            }
+            InstalledToolsAvailability::GenerationUnavailable(generation) => {
+                InstalledToolsObservation::SourceUnavailable(generation.installation.tools_arc())
+            }
             InstalledToolsAvailability::SourceUnavailable { tools, .. } => {
                 InstalledToolsObservation::SourceUnavailable(tools.clone())
             }
@@ -1469,9 +1493,15 @@ impl InstalledToolsState {
 
     pub(crate) fn snapshot(&self) -> Option<ActorRequestSnapshot> {
         match &*self.0.lock() {
-            InstalledToolsAvailability::Available(lease) => Some(ActorRequestSnapshot::Bootstrap(lease.clone())),
-            InstalledToolsAvailability::Generation(generation) => Some(ActorRequestSnapshot::Generation(generation.clone())),
-            InstalledToolsAvailability::Empty | InstalledToolsAvailability::GenerationUnavailable(_) | InstalledToolsAvailability::SourceUnavailable { .. } => None,
+            InstalledToolsAvailability::Available(lease) => {
+                Some(ActorRequestSnapshot::Bootstrap(lease.clone()))
+            }
+            InstalledToolsAvailability::Generation(generation) => {
+                Some(ActorRequestSnapshot::Generation(generation.clone()))
+            }
+            InstalledToolsAvailability::Empty
+            | InstalledToolsAvailability::GenerationUnavailable(_)
+            | InstalledToolsAvailability::SourceUnavailable { .. } => None,
         }
     }
 
@@ -1509,18 +1539,21 @@ impl InstalledToolsState {
         {
             return Err(SpecReplacementError::SurfaceChanged);
         }
-        let replacement = InstalledToolLease::new(expected.actor(), expected.source().clone(), Some(tools));
+        let replacement =
+            InstalledToolLease::new(expected.actor(), expected.source().clone(), Some(tools));
         *current = match &*current {
-            InstalledToolsAvailability::Generation(generation) => InstalledToolsAvailability::Generation(Arc::new(ActorGeneration {
-                id: generation.id,
-                installation: replacement,
-                prompts: generation.prompts.clone(),
-                context: generation.context.clone(),
-                public_owner: generation.public_owner.clone(),
-                scope: generation.scope.clone(),
-                configuration_digest: generation.configuration_digest,
-                durable: generation.durable.clone(),
-            })),
+            InstalledToolsAvailability::Generation(generation) => {
+                InstalledToolsAvailability::Generation(Arc::new(ActorGeneration {
+                    id: generation.id,
+                    installation: replacement,
+                    prompts: generation.prompts.clone(),
+                    context: generation.context.clone(),
+                    public_owner: generation.public_owner.clone(),
+                    scope: generation.scope.clone(),
+                    configuration_digest: generation.configuration_digest,
+                    durable: generation.durable.clone(),
+                }))
+            }
             _ => InstalledToolsAvailability::Available(replacement),
         };
         Ok(())
@@ -1537,7 +1570,9 @@ impl InstalledToolsState {
                     tools: lease.tools_arc(),
                 }
             }
-            InstalledToolsAvailability::Generation(generation) => InstalledToolsAvailability::GenerationUnavailable(generation),
+            InstalledToolsAvailability::Generation(generation) => {
+                InstalledToolsAvailability::GenerationUnavailable(generation)
+            }
             unavailable => unavailable,
         };
     }
@@ -1548,7 +1583,10 @@ impl InstalledToolsState {
 }
 
 impl<H, O> ResidentActorWorkbench<H, O>
-where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
+where
+    H: DispatchEffect<O> + Send + 'static,
+    O: OutputSink + Sync + 'static,
+{
     pub(crate) async fn prepare_actor_generation(
         &self,
         context: crate::ActorSessionContext,
@@ -1556,36 +1594,83 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
         expected: Option<Arc<ActorGeneration>>,
         references: tidepool_runtime::session::DurableGenerationReferences,
     ) -> Result<PreparedActorGeneration, ResidentActorWorkbenchError> {
-        self.access.with_machine(context, move |session, context, _| {
-            let mut next_context = context.clone();
-            let scope = if expected.is_some() {
-                let retained = session.mint_isolated_scope_with_lease().map_err(ResidentError::Session)?;
-                next_context.placement.lexical_scope = retained.scope();
-                // A replacement notebook inherits no notebook facades, bindings or imports.
-                next_context.source_imports = crate::ActorSourceImports::default();
-                retained
-            } else {
-                session.adopt_initial_notebook_scope(context.placement.lexical_scope).map_err(ResidentError::Session)?
-            };
-            session.validate_lexical_scope_lease(scope.scope(),&scope)?;
-            let commit = match descriptor.persistence_policy() {
-                crate::ActorPersistencePolicy::Ephemeral => PreparedGenerationCommit::Ephemeral(
-                    expected.as_ref().map_or(Ok(tidepool_runtime::session::NotebookGenerationId::INITIAL), |generation| generation.id.next())
-                        .map_err(|error| ResidentActorWorkbenchError::ActorProtocol(error.to_string()))?
-                ),
-                crate::ActorPersistencePolicy::Durable => {
-                    let owner = descriptor.actor_path().and_then(|path| tidepool_runtime::session::RecoveryPublicOwner::new(path, context.actor.incarnation.0))
-                        .ok_or_else(|| ResidentActorWorkbenchError::ActorProtocol("durable generation has no canonical actor owner".into()))?;
-                    let prepared = session.prepare_notebook_generation(scope.scope(), &owner,
-                        expected.as_ref().and_then(|generation| generation.durable.clone()), references).map_err(ResidentError::Session)?;
-                    let selected = prepared.selection();
-                    PreparedGenerationCommit::Durable { prepared, selected }
-                },
-            };
-            let native_owner = match &commit { PreparedGenerationCommit::Ephemeral(_) => None, PreparedGenerationCommit::Durable { prepared,.. } => Some(prepared.owner()) };
-            let public_owner = crate::resident_actor::WorkbenchPublicOwner::prepare_generation(&next_context,&descriptor,&scope,native_owner)?;
-            Ok(PreparedActorGeneration { context:next_context, scope, commit,public_owner })
-        }).await
+        self.access
+            .with_machine(context, move |session, context, _| {
+                let mut next_context = context.clone();
+                let scope = if expected.is_some() {
+                    let retained = session
+                        .mint_isolated_scope_with_lease()
+                        .map_err(ResidentError::Session)?;
+                    next_context.placement.lexical_scope = retained.scope();
+                    // A replacement notebook inherits no notebook facades, bindings or imports.
+                    next_context.source_imports = crate::ActorSourceImports::default();
+                    retained
+                } else {
+                    session
+                        .adopt_initial_notebook_scope(context.placement.lexical_scope)
+                        .map_err(ResidentError::Session)?
+                };
+                session.validate_lexical_scope_lease(scope.scope(), &scope)?;
+                let commit = match descriptor.persistence_policy() {
+                    crate::ActorPersistencePolicy::Ephemeral => {
+                        PreparedGenerationCommit::Ephemeral(
+                            expected
+                                .as_ref()
+                                .map_or(
+                                    Ok(tidepool_runtime::session::NotebookGenerationId::INITIAL),
+                                    |generation| generation.id.next(),
+                                )
+                                .map_err(|error| {
+                                    ResidentActorWorkbenchError::ActorProtocol(error.to_string())
+                                })?,
+                        )
+                    }
+                    crate::ActorPersistencePolicy::Durable => {
+                        let owner = descriptor
+                            .actor_path()
+                            .and_then(|path| {
+                                tidepool_runtime::session::RecoveryPublicOwner::new(
+                                    path,
+                                    context.actor.incarnation.0,
+                                )
+                            })
+                            .ok_or_else(|| {
+                                ResidentActorWorkbenchError::ActorProtocol(
+                                    "durable generation has no canonical actor owner".into(),
+                                )
+                            })?;
+                        let prepared = session
+                            .prepare_notebook_generation(
+                                scope.scope(),
+                                &owner,
+                                expected
+                                    .as_ref()
+                                    .and_then(|generation| generation.durable.clone()),
+                                references,
+                            )
+                            .map_err(ResidentError::Session)?;
+                        let selected = prepared.selection();
+                        PreparedGenerationCommit::Durable { prepared, selected }
+                    }
+                };
+                let native_owner = match &commit {
+                    PreparedGenerationCommit::Ephemeral(_) => None,
+                    PreparedGenerationCommit::Durable { prepared, .. } => Some(prepared.owner()),
+                };
+                let public_owner = crate::resident_actor::WorkbenchPublicOwner::prepare_generation(
+                    &next_context,
+                    &descriptor,
+                    &scope,
+                    native_owner,
+                )?;
+                Ok(PreparedActorGeneration {
+                    context: next_context,
+                    scope,
+                    commit,
+                    public_owner,
+                })
+            })
+            .await
     }
 
     /// The existing machine checkout and one actor issuance fence own publication.
@@ -1599,7 +1684,7 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
         prepared: PreparedActorGeneration,
         installation: InstalledToolLease,
         prompts: tidepool_runtime::session::ComposedPromptSnapshot,
-        configuration_digest: [u8;32],
+        configuration_digest: [u8; 32],
         publication: Arc<tidepool_runtime::session::PublicationDecision>,
     ) -> Result<ActorGenerationCommit, ResidentActorWorkbenchError> {
         self.access.with_machine(context, move |session, _, _| {
@@ -1612,8 +1697,7 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
                 _ => false,
             };
             if !same { return Ok(ActorGenerationCommit::Refused("actor generation changed during reload preparation".into())); }
-            let PreparedActorGeneration { mut context, scope, commit,public_owner } = prepared;
-            context.source_layer = installation.source().include_paths().to_vec().into();
+            let PreparedActorGeneration { context, scope, commit,public_owner } = prepared;
             let mut visible = None;
             match commit {
                 PreparedGenerationCommit::Ephemeral(id) => {
@@ -1630,7 +1714,17 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
                         let generation = Arc::new(ActorGeneration { id:selected.generation(),installation,prompts,context,public_owner:owner,scope,configuration_digest,durable:Some(selected) });
                         *current = InstalledToolsAvailability::Generation(generation.clone());
                         visible = Some(generation);
-                    }).map_err(ResidentError::Session)?;
+                    });
+                    let result = match result {
+                        Ok(result) => result,
+                        Err(error) if matches!(publication.phase(),tidepool_runtime::session::PublicationPhase::Published | tidepool_runtime::session::PublicationPhase::CommitClaimed { .. }) => {
+                            if let InstalledToolsAvailability::Generation(generation) = &*current {
+                                *current=InstalledToolsAvailability::GenerationUnavailable(generation.clone());
+                            }
+                            return Ok(ActorGenerationCommit::Unconfirmed(error.to_string()));
+                        },
+                        Err(error) => return Err(ResidentActorWorkbenchError::Resident(ResidentError::Session(error))),
+                    };
                     match result {
                         tidepool_runtime::session::DurablePublicOwnerPublication::Committed(_) => {},
                         tidepool_runtime::session::DurablePublicOwnerPublication::Refused { error } => return Ok(ActorGenerationCommit::Refused(error.to_string())),
@@ -1643,7 +1737,15 @@ where H: DispatchEffect<O> + Send + 'static, O: OutputSink + Sync + 'static {
                     }
                 },
             }
-            Ok(ActorGenerationCommit::Published(visible.expect("confirmed publication installed a prepared generation")))
+            match visible {
+                Some(generation) => Ok(ActorGenerationCommit::Published(generation)),
+                None => {
+                    if let InstalledToolsAvailability::Generation(generation)=&*current {
+                        *current=InstalledToolsAvailability::GenerationUnavailable(generation.clone());
+                    }
+                    Ok(ActorGenerationCommit::Unconfirmed("native publication confirmed without its live generation; admission requires reconciliation".into()))
+                },
+            }
         }).await
     }
 }
@@ -4854,7 +4956,7 @@ where
             session = %context.placement.session,
             operation = "resident_turn",
         );
-        self.log_include_roots_if_changed(context.placement.session, &context.source_layer);
+        self.log_include_roots_if_changed(context.placement.session, context.source_layer.as_ref());
         let slot_owner = SLOT_CONTINUATION_OWNER.try_with(Clone::clone).ok();
         let invocation_cancel = INVOCATION_CANCEL.try_with(Arc::clone).ok();
         self.with_host_machine(
@@ -5211,8 +5313,9 @@ where
         // The roots this actor's cells resolve a module in, in GHC's order:
         // private helpers, then the run graph. Helpers cannot define
         // AgentSpec, so every actor discovers the run's current spec.
-        let mut roots = context.source_layer.to_vec();
-        roots.extend(self.access.source.base_include.iter().cloned());
+        let roots = context
+            .source_layer
+            .include_paths(&self.access.source.base_include);
         crate::agent_spec::resolve(roots, self.access.source.spec.as_deref())
     }
 
@@ -6901,7 +7004,8 @@ where
 
         let effects_alias = context.haskell_effects_alias.clone();
         let prepared = source.prepare(&view);
-        let source_layer_revision = crate::agent_spec::layer_revision(&context.source_layer);
+        let source_layer_revision =
+            crate::agent_spec::layer_revision(context.source_layer.as_ref());
         let mut answer = if crate::lookup::requires_inspection(
             &request,
             &prepared.imports,
@@ -7011,7 +7115,7 @@ where
                 let fresh_view = actor_compile_view(session, context, &revalidate_source)?;
                 let fresh_prepared = revalidate_source.prepare(&fresh_view);
                 let source_revision_unchanged =
-                    crate::agent_spec::layer_revision(&context.source_layer)
+                    crate::agent_spec::layer_revision(context.source_layer.as_ref())
                         == source_layer_revision;
                 let effect_alias_unchanged = context.haskell_effects_alias == effects_alias;
                 if !fresh_view.is_current_for(&view)
@@ -7166,7 +7270,7 @@ where
         let compiler_source = source.clone();
         let effects = context.haskell_effects_alias.clone();
         self.access
-            .log_include_roots_if_changed(context.placement.session, &context.source_layer);
+            .log_include_roots_if_changed(context.placement.session, context.source_layer.as_ref());
         let inspection_span = tracing::info_span!(
             "compile_blocking",
             actor = %context.actor,
@@ -13060,7 +13164,7 @@ pub(crate) mod request_tests {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: crate::ActorSourceImports::default(),
             haskell_effects_alias: effects_alias.into(),
-            source_layer: std::sync::Arc::from([]),
+            source_layer: Vec::new().into(),
         };
         (
             session,
@@ -13281,7 +13385,7 @@ pub(crate) mod request_tests {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: crate::ActorSourceImports::default(),
             haskell_effects_alias: effects_alias.into(),
-            source_layer: std::sync::Arc::from([]),
+            source_layer: Vec::new().into(),
         };
         (
             session,
@@ -14743,7 +14847,7 @@ pub(crate) mod request_tests {
             live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
             source_imports: crate::ActorSourceImports::default(),
             haskell_effects_alias: "'[]".into(),
-            source_layer: std::sync::Arc::from([]),
+            source_layer: Vec::new().into(),
         };
         let projection = ActorContextProjection {
             context,
@@ -17946,9 +18050,14 @@ pub(crate) mod request_tests {
                 decision.request_cancellation();
             }
             match outcome {
-                CandidateOutcome::Refused => assert!(matches!(state.replace_explicit(&old,Arc::clone(&candidate)),Err(SpecReplacementError::Unavailable))),
+                CandidateOutcome::Refused => assert!(matches!(
+                    state.replace_explicit(&old, Arc::clone(&candidate)),
+                    Err(SpecReplacementError::Unavailable)
+                )),
                 CandidateOutcome::Cancelled => assert!(decision.claim_commit().is_none()),
-                CandidateOutcome::Published => state.replace_explicit(&current,Arc::clone(&candidate)).unwrap(),
+                CandidateOutcome::Published => state
+                    .replace_explicit(&current, Arc::clone(&candidate))
+                    .unwrap(),
             }
             let expected = if matches!(outcome, CandidateOutcome::Published) {
                 &candidate
@@ -18630,26 +18739,67 @@ pub(crate) mod request_tests {
     #[tokio::test]
     async fn explicit_replacement_fence_refuses_changed_dispatch_and_retired_actor() {
         with_test_compiler_owner(async {
-            let (session,context,source,_root) = host_mount_fixture();
+            let (session, context, source, _root) = host_mount_fixture();
             let machines = Arc::new(ActorMachineRegistry::new());
-            machines.insert_idle(context.placement.session,Box::new(session));
-            let workbench = ResidentActorWorkbench::new(machines,source,None).with_compilation_authority(crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()));
-            let first = Arc::new(workbench.prepare_tools(context.clone(),1,vec![]).await.unwrap());
-            let second = Arc::new(workbench.prepare_tools(context.clone(),2,vec![]).await.unwrap());
-            assert!(!Arc::ptr_eq(&first.dispatch,&second.dispatch));
-            let expected = InstalledToolLease::new(context.actor,crate::CheckpointSourceLayer::default(),Some(first));
+            machines.insert_idle(context.placement.session, Box::new(session));
+            let workbench = ResidentActorWorkbench::new(machines, source, None)
+                .with_compilation_authority(
+                    crate::resident_actor::WorkbenchCompilationAuthority::for_test(context.clone()),
+                );
+            let first = Arc::new(
+                workbench
+                    .prepare_tools(context.clone(), 1, vec![])
+                    .await
+                    .unwrap(),
+            );
+            let second = Arc::new(
+                workbench
+                    .prepare_tools(context.clone(), 2, vec![])
+                    .await
+                    .unwrap(),
+            );
+            assert!(!Arc::ptr_eq(&first.dispatch, &second.dispatch));
+            let expected = InstalledToolLease::new(
+                context.actor,
+                crate::CheckpointSourceLayer::default(),
+                Some(first),
+            );
             let state = InstalledToolsState::default();
-            state.publish(InstalledToolLease::new(context.actor,crate::CheckpointSourceLayer::default(),Some(second.clone())));
-            assert!(matches!(state.replace_explicit(&expected,second.clone()),Err(SpecReplacementError::Unavailable)));
-            assert_eq!(state.current().unwrap().tools().unwrap().install,2);
-            assert_eq!(expected.tools().unwrap().install,1,"accepted original installation survives replacement");
+            state.publish(InstalledToolLease::new(
+                context.actor,
+                crate::CheckpointSourceLayer::default(),
+                Some(second.clone()),
+            ));
+            assert!(matches!(
+                state.replace_explicit(&expected, second.clone()),
+                Err(SpecReplacementError::Unavailable)
+            ));
+            assert_eq!(state.current().unwrap().tools().unwrap().install, 2);
+            assert_eq!(
+                expected.tools().unwrap().install,
+                1,
+                "accepted original installation survives replacement"
+            );
             state.invalidate_source();
-            assert!(state.snapshot().is_none(),"unavailable installation cannot issue new requests");
-            assert!(matches!(state.replace_explicit(&expected,second.clone()),Err(SpecReplacementError::Unavailable)));
+            assert!(
+                state.snapshot().is_none(),
+                "unavailable installation cannot issue new requests"
+            );
+            assert!(matches!(
+                state.replace_explicit(&expected, second.clone()),
+                Err(SpecReplacementError::Unavailable)
+            ));
             state.clear();
-            assert!(matches!(state.replace_explicit(&expected,second),Err(SpecReplacementError::Unavailable)));
-            assert!(state.snapshot().is_none(),"replacement cannot resurrect a retired installation");
-        }).await;
+            assert!(matches!(
+                state.replace_explicit(&expected, second),
+                Err(SpecReplacementError::Unavailable)
+            ));
+            assert!(
+                state.snapshot().is_none(),
+                "replacement cannot resurrect a retired installation"
+            );
+        })
+        .await;
     }
 
     #[tokio::test]

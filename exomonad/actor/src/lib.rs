@@ -133,9 +133,9 @@ pub use local_actor::{
 pub use mailbox::MailboxValue;
 pub use mount::{
     ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
-    ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers, CheckpointSourceLayer,
-    RetainedSourceLayer, SourceEntryStorage, SourceLayerIssuer, SourceLayerReload,
-    StagedActorSourceReload, SourceGenerationEvidence, SourceInspectionError,
+    ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers, ActorSourceRoots,
+    CheckpointSourceLayer, RetainedSourceLayer, SourceEntryStorage, SourceGenerationEvidence,
+    SourceInspectionError, SourceLayerIssuer, SourceLayerReload, StagedActorSourceReload,
 };
 pub use notification::{
     NotificationError, NotificationPoll, NotificationReceipt, NotificationSend, NotificationState,
@@ -144,7 +144,7 @@ pub use prompt_catalog::hosted_prompt_fingerprint as exomonad_hosted_prompt_fing
 pub use recovery::{
     ActorRecoveryJournal, ApplicationConversation, DurableActorAdmission, DurableActorApplication,
     DurableActorRecord, DurableActorTerminal, DurableRootSuccessorAdmission,
-    JournalApplicationBindingAck, JournalOwnerStatus, JournalBootRegistration,
+    JournalApplicationBindingAck, JournalBootRegistration, JournalOwnerStatus,
     RecoveryBootRegistration, RootRecoveryPlacement, RootStartupIntent, RootStartupManifestPin,
 };
 pub use request::{

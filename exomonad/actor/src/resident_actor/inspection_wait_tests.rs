@@ -22,7 +22,7 @@ fn context(session: SessionId, scope: ScopeId) -> ActorSessionContext {
         live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         source_imports: ActorSourceImports::default(),
         haskell_effects_alias: "[]".into(),
-        source_layer: Arc::from([]),
+        source_layer: Vec::new().into(),
     }
 }
 

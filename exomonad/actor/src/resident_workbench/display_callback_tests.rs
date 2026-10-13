@@ -73,7 +73,7 @@ async fn expansion_fences_immediate_handler_with_compiler_owner() {
         live_payload: LivePayloadPolicy::HASKELL_EFFECT_VALUE,
         source_imports: crate::ActorSourceImports::default(),
         haskell_effects_alias: surface.row().into(),
-        source_layer: Arc::from([]),
+        source_layer: Vec::new().into(),
     };
     session
         .set_actor_execution(

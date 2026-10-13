@@ -67,7 +67,8 @@ mod workbench_ledger;
 #[cfg(test)]
 pub(crate) use drain_wait::{wait_drain_event, DrainWaitEvent};
 pub(crate) use owned_workbench::{
-    ExecutionResourceOwners, WorkbenchCompilationAuthority, WorkbenchPublicOwner, PreparedWorkbenchGenerationOwner,
+    ExecutionResourceOwners, PreparedWorkbenchGenerationOwner, WorkbenchCompilationAuthority,
+    WorkbenchPublicOwner,
 };
 
 use display_settlement::{
@@ -3244,7 +3245,12 @@ impl CurrentEffectOwner<'_> {
         match self {
             Self::Scoped { base, .. } => base.issued_snapshot(),
             Self::Workbench(execution) => execution.issued_snapshot.as_ref(),
-            Self::Tool { issued_snapshot, .. } | Self::Actor { issued_snapshot, .. } => issued_snapshot.as_ref(),
+            Self::Tool {
+                issued_snapshot, ..
+            }
+            | Self::Actor {
+                issued_snapshot, ..
+            } => issued_snapshot.as_ref(),
         }
     }
 
@@ -3656,8 +3662,13 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         }
     }
     fn context(&self, actor: ActorRef) -> ActorSessionContext {
-        self.actor_program_snapshot.as_ref().and_then(|snapshot| snapshot.generation())
-            .map_or_else(|| self.descriptor.session_context(actor), |generation| generation.context.clone())
+        self.actor_program_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.generation())
+            .map_or_else(
+                || self.descriptor.session_context(actor),
+                |generation| generation.context.clone(),
+            )
     }
 
     fn preflight_workbench(
@@ -3681,13 +3692,20 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                 },
             );
         }
-        let issued = invocation.installed_tools.or_else(|| self.installed_tools.snapshot());
-        let issued_generation = issued.as_ref().and_then(|snapshot| snapshot.generation()).cloned();
+        let issued = invocation
+            .installed_tools
+            .or_else(|| self.installed_tools.snapshot());
+        let issued_generation = issued
+            .as_ref()
+            .and_then(|snapshot| snapshot.generation())
+            .cloned();
         let installed_tools = match issued.as_ref().map(|snapshot| snapshot.installation()) {
             Some(lease) if lease.actor() != context.actor => {
                 return Err(KernelInvocationFailure::Rejected {
-                    receipts: Vec::new(), actor: context.actor,
-                    detail: "issued actor generation belongs to another actor".into(), diagnostic: None,
+                    receipts: Vec::new(),
+                    actor: context.actor,
+                    detail: "issued actor generation belongs to another actor".into(),
+                    diagnostic: None,
                 });
             }
             Some(lease) => Some(lease.clone()),
@@ -3717,8 +3735,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let current_builtin = request.tool_call().is_some_and(|call| {
             matches!(
                 call.name.as_str(),
-                crate::status_tool::STATUS_TOOL
-                    | crate::reload_tool::RELOAD_TOOL
+                crate::status_tool::STATUS_TOOL | crate::reload_tool::RELOAD_TOOL
             )
         });
         if !self.policy_installed
@@ -3759,9 +3776,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
                     .tool_call()
                     .and_then(|call| match call.name.as_str() {
                         crate::status_tool::STATUS_TOOL => Some(crate::status_tool::declaration()),
-                        crate::reload_tool::RELOAD_TOOL => {
-                            Some(crate::reload_tool::declaration())
-                        }
+                        crate::reload_tool::RELOAD_TOOL => Some(crate::reload_tool::declaration()),
                         _ => None,
                     })
             } else {
@@ -3893,27 +3908,27 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let public_owner = if let Some(generation) = &issued_generation {
             generation.public_owner.clone()
         } else {
-        let snapshot = self
-            .lifecycle
-            .as_ref()
-            .and_then(|lifecycle| lifecycle.resident_snapshot())
-            .ok_or_else(|| KernelInvocationFailure::Rejected {
-                receipts: Vec::new(),
-                actor,
-                detail: "admitted execution lost its immutable resident owner".into(),
-                diagnostic: None,
-            })?;
-        snapshot
-            .public_owner
-            .ready()
-            .cloned()
-            .filter(|owner| owner.matches_context(&context))
-            .ok_or_else(|| KernelInvocationFailure::Rejected {
-                receipts: Vec::new(),
-                actor,
-                detail: "admitted execution has no exact committed public owner".into(),
-                diagnostic: None,
-            })?
+            let snapshot = self
+                .lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.resident_snapshot())
+                .ok_or_else(|| KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
+                    actor,
+                    detail: "admitted execution lost its immutable resident owner".into(),
+                    diagnostic: None,
+                })?;
+            snapshot
+                .public_owner
+                .ready()
+                .cloned()
+                .filter(|owner| owner.matches_context(&context))
+                .ok_or_else(|| KernelInvocationFailure::Rejected {
+                    receipts: Vec::new(),
+                    actor,
+                    detail: "admitted execution has no exact committed public owner".into(),
+                    diagnostic: None,
+                })?
         };
         if let Some(binding) = &invocation.context_binding {
             let control = control
@@ -4221,7 +4236,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
         let hidden_terminal_actors = records
             .iter()
             .filter(|(identity, _)| observable.contains(*identity))
-            .filter(|(identity, record)| {
+            .filter(|(_identity, record)| {
                 record
                     .terminal
                     .clone()
@@ -4591,7 +4606,7 @@ impl<H, O> ResidentKernelBehavior<H, O> {
     ) -> RevisionIdentities {
         let own = self.runtime_observation.snapshot();
         let records = self.environment.actors.lock().clone();
-        let live = |identity: &ActorRef, record: &ResidentActorRecord| {
+        let live = |_identity: &ActorRef, record: &ResidentActorRecord| {
             record.terminal.is_none() && record.lifecycle.retained_terminal().get().is_none()
         };
         let operator_checkout = if self.descriptor.is_root() {
@@ -7687,7 +7702,9 @@ where
                     ));
                 }
             };
-            if let Some(installation) = &installation { self.bind_initial_generation(context,installation).await?; }
+            if let Some(installation) = &installation {
+                self.bind_initial_generation(context, installation).await?;
+            }
             self.check_application_readiness(kernel, context).await?;
             let publication = completion.publish_if_current(|| {
                 kernel.retained_exit().claim_before_shutdown(|| {
@@ -7781,11 +7798,23 @@ where
         &self,
         context: &ActorSessionContext,
     ) -> Result<Arc<WorkbenchPublicOwner>, ResidentActorWorkbenchError> {
-        let retained = self.actor_program_snapshot.as_ref().and_then(|snapshot|snapshot.generation()).cloned()
-            .filter(|generation|generation.public_owner.matches_context(context))
-            .or_else(||self.installed_tools.current_generation().filter(|generation|generation.public_owner.matches_context(context)));
+        let retained = self
+            .actor_program_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.generation())
+            .cloned()
+            .filter(|generation| generation.public_owner.matches_context(context))
+            .or_else(|| {
+                self.installed_tools
+                    .current_generation()
+                    .filter(|generation| generation.public_owner.matches_context(context))
+            });
         if let Some(generation) = retained {
-            if !generation.public_owner.is_current() { return Err(ResidentActorWorkbenchError::ActorProtocol("retained generation native ownership is unavailable".into())); }
+            if !generation.public_owner.is_current() {
+                return Err(ResidentActorWorkbenchError::ActorProtocol(
+                    "retained generation native ownership is unavailable".into(),
+                ));
+            }
             return Ok(generation.public_owner.clone());
         }
         let lifecycle = self
@@ -7806,20 +7835,58 @@ where
         context: &ActorSessionContext,
         installation: &LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        if self.installed_tools.current_generation().is_some() { return Ok(()); }
-        let (Some(tools),Some(prompts)) = (&installation.prepared_tools,&installation.prepared_prompts) else { return Ok(()); };
-        let Some(evidence) = tools.source().generation_evidence() else { return Ok(()); };
-        let expected = self.installed_tools.snapshot().ok_or_else(||ResidentActorWorkbenchError::ActorProtocol("initial generation lost bootstrap source custody".into()))?;
-        let references = tools.generation_references(evidence.reference.clone(),prompts.clone()).map_err(ResidentActorWorkbenchError::ActorProtocol)?;
+        if self.installed_tools.current_generation().is_some() {
+            return Ok(());
+        }
+        let (Some(tools), Some(prompts)) =
+            (&installation.prepared_tools, &installation.prepared_prompts)
+        else {
+            return Ok(());
+        };
+        let Some(evidence) = tools.source().generation_evidence() else {
+            return Ok(());
+        };
+        let expected = self.installed_tools.snapshot().ok_or_else(|| {
+            ResidentActorWorkbenchError::ActorProtocol(
+                "initial generation lost bootstrap source custody".into(),
+            )
+        })?;
+        let references = tools
+            .generation_references(evidence.reference.clone(), prompts.clone())
+            .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         let context = self.descriptor.session_context(context.actor);
         let workbench = self.environment.runner.application_workbench();
-        let prepared = workbench.prepare_actor_generation(context.clone(),self.descriptor.clone(),None,references).await?;
-        match workbench.commit_actor_generation(context,self.descriptor.clone(),self.installed_tools.clone(),expected,prepared,tools.clone(),prompts.clone(),evidence.configuration_digest,tidepool_runtime::session::PublicationDecision::new()).await? {
+        let prepared = workbench
+            .prepare_actor_generation(context.clone(), self.descriptor.clone(), None, references)
+            .await?;
+        match workbench
+            .commit_actor_generation(
+                context,
+                self.descriptor.clone(),
+                self.installed_tools.clone(),
+                expected,
+                prepared,
+                tools.clone(),
+                prompts.clone(),
+                evidence.configuration_digest,
+                tidepool_runtime::session::PublicationDecision::new(),
+            )
+            .await?
+        {
             crate::resident_workbench::ActorGenerationCommit::Published(generation) => {
-                if let Some(lifecycle) = &self.lifecycle { lifecycle.generation_published(generation.context.clone(),generation.public_owner.clone(),generation.installation.clone()); }
+                if let Some(lifecycle) = &self.lifecycle {
+                    lifecycle.generation_published(
+                        generation.context.clone(),
+                        generation.public_owner.clone(),
+                        generation.installation.clone(),
+                    );
+                }
                 Ok(())
-            },
-            crate::resident_workbench::ActorGenerationCommit::Refused(detail) | crate::resident_workbench::ActorGenerationCommit::Unconfirmed(detail) => Err(ResidentActorWorkbenchError::ActorProtocol(detail)),
+            }
+            crate::resident_workbench::ActorGenerationCommit::Refused(detail)
+            | crate::resident_workbench::ActorGenerationCommit::Unconfirmed(detail) => {
+                Err(ResidentActorWorkbenchError::ActorProtocol(detail))
+            }
         }
     }
 
@@ -7829,7 +7896,7 @@ where
         context: &ActorSessionContext,
         installation: LocalResidentInstallation,
     ) -> Result<(), ResidentActorWorkbenchError> {
-        self.bind_initial_generation(context,&installation).await?;
+        self.bind_initial_generation(context, &installation).await?;
         self.check_application_readiness(kernel, context).await?;
         kernel
             .retained_exit()
@@ -7843,7 +7910,9 @@ where
 
     fn publish_interactive_installation(&mut self, mut installation: LocalResidentInstallation) {
         if let Some(tools) = installation.prepared_tools.take() {
-            if self.installed_tools.current_generation().is_none() { self.installed_tools.publish(tools); }
+            if self.installed_tools.current_generation().is_none() {
+                self.installed_tools.publish(tools);
+            }
         }
         self.publish_installation(installation);
         self.policy_installed = true;
@@ -8038,7 +8107,9 @@ where
                 self.installed_tools.clone(),
             ));
 
-        let prompts = self.descriptor.compose_prompts(context.actor,policy.tools(),&self.runtime_observation)
+        let prompts = self
+            .descriptor
+            .compose_prompts(context.actor, policy.tools(), &self.runtime_observation)
             .map_err(ResidentActorWorkbenchError::ActorProtocol)?;
         let (checkpoint, checkpoint_attachment) = self
             .admitted_checkpoint
@@ -8081,9 +8152,11 @@ where
     ) -> Result<KernelStep<()>, ResidentActorWorkbenchError> {
         if self.actor_program_snapshot.is_none() {
             let source = self.freeze_installed_source(context.actor)?;
-            let bootstrap = crate::InstalledToolLease::new(context.actor,source,None);
+            let bootstrap = crate::InstalledToolLease::new(context.actor, source, None);
             self.installed_tools.publish(bootstrap.clone());
-            self.actor_program_snapshot = Some(crate::resident_workbench::ActorRequestSnapshot::Bootstrap(bootstrap));
+            self.actor_program_snapshot = Some(
+                crate::resident_workbench::ActorRequestSnapshot::Bootstrap(bootstrap),
+            );
         }
         let workbench = self.environment.runner.application_workbench();
         let guard = workbench
@@ -8196,7 +8269,11 @@ where
         }
         if matches!(boot, ResidentBoot::Workbench) {
             let source = self.freeze_installed_source(context.actor)?;
-            self.installed_tools.publish(crate::InstalledToolLease::new(context.actor, source, None));
+            self.installed_tools.publish(crate::InstalledToolLease::new(
+                context.actor,
+                source,
+                None,
+            ));
             self.set_standing(context.actor, ResidentStanding::Workbench);
             self.policy_installed = true;
             return Ok(KernelStep::Continue(()));
@@ -11965,8 +12042,12 @@ where
                         "tool execution lost its original resource owner",
                     )
                 })?;
-            let mut cursor =
-                green_tool::ToolCursor::new(work, control, self.checkpoint_publication.clone(), self.actor_program_snapshot.clone());
+            let mut cursor = green_tool::ToolCursor::new(
+                work,
+                control,
+                self.checkpoint_publication.clone(),
+                self.actor_program_snapshot.clone(),
+            );
             let mut outcome = cursor
                 .native(&self.environment, &context)
                 .resume_tool_invocation(awaiting.continuation, invocation.name, arguments)
@@ -12102,12 +12183,9 @@ where
     }
 
     fn serializes_workbench_publication(&self, request: &WorkbenchRequest) -> bool {
-        request.tool_call().is_some_and(|call| {
-            matches!(
-                call.name.as_str(),
-                crate::reload_tool::RELOAD_TOOL
-            )
-        })
+        request
+            .tool_call()
+            .is_some_and(|call| matches!(call.name.as_str(), crate::reload_tool::RELOAD_TOOL))
     }
 
     fn dispatch_workbench(

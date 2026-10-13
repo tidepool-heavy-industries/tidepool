@@ -580,8 +580,16 @@ impl ConcurrentResident {
         )
         .await
         .expect("start resident forest");
+        let source_effect =
+            exomonad_tool::ToolEffectKey::Actor(exomonad_actor::ActorEffectKey::Source);
+        assert!(!forest
+            .installed_intrinsic_effect_support()
+            .contains(&source_effect));
         if let Some(layers) = layers {
             forest.set_source_layers(layers);
+            assert!(forest
+                .installed_intrinsic_effect_support()
+                .contains(&source_effect));
         }
         let mut preparation = exomonad_actor::CompilerPreparationOwner::new();
         let prepared = preparation
