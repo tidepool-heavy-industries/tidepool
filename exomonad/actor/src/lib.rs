@@ -54,8 +54,7 @@ mod mount;
 mod notification;
 mod owned_result;
 mod prompt_catalog;
-pub(crate) mod reload_helpers_tool;
-pub(crate) mod reload_spec_tool;
+pub(crate) mod reload_tool;
 mod request;
 pub use request::sources::SourceDelivery;
 mod recovery;
@@ -136,7 +135,7 @@ pub use mount::{
     ActorCompileView, ActorCompileViewError, ActorPlacement, ActorRunTarget, ActorSessionContext,
     ActorSourceImports, ActorSourceLayerResolver, ActorSourceLayers, CheckpointSourceLayer,
     RetainedSourceLayer, SourceEntryStorage, SourceLayerIssuer, SourceLayerReload,
-    StagedActorSourceReload,
+    StagedActorSourceReload, SourceGenerationEvidence, SourceInspectionError,
 };
 pub use notification::{
     NotificationError, NotificationPoll, NotificationReceipt, NotificationSend, NotificationState,
