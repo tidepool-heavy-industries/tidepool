@@ -52,6 +52,19 @@ symlinks/status files are derived projections repaired from durable state. An
 uncertain commit blocks admission and reconciles; it never authorizes blind replay.
 Late A publication targets A, never B. Release old scopes only after leases end.
 
+The notebook generation ID is nonzero, initially 1, and the durable owner issues
+successors. Initial captured-child admission may retain inherited state; only
+reload replacements must have an isolated empty notebook. Do not apply the
+replacement emptiness rule to ordinary captured-child startup.
+
+Staged source exposes immutable prepared inputs, not a second commit operation.
+The active actor generation and durable head provide the stale-writer fence;
+derived symlinks cannot supply a conflicting authority. A projection repair
+failure after a confirmed transaction reports the committed generation and a
+repair warning. It is not a rollback or evidence of database uncertainty.
+Unrelated domain revision changes may rebase the prepared immutable write when
+the expected active generation remains unchanged; they must not repeat compilation.
+
 ## Source and compiler
 
 Cut old workspace-source fallback and restrictions justified only by it. A selected
