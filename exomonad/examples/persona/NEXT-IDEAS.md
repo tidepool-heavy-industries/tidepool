@@ -80,25 +80,20 @@ The desired direction is for the companion to edit its own authored prompts,
 memory organization, helpers and interfaces, with Git supplying inspectable
 history and restoration. The root model and effort remain human-selected.
 
-The current seed can write state, curate admitted context, author notebook
-definitions and inspect active Haskell. It cannot write its source through the
-state-rooted filesystem tools. System/developer prompts are frozen at startup.
-The existing source reload can check and publish Haskell and carries a workspace
-commit intent; it does not supply either missing capability. A changed registered
-tool surface also needs a new actor incarnation. Keep these distinctions visible
-when implementing self-editing.
+The seed can edit ordinary workspace files, including authored Haskell and
+memory, curate admitted context, and inspect active source separately from
+drafts. System/developer prompts remain frozen for the run. Publishing source,
+selecting its implementation for an operation, and activating prompts are
+separate boundaries; inspect their owning receipts before relying on a revision.
+A changed registered tool surface requires a new actor incarnation.
 
-Coordinate writable authored source and editable prompt activation with their
-existing Exomonad owners. Reuse the source, context, Git and prompt-assembly
-mechanisms. Establish when a saved revision affects a later inference and what
-restoration means for already completed effects. The seed's current
-`requestChange` proposal mechanism is a temporary bridge. Broader runtime work
-belongs in a separately coordinated change, with matching native/browser pins
-where necessary.
-
-State must stay outside source capture and drift inspection. The existing scoped
-fix is `40d9fd486f28ae287cf0f897e5f1b9f18ae1192e`; the integration owner should
-confirm its equivalent is present in the selected release.
+Future prompt activation and richer self-editing experiments should extend the
+existing source, context, Git and prompt-assembly owners. Establish when a saved
+revision affects inference and what restoration means for already completed
+effects. Broader runtime changes need matching native/browser pins where relevant.
+Durable memory under `.exomonad/state` remains outside source capture and drift.
+These are optional directions to explore through actual use, not a standing
+implementation plan.
 
 ## Harness adaptation worth harvesting
 
