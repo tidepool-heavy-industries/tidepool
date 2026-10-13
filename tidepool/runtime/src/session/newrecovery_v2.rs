@@ -26,9 +26,25 @@ pub(crate) use snapshots::{
 pub struct RecoveryPublicOwner {
     path: String,
     incarnation: u64,
+    notebook_generation: crate::session::NotebookGenerationId,
 }
 
 impl RecoveryPublicOwner {
+    pub fn notebook_generation(&self) -> crate::session::NotebookGenerationId {
+        self.notebook_generation
+    }
+    pub fn for_notebook_generation(
+        &self,
+        generation: crate::session::NotebookGenerationId,
+    ) -> Self {
+        Self {
+            notebook_generation: generation,
+            ..self.clone()
+        }
+    }
+    pub(crate) fn actor_owner(&self) -> Self {
+        self.for_notebook_generation(crate::session::NotebookGenerationId::INITIAL)
+    }
     pub fn new(path: &tidepool_repr::ActorPath, incarnation: u64) -> Option<Self> {
         if incarnation == 0 {
             return None;
@@ -36,6 +52,7 @@ impl RecoveryPublicOwner {
         Some(Self {
             path: path.to_string(),
             incarnation,
+            notebook_generation: crate::session::NotebookGenerationId::INITIAL,
         })
     }
 }
@@ -465,10 +482,10 @@ pub(crate) fn load_or_create_domain_graph(
         StoreDisposition::Refused(reason) => {
             return Err(convert(error(format!(
                 "domain creation refused: {reason:?}"
-            ))))
+            ))));
         }
         StoreDisposition::RecoveryRequired(error) => {
-            return Err(crate::session::SessionError::RecoveryStore(Box::new(error)))
+            return Err(crate::session::SessionError::RecoveryStore(Box::new(error)));
         }
     };
     graph.install_store_state(&state);

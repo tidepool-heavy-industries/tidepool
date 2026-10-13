@@ -16,8 +16,8 @@ use tidepool_repr::{Generation, SessionId};
 
 use super::RecoveryPublicOwner;
 
-const FORMAT: u64 = 1;
-const ENCODING: &str = "tidepool-run-v1/hamt-v3/5/0/3/sha256/cidv1/dag-cbor/blake2b256";
+const FORMAT: u64 = 2;
+const ENCODING: &str = "tidepool-run-v2/hamt-v3/5/0/3/sha256/cidv1/dag-cbor/blake2b256";
 
 /// The root machine survives host reincarnation. Independent machines retain
 /// the identity issued by the existing session registry.
@@ -169,6 +169,11 @@ pub(crate) struct PreparedRecoveryWrite {
     pub allocation_ceiling: Generation,
     pub blocks: Vec<(Cid, Arc<[u8]>)>,
     pub public_changes: Vec<PreparedPublicOwnerChange>,
+    pub generation_change: Option<PreparedGenerationChange>,
+}
+pub(crate) struct PreparedGenerationChange {
+    pub expected: Option<super::ActiveNotebookGeneration>,
+    pub next: super::ActiveNotebookGeneration,
 }
 #[derive(Clone)]
 pub(crate) enum PreparedPublicOwnerChange {
@@ -252,17 +257,17 @@ impl NativeStorage {
                 return Err(StoreError {
                     path: path.to_path_buf(),
                     ..error
-                })
+                });
             }
             TransactionResult::Refused(refusal) => {
                 return Err(store_error(
                     path,
                     StoreErrorKind::Storage,
                     format!("initialization refused: {refusal:?}"),
-                ))
+                ));
             }
             TransactionResult::RecoveryRequired(error) => {
-                return Err(store_error(path, StoreErrorKind::RecoveryRequired, error))
+                return Err(store_error(path, StoreErrorKind::RecoveryRequired, error));
             }
         }
         Self::from_connection(path, identity, physical_identity, connection)
@@ -483,6 +488,16 @@ impl NativeStorage {
         }, &[])
     }
 
+    fn active_notebook_generation(
+        &self,
+        domain: RecoveryDomainId,
+        actor: &RecoveryPublicOwner,
+    ) -> Result<Option<super::ActiveNotebookGeneration>, StoreError> {
+        self.validate_physical_identity()?;
+        let connection = self.connection.borrow();
+        read_active_generation(&connection.connection, domain, actor)
+            .map_err(|e| store_error(self.path(), StoreErrorKind::Integrity, e))
+    }
     fn publish(&self, prepared: PreparedRecoveryWrite) -> StoreDisposition<RecoveryDomainState> {
         let owner_keys = prepared
             .public_changes
@@ -503,6 +518,9 @@ impl NativeStorage {
             if prepared.allocation_ceiling < current.allocation_ceiling { return Err(StoreRefusal::CeilingDecrease); }
             insert_blocks(transaction, &prepared.blocks, &self.block_writes, &self.block_bytes).map_err(sql_refusal)?;
             for (change, key) in prepared.public_changes.iter().zip(&owner_keys) { apply_owner_change(transaction, prepared.domain_id, change, key)?; }
+            if let Some(change) = &prepared.generation_change {
+                apply_generation_change(transaction, prepared.domain_id, change)?;
+            }
             let updated = transaction.execute("UPDATE recovery_domains SET revision=?1,content_revision=?2,ceiling=?3,snapshot_root=?4 WHERE domain=?5 AND revision=?6 AND ceiling<=?3", params![
                 revision.0.to_be_bytes().as_slice(), content_revision.0.to_be_bytes().as_slice(), prepared.allocation_ceiling.0.to_be_bytes().as_slice(), prepared.snapshot_root.cid().to_bytes(), prepared.domain_id.bytes().as_slice(), prepared.expected_revision.0.to_be_bytes().as_slice()]).map_err(sql_refusal)?;
             if updated != 1 { return Err(StoreRefusal::StaleRevision); }
@@ -674,7 +692,7 @@ fn transact<T>(
                 Err(error) => {
                     TransactionResult::RecoveryRequired(format!("rollback failed: {error}"))
                 }
-            }
+            };
         }
     };
     #[cfg(test)]
@@ -763,6 +781,72 @@ fn insert_blocks(
             written_bytes.set(written_bytes.get().wrapping_add(bytes.len() as u64));
         }
     }
+    Ok(())
+}
+fn read_active_generation(
+    connection: &Connection,
+    domain: RecoveryDomainId,
+    actor: &RecoveryPublicOwner,
+) -> Result<Option<super::ActiveNotebookGeneration>, rusqlite::Error> {
+    let record: Option<Vec<u8>> = connection.query_row(
+        "SELECT g.record FROM active_notebook_generations a JOIN notebook_generations g ON a.domain=g.domain AND a.owner=g.owner WHERE a.domain=?1 AND a.actor=?2",
+        params![domain.bytes().as_slice(), owner_bytes(&actor.actor_owner())], |row| row.get(0)).optional()?;
+    record
+        .map(|bytes| {
+            let value: super::ActiveNotebookGeneration =
+                fvm_ipld_encoding::from_slice(&bytes).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            value
+                .references
+                .validate()
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            if value.owner.actor_owner() != actor.actor_owner() {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            Ok(value)
+        })
+        .transpose()
+}
+fn apply_generation_change(
+    transaction: &Transaction<'_>,
+    domain: RecoveryDomainId,
+    change: &PreparedGenerationChange,
+) -> Result<(), StoreRefusal> {
+    change
+        .next
+        .references
+        .validate()
+        .map_err(|_| StoreRefusal::StaleEpoch)?;
+    let actor = change.next.owner.actor_owner();
+    let current = read_active_generation(transaction, domain, &actor).map_err(sql_refusal)?;
+    if current != change.expected {
+        return Err(StoreRefusal::StaleEpoch);
+    }
+    let issued = match current {
+        Some(current) => current
+            .generation()
+            .next()
+            .map_err(|_| StoreRefusal::RevisionExhausted)?,
+        None => super::NotebookGenerationId::INITIAL,
+    };
+    if change.next.generation() != issued
+        || read_public_owner(transaction, domain, &change.next.owner)
+            .map_err(sql_refusal)?
+            .is_none()
+    {
+        return Err(StoreRefusal::OwnerMissing);
+    }
+    let record = fvm_ipld_encoding::to_vec(&change.next).map_err(|_| StoreRefusal::StaleEpoch)?;
+    transaction
+        .execute(
+            "INSERT INTO notebook_generations(domain,owner,record) VALUES(?1,?2,?3)",
+            params![
+                domain.bytes().as_slice(),
+                owner_bytes(&change.next.owner),
+                record
+            ],
+        )
+        .map_err(sql_refusal)?;
+    transaction.execute("INSERT INTO active_notebook_generations(domain,actor,owner) VALUES(?1,?2,?3) ON CONFLICT(domain,actor) DO UPDATE SET owner=excluded.owner", params![domain.bytes().as_slice(),owner_bytes(&actor),owner_bytes(&change.next.owner)]).map_err(sql_refusal)?;
     Ok(())
 }
 fn owner_bytes(owner: &RecoveryPublicOwner) -> Vec<u8> {
@@ -863,7 +947,7 @@ fn read_connection(path: &Path) -> Result<Connection, StoreError> {
     match std::fs::metadata(path) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(store_error(path, StoreErrorKind::MissingDatabase, error))
+            return Err(store_error(path, StoreErrorKind::MissingDatabase, error));
         }
         Err(error) => return Err(store_error(path, StoreErrorKind::Storage, error)),
     }
@@ -959,6 +1043,8 @@ const SCHEMA: &str = r#"
 CREATE TABLE store_meta(singleton INTEGER PRIMARY KEY CHECK(singleton=1),format INTEGER NOT NULL,encoding TEXT NOT NULL,identity BLOB NOT NULL CHECK(typeof(identity)='blob' AND length(identity)=16)) STRICT;
 CREATE TABLE blocks(cid BLOB PRIMARY KEY NOT NULL CHECK(typeof(cid)='blob'),bytes BLOB NOT NULL CHECK(typeof(bytes)='blob')) STRICT;
 CREATE TABLE recovery_domains(domain BLOB PRIMARY KEY NOT NULL CHECK(typeof(domain)='blob' AND length(domain)=9),lineage BLOB NOT NULL CHECK(typeof(lineage)='blob' AND length(lineage)=8),revision BLOB NOT NULL CHECK(typeof(revision)='blob' AND length(revision)=8),content_revision BLOB NOT NULL CHECK(typeof(content_revision)='blob' AND length(content_revision)=8),ceiling BLOB NOT NULL CHECK(typeof(ceiling)='blob' AND length(ceiling)=8),snapshot_root BLOB NOT NULL REFERENCES blocks(cid)) STRICT;
+CREATE TABLE notebook_generations(domain BLOB NOT NULL REFERENCES recovery_domains(domain),owner BLOB NOT NULL,record BLOB NOT NULL,PRIMARY KEY(domain,owner)) STRICT;
+CREATE TABLE active_notebook_generations(domain BLOB NOT NULL,actor BLOB NOT NULL,owner BLOB NOT NULL,PRIMARY KEY(domain,actor),FOREIGN KEY(domain,owner) REFERENCES notebook_generations(domain,owner)) STRICT;
 CREATE TABLE public_owners(domain BLOB NOT NULL REFERENCES recovery_domains(domain),owner BLOB NOT NULL CHECK(typeof(owner)='blob'),epoch BLOB NOT NULL CHECK(typeof(epoch)='blob' AND length(epoch)=8),surface_root BLOB NOT NULL REFERENCES blocks(cid),PRIMARY KEY(domain,owner)) STRICT;
 "#;
 
@@ -1034,6 +1120,7 @@ mod tests {
             snapshot_root: state.snapshot_root.clone(),
             allocation_ceiling: state.allocation_ceiling,
             blocks,
+            generation_change: None,
             public_changes: vec![match expected_epoch {
                 None => PreparedPublicOwnerChange::Insert(next),
                 Some(expected_epoch) => PreparedPublicOwnerChange::Replace {
@@ -1429,6 +1516,7 @@ mod tests {
                 snapshot_root: DomainSnapshotRoot::new(root),
                 allocation_ceiling: state.allocation_ceiling,
                 blocks,
+                generation_change: None,
                 public_changes: Vec::new(),
             })
         else {
@@ -1488,7 +1576,8 @@ mod tests {
                     snapshot_root: DomainSnapshotRoot::new(root),
                     allocation_ceiling: state.allocation_ceiling,
                     blocks,
-                    public_changes: Vec::new(),
+                    generation_change: None,
+            public_changes: Vec::new(),
                 },
                 |state| {
                     assert!(
@@ -1562,6 +1651,139 @@ mod tests {
                     prop_assert_eq!(actual.content_revision, StoreRevision(revision));
                     prop_assert_eq!(actual.allocation_ceiling, Generation(ceiling));
                 }
+            }
+        }
+    }
+    fn generation_write(
+        store: &RunRecoveryStore,
+        expected: Option<super::super::ActiveNotebookGeneration>,
+        actor: &RecoveryPublicOwner,
+        marker: u8,
+    ) -> (
+        PreparedRecoveryWrite,
+        super::super::ActiveNotebookGeneration,
+    ) {
+        use super::super::{
+            ActiveNotebookGeneration, ComposedPromptSnapshot, DurableGenerationReferences,
+            GenerationArtifactReference, NotebookGenerationId,
+        };
+        let state = store.read_domain(RecoveryDomainId::Root).unwrap().unwrap();
+        let id = expected
+            .as_ref()
+            .map_or(NotebookGenerationId::INITIAL, |v| {
+                v.generation().next().unwrap()
+            });
+        let next = ActiveNotebookGeneration {
+            owner: actor.for_notebook_generation(id),
+            references: DurableGenerationReferences {
+                source: GenerationArtifactReference::capture(vec![marker, 1]),
+                installation: GenerationArtifactReference::capture(vec![marker, 2]),
+                prompts: ComposedPromptSnapshot::capture(format!("prompt {marker}")),
+            },
+        };
+        let (cid, blocks) = blocks(&("surface", marker));
+        let write = PreparedRecoveryWrite {
+            domain_id: RecoveryDomainId::Root,
+            expected_revision: state.revision,
+            snapshot_root: state.snapshot_root,
+            allocation_ceiling: state.allocation_ceiling,
+            blocks,
+            public_changes: vec![PreparedPublicOwnerChange::Insert(
+                RecoveryPublicOwnerState {
+                    owner: next.owner.clone(),
+                    epoch: 1,
+                    surface_root: PublicSurfaceRoot::new(cid),
+                },
+            )],
+            generation_change: Some(PreparedGenerationChange {
+                expected,
+                next: next.clone(),
+            }),
+        };
+        (write, next)
+    }
+
+    #[test]
+    fn notebook_generation_commit_and_crash_recovery_select_one_complete_generation() {
+        for fault in [
+            None,
+            Some(StoreFault::BeforeCommit),
+            Some(StoreFault::CommitError),
+        ] {
+            let (directory, store) = store();
+            domain(&store, RecoveryDomainId::Root, 64);
+            let actor = owner("root/generation", 1);
+            let (write, next) = generation_write(&store, None, &actor, 7);
+            if let Some(fault) = fault {
+                store.inject_fault(fault);
+            }
+            match store.commit_publication(write) {
+                StoreDisposition::Committed(receipt) => receipt.installed_blocking().unwrap(),
+                StoreDisposition::Refused(_) => assert_eq!(fault, Some(StoreFault::BeforeCommit)),
+                StoreDisposition::RecoveryRequired(_) => {
+                    assert_eq!(fault, Some(StoreFault::CommitError));
+                    assert!(store.ensure_ready().is_err());
+                }
+            }
+            drop(store);
+            let recovered =
+                RunRecoveryStore::open(&directory.path().join("recovery.sqlite")).unwrap();
+            let actual = recovered
+                .active_notebook_generation(RecoveryDomainId::Root, &actor)
+                .unwrap();
+            assert_eq!(
+                actual,
+                if fault == Some(StoreFault::BeforeCommit) {
+                    None
+                } else {
+                    Some(next)
+                }
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+        #[test]
+        fn notebook_generation_histories_preserve_late_owners_and_refuse_stale_heads(ops in prop::collection::vec((0u8..5, any::<u8>()), 1..35)) {
+            let (_directory, store) = store();
+            domain(&store, RecoveryDomainId::Root, 64);
+            let actor = owner("root/model", 1);
+            let mut head = None;
+            let mut retained = Vec::<RecoveryPublicOwner>::new();
+            for (operation, marker) in ops {
+                match operation {
+                    0 | 1 => {
+                        let (write, next) = generation_write(&store, head.clone(), &actor, marker);
+                        if operation == 1 { store.inject_fault(StoreFault::BeforeCommit); }
+                        match store.commit_publication(write) {
+                            StoreDisposition::Committed(receipt) => { receipt.installed_blocking().unwrap(); retained.push(next.owner.clone()); head = Some(next); }
+                            StoreDisposition::Refused(_) => prop_assert_eq!(operation, 1),
+                            _ => panic!("unexpected generation transition"),
+                        }
+                    }
+                    2 => {
+                        // A declaration update changes only its qualified owner,
+                        // never whichever notebook generation is currently active.
+                        if let Some(old) = retained.first() {
+                            let state = store.read_domain(RecoveryDomainId::Root).unwrap().unwrap();
+                            let old_state = store.read_public_owner(RecoveryDomainId::Root, old).unwrap().unwrap();
+                            let StoreDisposition::Committed(_) = public_change(&store, RecoveryDomainId::Root, &state, old.clone(), Some(old_state.epoch), u64::from(marker)) else { panic!("late owner publication refused") };
+                        }
+                    }
+                    3 => {
+                        if head.is_some() {
+                            let (write, _) = generation_write(&store, None, &actor, marker);
+                            prop_assert!(matches!(store.commit_publication(write), StoreDisposition::Refused(_)));
+                        }
+                    }
+                    _ => {
+                        let recovered = RunRecoveryStore::open(store.path()).unwrap();
+                        prop_assert_eq!(recovered.active_notebook_generation(RecoveryDomainId::Root, &actor).unwrap(), head.clone());
+                    }
+                }
+                prop_assert_eq!(store.active_notebook_generation(RecoveryDomainId::Root, &actor).unwrap(), head.clone());
+                for old in &retained { prop_assert!(store.read_public_owner(RecoveryDomainId::Root, old).unwrap().is_some()); }
             }
         }
     }

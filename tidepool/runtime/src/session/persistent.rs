@@ -5962,6 +5962,148 @@ mod checkpoint_scope_tests {
         assert!(session.scope_tree().is_live(deferred));
         session.retire_scope(deferred);
     }
+    use crate::session::{DurablePublicOwnerPublication, RecoveryDomainId, StoreDisposition};
+
+    fn generation_refs(marker: u8) -> super::super::DurableGenerationReferences {
+        use super::super::{
+            ComposedPromptSnapshot, DurableGenerationReferences, GenerationArtifactReference,
+        };
+        DurableGenerationReferences {
+            source: GenerationArtifactReference::capture(vec![marker, 1]),
+            installation: GenerationArtifactReference::capture(vec![marker, 2]),
+            prompts: ComposedPromptSnapshot::capture(format!("instructions {marker}")),
+        }
+    }
+    #[test]
+    fn generation_replacement_retains_a_readiness_and_scope_without_machine_epoch_change() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut session, a, owner) = bootstrap_session(root.path(), 960);
+        let lease_a = session.prepared_lexical_scope_lease(a).unwrap();
+        let ready_a = session.durable_public_readiness(&owner, a).unwrap();
+        let initial = session
+            .prepare_notebook_generation(a, &owner, None, generation_refs(1))
+            .unwrap();
+        assert!(matches!(
+            session
+                .commit_notebook_generation(initial, &PublicationDecision::new(), |_| {})
+                .unwrap(),
+            DurablePublicOwnerPublication::Committed(_)
+        ));
+        let store = session.lib().durable_graph.as_ref().unwrap().store.clone();
+        let head_a = store
+            .active_notebook_generation(RecoveryDomainId::Root, &owner)
+            .unwrap()
+            .unwrap();
+        let b = session.mint_isolated_scope();
+        let prepared = session
+            .prepare_notebook_generation(b, &owner, Some(head_a.clone()), generation_refs(2))
+            .unwrap();
+        let owner_b = prepared.owner().clone();
+        // Allocation metadata is a benign intervening write. The prepared
+        // immutable generation must rebase without rerunning its installer.
+        let state = store.read_domain(RecoveryDomainId::Root).unwrap().unwrap();
+        assert!(matches!(
+            store.reserve_ceiling(
+                RecoveryDomainId::Root,
+                state.revision,
+                Generation(state.allocation_ceiling.0 + 1)
+            ),
+            StoreDisposition::Committed(_)
+        ));
+        let mut visible = false;
+        let result = session
+            .commit_notebook_generation(prepared, &PublicationDecision::new(), |readiness| {
+                visible = true;
+                assert_eq!(readiness.durable_owner(), &owner_b);
+                assert!(readiness.is_current());
+                assert!(ready_a.is_current());
+            })
+            .unwrap();
+        assert!(visible);
+        assert!(matches!(
+            result,
+            DurablePublicOwnerPublication::Committed(_)
+        ));
+        assert!(ready_a.is_ready());
+        session.validate_lexical_scope_lease(a, &lease_a).unwrap();
+        assert!(session
+            .begin_durable_private_execution(owner.clone(), a)
+            .is_ok());
+        assert!(session.lib().current_exact_context_in(b).is_none());
+        assert_eq!(
+            store
+                .active_notebook_generation(RecoveryDomainId::Root, &owner)
+                .unwrap()
+                .unwrap()
+                .owner,
+            owner_b
+        );
+        assert!(store
+            .read_public_owner(RecoveryDomainId::Root, &owner)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn generation_cancel_and_scope_mutation_do_not_publish_prepared_b() {
+        let root = tempfile::tempdir().unwrap();
+        let (mut session, a, owner) = bootstrap_session(root.path(), 961);
+        let prepared = session
+            .prepare_notebook_generation(a, &owner, None, generation_refs(1))
+            .unwrap();
+        session
+            .commit_notebook_generation(prepared, &PublicationDecision::new(), |_| {})
+            .unwrap();
+        let store = session.lib().durable_graph.as_ref().unwrap().store.clone();
+        let head = store
+            .active_notebook_generation(RecoveryDomainId::Root, &owner)
+            .unwrap()
+            .unwrap();
+        let inherited = session.mint_scope(a).unwrap();
+        assert!(session
+            .prepare_notebook_generation(inherited, &owner, Some(head.clone()), generation_refs(2))
+            .is_err());
+        let b = session.mint_isolated_scope();
+        let prepared = session
+            .prepare_notebook_generation(b, &owner, Some(head.clone()), generation_refs(2))
+            .unwrap();
+        let decision = PublicationDecision::new();
+        decision.request_cancellation();
+        assert!(matches!(
+            session
+                .commit_notebook_generation(prepared, &decision, |_| panic!(
+                    "cancelled generation became visible"
+                ))
+                .unwrap(),
+            DurablePublicOwnerPublication::Refused { .. }
+        ));
+        assert_eq!(
+            store
+                .active_notebook_generation(RecoveryDomainId::Root, &owner)
+                .unwrap(),
+            Some(head.clone())
+        );
+        let prepared = session
+            .prepare_notebook_generation(b, &owner, Some(head.clone()), generation_refs(2))
+            .unwrap();
+        let value = super::super::prepared::tests::rooted_publication_fixture(
+            &mut session,
+            "intruder",
+            963,
+        );
+        session.bind_in(b, value).unwrap();
+        assert!(session
+            .commit_notebook_generation(prepared, &PublicationDecision::new(), |_| panic!(
+                "mutated scope published"
+            ))
+            .is_err());
+        assert_eq!(
+            store
+                .active_notebook_generation(RecoveryDomainId::Root, &owner)
+                .unwrap(),
+            Some(head)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6843,5 +6985,212 @@ mod maintained_binding_lifetime_properties {
             );
             eprintln!("actual binding lifetime broad release partition: {support:?}");
         }
+    }
+}
+
+impl PersistentSession {
+    /// Bootstrap binds an already published captured surface. Replacement
+    /// generations must use an isolated, empty notebook scope.
+    pub fn prepare_notebook_generation(
+        &mut self,
+        scope: ScopeId,
+        actor: &super::RecoveryPublicOwner,
+        expected: Option<super::ActiveNotebookGeneration>,
+        references: super::DurableGenerationReferences,
+    ) -> Result<super::PreparedNotebookGeneration, SessionError> {
+        references
+            .validate()
+            .map_err(|e| SessionError::RecoveryManifest {
+                path: self.lib().root.clone(),
+                detail: e.to_string(),
+            })?;
+        let snapshot = self
+            .public_visibility_snapshot_in(scope)
+            .ok_or(SessionError::DeadScope(scope))?;
+        if scope == ScopeId::ROOT
+            || expected
+                .as_ref()
+                .is_some_and(|head| head.owner.actor_owner() != actor.actor_owner())
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        if expected.is_some()
+            && (self.scope_tree().parent_of(scope).is_some()
+                || snapshot.declaration_tip.0 != 0
+                || !snapshot.bindings.is_empty()
+                || !snapshot.source_instances.is_empty()
+                || self.lib().current_exact_context_in(scope).is_some())
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let id = match &expected {
+            Some(head) => head
+                .generation()
+                .next()
+                .map_err(|e| SessionError::RecoveryManifest {
+                    path: self.lib().root.clone(),
+                    detail: e.to_string(),
+                })?,
+            None => super::NotebookGenerationId::INITIAL,
+        };
+        let owner = actor.for_notebook_generation(id);
+        let state = self
+            .lib()
+            .durable_graph
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if state
+            .store
+            .active_notebook_generation(state.domain_id, actor)
+            .map_err(|e| SessionError::RecoveryStore(Box::new(e)))?
+            != expected
+        {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let mut candidate = state.graph.candidate();
+        let epoch = if expected.is_none() {
+            let surface = state
+                .graph
+                .surface(&owner)
+                .map_err(|e| super::recovery::graph_error(&state.path, e))?
+                .ok_or(SessionError::WrongPublicManifestTicket)?;
+            if self.lib().durable_public_scopes.get(&owner) != Some(&scope) {
+                return Err(SessionError::WrongPublicManifestTicket);
+            }
+            surface.epoch
+        } else {
+            let mut surface = super::recovery::RecoveryPublicSurface::empty(owner.clone());
+            surface.epoch = snapshot
+                .epoch
+                .checked_add(1)
+                .ok_or(SessionError::WrongPublicManifestTicket)?;
+            let epoch = surface.epoch;
+            candidate
+                .replace_surface(surface)
+                .map_err(|e| super::recovery::graph_error(&state.path, e))?;
+            epoch
+        };
+        let mut staged = candidate
+            .prepare(state.store_revision, state.allocation_ceiling)
+            .map_err(|e| super::recovery::graph_error(&state.path, e))?;
+        let next = super::ActiveNotebookGeneration { owner, references };
+        staged.prepared.generation_change = Some(super::recovery_store::PreparedGenerationChange {
+            expected: expected.clone(),
+            next: next.clone(),
+        });
+        Ok(super::PreparedNotebookGeneration {
+            staged,
+            scope,
+            epoch,
+            snapshot,
+            next,
+            expected,
+        })
+    }
+
+    /// The caller holds its generation issuance fence through this operation.
+    /// The callback only installs prepared live leases; it must not await.
+    pub fn commit_notebook_generation(
+        &mut self,
+        prepared: super::PreparedNotebookGeneration,
+        publication: &Arc<super::PublicationDecision>,
+        on_visible: impl FnOnce(Arc<super::RuntimeDurablePublicReadiness>),
+    ) -> Result<super::DurablePublicOwnerPublication, SessionError> {
+        let super::PreparedNotebookGeneration {
+            mut staged,
+            scope,
+            epoch,
+            snapshot,
+            next,
+            expected,
+        } = prepared;
+        if self.public_visibility_snapshot_in(scope).as_ref() != Some(&snapshot) {
+            return Err(SessionError::WrongPublicManifestTicket);
+        }
+        let lib = self.lib();
+        let state = lib
+            .durable_graph
+            .as_ref()
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if state
+            .store
+            .active_notebook_generation(state.domain_id, &next.owner)
+            .map_err(|e| SessionError::RecoveryStore(Box::new(e)))?
+            != expected
+        {
+            return Ok(super::durable_owner_disposition(
+                super::StoreDisposition::Refused(super::StoreRefusal::StaleEpoch),
+            ));
+        }
+        // Metadata and unrelated A publications do not invalidate prepared B.
+        // Rebase its exact surface on the latest graph without compiler work.
+        let current = state
+            .store
+            .read_domain(state.domain_id)
+            .map_err(|e| SessionError::RecoveryStore(Box::new(e)))?
+            .ok_or(SessionError::WrongPublicManifestTicket)?;
+        if current.revision != staged.prepared.expected_revision {
+            let graph = super::recovery::load_domain_graph(state.store.clone(), state.domain_id)
+                .map_err(|e| super::recovery::graph_error(&state.path, e))?;
+            let mut candidate = graph.candidate();
+            if expected.is_some() {
+                let surface = staged
+                    .graph
+                    .surface(&next.owner)
+                    .map_err(|e| super::recovery::graph_error(&state.path, e))?
+                    .ok_or(SessionError::WrongPublicManifestTicket)?;
+                candidate
+                    .replace_surface((*surface).clone())
+                    .map_err(|e| super::recovery::graph_error(&state.path, e))?;
+            }
+            staged = candidate
+                .prepare(current.revision, current.allocation_ceiling)
+                .map_err(|e| super::recovery::graph_error(&state.path, e))?;
+            staged.prepared.generation_change =
+                Some(super::recovery_store::PreparedGenerationChange {
+                    expected,
+                    next: next.clone(),
+                });
+        }
+        let mut scopes = lib.durable_public_scopes.clone();
+        scopes.insert(next.owner.clone(), scope);
+        self.public_visibility_epochs.try_reserve(1).map_err(|e| {
+            SessionError::RecoveryManifest {
+                path: self.lib().root.clone(),
+                detail: e.to_string(),
+            }
+        })?;
+        let readiness = self.prepare_durable_public_readiness(
+            &next.owner,
+            scope,
+            self.admission_owner().epoch(),
+        );
+        let Some(claim) = publication.claim_commit() else {
+            return Ok(super::durable_owner_disposition(
+                super::StoreDisposition::Refused(super::StoreRefusal::StaleEpoch),
+            ));
+        };
+        let outcome = match staged.commit() {
+            super::StoreDisposition::Committed((graph, receipt)) => {
+                let lib = self.lib_mut();
+                lib.install_committed_recovery_graph(graph, receipt.state.clone());
+                lib.durable_public_scopes = scopes;
+                self.public_visibility_epochs.insert(scope, epoch);
+                on_visible(readiness.clone());
+                claim.published();
+                match receipt.installed_blocking() {
+                    Ok(()) => super::StoreDisposition::Committed(readiness),
+                    Err(error) => super::StoreDisposition::RecoveryRequired(error),
+                }
+            }
+            super::StoreDisposition::Refused(error) => {
+                claim.before_rename_failure();
+                super::StoreDisposition::Refused(error)
+            }
+            super::StoreDisposition::RecoveryRequired(error) => {
+                super::StoreDisposition::RecoveryRequired(error)
+            }
+        };
+        Ok(super::durable_owner_disposition(outcome))
     }
 }

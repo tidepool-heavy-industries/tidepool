@@ -204,6 +204,13 @@ pub enum ResidentSessionState {
     Gone,
 }
 
+mod notebook_generation;
+pub use notebook_generation::{
+    ActiveNotebookGeneration, ComposedPromptSnapshot, DurableGenerationReferences,
+    GenerationArtifactReference, NotebookGenerationError, NotebookGenerationId,
+    PreparedNotebookGeneration,
+};
+
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -34,6 +34,10 @@ enum Operation {
     ReadDomain {
         domain: RecoveryDomainId,
     },
+    ReadGeneration {
+        domain: RecoveryDomainId,
+        actor: RecoveryPublicOwner,
+    },
     ReadOwner {
         domain: RecoveryDomainId,
         owner: RecoveryPublicOwner,
@@ -80,6 +84,7 @@ enum Operation {
 enum Value {
     ReadDomain(Result<Option<RecoveryDomainState>, StoreError>),
     ReadOwner(Result<Option<RecoveryPublicOwnerState>, StoreError>),
+    ReadGeneration(Result<Option<super::super::ActiveNotebookGeneration>, StoreError>),
     Owners(Result<Vec<RecoveryPublicOwnerState>, StoreError>),
     HasOwners(Result<bool, StoreError>),
     Snapshot(Result<Option<RecoverySnapshotIdentity>, StoreError>),
@@ -105,6 +110,7 @@ impl Value {
             },
             Self::ReadDomain(_)
             | Self::ReadOwner(_)
+            | Self::ReadGeneration(_)
             | Self::Owners(_)
             | Self::HasOwners(_)
             | Self::Snapshot(_)
@@ -125,6 +131,9 @@ impl Value {
 impl Operation {
     fn execute(self, storage: &NativeStorage) -> Value {
         match self {
+            Self::ReadGeneration { domain, actor } => {
+                Value::ReadGeneration(storage.active_notebook_generation(domain, &actor))
+            }
             Self::ReadDomain { domain } => Value::ReadDomain(storage.read_domain(domain)),
             Self::ReadOwner { domain, owner } => {
                 Value::ReadOwner(storage.read_public_owner(domain, &owner))
@@ -634,6 +643,22 @@ impl RunRecoveryStore {
                 value
             }
             Ok(_) => unreachable!("typed native response differs from request"),
+        }
+    }
+    pub fn active_notebook_generation(
+        &self,
+        domain: RecoveryDomainId,
+        actor: &RecoveryPublicOwner,
+    ) -> Result<Option<super::super::ActiveNotebookGeneration>, StoreError> {
+        match self.request(Operation::ReadGeneration {
+            domain,
+            actor: actor.clone(),
+        })? {
+            Response {
+                value: Value::ReadGeneration(value),
+                ..
+            } => value,
+            _ => unreachable!("typed native generation read differs from request"),
         }
     }
     pub fn read_public_owner(
