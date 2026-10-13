@@ -3482,9 +3482,6 @@ fn driver_sources(
     let bootstrap_preamble = preamble.clone();
     let toolset_support = include.clone();
     if let Some(inputs) = inputs {
-        // The live source layer goes AHEAD of the run's frozen capture, so a
-        // reloaded module shadows the copy the run started from. The frozen
-        // capture stays on the path beneath it as the verified floor.
         let layer = crate::exomonad::source::SourceLayer::new(run_root);
         let roots = inputs.captured_source_roots().len();
         if let Some(candidate) = &candidate {
@@ -3497,7 +3494,9 @@ fn driver_sources(
             layer.ensure_active(inputs)?;
             include.extend(layer.include_paths(roots));
         }
-        include.extend(inputs.include.iter().cloned());
+        // A live revision is the complete selected workspace source. Keeping
+        // the startup capture underneath it would resurrect deleted modules.
+        include.push(inputs.workspace_resources());
         for module in inputs.import_modules() {
             preamble = insert_preamble_imports(&preamble, module);
         }
