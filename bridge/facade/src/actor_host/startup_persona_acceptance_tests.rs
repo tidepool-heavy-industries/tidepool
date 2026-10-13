@@ -95,7 +95,7 @@ pub(super) fn configure_persona(config: &mut super::ActorHostConfig, entry: &str
     if conventional_spec {
         std::fs::write(
             authored.join("AgentSpec.hs"),
-            include_str!("fixtures/startup_persona_spec.hs"),
+            tidepool_testing::fixture_source("exomonad/examples/persona/.exomonad/AgentSpec.hs"),
         )
         .unwrap();
     }
@@ -353,7 +353,7 @@ async fn actual_persona_arrives_refreshes_and_retires_without_judgment() {
         .is_none());
     assert!(matches!(
         judgments.try_recv(),
-        Err(mpsc::error::TryRecvError::Empty)
+        Err(mpsc::error::TryRecvError::Disconnected)
     ));
 }
 
