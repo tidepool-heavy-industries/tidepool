@@ -3386,9 +3386,13 @@ impl PersistentSession {
             PublicManifestCommit::Durable | PublicManifestCommit::Ephemeral => {
                 claim.published();
             }
-            PublicManifestCommit::Refused { .. }
-            | PublicManifestCommit::RecoveryRequired { .. } => {
+            PublicManifestCommit::Refused { .. } => {
                 claim.before_rename_failure();
+            }
+            PublicManifestCommit::RecoveryRequired { .. } => {
+                // Visibility is unknown. Keep the cancellation/claim fence
+                // unresolved until the storage owner can be recovered.
+                drop(claim);
             }
             PublicManifestCommit::Cancelled => {
                 unreachable!("prepared publication")
@@ -5934,6 +5938,78 @@ mod checkpoint_scope_tests {
             .public_surfaces()
             .next()
             .is_none());
+    }
+
+    #[test]
+    fn uncertain_terminal_publication_keeps_claim_and_cancellation_pending() {
+        use crate::session::recovery_store::{RecoveryDomainId, StoreFault};
+
+        let root = tempfile::tempdir().unwrap();
+        let recovery = crate::session::recovery_test_fixture::RecoveryFixture::create(root.path());
+        let owner_authority = Arc::clone(&recovery.owner);
+        let mut session = publication_session(&recovery, root.path(), 74);
+        let private = session.mint_detached_scope(ScopeId::ROOT).unwrap();
+        let owner = public_owner("root/uncertain");
+        session
+            .bind_durable_public_scope(owner.clone(), ScopeId::ROOT)
+            .unwrap();
+        let staged = session
+            .snapshot_binding_publication(owner.clone(), ScopeId::ROOT, private, vec![])
+            .unwrap()
+            .stage()
+            .unwrap();
+        recovery.store.inject_fault(StoreFault::CommitError);
+
+        let decision = PublicationDecision::new();
+        assert!(matches!(
+            session
+                .attempt_public_manifest_admitted(staged, || {
+                    let claim = decision.claim_commit()?;
+                    assert_eq!(
+                        decision.request_cancellation(),
+                        super::super::PublicationCancellation::PendingCommitOutcome
+                    );
+                    Some(claim)
+                })
+                .map(crate::session::settled_manifest_attempt)
+                .unwrap(),
+            PublicManifestCommit::RecoveryRequired { .. }
+        ));
+        assert_eq!(
+            decision.phase(),
+            super::super::PublicationPhase::CommitClaimed {
+                cancellation_pending: true
+            }
+        );
+        assert_eq!(
+            decision.request_cancellation(),
+            super::super::PublicationCancellation::PendingCommitOutcome
+        );
+        assert!(decision.claim_commit().is_none());
+        assert!(recovery.store.ensure_ready().is_err());
+        assert!(session
+            .begin_durable_private_execution(&owner, ScopeId::ROOT)
+            .is_err());
+        assert!(session
+            .lib()
+            .durable_graph
+            .as_ref()
+            .unwrap()
+            .graph
+            .public_surfaces()
+            .next()
+            .is_none());
+
+        drop(session);
+        drop(recovery);
+        let reopened =
+            crate::session::recovery_test_fixture::RecoveryFixture::reopen(owner_authority);
+        let domain = RecoveryDomainId::Session(tidepool_repr::SessionId(74));
+        assert!(reopened
+            .store
+            .read_public_owner(domain, &owner)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
