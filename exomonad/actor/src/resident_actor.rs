@@ -3332,7 +3332,7 @@ impl CurrentEffectOwner<'_> {
             Self::Scoped { base, .. } => base.admitted_source(),
 
             Self::Workbench(execution) => Some(&execution.admitted_source),
-            Self::Actor { .. } | Self::Tool { .. } => None,
+            Self::Actor { issued_snapshot, .. } | Self::Tool { issued_snapshot, .. } => issued_snapshot.as_ref().map(|snapshot| snapshot.installation().source()),
         }
     }
 
