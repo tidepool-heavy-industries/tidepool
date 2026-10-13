@@ -429,6 +429,8 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
                 project.haskell.modules = vec!["Project.Work".into()];
             });
             std::fs::write(authored.join("Project/Work.hs"), work_module(1)).unwrap();
+            std::fs::create_dir_all(authored.join("state/memory")).unwrap();
+            std::fs::write(authored.join("state/memory/persona.md"), "retained memory").unwrap();
             config.workspace_inputs = Some(
                 crate::exomonad::workspace::FrozenWorkspace::load(
                     &config.workspace,
@@ -479,6 +481,11 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     // built from. No implicit rewriting of running work.
     let kept = committed(policy, "inspectFull saved").await;
     assert_eq!(kept["items"][0]["output"], "1", "{kept}");
+
+    let memory = committed(policy,
+        "Right body <- Files.readFile \".exomonad/state/memory/persona.md\"\ninspectFull (body == \"retained memory\")"
+    ).await;
+    assert_eq!(memory["items"][1]["output"], "True", "reload preserves memory: {memory}");
 
     // Provenance is data: active now names the published revision, and the
     // module's digest moved with it.

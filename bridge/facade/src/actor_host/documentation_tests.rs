@@ -1411,6 +1411,14 @@ async fn persona_and_helper_lookup_deliver_pinned_skills_with_workspace_files_co
                         explicit_display_output(&shown)["text"].as_str().unwrap(),
                     )
                     .unwrap();
+                    if !helper {
+                        let saved = displayed(campaign, policy.as_ref(),
+                            "import qualified Persona.Memory as Memory\nRight () <- Memory.note \"workspace-check\" \"retained note\"\ndisplay (\"saved\" :: Text)").await;
+                        assert_eq!(explicit_display_output(&saved)["text"], "saved");
+                        assert_eq!(std::fs::read_to_string(campaign._repository.path().join(
+                            ".exomonad/state/notes/workspace-check.md")).unwrap(), "retained note");
+                    }
+
                     let docs = received["documents"].as_array().unwrap();
                     assert_eq!(docs.len(), expected.len() + 2, "helper={helper}");
                     for (actual, canonical) in docs.iter().zip(expected) {

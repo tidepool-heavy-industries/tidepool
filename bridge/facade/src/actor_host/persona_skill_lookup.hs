@@ -11,10 +11,11 @@ let writerStatus = case LookupApi.lookupResults writer of { [r] -> case LookupAp
 workspaceEntries <- Files.listDirectory "."
 authoredEntries <- Files.listDirectory ".exomonad"
 specSource <- Files.readFile ".exomonad/Persona/Spec.hs"
+activeSpec <- readSourceModule "Persona.Spec"
 humanMemory <- Memory.recall Memory.Human
 insideState <- Files.readFile ".exomonad/state/probe.md"
 workspaceSource <- Files.readFile ".agents/skills/exomonad-jev/SKILL.md"
 traversal <- Files.readFile "../config.toml"
-let workspaceAccessible = (case workspaceEntries of { Right entries -> not (null entries); _ -> False }) && (case authoredEntries of { Right entries -> not (null entries); _ -> False }) && (case specSource of { Right body -> "module Persona.Spec" `T.isInfixOf` body; _ -> False }) && humanMemory == Right "human-memory-original"
+let workspaceAccessible = (case workspaceEntries of { Right entries -> not (null entries); _ -> False }) && (case authoredEntries of { Right entries -> not (null entries); _ -> False }) && (case specSource of { Right body -> "module Persona.Spec" `T.isInfixOf` body; _ -> False }) && (case activeSpec of { Right (_, body) -> "module Persona.Spec" `T.isInfixOf` body; _ -> False }) && humanMemory == Right "human-memory-original"
 let confined = insideState == Right "state marker" && workspaceSource == Right "workspace marker" && (case traversal of { Left (FsSandbox _) -> True; _ -> False })
 display (Json.encodeValue (Json.object ["documents" Json..= map (fmap (\body -> (T.length body, T.take 32 body, T.takeEnd 32 body)) . document) (LookupApi.lookupResults docs), "workspace_accessible" Json..= workspaceAccessible, "files_confined" Json..= confined, "docs_refused" Json..= refused, "writer_status" Json..= writerStatus]))
