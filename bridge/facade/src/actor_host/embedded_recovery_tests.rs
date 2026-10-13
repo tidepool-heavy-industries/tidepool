@@ -462,6 +462,44 @@ fn production_recovery_helper_refuses_missing_required_settings() {
 
 struct Process(Child, Option<ActorRef>);
 
+async fn assert_retained_initial_context(
+    run: &Path,
+    actor: ActorRef,
+    expected: exomonad_actor::InitialContextObservation,
+) {
+    let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(run).unwrap();
+    let journal = exomonad_actor::ActorRecoveryJournal::open_existing(
+        &anchor,
+        "actor-lifecycle.v2.jsonl",
+        Arc::new(anchor.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        journal.initial_context(actor).await.unwrap(),
+        Some(expected)
+    );
+    let mut stopped = journal.owner_status();
+    drop(journal);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !matches!(
+            *stopped.borrow(),
+            exomonad_actor::JournalOwnerStatus::Stopped { .. }
+        ) {
+            stopped.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("offline journal owner stops before fixture deletion");
+    assert_eq!(
+        *stopped.borrow(),
+        exomonad_actor::JournalOwnerStatus::Stopped {
+            clean: true,
+            fenced: false
+        }
+    );
+}
+
 fn observed_root(root: &Path) -> Option<exomonad_actor::DurableActorRecord> {
     let journal = root.join("run/actor-lifecycle.v2.jsonl");
     if !journal.try_exists().unwrap() {
@@ -920,11 +958,13 @@ async fn production_persona_crash_preserves_edited_context_without_reinitializat
     let after_crash =
         exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
             .unwrap();
-    assert!(latest_durable_root_application(&after_crash)
-        .unwrap()
-        .unwrap()
-        .terminal
-        .is_none());
+    assert!(
+        latest_durable_root_application(&after_crash)
+            .unwrap()
+            .unwrap()
+            .terminal
+            .is_none()
+    );
     std::fs::write(
         root.join("project/.exomonad/state/memory/persona.md"),
         "changed-after-crash",
@@ -1038,37 +1078,7 @@ async fn production_persona_crash_preserves_edited_context_without_reinitializat
     drop(store);
     recovered.0.kill().unwrap();
     assert_eq!(recovered.0.wait().unwrap().signal(), Some(9));
-    let anchor = tidepool_atomic_write::DirectoryAnchor::open_existing(&run).unwrap();
-    let journal = exomonad_actor::ActorRecoveryJournal::open_existing(
-        &anchor,
-        "actor-lifecycle.v2.jsonl",
-        Arc::new(anchor.clone()),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        journal.initial_context(current_actor).await.unwrap(),
-        Some(startup)
-    );
-    let mut stopped = journal.owner_status();
-    drop(journal);
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !matches!(
-            *stopped.borrow(),
-            exomonad_actor::JournalOwnerStatus::Stopped { .. }
-        ) {
-            stopped.changed().await.unwrap();
-        }
-    })
-    .await
-    .expect("offline journal owner stops before fixture deletion");
-    assert_eq!(
-        *stopped.borrow(),
-        exomonad_actor::JournalOwnerStatus::Stopped {
-            clean: true,
-            fenced: false
-        }
-    );
+    assert_retained_initial_context(&run, current_actor, startup).await;
     finish_fixture(retained_root);
 }
 
@@ -1090,9 +1100,11 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
         &std::fs::read(root.join("coherent-original.request-3.json")).unwrap(),
     )
     .unwrap();
-    assert!(request_b
-        .instructions
-        .contains(include_str!("fixtures/coherent_reload_prompt_b.md")));
+    assert!(
+        request_b
+            .instructions
+            .contains(include_str!("fixtures/coherent_reload_prompt_b.md"))
+    );
     let before =
         exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
             .unwrap();
@@ -1177,20 +1189,14 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
         retained_users.as_slice()
     );
     assert_eq!(resumed_users.len(), retained_users.len() + 1);
-    assert!(!serde_json::to_string(&resumed_users)
-        .unwrap()
-        .contains("memory-C"));
+    assert!(
+        !serde_json::to_string(&resumed_users)
+            .unwrap()
+            .contains("memory-C")
+    );
     let after =
         exomonad_actor::ActorRecoveryJournal::read_observed(&run.join("actor-lifecycle.v2.jsonl"))
             .unwrap();
-    assert_eq!(
-        latest_durable_root_application(&after)
-            .unwrap()
-            .unwrap()
-            .initial_context
-            .as_ref(),
-        Some(&startup)
-    );
     assert!(!root.join("coherent-recovered.jev-calls").exists());
     assert_eq!(
         std::fs::read_to_string(root.join("project/initializer-count.txt")).unwrap(),
@@ -1198,6 +1204,7 @@ async fn production_coherent_reload_recovers_published_configuration_without_rec
     );
     recovered.0.kill().unwrap();
     assert_eq!(recovered.0.wait().unwrap().signal(), Some(9));
+    assert_retained_initial_context(&run, actor_b, startup).await;
     // The recovery owner selects the installer; the draft and derived manifests
     // never locate an artifact for this refusal control.
     let owner = persisted_root_owner(&after, actor_b);
@@ -1577,12 +1584,14 @@ async fn production_missing_recovery_store_refuses_bound_root_without_rewriting_
     let journal = root.join("run/actor-lifecycle.v2.jsonl");
     let journal_bytes = std::fs::read(&journal).unwrap();
     let database = root.join("run/recovery.sqlite");
-    assert!(tidepool_runtime::session::observe_declaration_domain(
-        &database,
-        tidepool_runtime::session::RecoveryDomainId::Root,
-    )
-    .unwrap()
-    .is_some());
+    assert!(
+        tidepool_runtime::session::observe_declaration_domain(
+            &database,
+            tidepool_runtime::session::RecoveryDomainId::Root,
+        )
+        .unwrap()
+        .is_some()
+    );
     let mut retained_files = Vec::new();
     for suffix in ["", "-wal", "-shm"] {
         let original = root.join(format!("run/recovery.sqlite{suffix}"));
@@ -1703,8 +1712,8 @@ async fn production_cold_successor_executes_retained_original_declaration_in_fre
     let initial_identity =
         embedded_recovery::host_identity(&root.join("run"), "/root", initial_actor);
     use tidepool_runtime::session::{
-        observe_declaration_domain, RecoveryArtifactClosure, RecoveryDomainId, RecoveryExportKind,
-        RecoveryNodeKind,
+        RecoveryArtifactClosure, RecoveryDomainId, RecoveryExportKind, RecoveryNodeKind,
+        observe_declaration_domain,
     };
     let recovery_path = root.join("run/recovery.sqlite");
     let before = observe_declaration_domain(&recovery_path, RecoveryDomainId::Root)
