@@ -6621,6 +6621,18 @@ mod tests {
         let mut parcel = source
             .export_parcel(root)
             .expect("export dependency closure");
+        let constructor_ids = parcel
+            .constructors()
+            .iter()
+            .map(|entry| entry.declaration.host_id)
+            .chain(parcel.images().iter().flat_map(|entry| {
+                entry
+                    .image
+                    .interned_constructors
+                    .iter()
+                    .map(|(declaration, _)| declaration.host_id)
+            }))
+            .collect::<Vec<_>>();
         assert_eq!(parcel.bytes() > 0, copied_heap);
         assert_eq!(parcel.images().len(), 2);
         let identity = parcel.images()[0].imports[0].0.clone();
@@ -6635,6 +6647,9 @@ mod tests {
         )
         .expect("receiver base");
         let before = receiver.residency();
+        for identity in &constructor_ids {
+            assert!(receiver.interner.by_host(*identity).is_none());
+        }
         let cells_before = receiver.machine.root_cell_allocation_counts();
         assert!(matches!(
             receiver.import_parcel(parcel, RealmId::ROOT),
@@ -6647,6 +6662,12 @@ mod tests {
             before,
             "failed parcel leaves no roots, images, or descriptors"
         );
+        for identity in &constructor_ids {
+            assert!(
+                receiver.interner.by_host(*identity).is_none(),
+                "failed parcel must not retain constructor authority"
+            );
+        }
         let cells_after = receiver.machine.root_cell_allocation_counts();
         assert_eq!(cells_after.0, cells_before.0);
         assert!(

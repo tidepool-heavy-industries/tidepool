@@ -802,7 +802,7 @@ mod tests {
             &format!("VersionedSibling{name}"),
             60000 + u64::from(name) * 4 + u64::from(revision),
         );
-        declared.identity.family.symbol.occurrence = "VersionedFamily".into();
+        declared.identity.family.symbol.occurrence = format!("VersionedFamily{name}");
         declared.identity.family.version =
             tidepool_repr::execution_schema::TypeVersion::GhcAbi([revision; 16]);
         declared

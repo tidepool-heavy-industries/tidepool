@@ -868,7 +868,6 @@ impl PreparedMachine<'_> {
                     }
                     return Err(cleanup);
                 }
-                self.interner = previous_interner;
                 // Collection proved no copied object still names these
                 // provisional layouts. The copy's registrations need cleanup
                 // even when the first image never installed.
@@ -899,6 +898,7 @@ impl PreparedMachine<'_> {
                 for header in provisional_headers {
                     self.descriptor_registry.remove(&header);
                 }
+                self.interner = previous_interner;
                 Err(error)
             }
         }
