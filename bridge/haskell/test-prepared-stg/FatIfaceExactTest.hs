@@ -6,7 +6,7 @@ import Control.Concurrent (ThreadId, forkFinally, killThread, yield)
 import Control.Concurrent.MVar
   ( MVar, newEmptyMVar, putMVar, readMVar, takeMVar )
 import Control.Exception (SomeException, ErrorCall, try, bracket, finally, throwIO, evaluate)
-import Control.Monad (forM, forM_, unless)
+import Control.Monad (forM, forM_, foldM, unless)
 import Control.Monad.IO.Class (liftIO)
 import Data.Bits (shiftL, testBit)
 import Data.IORef (newIORef, readIORef, atomicModifyIORef')
@@ -17,7 +17,7 @@ import qualified Data.Set as Set
 import GHC
 import GHC.Core (CoreBind, Bind(..), maybeUnfoldingTemplate)
 import GHC.Core.FVs (exprSomeFreeVars)
-import GHC.Driver.Env (HscEnv)
+import GHC.Driver.Env (HscEnv, hsc_HPT)
 import GHC.Driver.Session (gopt_set, gopt_unset, updOptLevel)
 import GHC.Types.Id (Id, realIdUnfolding, isFCallId)
 import GHC.Tc.Types (tcg_rdr_env)
@@ -28,7 +28,7 @@ import GHC.Types.Unique (mkUnique)
 import GHC.Types.Var (varName, isLocalId, isId)
 import GHC.Types.Unique.Set (nonDetEltsUniqSet)
 import System.Directory
-  ( createDirectoryIfMissing
+  ( copyFile, createDirectoryIfMissing
   , getTemporaryDirectory
   , removeFile
   , removePathForcibly
@@ -48,7 +48,7 @@ import Tidepool.FatIface
   , fatSelectionDemandedGroupCount, fatSelectionPreparedGroupCount
   , lookupFatIfaceExact, lookupFatIfaceBodies
   , lookupFatIfaceComponents, privateOriginalDependencies
-  , newFatIfaceCache
+  , readExactInterface, newFatIfaceCache
   , OwnerInterfaceContext, ownerInterfaceLocation, ownerInterfaceTyCons, ownerInterfaceEntries, newOwnerInterfaceCache, copyOwnerInterfaceCache
   , lookupOwnerInterface, sameOwnerInterfaceContext, mergeOwnerInterfaceCaches, selectOwnerInterfaceCaches, evictOwnerInterfaceMatching
   )
@@ -58,7 +58,9 @@ import Tidepool.FatIface.Internal
   , privateComponents
   )
 import GHC.Conc (ThreadStatus(..), BlockReason(..), threadStatus)
-import Tidepool.ExactHydration (forkExactContext)
+import Tidepool.ExactHydration (forkExactContext, ExactIfaceArtifact(..), hydrateExactScope)
+import GHC.Unit.Home.ModInfo (lookupHpt, hm_iface)
+import GHC.Unit.Module.Location (ml_hi_file)
 import Tidepool.Resolve (ExactBodyLookup(..), recoverExactBody)
 import Tidepool.PreparedStg
   (newPreparedBodyCache, prepareRecoveredBodies, pmBindings, pmStableTopSpellings
@@ -172,6 +174,39 @@ scenario = do
       missingId <- lookupName missingIdentityName >>= \case
         Just (AnId identifier) -> pure identifier
         _ -> fail "missing-interface identity has no genuine exported Id"
+      -- A private captured owner can be absent from the lexical import graph.
+      -- Its immutable HPT interface must also replace the mutable finder path.
+      liftIO $ do
+        original <- maybe (fail "fat fixture HPT owner absent") (pure . hm_iface)
+          (lookupHpt (hsc_HPT hsc) (mkModuleName "FatFixture"))
+        let mutable = work </> "FatFixture.hi"
+            captured = work </> "captured-FatFixture.hi"
+            artifact = ExactIfaceArtifact "main" "FatFixture" captured "" []
+        copyFile mutable captured
+        removeFile mutable
+        (do
+          let alternative = work </> "captured-alternative-FatFixture.hi"
+          copyFile captured alternative
+          _ <- foldM (\environment path -> do
+              let selected = artifact { exactPath = path }
+              hydrated <- hydrateExactScope environment [(selected, original)]
+              resolved <- readExactInterface hydrated (mi_module original)
+              case resolved of
+                Right (_, location) -> assert (ml_hi_file location == path)
+                  "exact hydration retained a different captured owner location"
+                Left failure -> fail ("selected captured interface unreadable: " ++ show failure)
+              isolated <- newFatIfaceCache
+              recovered <- lookupFatIfaceExact hydrated isolated privateCallerName
+              assertPrivateScope privateCallerName recovered
+              pure hydrated) hsc [captured, captured, alternative, captured]
+          removeFile captured
+          missing <- hydrateExactScope hsc [(artifact, original)]
+          isolated <- newFatIfaceCache
+          refused <- lookupFatIfaceExact missing isolated privateCallerName
+          assert (case refused of FatIfaceLoadFailure{} -> True; _ -> False)
+            "missing selected captured interface fell back to another owner"
+          copyFile alternative captured)
+          `finally` copyFile captured mutable
       cache <- liftIO newFatIfaceCache
       liftIO verifyCacheConcurrency
       localResult <- liftIO (lookupFatIfaceExact hsc cache

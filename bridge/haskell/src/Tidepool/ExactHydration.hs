@@ -1093,7 +1093,22 @@ withCapturedIface timing owner bytes consume = do
 -- resolve each other's original Names while typechecking their details.
 hydrateExactScope
   :: HscEnv -> [(ExactIfaceArtifact, ModIface)] -> IO HscEnv
-hydrateExactScope env loaded = hydrateOriginalInterfaces env (map snd loaded)
+hydrateExactScope env loaded = do
+  forM_ loaded $ \(artifact, iface) -> do
+    let owner = mi_module iface
+    unless (owner == mkModule (stringToUnit (exactUnit artifact))
+        (mkModuleName (exactModule artifact))) $
+      fail "exact hydration interface owner differs from its selected artifact"
+    -- Private originals need the same selected location as lexical imports.
+    -- Fat-interface recovery bypasses the HPT and reads through the finder.
+    if moduleUnit owner == homeUnitAsUnit (hsc_home_unit env)
+      then do
+        _ <- addHomeModuleToFinder (hsc_FC env) (hsc_home_unit env)
+          (GWIB (moduleName owner) NotBoot)
+          (ms_location (exactInterfaceSummary env artifact))
+        pure ()
+      else pure ()
+  hydrateOriginalInterfaces env (map snd loaded)
 
 -- Typechecking original compiler interfaces is shared by exact hydration and
 -- producer semantic checks. This issues GHC details, not admitted authority.
