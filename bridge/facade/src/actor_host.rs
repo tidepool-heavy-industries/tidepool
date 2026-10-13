@@ -4457,11 +4457,6 @@ async fn operator_shutdown() -> Result<(), std::io::Error> {
     }
 }
 
-#[cfg(test)]
-fn developer_instructions(capabilities: &exomonad_actor::ActorCapabilities) -> String {
-    developer_instructions_selected(capabilities, None, None)
-}
-
 fn developer_instructions_selected(
     capabilities: &exomonad_actor::ActorCapabilities,
     inputs: Option<&crate::exomonad::workspace::FrozenWorkspace>,
