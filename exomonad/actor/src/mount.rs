@@ -501,6 +501,10 @@ pub trait ActorSourceLayers: Send + Sync {
         Err(SourceInspectionError::Unavailable("issued source inspection is unavailable".into()))
     }
 
+    fn revision(&self, _source: &CheckpointSourceLayer) -> Result<tidepool_bridge_effects::SrRevision, SourceInspectionError> {
+        Err(SourceInspectionError::Unavailable("issued source revision is unavailable".into()))
+    }
+
     fn observe(&self, _source: &CheckpointSourceLayer) -> Result<tidepool_bridge_effects::SrStatus, SourceInspectionError> {
         Err(SourceInspectionError::Unavailable("issued source status is unavailable".into()))
     }
@@ -521,6 +525,9 @@ pub trait ActorSourceLayers: Send + Sync {
 pub trait StagedActorSourceReload: Send + Sync {
     fn source(&self) -> &CheckpointSourceLayer;
     fn evidence(&self) -> &SourceGenerationEvidence;
+    fn previous_revision(&self) -> &tidepool_bridge_effects::SrRevision;
+    fn candidate_revision(&self) -> &tidepool_bridge_effects::SrRevision;
+    fn changed_modules(&self) -> &[String];
     fn source_reference(&self) -> &tidepool_runtime::session::GenerationArtifactReference {
         &self.evidence().reference
     }
