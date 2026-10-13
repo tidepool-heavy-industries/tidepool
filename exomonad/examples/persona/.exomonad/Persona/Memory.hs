@@ -1,6 +1,6 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE OverloadedStrings #-}
-module Persona.Memory (Block(..), path, remember, recall, initialise, note, requestChange) where
+module Persona.Memory (Block(..), path, remember, recall, initialise, note) where
 import Prelude hiding (readFile, writeFile)
 import Control.Monad.Freer (Eff, Member)
 import Data.Text (Text)
@@ -31,12 +31,6 @@ note :: Member FsWrite effects => Text -> Text -> Eff effects (Either FsError ()
 note name body = case component name of
   Left err -> pure (Left err)
   Right file -> writeFile (".exomonad/state/notes/" <> file <> ".md") body
-requestChange :: Member FsWrite effects => Text -> Text -> Text -> Eff effects (Either FsError ())
-requestChange name activeRevision proposal = case component name of
-  Left err -> pure (Left err)
-  Right file -> writeFile (".exomonad/state/changes/" <> file <> ".md")
-    ("# Proposed harness change\n\nActive source revision: " <> activeRevision <> "\n\n" <> proposal <>
-     "\n\nThis is a request for the operator's coding session. It has not changed the running harness.\n")
 component :: Text -> Either FsError Text
 component name
   | T.null name || name == "." || name == ".." || T.any (`elem` ("/\\\0" :: String)) name = Left (FsSandbox "Use a nonempty single-component note name")
