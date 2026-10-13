@@ -12112,15 +12112,41 @@ pub(super) mod tests {
         let new_nested = engine
             .build_host_value(RealmId::ROOT, &new_reply, &table)
             .unwrap();
-        let parked = park_attested_fixture(
-            &mut engine,
-            first,
-            PreparedReplyEvidence::Static {
-                owner: first,
-                constructor: DataConId(990),
-                node: TypeNodeId(1),
-            },
-        );
+        let resume_runner = engine
+            .install(json_mount_program(), &bindings, &index)
+            .expect("fixture with the prepared two-argument resume ABI installs");
+        let continuation = {
+            let mut builder = engine.machine.managed_builder().unwrap();
+            let root = builder
+                .constructor(DataConId(105), &[])
+                .expect("fixture continuation constructor is declared");
+            builder
+                .finish(RealmId::ROOT, root)
+                .expect("fixture continuation is retained")
+        };
+        let parked = engine
+            .machine
+            .park(
+                continuation,
+                RealmId::ROOT,
+                None,
+                ParkRequest {
+                    principal: PrincipalId::SYSTEM,
+                    effect_policy: EffectRunPolicy::SuspendAll,
+                    live_payload: LivePayloadPolicy::None,
+                    evidence: PreparedFrameEvidence {
+                        reply: PreparedReplyEvidence::Static {
+                            owner: first,
+                            constructor: DataConId(990),
+                            node: TypeNodeId(1),
+                        },
+                        runner: resume_runner,
+                        resume_entry: ValueId(1),
+                        continuation_rep: RuntimeRep::LiftedRef,
+                    },
+                },
+            )
+            .expect("the typed reply frame parks with the real resume ABI");
         let roots = engine.persistent_roots_count();
         let handles = engine.handle_count();
         assert!(matches!(
@@ -12139,6 +12165,11 @@ pub(super) mod tests {
         let PreparedSettlement::Done { value } = resumed.settlement else {
             panic!("valid A response settles the parked frame")
         };
+        assert!(matches!(
+            engine.observe(resume_runner, value).unwrap(),
+            HaskellValue::Con(DataConId(992), fields)
+                if matches!(fields.as_slice(), [HaskellValue::Con(DataConId(991), children)] if children.is_empty())
+        ));
         assert!(engine.release(value));
         assert_eq!(engine.parked_count(), 0);
         // A conflicting declaration with A's identity and a new erased layout
