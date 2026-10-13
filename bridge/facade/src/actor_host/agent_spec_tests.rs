@@ -556,7 +556,7 @@ async fn removing_only_the_slot_keeps_transitive_tool_implementation_linkable() 
 }
 
 #[tokio::test]
-async fn spec_reload_installs_an_already_published_source_revision() {
+async fn coherent_reload_installs_handlers_and_preserves_an_issued_request() {
     let campaign = start(DESCRIPTION, "one").await;
     campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.as_ref();
@@ -570,18 +570,12 @@ async fn spec_reload_installs_an_already_published_source_revision() {
         tools_module(DESCRIPTION, "two"),
     )
     .unwrap();
-    let source_reload = dispatch_haskell_script(policy, "Right outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { ReloadPublished _ _ _ _ -> True; _ -> False })").await;
+    let source_reload = dispatch_haskell_script(policy, "Right outcome <- reloadSource []\ninspectFull (case outcome of { ReloadPublished _ _ _ -> True; _ -> False })").await;
     assert!(
         source_reload.to_string().contains("True"),
         "{source_reload}"
     );
-    assert!(
-        probe(policy).await.contains("one"),
-        "source publication has not installed new handlers"
-    );
-    let receipt = reload(policy).await;
-    assert!(receipt.contains("swapped"), "{receipt}");
-    assert!(probe(policy).await.contains("two"));
+    assert!(probe(policy).await.contains("two"), "coherent reload installs the new handler");
     assert!(
         probe(old_request.as_ref()).await.contains("one"),
         "accepted old call keeps its original handler"

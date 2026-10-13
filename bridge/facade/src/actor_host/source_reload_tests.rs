@@ -4,9 +4,9 @@
 //! The reload mechanism's own transaction — identity, the rebuilt
 //! reverse-dependency closure, and what a rejected candidate leaves behind —
 //! is checked in `crate::exomonad::source`. What is checked HERE is what only a
-//! live session can answer: a later cell compiles against the published
-//! revision while a value bound before the reload keeps the code it was built
-//! from, and an actor's reload reaches its own layer and no other.
+//! live session can answer: a changed revision starts a fresh notebook while
+//! an already-issued request keeps its original bindings and source, and an
+//! actor's reload reaches its own layer and no other.
 #![allow(
     clippy::disallowed_methods,
     reason = "test: launches real tmux/process fixtures directly, not through the production launcher"
@@ -326,7 +326,7 @@ async fn a_child_with_stale_or_missing_checkout_tooling_uses_the_run_graph() {
 
     let refused = committed(
         child.policy.as_ref(),
-        "outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { Left (SourceUnavailable _) -> \"refused\"; _ -> \"published\" })",
+        "outcome <- reloadSource []\ninspectFull (case outcome of { Left (SourceUnavailable _) -> \"refused\"; _ -> \"published\" })",
     )
     .await;
     assert_eq!(refused["items"][1]["output"], "refused", "{refused}");
@@ -416,7 +416,7 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
     .unwrap();
     let refused = committed(
         child.policy.as_ref(),
-        "outcome <- reloadSource [] Nothing\ninspectFull (case outcome of { Left (SourceUnavailable _) -> \"refused\"; _ -> \"published\" })",
+        "outcome <- reloadSource []\ninspectFull (case outcome of { Left (SourceUnavailable _) -> \"refused\"; _ -> \"published\" })",
     )
     .await;
     assert_eq!(refused["items"][1]["output"], "refused", "{refused}");
@@ -427,9 +427,9 @@ async fn a_child_without_its_own_source_cannot_republish_the_run() {
 }
 
 /// The whole point, end to end: write a module, reload, and the next cell has
-/// it — without restarting, and without rewriting work already in flight.
+/// it — with a fresh notebook, and without rewriting work already in flight.
 #[tokio::test]
-async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
+async fn a_reloaded_module_starts_a_fresh_notebook_and_preserves_issued_bindings() {
     let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
@@ -455,6 +455,7 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     campaign.run_scenario(|campaign| Box::pin(async move {
     let policy = campaign.root_installation.policy.clone();
     let policy = policy.as_ref();
+    let issued_a = policy.snapshot_for_request().expect("installed generation A");
 
     // A value bound while the first revision is active.
     let bound = displayed(campaign, policy, "saved <- pure answer\ndisplay saved").await;
@@ -476,7 +477,7 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     assert_eq!(super::test_campaign::committed_display_text(&edited), "1", "draft edits preserve active code: {edited}");
     let reloaded = displayed(
         campaign, policy,
-        "Right outcome <- reloadSource [] Nothing\ndisplay (case outcome of { ReloadPublished _ _ changed _ -> changed == [\"Project.Work\"]; _ -> False })",
+        "Right outcome <- reloadSource []\ndisplay (case outcome of { ReloadPublished _ _ changed -> changed == [\"Project.Work\"]; _ -> False })",
     )
     .await;
     assert_eq!(
@@ -488,13 +489,15 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
     let later = displayed(campaign, policy, "display answer").await;
     assert_eq!(super::test_campaign::committed_display_text(&later), "41", "{later}");
 
-    // …and the binding made before the reload still holds the code it was
-    // built from. No implicit rewriting of running work.
-    let kept = displayed(campaign, policy, "display saved").await;
+    let absent = dispatch_haskell_script(policy, "display saved").await;
+    assert_eq!(absent["status"], "rejected", "B must not inherit A bindings: {absent}");
+
+    // An issued A request still sees A bindings; B starts without those names.
+    let kept = displayed(campaign, issued_a.as_ref(), "display saved").await;
     assert_eq!(super::test_campaign::committed_display_text(&kept), "1", "{kept}");
 
     let memory = displayed(campaign, policy,
-        "Right body <- Files.readFile \".exomonad/state/memory/persona.md\"\ndisplay (body == \"retained memory\")"
+        "import qualified Tidepool.Effects.Authored as Files\nRight body <- Files.readFile \".exomonad/state/memory/persona.md\"\ndisplay (body == \"retained memory\")"
     ).await;
     assert_eq!(super::test_campaign::committed_display_text(&memory), "True", "reload preserves memory: {memory}");
 
@@ -510,7 +513,7 @@ async fn a_reloaded_module_reaches_later_cells_and_leaves_bindings_alone() {
 }
 
 #[tokio::test]
-async fn reload_rejects_a_new_unconfigured_module_with_restart_guidance() {
+async fn reload_admits_a_valid_new_module_into_the_complete_graph() {
     let campaign = TestCampaign::start_with_config(
         |admission| admission,
         |config| {
@@ -538,16 +541,18 @@ async fn reload_rejects_a_new_unconfigured_module_with_restart_guidance() {
 
     let result = committed(
         policy.as_ref(),
-        "Right before <- sourceStatus\nRight outcome <- reloadSource [] Nothing\nRight after <- sourceStatus\ninspectFull (case outcome of { ReloadRejected _ _ detail -> \"Project.Vibe\" `T.isInfixOf` detail && \"restart\" `T.isInfixOf` detail; _ -> False })\ninspectFull (revisionGeneration (statusActive before) == revisionGeneration (statusActive after))",
+        "Right before <- sourceStatus\nRight outcome <- reloadSource []\nRight after <- sourceStatus\ninspectFull (case outcome of { ReloadPublished _ _ changed -> \"Project.Vibe\" `elem` changed; _ -> False })\ninspectFull (revisionIdentity (statusActive before) == revisionIdentity (statusActive after))",
     )
     .await;
     assert_eq!(result["items"][3]["output"], "True", "{result}");
     assert_eq!(result["items"][4]["output"], "True", "{result}");
     assert!(
         new_module.is_file(),
-        "a refused reload leaves the edit in place"
+        "publication leaves the authored edit in place"
     );
-    assert_eq!(run_layer_target(campaign), published_before);
+    assert_ne!(run_layer_target(campaign), published_before);
+    let fresh = committed(policy.as_ref(), "import Project.Vibe\ninspectFull vibeAnswer").await;
+    assert_eq!(fresh["items"][1]["output"], "42", "{fresh}");
 })).await;
 }
 
@@ -590,7 +595,7 @@ async fn a_rejected_reload_is_a_value_and_leaves_the_notebook_running() {
     assert!(!edited["items"].as_array().unwrap().is_empty(), "{edited}");
     let rejected = displayed(
         campaign, policy,
-        "Right outcome <- reloadSource [] Nothing\ndisplay ((case outcome of { ReloadRejected active failed _ -> revisionIdentity active /= revisionIdentity failed; _ -> False }) && (case outcome of { ReloadRejected _ _ detail -> \"undefinedByThisReload\" `T.isInfixOf` detail; _ -> False }))",
+        "Right outcome <- reloadSource []\ndisplay ((case outcome of { ReloadRejected active failed _ -> revisionIdentity active /= revisionIdentity failed; _ -> False }) && (case outcome of { ReloadRejected _ _ detail -> \"undefinedByThisReload\" `T.isInfixOf` detail; _ -> False }))",
     )
     .await;
     assert_eq!(
