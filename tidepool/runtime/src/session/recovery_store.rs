@@ -449,6 +449,26 @@ impl NativeStorage {
         Ok(snapshot)
     }
 
+    /// Observe the exact selected generation without opening a writable run
+    /// owner or constructing live source/installation authority.
+    pub fn read_notebook_generation_at(
+        path: &Path,
+        domain: RecoveryDomainId,
+        actor: &RecoveryPublicOwner,
+    ) -> Result<Option<super::ActiveNotebookGeneration>, StoreError> {
+        let mut connection = read_connection(path)?;
+        read_contract(path, &connection)?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| store_error(path, StoreErrorKind::Storage, error))?;
+        let selected = read_active_generation(&transaction, domain, actor)
+            .map_err(|error| sql_store_error(path, error))?;
+        transaction
+            .rollback()
+            .map_err(|error| store_error(path, StoreErrorKind::Storage, error))?;
+        Ok(selected)
+    }
+
     pub(crate) fn create_domain(
         &self,
         domain: RecoveryDomainId,
@@ -817,7 +837,7 @@ fn read_active_generation(
     actor: &RecoveryPublicOwner,
 ) -> Result<Option<super::ActiveNotebookGeneration>, rusqlite::Error> {
     let record: Option<(Vec<u8>, Vec<u8>)> = connection.query_row(
-        "SELECT g.record,g.owner FROM active_notebook_generations a JOIN notebook_generations g ON a.domain=g.domain AND a.owner=g.owner WHERE a.domain=?1 AND a.actor=?2",
+        "SELECT g.record,a.owner FROM active_notebook_generations a LEFT JOIN notebook_generations g ON a.domain=g.domain AND a.owner=g.owner WHERE a.domain=?1 AND a.actor=?2",
         params![domain.bytes().as_slice(), owner_bytes(&actor.actor_owner())], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
     record
         .map(|(bytes, selected_owner)| {
@@ -982,7 +1002,7 @@ fn read_connection(path: &Path) -> Result<Connection, StoreError> {
         Err(error) => return Err(store_error(path, StoreErrorKind::Storage, error)),
     }
     Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| store_error(path, StoreErrorKind::Storage, error))
+        .map_err(|error| sql_store_error(path, error))
 }
 fn read_contract(path: &Path, connection: &Connection) -> Result<[u8; 16], StoreError> {
     let (format, encoding, identity): (u64, String, Vec<u8>) = connection
@@ -991,7 +1011,7 @@ fn read_contract(path: &Path, connection: &Connection) -> Result<[u8; 16], Store
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .map_err(|error| store_error(path, StoreErrorKind::Storage, error))?;
+        .map_err(|error| sql_store_error(path, error))?;
     if format != FORMAT {
         return Err(store_error(
             path,
@@ -1835,5 +1855,108 @@ mod tests {
                 for old in &retained { prop_assert!(store.read_public_owner(RecoveryDomainId::Root, old).unwrap().is_some()); }
             }
         }
+    }
+    #[test]
+    fn read_only_generation_lookup_preserves_selection_and_missing_distinctions() {
+        let (directory, store) = store();
+        domain(&store, RecoveryDomainId::Root, 64);
+        let actor = owner("root/read-only", 1);
+        assert_eq!(
+            RunRecoveryStore::read_notebook_generation_at(
+                store.path(),
+                RecoveryDomainId::Root,
+                &actor
+            )
+            .unwrap(),
+            None
+        );
+        let (write, a) = generation_write(&store, None, &actor, 1);
+        let StoreDisposition::Committed(receipt) = store.commit_publication(write) else {
+            panic!("initial generation refused")
+        };
+        receipt.installed_blocking().unwrap();
+        let (write, b) = generation_write(&store, Some(a), &actor, 2);
+        let StoreDisposition::Committed(receipt) = store.commit_publication(write) else {
+            panic!("replacement generation refused")
+        };
+        receipt.installed_blocking().unwrap();
+        let snapshot = store.read_domain(RecoveryDomainId::Root).unwrap();
+        let work = store.work().unwrap();
+        assert_eq!(
+            RunRecoveryStore::read_notebook_generation_at(
+                store.path(),
+                RecoveryDomainId::Root,
+                &actor
+            )
+            .unwrap(),
+            Some(b)
+        );
+        assert_eq!(store.read_domain(RecoveryDomainId::Root).unwrap(), snapshot);
+        assert_eq!(store.work().unwrap().transactions, work.transactions);
+        assert_eq!(
+            RunRecoveryStore::read_notebook_generation_at(
+                store.path(),
+                RecoveryDomainId::Root,
+                &owner("root/absent", 1)
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            RunRecoveryStore::read_notebook_generation_at(
+                store.path(),
+                RecoveryDomainId::Session(SessionId(99)),
+                &actor
+            )
+            .unwrap(),
+            None
+        );
+        let missing = directory.path().join("missing.sqlite");
+        assert!(matches!(
+            RunRecoveryStore::read_notebook_generation_at(&missing, RecoveryDomainId::Root, &actor),
+            Err(StoreError {
+                kind: StoreErrorKind::MissingDatabase,
+                ..
+            })
+        ));
+        assert!(!missing.exists());
+        let broken = directory.path().join("broken.sqlite");
+        std::fs::write(&broken, b"not a SQLite recovery store").unwrap();
+        assert!(matches!(
+            RunRecoveryStore::read_notebook_generation_at(&broken, RecoveryDomainId::Root, &actor),
+            Err(StoreError {
+                kind: StoreErrorKind::Integrity,
+                ..
+            })
+        ));
+        assert_eq!(
+            std::fs::read(&broken).unwrap(),
+            b"not a SQLite recovery store"
+        );
+    }
+    #[test]
+    fn read_only_generation_lookup_observes_uncertain_commit_without_clearing_fence() {
+        let (_directory, store) = store();
+        domain(&store, RecoveryDomainId::Root, 64);
+        let actor = owner("root/read-only-uncertain", 1);
+        let (write, committed) = generation_write(&store, None, &actor, 8);
+        store.inject_fault(StoreFault::CommitError);
+        assert!(matches!(
+            store.commit_publication(write),
+            StoreDisposition::RecoveryRequired(_)
+        ));
+        assert!(store
+            .active_notebook_generation(RecoveryDomainId::Root, &actor)
+            .is_err());
+        assert_eq!(
+            RunRecoveryStore::read_notebook_generation_at(
+                store.path(),
+                RecoveryDomainId::Root,
+                &actor
+            )
+            .unwrap(),
+            Some(committed)
+        );
+        assert!(store.ensure_ready().is_err());
     }
 }

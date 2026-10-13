@@ -602,6 +602,15 @@ impl RunRecoveryStore {
     ) -> Result<Option<RecoverySnapshotIdentity>, StoreError> {
         NativeStorage::read_snapshot_at(path, domain, owner)
     }
+    /// Read-only observation of persisted generation references. Issuing
+    /// owners must independently restore and validate the referenced inputs.
+    pub fn read_notebook_generation_at(
+        path: &Path,
+        domain: RecoveryDomainId,
+        actor: &RecoveryPublicOwner,
+    ) -> Result<Option<super::super::ActiveNotebookGeneration>, StoreError> {
+        NativeStorage::read_notebook_generation_at(path, domain, actor)
+    }
     pub async fn begin_provider_transition(&self) -> Result<ProviderTransition, StoreError> {
         let (reply, result) = tokio::sync::oneshot::channel();
         self.handle
